@@ -1,15 +1,29 @@
 # Enforcement of the Laws of AL/X
 
-**Status:** Initial enforcement specification; owner approval required before runtime implementation
+**Status:** Initial enforcement specification; plain-language architecture acceptance required before runtime implementation
 
 `LAWS_OF_ALX.md` is the canonical statement of the laws. This document defines the evidence and gates required to prove that an implementation follows them. It may clarify how compliance is demonstrated, but may not weaken or reinterpret a law.
+
+## Division of responsibility
+
+Friedl defines and approves what AL/X must be, how she must behave, what authority she may exercise, what information she may retain, and which product trade-offs or exceptions are acceptable. Technical proposals must present those decisions to him in plain language.
+
+Models and implementers are responsible for translating those decisions into sound architecture, executable tests, and accurate evidence. They may not transfer technical validation to Friedl, treat his approval as proof that an implementation is correct, or require him to assess software mechanics he has not been given a reasonable way to evaluate.
+
+Friedl's acceptance means that the described behaviour and meaningful trade-offs match his intent. Implementers remain accountable for proving that the system actually delivers that behaviour and complies with every law.
+
+## Central design test
+
+We structure AL/X's capabilities, safety boundaries, and memory—not her reasoning path.
+
+AL/X must understand the goal, choose an approach, act, examine the evidence, adjust the approach, and continue until complete or genuinely blocked. If an expected step is unavailable or produces surprising evidence, AL/X must be able to pivot without a new phrase handler, route, or hard-coded fallback workflow.
 
 ## Gate policy
 
 - A change fails if any applicable automated gate fails.
 - A change fails if required review evidence is absent.
 - "The model will understand" and "the reviewer will notice" are not evidence.
-- Runtime implementation may not begin until Friedl approves the architecture and the initial executable enforcement suite.
+- Runtime implementation may not begin until Friedl accepts the architecture's behaviour and meaningful trade-offs in plain language and the implementers have produced the initial executable enforcement suite.
 - A capability may not be declared complete until its architectural, behavioural, restart, safety, and paraphrase tests pass.
 - Any unavoidable false positive in an automated gate must be resolved by improving the gate or by an explicitly approved, narrowly scoped exception. Disabling a gate is not a workaround.
 
@@ -80,7 +94,7 @@ Every runtime or domain-capability change must include a short compliance record
 - exceptions requested or `none`;
 - unresolved evidence or `none`.
 
-The author and reviewing model must both assess compliance. Friedl's approval is additionally required for laws, exceptions, architecture boundaries, and the introduction of a new primitive capability.
+The author and reviewing model must both assess technical compliance. Friedl's explicit approval is required for laws and exceptions. His plain-language acceptance is required for observable architecture behaviour, meaningful product trade-offs, retained information, authority boundaries, and the purpose of a genuinely new primitive capability.
 
 ## Enforcement rollout
 
@@ -94,7 +108,7 @@ The author and reviewing model must both assess compliance. Friedl's approval is
 
 ### Required before runtime code
 
-- An owner-approved architecture identifying the six mandatory boundaries.
+- A plain-language architecture accepted by Friedl and identifying the six mandatory boundaries.
 - An executable static-analysis suite covering structural prohibitions.
 - An executable architecture-test suite proving dependency boundaries.
 - CI that runs those suites and cannot silently skip them.
@@ -111,4 +125,3 @@ The author and reviewing model must both assess compliance. Friedl's approval is
 ## Drift response
 
 If a violation is found, stop feature work, record the failing law and evidence, remove or redesign the violating path, add a regression gate, and only then resume. Existing code, sunk effort, or schedule pressure does not grandfather a violation.
-
