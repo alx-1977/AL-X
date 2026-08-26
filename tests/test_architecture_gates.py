@@ -117,6 +117,29 @@ class GovernanceGateTests(unittest.TestCase):
                 violations,
             )
 
+    def test_automatic_greptile_reviews_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(REPOSITORY_ROOT / ".greptile", root / ".greptile")
+            (root / "governance").mkdir()
+            shutil.copy(
+                REPOSITORY_ROOT / "governance/GREPTILE.sha256",
+                root / "governance/GREPTILE.sha256",
+            )
+            config_path = root / ".greptile/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["triggerOnUpdates"] = True
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            violations: list[str] = []
+            _check_greptile(root, violations)
+            self.assertTrue(
+                any(
+                    "automatic commit re-reviews must remain disabled" in violation
+                    for violation in violations
+                ),
+                violations,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
