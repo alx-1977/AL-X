@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "path": "LAWS_OF_ALX.md",
+      "description": "Sole canonical statement of all 18 approved Laws of AL/X."
+    },
+    {
+      "path": "docs/LAW_ENFORCEMENT.md",
+      "description": "Required mechanical and human evidence for enforcing each Law."
+    },
+    {
+      "path": "docs/ARCHITECTURE_BLUEPRINT.md",
+      "description": "Friedl-accepted foundation boundaries and authority model."
+    },
+    {
+      "path": "docs/FOUNDATION_PROOF.md",
+      "description": "Approved behavioural proof and automatic failure conditions."
+    },
+    {
+      "path": "architecture/boundaries.toml",
+      "description": "Machine-readable dependency and provider-isolation boundaries."
+    },
+    {
+      "path": "governance/EXCEPTIONS.md",
+      "description": "Only valid register of exceptions explicitly approved by Friedl."
+    }
+  ]
+}
