@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.check_architecture import Rules, check_source, load_rules
-from scripts.check_governance import check_repository
+from scripts.check_governance import _check_greptile, check_repository
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +92,30 @@ class ArchitectureGateTests(unittest.TestCase):
 class GovernanceGateTests(unittest.TestCase):
     def test_repository_governance_passes(self) -> None:
         self.assertEqual([], check_repository(REPOSITORY_ROOT))
+
+    def test_greptile_constitutional_config_passes(self) -> None:
+        violations: list[str] = []
+        _check_greptile(REPOSITORY_ROOT, violations)
+        self.assertEqual([], violations)
+
+    def test_missing_greptile_rule_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(REPOSITORY_ROOT / ".greptile", root / ".greptile")
+            config_path = root / ".greptile/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["rules"] = [
+                rule
+                for rule in config["rules"]
+                if rule["id"] != "alx-dynamic-reasoning"
+            ]
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            violations: list[str] = []
+            _check_greptile(root, violations)
+            self.assertTrue(
+                any("alx-dynamic-reasoning" in violation for violation in violations),
+                violations,
+            )
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -12,6 +13,9 @@ from pathlib import Path
 
 
 REQUIRED_FILES = (
+    ".greptile/config.json",
+    ".greptile/files.json",
+    ".greptile/rules.md",
     ".github/CODEOWNERS",
     ".github/copilot-instructions.md",
     ".github/pull_request_template.md",
@@ -26,8 +30,28 @@ REQUIRED_FILES = (
     "docs/TECHNICAL_PLAN.md",
     "governance/DECISIONS.md",
     "governance/EXCEPTIONS.md",
+    "governance/GREPTILE.sha256",
     "governance/LAWS_OF_ALX.sha256",
 )
+
+GREPTILE_RULE_IDS = {
+    "alx-single-reasoning-authority",
+    "alx-dynamic-reasoning",
+    "alx-no-unapproved-hardcoding",
+    "alx-one-conversation-path",
+    "alx-primitive-tool-boundary",
+    "alx-durable-goal-loop",
+    "alx-explicit-exceptions-only",
+}
+
+GREPTILE_CONTEXT_FILES = {
+    "LAWS_OF_ALX.md",
+    "docs/LAW_ENFORCEMENT.md",
+    "docs/ARCHITECTURE_BLUEPRINT.md",
+    "docs/FOUNDATION_PROOF.md",
+    "architecture/boundaries.toml",
+    "governance/EXCEPTIONS.md",
+}
 
 
 def _read(root: Path, relative_path: str, violations: list[str]) -> str:
@@ -120,6 +144,118 @@ def _check_env_is_ignored(root: Path, violations: list[str]) -> None:
         violations.append(".env is tracked by git and must not be committed")
 
 
+def _load_json(path: Path, relative_path: str, violations: list[str]) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        violations.append(f"{relative_path}: invalid or unreadable JSON: {error}")
+        return {}
+    if not isinstance(value, dict):
+        violations.append(f"{relative_path}: top-level value must be an object")
+        return {}
+    return value
+
+
+def _check_greptile(root: Path, violations: list[str]) -> None:
+    config_path = root / ".greptile/config.json"
+    files_path = root / ".greptile/files.json"
+    rules_path = root / ".greptile/rules.md"
+    if not all(path.is_file() for path in (config_path, files_path, rules_path)):
+        return
+
+    config = _load_json(config_path, ".greptile/config.json", violations)
+    if config.get("strictness") != 1:
+        violations.append(".greptile/config.json: strictness must remain 1")
+    if config.get("triggerOnUpdates") is not True:
+        violations.append(".greptile/config.json: triggerOnUpdates must remain enabled")
+    instructions = config.get("instructions", "")
+    for marker in (
+        "independent constitutional reviewer",
+        "AL/X LAW VIOLATION — BLOCKING",
+        "Never invent, infer, or approve an exception",
+    ):
+        if marker not in instructions:
+            violations.append(
+                f".greptile/config.json: instructions missing required marker: {marker}"
+            )
+
+    rules = config.get("rules", [])
+    if not isinstance(rules, list):
+        violations.append(".greptile/config.json: rules must be an array")
+        rules = []
+    rules_by_id = {
+        rule.get("id"): rule
+        for rule in rules
+        if isinstance(rule, dict) and isinstance(rule.get("id"), str)
+    }
+    missing_rules = GREPTILE_RULE_IDS - rules_by_id.keys()
+    if missing_rules:
+        violations.append(
+            ".greptile/config.json: missing constitutional rules: "
+            + ", ".join(sorted(missing_rules))
+        )
+    for rule_id in GREPTILE_RULE_IDS & rules_by_id.keys():
+        rule = rules_by_id[rule_id]
+        if rule.get("severity") != "high" or rule.get("enabled") is False:
+            violations.append(
+                f".greptile/config.json: {rule_id} must remain enabled at high severity"
+            )
+
+    context = _load_json(files_path, ".greptile/files.json", violations)
+    context_entries = context.get("files", [])
+    context_paths = {
+        entry.get("path")
+        for entry in context_entries
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+    missing_context = GREPTILE_CONTEXT_FILES - context_paths
+    if missing_context:
+        violations.append(
+            ".greptile/files.json: missing canonical context: "
+            + ", ".join(sorted(missing_context))
+        )
+
+    rules_text = rules_path.read_text(encoding="utf-8")
+    _require_markers(
+        rules_text,
+        ".greptile/rules.md",
+        (
+            "`LAWS_OF_ALX.md` is the sole canonical law text.",
+            "Who is deciding meaning",
+            "AL/X LAW VIOLATION — BLOCKING",
+            "Do not create or infer exceptions.",
+        ),
+        violations,
+    )
+
+    checksum_path = root / "governance/GREPTILE.sha256"
+    if not checksum_path.is_file():
+        return
+    expected_paths = {
+        ".greptile/config.json",
+        ".greptile/files.json",
+        ".greptile/rules.md",
+    }
+    recorded: dict[str, str] = {}
+    for line in checksum_path.read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  (\.greptile/(?:config\.json|files\.json|rules\.md))", line)
+        if not match:
+            violations.append("governance/GREPTILE.sha256: invalid checksum record")
+            continue
+        recorded[match.group(2)] = match.group(1)
+    if recorded.keys() != expected_paths:
+        violations.append(
+            "governance/GREPTILE.sha256: expected checksums for all three Greptile files"
+        )
+        return
+    for relative_path, expected_digest in recorded.items():
+        actual_digest = hashlib.sha256((root / relative_path).read_bytes()).hexdigest()
+        if actual_digest != expected_digest:
+            violations.append(
+                f"{relative_path} differs from its approved checksum; explicit owner approval and checksum update are required"
+            )
+
+
 def check_repository(root: Path) -> list[str]:
     root = root.resolve()
     violations: list[str] = []
@@ -190,6 +326,7 @@ def check_repository(root: Path) -> list[str]:
 
     exceptions = _read(root, "governance/EXCEPTIONS.md", violations)
     _check_exceptions(exceptions, violations)
+    _check_greptile(root, violations)
     _check_law_checksum(root, violations)
     _check_env_is_ignored(root, violations)
 

@@ -1,0 +1,46 @@
+{
+  "strictness": 1,
+  "commentTypes": [
+    "logic",
+    "info"
+  ],
+  "triggerOnUpdates": true,
+  "instructions": "Act as AL/X's independent constitutional reviewer. Review semantics and authority, not only syntax or whether tests pass. LAWS_OF_ALX.md is canonical; supporting summaries never replace it. Report every probable breach as `AL/X LAW VIOLATION — BLOCKING`, cite the applicable Law number and exact code, explain which authority moved out of AL/X, and require redesign or an existing Friedl-approved exception from governance/EXCEPTIONS.md. Never invent, infer, or approve an exception.",
+  "rules": [
+    {
+      "id": "alx-single-reasoning-authority",
+      "severity": "high",
+      "rule": "Only the AL/X Core Agent may interpret Friedl's goal, choose or sequence capabilities, evaluate results, decide continuation or completion, and formulate AL/X's response. Flag any second authority in frontends, routes, handlers, coordinators, state machines, integrations, tools, or fallback logic."
+    },
+    {
+      "id": "alx-dynamic-reasoning",
+      "severity": "high",
+      "rule": "Flag behaviour prescribed through phrases, keywords, regexes, intent enums, routes, fixed sequences, decision trees, domain workflows, coded fallbacks, or exact-wording tests. Code may structure capabilities, memory, evidence, and safety boundaries; it may not encode AL/X's reasoning path."
+    },
+    {
+      "id": "alx-no-unapproved-hardcoding",
+      "severity": "high",
+      "rule": "Flag hard-coded behavioural, conversational, customer, device, domain, business, threshold, path, environment, response, or hidden-default decisions that AL/X could reasonably discover, retrieve, infer, calculate, or obtain from configuration. Allow only justified software/schema mechanics, universal constants, external protocol values, configurable values, or an explicit approved exception."
+    },
+    {
+      "id": "alx-one-conversation-path",
+      "severity": "high",
+      "rule": "All typed input, speech transcripts, clarifications, corrections, and confirmations must enter the same authoritative conversation path. Flag feature-owned language interpretation, voice routing registries, parallel confirmation or response logic, frontend capability selection, or frontend-owned authoritative goal state."
+    },
+    {
+      "id": "alx-primitive-tool-boundary",
+      "severity": "high",
+      "rule": "Tools must be reusable language-blind primitives with structured inputs and results. Flag raw user language at tool boundaries, journey-shaped tools, tools that call the next tool, tools that decide goal completion, provider-specific workflow behaviour, or a new tool justified only by new wording or a journey step."
+    },
+    {
+      "id": "alx-durable-goal-loop",
+      "severity": "high",
+      "rule": "Flag changes that make goals, decisions, approvals, blockers, evidence, or unfinished work process-only or frontend-only; impose one-turn or one-action limits; prevent restart-safe continuation; or fail to return every capability result to AL/X for evaluation and replanning."
+    },
+    {
+      "id": "alx-explicit-exceptions-only",
+      "severity": "high",
+      "rule": "A probable Laws of AL/X violation is blocking unless the exact scope is already recorded as a Friedl-approved exception in governance/EXCEPTIONS.md. Author claims, passing tests, convenience, precedent, and reviewer preference do not create exceptions."
+    }
+  ]
+}
