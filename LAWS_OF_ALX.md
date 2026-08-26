@@ -1,6 +1,6 @@
 # Laws of AL/X
 
-**Status:** Draft — owner approval required  
+**Status:** Founding construction laws approved
 **Owner:** Friedl  
 **Current phase:** Construction laws only
 
@@ -12,27 +12,45 @@ No implementer or model may weaken, reinterpret, bypass, or silently introduce a
 
 ### Law 1 — Absolutely no hard-coding unless Friedl explicitly asks for it
 
+**Status:** Approved by Friedl on 2026-08-26
+
 No phrase matching, keyword routing, scripted conversational paths, fixed workflow sequences, special-case conversational handlers, predetermined responses, or hidden assumptions about how a task must proceed may be introduced unless Friedl explicitly requests and approves that deterministic behaviour.
 
+Known universal constants and values mandated by an external technical standard or protocol may be encoded directly. This allowance may not be used to conceal a product decision, behavioural assumption, workflow, user preference, business rule, or conversational interpretation. Ordinary environment-specific values must be named and configurable where they can legitimately vary.
+
 ### Law 2 — No dumb systems; AL/X must be agentic
+
+**Status:** Approved by Friedl on 2026-08-26
 
 AL/X is a co-designer. She understands goals, reasons from context, chooses and composes capabilities, evaluates results, asks intelligent questions when genuinely blocked, and continues working toward the goal.
 
 AL/X must not be reduced to a command router, menu system, workflow engine, or voice-operated collection of buttons.
 
+AL/X must determine reasonable next steps from the goal and current evidence, use as many capabilities as the goal requires, evaluate and verify their results, revise her approach when the evidence changes, remember unfinished work, and resume it. She must not ask Friedl to direct each step when safe, useful, authorised progress remains possible.
+
+As a required part of being a co-designer, AL/X must proactively identify risks, question assumptions, propose alternatives, and disagree constructively when her reasoning or evidence indicates that doing so would improve the outcome. She must explain the basis for a challenge clearly and honestly. Constructive disagreement does not give AL/X unrestricted authority to perform consequential actions; that authority is governed separately.
+
 ### Law 3 — One voice and conversation path only
+
+**Status:** Approved by Friedl on 2026-08-26
 
 Every conversational input, whether spoken or typed, enters the same authoritative AL/X conversation and reasoning path.
 
 Features, tools, integrations, routes, and frontend surfaces may not create their own language interpreters, phrase handlers, confirmation logic, response generators, conversational memory, or parallel conversational paths.
 
-## Proposed supporting construction laws
+Speech-to-text may transcribe audio but may not interpret meaning or route commands. Every user message, clarification, correction, and confirmation must pass through the same AL/X authority before any domain capability acts. Tools return structured facts and results; they do not decide what AL/X says. Only AL/X owns the final conversational response, while interfaces may display that response without creating another assistant voice.
 
-The following laws were proposed during the founding discussion. They are not approved merely because they appear here; each must be reviewed with Friedl before its status changes.
+Background events such as important email, calendar reminders, or failed external operations may enter AL/X as structured events rather than user speech. AL/X remains the only authority that interprets their significance and decides whether, when, and how to respond. A background-event path may not become a second conversational agent.
+
+## Supporting construction laws
+
+**Status:** Laws 4–18 approved by Friedl on 2026-08-26
 
 ### Law 4 — Only AL/X may interpret the user
 
 Raw user language may be interpreted only by the single authoritative AL/X agent. Tools, frontend code, routes, and integrations receive structured instructions and may not inspect the user's wording to decide what it means.
+
+Tools may use AI or deterministic processing to interpret domain material such as emails, invoices, documents, datasheets, or code, but may not independently interpret what Friedl wants. Authentication, schema validation, malware checks, and permission enforcement protect the system and do not constitute interpretation of user intent.
 
 ### Law 5 — Tools are language-blind primitives
 
@@ -78,6 +96,8 @@ The architecture may not impose a one-turn, one-route, or one-action limit. AL/X
 
 Goals, referents, decisions, blockers, approvals, and completed work may not exist only in browser state, prompt text, or short-lived process memory. Restarting AL/X must not erase unfinished work.
 
+Durable context must have explicit privacy, retention, inspection, correction, and deletion controls. Persistence does not authorise keeping everything forever.
+
 ### Law 16 — Exceptions require explicit owner approval
 
 Any proposed hard-coded or deterministic behaviour must be identified before implementation, justified, and explicitly approved by Friedl. It may not be introduced quietly as an implementation detail.
@@ -90,6 +110,8 @@ Acceptance tests use varied wording, follow-ups, corrections, interruptions, and
 
 Approved laws must have objective enforcement wherever technically possible. Phrase routers, parallel conversation paths, frontend domain orchestration, unapproved workflow tools, and other prohibited structures must fail automated checks rather than rely on memory or review promises.
 
+When a law cannot be enforced automatically, compliance requires an explicit review checklist and recorded evidence. Lack of an automated check does not weaken the law.
+
 ## Founding litmus tests
 
 - If a reasonable new way of asking for an existing capability requires application code, the architecture has drifted.
@@ -98,5 +120,9 @@ Approved laws must have objective enforcement wherever technically possible. Phr
 
 ## Approval record
 
-No supporting law is approved until Friedl reviews it. Approval status, amendments, and explicitly authorised exceptions will be recorded here before implementation proceeds.
+Approval status, amendments, and explicitly authorised exceptions are recorded here. Approved wording may not be changed silently.
 
+- 2026-08-26 — Law 1 approved, including the boundary permitting known universal constants and externally mandated technical values while prohibiting their use to conceal product behaviour.
+- 2026-08-26 — Law 2 approved, including proactive challenge and constructive disagreement as required co-designer behaviour.
+- 2026-08-26 — Law 3 approved, including structured background events entering the same authoritative AL/X reasoning and response path.
+- 2026-08-26 — Laws 4–18 approved together. Clarifications recorded for domain-material interpretation, durable-context privacy and retention controls, and evidence-based review where automatic enforcement is not technically possible.
