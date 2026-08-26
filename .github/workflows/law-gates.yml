@@ -1,0 +1,35 @@
+name: ALX Law Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  law-gates:
+    name: law-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify governance
+        run: python scripts/check_governance.py
+
+      - name: Verify architecture boundaries
+        run: python scripts/check_architecture.py
+
+      - name: Test the enforcement gates
+        run: python -m unittest discover -s tests -v
+

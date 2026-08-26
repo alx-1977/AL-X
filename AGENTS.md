@@ -9,7 +9,7 @@ Before analysing, planning, reviewing, or changing this repository:
 1. Read `LAWS_OF_ALX.md` in full.
 2. Read `docs/LAW_ENFORCEMENT.md` in full.
 3. Read `docs/ARCHITECTURE_BLUEPRINT.md` and `docs/FOUNDATION_PROOF.md` in full when they exist.
-4. Treat the approved laws and enforcement requirements as binding constraints, not design suggestions. Respect the recorded status of architecture and proof proposals; a proposal may guide planning but does not authorise runtime implementation.
+4. Treat the approved laws, enforcement requirements, accepted architecture, and approved foundation proof as binding constraints, not design suggestions. Respect the recorded status of any future proposal; a proposal may guide planning but does not authorise implementation.
 
 If a required document is missing, unreadable, contradictory, or the requested work appears to conflict with it, stop before making changes and explain the conflict to Friedl.
 
@@ -53,4 +53,4 @@ Do not reinterpret a workflow as a "tool" to bypass the laws. A tool must repres
 
 ## Current project phase
 
-The repository is governance-only. Runtime implementation, integrations, frontend work, and migration from the previous system remain unauthorised until Friedl approves the architecture and its enforcement gates.
+The accepted architecture is in its enforcement phase. Runtime implementation remains unauthorised until the initial executable gates and protected-branch required checks are active. Integrations, frontend work, and migration from the previous system remain unauthorised until their later gates are satisfied.

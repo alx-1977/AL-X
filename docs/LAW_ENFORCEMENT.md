@@ -104,7 +104,12 @@ The author and reviewing model must both assess technical compliance. Friedl's e
 - Model-specific entry files point to the same canonical instructions without duplicating the laws.
 - `LAWS_OF_ALX.md` remains the sole canonical law text.
 - `governance/EXCEPTIONS.md` is the only valid exception register.
+- `governance/DECISIONS.md` records approved product and architecture decisions without creating exceptions.
 - The pull-request template requires explicit compliance evidence.
+- `scripts/check_governance.py` verifies the canonical documents, approval markers, law checksum, decision/exception records, model entry points, and `.env` protection.
+- `scripts/check_architecture.py` enforces machine-readable module dependencies, provider isolation, prohibited source structures, raw-language tool boundaries, and detectable phrase routing.
+- The enforcement tests inject deliberate violations and must prove that the gates reject them.
+- GitHub Actions runs all available law gates on pushes and pull requests to `main`.
 
 ### Required before runtime code
 

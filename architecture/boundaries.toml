@@ -1,0 +1,54 @@
+schema_version = 1
+source_root = "src/alx"
+
+boundaries = [
+  "contracts",
+  "core",
+  "conversation",
+  "goals",
+  "capabilities",
+  "safety",
+  "tools",
+  "providers",
+  "interfaces",
+  "bootstrap",
+  "config",
+]
+
+provider_only_imports = ["anthropic", "openai", "xai_sdk"]
+
+forbidden_source_names = [
+  "command_router",
+  "intent",
+  "intents",
+  "phrase_router",
+  "voice_registry",
+  "voice_router",
+  "workflow",
+  "workflows",
+]
+
+[allowed_imports]
+contracts = []
+core = ["contracts"]
+conversation = ["contracts", "core"]
+goals = ["contracts"]
+capabilities = ["contracts", "safety"]
+safety = ["contracts"]
+tools = ["contracts"]
+providers = ["contracts"]
+interfaces = ["contracts", "conversation"]
+bootstrap = [
+  "contracts",
+  "core",
+  "conversation",
+  "goals",
+  "capabilities",
+  "safety",
+  "tools",
+  "providers",
+  "interfaces",
+  "config",
+]
+config = []
+

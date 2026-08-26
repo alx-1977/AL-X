@@ -1,6 +1,6 @@
 # AL/X Foundation Architecture Blueprint
 
-**Status:** Proposed for Friedl's plain-language acceptance
+**Status:** Accepted by Friedl on 2026-08-26
 **Scope:** The AL/X foundation only; no email, calendar, Xero, production, or design capability is implemented here
 
 ## The promise
@@ -120,7 +120,6 @@ Cost controls may cause AL/X to checkpoint or request permission to continue an 
 
 This document deliberately does not select a programming language, database product, web framework, model provider, or visual design. Those implementation choices must support these boundaries and will be recommended with technical evidence. They cannot alter the approved behaviour.
 
-## Acceptance in plain language
+## Acceptance record
 
-Friedl is being asked whether this describes the AL/X he wants—not to verify the software mechanics. Models and implementers remain responsible for building the architecture correctly and proving it with the foundation tests.
-
+Friedl confirmed on 2026-08-26 that this describes the AL/X he wants. This is acceptance of the behaviour and meaningful trade-offs, not technical certification. Models and implementers remain responsible for building the architecture correctly and proving it with the foundation tests.

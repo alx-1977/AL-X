@@ -1,6 +1,6 @@
 # AL/X Foundation Proof
 
-**Status:** Proposed acceptance demonstration; no external integrations
+**Status:** Approved for implementation by Friedl on 2026-08-26; no external integrations
 
 ## Purpose
 
@@ -122,4 +122,3 @@ Model selection is a measured configuration decision. A model that fails a law-c
 ## What Friedl will see
 
 The acceptance report will show the original goal, disruptions introduced, AL/X's observable actions, evidence used, whether she pivoted, what survived restart, approval behaviour, final result, and any failures. Friedl will not be asked to inspect internal code to decide whether the demonstration passed.
-

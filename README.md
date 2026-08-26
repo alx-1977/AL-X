@@ -6,16 +6,17 @@ This is the clean rebuild of AL/X.
 
 Governance only. No application implementation, integration, workflow, agent runtime, frontend, or migration from the previous JARVIS repository is authorised yet.
 
-The founding **Laws of AL/X** are owner-approved. The repository contains the initial model-instruction and enforcement specification layer, a proposed foundation architecture, and a proposed behavioural proof. Runtime implementation may begin only after Friedl accepts the architecture's behaviour and meaningful trade-offs in plain language and the executable enforcement gates defined in `docs/LAW_ENFORCEMENT.md` exist.
+The founding **Laws of AL/X** and foundation architecture are owner-approved. The behavioural proof is approved for implementation. Runtime implementation may begin only after the executable enforcement gates pass in CI and the `main` branch requires them.
 
 ## Mandatory instructions
 
 Every model and contributor must begin with `AGENTS.md`, which requires the complete reading of the canonical laws and their enforcement specification. Model-specific instruction files only point to that authority; they do not maintain separate copies of the rules.
 
-## Current foundation proposals
+## Current foundation
 
-- `docs/ARCHITECTURE_BLUEPRINT.md` describes the single-path, model-independent AL/X foundation in plain language.
-- `docs/FOUNDATION_PROOF.md` defines the behavioural demonstration that must pass before real integrations are accepted.
+- `docs/ARCHITECTURE_BLUEPRINT.md` describes the accepted single-path, model-independent AL/X foundation.
+- `docs/FOUNDATION_PROOF.md` defines the approved behavioural demonstration that must pass before real integrations are accepted.
+- `docs/TECHNICAL_PLAN.md` defines the minimal implementation sequence.
 
 ## Source of authority
 
