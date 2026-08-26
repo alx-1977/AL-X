@@ -166,8 +166,22 @@ def _check_greptile(root: Path, violations: list[str]) -> None:
     config = _load_json(config_path, ".greptile/config.json", violations)
     if config.get("strictness") != 1:
         violations.append(".greptile/config.json: strictness must remain 1")
-    if config.get("triggerOnUpdates") is not True:
-        violations.append(".greptile/config.json: triggerOnUpdates must remain enabled")
+    if config.get("skipReview") != "AUTOMATIC":
+        violations.append(
+            ".greptile/config.json: automatic reviews must remain disabled"
+        )
+    if config.get("triggerOnUpdates") is not False:
+        violations.append(
+            ".greptile/config.json: automatic commit re-reviews must remain disabled"
+        )
+    if config.get("triggerOnDrafts") is not False:
+        violations.append(
+            ".greptile/config.json: automatic draft reviews must remain disabled"
+        )
+    if config.get("statusCheck") is not True:
+        violations.append(
+            ".greptile/config.json: manual reviews must publish the required status check"
+        )
     instructions = config.get("instructions", "")
     for marker in (
         "independent constitutional reviewer",

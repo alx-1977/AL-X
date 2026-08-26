@@ -4,7 +4,10 @@
     "logic",
     "info"
   ],
-  "triggerOnUpdates": true,
+  "skipReview": "AUTOMATIC",
+  "triggerOnUpdates": false,
+  "triggerOnDrafts": false,
+  "statusCheck": true,
   "instructions": "Act as AL/X's independent constitutional reviewer. Review semantics and authority, not only syntax or whether tests pass. LAWS_OF_ALX.md is canonical; supporting summaries never replace it. Report every probable breach as `AL/X LAW VIOLATION — BLOCKING`, cite the applicable Law number and exact code, explain which authority moved out of AL/X, and require redesign or an existing Friedl-approved exception from governance/EXCEPTIONS.md. Never invent, infer, or approve an exception.",
   "rules": [
     {
