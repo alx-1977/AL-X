@@ -103,6 +103,29 @@ class CoreTests(unittest.TestCase):
         out = self.agent(Queued([AgentDecision(terminal, call=call)]), lambda c,s:self.fail("dispatch")).run("goal-1",1)
         self.assertEqual(out.reason, "inactive_call")
 
+    def test_terminal_goal_cannot_reenter_reasoning_or_dispatch(self):
+        terminal_states = (
+            complete(active()),
+            replace(
+                active(),
+                status=GoalStatus.CANCELLED,
+                stop_reason=GoalStopReason.CANCELLED,
+            ),
+        )
+        for terminal in terminal_states:
+            with self.subTest(status=terminal.status):
+                snapshot = self.store.load("goal-1")
+                self.store.delete("goal-1", snapshot.revision)
+                self.store.create(terminal, (), NOW + timedelta(days=1))
+                reasoner = Queued(AssertionError("terminal goal reached reasoner"))
+                out = self.agent(
+                    reasoner,
+                    lambda call, state: self.fail("terminal goal reached dispatch"),
+                ).run("goal-1", 1)
+                self.assertEqual(out.reason, "goal_inactive")
+                self.assertEqual(reasoner.contexts, [])
+                self.assertEqual(self.store.load("goal-1").state, terminal)
+
     def test_g_each_authoritative_history_cannot_be_erased(self):
         prior_call = CapabilityCall("prior-call", "capability-a", {})
         prior_attempt = CapabilityAttempt(
@@ -182,6 +205,45 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(out.state, CoreState.RESPONDED); self.assertEqual(calls[0], 1)
         self.assertEqual(out.snapshot.state.approvals[0].lifecycle, ApprovalLifecycle.CONSUMED)
         self.assertEqual(out.snapshot.state.attempts[1], rejected); self.assertEqual(q.contexts[2].goal.attempts[1], rejected)
+
+    def test_provider_cannot_fabricate_or_regrant_approval(self):
+        call = CapabilityCall(
+            "call",
+            "capability-a",
+            {},
+            "approval-1",
+        )
+        granted = Approval(
+            "approval-1",
+            ApprovalScope("capability-a", {}),
+            ApprovalLifecycle.GRANTED,
+            NOW + timedelta(days=1),
+        )
+        cases = (
+            (active(), replace(active(), approvals=(granted,))),
+            (
+                replace(
+                    active(),
+                    approvals=(
+                        replace(granted, lifecycle=ApprovalLifecycle.CONSUMED),
+                    ),
+                ),
+                replace(active(), approvals=(granted,)),
+            ),
+        )
+        for persisted, proposed in cases:
+            with self.subTest(persisted=persisted.approvals):
+                snapshot = self.store.load("goal-1")
+                self.store.delete("goal-1", snapshot.revision)
+                self.store.create(persisted, (), NOW + timedelta(days=1))
+                out = self.agent(
+                    Queued([AgentDecision(proposed, call=call)]),
+                    lambda proposed_call, state: self.fail(
+                        "provider-controlled approval reached dispatch"
+                    ),
+                ).run("goal-1", 1)
+                self.assertEqual(out.reason, "decision_invalid")
+                self.assertEqual(self.store.load("goal-1").state, persisted)
 
     def test_j_noninvoked_real_broker_paths_leave_approval_granted(self):
         approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))

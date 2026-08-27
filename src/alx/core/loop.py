@@ -51,6 +51,9 @@ class CoreAgent:
             raise ValueError("step_budget must be positive")
 
         snapshot = self._store.load(goal_id)
+        if not snapshot.state.continues:
+            return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_inactive")
+
         for _ in range(step_budget):
             try:
                 decision = self._reasoner.decide(
@@ -66,6 +69,7 @@ class CoreAgent:
             if (
                 decision.goal.goal_id != goal_id
                 or decision.goal.attempts != snapshot.state.attempts
+                or decision.goal.approvals != snapshot.state.approvals
                 or not self._preserves_history(snapshot.state, decision.goal)
             ):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="decision_invalid")
