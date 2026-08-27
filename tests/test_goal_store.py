@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -11,13 +12,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import (  # noqa: E402
-    Approval, ApprovalLifecycle, ApprovalScope, CapabilityResult, CapabilityResultState,
+    Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityResult, CapabilityResultState,
     ConversationOrigin, ConversationTurn, Evidence, GoalState, GoalStatus, GoalStopReason,
     Objective, ProgressRecord, Referent, SuccessCriterion, WorkItem,
 )
 from alx.goals import (  # noqa: E402
     GoalAlreadyExists, GoalNotFound, GoalRevisionConflict, SQLiteGoalStore, UnsupportedSchema,
 )
+from alx.goals.store import _goal_to_data  # noqa: E402
 
 
 NOW = datetime(2026, 8, 27, 9, 30, tzinfo=UTC)
@@ -37,9 +39,9 @@ def state(identifier: str = "goal-1", **changes: object) -> GoalState:
         "decisions": (ProgressRecord("decision-1", "decision", ("evidence-1",)),),
         "corrections": (ProgressRecord("correction-1", "correction", ("evidence-1",)),),
         "progress": (ProgressRecord("progress-1", "progress", ("evidence-1",)),),
-        "completed_actions": (
-            CapabilityResult("call-1", "capability-1", CapabilityResultState.PARTIAL, {"available": 1}, {"code": "limited"}, ("evidence-1",)),
-            CapabilityResult("call-2", "capability-2", CapabilityResultState.FAILED, failure={"code": "unavailable"}),
+        "attempts": (
+            CapabilityAttempt(CapabilityCall("call-1", "capability-1"), CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult("call-1", "capability-1", CapabilityResultState.PARTIAL, {"available": 1}, {"code": "limited"}, ("evidence-1",))),
+            CapabilityAttempt(CapabilityCall("call-2", "capability-2"), CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult("call-2", "capability-2", CapabilityResultState.FAILED, failure={"code": "unavailable"})),
         ),
         "blockers": (WorkItem("blocker-1", "blocker"),),
         "outstanding_work": (WorkItem("work-1", "outstanding"),),
@@ -151,11 +153,29 @@ class GoalStoreTests(unittest.TestCase):
     def test_future_schema_is_rejected(self) -> None:
         self.store.close()
         connection = sqlite3.connect(self.path)
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
         connection.commit()
         connection.close()
         with self.assertRaises(UnsupportedSchema):
             SQLiteGoalStore(self.path)
+
+    def test_v1_json_migrates_to_truthful_legacy_attempt(self) -> None:
+        saved = self.store.create(state(), (), NOW + timedelta(days=1))
+        payload = _goal_to_data(saved.state)
+        result = saved.state.attempts[0].result
+        payload.pop("attempts")
+        payload["completed_actions"] = [[result.call_id, result.capability_id, result.state.value, dict(result.values), dict(result.failure), list(result.evidence_refs)]]
+        self.store._connection.execute("UPDATE goals SET state_json = ?", (json.dumps(payload),))
+        self.store._connection.execute("PRAGMA user_version = 1")
+        self.store._connection.commit(); self.store.close(); self.store = SQLiteGoalStore(self.path)
+        legacy = self.store.load("goal-1").state.attempts[0]
+        self.assertEqual(legacy.disposition, CapabilityAttemptDisposition.LEGACY)
+        self.assertIsNone(legacy.call); self.assertIsNone(legacy.implementation_invoked); self.assertEqual(legacy.reason_code, "legacy_v1")
+        self.assertEqual(legacy.result, result)
+        snapshot = self.store.load("goal-1")
+        self.store.replace(snapshot.state, snapshot.turns, snapshot.retention_until, snapshot.revision)
+        self.store.close(); self.store = SQLiteGoalStore(self.path)
+        self.assertEqual(self.store.load("goal-1").state.attempts[0].call, None)
 
 
 if __name__ == "__main__":

@@ -4,20 +4,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from alx.contracts import (
-    Approval, ApprovalLifecycle, ApprovalScope, CapabilityResult,
+    Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityResult,
     CapabilityResultState, ConversationOrigin, ConversationTurn, Evidence, GoalState,
     GoalStatus, GoalStopReason, Objective, ProgressRecord, Referent, SuccessCriterion,
-    WorkItem,
+    WorkItem, GoalSnapshot,
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class GoalStoreError(Exception):
@@ -78,9 +77,10 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "decisions": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.decisions],
         "corrections": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.corrections],
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
-        "completed_actions": [
-            [item.call_id, item.capability_id, item.state.value, _data(item.values), _data(item.failure), list(item.evidence_refs)]
-            for item in goal.completed_actions
+        "attempts": [
+            [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
+             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.values), _data(item.result.failure), list(item.result.evidence_refs)], item.reason_code]
+            for item in goal.attempts
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
         "outstanding_work": [[item.item_id, item.summary] for item in goal.outstanding_work],
@@ -98,6 +98,27 @@ def _progress(values: list[list[Any]]) -> tuple[ProgressRecord, ...]:
     return tuple(ProgressRecord(item[0], item[1], tuple(item[2])) for item in values)
 
 
+def _attempts(data: dict[str, Any]) -> tuple[CapabilityAttempt, ...]:
+    if "attempts" not in data:
+        return tuple(
+            CapabilityAttempt(None, CapabilityAttemptDisposition.LEGACY, None,
+                              CapabilityResult(item[0], item[1], CapabilityResultState(item[2]), item[3], item[4], tuple(item[5])), "legacy_v1")
+            for item in data.get("completed_actions", [])
+        )
+    values = []
+    for item in data["attempts"]:
+        result_data = item[6]
+        if result_data is None:
+            result = None
+        elif len(result_data) == 4:
+            result = CapabilityResult(item[0], item[1], CapabilityResultState(result_data[0]), result_data[1], result_data[2], tuple(result_data[3]))
+        else:
+            result = CapabilityResult(result_data[0], result_data[1], CapabilityResultState(result_data[2]), result_data[3], result_data[4], tuple(result_data[5]))
+        call = None if item[0] is None else CapabilityCall(item[0], item[1], item[2], item[3])
+        values.append(CapabilityAttempt(call, CapabilityAttemptDisposition(item[4]), item[5], result, item[7]))
+    return tuple(values)
+
+
 def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
     return GoalState(
         goal_id=goal_id,
@@ -108,10 +129,7 @@ def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
         decisions=_progress(data["decisions"]),
         corrections=_progress(data["corrections"]),
         progress=_progress(data["progress"]),
-        completed_actions=tuple(
-            CapabilityResult(item[0], item[1], CapabilityResultState(item[2]), item[3], item[4], tuple(item[5]))
-            for item in data["completed_actions"]
-        ),
+        attempts=_attempts(data),
         blockers=tuple(WorkItem(*item) for item in data["blockers"]),
         outstanding_work=tuple(WorkItem(*item) for item in data["outstanding_work"]),
         evidence=tuple(Evidence(item[0], item[1], item[2], tuple(item[3])) for item in data["evidence"]),
@@ -136,14 +154,6 @@ def _turn_from_data(value: str) -> ConversationTurn:
     parsed = _time_from_data(occurred_at)
     assert parsed is not None
     return ConversationTurn(conversation_id, turn_id, ConversationOrigin(origin), content, parsed)
-
-
-@dataclass(frozen=True, slots=True)
-class GoalSnapshot:
-    state: GoalState
-    turns: tuple[ConversationTurn, ...]
-    revision: int
-    retention_until: datetime
 
 
 class SQLiteGoalStore:

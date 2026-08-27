@@ -9,8 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.capabilities import CapabilityBroker, CapabilityRegistry, DuplicateCapability  # noqa: E402
 from alx.contracts import (  # noqa: E402
-    Approval, ApprovalLifecycle, ApprovalScope, CapabilityCall, CapabilityDefinition,
-    CapabilityResult, CapabilityResultState, SideEffect, StructuredSchema, ValueKind,
+    Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttemptDisposition,
+    CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
+    SideEffect, StructuredSchema, ValueKind,
 )
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate, SafetyState  # noqa: E402
 
@@ -143,6 +144,97 @@ class RegistryAndBrokerTests(unittest.TestCase):
         self.assertEqual(good.dispatch(call, authority()).result.failure["code"], "unavailable")
         bad = CapabilityBroker(registry, gate, {"capability-1": lambda data: CapabilityResult("call-1", "capability-1", CapabilityResultState.FAILED, failure={"code": "other"})})
         self.assertEqual(bad.dispatch(call, authority()).reason, "result_failure_invalid")
+
+    def test_broker_reports_executor_invocation_truthfully_for_every_failure_stage(self) -> None:
+        valid_call = CapabilityCall("call-1", "capability-1", {"value": 1})
+        definition_registry = CapabilityRegistry((definition(),))
+        allow = SafetyGate({"capability-1": AuthorityPolicy()})
+
+        not_invoked = (
+            (
+                "unknown",
+                CapabilityBroker(CapabilityRegistry(), allow, {}),
+                valid_call,
+                "capability_unknown",
+                CapabilityAttemptDisposition.BROKER_FAILURE,
+            ),
+            (
+                "invalid_input",
+                CapabilityBroker(definition_registry, allow, {}),
+                CapabilityCall("call-1", "capability-1", {"value": True}),
+                "input_invalid",
+                CapabilityAttemptDisposition.REJECTED,
+            ),
+            (
+                "safety_rejection",
+                CapabilityBroker(
+                    definition_registry,
+                    SafetyGate({"capability-1": AuthorityPolicy(enabled=False)}),
+                    {},
+                ),
+                valid_call,
+                "policy_denied",
+                CapabilityAttemptDisposition.REJECTED,
+            ),
+            (
+                "missing_implementation",
+                CapabilityBroker(definition_registry, allow, {}),
+                valid_call,
+                "implementation_missing",
+                CapabilityAttemptDisposition.BROKER_FAILURE,
+            ),
+        )
+        for name, broker, call, reason, disposition in not_invoked:
+            with self.subTest(stage=name):
+                attempt = broker.dispatch(call, authority())
+                self.assertFalse(attempt.implementation_invoked)
+                self.assertEqual(attempt.reason, reason)
+                self.assertEqual(attempt.disposition, disposition)
+
+        invoked_results = {
+            "executor_error": RuntimeError("failed"),
+            "result_malformed": object(),
+            "result_identity_invalid": CapabilityResult(
+                "other",
+                "capability-1",
+                CapabilityResultState.SUCCEEDED,
+                {"ok": True},
+            ),
+            "result_output_invalid": CapabilityResult(
+                "call-1",
+                "capability-1",
+                CapabilityResultState.SUCCEEDED,
+                {"ok": "wrong"},
+            ),
+            "result_failure_invalid": CapabilityResult(
+                "call-1",
+                "capability-1",
+                CapabilityResultState.FAILED,
+                failure={"code": "undeclared"},
+            ),
+        }
+        for expected_reason, returned in invoked_results.items():
+            with self.subTest(stage=expected_reason):
+                calls = [0]
+
+                def execute(data: object, value: object = returned) -> CapabilityResult:
+                    calls[0] += 1
+                    if isinstance(value, Exception):
+                        raise value
+                    return value  # type: ignore[return-value]
+
+                attempt = CapabilityBroker(
+                    definition_registry,
+                    allow,
+                    {"capability-1": execute},  # type: ignore[dict-item]
+                ).dispatch(valid_call, authority())
+                self.assertTrue(attempt.implementation_invoked)
+                self.assertEqual(calls[0], 1)
+                self.assertEqual(
+                    attempt.disposition,
+                    CapabilityAttemptDisposition.BROKER_FAILURE,
+                )
+                self.assertEqual(attempt.reason, expected_reason)
 
 if __name__ == "__main__":
     unittest.main()

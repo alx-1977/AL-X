@@ -168,6 +168,13 @@ class CapabilityResultState(str, Enum):
     FAILED = "failed"
 
 
+class CapabilityAttemptDisposition(str, Enum):
+    EXECUTED = "executed"
+    REJECTED = "rejected"
+    BROKER_FAILURE = "broker_failure"
+    LEGACY = "legacy"
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityCall:
     """A language-blind proposal; it contains structured arguments, never a turn."""
@@ -207,6 +214,49 @@ class CapabilityResult:
             raise ValueError("a failed result requires structured failure details")
         if self.state is CapabilityResultState.PARTIAL and not self.values:
             raise ValueError("a partial result requires available structured values")
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityAttempt:
+    call: CapabilityCall | None
+    disposition: CapabilityAttemptDisposition
+    implementation_invoked: bool | None
+    result: CapabilityResult | None = None
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.disposition, CapabilityAttemptDisposition):
+            raise TypeError("attempt disposition must be a CapabilityAttemptDisposition")
+        if self.reason_code is not None:
+            _required(self.reason_code, "reason_code")
+        if self.call is not None and self.result is not None and (
+            self.result.call_id != self.call.call_id or self.result.capability_id != self.call.capability_id
+        ):
+            raise ValueError("attempt result must identify its original call")
+        if self.disposition is CapabilityAttemptDisposition.LEGACY:
+            if self.call is not None or self.implementation_invoked is not None or self.result is None or self.reason_code != "legacy_v1":
+                raise ValueError("legacy attempts retain only explicitly recoverable v1 results")
+        elif self.call is None:
+            raise ValueError("non-legacy attempts require an original call")
+        elif not isinstance(self.implementation_invoked, bool):
+            raise TypeError("non-legacy attempts require a boolean invocation flag")
+        elif self.disposition is CapabilityAttemptDisposition.EXECUTED:
+            if not self.implementation_invoked or self.result is None:
+                raise ValueError("executed attempts require an invoked implementation and result")
+        elif self.disposition is CapabilityAttemptDisposition.REJECTED:
+            if self.implementation_invoked or self.result is not None or self.reason_code is None:
+                raise ValueError("rejected attempts require a reason without invocation or result")
+        elif self.disposition is CapabilityAttemptDisposition.BROKER_FAILURE:
+            if self.result is None or self.result.state is not CapabilityResultState.FAILED or self.reason_code is None:
+                raise ValueError("broker failures require a result and reason")
+
+    @property
+    def state(self) -> CapabilityAttemptDisposition:
+        return self.disposition
+
+    @property
+    def reason(self) -> str | None:
+        return self.reason_code
 
 
 class ApprovalLifecycle(str, Enum):
@@ -295,7 +345,7 @@ class GoalState:
     decisions: tuple[ProgressRecord, ...] = ()
     corrections: tuple[ProgressRecord, ...] = ()
     progress: tuple[ProgressRecord, ...] = ()
-    completed_actions: tuple[CapabilityResult, ...] = ()
+    attempts: tuple[CapabilityAttempt, ...] = ()
     blockers: tuple[WorkItem, ...] = ()
     outstanding_work: tuple[WorkItem, ...] = ()
     evidence: tuple[Evidence, ...] = ()
@@ -310,7 +360,7 @@ class GoalState:
         object.__setattr__(self, "context", freeze_data(self.context))
         for name in (
             "success_criteria", "referents", "decisions", "corrections", "progress",
-            "completed_actions", "blockers", "outstanding_work", "evidence", "approvals",
+            "attempts", "blockers", "outstanding_work", "evidence", "approvals",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         expected = _STOP_BY_STATUS.get(self.status)
@@ -339,3 +389,7 @@ class GoalState:
     @property
     def continues(self) -> bool:
         return self.status is GoalStatus.ACTIVE
+
+    @property
+    def completed_actions(self) -> tuple[CapabilityResult, ...]:
+        return tuple(item.result for item in self.attempts if item.result is not None and item.disposition in (CapabilityAttemptDisposition.EXECUTED, CapabilityAttemptDisposition.LEGACY))

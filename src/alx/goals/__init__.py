@@ -4,10 +4,10 @@ from alx.goals.store import (
     GoalAlreadyExists,
     GoalNotFound,
     GoalRevisionConflict,
-    GoalSnapshot,
     SQLiteGoalStore,
     UnsupportedSchema,
 )
+from alx.contracts import GoalSnapshot
 
 __all__ = [
     "GoalAlreadyExists", "GoalNotFound", "GoalRevisionConflict", "GoalSnapshot",
