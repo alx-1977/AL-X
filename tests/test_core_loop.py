@@ -249,7 +249,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(resumed.reason, "dispatch_unresolved")
         self.assertEqual(reasoner.contexts, [])
 
-    def test_dispatch_failure_keeps_durable_claim_and_blocks_restart(self):
+    def test_dispatch_failure_requires_trusted_reconciliation_before_restart(self):
         approval = Approval(
             "approval-1",
             ApprovalScope("capability-a", {}),
@@ -286,6 +286,57 @@ class CoreTests(unittest.TestCase):
         ).run("goal-1", 1)
         self.assertEqual(resumed.reason, "dispatch_unresolved")
         self.assertEqual(reasoner.contexts, [])
+        resolved_attempt = CapabilityAttempt(
+            call,
+            CapabilityAttemptDisposition.BROKER_FAILURE,
+            False,
+            CapabilityResult(
+                call.call_id,
+                call.capability_id,
+                CapabilityResultState.FAILED,
+                failure={"code": "dispatch_not_invoked"},
+            ),
+            "dispatch_not_invoked",
+        )
+        reconciled = self.agent(
+            Queued([]),
+            lambda proposed, state: self.fail("reconciliation dispatched"),
+        ).reconcile_dispatch("goal-1", resolved_attempt)
+        self.assertEqual(reconciled.reason, "dispatch_reconciled")
+        self.assertEqual(reconciled.snapshot.state.attempts, (resolved_attempt,))
+        self.assertEqual(
+            reconciled.snapshot.state.approvals[0].lifecycle,
+            ApprovalLifecycle.GRANTED,
+        )
+        completed = complete(reconciled.snapshot.state)
+        continued = self.agent(
+            Queued([AgentDecision(completed, response="done")]),
+            lambda proposed, state: self.fail("completed goal dispatched"),
+        ).run("goal-1", 1)
+        self.assertEqual(continued.state, CoreState.RESPONDED)
+
+    def test_dispatch_reconciliation_rejects_unrelated_evidence(self):
+        call = CapabilityCall("call", "capability-a", {})
+        self.agent(
+            Queued([AgentDecision(active(), call=call)]),
+            lambda proposed, state: (_ for _ in ()).throw(RuntimeError()),
+        ).run("goal-1", 1)
+        unrelated = CapabilityCall("other", "capability-a", {})
+        unrelated_attempt = CapabilityAttempt(
+            unrelated,
+            CapabilityAttemptDisposition.REJECTED,
+            False,
+            reason_code="not_related",
+        )
+        out = self.agent(Queued([]), lambda proposed, state: None).reconcile_dispatch(
+            "goal-1",
+            unrelated_attempt,
+        )
+        self.assertEqual(out.reason, "attempt_invalid")
+        self.assertEqual(
+            self.store.load("goal-1").state.attempts[0].disposition,
+            CapabilityAttemptDisposition.PENDING,
+        )
 
     def test_j_real_broker_success_consumes_and_reuse_is_rejected(self):
         approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))

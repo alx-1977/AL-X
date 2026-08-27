@@ -135,39 +135,76 @@ class CoreAgent:
             if attempt.call != decision.call:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
 
-            approvals = tuple(
-                replace(
-                    item,
-                    lifecycle=(
-                        ApprovalLifecycle.CONSUMED
-                        if attempt.implementation_invoked
-                        else ApprovalLifecycle.GRANTED
-                    ),
-                )
-                if (
-                    item.lifecycle is ApprovalLifecycle.CLAIMED
-                    and item.approval_id == attempt.call.approval_id
-                    and item.scope.matches(attempt.call)
-                )
-                else item
-                for item in snapshot.state.approvals
-            )
-            updated = replace(
-                snapshot.state,
-                attempts=(*snapshot.state.attempts[:-1], attempt),
-                approvals=approvals,
-            )
-            snapshot = self._store.replace(
-                updated,
-                snapshot.turns,
-                snapshot.retention_until,
-                snapshot.revision,
-            )
+            snapshot = self._finalize_dispatch(snapshot, attempt)
 
         return CoreOutcome(
             CoreState.CHECKPOINTED,
             snapshot,
             reason="budget_exhausted",
+        )
+
+    def reconcile_dispatch(
+        self,
+        goal_id: str,
+        attempt: CapabilityAttempt,
+    ) -> CoreOutcome:
+        """Record trusted evidence for a dispatch left uncertain by interruption."""
+        snapshot = self._store.load(goal_id)
+        pending = tuple(
+            item
+            for item in snapshot.state.attempts
+            if item.disposition is CapabilityAttemptDisposition.PENDING
+        )
+        if len(pending) != 1:
+            return CoreOutcome(
+                CoreState.ERROR,
+                snapshot,
+                reason="pending_dispatch_missing",
+            )
+        if (
+            attempt.disposition is CapabilityAttemptDisposition.PENDING
+            or attempt.call != pending[0].call
+        ):
+            return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
+        snapshot = self._finalize_dispatch(snapshot, attempt)
+        return CoreOutcome(
+            CoreState.CHECKPOINTED,
+            snapshot,
+            reason="dispatch_reconciled",
+        )
+
+    def _finalize_dispatch(
+        self,
+        snapshot: GoalSnapshot,
+        attempt: CapabilityAttempt,
+    ) -> GoalSnapshot:
+        approvals = tuple(
+            replace(
+                item,
+                lifecycle=(
+                    ApprovalLifecycle.CONSUMED
+                    if attempt.implementation_invoked
+                    else ApprovalLifecycle.GRANTED
+                ),
+            )
+            if (
+                item.lifecycle is ApprovalLifecycle.CLAIMED
+                and item.approval_id == attempt.call.approval_id
+                and item.scope.matches(attempt.call)
+            )
+            else item
+            for item in snapshot.state.approvals
+        )
+        updated = replace(
+            snapshot.state,
+            attempts=(*snapshot.state.attempts[:-1], attempt),
+            approvals=approvals,
+        )
+        return self._store.replace(
+            updated,
+            snapshot.turns,
+            snapshot.retention_until,
+            snapshot.revision,
         )
 
     @staticmethod

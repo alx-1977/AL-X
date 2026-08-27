@@ -375,6 +375,8 @@ class GoalState:
         )
         if len(pending) > 1:
             raise ValueError("a goal may contain only one unresolved dispatch")
+        if pending and pending[0] != self.attempts[-1]:
+            raise ValueError("an unresolved dispatch must be the latest attempt")
         if pending and self.status is not GoalStatus.ACTIVE:
             raise ValueError("an unresolved dispatch requires an active goal")
         for approval in self.approvals:
