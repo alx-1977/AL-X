@@ -52,7 +52,7 @@ class CoreAgent:
             raise ValueError("step_budget must be positive")
 
         snapshot = self._store.load(goal_id)
-        if not snapshot.state.continues:
+        if snapshot.state.status in (GoalStatus.COMPLETED, GoalStatus.CANCELLED):
             return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_inactive")
         if self._has_pending_dispatch(snapshot.state):
             return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_unresolved")

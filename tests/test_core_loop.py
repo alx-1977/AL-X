@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts import AgentDecision, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState, Evidence, GoalState, GoalStatus, GoalStopReason, Objective, ProgressRecord, SideEffect, StructuredSchema, SuccessCriterion, ValueKind
+from alx.contracts import AgentDecision, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState, Evidence, GoalState, GoalStatus, GoalStopReason, Objective, ProgressRecord, SideEffect, StructuredSchema, SuccessCriterion, ValueKind, WorkItem
 from alx.core import CoreAgent, CoreState
 from alx.goals import GoalRevisionConflict, SQLiteGoalStore
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
@@ -125,6 +125,62 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(out.reason, "goal_inactive")
                 self.assertEqual(reasoner.contexts, [])
                 self.assertEqual(self.store.load("goal-1").state, terminal)
+
+    def test_paused_goal_can_resume_through_core_reasoning(self):
+        requested = Approval(
+            "approval-1",
+            ApprovalScope("capability-a", {}),
+            ApprovalLifecycle.REQUESTED,
+            NOW + timedelta(days=1),
+        )
+        paused_states = (
+            replace(
+                active(),
+                outstanding_work=(WorkItem("input-1", "required input"),),
+                status=GoalStatus.AWAITING_INPUT,
+                stop_reason=GoalStopReason.REQUIRED_INPUT,
+            ),
+            replace(
+                active(),
+                approvals=(requested,),
+                status=GoalStatus.AWAITING_APPROVAL,
+                stop_reason=GoalStopReason.REQUIRED_APPROVAL,
+            ),
+            replace(
+                active(),
+                blockers=(WorkItem("blocker-1", "temporary blocker"),),
+                status=GoalStatus.BLOCKED,
+                stop_reason=GoalStopReason.GENUINELY_BLOCKED,
+            ),
+        )
+        for paused in paused_states:
+            with self.subTest(status=paused.status):
+                snapshot = self.store.load("goal-1")
+                self.store.delete("goal-1", snapshot.revision)
+                self.store.create(paused, (), NOW + timedelta(days=1))
+                resumed = replace(
+                    paused,
+                    blockers=(),
+                    outstanding_work=(),
+                    status=GoalStatus.ACTIVE,
+                    stop_reason=None,
+                )
+                call = CapabilityCall("resume-" + paused.status.value, "capability-a", {})
+                attempt = CapabilityAttempt(
+                    call,
+                    CapabilityAttemptDisposition.REJECTED,
+                    False,
+                    reason_code="test_result",
+                )
+                reasoner = Queued([AgentDecision(resumed, call=call)])
+                out = self.agent(reasoner, lambda proposed, state: attempt).run(
+                    "goal-1",
+                    1,
+                )
+                self.assertEqual(out.state, CoreState.CHECKPOINTED)
+                self.assertEqual(len(reasoner.contexts), 1)
+                self.assertEqual(out.snapshot.state.status, GoalStatus.ACTIVE)
+                self.assertEqual(out.snapshot.state.attempts, (attempt,))
 
     def test_g_each_authoritative_history_cannot_be_erased(self):
         prior_call = CapabilityCall("prior-call", "capability-a", {})
