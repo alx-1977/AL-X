@@ -184,7 +184,52 @@ class CoreTests(unittest.TestCase):
     def test_k_provider_and_dispatch_error_preserve_checkpoint(self):
         self.assertEqual(self.agent(Queued(RuntimeError()),lambda c,s:None).run("goal-1",1).state,CoreState.ERROR)
         call=CapabilityCall("a","capability-a",{}); out=self.agent(Queued([AgentDecision(active(),call=call)]),lambda c,s:(_ for _ in ()).throw(RuntimeError())).run("goal-1",1)
-        self.assertEqual(out.reason,"dispatch_error"); self.assertEqual(self.store.load("goal-1").state.attempts,())
+        self.assertEqual(out.reason,"dispatch_error")
+        pending = self.store.load("goal-1").state.attempts
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].disposition, CapabilityAttemptDisposition.PENDING)
+        reasoner = Queued(AssertionError("unresolved dispatch reached reasoner"))
+        resumed = self.agent(reasoner, lambda c,s:self.fail("dispatch repeated")).run("goal-1",1)
+        self.assertEqual(resumed.reason, "dispatch_unresolved")
+        self.assertEqual(reasoner.contexts, [])
+
+    def test_dispatch_failure_keeps_durable_claim_and_blocks_restart(self):
+        approval = Approval(
+            "approval-1",
+            ApprovalScope("capability-a", {}),
+            ApprovalLifecycle.GRANTED,
+            NOW + timedelta(days=1),
+        )
+        self.store.delete("goal-1", 1)
+        self.store.create(
+            replace(active(), approvals=(approval,)),
+            (),
+            NOW + timedelta(days=1),
+        )
+        call = CapabilityCall("call", "capability-a", {}, "approval-1")
+        out = self.agent(
+            Queued([AgentDecision(replace(active(), approvals=(approval,)), call=call)]),
+            lambda proposed, state: (_ for _ in ()).throw(RuntimeError()),
+        ).run("goal-1", 1)
+        self.assertEqual(out.reason, "dispatch_error")
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        recovered = self.store.load("goal-1")
+        self.assertEqual(
+            recovered.state.approvals[0].lifecycle,
+            ApprovalLifecycle.CLAIMED,
+        )
+        self.assertEqual(
+            recovered.state.attempts[0].disposition,
+            CapabilityAttemptDisposition.PENDING,
+        )
+        reasoner = Queued(AssertionError("unresolved restart reached reasoner"))
+        resumed = self.agent(
+            reasoner,
+            lambda proposed, state: self.fail("unresolved action repeated"),
+        ).run("goal-1", 1)
+        self.assertEqual(resumed.reason, "dispatch_unresolved")
+        self.assertEqual(reasoner.contexts, [])
 
     def test_j_real_broker_success_consumes_and_reuse_is_rejected(self):
         approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))
@@ -255,6 +300,64 @@ class CoreTests(unittest.TestCase):
                 out = self.agent(Queued([AgentDecision(replace(active(), approvals=(approval,)), call=call)]), lambda c,s: broker.dispatch(c, AuthorityContext("principal", frozenset(), NOW, s.approvals))).run("goal-1",1)
                 self.assertEqual(out.snapshot.state.approvals[0].lifecycle, ApprovalLifecycle.GRANTED)
                 self.assertFalse(out.snapshot.state.attempts[0].implementation_invoked)
+
+    def test_overlapping_run_cannot_reuse_claimed_approval(self):
+        approval = Approval(
+            "approval-1",
+            ApprovalScope("capability-a", {}),
+            ApprovalLifecycle.GRANTED,
+            NOW + timedelta(days=1),
+        )
+        self.store.delete("goal-1", 1)
+        self.store.create(
+            replace(active(), approvals=(approval,)),
+            (),
+            NOW + timedelta(days=1),
+        )
+        call = CapabilityCall("first", "capability-a", {}, "approval-1")
+        result = CapabilityResult(
+            "first",
+            "capability-a",
+            CapabilityResultState.SUCCEEDED,
+            {},
+        )
+        attempt = CapabilityAttempt(
+            call,
+            CapabilityAttemptDisposition.EXECUTED,
+            True,
+            result,
+        )
+        overlapping_store = SQLiteGoalStore(self.path)
+        overlapping_reasoner = Queued(
+            AssertionError("claimed approval reached overlapping reasoner")
+        )
+        overlapping = []
+
+        def dispatch(proposed, state):
+            other = CoreAgent(
+                overlapping_store,
+                overlapping_reasoner,
+                lambda inner_call, inner_state: self.fail("approval reused"),
+                DEFINITIONS,
+            ).run("goal-1", 1)
+            overlapping.append(other)
+            return attempt
+
+        try:
+            out = self.agent(
+                Queued([AgentDecision(replace(active(), approvals=(approval,)), call=call)]),
+                dispatch,
+            ).run("goal-1", 1)
+        finally:
+            overlapping_store.close()
+        self.assertEqual(out.state, CoreState.CHECKPOINTED)
+        self.assertEqual(overlapping[0].reason, "dispatch_unresolved")
+        self.assertEqual(overlapping_reasoner.contexts, [])
+        self.assertEqual(
+            out.snapshot.state.approvals[0].lifecycle,
+            ApprovalLifecycle.CONSUMED,
+        )
+        self.assertEqual(out.snapshot.state.attempts, (attempt,))
 
     def test_c_real_broker_executor_exception_is_invoked_once(self):
         approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))

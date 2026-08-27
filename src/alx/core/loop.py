@@ -8,6 +8,7 @@ from enum import Enum
 from alx.contracts import (
     ApprovalLifecycle,
     CapabilityAttempt,
+    CapabilityAttemptDisposition,
     CapabilityDefinition,
     CapabilityDispatch,
     DurableGoalStore,
@@ -53,6 +54,8 @@ class CoreAgent:
         snapshot = self._store.load(goal_id)
         if not snapshot.state.continues:
             return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_inactive")
+        if self._has_pending_dispatch(snapshot.state):
+            return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_unresolved")
 
         for _ in range(step_budget):
             try:
@@ -98,24 +101,51 @@ class CoreAgent:
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
 
-            snapshot = self._store.replace(
+            pending = CapabilityAttempt(
+                decision.call,
+                CapabilityAttemptDisposition.PENDING,
+                None,
+                reason_code="dispatch_pending",
+            )
+            claimed_approvals = tuple(
+                replace(item, lifecycle=ApprovalLifecycle.CLAIMED)
+                if (
+                    item.lifecycle is ApprovalLifecycle.GRANTED
+                    and item.approval_id == decision.call.approval_id
+                    and item.scope.matches(decision.call)
+                )
+                else item
+                for item in decision.goal.approvals
+            )
+            checkpoint = replace(
                 decision.goal,
+                attempts=(*decision.goal.attempts, pending),
+                approvals=claimed_approvals,
+            )
+            snapshot = self._store.replace(
+                checkpoint,
                 snapshot.turns,
                 snapshot.retention_until,
                 snapshot.revision,
             )
             try:
-                attempt = self._dispatch(decision.call, snapshot.state)
+                attempt = self._dispatch(decision.call, decision.goal)
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_error")
             if attempt.call != decision.call:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
 
             approvals = tuple(
-                replace(item, lifecycle=ApprovalLifecycle.CONSUMED)
+                replace(
+                    item,
+                    lifecycle=(
+                        ApprovalLifecycle.CONSUMED
+                        if attempt.implementation_invoked
+                        else ApprovalLifecycle.GRANTED
+                    ),
+                )
                 if (
-                    attempt.implementation_invoked
-                    and item.lifecycle is ApprovalLifecycle.GRANTED
+                    item.lifecycle is ApprovalLifecycle.CLAIMED
                     and item.approval_id == attempt.call.approval_id
                     and item.scope.matches(attempt.call)
                 )
@@ -124,7 +154,7 @@ class CoreAgent:
             )
             updated = replace(
                 snapshot.state,
-                attempts=(*snapshot.state.attempts, attempt),
+                attempts=(*snapshot.state.attempts[:-1], attempt),
                 approvals=approvals,
             )
             snapshot = self._store.replace(
@@ -157,5 +187,12 @@ class CoreAgent:
                 and attempt.result is not None
                 and attempt.result.call_id == call_id
             )
+            for attempt in state.attempts
+        )
+
+    @staticmethod
+    def _has_pending_dispatch(state: GoalState) -> bool:
+        return any(
+            attempt.disposition is CapabilityAttemptDisposition.PENDING
             for attempt in state.attempts
         )

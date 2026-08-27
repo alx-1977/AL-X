@@ -169,6 +169,7 @@ class CapabilityResultState(str, Enum):
 
 
 class CapabilityAttemptDisposition(str, Enum):
+    PENDING = "pending"
     EXECUTED = "executed"
     REJECTED = "rejected"
     BROKER_FAILURE = "broker_failure"
@@ -238,6 +239,9 @@ class CapabilityAttempt:
                 raise ValueError("legacy attempts retain only explicitly recoverable v1 results")
         elif self.call is None:
             raise ValueError("non-legacy attempts require an original call")
+        elif self.disposition is CapabilityAttemptDisposition.PENDING:
+            if self.implementation_invoked is not None or self.result is not None or self.reason_code != "dispatch_pending":
+                raise ValueError("pending attempts record unresolved dispatch without claiming an invocation")
         elif not isinstance(self.implementation_invoked, bool):
             raise TypeError("non-legacy attempts require a boolean invocation flag")
         elif self.disposition is CapabilityAttemptDisposition.EXECUTED:
@@ -262,6 +266,7 @@ class CapabilityAttempt:
 class ApprovalLifecycle(str, Enum):
     REQUESTED = "requested"
     GRANTED = "granted"
+    CLAIMED = "claimed"
     DENIED = "denied"
     WITHDRAWN = "withdrawn"
     EXPIRED = "expired"
@@ -363,6 +368,23 @@ class GoalState:
             "attempts", "blockers", "outstanding_work", "evidence", "approvals",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        pending = tuple(
+            item
+            for item in self.attempts
+            if item.disposition is CapabilityAttemptDisposition.PENDING
+        )
+        if len(pending) > 1:
+            raise ValueError("a goal may contain only one unresolved dispatch")
+        if pending and self.status is not GoalStatus.ACTIVE:
+            raise ValueError("an unresolved dispatch requires an active goal")
+        for approval in self.approvals:
+            if approval.lifecycle is ApprovalLifecycle.CLAIMED and not any(
+                item.call is not None
+                and item.call.approval_id == approval.approval_id
+                and approval.scope.matches(item.call)
+                for item in pending
+            ):
+                raise ValueError("a claimed approval requires its pending capability attempt")
         expected = _STOP_BY_STATUS.get(self.status)
         if self.status is GoalStatus.ACTIVE:
             if self.stop_reason is not None:
