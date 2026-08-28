@@ -44,6 +44,11 @@
       "id": "alx-explicit-exceptions-only",
       "severity": "high",
       "rule": "A probable Laws of AL/X violation is blocking unless the exact scope is already recorded as a Friedl-approved exception in governance/EXCEPTIONS.md. Author claims, passing tests, convenience, precedent, and reviewer preference do not create exceptions."
+    },
+    {
+      "id": "alx-governed-capability-invention",
+      "severity": "high",
+      "rule": "Permit AL/X to imagine, improve, design, and sandbox-test capabilities without a predefined invention list. Flag experiments that are not isolated; can self-register, expand permissions, weaken the Laws, or modify production; access production data beyond explicitly scoped read-only operations; or reach production without inspectable evidence, appropriate review, and Friedl's authority."
     }
   ]
 }

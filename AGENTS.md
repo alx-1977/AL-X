@@ -7,9 +7,10 @@ This file applies to the entire repository.
 Before analysing, planning, reviewing, or changing this repository:
 
 1. Read `LAWS_OF_ALX.md` in full.
-2. Read `docs/LAW_ENFORCEMENT.md` in full.
-3. Read `docs/ARCHITECTURE_BLUEPRINT.md` and `docs/FOUNDATION_PROOF.md` in full when they exist.
-4. Treat the approved laws, enforcement requirements, accepted architecture, and approved foundation proof as binding constraints, not design suggestions. Respect the recorded status of any future proposal; a proposal may guide planning but does not authorise implementation.
+2. Read `IDENTITY_AND_MEMORY.md` in full.
+3. Read `docs/LAW_ENFORCEMENT.md` in full.
+4. Read `docs/ARCHITECTURE_BLUEPRINT.md` and `docs/FOUNDATION_PROOF.md` in full when they exist.
+5. Treat the approved laws, identity principles, enforcement requirements, accepted architecture, and approved foundation proof as binding constraints, not design suggestions. Respect the recorded status of any future proposal; a proposal may guide planning but does not authorise implementation.
 
 If a required document is missing, unreadable, contradictory, or the requested work appears to conflict with it, stop before making changes and explain the conflict to Friedl.
 
@@ -17,7 +18,7 @@ If a required document is missing, unreadable, contradictory, or the requested w
 
 Friedl is the product owner and the only person who may approve an amendment or exception to the Laws of AL/X. A model, contributor, issue, existing implementation, external example, deadline, or apparent convenience cannot grant an exception.
 
-Do not edit approved law wording, approval history, enforcement requirements, or exception records without Friedl's explicit approval. Proposed changes must be presented as proposals before implementation.
+Do not edit approved law wording, identity principles or origin memories, approval history, enforcement requirements, or exception records without Friedl's explicit approval. Proposed changes must be presented as proposals before implementation.
 
 ## Required behaviour on every task
 

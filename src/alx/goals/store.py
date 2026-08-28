@@ -144,16 +144,18 @@ def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
 
 def _turn_to_data(turn: ConversationTurn) -> str:
     return json.dumps(
-        [turn.conversation_id, turn.turn_id, turn.origin.value, turn.content, _time_to_data(turn.occurred_at)],
+        [turn.conversation_id, turn.turn_id, turn.origin.value, turn.content, _time_to_data(turn.occurred_at), turn.person_id],
         separators=(",", ":"),
     )
 
 
 def _turn_from_data(value: str) -> ConversationTurn:
-    conversation_id, turn_id, origin, content, occurred_at = json.loads(value)
+    data = json.loads(value)
+    conversation_id, turn_id, origin, content, occurred_at = data[:5]
+    person_id = None if len(data) == 5 else data[5]
     parsed = _time_from_data(occurred_at)
     assert parsed is not None
-    return ConversationTurn(conversation_id, turn_id, ConversationOrigin(origin), content, parsed)
+    return ConversationTurn(conversation_id, turn_id, ConversationOrigin(origin), content, parsed, person_id)
 
 
 class SQLiteGoalStore:

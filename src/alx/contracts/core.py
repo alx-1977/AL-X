@@ -13,6 +13,7 @@ from alx.contracts.records import (
     ConversationTurn,
     GoalState,
 )
+from alx.contracts.memory import MemoryProposal, MemorySnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,12 +50,17 @@ class AgentDecision:
     goal: GoalState
     call: CapabilityCall | None = None
     response: str | None = None
+    memory_proposals: tuple[MemoryProposal, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.call is None) == (self.response is None):
             raise ValueError("a decision contains exactly one call or response")
         if self.response is not None and not self.response.strip():
             raise ValueError("response must not be blank")
+        object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
+        memory_ids = [item.memory_id for item in self.memory_proposals]
+        if len(memory_ids) != len(set(memory_ids)):
+            raise ValueError("a decision cannot repeat a memory identifier")
 
 
 class ReasoningProvider(Protocol):
@@ -62,6 +68,13 @@ class ReasoningProvider(Protocol):
 
 
 class DurableGoalStore(Protocol):
+    def create(
+        self,
+        state: GoalState,
+        turns: tuple[ConversationTurn, ...],
+        retention_until: datetime,
+    ) -> GoalSnapshot: ...
+
     def load(self, goal_id: str) -> GoalSnapshot: ...
 
     def replace(
@@ -71,6 +84,14 @@ class DurableGoalStore(Protocol):
         retention_until: datetime,
         expected_revision: int,
     ) -> GoalSnapshot: ...
+
+
+class DurableMemoryStore(Protocol):
+    def remember(
+        self,
+        proposal: MemoryProposal,
+        retention_until: datetime,
+    ) -> MemorySnapshot: ...
 
 
 class CapabilityDispatch(Protocol):

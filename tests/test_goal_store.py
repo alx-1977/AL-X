@@ -72,7 +72,14 @@ class GoalStoreTests(unittest.TestCase):
         self.assertEqual(loaded.retention_until, saved.retention_until)
 
     def test_turns_round_trip_in_insertion_order(self) -> None:
-        turns = (turn("turn-1"), turn("turn-2", ConversationOrigin.SPEECH_TRANSCRIPT), turn("turn-3"))
+        turns = (
+            turn("turn-1"),
+            ConversationTurn(
+                "conversation-1", "turn-2", ConversationOrigin.SPEECH_TRANSCRIPT,
+                "turn turn-2", NOW, "friedl",
+            ),
+            turn("turn-3"),
+        )
         self.store.create(state(), turns, NOW + timedelta(days=1))
         self.assertEqual(self.store.load("goal-1").turns, turns)
 

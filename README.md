@@ -4,9 +4,9 @@ This is the clean rebuild of AL/X.
 
 ## Current phase
 
-Governance only. No application implementation, integration, workflow, agent runtime, frontend, or migration from the previous JARVIS repository is authorised yet.
+The governed foundation runtime is under incremental implementation. Domain integrations and workflows remain out of scope until the foundation proof passes. The first voice work is limited to the single Conversation Gateway and replaceable reasoning, transcription, and synthesis provider boundaries approved by Friedl.
 
-The founding **Laws of AL/X** and foundation architecture are owner-approved. The behavioural proof is approved for implementation. Runtime implementation may begin only after the executable enforcement gates pass in CI and the `main` branch requires them.
+The founding **Laws of AL/X**, foundation architecture, and initial voice boundary are owner-approved. Every increment must pass the executable governance and architecture gates before review.
 
 ## Mandatory instructions
 
@@ -17,6 +17,12 @@ Every model and contributor must begin with `AGENTS.md`, which requires the comp
 - `docs/ARCHITECTURE_BLUEPRINT.md` describes the accepted single-path, model-independent AL/X foundation.
 - `docs/FOUNDATION_PROOF.md` defines the approved behavioural demonstration that must pass before real integrations are accepted.
 - `docs/TECHNICAL_PLAN.md` defines the minimal implementation sequence.
+- `IDENTITY_AND_MEMORY.md` contains Friedl-approved identity principles, origin memories, and autobiographical-memory boundaries subordinate to the Laws.
+- `src/alx/conversation` contains the only conversational ingress.
+- `src/alx/providers` isolates external reasoning, STT, and TTS APIs behind provider-neutral contracts.
+- `src/alx/core/model_reasoner.py` is the single provider-neutral bridge from approved identity, durable state, and primitive schemas to an authoritative Core decision.
+- `src/alx/memories` persists Core-selected factual, relationship, and autobiographical memories with provenance, revision history, person isolation, and retention controls; it never decides what is meaningful.
+- `.env.example` lists provider selection and model settings; provider and model choices are never embedded into Core behaviour.
 
 ## Source of authority
 

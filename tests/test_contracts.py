@@ -48,6 +48,11 @@ class ConversationContractTests(unittest.TestCase):
             ConversationTurn("conversation-1", "turn-1", ConversationOrigin.TYPED, "words", naive)
         with self.assertRaises(ValueError):
             BackgroundEvent("event-1", "source_change", naive)
+        with self.assertRaises(ValueError):
+            ConversationTurn(
+                "conversation-1", "turn-2", ConversationOrigin.TYPED,
+                "words", NOW, " ",
+            )
 
 
 class CapabilityContractTests(unittest.TestCase):

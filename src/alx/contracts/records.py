@@ -72,12 +72,15 @@ class ConversationTurn:
     origin: ConversationOrigin
     content: str
     occurred_at: datetime
+    person_id: str | None = None
 
     def __post_init__(self) -> None:
         _required(self.conversation_id, "conversation_id")
         _required(self.turn_id, "turn_id")
         _required(self.content, "content")
         _aware(self.occurred_at, "occurred_at")
+        if self.person_id is not None:
+            _required(self.person_id, "person_id")
 
 
 @dataclass(frozen=True, slots=True)

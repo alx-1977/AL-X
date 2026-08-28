@@ -62,6 +62,7 @@ Any proposal must name the concrete module that owns each boundary. Two owners f
 | 16 | CI verifies that every exception identifier exists in `governance/EXCEPTIONS.md` and matches its exact scope and expiry/review condition. | Friedl explicitly approves each exception before implementation. |
 | 17 | Test-policy checks reject suites whose behavioural coverage depends only on exact trigger phrases or intent labels. | Review scenarios for varied language, interruptions, corrections, and restarts. |
 | 18 | CI makes all implemented law gates required and prevents silent skipping. | Record evidence for any law that cannot yet be mechanically verified. |
+| 19 | Sandbox-boundary tests prove experiments cannot self-register, increase permissions, modify production systems, or use production-data operations other than explicitly scoped reads. Deployment tests require a separately governed capability record and authority decision. | Review the experiment's isolation, resource and privacy controls, production-data scope, evidence, and proposed deployment; Friedl alone authorises production deployment. |
 
 ## Required test scenarios for every conversational capability
 
