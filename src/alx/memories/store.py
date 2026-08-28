@@ -112,49 +112,39 @@ class SQLiteMemoryStore:
 
     def create(self, proposal: MemoryProposal, retention_until: datetime) -> MemorySnapshot:
         _aware(retention_until, "retention_until")
-        if proposal.supersedes_memory_id is not None:
-            if not self._exists(proposal.supersedes_memory_id):
-                raise SupersededMemoryNotFound(proposal.supersedes_memory_id)
-            previous = self.load(proposal.supersedes_memory_id)
-            if previous.kind is not proposal.kind or previous.person_id != proposal.person_id:
-                raise InvalidMemorySupersession(proposal.supersedes_memory_id)
-        revision = MemoryRevision(
-            1, proposal.content, proposal.source_references, proposal.formed_at,
-            meaning=proposal.meaning,
-        )
         try:
             with self._connection:
-                self._connection.execute(
-                    "INSERT INTO memories(memory_id, kind, person_id, supersedes_memory_id, retention_until) VALUES (?, ?, ?, ?, ?)",
-                    (proposal.memory_id, proposal.kind.value, proposal.person_id, proposal.supersedes_memory_id, retention_until.isoformat()),
-                )
-                self._connection.execute(
-                    "INSERT INTO memory_revisions(memory_id, revision, revision_json) VALUES (?, ?, ?)",
-                    (proposal.memory_id, 1, _encode_revision(revision)),
-                )
+                self._insert(proposal, retention_until)
         except sqlite3.IntegrityError as error:
             raise MemoryAlreadyExists(proposal.memory_id) from error
         return self.load(proposal.memory_id)
 
     def remember(self, proposal: MemoryProposal, retention_until: datetime) -> MemorySnapshot:
         """Persist once, while making an identical Core retry harmless."""
-        try:
-            return self.create(proposal, retention_until)
-        except MemoryAlreadyExists:
-            existing = self.load(proposal.memory_id)
-            initial = existing.revisions[0]
-            if (
-                existing.kind is proposal.kind
-                and existing.person_id == proposal.person_id
-                and existing.supersedes_memory_id == proposal.supersedes_memory_id
-                and initial.content == proposal.content
-                and initial.source_references == proposal.source_references
-                and initial.recorded_at == proposal.formed_at
-                and initial.meaning == proposal.meaning
-                and existing.retention_until == retention_until
-            ):
-                return existing
-            raise MemoryIdentityConflict(proposal.memory_id)
+        return self.remember_many((proposal,), retention_until)[0]
+
+    def remember_many(
+        self,
+        proposals: tuple[MemoryProposal, ...],
+        retention_until: datetime,
+    ) -> tuple[MemorySnapshot, ...]:
+        """Persist one Core-selected batch atomically and idempotently."""
+        _aware(retention_until, "retention_until")
+        proposal_list = tuple(proposals)
+        if not proposal_list:
+            return ()
+        memory_ids = [proposal.memory_id for proposal in proposal_list]
+        if len(memory_ids) != len(set(memory_ids)):
+            raise ValueError("a memory batch cannot repeat a memory identifier")
+        with self._connection:
+            for proposal in proposal_list:
+                try:
+                    self._insert(proposal, retention_until)
+                except sqlite3.IntegrityError:
+                    existing = self.load(proposal.memory_id)
+                    if not self._matches_proposal(existing, proposal, retention_until):
+                        raise MemoryIdentityConflict(proposal.memory_id)
+        return tuple(self.load(proposal.memory_id) for proposal in proposal_list)
 
     def load(self, memory_id: str) -> MemorySnapshot:
         row = self._connection.execute(
@@ -266,12 +256,14 @@ class SQLiteMemoryStore:
         return self.load(memory_id)
 
     def delete(self, memory_id: str, expected_revision: int) -> None:
-        current = self.load(memory_id)
-        if current.revision != expected_revision:
-            raise MemoryRevisionConflict(memory_id)
         with self._connection:
-            cursor = self._connection.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
+            cursor = self._connection.execute(
+                "DELETE FROM memories WHERE memory_id = ? AND (SELECT MAX(revision) FROM memory_revisions WHERE memory_id = ?) = ?",
+                (memory_id, memory_id, expected_revision),
+            )
             if cursor.rowcount != 1:
+                if self._exists(memory_id):
+                    raise MemoryRevisionConflict(memory_id)
                 raise MemoryNotFound(memory_id)
 
     def purge_expired(self, now: datetime) -> tuple[str, ...]:
@@ -289,3 +281,44 @@ class SQLiteMemoryStore:
 
     def _exists(self, memory_id: str) -> bool:
         return self._connection.execute("SELECT 1 FROM memories WHERE memory_id = ?", (memory_id,)).fetchone() is not None
+
+    def _insert(self, proposal: MemoryProposal, retention_until: datetime) -> None:
+        if proposal.supersedes_memory_id is not None:
+            if not self._exists(proposal.supersedes_memory_id):
+                raise SupersededMemoryNotFound(proposal.supersedes_memory_id)
+            previous = self.load(proposal.supersedes_memory_id)
+            if previous.kind is not proposal.kind or previous.person_id != proposal.person_id:
+                raise InvalidMemorySupersession(proposal.supersedes_memory_id)
+        revision = MemoryRevision(
+            1,
+            proposal.content,
+            proposal.source_references,
+            proposal.formed_at,
+            meaning=proposal.meaning,
+        )
+        self._connection.execute(
+            "INSERT INTO memories(memory_id, kind, person_id, supersedes_memory_id, retention_until) VALUES (?, ?, ?, ?, ?)",
+            (proposal.memory_id, proposal.kind.value, proposal.person_id, proposal.supersedes_memory_id, retention_until.isoformat()),
+        )
+        self._connection.execute(
+            "INSERT INTO memory_revisions(memory_id, revision, revision_json) VALUES (?, ?, ?)",
+            (proposal.memory_id, 1, _encode_revision(revision)),
+        )
+
+    @staticmethod
+    def _matches_proposal(
+        existing: MemorySnapshot,
+        proposal: MemoryProposal,
+        retention_until: datetime,
+    ) -> bool:
+        initial = existing.revisions[0]
+        return (
+            existing.kind is proposal.kind
+            and existing.person_id == proposal.person_id
+            and existing.supersedes_memory_id == proposal.supersedes_memory_id
+            and initial.content == proposal.content
+            and initial.source_references == proposal.source_references
+            and initial.recorded_at == proposal.formed_at
+            and initial.meaning == proposal.meaning
+            and existing.retention_until == retention_until
+        )

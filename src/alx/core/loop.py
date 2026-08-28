@@ -102,6 +102,12 @@ class CoreAgent:
         self._validate_step_budget(step_budget)
 
         snapshot = self._store.load(goal_id)
+        if not self._flush_pending_memory_batches(goal_id):
+            return CoreOutcome(
+                CoreState.ERROR,
+                snapshot,
+                reason="memory_persistence_error",
+            )
         if snapshot.state.status in (GoalStatus.COMPLETED, GoalStatus.CANCELLED):
             return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_inactive")
         if self._has_pending_dispatch(snapshot.state):
@@ -146,14 +152,13 @@ class CoreAgent:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_id_reused")
                 if not self._memory_query_is_authorized(snapshot, decision.memory_query):
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_unauthorized")
-                if not self._persist_memories_safely(decision.memory_proposals, snapshot.retention_until):
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
-                snapshot = self._store.replace(
+                snapshot, memories_committed = self._replace_with_memory_batch(
+                    snapshot,
                     decision.goal,
-                    snapshot.turns,
-                    snapshot.retention_until,
-                    snapshot.revision,
+                    decision.memory_proposals,
                 )
+                if not memories_committed:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 if self._memory_store is None:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_store_unavailable")
                 try:
@@ -173,14 +178,13 @@ class CoreAgent:
                         snapshot,
                         reason="active_response",
                     )
-                if not self._persist_memories_safely(decision.memory_proposals, snapshot.retention_until):
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
-                snapshot = self._store.replace(
+                snapshot, memories_committed = self._replace_with_memory_batch(
+                    snapshot,
                     decision.goal,
-                    snapshot.turns,
-                    snapshot.retention_until,
-                    snapshot.revision,
+                    decision.memory_proposals,
                 )
+                if not memories_committed:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 return CoreOutcome(
                     CoreState.RESPONDED,
                     snapshot,
@@ -191,8 +195,6 @@ class CoreAgent:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="inactive_call")
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
-            if not self._persist_memories_safely(decision.memory_proposals, snapshot.retention_until):
-                return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
 
             pending = CapabilityAttempt(
                 decision.call,
@@ -215,12 +217,13 @@ class CoreAgent:
                 attempts=(*decision.goal.attempts, pending),
                 approvals=claimed_approvals,
             )
-            snapshot = self._store.replace(
+            snapshot, memories_committed = self._replace_with_memory_batch(
+                snapshot,
                 checkpoint,
-                snapshot.turns,
-                snapshot.retention_until,
-                snapshot.revision,
+                decision.memory_proposals,
             )
+            if not memories_committed:
+                return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
             try:
                 attempt = self._dispatch(decision.call, decision.goal)
             except Exception:
@@ -380,27 +383,49 @@ class CoreAgent:
             return True
         return bool(snapshot.turns) and snapshot.turns[-1].person_id == query.person_id
 
-    def _persist_memories_safely(
+    def _replace_with_memory_batch(
         self,
+        snapshot: GoalSnapshot,
+        state: GoalState,
         proposals: tuple[MemoryProposal, ...],
-        retention_until: datetime,
-    ) -> bool:
+    ) -> tuple[GoalSnapshot, bool]:
+        if proposals and self._memory_store is None:
+            return snapshot, False
+        if proposals:
+            updated = self._store.replace_with_memory_batch(
+                state,
+                snapshot.turns,
+                snapshot.retention_until,
+                snapshot.revision,
+                proposals,
+            )
+        else:
+            updated = self._store.replace(
+                state,
+                snapshot.turns,
+                snapshot.retention_until,
+                snapshot.revision,
+            )
+        return updated, self._flush_pending_memory_batches(state.goal_id)
+
+    def _flush_pending_memory_batches(self, goal_id: str) -> bool:
         try:
-            self._persist_memories(proposals, retention_until)
+            batches = self._store.pending_memory_batches(goal_id)
+            if batches and self._memory_store is None:
+                return False
+            for batch in batches:
+                assert self._memory_store is not None
+                self._memory_store.remember_many(
+                    batch.proposals,
+                    batch.retention_until,
+                )
+                self._store.acknowledge_memory_batch(
+                    batch.goal_id,
+                    batch.goal_revision,
+                )
         except Exception:
             return False
         return True
-
-    def _persist_memories(
-        self,
-        proposals: tuple[MemoryProposal, ...],
-        retention_until: datetime,
-    ) -> None:
-        if proposals and self._memory_store is None:
-            raise RuntimeError("memory store is required for Core memory proposals")
-        if self._memory_store is not None:
-            for proposal in proposals:
-                self._memory_store.remember(proposal, retention_until)
 
     @staticmethod
     def _validate_step_budget(step_budget: int) -> None:
