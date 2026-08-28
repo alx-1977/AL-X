@@ -14,12 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.contracts import (  # noqa: E402
     Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityResult, CapabilityResultState,
     ConversationOrigin, ConversationTurn, Evidence, GoalState, GoalStatus, GoalStopReason,
-    Objective, ProgressRecord, Referent, SuccessCriterion, WorkItem,
+    MemoryKind, MemoryProposal, Objective, ProgressRecord, Referent,
+    SuccessCriterion, WorkItem,
 )
 from alx.goals import (  # noqa: E402
     GoalAlreadyExists, GoalNotFound, GoalRevisionConflict, SQLiteGoalStore, UnsupportedSchema,
 )
-from alx.goals.store import _goal_to_data  # noqa: E402
+from alx.goals.store import SCHEMA_VERSION, _goal_to_data  # noqa: E402
 
 
 NOW = datetime(2026, 8, 27, 9, 30, tzinfo=UTC)
@@ -130,6 +131,35 @@ class GoalStoreTests(unittest.TestCase):
         self.assertEqual(recovered.revision, saved.revision)
         self.assertEqual(recovered.turns, original_turns)
 
+    def test_failed_goal_replace_cannot_leave_a_memory_batch(self) -> None:
+        original_turns = (turn("turn-1"),)
+        saved = self.store.create(state(), original_turns, NOW + timedelta(days=1))
+        duplicate_turns = (
+            turn("turn-2"),
+            turn("turn-2", ConversationOrigin.SPEECH_TRANSCRIPT),
+        )
+        selected = MemoryProposal(
+            "memory-1",
+            MemoryKind.FACTUAL,
+            "A structured fact selected by Core.",
+            ("turn:turn-1",),
+            NOW,
+        )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.replace_with_memory_batch(
+                state(),
+                duplicate_turns,
+                NOW + timedelta(days=2),
+                saved.revision,
+                (selected,),
+            )
+
+        recovered = self.store.load("goal-1")
+        self.assertEqual(recovered.revision, saved.revision)
+        self.assertEqual(recovered.turns, original_turns)
+        self.assertEqual(self.store.pending_memory_batches("goal-1"), ())
+
     def test_inspection_listing_and_delete_removes_turns(self) -> None:
         first = self.store.create(state("goal-a"), (turn("turn-a"),), NOW + timedelta(days=1))
         self.store.create(state("goal-b"), (), NOW + timedelta(days=1))
@@ -160,7 +190,7 @@ class GoalStoreTests(unittest.TestCase):
     def test_future_schema_is_rejected(self) -> None:
         self.store.close()
         connection = sqlite3.connect(self.path)
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
         connection.commit()
         connection.close()
         with self.assertRaises(UnsupportedSchema):

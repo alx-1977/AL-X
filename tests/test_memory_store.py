@@ -110,6 +110,30 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         with self.assertRaises(MemoryRevisionConflict):
             self.store.correct("memory-1", MemoryCorrection("x", "y", ("turn-12",), NOW, "z"), saved.revision)
 
+    def test_stale_delete_cannot_erase_a_concurrent_correction(self) -> None:
+        saved = self.store.create(proposal("memory-1"), NOW + timedelta(days=90))
+        stale_store = SQLiteMemoryStore(self.path)
+        try:
+            stale_revision = stale_store.load("memory-1").revision
+            corrected = self.store.correct(
+                "memory-1",
+                MemoryCorrection(
+                    "Newer evidence changed this memory.",
+                    "A concurrent correction must survive stale deletion.",
+                    ("conversation:turn-11",),
+                    NOW + timedelta(hours=1),
+                    "I now preserve concurrent corrections explicitly.",
+                ),
+                saved.revision,
+            )
+
+            with self.assertRaises(MemoryRevisionConflict):
+                stale_store.delete("memory-1", stale_revision)
+
+            self.assertEqual(self.store.load("memory-1"), corrected)
+        finally:
+            stale_store.close()
+
     def test_categories_are_distinct_and_relationship_queries_are_person_scoped(self) -> None:
         self.store.create(proposal("fact-1", MemoryKind.FACTUAL), NOW + timedelta(days=30))
         self.store.create(proposal("friedl-1", MemoryKind.RELATIONSHIP, person_id="friedl"), NOW + timedelta(days=30))
@@ -149,6 +173,27 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         )
         with self.assertRaises(MemoryIdentityConflict):
             self.store.remember(conflict, retention)
+
+    def test_memory_batch_rolls_back_every_new_record_on_conflict(self) -> None:
+        retention = NOW + timedelta(days=90)
+        self.store.create(proposal("existing"), retention)
+        conflicting = MemoryProposal(
+            "existing",
+            MemoryKind.AUTOBIOGRAPHICAL,
+            "A conflicting identity.",
+            ("conversation:turn-8",),
+            NOW,
+            meaning="This must reject the complete batch.",
+        )
+
+        with self.assertRaises(MemoryIdentityConflict):
+            self.store.remember_many(
+                (proposal("new-before-conflict"), conflicting),
+                retention,
+            )
+
+        with self.assertRaises(MemoryNotFound):
+            self.store.load("new-before-conflict")
 
     def test_retrieval_filters_without_keywords_scores_or_cross_person_leakage(self) -> None:
         retention = NOW + timedelta(days=90)

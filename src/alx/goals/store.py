@@ -11,12 +11,13 @@ from typing import Any, Iterable
 from alx.contracts import (
     Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityResult,
     CapabilityResultState, ConversationOrigin, ConversationTurn, Evidence, GoalState,
-    GoalStatus, GoalStopReason, Objective, ProgressRecord, Referent, SuccessCriterion,
-    WorkItem, GoalSnapshot,
+    GoalStatus, GoalStopReason, MemoryKind, MemoryProposal, Objective,
+    PendingMemoryBatch, ProgressRecord, Referent, SuccessCriterion, WorkItem,
+    GoalSnapshot,
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class GoalStoreError(Exception):
@@ -158,6 +159,38 @@ def _turn_from_data(value: str) -> ConversationTurn:
     return ConversationTurn(conversation_id, turn_id, ConversationOrigin(origin), content, parsed, person_id)
 
 
+def _memory_proposal_to_data(proposal: MemoryProposal) -> str:
+    return json.dumps(
+        {
+            "memory_id": proposal.memory_id,
+            "kind": proposal.kind.value,
+            "content": proposal.content,
+            "source_references": list(proposal.source_references),
+            "formed_at": _time_to_data(proposal.formed_at),
+            "person_id": proposal.person_id,
+            "meaning": proposal.meaning,
+            "supersedes_memory_id": proposal.supersedes_memory_id,
+        },
+        separators=(",", ":"),
+    )
+
+
+def _memory_proposal_from_data(value: str) -> MemoryProposal:
+    data = json.loads(value)
+    formed_at = _time_from_data(data["formed_at"])
+    assert formed_at is not None
+    return MemoryProposal(
+        memory_id=data["memory_id"],
+        kind=MemoryKind(data["kind"]),
+        content=data["content"],
+        source_references=tuple(data["source_references"]),
+        formed_at=formed_at,
+        person_id=data["person_id"],
+        meaning=data["meaning"],
+        supersedes_memory_id=data["supersedes_memory_id"],
+    )
+
+
 class SQLiteGoalStore:
     """Small transactional store; it persists facts but never reads their meaning."""
 
@@ -188,6 +221,9 @@ class SQLiteGoalStore:
             )
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS conversation_turns (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, turn_id TEXT NOT NULL, turn_json TEXT NOT NULL, PRIMARY KEY(goal_id, ordinal), UNIQUE(goal_id, turn_id))"
+            )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS pending_memory_batches (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, goal_revision INTEGER NOT NULL, ordinal INTEGER NOT NULL, proposal_json TEXT NOT NULL, retention_until TEXT NOT NULL, PRIMARY KEY(goal_id, goal_revision, ordinal))"
             )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -229,17 +265,83 @@ class SQLiteGoalStore:
         _aware(retention_until, "retention_until")
         turn_list = tuple(turns)
         with self._connection:
-            updated = self._connection.execute(
-                "UPDATE goals SET revision = revision + 1, retention_until = ?, state_json = ? WHERE goal_id = ? AND revision = ?",
-                (_time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), state.goal_id, expected_revision),
-            ).rowcount
-            if not updated:
-                if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
-                    raise GoalRevisionConflict(state.goal_id)
-                raise GoalNotFound(state.goal_id)
-            self._connection.execute("DELETE FROM conversation_turns WHERE goal_id = ?", (state.goal_id,))
-            self._write_turns(state.goal_id, turn_list)
+            self._replace_rows(state, turn_list, retention_until, expected_revision)
         return GoalSnapshot(state, turn_list, expected_revision + 1, retention_until)
+
+    def replace_with_memory_batch(
+        self,
+        state: GoalState,
+        turns: Iterable[ConversationTurn],
+        retention_until: datetime,
+        expected_revision: int,
+        proposals: tuple[MemoryProposal, ...],
+    ) -> GoalSnapshot:
+        """Commit a goal revision and its exact memory intent in one transaction."""
+        _aware(retention_until, "retention_until")
+        proposal_list = tuple(proposals)
+        if not proposal_list:
+            raise ValueError("replace_with_memory_batch requires proposals")
+        turn_list = tuple(turns)
+        goal_revision = expected_revision + 1
+        with self._connection:
+            self._replace_rows(state, turn_list, retention_until, expected_revision)
+            self._connection.executemany(
+                "INSERT INTO pending_memory_batches(goal_id, goal_revision, ordinal, proposal_json, retention_until) VALUES (?, ?, ?, ?, ?)",
+                (
+                    (
+                        state.goal_id,
+                        goal_revision,
+                        ordinal,
+                        _memory_proposal_to_data(proposal),
+                        _time_to_data(retention_until),
+                    )
+                    for ordinal, proposal in enumerate(proposal_list)
+                ),
+            )
+        return GoalSnapshot(state, turn_list, goal_revision, retention_until)
+
+    def pending_memory_batches(self, goal_id: str) -> tuple[PendingMemoryBatch, ...]:
+        rows = self._connection.execute(
+            "SELECT goal_revision, proposal_json, retention_until FROM pending_memory_batches WHERE goal_id = ? ORDER BY goal_revision, ordinal",
+            (goal_id,),
+        ).fetchall()
+        batches: list[PendingMemoryBatch] = []
+        current_revision: int | None = None
+        current_retention: datetime | None = None
+        current_proposals: list[MemoryProposal] = []
+        for goal_revision, proposal_json, retention_value in rows:
+            if current_revision is not None and goal_revision != current_revision:
+                assert current_retention is not None
+                batches.append(
+                    PendingMemoryBatch(
+                        goal_id,
+                        current_revision,
+                        tuple(current_proposals),
+                        current_retention,
+                    )
+                )
+                current_proposals = []
+            current_revision = goal_revision
+            current_retention = _time_from_data(retention_value)
+            current_proposals.append(_memory_proposal_from_data(proposal_json))
+        if current_revision is not None:
+            assert current_retention is not None
+            batches.append(
+                PendingMemoryBatch(
+                    goal_id,
+                    current_revision,
+                    tuple(current_proposals),
+                    current_retention,
+                )
+            )
+        return tuple(batches)
+
+    def acknowledge_memory_batch(self, goal_id: str, goal_revision: int) -> None:
+        with self._connection:
+            self._connection.execute(
+                "DELETE FROM pending_memory_batches WHERE goal_id = ? AND goal_revision = ?",
+                (goal_id, goal_revision),
+            )
 
     def delete(self, goal_id: str, expected_revision: int) -> None:
         with self._connection:
@@ -271,3 +373,21 @@ class SQLiteGoalStore:
                 "INSERT INTO conversation_turns(goal_id, ordinal, turn_id, turn_json) VALUES (?, ?, ?, ?)",
                 (goal_id, ordinal, turn.turn_id, _turn_to_data(turn)),
             )
+
+    def _replace_rows(
+        self,
+        state: GoalState,
+        turns: tuple[ConversationTurn, ...],
+        retention_until: datetime,
+        expected_revision: int,
+    ) -> None:
+        updated = self._connection.execute(
+            "UPDATE goals SET revision = revision + 1, retention_until = ?, state_json = ? WHERE goal_id = ? AND revision = ?",
+            (_time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), state.goal_id, expected_revision),
+        ).rowcount
+        if not updated:
+            if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
+                raise GoalRevisionConflict(state.goal_id)
+            raise GoalNotFound(state.goal_id)
+        self._connection.execute("DELETE FROM conversation_turns WHERE goal_id = ?", (state.goal_id,))
+        self._write_turns(state.goal_id, turns)

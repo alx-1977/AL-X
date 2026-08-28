@@ -113,6 +113,21 @@ class SequenceModel:
         return ModelCompletion("fake", "fake-model", self.outputs.pop(0))
 
 
+class FailFirstMemoryBatch:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.failed = False
+
+    def remember_many(self, proposals, retention_until):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("simulated interruption before memory commit")
+        return self.delegate.remember_many(proposals, retention_until)
+
+    def retrieve(self, query, as_of):
+        return self.delegate.retrieve(query, as_of)
+
+
 class ModelReasonerTests(unittest.TestCase):
     def context(self):
         return ReasoningContext(
@@ -287,6 +302,75 @@ class ModelReasonerTests(unittest.TestCase):
                 self.assertEqual(remembered.current.source_references, ("turn:turn-1",))
                 relationship = memory_store.load("relationship-1")
                 self.assertEqual(relationship.person_id, "friedl")
+            finally:
+                goal_store.close()
+                memory_store.close()
+
+    def test_goal_revision_recovers_exact_memory_batch_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            goal_path = Path(directory) / "goals.sqlite3"
+            goal_store = SQLiteGoalStore(goal_path)
+            memory_store = SQLiteMemoryStore(Path(directory) / "memories.sqlite3")
+            try:
+                turn = self.context().turns[0]
+                goal_store.create(goal(), (turn,), NOW + timedelta(days=30))
+                selected_memory = {
+                    "id": "memory-recovered",
+                    "kind": "autobiographical",
+                    "content": "I preserved a memory decision across an interruption.",
+                    "source_references": ["turn:turn-1"],
+                    "formed_at": NOW.isoformat(),
+                    "person_id": None,
+                    "meaning": "Durable intent matters more than retrying model output.",
+                    "supersedes_memory_id": None,
+                }
+                interrupted_memory_store = FailFirstMemoryBatch(memory_store)
+                first_core = CoreAgent(
+                    goal_store,
+                    ModelReasoner(
+                        FakeModel(base_output(memory_proposals=[selected_memory])),
+                        "laws",
+                        "identity",
+                    ),
+                    lambda call, state: self.fail("a response must not dispatch"),
+                    (CAPABILITY,),
+                    interrupted_memory_store,
+                    clock=lambda: NOW,
+                )
+
+                first = first_core.run("goal-1", 1)
+
+                self.assertEqual(first.state, CoreState.ERROR)
+                self.assertEqual(first.reason, "memory_persistence_error")
+                pending = goal_store.pending_memory_batches("goal-1")
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0].proposals[0].memory_id, "memory-recovered")
+                with self.assertRaises(MemoryNotFound):
+                    memory_store.load("memory-recovered")
+
+                goal_store.close()
+                goal_store = SQLiteGoalStore(goal_path)
+                resumed_core = CoreAgent(
+                    goal_store,
+                    ModelReasoner(
+                        FakeModel(base_output(new_decisions=[], memory_proposals=[])),
+                        "laws",
+                        "identity",
+                    ),
+                    lambda call, state: self.fail("a response must not dispatch"),
+                    (CAPABILITY,),
+                    interrupted_memory_store,
+                    clock=lambda: NOW,
+                )
+
+                resumed = resumed_core.run("goal-1", 1)
+
+                self.assertEqual(resumed.state, CoreState.RESPONDED)
+                self.assertEqual(
+                    memory_store.load("memory-recovered").current.content,
+                    selected_memory["content"],
+                )
+                self.assertEqual(goal_store.pending_memory_batches("goal-1"), ())
             finally:
                 goal_store.close()
                 memory_store.close()
