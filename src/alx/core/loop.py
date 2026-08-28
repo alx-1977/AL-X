@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
 from alx.contracts import (
@@ -20,6 +21,8 @@ from alx.contracts import (
     Objective,
     MemoryKind,
     MemoryProposal,
+    MemoryQuery,
+    MemorySnapshot,
     ReasoningContext,
     ReasoningProvider,
     SuccessCriterion,
@@ -49,12 +52,14 @@ class CoreAgent:
         dispatch: CapabilityDispatch,
         capabilities: tuple[CapabilityDefinition, ...],
         memory_store: DurableMemoryStore | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
         self._reasoner = reasoner
         self._dispatch = dispatch
         self._capabilities = tuple(capabilities)
         self._memory_store = memory_store
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def start(
         self,
@@ -102,13 +107,22 @@ class CoreAgent:
         if self._has_pending_dispatch(snapshot.state):
             return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_unresolved")
 
+        retrieved_memories: tuple[MemorySnapshot, ...] = ()
+        memory_query_ids: set[str] = set()
         for _ in range(step_budget):
+            try:
+                now = self._clock()
+                if now.tzinfo is None or now.utcoffset() is None:
+                    raise ValueError("Core clock must be timezone-aware")
+            except Exception:
+                return CoreOutcome(CoreState.ERROR, snapshot, reason="clock_error")
             try:
                 decision = self._reasoner.decide(
                     ReasoningContext(
                         snapshot.state,
                         snapshot.turns,
                         self._capabilities,
+                        retrieved_memories,
                     )
                 )
             except Exception:
@@ -122,8 +136,35 @@ class CoreAgent:
             ):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="decision_invalid")
 
-            if not self._memory_proposals_are_grounded(snapshot, decision.memory_proposals):
+            if not self._memory_proposals_are_grounded(snapshot, decision.memory_proposals, now):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_proposal_invalid")
+
+            if decision.memory_query is not None:
+                if decision.goal.status is not GoalStatus.ACTIVE:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="inactive_memory_query")
+                if decision.memory_query.query_id in memory_query_ids:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_id_reused")
+                if not self._memory_query_is_authorized(snapshot, decision.memory_query):
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_unauthorized")
+                if not self._persist_memories_safely(decision.memory_proposals, snapshot.retention_until):
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                snapshot = self._store.replace(
+                    decision.goal,
+                    snapshot.turns,
+                    snapshot.retention_until,
+                    snapshot.revision,
+                )
+                if self._memory_store is None:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_store_unavailable")
+                try:
+                    retrieved_memories = self._memory_store.retrieve(
+                        decision.memory_query,
+                        now,
+                    )
+                except Exception:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_retrieval_error")
+                memory_query_ids.add(decision.memory_query.query_id)
+                continue
 
             if decision.call is None:
                 if decision.goal.status is GoalStatus.ACTIVE:
@@ -290,8 +331,10 @@ class CoreAgent:
     def _memory_proposals_are_grounded(
         snapshot: GoalSnapshot,
         proposals: tuple[MemoryProposal, ...],
+        as_of: datetime,
     ) -> bool:
         turns = {f"turn:{item.turn_id}": item.person_id for item in snapshot.turns}
+        turn_times = {f"turn:{item.turn_id}": item.occurred_at for item in snapshot.turns}
         state = snapshot.state
         references = {
             *turns,
@@ -306,7 +349,15 @@ class CoreAgent:
             ),
         }
         for proposal in proposals:
+            if proposal.formed_at > as_of:
+                return False
             if any(reference not in references for reference in proposal.source_references):
+                return False
+            if any(
+                proposal.formed_at < turn_times[reference]
+                for reference in proposal.source_references
+                if reference in turn_times
+            ):
                 return False
             if proposal.kind is MemoryKind.RELATIONSHIP:
                 sourced_people = [
@@ -319,6 +370,15 @@ class CoreAgent:
                 ):
                     return False
         return True
+
+    @staticmethod
+    def _memory_query_is_authorized(
+        snapshot: GoalSnapshot,
+        query: MemoryQuery,
+    ) -> bool:
+        if query.person_id is None:
+            return True
+        return bool(snapshot.turns) and snapshot.turns[-1].person_id == query.person_id
 
     def _persist_memories_safely(
         self,

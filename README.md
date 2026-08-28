@@ -21,7 +21,7 @@ Every model and contributor must begin with `AGENTS.md`, which requires the comp
 - `src/alx/conversation` contains the only conversational ingress.
 - `src/alx/providers` isolates external reasoning, STT, and TTS APIs behind provider-neutral contracts.
 - `src/alx/core/model_reasoner.py` is the single provider-neutral bridge from approved identity, durable state, and primitive schemas to an authoritative Core decision.
-- `src/alx/memories` persists Core-selected factual, relationship, and autobiographical memories with provenance, revision history, person isolation, and retention controls; it never decides what is meaningful.
+- `src/alx/memories` persists Core-selected factual, relationship, and autobiographical memories with provenance, revision history, person isolation, and retention controls. The Core may retrieve a narrowly scoped selection through structured metadata, while the store never interprets the conversation or decides semantic relevance.
 - `.env.example` lists provider selection and model settings; provider and model choices are never embedded into Core behaviour.
 
 ## Source of authority

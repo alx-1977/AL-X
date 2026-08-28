@@ -17,6 +17,7 @@ from alx.contracts import (  # noqa: E402
     GoalState,
     GoalStatus,
     MemoryKind,
+    MemoryProposal,
     ModelCompletion,
     Objective,
     ReasoningContext,
@@ -76,6 +77,15 @@ def base_output(**changes):
         "outstanding_work": [{"id": "continue-1", "summary": "await the next turn"}],
         "new_evidence": [],
         "memory_proposals": [],
+        "memory_query_id": None,
+        "memory_kinds": [],
+        "memory_ids": [],
+        "memory_person_id": None,
+        "memory_formed_after": None,
+        "memory_formed_before": None,
+        "memory_source_references": [],
+        "memory_source_match": "any",
+        "memory_include_superseded": False,
         "status": "awaiting_input",
         "stop_reason": "required_input",
     }
@@ -91,6 +101,16 @@ class FakeModel:
     def complete(self, request):
         self.requests.append(request)
         return ModelCompletion("fake", "fake-model", self.output)
+
+
+class SequenceModel:
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.requests = []
+
+    def complete(self, request):
+        self.requests.append(request)
+        return ModelCompletion("fake", "fake-model", self.outputs.pop(0))
 
 
 class ModelReasonerTests(unittest.TestCase):
@@ -293,6 +313,16 @@ class ModelReasonerTests(unittest.TestCase):
                 "meaning": None,
                 "supersedes_memory_id": None,
             },
+            {
+                "id": "future-memory",
+                "kind": "factual",
+                "content": "not formed yet",
+                "source_references": ["turn:turn-1"],
+                "formed_at": (NOW + timedelta(days=1)).isoformat(),
+                "person_id": None,
+                "meaning": None,
+                "supersedes_memory_id": None,
+            },
         ):
             with self.subTest(memory_id=proposal["id"]), tempfile.TemporaryDirectory() as directory:
                 goal_store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
@@ -306,6 +336,7 @@ class ModelReasonerTests(unittest.TestCase):
                         lambda call, state: self.fail("invalid memory must not dispatch"),
                         (CAPABILITY,),
                         memory_store,
+                        clock=lambda: NOW,
                     )
                     outcome = core.run("goal-1", 1)
                     self.assertEqual(outcome.state, CoreState.ERROR)
@@ -316,6 +347,99 @@ class ModelReasonerTests(unittest.TestCase):
                 finally:
                     goal_store.close()
                     memory_store.close()
+
+    def test_core_retrieves_only_its_structured_person_scoped_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            goal_store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            memory_store = SQLiteMemoryStore(Path(directory) / "memories.sqlite3")
+            retention = NOW + timedelta(days=30)
+            try:
+                turn = self.context().turns[0]
+                goal_store.create(goal(), (turn,), retention)
+                memory_store.create(
+                    MemoryProposal(
+                        "friedl-memory", MemoryKind.RELATIONSHIP,
+                        "Friedl prefers evidence-based disagreement.", ("turn:turn-1",),
+                        NOW, person_id="friedl",
+                    ),
+                    retention,
+                )
+                memory_store.create(
+                    MemoryProposal(
+                        "other-memory", MemoryKind.RELATIONSHIP,
+                        "Another person's preference.", ("turn:other",),
+                        NOW, person_id="other",
+                    ),
+                    retention,
+                )
+                model = SequenceModel([
+                    base_output(
+                        action="retrieve_memories",
+                        response=None,
+                        status="active",
+                        stop_reason=None,
+                        outstanding_work=[],
+                        new_decisions=[],
+                        memory_query_id="memory-query-1",
+                        memory_kinds=["relationship"],
+                        memory_person_id="friedl",
+                    ),
+                    base_output(),
+                ])
+                core = CoreAgent(
+                    goal_store,
+                    ModelReasoner(model, "laws", "identity"),
+                    lambda call, state: self.fail("retrieval must not dispatch a capability"),
+                    (CAPABILITY,),
+                    memory_store,
+                    clock=lambda: NOW,
+                )
+
+                outcome = core.run("goal-1", 2)
+
+                self.assertEqual(outcome.state, CoreState.RESPONDED)
+                first_context = json.loads(model.requests[0].messages[2].content)
+                second_context = json.loads(model.requests[1].messages[2].content)
+                self.assertEqual(first_context["retrieved_memories"], [])
+                self.assertEqual(
+                    [item["memory_id"] for item in second_context["retrieved_memories"]],
+                    ["friedl-memory"],
+                )
+                self.assertNotIn("other-memory", model.requests[1].messages[2].content)
+            finally:
+                goal_store.close()
+                memory_store.close()
+
+    def test_core_rejects_relationship_retrieval_for_another_person(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            goal_store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            memory_store = SQLiteMemoryStore(Path(directory) / "memories.sqlite3")
+            try:
+                goal_store.create(goal(), self.context().turns, NOW + timedelta(days=30))
+                output = base_output(
+                    action="retrieve_memories",
+                    response=None,
+                    status="active",
+                    stop_reason=None,
+                    outstanding_work=[],
+                    memory_query_id="memory-query-1",
+                    memory_kinds=["relationship"],
+                    memory_person_id="other",
+                )
+                core = CoreAgent(
+                    goal_store,
+                    ModelReasoner(FakeModel(output), "laws", "identity"),
+                    lambda call, state: self.fail("unauthorized retrieval must not dispatch"),
+                    (CAPABILITY,),
+                    memory_store,
+                    clock=lambda: NOW,
+                )
+                outcome = core.run("goal-1", 1)
+                self.assertEqual(outcome.state, CoreState.ERROR)
+                self.assertEqual(outcome.reason, "memory_query_unauthorized")
+            finally:
+                goal_store.close()
+                memory_store.close()
 
 
 if __name__ == "__main__":

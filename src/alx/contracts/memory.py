@@ -35,6 +35,89 @@ class MemoryKind(str, Enum):
     AUTOBIOGRAPHICAL = "autobiographical"
 
 
+class MemorySourceMatch(str, Enum):
+    ANY = "any"
+    ALL = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryQuery:
+    """Structured retrieval scope chosen semantically by the AL/X Core."""
+
+    query_id: str
+    kinds: tuple[MemoryKind, ...] = ()
+    memory_ids: tuple[str, ...] = ()
+    person_id: str | None = None
+    formed_after: datetime | None = None
+    formed_before: datetime | None = None
+    source_references: tuple[str, ...] = ()
+    source_match: MemorySourceMatch = MemorySourceMatch.ANY
+    include_superseded: bool = False
+
+    def __post_init__(self) -> None:
+        _required(self.query_id, "query_id")
+        object.__setattr__(self, "kinds", tuple(self.kinds))
+        object.__setattr__(self, "memory_ids", tuple(self.memory_ids))
+        object.__setattr__(self, "source_references", tuple(self.source_references))
+        if any(not isinstance(item, MemoryKind) for item in self.kinds):
+            raise TypeError("kinds must contain only MemoryKind values")
+        if not self.kinds:
+            raise ValueError("retrieval requires at least one memory kind")
+        if len(self.kinds) != len(set(self.kinds)):
+            raise ValueError("kinds must not contain duplicates")
+        if any(not item.strip() for item in self.memory_ids):
+            raise ValueError("memory_ids must not contain blanks")
+        if len(self.memory_ids) != len(set(self.memory_ids)):
+            raise ValueError("memory_ids must not contain duplicates")
+        if any(not item.strip() for item in self.source_references):
+            raise ValueError("source_references must not contain blanks")
+        if len(self.source_references) != len(set(self.source_references)):
+            raise ValueError("source_references must not contain duplicates")
+        if self.person_id is not None:
+            _required(self.person_id, "person_id")
+        if self.formed_after is not None:
+            _aware(self.formed_after, "formed_after")
+        if self.formed_before is not None:
+            _aware(self.formed_before, "formed_before")
+        if (
+            self.formed_after is not None
+            and self.formed_before is not None
+            and self.formed_after > self.formed_before
+        ):
+            raise ValueError("formed_after must not be later than formed_before")
+        if not isinstance(self.source_match, MemorySourceMatch):
+            raise TypeError("source_match must be a MemorySourceMatch")
+        if not isinstance(self.include_superseded, bool):
+            raise TypeError("include_superseded must be boolean")
+        if MemoryKind.RELATIONSHIP in self.kinds and self.person_id is None:
+            raise ValueError("relationship retrieval requires person_id")
+        if self.person_id is not None and MemoryKind.RELATIONSHIP not in self.kinds:
+            raise ValueError("person_id is only a relationship-memory retrieval boundary")
+        if (
+            self.person_id is not None
+            and any(kind is not MemoryKind.RELATIONSHIP for kind in self.kinds)
+            and not any(
+                (
+                    self.memory_ids,
+                    self.formed_after,
+                    self.formed_before,
+                    self.source_references,
+                )
+            )
+        ):
+            raise ValueError("non-relationship kinds require their own retrieval scope")
+        if not any(
+            (
+                self.memory_ids,
+                self.person_id,
+                self.formed_after,
+                self.formed_before,
+                self.source_references,
+            )
+        ):
+            raise ValueError("retrieval requires a scope narrower than memory kind alone")
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryProposal:
     """A semantic memory judgement already made by the AL/X Core."""

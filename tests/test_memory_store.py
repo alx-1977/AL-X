@@ -6,8 +6,15 @@ from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from alx.contracts import MemoryCorrection, MemoryKind, MemoryProposal
+from alx.contracts import (
+    MemoryCorrection,
+    MemoryKind,
+    MemoryProposal,
+    MemoryQuery,
+    MemorySourceMatch,
+)
 from alx.memories import (
+    InvalidMemorySupersession,
     MemoryIdentityConflict,
     MemoryNotFound,
     MemoryRevisionConflict,
@@ -52,6 +59,20 @@ class MemoryContractTests(unittest.TestCase):
     def test_contract_has_no_significance_scoring_fields(self) -> None:
         names = {item.name for item in fields(MemoryProposal)}
         self.assertTrue(names.isdisjoint({"importance", "score", "threshold", "emotional_delta", "sentiment"}))
+
+    def test_retrieval_requires_structured_scope_and_person_boundary(self) -> None:
+        with self.assertRaises(ValueError):
+            MemoryQuery("query-1", (MemoryKind.AUTOBIOGRAPHICAL,))
+        with self.assertRaises(ValueError):
+            MemoryQuery("query-2", (MemoryKind.RELATIONSHIP,), memory_ids=("memory-1",))
+        with self.assertRaises(ValueError):
+            MemoryQuery("query-3", (MemoryKind.FACTUAL,), person_id="friedl")
+        with self.assertRaises(ValueError):
+            MemoryQuery(
+                "query-4",
+                (MemoryKind.RELATIONSHIP, MemoryKind.AUTOBIOGRAPHICAL),
+                person_id="friedl",
+            )
 
 
 class SQLiteMemoryStoreTests(unittest.TestCase):
@@ -104,6 +125,18 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         self.store.create(proposal("memory-1"), NOW + timedelta(days=90))
         evolved = self.store.create(proposal("memory-2", supersedes="memory-1"), NOW + timedelta(days=90))
         self.assertEqual(evolved.supersedes_memory_id, "memory-1")
+        self.store.create(
+            proposal("friedl-relationship", MemoryKind.RELATIONSHIP, person_id="friedl"),
+            NOW + timedelta(days=90),
+        )
+        with self.assertRaises(InvalidMemorySupersession):
+            self.store.create(
+                proposal(
+                    "other-relationship", MemoryKind.RELATIONSHIP,
+                    person_id="other", supersedes="friedl-relationship",
+                ),
+                NOW + timedelta(days=90),
+            )
 
     def test_identical_core_retry_is_idempotent_but_conflicting_identity_fails(self) -> None:
         original = proposal("memory-1")
@@ -116,6 +149,48 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         )
         with self.assertRaises(MemoryIdentityConflict):
             self.store.remember(conflict, retention)
+
+    def test_retrieval_filters_without_keywords_scores_or_cross_person_leakage(self) -> None:
+        retention = NOW + timedelta(days=90)
+        self.store.create(proposal("friedl-1", MemoryKind.RELATIONSHIP, person_id="friedl"), retention)
+        self.store.create(proposal("other-1", MemoryKind.RELATIONSHIP, person_id="other"), retention)
+        self.store.create(proposal("old-view"), retention)
+        self.store.create(proposal("new-view", supersedes="old-view"), retention)
+        self.store.create(proposal("revived-old"), retention)
+        self.store.create(proposal("expired-new", supersedes="revived-old"), NOW)
+        self.store.create(proposal("expired"), NOW)
+
+        relationship = self.store.retrieve(
+            MemoryQuery("query-1", (MemoryKind.RELATIONSHIP,), person_id="friedl"),
+            NOW,
+        )
+        self.assertEqual([item.memory_id for item in relationship], ["friedl-1"])
+        current = self.store.retrieve(
+            MemoryQuery(
+                "query-2", (MemoryKind.AUTOBIOGRAPHICAL,),
+                memory_ids=("old-view", "new-view"),
+                source_references=("conversation:turn-7",),
+                source_match=MemorySourceMatch.ALL,
+            ),
+            NOW,
+        )
+        self.assertEqual([item.memory_id for item in current], ["new-view"])
+        revived = self.store.retrieve(
+            MemoryQuery(
+                "query-revived", (MemoryKind.AUTOBIOGRAPHICAL,),
+                memory_ids=("revived-old", "expired-new"),
+            ),
+            NOW,
+        )
+        self.assertEqual([item.memory_id for item in revived], ["revived-old"])
+        with_history = self.store.retrieve(
+            MemoryQuery(
+                "query-3", (MemoryKind.AUTOBIOGRAPHICAL,),
+                memory_ids=("old-view", "new-view"), include_superseded=True,
+            ),
+            NOW,
+        )
+        self.assertEqual([item.memory_id for item in with_history], ["new-view", "old-view"])
 
     def test_inspection_delete_and_retention_purge(self) -> None:
         doomed = self.store.create(proposal("delete-me"), NOW + timedelta(days=1))

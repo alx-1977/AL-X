@@ -43,8 +43,10 @@ from alx.contracts.memory import (
     MemoryCorrection,
     MemoryKind,
     MemoryProposal,
+    MemoryQuery,
     MemoryRevision,
     MemorySnapshot,
+    MemorySourceMatch,
 )
 
 __all__ = [
@@ -59,6 +61,6 @@ __all__ = [
     "TranscriptionState",
     "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",
     "ReasoningModel",
-    "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryRevision",
-    "MemorySnapshot",
+    "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
+    "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
 ]
