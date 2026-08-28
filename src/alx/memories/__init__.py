@@ -1,6 +1,7 @@
 """Durable, non-interpretive memory persistence."""
 
 from alx.memories.store import (
+    InvalidMemorySupersession,
     MemoryAlreadyExists,
     MemoryIdentityConflict,
     MemoryNotFound,
@@ -10,6 +11,7 @@ from alx.memories.store import (
 )
 
 __all__ = [
+    "InvalidMemorySupersession",
     "MemoryAlreadyExists",
     "MemoryIdentityConflict",
     "MemoryNotFound",

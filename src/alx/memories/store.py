@@ -11,8 +11,10 @@ from alx.contracts import (
     MemoryCorrection,
     MemoryKind,
     MemoryProposal,
+    MemoryQuery,
     MemoryRevision,
     MemorySnapshot,
+    MemorySourceMatch,
 )
 
 
@@ -36,6 +38,10 @@ class MemoryRevisionConflict(MemoryStoreError):
 
 
 class SupersededMemoryNotFound(MemoryStoreError):
+    pass
+
+
+class InvalidMemorySupersession(MemoryStoreError):
     pass
 
 
@@ -106,8 +112,12 @@ class SQLiteMemoryStore:
 
     def create(self, proposal: MemoryProposal, retention_until: datetime) -> MemorySnapshot:
         _aware(retention_until, "retention_until")
-        if proposal.supersedes_memory_id is not None and not self._exists(proposal.supersedes_memory_id):
-            raise SupersededMemoryNotFound(proposal.supersedes_memory_id)
+        if proposal.supersedes_memory_id is not None:
+            if not self._exists(proposal.supersedes_memory_id):
+                raise SupersededMemoryNotFound(proposal.supersedes_memory_id)
+            previous = self.load(proposal.supersedes_memory_id)
+            if previous.kind is not proposal.kind or previous.person_id != proposal.person_id:
+                raise InvalidMemorySupersession(proposal.supersedes_memory_id)
         revision = MemoryRevision(
             1, proposal.content, proposal.source_references, proposal.formed_at,
             meaning=proposal.meaning,
@@ -178,6 +188,51 @@ class SQLiteMemoryStore:
             )
         return tuple(self.load(row[0]) for row in rows)
 
+    def retrieve(self, query: MemoryQuery, as_of: datetime) -> tuple[MemorySnapshot, ...]:
+        """Apply Core-selected metadata constraints without interpreting meaning."""
+        _aware(as_of, "as_of")
+        snapshots = tuple(
+            self.load(row[0])
+            for row in self._connection.execute("SELECT memory_id FROM memories ORDER BY memory_id")
+        )
+        live_snapshots = tuple(item for item in snapshots if item.retention_until > as_of)
+        superseded_ids = {
+            item.supersedes_memory_id
+            for item in live_snapshots
+            if item.supersedes_memory_id is not None
+        }
+        selected = []
+        for item in live_snapshots:
+            current = item.current
+            formed_at = item.revisions[0].recorded_at
+            if formed_at > as_of or current.recorded_at > as_of:
+                continue
+            sources = set(current.source_references)
+            requested_sources = set(query.source_references)
+            if query.kinds and item.kind not in query.kinds:
+                continue
+            if query.memory_ids and item.memory_id not in query.memory_ids:
+                continue
+            if (
+                item.kind is MemoryKind.RELATIONSHIP
+                and item.person_id != query.person_id
+            ):
+                continue
+            if query.formed_after is not None and formed_at < query.formed_after:
+                continue
+            if query.formed_before is not None and formed_at > query.formed_before:
+                continue
+            if requested_sources:
+                matches = requested_sources.intersection(sources)
+                if query.source_match is MemorySourceMatch.ANY and not matches:
+                    continue
+                if query.source_match is MemorySourceMatch.ALL and not requested_sources.issubset(sources):
+                    continue
+            if not query.include_superseded and item.memory_id in superseded_ids:
+                continue
+            selected.append(item)
+        return tuple(selected)
+
     def correct(self, memory_id: str, correction: MemoryCorrection, expected_revision: int) -> MemorySnapshot:
         current = self.load(memory_id)
         if current.revision != expected_revision:
@@ -222,9 +277,11 @@ class SQLiteMemoryStore:
     def purge_expired(self, now: datetime) -> tuple[str, ...]:
         _aware(now, "now")
         identifiers = tuple(
-            row[0] for row in self._connection.execute(
-                "SELECT memory_id FROM memories WHERE retention_until <= ? ORDER BY memory_id", (now.isoformat(),)
+            row[0]
+            for row in self._connection.execute(
+                "SELECT memory_id, retention_until FROM memories ORDER BY memory_id"
             )
+            if datetime.fromisoformat(row[1]) <= now
         )
         with self._connection:
             self._connection.executemany("DELETE FROM memories WHERE memory_id = ?", ((item,) for item in identifiers))

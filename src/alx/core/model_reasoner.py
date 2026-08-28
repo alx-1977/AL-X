@@ -20,6 +20,8 @@ from alx.contracts import (
     ModelRole,
     MemoryKind,
     MemoryProposal,
+    MemoryQuery,
+    MemorySourceMatch,
     Objective,
     ProgressRecord,
     ReasoningContext,
@@ -234,6 +236,21 @@ def _context_payload(context: ReasoningContext) -> str:
                 if item.call is not None
             ),
         ],
+        "retrieved_memories": [
+            {
+                "memory_id": item.memory_id,
+                "kind": item.kind.value,
+                "person_id": item.person_id,
+                "supersedes_memory_id": item.supersedes_memory_id,
+                "content": item.current.content,
+                "source_references": list(item.current.source_references),
+                "formed_at": item.revisions[0].recorded_at.isoformat(),
+                "revised_at": item.current.recorded_at.isoformat(),
+                "revision_reason": item.current.reason,
+                "meaning": item.current.meaning,
+            }
+            for item in context.memories
+        ],
         "capabilities": [
             {
                 "id": item.capability_id,
@@ -266,7 +283,7 @@ def decision_schema() -> dict[str, Any]:
     nullable_string = {"type": ["string", "null"]}
     progress = {"id": string, "summary": string, "evidence_refs": {"type": "array", "items": string}}
     properties: dict[str, Any] = {
-        "action": {"type": "string", "enum": ["respond", "call_capability"]},
+        "action": {"type": "string", "enum": ["respond", "call_capability", "retrieve_memories"]},
         "response": nullable_string,
         "call_id": nullable_string,
         "capability_id": nullable_string,
@@ -301,6 +318,15 @@ def decision_schema() -> dict[str, Any]:
                 "supersedes_memory_id": nullable_string,
             }
         ),
+        "memory_query_id": nullable_string,
+        "memory_kinds": {"type": "array", "items": {"type": "string", "enum": [item.value for item in MemoryKind]}},
+        "memory_ids": {"type": "array", "items": string},
+        "memory_person_id": nullable_string,
+        "memory_formed_after": nullable_string,
+        "memory_formed_before": nullable_string,
+        "memory_source_references": {"type": "array", "items": string},
+        "memory_source_match": {"type": "string", "enum": [item.value for item in MemorySourceMatch]},
+        "memory_include_superseded": {"type": "boolean"},
         "status": {"type": "string", "enum": [item.value for item in GoalStatus]},
         "stop_reason": {
             "type": ["string", "null"],
@@ -390,11 +416,44 @@ class ModelReasoner:
             )
             for item in output["memory_proposals"]
         )
+        query_fields_present = any(
+            (
+                output["memory_query_id"] is not None,
+                bool(output["memory_kinds"]),
+                bool(output["memory_ids"]),
+                output["memory_person_id"] is not None,
+                output["memory_formed_after"] is not None,
+                output["memory_formed_before"] is not None,
+                bool(output["memory_source_references"]),
+                output["memory_source_match"] != MemorySourceMatch.ANY.value,
+                output["memory_include_superseded"],
+            )
+        )
+        if output["action"] == "retrieve_memories":
+            if output["response"] is not None or any(
+                output[name] is not None
+                for name in ("call_id", "capability_id", "arguments_json", "approval_id")
+            ):
+                raise ValueError("a memory query cannot include a response or capability call")
+            if output["memory_query_id"] is None:
+                raise ValueError("a memory query requires an identifier")
+            query = MemoryQuery(
+                output["memory_query_id"],
+                tuple(MemoryKind(item) for item in output["memory_kinds"]),
+                _strings(output["memory_ids"], "memory_ids"),
+                output["memory_person_id"],
+                None if output["memory_formed_after"] is None else datetime.fromisoformat(output["memory_formed_after"]),
+                None if output["memory_formed_before"] is None else datetime.fromisoformat(output["memory_formed_before"]),
+                _strings(output["memory_source_references"], "memory_source_references"),
+                MemorySourceMatch(output["memory_source_match"]),
+                output["memory_include_superseded"],
+            )
+            return AgentDecision(state, memory_proposals=memory_proposals, memory_query=query)
         if output["action"] == "respond":
-            if any(output[name] is not None for name in ("call_id", "capability_id", "arguments_json", "approval_id")):
-                raise ValueError("a response cannot include a capability call")
+            if query_fields_present or any(output[name] is not None for name in ("call_id", "capability_id", "arguments_json", "approval_id")):
+                raise ValueError("a response cannot include another action")
             return AgentDecision(state, response=output["response"], memory_proposals=memory_proposals)
-        if output["action"] != "call_capability" or output["response"] is not None:
+        if output["action"] != "call_capability" or output["response"] is not None or query_fields_present:
             raise ValueError("unknown or contradictory decision action")
         if any(output[name] is None for name in ("call_id", "capability_id", "arguments_json")):
             raise ValueError("a capability decision requires a complete call")

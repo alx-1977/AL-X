@@ -13,7 +13,7 @@ from alx.contracts.records import (
     ConversationTurn,
     GoalState,
 )
-from alx.contracts.memory import MemoryProposal, MemorySnapshot
+from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,10 +39,12 @@ class ReasoningContext:
     goal: GoalState
     turns: tuple[ConversationTurn, ...]
     capabilities: tuple[CapabilityDefinition, ...]
+    memories: tuple[MemorySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
+        object.__setattr__(self, "memories", tuple(self.memories))
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,10 +53,11 @@ class AgentDecision:
     call: CapabilityCall | None = None
     response: str | None = None
     memory_proposals: tuple[MemoryProposal, ...] = ()
+    memory_query: MemoryQuery | None = None
 
     def __post_init__(self) -> None:
-        if (self.call is None) == (self.response is None):
-            raise ValueError("a decision contains exactly one call or response")
+        if sum(item is not None for item in (self.call, self.response, self.memory_query)) != 1:
+            raise ValueError("a decision contains exactly one call, response, or memory query")
         if self.response is not None and not self.response.strip():
             raise ValueError("response must not be blank")
         object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
@@ -92,6 +95,12 @@ class DurableMemoryStore(Protocol):
         proposal: MemoryProposal,
         retention_until: datetime,
     ) -> MemorySnapshot: ...
+
+    def retrieve(
+        self,
+        query: MemoryQuery,
+        as_of: datetime,
+    ) -> tuple[MemorySnapshot, ...]: ...
 
 
 class CapabilityDispatch(Protocol):
