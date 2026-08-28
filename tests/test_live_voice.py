@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import json
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,8 +62,10 @@ class FakeGateway:
     def __init__(self, outcomes):
         self.outcomes = iter(outcomes)
         self.calls = []
+        self.thread_ids = []
 
     def receive_conversation_turn(self, turn, step_budget, retention_until):
+        self.thread_ids.append(threading.get_ident())
         self.calls.append((turn, step_budget, retention_until))
         return next(self.outcomes)
 
@@ -168,6 +171,7 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(retention_until)
         self.assertEqual(synthesizer.responses, ["authoritative response"])
         self.assertEqual(transcriber.received[0].payload, b"pcm")
+        self.assertNotEqual(gateway.thread_ids, [threading.get_ident()])
         self.assertEqual(
             [event.kind for event in events],
             [

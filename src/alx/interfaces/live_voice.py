@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict, deque
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
@@ -107,6 +108,7 @@ class VoiceSession:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._diagnostics = diagnostics
+        self._core_turn_lock = asyncio.Lock()
 
     async def exchange(
         self,
@@ -136,11 +138,13 @@ class VoiceSession:
             yield VoiceEvent(VoiceEventKind.THINKING)
             LOGGER.info("Authoritative Core turn started")
             try:
-                outcome = self._gateway.receive_conversation_turn(
-                    turn,
-                    self._step_budget,
-                    now + timedelta(days=self._retention_days),
-                )
+                async with self._core_turn_lock:
+                    outcome = await asyncio.to_thread(
+                        self._gateway.receive_conversation_turn,
+                        turn,
+                        self._step_budget,
+                        now + timedelta(days=self._retention_days),
+                    )
             except Exception:
                 if self._diagnostics is not None:
                     for diagnostic in self._diagnostics.drain(conversation_id):

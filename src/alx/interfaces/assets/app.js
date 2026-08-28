@@ -135,6 +135,19 @@ async function playResponse(mediaType) {
   const url = URL.createObjectURL(new Blob(audioParts, { type: mediaType }));
   audioParts = [];
   const audio = new Audio();
+  let playbackSettled = false;
+  const finishPlayback = (message, tone) => {
+    if (playbackSettled) return;
+    playbackSettled = true;
+    URL.revokeObjectURL(url);
+    playbackActive = false;
+    pendingListening = false;
+    sending = true;
+    setPhase("listening");
+    beginDiagnosticStage("Listening");
+    diagnostic(message, tone);
+    heardThisTurn = false;
+  };
   audio.preload = "auto";
   const ready = new Promise((resolve, reject) => {
     audio.addEventListener("canplay", resolve, { once: true });
@@ -145,29 +158,23 @@ async function playResponse(mediaType) {
   try {
     await ready;
   } catch (error) {
-    URL.revokeObjectURL(url);
-    throw error;
+    finishPlayback("Browser could not prepare synthesized audio; microphone resumed", "error");
+    return;
   }
   diagnostic(`Browser audio buffer ready · ${ttsElapsed()}`, "ok");
   beginDiagnosticStage("Playing synthesized response");
   audio.onended = () => {
-    URL.revokeObjectURL(url);
-    playbackActive = false;
-    pendingListening = false;
-    sending = true;
-    setPhase("listening");
-    beginDiagnosticStage("Listening");
-    diagnostic("Playback completed; microphone resumed", "ok");
-    heardThisTurn = false;
+    finishPlayback("Playback completed; microphone resumed", "ok");
   };
   audio.onerror = () => {
-    URL.revokeObjectURL(url);
-    playbackActive = false;
-    setPhase("error");
-    beginDiagnosticStage("Playback error");
-    diagnostic("Browser could not play synthesized audio", "error");
+    finishPlayback("Browser playback failed; microphone resumed", "error");
   };
-  await audio.play();
+  try {
+    await audio.play();
+  } catch (error) {
+    finishPlayback("Browser refused synthesized audio; microphone resumed", "error");
+    return;
+  }
   diagnostic(`Playback started · ${ttsElapsed()} · ${audioChunkCount} chunks · ${audioByteCount} bytes`, "active");
 }
 

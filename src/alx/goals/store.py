@@ -195,7 +195,9 @@ class SQLiteGoalStore:
     """Small transactional store; it persists facts but never reads their meaning."""
 
     def __init__(self, database_path: str | Path) -> None:
-        self._connection = sqlite3.connect(str(database_path))
+        # Core turns execute on one serialized worker so blocking provider I/O
+        # cannot stall the asyncio voice transport.
+        self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._migrate()
 
