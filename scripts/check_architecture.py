@@ -139,8 +139,17 @@ class SourceVisitor(ast.NodeVisitor):
         )
 
     def _check_identifier(self, node: ast.AST, identifier: str) -> None:
+        normalised = _normalise_identifier(identifier)
         tokens = _identifier_tokens(identifier)
-        forbidden = tokens & self.rules.forbidden_source_names
+        forbidden = {
+            item
+            for item in self.rules.forbidden_source_names
+            if (
+                item in tokens
+                or normalised.startswith(item + "_")
+                or normalised.endswith("_" + item)
+            )
+        }
         if forbidden:
             self._add(
                 node,

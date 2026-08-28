@@ -6,6 +6,7 @@ boundaries = [
   "core",
   "conversation",
   "goals",
+  "memories",
   "capabilities",
   "safety",
   "tools",
@@ -15,7 +16,7 @@ boundaries = [
   "config",
 ]
 
-provider_only_imports = ["anthropic", "openai", "xai_sdk"]
+provider_only_imports = ["anthropic", "httpx", "openai", "websockets", "xai_sdk"]
 
 forbidden_source_names = [
   "command_router",
@@ -24,6 +25,9 @@ forbidden_source_names = [
   "phrase_router",
   "voice_registry",
   "voice_router",
+  "wake_word",
+  "wakeword",
+  "hotword",
   "workflow",
   "workflows",
 ]
@@ -33,6 +37,7 @@ contracts = []
 core = ["contracts"]
 conversation = ["contracts", "core"]
 goals = ["contracts"]
+memories = ["contracts"]
 capabilities = ["contracts", "safety"]
 safety = ["contracts"]
 tools = ["contracts"]
@@ -43,6 +48,7 @@ bootstrap = [
   "core",
   "conversation",
   "goals",
+  "memories",
   "capabilities",
   "safety",
   "tools",
@@ -51,4 +57,3 @@ bootstrap = [
   "config",
 ]
 config = []
-

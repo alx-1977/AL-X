@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 
 from scripts.check_architecture import Rules, check_source, load_rules
-from scripts.check_governance import _check_greptile, check_repository
+from scripts.check_governance import (
+    _check_greptile,
+    _check_identity_checksum,
+    _check_law_checksum,
+    check_repository,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +58,13 @@ class ArchitectureGateTests(unittest.TestCase):
             "allowed only in providers",
         )
 
+    def test_provider_http_client_is_provider_only(self) -> None:
+        self.assert_rejected(
+            "core/agent_loop.py",
+            "import httpx\n",
+            "allowed only in providers",
+        )
+
     def test_raw_language_is_rejected_at_tool_boundary(self) -> None:
         self.assert_rejected(
             "tools/mail.py",
@@ -86,6 +98,13 @@ class ArchitectureGateTests(unittest.TestCase):
             "tools/invoice_workflow.py",
             "VALUE = 1\n",
             "forbidden routing/workflow source name",
+        )
+
+    def test_wake_word_activation_is_rejected(self) -> None:
+        self.assert_rejected(
+            "interfaces/audio.py",
+            "def wake_word_detected(samples: bytes) -> bool:\n    return True\n",
+            "forbidden routing/workflow identifier",
         )
 
 
@@ -139,6 +158,45 @@ class GovernanceGateTests(unittest.TestCase):
                 ),
                 violations,
             )
+
+    def test_silent_identity_rewrite_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "governance").mkdir()
+            shutil.copy(
+                REPOSITORY_ROOT / "IDENTITY_AND_MEMORY.md",
+                root / "IDENTITY_AND_MEMORY.md",
+            )
+            shutil.copy(
+                REPOSITORY_ROOT / "governance/IDENTITY_AND_MEMORY.sha256",
+                root / "governance/IDENTITY_AND_MEMORY.sha256",
+            )
+            identity = root / "IDENTITY_AND_MEMORY.md"
+            identity.write_text(
+                identity.read_text(encoding="utf-8") + "\nUnapproved change.\n",
+                encoding="utf-8",
+            )
+            violations: list[str] = []
+            _check_identity_checksum(root, violations)
+            self.assertTrue(
+                any("explicit owner approval" in violation for violation in violations),
+                violations,
+            )
+
+    def test_silent_law_rewrite_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "governance").mkdir()
+            shutil.copy(REPOSITORY_ROOT / "LAWS_OF_ALX.md", root / "LAWS_OF_ALX.md")
+            shutil.copy(
+                REPOSITORY_ROOT / "governance/LAWS_OF_ALX.sha256",
+                root / "governance/LAWS_OF_ALX.sha256",
+            )
+            laws = root / "LAWS_OF_ALX.md"
+            laws.write_text(laws.read_text(encoding="utf-8") + "\nUnapproved change.\n", encoding="utf-8")
+            violations: list[str] = []
+            _check_law_checksum(root, violations)
+            self.assertTrue(any("owner-approved amendment" in item for item in violations), violations)
 
 
 if __name__ == "__main__":

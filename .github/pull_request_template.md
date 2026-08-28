@@ -20,6 +20,7 @@
 - [ ] No phrase, keyword, regex, fixed-intent, or wording-specific behaviour was introduced.
 - [ ] Durable goal/context behaviour is preserved and tested where applicable.
 - [ ] Relevant architecture, restart, paraphrase, multi-tool, failure-recovery, and safety tests pass.
+- [ ] Experimental capabilities remain isolated; any production-data access is explicitly scoped read-only, and deployment evidence and authority are recorded.
 - [ ] Every encoded constant is justified below.
 - [ ] Exceptions are listed below and already recorded in `governance/EXCEPTIONS.md`, or there are none.
 - [ ] Unverified requirements are listed below; a blank section is not treated as a pass.
@@ -39,4 +40,3 @@
 ## Unverified requirements
 
 <!-- List any missing evidence, or "None". -->
-

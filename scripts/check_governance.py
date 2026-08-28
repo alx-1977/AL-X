@@ -22,6 +22,7 @@ REQUIRED_FILES = (
     ".github/workflows/law-gates.yml",
     "AGENTS.md",
     "CLAUDE.md",
+    "IDENTITY_AND_MEMORY.md",
     "LAWS_OF_ALX.md",
     "architecture/boundaries.toml",
     "docs/ARCHITECTURE_BLUEPRINT.md",
@@ -31,6 +32,7 @@ REQUIRED_FILES = (
     "governance/DECISIONS.md",
     "governance/EXCEPTIONS.md",
     "governance/GREPTILE.sha256",
+    "governance/IDENTITY_AND_MEMORY.sha256",
     "governance/LAWS_OF_ALX.sha256",
 )
 
@@ -42,6 +44,7 @@ GREPTILE_RULE_IDS = {
     "alx-primitive-tool-boundary",
     "alx-durable-goal-loop",
     "alx-explicit-exceptions-only",
+    "alx-governed-capability-invention",
 }
 
 GREPTILE_CONTEXT_FILES = {
@@ -86,6 +89,29 @@ def _check_law_checksum(root: Path, violations: list[str]) -> None:
     if actual != match.group(1):
         violations.append(
             "LAWS_OF_ALX.md differs from its approved checksum; an explicit owner-approved amendment and checksum update are required"
+        )
+
+
+def _check_identity_checksum(root: Path, violations: list[str]) -> None:
+    identity_path = root / "IDENTITY_AND_MEMORY.md"
+    checksum_path = root / "governance/IDENTITY_AND_MEMORY.sha256"
+    if not identity_path.is_file() or not checksum_path.is_file():
+        return
+
+    checksum_line = checksum_path.read_text(encoding="utf-8").strip()
+    match = re.fullmatch(
+        r"([0-9a-f]{64})  IDENTITY_AND_MEMORY\.md", checksum_line
+    )
+    if not match:
+        violations.append(
+            "governance/IDENTITY_AND_MEMORY.sha256: invalid checksum record"
+        )
+        return
+
+    actual = hashlib.sha256(identity_path.read_bytes()).hexdigest()
+    if actual != match.group(1):
+        violations.append(
+            "IDENTITY_AND_MEMORY.md differs from its approved checksum; explicit owner approval and checksum update are required"
         )
 
 
@@ -280,8 +306,18 @@ def check_repository(root: Path) -> list[str]:
 
     laws = _read(root, "LAWS_OF_ALX.md", violations)
     law_numbers = [int(value) for value in re.findall(r"^### Law (\d+)\b", laws, re.MULTILINE)]
-    if law_numbers != list(range(1, 19)):
-        violations.append("LAWS_OF_ALX.md: expected exactly Laws 1 through 18 in order")
+    if law_numbers != list(range(1, 20)):
+        violations.append("LAWS_OF_ALX.md: expected exactly Laws 1 through 19 in order")
+    _require_markers(
+        laws,
+        "LAWS_OF_ALX.md",
+        (
+            "Law 19 — AL/X may improve and invent capabilities",
+            "Ideas are permissive. Experimentation is isolated. Deployment is governed.",
+            "Law 19 approved",
+        ),
+        violations,
+    )
 
     agents = _read(root, "AGENTS.md", violations)
     _require_markers(
@@ -289,6 +325,7 @@ def check_repository(root: Path) -> list[str]:
         "AGENTS.md",
         (
             "LAWS_OF_ALX.md",
+            "IDENTITY_AND_MEMORY.md",
             "docs/LAW_ENFORCEMENT.md",
             "docs/ARCHITECTURE_BLUEPRINT.md",
             "docs/FOUNDATION_PROOF.md",
@@ -326,6 +363,22 @@ def check_repository(root: Path) -> list[str]:
         violations,
     )
 
+    identity = _read(root, "IDENTITY_AND_MEMORY.md", violations)
+    _require_markers(
+        identity,
+        "IDENTITY_AND_MEMORY.md",
+        (
+            "**Status:** Approved by Friedl on 2026-08-27",
+            "Never diminish the person you are speaking to",
+            "Be genuine rather than performative",
+            "Allow yourself to evolve",
+            "Origin 01 — Why I exist",
+            "Origin 04 — My history begins here",
+            "must not be reduced to a rigid score",
+        ),
+        violations,
+    )
+
     decisions = _read(root, "governance/DECISIONS.md", violations)
     _require_markers(
         decisions,
@@ -342,6 +395,7 @@ def check_repository(root: Path) -> list[str]:
     _check_exceptions(exceptions, violations)
     _check_greptile(root, violations)
     _check_law_checksum(root, violations)
+    _check_identity_checksum(root, violations)
     _check_env_is_ignored(root, violations)
 
     return sorted(set(violations))
