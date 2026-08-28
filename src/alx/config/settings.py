@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping
 
 
@@ -196,4 +197,29 @@ class RuntimeSettings:
                 output_format=environment.get("ALX_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
                 timeout_seconds=_positive_integer(environment, "ALX_TTS_TIMEOUT_SECONDS", 60),
             ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LiveVoiceSettings:
+    host: str
+    port: int
+    storage_root: Path
+    primary_person_id: str
+    goal_retention_days: int
+    core_step_budget: int
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> LiveVoiceSettings:
+        return cls(
+            host=_required(environment, "ALX_INTERFACE_HOST"),
+            port=_integer_in_range(environment, "ALX_INTERFACE_PORT", 1, 65535),
+            storage_root=Path(
+                _required(environment, "ALX_RUNTIME_STORAGE_ROOT")
+            ).expanduser(),
+            primary_person_id=_required(environment, "ALX_PRIMARY_PERSON_ID"),
+            goal_retention_days=_positive_integer(
+                environment, "ALX_GOAL_RETENTION_DAYS", 3650
+            ),
+            core_step_budget=_positive_integer(environment, "ALX_CORE_STEP_BUDGET", 8),
         )

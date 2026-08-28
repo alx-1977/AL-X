@@ -16,7 +16,7 @@ boundaries = [
   "config",
 ]
 
-provider_only_imports = ["anthropic", "httpx", "openai", "websockets", "xai_sdk"]
+restricted_external_imports = { anthropic = ["providers"], httpx = ["providers"], openai = ["providers"], websockets = ["providers", "interfaces"], xai_sdk = ["providers"] }
 
 forbidden_source_names = [
   "command_router",

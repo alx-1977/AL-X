@@ -2,6 +2,7 @@
 
 from alx.config.settings import (
     ConfigurationError,
+    LiveVoiceSettings,
     ReasoningSettings,
     RuntimeSettings,
     SpeechToTextSettings,
@@ -10,6 +11,7 @@ from alx.config.settings import (
 
 __all__ = [
     "ConfigurationError",
+    "LiveVoiceSettings",
     "ReasoningSettings",
     "RuntimeSettings",
     "SpeechToTextSettings",

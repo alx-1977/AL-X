@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap import build_runtime_providers  # noqa: E402
-from alx.config import ConfigurationError, RuntimeSettings  # noqa: E402
+from alx.config import ConfigurationError, LiveVoiceSettings, RuntimeSettings  # noqa: E402
 from alx.providers import (  # noqa: E402
     CartesiaTranscriber,
     ElevenLabsSynthesizer,
@@ -38,6 +38,22 @@ def environment(**changes: str) -> dict[str, str]:
 
 
 class RuntimeConfigurationTests(unittest.TestCase):
+    def test_live_voice_runtime_policy_is_configuration(self) -> None:
+        settings = LiveVoiceSettings.from_environment(
+            environment(
+                ALX_INTERFACE_HOST="127.0.0.1",
+                ALX_INTERFACE_PORT="8765",
+                ALX_RUNTIME_STORAGE_ROOT=".alx/runtime",
+                ALX_PRIMARY_PERSON_ID="friedl",
+                ALX_GOAL_RETENTION_DAYS="3650",
+                ALX_CORE_STEP_BUDGET="8",
+            )
+        )
+        self.assertEqual(settings.port, 8765)
+        self.assertEqual(settings.storage_root, Path(".alx/runtime"))
+        self.assertEqual(settings.primary_person_id, "friedl")
+        self.assertEqual(settings.core_step_budget, 8)
+
     def test_every_provider_and_model_is_configuration(self) -> None:
         settings = RuntimeSettings.from_environment(environment())
         self.assertEqual(settings.reasoning.provider, "xai")

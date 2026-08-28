@@ -24,6 +24,18 @@ Every model and contributor must begin with `AGENTS.md`, which requires the comp
 - `src/alx/memories` persists Core-selected factual, relationship, and autobiographical memories with provenance, revision history, person isolation, and retention controls. The Core may retrieve a narrowly scoped selection through structured metadata, while the store never interprets the conversation or decides semantic relevance.
 - `.env.example` lists provider selection and model settings; provider and model choices are never embedded into Core behaviour.
 
+## Local voice runtime
+
+The first permanent interface is voice-only. A one-time **Start AL/X** control grants the browser microphone permission; it is not push-to-talk. After that, Cartesia's configured turn detector identifies speech boundaries automatically. The browser transports PCM audio and plays ElevenLabs audio, while the existing Conversation Gateway and Core remain the only conversational path and reasoning authority.
+
+Start the local runtime from the repository root:
+
+```bash
+PYTHONPATH=src python3 -m alx.bootstrap.live_voice
+```
+
+Then open `http://127.0.0.1:8765`. Runtime policy, provider selection, models, voice, turn-detection profile, and the new runtime's isolated storage location all come from `.env`; none are selected by frontend code.
+
 ## Source of authority
 
 Friedl is the product owner and final authority for what AL/X is, how she behaves, and how she may be built. Models and implementers may propose changes, but may not weaken, reinterpret, or silently create exceptions to an approved law.

@@ -65,6 +65,17 @@ class ArchitectureGateTests(unittest.TestCase):
             "allowed only in providers",
         )
 
+    def test_websocket_transport_is_limited_to_providers_and_interfaces(self) -> None:
+        self.assertEqual(
+            [],
+            self.inspect("interfaces/live_voice.py", "import websockets\n"),
+        )
+        self.assert_rejected(
+            "core/agent_loop.py",
+            "import websockets\n",
+            "allowed only in interfaces, providers",
+        )
+
     def test_raw_language_is_rejected_at_tool_boundary(self) -> None:
         self.assert_rejected(
             "tools/mail.py",

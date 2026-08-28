@@ -123,6 +123,49 @@ class ConversationGatewayTests(unittest.TestCase):
         with self.assertRaises(GoalNotFound):
             self.store.load("goal-1")
 
+    def test_gateway_alone_owns_durable_goal_selection_for_conversation_turns(self) -> None:
+        class RecordingCore:
+            def __init__(self):
+                self.calls = []
+
+            def start(self, goal_id, turn, retention_until, step_budget):
+                self.calls.append(("start", goal_id, turn, retention_until, step_budget))
+                return "started"
+
+            def continue_goal(self, goal_id, turn, step_budget):
+                self.calls.append(("continue", goal_id, turn, None, step_budget))
+                return "continued"
+
+        core = RecordingCore()
+        located = iter((None, "goal-1", None))
+        identifiers = iter(("goal-1", "goal-2"))
+        gateway = ConversationGateway(
+            core,
+            lambda conversation_id: next(located),
+            lambda: next(identifiers),
+        )
+        turns = tuple(
+            ConversationTurn(
+                "conversation-1",
+                f"turn-{number}",
+                ConversationOrigin.SPEECH_TRANSCRIPT,
+                f"words-{number}",
+                NOW + timedelta(minutes=number),
+            )
+            for number in range(3)
+        )
+        retention = NOW + timedelta(days=30)
+
+        results = tuple(
+            gateway.receive_conversation_turn(turn, 4, retention) for turn in turns
+        )
+
+        self.assertEqual(results, ("started", "continued", "started"))
+        self.assertEqual(
+            [(call[0], call[1]) for call in core.calls],
+            [("start", "goal-1"), ("continue", "goal-1"), ("start", "goal-2")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
