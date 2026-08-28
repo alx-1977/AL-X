@@ -76,7 +76,7 @@ class CapabilityContractTests(unittest.TestCase):
 class GoalContractTests(unittest.TestCase):
     def test_active_goal_continues_and_terminal_states_are_limited(self) -> None:
         self.assertTrue(goal().continues)
-        completed = goal(status=GoalStatus.COMPLETED, stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET, evidence=(Evidence("evidence-1", "observation", supports=("criterion-1",)),))
+        completed = goal(status=GoalStatus.COMPLETED, stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET, evidence=(Evidence("evidence-1", "observation", supports=("criterion-1",), source_references=("turn:turn-1",)),))
         self.assertFalse(completed.continues)
         with self.assertRaises(ValueError):
             goal(status=GoalStatus.COMPLETED, stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET)
@@ -129,7 +129,7 @@ class GoalContractTests(unittest.TestCase):
                 status=GoalStatus.COMPLETED,
                 stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET,
                 blockers=(WorkItem("blocker-1", "unresolved"),),
-                evidence=(Evidence("evidence-1", "observation", supports=("criterion-1",)),),
+                evidence=(Evidence("evidence-1", "observation", supports=("criterion-1",), source_references=("turn:turn-1",)),),
             )
         with self.assertRaises(ValueError):
             CapabilityResult("call-1", "capability-1", CapabilityResultState.SUCCEEDED, evidence_refs=("",))

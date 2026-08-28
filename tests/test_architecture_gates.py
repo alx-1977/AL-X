@@ -65,6 +65,13 @@ class ArchitectureGateTests(unittest.TestCase):
             "allowed only in providers",
         )
 
+    def test_certificate_bundle_is_provider_only(self) -> None:
+        self.assert_rejected(
+            "core/agent_loop.py",
+            "import certifi\n",
+            "allowed only in providers",
+        )
+
     def test_websocket_transport_is_limited_to_providers_and_interfaces(self) -> None:
         self.assertEqual(
             [],

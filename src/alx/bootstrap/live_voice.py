@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,10 +14,10 @@ from alx.bootstrap.reasoning import build_model_reasoner
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import LiveVoiceSettings, RuntimeSettings
 from alx.contracts import GoalStatus
-from alx.conversation import ConversationGateway
+from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
-from alx.interfaces import LiveVoiceServer, VoiceSession
+from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
 
@@ -46,13 +47,41 @@ def locate_active_goal(store: SQLiteGoalStore, conversation_id: str) -> str | No
     candidates = [
         snapshot
         for snapshot in store.list_goals()
-        if snapshot.turns
-        and snapshot.turns[-1].conversation_id == conversation_id
-        and snapshot.state.status in (GoalStatus.ACTIVE, GoalStatus.AWAITING_INPUT)
+        if snapshot.conversation_id == conversation_id
+        and snapshot.state.status in (
+            GoalStatus.ACTIVE,
+            GoalStatus.AWAITING_INPUT,
+            GoalStatus.AWAITING_APPROVAL,
+            GoalStatus.BLOCKED,
+        )
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda item: item.turns[-1].occurred_at).state.goal_id
+    return candidates[-1].state.goal_id
+
+
+def migrate_legacy_conversations(
+    goal_store: SQLiteGoalStore,
+    conversation_store: SQLiteConversationStore,
+) -> None:
+    """Move pre-refactor turns once without keeping goals as their owner."""
+    grouped: dict[str, list] = {}
+    for turn in goal_store.legacy_conversation_turns():
+        grouped.setdefault(turn.conversation_id, []).append(turn)
+    for conversation_id, turns in grouped.items():
+        try:
+            conversation_store.load(conversation_id)
+            continue
+        except ConversationNotFound:
+            pass
+        related = [
+            item for item in goal_store.list_goals()
+            if item.conversation_id == conversation_id
+        ]
+        retention = max(item.retention_until for item in related)
+        snapshot = conversation_store.create(conversation_id, retention)
+        for turn in turns:
+            snapshot = conversation_store.append(turn, retention, snapshot.revision)
 
 
 async def run(repository_root: Path) -> None:
@@ -64,8 +93,11 @@ async def run(repository_root: Path) -> None:
         storage_root = repository_root / storage_root
     storage_root.mkdir(parents=True, exist_ok=True)
 
-    providers = build_runtime_providers(provider_settings)
+    diagnostics = VoiceDiagnosticBuffer()
+    providers = build_runtime_providers(provider_settings, diagnostics.publish)
     goal_store = SQLiteGoalStore(storage_root / "goals.sqlite3")
+    conversation_store = SQLiteConversationStore(storage_root / "conversations.sqlite3")
+    migrate_legacy_conversations(goal_store, conversation_store)
     memory_store = SQLiteMemoryStore(storage_root / "memories.sqlite3")
     registry = CapabilityRegistry()
     broker = CapabilityBroker(registry, SafetyGate({}), {})
@@ -90,6 +122,7 @@ async def run(repository_root: Path) -> None:
     )
     gateway = ConversationGateway(
         core,
+        conversation_store,
         lambda conversation_id: locate_active_goal(goal_store, conversation_id),
     )
     session = VoiceSession(
@@ -99,6 +132,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.primary_person_id,
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
+        diagnostics=diagnostics,
     )
     server = LiveVoiceServer(
         session,
@@ -110,12 +144,17 @@ async def run(repository_root: Path) -> None:
     try:
         await server.serve_forever()
     finally:
+        conversation_store.close()
         memory_store.close()
         goal_store.close()
 
 
 def main() -> None:
     repository_root = Path(__file__).resolve().parents[3]
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     try:
         asyncio.run(run(repository_root))
     except KeyboardInterrupt:

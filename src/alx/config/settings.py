@@ -55,6 +55,15 @@ def _positive_integer(environment: Mapping[str, str], name: str, fallback: int) 
     return value
 
 
+def _boolean(environment: Mapping[str, str], name: str, fallback: bool) -> bool:
+    raw = environment.get(name, "true" if fallback else "false").strip().lower()
+    if raw in ("true", "1", "yes"):
+        return True
+    if raw in ("false", "0", "no"):
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
 def _number_in_range(
     environment: Mapping[str, str],
     name: str,
@@ -94,6 +103,19 @@ class ReasoningSettings:
     api_key: str
     base_url: str
     timeout_seconds: int
+    streaming: bool
+    service_tier: str
+    effort: str
+
+    def __post_init__(self) -> None:
+        if self.service_tier not in ("default", "priority"):
+            raise ConfigurationError(
+                "ALX_REASONING_SERVICE_TIER must be default or priority"
+            )
+        if self.effort not in ("none", "low", "medium", "high", "xhigh", "max"):
+            raise ConfigurationError(
+                "ALX_REASONING_EFFORT must be none, low, medium, high, xhigh, or max"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,18 +162,40 @@ class RuntimeSettings:
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> RuntimeSettings:
+        reasoning_provider = _required(environment, "ALX_REASONING_PROVIDER")
+        provider_key_name = {
+            "openai": "OPENAI_API_KEY",
+            "xai": "XAI_API_KEY",
+        }.get(reasoning_provider, "ALX_REASONING_API_KEY")
+        provider_base_name = {
+            "openai": "OPENAI_BASE_URL",
+            "xai": "XAI_BASE_URL",
+        }.get(reasoning_provider, "ALX_REASONING_BASE_URL")
+        provider_base_fallback = {
+            "openai": "https://api.openai.com",
+            "xai": "https://api.x.ai",
+        }.get(reasoning_provider)
         return cls(
             reasoning=ReasoningSettings(
-                provider=_required(environment, "ALX_REASONING_PROVIDER"),
+                provider=reasoning_provider,
                 model=_required(environment, "ALX_REASONING_MODEL"),
-                api_key=_credential(environment, "ALX_REASONING_API_KEY", "XAI_API_KEY"),
+                api_key=_credential(
+                    environment, "ALX_REASONING_API_KEY", provider_key_name
+                ),
                 base_url=_configured(
                     environment,
                     "ALX_REASONING_BASE_URL",
-                    "XAI_BASE_URL",
-                    "https://api.x.ai",
+                    provider_base_name,
+                    provider_base_fallback,
                 ).rstrip("/"),
                 timeout_seconds=_positive_integer(environment, "ALX_REASONING_TIMEOUT_SECONDS", 120),
+                streaming=_boolean(environment, "ALX_REASONING_STREAMING", True),
+                service_tier=environment.get(
+                    "ALX_REASONING_SERVICE_TIER", "default"
+                ).strip().lower(),
+                effort=environment.get(
+                    "ALX_REASONING_EFFORT", "medium"
+                ).strip().lower(),
             ),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),

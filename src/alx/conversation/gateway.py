@@ -3,58 +3,63 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
-from alx.contracts import ConversationTurn
-from alx.core import CoreAgent, CoreOutcome
+from alx.contracts import (
+    ConversationOrigin, ConversationTurn, DurableConversationStore,
+)
+from alx.conversation.store import ConversationNotFound
+from alx.core import CoreAgent, CoreOutcome, CoreState
 
 
 class ActiveGoalLocator(Protocol):
-    """Locate durable continuation state without interpreting any words."""
+    """Locate attached durable goal state without interpreting any words."""
 
     def __call__(self, conversation_id: str) -> str | None: ...
 
 
 class ConversationGateway:
-    def __init__(
-        self,
-        core: CoreAgent,
-        locate_active_goal: ActiveGoalLocator | None = None,
-        identifier_factory: Callable[[], str] | None = None,
-    ) -> None:
+    def __init__(self, core: CoreAgent, conversation_store: DurableConversationStore,
+                 locate_active_goal: ActiveGoalLocator,
+                 identifier_factory: Callable[[], str] | None = None,
+                 clock: Callable[[], datetime] | None = None) -> None:
         self._core = core
+        self._conversation_store = conversation_store
         self._locate_active_goal = locate_active_goal
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
-    def receive_conversation_turn(
-        self,
-        turn: ConversationTurn,
-        step_budget: int,
-        retention_until: datetime,
-    ) -> CoreOutcome:
-        """Continue durable Core state, or begin it, without reading the turn."""
-        if self._locate_active_goal is None:
-            raise RuntimeError("active goal locator is not configured")
-        goal_id = self._locate_active_goal(turn.conversation_id)
-        if goal_id is None:
-            return self.receive(
-                turn,
+    def receive_conversation_turn(self, turn: ConversationTurn, step_budget: int,
+                                  retention_until: datetime) -> CoreOutcome:
+        """Persist a turn, then pass the same durable thread to the sole Core."""
+        if step_budget <= 0:
+            raise ValueError("step_budget must be positive")
+        try:
+            conversation = self._conversation_store.load(turn.conversation_id)
+        except ConversationNotFound:
+            conversation = self._conversation_store.create(
+                turn.conversation_id, retention_until)
+        conversation = self._conversation_store.append(
+            turn, retention_until, conversation.revision)
+        outcome = self._core.process(
+            conversation,
+            self._locate_active_goal(turn.conversation_id),
+            retention_until,
+            step_budget,
+        )
+        if outcome.state is CoreState.RESPONDED and outcome.response is not None:
+            response_turn = ConversationTurn(
+                turn.conversation_id,
                 self._identifier_factory(),
-                step_budget,
-                retention_until,
+                ConversationOrigin.ALX_RESPONSE,
+                outcome.response,
+                self._clock(),
             )
-        return self.receive(turn, goal_id, step_budget)
-
-    def receive(
-        self,
-        turn: ConversationTurn,
-        goal_id: str,
-        step_budget: int,
-        retention_until: datetime | None = None,
-    ) -> CoreOutcome:
-        """Transport a turn without inspecting its wording or origin."""
-        if retention_until is None:
-            return self._core.continue_goal(goal_id, turn, step_budget)
-        return self._core.start(goal_id, turn, retention_until, step_budget)
+            self._conversation_store.append(
+                response_turn,
+                retention_until,
+                self._conversation_store.load(turn.conversation_id).revision,
+            )
+        return outcome

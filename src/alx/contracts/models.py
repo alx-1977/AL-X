@@ -36,6 +36,7 @@ class ModelRequest:
     messages: tuple[ModelMessage, ...]
     output_schema_name: str
     output_schema: StructuredData
+    affinity_key: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
@@ -43,6 +44,8 @@ class ModelRequest:
             raise ValueError("a model request requires at least one message")
         _required(self.output_schema_name, "output_schema_name")
         object.__setattr__(self, "output_schema", freeze_data(self.output_schema))
+        if self.affinity_key is not None:
+            _required(self.affinity_key, "affinity_key")
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,11 +1,11 @@
-"""xAI structured-output transport behind the provider-neutral model port."""
+"""OpenAI Responses transport behind the provider-neutral model port."""
 
 from __future__ import annotations
 
 import json
 import logging
-from time import monotonic
 from collections.abc import Callable, Mapping
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -25,7 +25,9 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-class XAIReasoningModel:
+class OpenAIReasoningModel:
+    """Translate neutral AL/X model requests to the OpenAI Responses API."""
+
     def __init__(
         self,
         model: str,
@@ -36,60 +38,67 @@ class XAIReasoningModel:
         *,
         streaming: bool = True,
         service_tier: str = "default",
+        reasoning_effort: str = "medium",
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
         if service_tier not in ("default", "priority"):
             raise ValueError("service_tier must be default or priority")
+        if reasoning_effort not in ("none", "low", "medium", "high", "xhigh", "max"):
+            raise ValueError("unsupported OpenAI reasoning effort")
         self._model = model
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._client = client or httpx.Client(timeout=timeout_seconds)
         self._streaming = streaming
         self._service_tier = service_tier
+        self._reasoning_effort = reasoning_effort
         self._telemetry_sink = telemetry_sink
 
     def complete(self, request: ModelRequest) -> ModelCompletion:
         started_at = monotonic()
         LOGGER.info("Reasoning provider request started")
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
-            "service_tier": self._service_tier,
-            "messages": [
+            "input": [
                 {"role": item.role.value, "content": item.content}
                 for item in request.messages
             ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
+            "reasoning": {"effort": self._reasoning_effort},
+            "text": {
+                "format": {
+                    "type": "json_schema",
                     "name": request.output_schema_name,
                     "strict": True,
                     "schema": _json_value(request.output_schema),
-                },
+                }
             },
         }
+        if self._service_tier != "default":
+            payload["service_tier"] = self._service_tier
+        if request.affinity_key is not None:
+            payload["prompt_cache_key"] = request.affinity_key
         if self._streaming:
             payload["stream"] = True
-            payload["stream_options"] = {"include_usage": True}
+            payload["stream_options"] = {"include_obfuscation": False}
+
         try:
             headers = {
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             }
-            if request.affinity_key is not None:
-                headers["x-grok-conv-id"] = request.affinity_key
             if self._streaming:
                 content, model, usage, service_tier, timings = self._stream(
                     headers, payload, started_at
                 )
             else:
                 response = self._client.post(
-                    f"{self._base_url}/v1/chat/completions",
+                    f"{self._base_url}/v1/responses",
                     headers=headers,
                     json=payload,
                 )
                 response.raise_for_status()
                 body: dict[str, Any] = response.json()
-                content = body["choices"][0]["message"]["content"]
+                content = self._response_text(body)
                 model = body.get("model") or self._model
                 usage = body.get("usage") or {}
                 service_tier = body.get("service_tier") or self._service_tier
@@ -99,7 +108,7 @@ class XAIReasoningModel:
                 raise ValueError("structured output is not an object")
             if not isinstance(usage, dict):
                 usage = {}
-            completion = ModelCompletion("xai", model, output, usage)
+            completion = ModelCompletion("openai", model, output, usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -107,10 +116,7 @@ class XAIReasoningModel:
                     model, service_tier, usage, duration, timings
                 ),
             )
-            LOGGER.info(
-                "Reasoning provider request completed in %.3f seconds",
-                duration,
-            )
+            LOGGER.info("Reasoning provider request completed in %.3f seconds", duration)
             return completion
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             duration = monotonic() - started_at
@@ -118,7 +124,7 @@ class XAIReasoningModel:
                 request.affinity_key,
                 {
                     "code": "reasoning.failed",
-                    "provider": "xai",
+                    "provider": "openai",
                     "model": self._model,
                     "duration_ms": round(duration * 1000),
                     "error_type": type(error).__name__,
@@ -129,7 +135,7 @@ class XAIReasoningModel:
                 duration,
                 type(error).__name__,
             )
-            raise ProviderError("xai", type(error).__name__) from error
+            raise ProviderError("openai", type(error).__name__) from error
 
     def _stream(
         self,
@@ -143,9 +149,10 @@ class XAIReasoningModel:
         usage: dict[str, Any] = {}
         first_event_at: float | None = None
         first_content_at: float | None = None
+        completed = False
         with self._client.stream(
             "POST",
-            f"{self._base_url}/v1/chat/completions",
+            f"{self._base_url}/v1/responses",
             headers=headers,
             json=payload,
         ) as response:
@@ -162,22 +169,33 @@ class XAIReasoningModel:
                 now = monotonic()
                 if first_event_at is None:
                     first_event_at = now
-                model = event.get("model") or model
-                service_tier = event.get("service_tier") or service_tier
-                event_usage = event.get("usage")
-                if isinstance(event_usage, dict) and event_usage:
-                    usage = event_usage
-                choices = event.get("choices")
-                if not isinstance(choices, list) or not choices:
-                    continue
-                delta = choices[0].get("delta")
-                if not isinstance(delta, dict):
-                    continue
-                content = delta.get("content")
-                if isinstance(content, str) and content:
-                    if first_content_at is None:
-                        first_content_at = now
-                    parts.append(content)
+                event_type = event.get("type")
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta")
+                    if isinstance(delta, str) and delta:
+                        if first_content_at is None:
+                            first_content_at = now
+                        parts.append(delta)
+                elif event_type == "response.completed":
+                    result = event.get("response")
+                    if not isinstance(result, dict):
+                        raise ValueError("completed response event is malformed")
+                    completed = True
+                    model = result.get("model") or model
+                    service_tier = result.get("service_tier") or service_tier
+                    result_usage = result.get("usage")
+                    if isinstance(result_usage, dict):
+                        usage = result_usage
+                    if not parts:
+                        fallback = self._response_text(result)
+                        if fallback:
+                            if first_content_at is None:
+                                first_content_at = now
+                            parts.append(fallback)
+                elif event_type in ("response.failed", "response.incomplete"):
+                    raise ValueError(str(event_type))
+        if not completed:
+            raise ValueError("response stream ended before completion")
         finished_at = monotonic()
         timings = {
             "first_event_seconds": (
@@ -193,6 +211,30 @@ class XAIReasoningModel:
             ),
         }
         return "".join(parts), model, usage, service_tier, timings
+
+    @staticmethod
+    def _response_text(body: Mapping[str, Any]) -> str:
+        output = body.get("output")
+        if not isinstance(output, list):
+            raise ValueError("response output is missing")
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, Mapping) or item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, Mapping):
+                    continue
+                if part.get("type") == "refusal":
+                    raise ValueError("model refused structured response")
+                text = part.get("text")
+                if part.get("type") == "output_text" and isinstance(text, str):
+                    parts.append(text)
+        if not parts:
+            raise ValueError("response contains no output text")
+        return "".join(parts)
 
     @staticmethod
     def _nested_integer(data: Mapping[str, Any], *path: str) -> int:
@@ -211,30 +253,28 @@ class XAIReasoningModel:
         duration: float,
         timings: Mapping[str, float],
     ) -> dict[str, Any]:
-        output_tokens = self._nested_integer(usage, "completion_tokens")
-        if not output_tokens:
-            output_tokens = self._nested_integer(usage, "output_tokens")
-        reasoning_tokens = self._nested_integer(
-            usage, "completion_tokens_details", "reasoning_tokens"
-        ) or self._nested_integer(usage, "output_tokens_details", "reasoning_tokens")
         return {
             "code": "reasoning.completed",
-            "provider": "xai",
+            "provider": "openai",
             "model": model,
             "service_tier": service_tier,
+            "reasoning_effort": self._reasoning_effort,
             "duration_ms": round(duration * 1000),
             "first_event_ms": round(timings.get("first_event_seconds", 0.0) * 1000),
-            "first_content_ms": round(timings.get("first_content_seconds", 0.0) * 1000),
+            "first_content_ms": round(
+                timings.get("first_content_seconds", 0.0) * 1000
+            ),
             "answer_generation_ms": round(
                 timings.get("answer_generation_seconds", 0.0) * 1000
             ),
-            "input_tokens": self._nested_integer(usage, "prompt_tokens")
-            or self._nested_integer(usage, "input_tokens"),
+            "input_tokens": self._nested_integer(usage, "input_tokens"),
             "cached_tokens": self._nested_integer(
-                usage, "prompt_tokens_details", "cached_tokens"
-            ) or self._nested_integer(usage, "input_tokens_details", "cached_tokens"),
-            "reasoning_tokens": reasoning_tokens,
-            "output_tokens": output_tokens,
+                usage, "input_tokens_details", "cached_tokens"
+            ),
+            "reasoning_tokens": self._nested_integer(
+                usage, "output_tokens_details", "reasoning_tokens"
+            ),
+            "output_tokens": self._nested_integer(usage, "output_tokens"),
             "total_tokens": self._nested_integer(usage, "total_tokens"),
         }
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,15 +12,25 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.bootstrap.live_voice import load_environment, locate_active_goal  # noqa: E402
+from alx.bootstrap.live_voice import (  # noqa: E402
+    load_environment, locate_active_goal, migrate_legacy_conversations,
+)
 from alx.contracts import (  # noqa: E402
     AudioChunk,
     ConversationOrigin,
+    ConversationTurn,
+    GoalState,
     GoalStatus,
+    Objective,
+    SuccessCriterion,
     TranscriptionEvent,
     TranscriptionState,
 )
-from alx.interfaces import VoiceEventKind, VoiceSession  # noqa: E402
+from alx.interfaces import VoiceDiagnosticBuffer, VoiceEventKind, VoiceSession  # noqa: E402
+from alx.core import CoreState  # noqa: E402
+from alx.conversation import SQLiteConversationStore  # noqa: E402
+from alx.goals import SQLiteGoalStore  # noqa: E402
+from alx.goals.store import _goal_to_data  # noqa: E402
 
 
 NOW = datetime(2026, 8, 28, 9, 30, tzinfo=UTC)
@@ -39,7 +51,7 @@ class FakeSynthesizer:
     def __init__(self):
         self.responses = []
 
-    async def synthesize(self, response):
+    async def synthesize(self, response, correlation_id=None):
         self.responses.append(response)
         yield AudioChunk("tts", 0, b"spoken", "audio/mpeg")
         yield AudioChunk("tts", 1, b"", "audio/mpeg", final=True)
@@ -55,8 +67,14 @@ class FakeGateway:
         return next(self.outcomes)
 
 
-def outcome(status, response="authoritative response", reason=None):
+def outcome(
+    status,
+    response="authoritative response",
+    reason=None,
+    core_state=CoreState.RESPONDED,
+):
     return SimpleNamespace(
+        state=core_state,
         snapshot=SimpleNamespace(state=SimpleNamespace(status=status)),
         response=response,
         reason=reason,
@@ -72,6 +90,53 @@ async def incoming_audio():
 
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tts_transport_diagnostics_arrive_before_audio(self) -> None:
+        diagnostics = VoiceDiagnosticBuffer()
+
+        class DiagnosticSynthesizer:
+            async def synthesize(self, response, correlation_id=None):
+                for code in (
+                    "tts.request_sent",
+                    "tts.text_sent",
+                    "tts.stream_connected",
+                    "tts.first_audio_byte",
+                ):
+                    diagnostics.publish(
+                        correlation_id,
+                        {"code": code, "transport": "http", "elapsed_ms": 1},
+                    )
+                yield AudioChunk("tts", 0, b"spoken", "audio/mpeg")
+                yield AudioChunk("tts", 1, b"", "audio/mpeg", final=True)
+
+        session = VoiceSession(
+            FakeGateway((outcome(GoalStatus.ACTIVE),)),
+            FakeTranscriber((transcription("final", TranscriptionState.FINAL, "Hello"),)),
+            DiagnosticSynthesizer(),
+            "friedl", 8, 3650,
+            clock=lambda: NOW,
+            identifier_factory=lambda: "turn-1",
+            diagnostics=diagnostics,
+        )
+        events = [
+            event async for event in session.exchange("conversation-1", incoming_audio())
+        ]
+        first_audio = next(index for index, event in enumerate(events)
+                           if event.kind is VoiceEventKind.AUDIO)
+        codes = [
+            event.diagnostic["code"]
+            for event in events[:first_audio]
+            if event.kind is VoiceEventKind.DIAGNOSTIC
+        ]
+        self.assertEqual(
+            codes,
+            [
+                "tts.request_sent",
+                "tts.text_sent",
+                "tts.stream_connected",
+                "tts.first_audio_byte",
+            ],
+        )
+
     async def test_transcript_enters_gateway_unchanged_and_only_core_response_is_spoken(self) -> None:
         transcriber = FakeTranscriber(
             (
@@ -148,30 +213,117 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(call[2] is not None for call in gateway.calls))
 
+    async def test_rejected_core_decision_reports_error_and_resumes_listening(self) -> None:
+        transcriber = FakeTranscriber(
+            (
+                transcription("one", TranscriptionState.FINAL, "First thought"),
+                transcription("two", TranscriptionState.FINAL, "Try again"),
+            )
+        )
+        synthesizer = FakeSynthesizer()
+        gateway = FakeGateway(
+            (
+                outcome(
+                    GoalStatus.ACTIVE,
+                    response=None,
+                    reason="decision_invalid",
+                    core_state=CoreState.ERROR,
+                ),
+                outcome(GoalStatus.AWAITING_INPUT, "recovered response"),
+            )
+        )
+        identifiers = iter(("turn-1", "turn-2"))
+        session = VoiceSession(
+            gateway,
+            transcriber,
+            synthesizer,
+            "friedl",
+            8,
+            3650,
+            clock=lambda: NOW,
+            identifier_factory=lambda: next(identifiers),
+        )
+
+        events = [event async for event in session.exchange("conversation-1", incoming_audio())]
+
+        self.assertEqual(
+            [event.kind for event in events],
+            [
+                VoiceEventKind.THINKING,
+                VoiceEventKind.ERROR,
+                VoiceEventKind.LISTENING,
+                VoiceEventKind.THINKING,
+                VoiceEventKind.SPEAKING,
+                VoiceEventKind.AUDIO,
+                VoiceEventKind.AUDIO,
+                VoiceEventKind.LISTENING,
+            ],
+        )
+        self.assertEqual(events[1].reason, "decision_invalid")
+        self.assertEqual(synthesizer.responses, ["recovered response"])
+
 
 class BootstrapVoiceTests(unittest.TestCase):
+    def test_legacy_goal_owned_turns_migrate_to_independent_conversation_store(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            goal_path = Path(directory) / "goals.sqlite3"
+            conversation_path = Path(directory) / "conversations.sqlite3"
+            state = GoalState(
+                "goal-1", Objective("turn:turn-1", "objective"),
+                (SuccessCriterion("criterion-1", "success"),),
+            )
+            turn = ConversationTurn(
+                "conversation-1", "turn-1", ConversationOrigin.TYPED,
+                "preserve me", NOW, "friedl",
+            )
+            connection = sqlite3.connect(goal_path)
+            connection.execute(
+                "CREATE TABLE goals (goal_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, retention_until TEXT NOT NULL, state_json TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE conversation_turns (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, turn_id TEXT NOT NULL, turn_json TEXT NOT NULL, PRIMARY KEY(goal_id, ordinal), UNIQUE(goal_id, turn_id))"
+            )
+            connection.execute(
+                "CREATE TABLE pending_memory_batches (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, goal_revision INTEGER NOT NULL, ordinal INTEGER NOT NULL, proposal_json TEXT NOT NULL, retention_until TEXT NOT NULL, PRIMARY KEY(goal_id, goal_revision, ordinal))"
+            )
+            connection.execute(
+                "INSERT INTO goals VALUES (?, ?, ?, ?)",
+                ("goal-1", 1, NOW.isoformat(), json.dumps(_goal_to_data(state))),
+            )
+            connection.execute(
+                "INSERT INTO conversation_turns VALUES (?, ?, ?, ?)",
+                ("goal-1", 0, "turn-1", json.dumps([
+                    turn.conversation_id, turn.turn_id, turn.origin.value,
+                    turn.content, turn.occurred_at.isoformat(), turn.person_id,
+                ])),
+            )
+            connection.execute("PRAGMA user_version = 3")
+            connection.commit()
+            connection.close()
+            goals = SQLiteGoalStore(goal_path)
+            conversations = SQLiteConversationStore(conversation_path)
+            try:
+                migrate_legacy_conversations(goals, conversations)
+                self.assertEqual(conversations.load("conversation-1").turns, (turn,))
+                self.assertEqual(goals.load("goal-1").conversation_id, "conversation-1")
+                migrate_legacy_conversations(goals, conversations)
+                self.assertEqual(conversations.load("conversation-1").turns, (turn,))
+            finally:
+                conversations.close()
+                goals.close()
+
     def test_active_goal_is_recovered_from_latest_durable_conversation_state(self) -> None:
         older = SimpleNamespace(
             state=SimpleNamespace(goal_id="older", status=GoalStatus.AWAITING_INPUT),
-            turns=(SimpleNamespace(conversation_id="conversation-1", occurred_at=NOW),),
+            conversation_id="conversation-1",
         )
         newer = SimpleNamespace(
             state=SimpleNamespace(goal_id="newer", status=GoalStatus.ACTIVE),
-            turns=(
-                SimpleNamespace(
-                    conversation_id="conversation-1",
-                    occurred_at=NOW.replace(minute=31),
-                ),
-            ),
+            conversation_id="conversation-1",
         )
         completed = SimpleNamespace(
             state=SimpleNamespace(goal_id="done", status=GoalStatus.COMPLETED),
-            turns=(
-                SimpleNamespace(
-                    conversation_id="conversation-1",
-                    occurred_at=NOW.replace(minute=32),
-                ),
-            ),
+            conversation_id="conversation-1",
         )
         store = SimpleNamespace(list_goals=lambda: (older, newer, completed))
 

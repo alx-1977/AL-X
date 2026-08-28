@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -15,6 +16,9 @@ from websockets.http11 import Request, Response
 
 from alx.contracts import AudioChunk
 from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LiveVoiceServer:
@@ -52,6 +56,7 @@ class LiveVoiceServer:
             await connection.close(code=1008, reason="unsupported_transport_path")
             return
         conversation_id = self._conversation_id(parse_qs(parsed.query))
+        LOGGER.info("Voice session connected")
         await connection.send(
             json.dumps(
                 {
@@ -80,11 +85,24 @@ class LiveVoiceServer:
                             )
                         )
                     continue
+                if event.kind is VoiceEventKind.DIAGNOSTIC:
+                    assert event.diagnostic is not None
+                    await connection.send(
+                        json.dumps(
+                            {
+                                "type": "diagnostic",
+                                **event.diagnostic,
+                            }
+                        )
+                    )
+                    continue
                 message = {"type": "phase", "value": event.kind.value}
                 if event.kind is VoiceEventKind.ERROR:
                     message["reason"] = event.reason
+                    LOGGER.error("Voice session failed: %s", event.reason)
                 await connection.send(json.dumps(message))
-        except Exception:
+        except Exception as error:
+            LOGGER.error("Voice transport failed: %s", type(error).__name__)
             await connection.send(
                 json.dumps(
                     {
@@ -104,6 +122,16 @@ class LiveVoiceServer:
         async for payload in connection:
             if not isinstance(payload, bytes) or not payload:
                 continue
+            if sequence == 0:
+                LOGGER.info("First microphone audio frame received")
+                await connection.send(
+                    json.dumps(
+                        {
+                            "type": "diagnostic",
+                            "code": "microphone.audio_received",
+                        }
+                    )
+                )
             yield AudioChunk(
                 stream_id,
                 sequence,

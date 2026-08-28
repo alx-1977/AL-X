@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from collections.abc import AsyncIterable, AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
+import certifi
 import websockets
 
 from alx.contracts import AudioChunk, TranscriptionEvent, TranscriptionState
@@ -29,6 +31,7 @@ class CartesiaTranscriber:
         turn_end_threshold: float,
         turn_end_timeout_ms: int,
         connection_factory: Callable[..., Any] | None = None,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self._model = model
         self._api_key = api_key
@@ -41,6 +44,9 @@ class CartesiaTranscriber:
         self._turn_end_threshold = turn_end_threshold
         self._turn_end_timeout_ms = turn_end_timeout_ms
         self._connect = connection_factory or websockets.connect
+        self._ssl_context = ssl_context or ssl.create_default_context(
+            cafile=certifi.where()
+        )
 
     async def transcribe(
         self,
@@ -63,6 +69,7 @@ class CartesiaTranscriber:
             async with self._connect(
                 endpoint,
                 additional_headers={"X-API-Key": self._api_key},
+                ssl=self._ssl_context,
             ) as socket:
                 sender = asyncio.create_task(self._send_audio(socket, chunks))
                 event_number = 0
