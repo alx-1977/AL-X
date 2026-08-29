@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -11,7 +11,8 @@ from uuid import uuid4
 
 from alx.contracts import (
     AgentDecision, Approval, ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
-    CapabilityDefinition, CapabilityDispatch, ConversationSnapshot,
+    CapabilityDefinition, CapabilityDispatch, CapabilityResult,
+    CapabilityResultState, ConversationSnapshot,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
@@ -59,7 +60,13 @@ class CoreAgent:
         if snapshot is not None and snapshot.conversation_id != conversation.conversation_id:
             return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_conversation_mismatch")
         if snapshot is not None and self._has_pending_dispatch(snapshot.state):
-            return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_unresolved")
+            # A dispatch that never returned means the process stopped between
+            # the durable checkpoint and the result. Refusing here would wedge
+            # the goal permanently, so the attempt is closed with an explicitly
+            # unknown outcome. It is never retried automatically: the external
+            # action may already have taken effect, and only the Core may
+            # decide, from this evidence, whether to verify or ask.
+            snapshot = self._close_interrupted_dispatch(snapshot)
         if snapshot is not None and not self._flush_pending_memory_batches(snapshot.state.goal_id):
             return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
 
@@ -235,6 +242,28 @@ class CoreAgent:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
             snapshot = self._finalize_dispatch(snapshot, attempt)
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
+
+    def _close_interrupted_dispatch(self, snapshot: GoalSnapshot) -> GoalSnapshot:
+        """Resolve an interrupted dispatch as an unknown outcome, once."""
+        pending = tuple(item for item in snapshot.state.attempts
+                        if item.disposition is CapabilityAttemptDisposition.PENDING)
+        if len(pending) != 1 or pending[0].call is None:
+            return snapshot
+        call = pending[0].call
+        closed = CapabilityAttempt(
+            call,
+            CapabilityAttemptDisposition.BROKER_FAILURE,
+            True,
+            CapabilityResult(
+                call.call_id,
+                call.capability_id,
+                CapabilityResultState.FAILED,
+                failure={"code": "dispatch_interrupted"},
+            ),
+            "dispatch_interrupted",
+        )
+        LOGGER.info("Closing interrupted dispatch for %s", call.capability_id)
+        return self._finalize_dispatch(snapshot, closed)
 
     def reconcile_dispatch(self, goal_id: str, attempt: CapabilityAttempt) -> CoreOutcome:
         snapshot = self._store.load(goal_id)
@@ -414,6 +443,67 @@ class CoreAgent:
                            stop_reason=GoalStopReason.CANCELLED)
         return state
 
+    # Transient material is shown to the model so it can speak about a message,
+    # but it was promised never to enter durable state. A model-authored record
+    # can otherwise carry the body across that boundary by quoting it, so any
+    # durable text reproducing a substantial run of transient content is
+    # refused. This checks content, not provenance.
+    _TRANSIENT_QUOTE_CHARACTERS = 120
+
+    @classmethod
+    def _transient_texts(cls, conversation: ConversationSnapshot) -> tuple[str, ...]:
+        collected: list[str] = []
+
+        def walk(value: object) -> None:
+            if isinstance(value, str):
+                if len(value) >= cls._TRANSIENT_QUOTE_CHARACTERS:
+                    collected.append(value)
+                return
+            if isinstance(value, Mapping):
+                for nested in value.values():
+                    walk(nested)
+                return
+            if isinstance(value, (tuple, list)):
+                for nested in value:
+                    walk(nested)
+
+        for event in conversation.events:
+            walk(event.transient_data)
+        return tuple(collected)
+
+    @classmethod
+    def _durable_texts(cls, value: object) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, Mapping):
+            for nested in value.values():
+                found.extend(cls._durable_texts(nested))
+        elif isinstance(value, (tuple, list)):
+            for nested in value:
+                found.extend(cls._durable_texts(nested))
+        return found
+
+    @classmethod
+    def _reproduces_transient_content(
+        cls, conversation: ConversationSnapshot, values: object
+    ) -> bool:
+        """Report whether durable text reproduces a run of transient content."""
+        sources = cls._transient_texts(conversation)
+        if not sources:
+            return False
+        window = cls._TRANSIENT_QUOTE_CHARACTERS
+        for candidate in cls._durable_texts(values):
+            normalised = " ".join(candidate.split())
+            if len(normalised) < window:
+                continue
+            for source in sources:
+                compact = " ".join(source.split())
+                for start in range(0, len(normalised) - window + 1):
+                    if normalised[start:start + window] in compact:
+                        return True
+        return False
+
     @staticmethod
     def _evidence_grounding_error(conversation: ConversationSnapshot,
                                   state: GoalState, existing: tuple,
@@ -437,15 +527,41 @@ class CoreAgent:
                 return "evidence_source_unknown"
             if any(reference not in criteria for reference in item.supports):
                 return "evidence_support_unknown"
+            if CoreAgent._reproduces_transient_content(conversation, item.attributes):
+                return "evidence_reproduces_transient_content"
             known.add(f"evidence:{item.evidence_id}")
         return None
+
+    # A definite pre-effect failure returns the approval, because the external
+    # action provably did not happen and Friedl already authorised this exact
+    # action. Anything that reached the implementation and could have taken
+    # effect stays consumed, so an ambiguous outcome can never be retried
+    # automatically against production.
+    _PRE_EFFECT_FAILURE_CODES = frozenset({
+        "capability_unknown",
+        "implementation_missing",
+        "input_invalid",
+        "executor_error",
+    })
+
+    @classmethod
+    def _approval_is_spent(cls, attempt: CapabilityAttempt) -> bool:
+        """Report whether an approval must not be reused after this attempt."""
+        if not attempt.implementation_invoked:
+            return False
+        if attempt.disposition is CapabilityAttemptDisposition.BROKER_FAILURE and (
+            attempt.reason_code in cls._PRE_EFFECT_FAILURE_CODES
+        ):
+            return False
+        return True
 
     def _finalize_dispatch(self, snapshot: GoalSnapshot,
                            attempt: CapabilityAttempt) -> GoalSnapshot:
         assert attempt.call is not None
+        consumed = self._approval_is_spent(attempt)
         approvals = tuple(
             replace(item, lifecycle=(ApprovalLifecycle.CONSUMED
-                                     if attempt.implementation_invoked
+                                     if consumed
                                      else ApprovalLifecycle.GRANTED))
             if (item.lifecycle is ApprovalLifecycle.CLAIMED
                 and item.approval_id == attempt.call.approval_id
@@ -521,6 +637,10 @@ class CoreAgent:
                           if reference in turns]
                 if not people or any(person_id != proposal.person_id for person_id in people):
                     return "relationship_person_mismatch"
+            if CoreAgent._reproduces_transient_content(
+                conversation, (proposal.content, proposal.meaning)
+            ):
+                return "memory_reproduces_transient_content"
         return None
 
     @staticmethod
@@ -540,13 +660,18 @@ class CoreAgent:
 
     @staticmethod
     def _repeats_rejected_call(state: GoalState, call: CapabilityCall) -> bool:
-        """Stop deterministic safety/input rejections from becoming model loops."""
+        """Stop deterministic safety/input rejections from becoming model loops.
+
+        The identity of a repeat is the capability and its arguments. A new
+        call or approval identifier does not make a refused action different,
+        so retrying the same refused action with fresh identifiers is still a
+        loop and is stopped here.
+        """
         return any(
             item.call is not None
             and item.disposition is CapabilityAttemptDisposition.REJECTED
             and item.call.capability_id == call.capability_id
             and item.call.arguments == call.arguments
-            and item.call.approval_id == call.approval_id
             for item in state.attempts
         )
 

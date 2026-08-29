@@ -82,3 +82,21 @@ This file records approved product and architecture decisions that guide impleme
 - **Decision:** Do not interpret compact `R<number>` forms as South African currency in the ElevenLabs adapter. Ambiguous forms such as `R5`, `R10`, `R100`, and `R2000` pass to ElevenLabs unchanged rather than being assigned a meaning outside the Core.
 - **Native normalization:** Continue relying on the configured ElevenLabs model's verified native normalization for unambiguous currency forms such as `R2,000` and `R2 000.50`.
 - **Future boundary:** Contextual speech metadata may be considered later if compact currency becomes important. This decision does not authorise that architecture and creates no Law exception.
+
+## D-010 — Production mail mutation authorised: move to recoverable Trash
+
+- **Date:** 2026-08-29
+- **Decision owner:** Friedl
+- **Decision:** Friedl authorises the `move_mail_message_to_trash` capability to operate against his real iCloud account in the local AL/X runtime. This is the production-deployment authorisation Law 19 requires for a capability that modifies production data.
+- **Exact scope:** One capability, `move_mail_message_to_trash`, moving one identified message from its mailbox to the server-designated recoverable Trash mailbox. No other mailbox mutation is authorised.
+- **Why it is needed:** Dismissing and deleting mail is one of the three original purposes of the email integration. Without it AL/X can read and acknowledge mail but cannot act on it.
+- **Recoverability:** The operation is an IMAP `UID MOVE` to the mailbox the server flags `\Trash`. It is not `EXPUNGE` and performs no permanent deletion. A moved message remains recoverable from Trash under Friedl's normal iCloud retention.
+- **Required safeguards, verified present:**
+  - the capability is classified `SideEffect.EFFECTFUL`;
+  - it requires the distinct `mail.trash` permission, separate from reading;
+  - it requires an exact, per-message approval grounded in Friedl's own latest conversational turn; a general instruction cannot authorise it;
+  - the approval scope is equality-matched, so any change of message or mailbox invalidates it;
+  - the Trash mailbox is discovered from the server's own flag rather than a hard-coded name.
+- **Boundary:** This authorises Trash only. It does not authorise permanent deletion, expunge, archive, move to any other mailbox, flag changes, mark-read as an external mutation, sending, or drafting. Each of those remains a separate governed decision.
+- **Not an exception:** This is a deployment authorisation under Law 19, not an exception to any Law. `governance/EXCEPTIONS.md` remains empty.
+- **Review condition:** To be revisited if the approval mechanism changes, if an unapproved move is ever observed, or if permanent-deletion authority is later proposed.

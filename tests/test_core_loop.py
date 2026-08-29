@@ -329,7 +329,13 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(dispatches, [first])
         self.assertEqual(len(reasoner.contexts), 2)
 
-    def test_unresolved_dispatch_survives_restart_and_blocks_repeat(self) -> None:
+    def test_interrupted_dispatch_recovers_without_repeating_the_action(self) -> None:
+        """An interrupted dispatch must neither wedge the goal nor be retried.
+
+        The external action may already have taken effect, so the attempt is
+        closed with an explicitly unknown outcome and handed to the Core as
+        evidence. Only the Core may decide whether to verify or ask.
+        """
         self.store.create(goal(), "conversation-1", RETENTION)
         call = CapabilityCall("call-1", "inspect", {})
         outcome = self.agent(
@@ -339,10 +345,31 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "dispatch_error")
         self.store.close()
         self.store = SQLiteGoalStore(self.path)
-        reasoner = Queued(AssertionError("pending action reached model"))
-        resumed = self.agent(reasoner).process(conversation(), "goal-1", RETENTION, 1)
-        self.assertEqual(resumed.reason, "dispatch_unresolved")
-        self.assertEqual(reasoner.contexts, [])
+
+        dispatches: list[CapabilityCall] = []
+
+        def dispatch(proposed, state):
+            dispatches.append(proposed)
+            raise AssertionError("an interrupted action must not be re-dispatched")
+
+        reasoner = Queued(AgentDecision(response="I could not confirm that."))
+        resumed = self.agent(reasoner, dispatch).process(
+            conversation(), "goal-1", RETENTION, 1
+        )
+        # The goal is usable again and the model was consulted.
+        self.assertEqual(resumed.state, CoreState.RESPONDED)
+        self.assertEqual(len(reasoner.contexts), 1)
+        # The interrupted action was never repeated.
+        self.assertEqual(dispatches, [])
+        # The unknown outcome is durable evidence the Core can reason about.
+        stored = self.store.load("goal-1").state
+        self.assertFalse(
+            any(item.disposition is CapabilityAttemptDisposition.PENDING
+                for item in stored.attempts)
+        )
+        closed = stored.attempts[-1]
+        self.assertEqual(closed.reason_code, "dispatch_interrupted")
+        self.assertEqual(closed.result.failure["code"], "dispatch_interrupted")
 
 
 if __name__ == "__main__":
