@@ -20,6 +20,10 @@ from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
 
 LOGGER = logging.getLogger(__name__)
 
+# A dropped speech transport ends one exchange, not the conversation. The person
+# may simply have been silent while the provider timed the socket out.
+RECOVERABLE_TRANSPORT_REASONS = frozenset({"speech_transcription_error"})
+
 
 class LiveVoiceServer:
     def __init__(
@@ -66,6 +70,16 @@ class LiveVoiceServer:
                 }
             )
         )
+        # A transcription transport can drop while the person is simply silent.
+        # That ends one exchange but not the conversation, so it is re-entered on
+        # the same durable conversation while the browser socket stays open.
+        while await self._exchange_once(connection, conversation_id):
+            LOGGER.info("Resuming voice session on the same conversation")
+
+    async def _exchange_once(
+        self, connection: ServerConnection, conversation_id: str
+    ) -> bool:
+        """Run one exchange. Report whether the conversation should resume."""
         try:
             async for event in self._session.exchange(
                 conversation_id,
@@ -100,6 +114,16 @@ class LiveVoiceServer:
                 if event.kind is VoiceEventKind.ERROR:
                     message["reason"] = event.reason
                     LOGGER.error("Voice session failed: %s", event.reason)
+                    await connection.send(json.dumps(message))
+                    if event.reason in RECOVERABLE_TRANSPORT_REASONS:
+                        await connection.send(
+                            json.dumps({
+                                "type": "phase",
+                                "value": VoiceEventKind.LISTENING.value,
+                            })
+                        )
+                        return True
+                    return False
                 await connection.send(json.dumps(message))
         except Exception as error:
             LOGGER.error("Voice transport failed: %s", type(error).__name__)
@@ -112,6 +136,7 @@ class LiveVoiceServer:
                     }
                 )
             )
+        return False
 
     async def _audio(
         self,

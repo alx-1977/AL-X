@@ -146,6 +146,14 @@ class VoiceSession:
                 kind, item = await incoming.get()
                 if kind == "error":
                     yield VoiceEvent(VoiceEventKind.ERROR, reason=item)
+                    # A background observation failure leaves speech intact, so the
+                    # conversation continues rather than ending. The observation
+                    # task has stopped; it is restarted so mail is still watched.
+                    if item == "background_event_error" and self._event_source is not None:
+                        LOGGER.info("Restarting background observation after failure")
+                        tasks.append(asyncio.create_task(receive_events()))
+                        yield VoiceEvent(VoiceEventKind.LISTENING)
+                        continue
                     return
                 if kind == "transcription_end":
                     if self._event_source is None:

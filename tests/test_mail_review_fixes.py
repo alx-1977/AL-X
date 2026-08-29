@@ -382,3 +382,56 @@ class TrashAuthorisationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpokenResponseGuidanceTests(unittest.TestCase):
+    """The model must know its response is spoken, or it writes for a screen."""
+
+    def test_the_model_is_told_its_response_is_spoken(self) -> None:
+        source = (Path(__file__).resolve().parents[1]
+                  / "src/alx/core/model_reasoner.py").read_text("utf-8")
+        self.assertIn("spoken aloud", source)
+
+    def test_the_guidance_states_the_medium_without_scripting_wording(self) -> None:
+        """Law 1 and the identity document both forbid scripted phrasing."""
+        source = (Path(__file__).resolve().parents[1]
+                  / "src/alx/core/model_reasoner.py").read_text("utf-8")
+        # No example sentence, greeting, or fixed reply is supplied.
+        for scripted in ('say "', "reply with", "respond with the phrase",
+                         "always begin", "use the words"):
+            self.assertNotIn(scripted, source.lower())
+
+    def test_identity_was_not_expanded_into_style_rules(self) -> None:
+        identity = (Path(__file__).resolve().parents[1]
+                    / "IDENTITY_AND_MEMORY.md").read_text("utf-8")
+        self.assertIn("must not be expanded into detailed style rules", identity)
+        self.assertNotIn("spoken aloud", identity)
+
+
+class SessionResilienceTests(unittest.TestCase):
+    """One dropped speech transport must not end the conversation."""
+
+    def test_only_transport_failures_are_treated_as_recoverable(self) -> None:
+        from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
+
+        self.assertIn("speech_transcription_error", RECOVERABLE_TRANSPORT_REASONS)
+        # A refused action or an invalid Core decision is not a transport fault
+        # and must not silently resume as though nothing happened.
+        for reason in ("repeated_rejected_call", "active_goal_required",
+                       "goal_proposal_invalid", "voice_transport_error"):
+            self.assertNotIn(reason, RECOVERABLE_TRANSPORT_REASONS)
+
+    def test_the_handler_resumes_rather_than_returning_once(self) -> None:
+        import ast
+
+        tree = ast.parse((Path(__file__).resolve().parents[1]
+                          / "src/alx/interfaces/server.py").read_text("utf-8"))
+        handler = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_handle_voice"
+        )
+        # The conversation is re-entered while the browser socket stays open.
+        self.assertTrue(
+            any(isinstance(node, ast.While) for node in ast.walk(handler)),
+            "a recoverable failure must re-enter the exchange",
+        )
