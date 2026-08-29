@@ -342,7 +342,7 @@ class ICloudMailAdapter:
     def read(self, reference: MailReference) -> MailContent:
         connection = self._open()
         try:
-            status, _ = connection.select(reference.mailbox_id, readonly=True)
+            status, _ = connection.select(self._quoted(reference.mailbox_id), readonly=True)
             if status != "OK":
                 raise MailAccessError("mailbox_unavailable")
             if _uid_validity(connection) != reference.uid_validity:
@@ -362,6 +362,19 @@ class ICloudMailAdapter:
             )
         finally:
             self._close(connection)
+
+    @staticmethod
+    def _quoted(mailbox_id: str) -> str:
+        """Quote a mailbox name so names containing spaces remain usable.
+
+        The server-designated Trash mailbox is commonly "Deleted Messages" on
+        iCloud. Passed unquoted, IMAP reads the space as an argument separator
+        and rejects the command.
+        """
+        if mailbox_id.startswith('"') and mailbox_id.endswith('"'):
+            return mailbox_id
+        escaped = mailbox_id.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
 
     @staticmethod
     def _trash_mailbox(values) -> str:
@@ -385,7 +398,7 @@ class ICloudMailAdapter:
     def move_to_trash(self, reference: MailReference) -> str:
         connection = self._open()
         try:
-            status, _ = connection.select(reference.mailbox_id, readonly=False)
+            status, _ = connection.select(self._quoted(reference.mailbox_id), readonly=False)
             if status != "OK":
                 raise MailAccessError("mailbox_unavailable")
             if _uid_validity(connection) != reference.uid_validity:
@@ -394,7 +407,7 @@ class ICloudMailAdapter:
             if status != "OK":
                 raise MailAccessError("trash_unavailable")
             trash = self._trash_mailbox(values)
-            status, _ = connection.uid("MOVE", reference.uid, trash)
+            status, _ = connection.uid("MOVE", reference.uid, self._quoted(trash))
             if status != "OK":
                 raise MailAccessError("move_failed")
             self._observations.acknowledge(reference)

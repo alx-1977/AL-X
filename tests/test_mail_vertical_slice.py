@@ -221,7 +221,10 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(destination, "Deleted Messages")
         rendered = repr(self.imap.commands)
         self.assertIn("BODY.PEEK[]", rendered)
-        self.assertIn("'MOVE', '2', 'Deleted Messages'", rendered)
+        # The Trash mailbox name contains a space, so it must reach IMAP quoted.
+        # Passed unquoted the server reads it as two arguments and rejects the
+        # command, which is how a real move failed while this double passed.
+        self.assertIn("""'MOVE', '2', '"Deleted Messages"'""", rendered)
         self.assertNotIn("STORE", rendered)
         self.assertNotIn("EXPUNGE", rendered)
 

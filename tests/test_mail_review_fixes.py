@@ -273,6 +273,83 @@ class TransientContentTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
 
 
+class MailboxQuotingTests(unittest.TestCase):
+    """Regression: an unquoted Trash name made every real move fail.
+
+    The previous fake accepted any argument, so the suite passed while the live
+    IMAP server rejected the command. This double rejects an unquoted name with
+    a space, the way a real server does.
+    """
+
+    class StrictConnection:
+        def __init__(self) -> None:
+            self.commands: list[tuple] = []
+
+        @staticmethod
+        def _check(name: object) -> None:
+            if isinstance(name, str) and " " in name and not (
+                name.startswith('"') and name.endswith('"')
+            ):
+                raise OSError("BAD unquoted mailbox name with a space")
+
+        def login(self, address, secret):
+            self.commands.append(("LOGIN",))
+            return "OK", [b""]
+
+        def logout(self):
+            return "BYE", [b""]
+
+        def select(self, mailbox_id, readonly=False):
+            self._check(mailbox_id)
+            self.commands.append(("SELECT", mailbox_id, readonly))
+            return "OK", [b"1"]
+
+        def response(self, name):
+            return name, [b"UIDVALIDITY 1"]
+
+        def list(self):
+            return "OK", [b'(\\Trash) "/" "Deleted Messages"']
+
+        def uid(self, command, *arguments):
+            for argument in arguments:
+                self._check(argument)
+            self.commands.append(("UID", command, *arguments))
+            return "OK", [b""]
+
+    def test_a_trash_name_with_a_space_is_quoted_for_every_command(self) -> None:
+        from alx.contracts import MailReference
+        from alx.providers.icloud_mail import ICloudMailAdapter
+
+        connection = self.StrictConnection()
+
+        class Observations:
+            def acknowledge(self, reference):
+                return None
+
+        adapter = ICloudMailAdapter(
+            "imap.example.test", 993, "friedl@example.test", "secret",
+            Observations(), 15, connection_factory=lambda *_, **__: connection,
+        )
+        trash = adapter.move_to_trash(MailReference("INBOX", "1", "2"))
+        self.assertEqual(trash, "Deleted Messages")
+        moves = [item for item in connection.commands
+                 if item[0] == "UID" and item[1] == "MOVE"]
+        self.assertTrue(moves)
+        self.assertTrue(
+            all(item[-1].startswith('"') for item in moves),
+            "the Trash mailbox must reach IMAP quoted",
+        )
+
+    def test_quoting_is_idempotent_and_escapes_a_quote(self) -> None:
+        from alx.providers.icloud_mail import ICloudMailAdapter
+
+        self.assertEqual(ICloudMailAdapter._quoted("INBOX"), '"INBOX"')
+        self.assertEqual(
+            ICloudMailAdapter._quoted("Deleted Messages"), '"Deleted Messages"'
+        )
+        self.assertEqual(ICloudMailAdapter._quoted('"INBOX"'), '"INBOX"')
+
+
 class TrashAuthorisationTests(unittest.TestCase):
     """D-010 records the authorisation; these assert the safeguards it claims."""
 
