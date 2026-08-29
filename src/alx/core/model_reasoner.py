@@ -41,7 +41,10 @@ retrieval. Ordinary conversation does not require a goal update. When useful, pr
 a goal mutation separately; the runtime, not you, decides whether it becomes durable
 truth. Request completion rather than authoring completed state. Every proposed item
 of evidence must cite one or more available durable source references exactly as
-supplied. Never route by phrase, call an unregistered capability, fabricate evidence,
+supplied. An evidence item's supports field lists success criterion identifiers
+only, taken from the active goal's success_criteria or from the criteria created
+in the same mutation; it is not for decision, correction, or progress record
+identifiers, and evidence supporting no criterion must leave it empty. Never route by phrase, call an unregistered capability, fabricate evidence,
 erase history, or alter approvals. You may propose one exact action approval only
 when the latest retained person turn explicitly authorizes that same consequential
 capability call; cite that turn exactly. A response may depend on a goal commit only when
@@ -430,7 +433,16 @@ def decision_schema() -> dict[str, Any]:
                     "id": string,
                     "kind": string,
                     "attributes_json": string,
-                    "supports": {"type": "array", "items": string},
+                    "supports": {
+                        "type": "array",
+                        "items": string,
+                        "description": (
+                            "Success criterion identifiers this evidence proves. "
+                            "Must already exist in success_criteria or be created "
+                            "in this same mutation. Never a decision, correction, "
+                            "or progress identifier. Empty if it proves none."
+                        ),
+                    },
                     "source_references": {"type": "array", "items": string},
                 }
             ),
