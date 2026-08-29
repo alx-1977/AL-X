@@ -448,7 +448,10 @@ class CoreAgent:
     # can otherwise carry the body across that boundary by quoting it, so any
     # durable text reproducing a substantial run of transient content is
     # refused. This checks content, not provenance.
-    _TRANSIENT_QUOTE_CHARACTERS = 120
+    # A quoted run this long is treated as reproduction. It is deliberately
+    # short, because a leak is not always a long block: a one-line code or
+    # account number is the most sensitive thing a message can carry.
+    _TRANSIENT_QUOTE_CHARACTERS = 24
 
     @classmethod
     def _transient_texts(cls, conversation: ConversationSnapshot) -> tuple[str, ...]:
@@ -456,7 +459,9 @@ class CoreAgent:
 
         def walk(value: object) -> None:
             if isinstance(value, str):
-                if len(value) >= cls._TRANSIENT_QUOTE_CHARACTERS:
+                # Every transient string is a source, however short. A brief
+                # body is not less private than a long one.
+                if value.strip():
                     collected.append(value)
                 return
             if isinstance(value, Mapping):
@@ -488,19 +493,35 @@ class CoreAgent:
     def _reproduces_transient_content(
         cls, conversation: ConversationSnapshot, values: object
     ) -> bool:
-        """Report whether durable text reproduces a run of transient content."""
-        sources = cls._transient_texts(conversation)
+        """Report whether durable text reproduces transient content.
+
+        Reproduction is judged per durable string and by content, not by block
+        size. A short transient body copied whole is caught, and so is a long
+        body divided among several short records, because each fragment is
+        still compared against the whole source.
+        """
+        sources = [" ".join(item.split()) for item in cls._transient_texts(conversation)]
+        sources = [item for item in sources if item]
         if not sources:
             return False
         window = cls._TRANSIENT_QUOTE_CHARACTERS
         for candidate in cls._durable_texts(values):
             normalised = " ".join(candidate.split())
-            if len(normalised) < window:
+            if not normalised:
                 continue
             for source in sources:
-                compact = " ".join(source.split())
+                # A short source copied in full is reproduction in full.
+                if len(source) <= window:
+                    if source in normalised:
+                        return True
+                    continue
+                # Otherwise any sufficiently long shared run is reproduction,
+                # whichever side the fragment came from.
+                shortest = min(len(normalised), len(source))
+                if shortest < window:
+                    continue
                 for start in range(0, len(normalised) - window + 1):
-                    if normalised[start:start + window] in compact:
+                    if normalised[start:start + window] in source:
                         return True
         return False
 

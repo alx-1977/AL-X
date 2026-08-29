@@ -236,6 +236,51 @@ class TransientContentTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "memory_proposal_invalid")
 
+    def test_a_short_body_copied_verbatim_is_refused(self) -> None:
+        """Regression: a body under the window bypassed the guard entirely.
+
+        A one-line code or account number is the most sensitive thing a
+        message can carry, so brevity must not grant an exemption.
+        """
+        short = "Bank OTP is 449281. Do not share it."
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW,
+            data={"uid": "58610", "subject": "Verification"},
+            transient_data={"body_text": short},
+        )
+        conversation_with_short = conversation("what does it say?", events=(event,))
+        reasoner = Queued(AgentDecision(
+            response="Noted.",
+            memory_proposals=(MemoryProposal(
+                "memory-1", MemoryKind.FACTUAL, short, ("event:event-1",), NOW),),
+        ))
+        outcome = self.agent(reasoner).process(
+            conversation_with_short, None, RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "memory_proposal_invalid")
+
+    def test_a_body_split_across_short_records_is_refused(self) -> None:
+        """Regression: dividing a body into sub-window fragments bypassed it."""
+        chunks = [self.BODY[index:index + 90] for index in range(0, len(self.BODY), 90)]
+        self.assertGreater(len(chunks), 1)
+        reasoner = Queued(AgentDecision(
+            goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE,
+                objective_summary="Answer about the quote",
+                success_criteria=(SuccessCriterion("criterion-1", "answered"),),
+                new_evidence=(Evidence(
+                    "evidence-1", "mail",
+                    attributes={"part_one": chunks[0], "part_two": chunks[1]},
+                    supports=("criterion-1",),
+                    source_references=("event:event-1",)),)),
+            response="Here is what it says.",
+            response_requires_goal_commit=True,
+        ))
+        outcome = self.agent(reasoner).process(
+            self.conversation_with_body(), None, RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+
     def test_the_core_may_still_describe_the_message_in_its_own_words(self) -> None:
         """The guard must not block legitimate summarisation."""
         reasoner = Queued(AgentDecision(
