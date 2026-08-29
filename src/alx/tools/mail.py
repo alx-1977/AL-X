@@ -13,6 +13,8 @@ from alx.contracts import (
     MailAccount,
     MailObservationControl,
     MailReference,
+    MailSendError,
+    OutboundReply,
     SideEffect,
     StructuredData,
     StructuredSchema,
@@ -23,6 +25,7 @@ from alx.contracts import (
 READ_MAIL_MESSAGE = "read_mail_message"
 ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
 MOVE_MAIL_MESSAGE_TO_TRASH = "move_mail_message_to_trash"
+SEND_MAIL_REPLY = "send_mail_reply"
 
 _FAILURES = (
     "arguments_unusable",
@@ -34,6 +37,9 @@ _FAILURES = (
     "observation_unavailable",
     "trash_unavailable",
     "move_failed",
+    "recipients_refused",
+    "send_rejected",
+    "send_outcome_unknown",
 )
 
 _STRING = StructuredSchema(ValueKind.STRING)
@@ -71,8 +77,16 @@ READ_DEFINITION = CapabilityDefinition(
             "sender": _STRING,
             "received_at": _STRING,
             "body": _STRING,
+            "reply_to": _STRING,
+            "recipients": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "carbon_copy": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "message_id": _STRING,
+            "reply_references": StructuredSchema(ValueKind.ARRAY, items=_STRING),
         },
-        ("reference", "subject", "sender", "received_at", "body"),
+        (
+            "reference", "subject", "sender", "received_at", "body",
+            "recipients", "carbon_copy", "reply_references",
+        ),
         extra_properties=False,
     ),
     SideEffect.NONE,
@@ -107,7 +121,87 @@ TRASH_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+_ADDRESS_LIST = StructuredSchema(ValueKind.ARRAY, items=_STRING)
+
+SEND_REPLY_DEFINITION = CapabilityDefinition(
+    SEND_MAIL_REPLY,
+    (
+        "Transmit one prepared reply from the configured mail identity to explicit "
+        "recipients, carrying the threading identifiers supplied with it."
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "to": _ADDRESS_LIST,
+            "carbon_copy": _ADDRESS_LIST,
+            "subject": _STRING,
+            "body": _STRING,
+            "in_reply_to": _STRING,
+            "references": _ADDRESS_LIST,
+        },
+        ("to", "subject", "body"),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "transmitted_message_id": _STRING,
+            "accepted": StructuredSchema(ValueKind.BOOLEAN),
+            "sender_address": _STRING,
+            "recipients_accepted": _ADDRESS_LIST,
+            "recipients_refused": _ADDRESS_LIST,
+            "subject": _STRING,
+            "in_reply_to": _STRING,
+        },
+        (
+            "transmitted_message_id", "accepted", "sender_address",
+            "recipients_accepted", "recipients_refused", "subject",
+        ),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
 DEFINITIONS = (READ_DEFINITION, ACKNOWLEDGE_DEFINITION, TRASH_DEFINITION)
+
+# Sending is irreversible and has no recorded production-deployment
+# authorisation, so it is defined but deliberately not part of the registered
+# set. Composing it into a runtime requires a governance decision first.
+SEND_DEFINITIONS = (SEND_REPLY_DEFINITION,)
+
+
+def _addresses(arguments: StructuredData, field_name: str) -> tuple[str, ...]:
+    values = arguments.get(field_name)
+    if values is None:
+        return ()
+    if not isinstance(values, (tuple, list)):
+        raise ValueError(f"{field_name} must be a list of addresses")
+    found: list[str] = []
+    for item in values:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{field_name} entries must be addresses")
+        found.append(item)
+    return tuple(found)
+
+
+def _outbound_reply(arguments: StructuredData) -> OutboundReply:
+    """Read a structured reply. No field names or carries a sender identity."""
+    subject = arguments.get("subject")
+    body = arguments.get("body")
+    in_reply_to = arguments.get("in_reply_to", "")
+    for name, value in (("subject", subject), ("body", body),
+                        ("in_reply_to", in_reply_to)):
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be a string")
+    return OutboundReply(
+        to=_addresses(arguments, "to"),
+        subject=subject,
+        body=body,
+        in_reply_to=in_reply_to,
+        references=_addresses(arguments, "references"),
+        carbon_copy=_addresses(arguments, "carbon_copy"),
+    )
 
 
 def _reference(arguments: StructuredData) -> MailReference:
@@ -149,11 +243,18 @@ def build_mail_executors(
             return failed(READ_MAIL_MESSAGE, "arguments_unusable")
         except MailAccessError as error:
             return failed(READ_MAIL_MESSAGE, error.code)
+        # Addresses and identifiers are references, not message content, so they
+        # remain durable. The body stays transient.
         durable: dict[str, Any] = {
             "reference": _reference_values(content.reference),
             "subject": content.subject,
             "sender": content.sender,
             "received_at": content.received_at,
+            "reply_to": content.participants.reply_to,
+            "recipients": tuple(content.participants.recipients),
+            "carbon_copy": tuple(content.participants.carbon_copy),
+            "message_id": content.threading.message_id,
+            "reply_references": content.threading.reply_references(),
         }
         return CapabilityResult(
             call_id_source(),
@@ -202,3 +303,54 @@ def build_mail_executors(
         ACKNOWLEDGE_MAIL_MESSAGE: acknowledge,
         MOVE_MAIL_MESSAGE_TO_TRASH: move_to_trash,
     }
+
+
+def build_send_executors(
+    sender: Any,
+    call_id_source: Callable[[], str],
+) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
+    """Bind the reply primitive to one configured sending identity.
+
+    This is built separately from the observation executors so a runtime can
+    read mail without being able to send it.
+    """
+
+    def send_reply(arguments: StructuredData) -> CapabilityResult:
+        try:
+            reply = _outbound_reply(arguments)
+        except ValueError:
+            return CapabilityResult(
+                call_id_source(),
+                SEND_MAIL_REPLY,
+                CapabilityResultState.FAILED,
+                failure={"code": "arguments_unusable"},
+            )
+        try:
+            outcome = sender.send_reply(reply)
+        except MailSendError as error:
+            return CapabilityResult(
+                call_id_source(),
+                SEND_MAIL_REPLY,
+                CapabilityResultState.FAILED,
+                failure={"code": error.code},
+            )
+        values: dict[str, Any] = {
+            "transmitted_message_id": outcome.transmitted_message_id,
+            "accepted": outcome.accepted,
+            "sender_address": sender.address,
+            "recipients_accepted": tuple(outcome.recipients_accepted),
+            "recipients_refused": tuple(outcome.recipients_refused),
+            "subject": reply.subject,
+        }
+        if reply.in_reply_to:
+            values["in_reply_to"] = reply.in_reply_to
+        # A refused recipient means the message did not reach everyone, so the
+        # result is partial rather than a clean success.
+        state = (
+            CapabilityResultState.PARTIAL
+            if outcome.recipients_refused
+            else CapabilityResultState.SUCCEEDED
+        )
+        return CapabilityResult(call_id_source(), SEND_MAIL_REPLY, state, values)
+
+    return {SEND_MAIL_REPLY: send_reply}

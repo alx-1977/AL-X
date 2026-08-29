@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesParser
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,9 @@ from alx.contracts import (
     BackgroundEvent,
     MailAccessError,
     MailContent,
+    MailParticipants,
     MailReference,
+    MailThreading,
 )
 
 
@@ -62,6 +65,37 @@ def _plain_body(item) -> str:
             rich.append(html.unescape(without_tags))
     selected = "\n".join(plain or rich)
     return "\n".join(line.strip() for line in selected.splitlines() if line.strip())
+
+
+# RFC 5322 message identifiers are angle-addr tokens.
+_MESSAGE_ID_PATTERN = re.compile(r"<[^<>\s]+>")
+
+
+def _identifier(value: str | None) -> str:
+    """Return the first RFC 5322 message identifier in a header."""
+    found = _MESSAGE_ID_PATTERN.findall(str(value or ""))
+    return found[0] if found else ""
+
+
+def _identifiers(value: str | None) -> tuple[str, ...]:
+    """Return every message identifier in a header, order preserved."""
+    seen: list[str] = []
+    for item in _MESSAGE_ID_PATTERN.findall(str(value or "")):
+        if item not in seen:
+            seen.append(item)
+    return tuple(seen)
+
+
+def _address_list(item, name: str) -> tuple[str, ...]:
+    """Return the decoded addresses on one header, order preserved."""
+    values = item.get_all(name)
+    if not values:
+        return ()
+    found: list[str] = []
+    for _display, address in getaddresses([str(v) for v in values]):
+        if address and address not in found:
+            found.append(address)
+    return tuple(found)
 
 
 def _uid_validity(connection) -> str:
@@ -288,7 +322,7 @@ class ICloudMailAdapter:
                 status, fetched = connection.uid(
                     "fetch",
                     str(uid),
-                    "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)])",
+                    "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES SUBJECT FROM TO CC REPLY-TO DATE)])",
                 )
                 if status != "OK":
                     continue
@@ -359,6 +393,17 @@ class ICloudMailAdapter:
                 _decoded(parsed.get("From")),
                 str(parsed.get("Date", "")),
                 _plain_body(parsed),
+                MailParticipants(
+                    sender=_decoded(parsed.get("From")),
+                    reply_to=_decoded(parsed.get("Reply-To")),
+                    recipients=_address_list(parsed, "To"),
+                    carbon_copy=_address_list(parsed, "Cc"),
+                ),
+                MailThreading(
+                    message_id=_identifier(parsed.get("Message-ID")),
+                    in_reply_to=_identifier(parsed.get("In-Reply-To")),
+                    references=_identifiers(parsed.get("References")),
+                ),
             )
         finally:
             self._close(connection)

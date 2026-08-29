@@ -57,7 +57,12 @@ from alx.contracts.mail import (
     MailAccount,
     MailContent,
     MailObservationControl,
+    MailParticipants,
     MailReference,
+    MailSendError,
+    MailThreading,
+    OutboundReply,
+    ReplyOutcome,
 )
 
 __all__ = [
@@ -75,5 +80,6 @@ __all__ = [
     "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
     "BackgroundEventSource", "MailAccessError", "MailAccount", "MailContent",
-    "MailObservationControl", "MailReference",
+    "MailObservationControl", "MailParticipants", "MailReference",
+    "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
 ]
