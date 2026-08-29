@@ -1,0 +1,17 @@
+{
+  "vocabulary_version": "1.0.0",
+  "cases": [
+    {"category": "resistance", "written": "10 Ω, 4.7 kΩ, and 2 MΩ", "expected_spoken": "ten ohms, four point seven kilo-ohms, and two mega-ohms"},
+    {"category": "voltage", "written": "3.3 V and 500 mV", "expected_spoken": "three point three volts and five hundred millivolts"},
+    {"category": "current", "written": "2 A, 250 mA, and 10 µA", "expected_spoken": "two amps, two hundred and fifty milliamps, and ten microamps"},
+    {"category": "power", "written": "5 W and 500 mW", "expected_spoken": "five watts and five hundred milliwatts"},
+    {"category": "frequency", "written": "2 Hz, 20 kHz, 100 MHz, and 2.4 GHz", "expected_spoken": "two hertz, twenty kilohertz, one hundred megahertz, and two point four gigahertz"},
+    {"category": "capacitance", "written": "2 F, 10 µF, 100 nF, and 22 pF", "expected_spoken": "two farads, ten microfarads, one hundred nanofarads, and twenty-two picofarads"},
+    {"category": "temperature", "written": "85 °C", "expected_spoken": "eighty-five degrees Celsius"},
+    {"category": "component", "written": "Fit a 10 kΩ resistor and a 100 nF capacitor.", "expected_spoken": "Fit a ten kilo-ohms resistor and a one hundred nanofarads capacitor."},
+    {"category": "currency", "written": "R2000", "expected_spoken": "two thousand rand"},
+    {"category": "currency", "written": "R2,000", "expected_spoken": "two thousand rand"},
+    {"category": "currency", "written": "R2 000.50", "expected_spoken": "two thousand rand and fifty cents"},
+    {"category": "names", "written": "AL/X reviews an Altium PCB BOM for JLCPCB, MPS, DHL, and Xero.", "expected_spoken": "Alex reviews an Altium P C B B O M for J L C P C B, M P S, D H L, and Xero."}
+  ]
+}

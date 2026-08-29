@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 
 from alx.contracts import AudioChunk
+from alx.providers.elevenlabs_pronunciation import DictionaryLocator, render_spoken_text
 from alx.providers.errors import ProviderError
 
 
@@ -34,6 +35,8 @@ class ElevenLabsSynthesizer:
         base_url: str,
         output_format: str,
         timeout_seconds: int,
+        pronunciation_dictionary_id: str,
+        pronunciation_dictionary_version_id: str,
         client: httpx.AsyncClient | None = None,
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
@@ -42,6 +45,10 @@ class ElevenLabsSynthesizer:
         self._voice_id = voice_id
         self._base_url = base_url.rstrip("/")
         self._output_format = output_format
+        self._pronunciation_dictionary = DictionaryLocator(
+            pronunciation_dictionary_id,
+            pronunciation_dictionary_version_id,
+        )
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
         self._telemetry_sink = telemetry_sink
 
@@ -80,7 +87,14 @@ class ElevenLabsSynthesizer:
                     "xi-api-key": self._api_key,
                     "Content-Type": "application/json",
                 },
-                json={"text": response, "model_id": self._model},
+                json={
+                    "text": render_spoken_text(response),
+                    "model_id": self._model,
+                    "apply_text_normalization": "on",
+                    "pronunciation_dictionary_locators": [
+                        self._pronunciation_dictionary.as_request_value()
+                    ],
+                },
             ) as provider_response:
                 provider_response.raise_for_status()
                 self._emit_telemetry(

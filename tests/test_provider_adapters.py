@@ -403,6 +403,8 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
             "https://speech.example",
             "mp3_44100_128",
             10,
+            "dictionary-id",
+            "dictionary-version-id",
             client,
             telemetry_sink=lambda key, values: telemetry.append((key, values)),
         )
@@ -414,7 +416,20 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         sent = json.loads(captured["request"].content)
         self.assertIn("preferred-voice", captured["request"].url.path)
-        self.assertEqual(sent, {"text": "ALX response", "model_id": "configured-tts"})
+        self.assertEqual(
+            sent,
+            {
+                "text": "ALX response",
+                "model_id": "configured-tts",
+                "apply_text_normalization": "on",
+                "pronunciation_dictionary_locators": [
+                    {
+                        "pronunciation_dictionary_id": "dictionary-id",
+                        "version_id": "dictionary-version-id",
+                    }
+                ],
+            },
+        )
         self.assertEqual(chunks[0].payload, b"spoken-audio")
         self.assertTrue(chunks[-1].final)
         self.assertEqual(chunks[-1].payload, b"")
@@ -429,6 +444,40 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(item[0] == "conversation-1" for item in telemetry))
         self.assertTrue(all(item[1]["transport"] == "http" for item in telemetry))
+        await client.aclose()
+
+    async def test_elevenlabs_changes_only_provider_bound_compact_rand_text(self) -> None:
+        captured = {}
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return httpx.Response(200, content=b"spoken-audio")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        adapter = ElevenLabsSynthesizer(
+            "configured-tts",
+            "secret",
+            "preferred-voice",
+            "https://speech.example",
+            "mp3_44100_128",
+            10,
+            "dictionary-id",
+            "dictionary-version-id",
+            client,
+        )
+        authoritative_response = "The quote is R2000, or R2,000 when formatted."
+
+        _ = [chunk async for chunk in adapter.synthesize(authoritative_response)]
+
+        sent = json.loads(captured["request"].content)
+        self.assertEqual(
+            sent["text"],
+            "The quote is two thousand rand, or R2,000 when formatted.",
+        )
+        self.assertEqual(
+            authoritative_response,
+            "The quote is R2000, or R2,000 when formatted.",
+        )
         await client.aclose()
 
 
