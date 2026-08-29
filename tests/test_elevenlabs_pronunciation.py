@@ -19,6 +19,7 @@ from alx.providers.elevenlabs_pronunciation import (  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 VOCABULARY = ROOT / "config/pronunciation/alx-vocabulary.v1.json"
 ACCEPTANCE = ROOT / "tests/fixtures/pronunciation_acceptance.json"
+DEPLOYMENT = ROOT / "config/pronunciation/elevenlabs-deployment.v1.json"
 
 
 class PronunciationVocabularyTests(unittest.TestCase):
@@ -37,6 +38,18 @@ class PronunciationVocabularyTests(unittest.TestCase):
             {"resistance", "voltage", "current", "power", "frequency", "capacitance", "temperature", "component", "currency", "names"}
             <= categories
         )
+
+    def test_deployment_manifest_matches_canonical_vocabulary(self) -> None:
+        vocabulary = load_vocabulary(VOCABULARY)
+        deployment = json.loads(DEPLOYMENT.read_text(encoding="utf-8"))
+        self.assertEqual(deployment["schema_version"], 1)
+        self.assertEqual(deployment["provider"], "elevenlabs")
+        self.assertEqual(
+            deployment["vocabulary_version"], vocabulary.vocabulary_version
+        )
+        self.assertEqual(deployment["rules_count"], len(vocabulary.rules))
+        self.assertTrue(deployment["dictionary_id"])
+        self.assertTrue(deployment["version_id"])
 
     def test_only_failed_compact_rand_format_is_rendered_for_speech(self) -> None:
         self.assertEqual(render_spoken_text("R2000"), "two thousand rand")

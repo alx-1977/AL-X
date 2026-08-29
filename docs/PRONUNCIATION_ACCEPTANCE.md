@@ -1,8 +1,9 @@
 # AL/X Pronunciation Acceptance
 
-**Status:** Local implementation passed; remote dictionary deployment blocked by API-key scope
+**Status:** Accepted against the configured ElevenLabs model and voice
 **Vocabulary:** `config/pronunciation/alx-vocabulary.v1.json` version 1.0.0
 **Model under test:** Configured ElevenLabs `eleven_v3` voice
+**Remote locator:** dictionary `ZlCeLofc0hxmUesbz79D`, version `PcyGfkIXIQTHSnPlqftx`
 
 ## Architecture evidence
 
@@ -25,13 +26,30 @@ Audio was generated with the configured voice and `apply_text_normalization` for
 
 Only the failed compact form is deterministically rendered before synthesis. The original response remains unchanged.
 
-## Pending evidence
+## Persistent dictionary verification
 
-The configured ElevenLabs API key currently lacks `pronunciation_dictionaries_read` and dictionary-write access. Until that scope is enabled, AL/X cannot create the persistent remote dictionary or run the actual engineering/acronym acceptance audio with its locator attached.
+- ElevenLabs returned 33 rules for the deployed dictionary.
+- The local canonical vocabulary contains the same 33 rules.
+- The latest remote version is the exact version referenced by `.env` and the deployment manifest.
+- Runtime synthesis sends only this locator, never the full rule set.
 
-After the key is updated:
+## Actual pronunciation fixture
 
-1. Run `PYTHONPATH=src python3 scripts/sync_elevenlabs_dictionary.py`.
-2. Store the returned dictionary ID and version ID in the two configured `.env` keys.
-3. Run the actual audio fixture against the selected voice.
-4. Record every observed result here before the branch is accepted.
+Each fixture entry was synthesized using the active dictionary and configured `eleven_v3` voice, then transcribed with ElevenLabs Scribe v2 as an objective listening aid. Scribe commonly formats spoken number words back into digits and spoken initialisms back into acronym text; those formatting differences do not alter the observed pronunciation.
+
+| Category | Written input | Observed transcript | Result |
+| --- | --- | --- | --- |
+| Resistance | `10 Ω, 4.7 kΩ, and 2 MΩ` | `10 ohms, 4.7 kiloohms, and 2 megaohms` | Pass |
+| Voltage | `3.3 V and 500 mV` | `3.3 volts and 500 millivolts` | Pass |
+| Current | `2 A, 250 mA, and 10 µA` | `2 amps, 250 milliamps, and 10 microamps` | Pass |
+| Power | `5 W and 500 mW` | `Five watts and 500 milliwatts` | Pass |
+| Frequency | `2 Hz, 20 kHz, 100 MHz, and 2.4 GHz` | `Two hertz, 20 kilohertz, 100 megahertz, and 2.4 gigahertz` | Pass |
+| Capacitance | `2 F, 10 µF, 100 nF, and 22 pF` | `Two farads, 10 microfarads, 100 nanofarads, and 22 picofarads` | Pass |
+| Temperature | `85 °C` | `85 degrees Celsius` | Pass |
+| Component values | `Fit a 10 kΩ resistor and a 100 nF capacitor.` | `Fit a 10 kiloohms resistor and a 100 nanofarads capacitor` | Pass |
+| Compact rand | `R2000` | `2,000 rand` | Pass through scoped provider rendering |
+| Comma rand | `R2,000` | `2,000 rand` | Pass through native normalization |
+| Rand and cents | `R2 000.50` | `Two thousand rand and fifty cents` | Pass through native normalization |
+| Names and acronyms | `AL/X reviews an Altium PCB BOM for JLCPCB, MPS, DHL, and Xero.` | `Alex reviews an Altium PCB BOM for JLCPCB, MPS, DHL, and Zero.` | Pass; initialisms normalized in transcript |
+
+No unresolved pronunciation failure remains in vocabulary version 1.0.0. New terminology is added locally, deployed as a new remote version, and re-evaluated before its locator becomes active.
