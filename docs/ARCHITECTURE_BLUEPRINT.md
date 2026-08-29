@@ -12,18 +12,17 @@ We structure AL/X's capabilities, safety boundaries, and memory—not her reason
 ## The single path
 
 ```text
-Typed input ─┐
-Voice text ──┼──> Conversation Gateway ──> AL/X Core Agent ──> Final AL/X response
-Events ──────┘                              │       ▲
-                                           │       │
-                                      proposed   structured
-                                       action      result
-                                           │       │
-                                           ▼       │
-                                  Capability Broker ──> Safety Gate ──> Primitive Tool
-                                           ▲
-                                           │
-                                    Durable Goal Store
+Typed input ─┐                         Durable Conversation Store
+Voice text ──┼──> Conversation Gateway ────────────┬───────────────> AL/X Core Agent ──> Final AL/X response
+Events ──────┘                                     │                         │       ▲
+                                                   │                    optional   structured
+                                                   │                      goal      result
+                                                   │                       │         │
+                                                   │                       ▼         │
+                                                   └──────────── Durable Goal Store │
+                                                                             │       │
+                                                                             ▼       │
+                                                                    Capability Broker ──> Safety Gate ──> Primitive Tool
 ```
 
 There is no email conversation path, schematic-review path, coding path, or Grok path. Every user message reaches the same AL/X Core Agent. Every result returns to that agent. Only that agent decides what to do next and what AL/X says.
@@ -32,7 +31,7 @@ There is no email conversation path, schematic-review path, coding path, or Grok
 
 ### 1. Conversation Gateway
 
-This is the only entrance for user conversation. Typed text and speech transcripts are represented in the same form. A confirmation, correction, or follow-up is another turn in the same conversation—not a special action route.
+This is the only entrance for user conversation. Typed text and speech transcripts are represented in the same form. A confirmation, correction, or follow-up is another turn in the same durable conversation—not a special action route. The conversation survives independently of whether a goal is active, and accepted AL/X responses are part of that same thread.
 
 Background events may enter through the gateway as labelled facts. They cannot speak to Friedl or choose an action by themselves.
 
@@ -40,13 +39,15 @@ Background events may enter through the gateway as labelled facts. They cannot s
 
 This is AL/X's only reasoning authority. It receives the active goal, relevant durable context, available primitive capabilities, results, and safety constraints. It can reason again as many times as necessary.
 
-The Core Agent may propose a capability call, update its understanding of the goal, request genuinely necessary information or approval, challenge an assumption, or declare a goal complete with evidence. It cannot claim completion merely because a tool returned successfully.
+The Core Agent may propose a capability call, update its understanding of an optional goal, request genuinely necessary information or approval, or challenge an assumption. The model proposes goal changes separately from its response. Deterministic Core code validates and reduces those proposals, and only the Core derives completion after sourced evidence covers every success criterion and no unresolved work remains.
+
+An ordinary conversational response does not require a goal or goal-completion metadata. If an optional goal proposal is rejected but the response remains safe and true without it, the response is retained and the goal remains unchanged. A rejected proposal cannot trigger a blanket rerun of the reasoning turn.
 
 The language model sits behind a replaceable model adapter. Exactly one configured model acts as AL/X for a reasoning turn. Changing from one model provider to another does not create a new conversation route, tool set, workflow, memory system, or personality.
 
 ### 3. Durable Goal Store
 
-This is AL/X's authoritative working memory. It survives restarting the backend, browser, or computer process.
+This is AL/X's authoritative optional work state. It survives restarting the backend, browser, or computer process. A goal is attached to a conversation; it does not contain or own the conversation.
 
 For each active goal it records, in inspectable form:
 
@@ -58,7 +59,7 @@ For each active goal it records, in inspectable form:
 - blockers, unresolved questions, and useful next possibilities;
 - retention and deletion information.
 
-A provider's conversation history or hidden reasoning is not the authoritative goal record. Provider storage may assist continuity, but AL/X must be able to reconstruct the goal from her own durable records.
+A separate durable conversation record owns the continuous thread. A provider's conversation history or hidden reasoning is authoritative for neither conversation nor goal state. Provider storage may assist continuity, but AL/X must be able to reconstruct both from her own durable records.
 
 ### 4. Capability Registry and Broker
 

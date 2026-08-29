@@ -11,15 +11,26 @@ from alx.contracts.records import (
     CapabilityAttempt,
     CapabilityCall,
     ConversationTurn,
+    GoalProposal,
     GoalState,
 )
 from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
 
 
+class DecisionValidationError(ValueError):
+    """The model returned a decision that cannot safely enter durable state."""
+
+    def __init__(self, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("decision validation reason must not be blank")
+        self.reason = reason
+        super().__init__(reason)
+
+
 @dataclass(frozen=True, slots=True)
 class GoalSnapshot:
     state: GoalState
-    turns: tuple[ConversationTurn, ...]
+    conversation_id: str
     revision: int
     retention_until: datetime
 
@@ -31,7 +42,27 @@ class GoalSnapshot:
             or self.retention_until.utcoffset() is None
         ):
             raise ValueError("retention_until must be timezone-aware")
+        if not self.conversation_id.strip():
+            raise ValueError("conversation_id must not be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSnapshot:
+    conversation_id: str
+    turns: tuple[ConversationTurn, ...]
+    revision: int
+    retention_until: datetime
+
+    def __post_init__(self) -> None:
+        if not self.conversation_id.strip():
+            raise ValueError("conversation_id must not be blank")
+        if self.revision <= 0:
+            raise ValueError("revision must be positive")
+        if self.retention_until.tzinfo is None or self.retention_until.utcoffset() is None:
+            raise ValueError("retention_until must be timezone-aware")
         object.__setattr__(self, "turns", tuple(self.turns))
+        if any(turn.conversation_id != self.conversation_id for turn in self.turns):
+            raise ValueError("all turns must belong to the snapshot conversation")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +94,7 @@ class PendingMemoryBatch:
 
 @dataclass(frozen=True, slots=True)
 class ReasoningContext:
-    goal: GoalState
+    active_goal: GoalState | None
     turns: tuple[ConversationTurn, ...]
     capabilities: tuple[CapabilityDefinition, ...]
     memories: tuple[MemorySnapshot, ...] = ()
@@ -73,12 +104,12 @@ class ReasoningContext:
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "memories", tuple(self.memories))
 
-
 @dataclass(frozen=True, slots=True)
 class AgentDecision:
-    goal: GoalState
     call: CapabilityCall | None = None
     response: str | None = None
+    goal_proposal: GoalProposal | None = None
+    response_requires_goal_commit: bool = False
     memory_proposals: tuple[MemoryProposal, ...] = ()
     memory_query: MemoryQuery | None = None
 
@@ -87,6 +118,8 @@ class AgentDecision:
             raise ValueError("a decision contains exactly one call, response, or memory query")
         if self.response is not None and not self.response.strip():
             raise ValueError("response must not be blank")
+        if self.response_requires_goal_commit and self.response is None:
+            raise ValueError("only a response can depend on a goal commit")
         object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
@@ -101,7 +134,7 @@ class DurableGoalStore(Protocol):
     def create(
         self,
         state: GoalState,
-        turns: tuple[ConversationTurn, ...],
+        conversation_id: str,
         retention_until: datetime,
     ) -> GoalSnapshot: ...
 
@@ -110,7 +143,6 @@ class DurableGoalStore(Protocol):
     def replace(
         self,
         state: GoalState,
-        turns: tuple[ConversationTurn, ...],
         retention_until: datetime,
         expected_revision: int,
     ) -> GoalSnapshot: ...
@@ -118,7 +150,6 @@ class DurableGoalStore(Protocol):
     def replace_with_memory_batch(
         self,
         state: GoalState,
-        turns: tuple[ConversationTurn, ...],
         retention_until: datetime,
         expected_revision: int,
         proposals: tuple[MemoryProposal, ...],
@@ -134,6 +165,23 @@ class DurableGoalStore(Protocol):
         goal_id: str,
         goal_revision: int,
     ) -> None: ...
+
+
+class DurableConversationStore(Protocol):
+    def create(
+        self,
+        conversation_id: str,
+        retention_until: datetime,
+    ) -> ConversationSnapshot: ...
+
+    def load(self, conversation_id: str) -> ConversationSnapshot: ...
+
+    def append(
+        self,
+        turn: ConversationTurn,
+        retention_until: datetime,
+        expected_revision: int,
+    ) -> ConversationSnapshot: ...
 
 
 class DurableMemoryStore(Protocol):

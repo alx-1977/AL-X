@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AL/X</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <video class="backdrop" src="/background.mp4" autoplay muted loop playsinline></video>
+    <main id="activation" class="activation" aria-live="polite">
+      <p id="status">Ready when you are</p>
+      <button id="begin" type="button">Start AL/X</button>
+    </main>
+    <aside class="diagnostics" aria-label="AL/X development diagnostics">
+      <header class="diagnostics__header">
+        <span class="diagnostics__indicator" aria-hidden="true"></span>
+        <div>
+          <strong>AL/X Diagnostic Console</strong>
+          <small>Temporary development telemetry</small>
+        </div>
+        <button id="diagnostic-clear" type="button">Clear</button>
+      </header>
+      <div class="diagnostics__stage">
+        <span id="diagnostic-stage">Interface ready</span>
+        <time id="diagnostic-elapsed">00:00.0</time>
+      </div>
+      <div id="diagnostic-log" class="diagnostics__log" role="log" aria-live="polite"></div>
+      <footer>Content and credentials are never displayed</footer>
+    </aside>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -85,4 +85,8 @@ class SpeechTranscriber(Protocol):
 class SpeechSynthesizer(Protocol):
     """Replaceable TTS port for an already-authoritative AL/X response."""
 
-    def synthesize(self, response: str) -> AsyncIterator[AudioChunk]: ...
+    def synthesize(
+        self,
+        response: str,
+        correlation_id: str | None = None,
+    ) -> AsyncIterator[AudioChunk]: ...

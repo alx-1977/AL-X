@@ -7,10 +7,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap import build_runtime_providers  # noqa: E402
-from alx.config import ConfigurationError, RuntimeSettings  # noqa: E402
+from alx.config import ConfigurationError, LiveVoiceSettings, RuntimeSettings  # noqa: E402
 from alx.providers import (  # noqa: E402
     CartesiaTranscriber,
     ElevenLabsSynthesizer,
+    OpenAIReasoningModel,
     XAIReasoningModel,
 )
 
@@ -38,10 +39,29 @@ def environment(**changes: str) -> dict[str, str]:
 
 
 class RuntimeConfigurationTests(unittest.TestCase):
+    def test_live_voice_runtime_policy_is_configuration(self) -> None:
+        settings = LiveVoiceSettings.from_environment(
+            environment(
+                ALX_INTERFACE_HOST="127.0.0.1",
+                ALX_INTERFACE_PORT="8765",
+                ALX_RUNTIME_STORAGE_ROOT=".alx/runtime",
+                ALX_PRIMARY_PERSON_ID="friedl",
+                ALX_GOAL_RETENTION_DAYS="3650",
+                ALX_CORE_STEP_BUDGET="8",
+            )
+        )
+        self.assertEqual(settings.port, 8765)
+        self.assertEqual(settings.storage_root, Path(".alx/runtime"))
+        self.assertEqual(settings.primary_person_id, "friedl")
+        self.assertEqual(settings.core_step_budget, 8)
+
     def test_every_provider_and_model_is_configuration(self) -> None:
         settings = RuntimeSettings.from_environment(environment())
         self.assertEqual(settings.reasoning.provider, "xai")
         self.assertEqual(settings.reasoning.model, "reasoning-model")
+        self.assertTrue(settings.reasoning.streaming)
+        self.assertEqual(settings.reasoning.service_tier, "default")
+        self.assertEqual(settings.reasoning.effort, "medium")
         self.assertEqual(settings.speech_to_text.model, "stt-model")
         self.assertEqual(settings.speech_to_text.turn_start_threshold, 0.7)
         self.assertEqual(settings.speech_to_text.turn_end_timeout_ms, 4500)
@@ -75,7 +95,10 @@ class RuntimeConfigurationTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             RuntimeSettings.from_environment(values)
         settings = RuntimeSettings.from_environment(
-            environment(ALX_REASONING_PROVIDER="not-installed")
+            environment(
+                ALX_REASONING_PROVIDER="not-installed",
+                ALX_REASONING_BASE_URL="https://not-installed.example",
+            )
         )
         with self.assertRaises(ConfigurationError):
             build_runtime_providers(settings)
@@ -89,12 +112,36 @@ class RuntimeConfigurationTests(unittest.TestCase):
             RuntimeSettings.from_environment(
                 environment(ALX_STT_TURN_END_TIMEOUT_MS="12000")
             )
+        with self.assertRaises(ConfigurationError):
+            RuntimeSettings.from_environment(
+                environment(ALX_REASONING_STREAMING="sometimes")
+            )
+        with self.assertRaises(ConfigurationError):
+            RuntimeSettings.from_environment(
+                environment(ALX_REASONING_SERVICE_TIER="unlimited")
+            )
+        with self.assertRaises(ConfigurationError):
+            RuntimeSettings.from_environment(
+                environment(ALX_REASONING_EFFORT="unlimited")
+            )
 
     def test_composition_root_returns_only_neutral_runtime_ports(self) -> None:
         providers = build_runtime_providers(RuntimeSettings.from_environment(environment()))
         self.assertIsInstance(providers.reasoning, XAIReasoningModel)
         self.assertIsInstance(providers.speech_to_text, CartesiaTranscriber)
         self.assertIsInstance(providers.text_to_speech, ElevenLabsSynthesizer)
+
+    def test_openai_provider_uses_openai_credential_and_default_endpoint(self) -> None:
+        values = environment(ALX_REASONING_PROVIDER="openai")
+        values.pop("ALX_REASONING_API_KEY")
+        values["OPENAI_API_KEY"] = "openai-secret"
+
+        settings = RuntimeSettings.from_environment(values)
+        providers = build_runtime_providers(settings)
+
+        self.assertEqual(settings.reasoning.api_key, "openai-secret")
+        self.assertEqual(settings.reasoning.base_url, "https://api.openai.com")
+        self.assertIsInstance(providers.reasoning, OpenAIReasoningModel)
 
 
 if __name__ == "__main__":

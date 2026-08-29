@@ -3,533 +3,216 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts import AgentDecision, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState, Evidence, GoalState, GoalStatus, GoalStopReason, Objective, ProgressRecord, SideEffect, StructuredSchema, SuccessCriterion, ValueKind, WorkItem
-from alx.core import CoreAgent, CoreState
-from alx.goals import GoalRevisionConflict, SQLiteGoalStore
-from alx.capabilities import CapabilityBroker, CapabilityRegistry
-from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
-from alx.contracts import Approval, ApprovalLifecycle, ApprovalScope
+from alx.contracts import (  # noqa: E402
+    AgentDecision, CapabilityAttempt, CapabilityAttemptDisposition,
+    CapabilityCall, CapabilityDefinition, CapabilityResult,
+    CapabilityResultState, ConversationOrigin, ConversationSnapshot,
+    ConversationTurn, DecisionValidationError, Evidence, GoalMutationKind,
+    GoalProposal, GoalState, GoalStatus, Objective, SideEffect,
+    MemoryKind, MemoryProposal, StructuredSchema, SuccessCriterion, ValueKind,
+    WorkItem,
+)
+from alx.core import CoreAgent, CoreState  # noqa: E402
+from alx.goals import SQLiteGoalStore  # noqa: E402
 
-NOW = datetime(2026, 8, 27, tzinfo=UTC)
+NOW = datetime(2026, 8, 28, tzinfo=UTC)
+RETENTION = NOW + timedelta(days=30)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
-DEFINITIONS = (CapabilityDefinition("capability-a", "generic primitive A", SCHEMA, SCHEMA, SideEffect.NONE), CapabilityDefinition("capability-b", "generic primitive B", SCHEMA, SCHEMA, SideEffect.NONE))
+DEFINITION = CapabilityDefinition(
+    "inspect", "Inspect structured material", SCHEMA, SCHEMA, SideEffect.NONE,
+)
 
-def active(attempts=()):
-    return GoalState("goal-1", Objective("turn-1", "objective"), (SuccessCriterion("criterion-1", "criterion"),), attempts=attempts)
 
-def complete(state):
-    return replace(state, status=GoalStatus.COMPLETED, stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET, evidence=(Evidence("evidence-1", "fact", supports=("criterion-1",)),))
+def conversation(*turns: ConversationTurn) -> ConversationSnapshot:
+    if not turns:
+        turns = (ConversationTurn("conversation-1", "turn-1", ConversationOrigin.TYPED,
+                                  "Hello", NOW, "friedl"),)
+    return ConversationSnapshot("conversation-1", turns, 1, RETENTION)
+
+
+def goal(**changes) -> GoalState:
+    values = dict(
+        goal_id="goal-1",
+        objective=Objective("turn:turn-1", "Do the work"),
+        success_criteria=(SuccessCriterion("criterion-1", "verified"),),
+    )
+    values.update(changes)
+    return GoalState(**values)
+
 
 class Queued:
-    def __init__(self, decisions): self.decisions = decisions; self.contexts = []
+    def __init__(self, *decisions) -> None:
+        self.decisions = list(decisions)
+        self.contexts = []
+
     def decide(self, context):
         self.contexts.append(context)
-        if isinstance(self.decisions, Exception): raise self.decisions
-        return self.decisions.pop(0)
+        item = self.decisions.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
 
 class CoreTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(); self.path = Path(self.tmp.name) / "x.sqlite"; self.store = SQLiteGoalStore(self.path)
-        self.store.create(active(), (), NOW + timedelta(days=1))
-    def tearDown(self): self.store.close(); self.tmp.cleanup()
-    def agent(self, reasoner, dispatch): return CoreAgent(self.store, reasoner, dispatch, DEFINITIONS)
-    def test_a_zero_tool_completion_and_active_response_rejection(self):
-        out = self.agent(Queued([AgentDecision(complete(active()), response="done")]), lambda c, s: None).run("goal-1", 1)
-        self.assertEqual(out.state, CoreState.RESPONDED); self.assertEqual(self.store.load("goal-1").state.status, GoalStatus.COMPLETED)
-        self.store.delete("goal-1", out.snapshot.revision); self.store.create(active(), (), NOW + timedelta(days=1))
-        out = self.agent(Queued([AgentDecision(active(), response="still active")]), lambda c,s: self.fail("dispatch")).run("goal-1", 1)
-        self.assertEqual(out.reason, "active_response"); self.assertEqual(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
-    def test_b_d_multistep_provider_selected_order_and_context(self):
-        a = CapabilityCall("a", "capability-a", {}); at = CapabilityAttempt(a, CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult("a", "capability-a", CapabilityResultState.FAILED, failure={"code":"x"}))
-        b = CapabilityCall("b", "capability-b", {}); bt = CapabilityAttempt(b, CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult("b", "capability-b", CapabilityResultState.PARTIAL, {"v":1}))
-        q = Queued([AgentDecision(active(), call=a), AgentDecision(active((at,)), call=b), AgentDecision(complete(active((at,bt))), response="done")]); seen=[]
-        out = self.agent(q, lambda c,s: (seen.append(c.capability_id) or (at if c==a else bt))).run("goal-1",3)
-        self.assertEqual(out.state,CoreState.RESPONDED); self.assertEqual(seen,["capability-a","capability-b"]); self.assertEqual(q.contexts[1].goal.attempts,(at,)); self.assertEqual(q.contexts[0].capabilities,DEFINITIONS)
-    def test_c_h_i_attempt_checkpoint_before_next_turn(self):
-        call = CapabilityCall("a", "capability-a", {})
-        attempt = CapabilityAttempt(
-            call,
-            CapabilityAttemptDisposition.REJECTED,
-            False,
-            reason_code="input_invalid",
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "goals.sqlite3"
+        self.store = SQLiteGoalStore(self.path)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.directory.cleanup()
+
+    def agent(self, reasoner, dispatch=lambda call, state: None, identifiers=("goal-1",)):
+        values = iter(identifiers)
+        return CoreAgent(self.store, reasoner, dispatch, (DEFINITION,),
+                         clock=lambda: NOW, identifier_factory=lambda: next(values))
+
+    def test_ordinary_response_requires_no_goal_or_goal_metadata(self) -> None:
+        reasoner = Queued(AgentDecision(response="A normal answer."))
+        outcome = self.agent(reasoner).process(conversation(), None, RETENTION, 1)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "A normal answer.")
+        self.assertIsNone(outcome.snapshot)
+        self.assertIsNone(reasoner.contexts[0].active_goal)
+        self.assertEqual(self.store.list_goals(), ())
+
+    def test_core_creates_goal_only_from_optional_proposal(self) -> None:
+        proposal = GoalProposal(
+            GoalMutationKind.CREATE,
+            "Investigate the fault",
+            (SuccessCriterion("criterion-1", "cause verified"),),
         )
-        revisions = []
-
-        class InspectingReasoner:
-            def __init__(inner):
-                inner.calls = 0
-
-            def decide(inner, context):
-                inner.calls += 1
-                if inner.calls == 1:
-                    return AgentDecision(active(), call=call)
-                durable = self.store.load("goal-1")
-                self.assertEqual(durable.state.attempts, context.goal.attempts)
-                self.assertEqual(context.goal.attempts, (attempt,))
-                return AgentDecision(complete(context.goal), response="done")
-
-        out = self.agent(
-            InspectingReasoner(),
-            lambda proposed, state: (
-                revisions.append(self.store.load("goal-1").revision) or attempt
-            ),
-        ).run("goal-1", 2)
-        self.assertEqual(out.state, CoreState.RESPONDED)
-        self.assertGreaterEqual(revisions[0], 2)
-    def test_e_l_restart_budget_and_validation(self):
-        call=CapabilityCall("a","capability-a",{}); at=CapabilityAttempt(call,CapabilityAttemptDisposition.EXECUTED,True,CapabilityResult("a","capability-a",CapabilityResultState.SUCCEEDED,{}))
-        self.assertEqual(self.agent(Queued([AgentDecision(active(),call=call)]),lambda c,s:at).run("goal-1",1).state,CoreState.CHECKPOINTED)
-        self.store.close(); self.store=SQLiteGoalStore(self.path); state=self.store.load("goal-1").state
-        self.assertEqual(self.agent(Queued([AgentDecision(complete(state),response="done")]),lambda c,s:at).run("goal-1",1).state,CoreState.RESPONDED)
-        with self.assertRaises(ValueError): self.agent(Queued([]),lambda c,s:at).run("goal-1",0)
-    def test_f_g_invalid_goal_and_fabricated_attempt_do_not_dispatch(self):
-        call=CapabilityCall("a","capability-a",{}); fabricated=CapabilityAttempt(call,CapabilityAttemptDisposition.REJECTED,False,reason_code="x")
-        out=self.agent(Queued([AgentDecision(active((fabricated,)),call=call)]),lambda c,s:self.fail("dispatch")).run("goal-1",1)
-        self.assertEqual(out.reason,"decision_invalid"); self.assertEqual(self.store.load("goal-1").state.attempts,())
-        wrong_goal = replace(active(), goal_id="other-goal")
-        out = self.agent(
-            Queued([AgentDecision(wrong_goal, call=call)]),
-            lambda proposed, state: self.fail("dispatch"),
-        ).run("goal-1", 1)
-        self.assertEqual(out.reason, "decision_invalid")
-        self.assertEqual(self.store.load("goal-1").state, active())
-        terminal = replace(active(), status=GoalStatus.CANCELLED, stop_reason=GoalStopReason.CANCELLED)
-        out = self.agent(Queued([AgentDecision(terminal, call=call)]), lambda c,s:self.fail("dispatch")).run("goal-1",1)
-        self.assertEqual(out.reason, "inactive_call")
-
-    def test_terminal_goal_cannot_reenter_reasoning_or_dispatch(self):
-        terminal_states = (
-            complete(active()),
-            replace(
-                active(),
-                status=GoalStatus.CANCELLED,
-                stop_reason=GoalStopReason.CANCELLED,
-            ),
+        outcome = self.agent(Queued(AgentDecision(response="I’ll investigate.",
+                                                   goal_proposal=proposal))).process(
+            conversation(), None, RETENTION, 1,
         )
-        for terminal in terminal_states:
-            with self.subTest(status=terminal.status):
-                snapshot = self.store.load("goal-1")
-                self.store.delete("goal-1", snapshot.revision)
-                self.store.create(terminal, (), NOW + timedelta(days=1))
-                reasoner = Queued(AssertionError("terminal goal reached reasoner"))
-                out = self.agent(
-                    reasoner,
-                    lambda call, state: self.fail("terminal goal reached dispatch"),
-                ).run("goal-1", 1)
-                self.assertEqual(out.reason, "goal_inactive")
-                self.assertEqual(reasoner.contexts, [])
-                self.assertEqual(self.store.load("goal-1").state, terminal)
+        self.assertEqual(outcome.snapshot.state.objective.summary, "Investigate the fault")
+        self.assertEqual(outcome.snapshot.conversation_id, "conversation-1")
+        self.assertEqual(outcome.snapshot.state.status, GoalStatus.ACTIVE)
 
-    def test_paused_goal_can_resume_through_core_reasoning(self):
-        requested = Approval(
-            "approval-1",
-            ApprovalScope("capability-a", {}),
-            ApprovalLifecycle.REQUESTED,
-            NOW + timedelta(days=1),
+    def test_invalid_optional_goal_proposal_does_not_discard_safe_response(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        unsupported = Evidence(
+            "evidence-1", "claim", supports=("criterion-1",),
+            source_references=("turn:not-real",),
         )
-        paused_states = (
-            replace(
-                active(),
-                outstanding_work=(WorkItem("input-1", "required input"),),
-                status=GoalStatus.AWAITING_INPUT,
-                stop_reason=GoalStopReason.REQUIRED_INPUT,
-            ),
-            replace(
-                active(),
-                approvals=(requested,),
-                status=GoalStatus.AWAITING_APPROVAL,
-                stop_reason=GoalStopReason.REQUIRED_APPROVAL,
-            ),
-            replace(
-                active(),
-                blockers=(WorkItem("blocker-1", "temporary blocker"),),
-                status=GoalStatus.BLOCKED,
-                stop_reason=GoalStopReason.GENUINELY_BLOCKED,
-            ),
-        )
-        for paused in paused_states:
-            with self.subTest(status=paused.status):
-                snapshot = self.store.load("goal-1")
-                self.store.delete("goal-1", snapshot.revision)
-                self.store.create(paused, (), NOW + timedelta(days=1))
-                resumed = replace(
-                    paused,
-                    blockers=(),
-                    outstanding_work=(),
-                    status=GoalStatus.ACTIVE,
-                    stop_reason=None,
-                )
-                call = CapabilityCall("resume-" + paused.status.value, "capability-a", {})
-                attempt = CapabilityAttempt(
-                    call,
-                    CapabilityAttemptDisposition.REJECTED,
-                    False,
-                    reason_code="test_result",
-                )
-                reasoner = Queued([AgentDecision(resumed, call=call)])
-                out = self.agent(reasoner, lambda proposed, state: attempt).run(
-                    "goal-1",
-                    1,
-                )
-                self.assertEqual(out.state, CoreState.CHECKPOINTED)
-                self.assertEqual(len(reasoner.contexts), 1)
-                self.assertEqual(out.snapshot.state.status, GoalStatus.ACTIVE)
-                self.assertEqual(out.snapshot.state.attempts, (attempt,))
+        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION,
+                                new_evidence=(unsupported,))
+        reasoner = Queued(AgentDecision(response="Here is the useful answer.",
+                                        goal_proposal=proposal))
+        outcome = self.agent(reasoner).process(conversation(), "goal-1", RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Here is the useful answer.")
+        self.assertEqual(outcome.reason, "goal_proposal_rejected")
+        self.assertEqual(self.store.load("goal-1").state, goal())
+        self.assertEqual(len(reasoner.contexts), 1)
 
-    def test_g_each_authoritative_history_cannot_be_erased(self):
-        prior_call = CapabilityCall("prior-call", "capability-a", {})
-        prior_attempt = CapabilityAttempt(
-            prior_call,
-            CapabilityAttemptDisposition.EXECUTED,
-            True,
-            CapabilityResult(
-                "prior-call",
-                "capability-a",
-                CapabilityResultState.SUCCEEDED,
-                {},
-            ),
+    def test_materially_dependent_rejection_fails_without_blanket_retry(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
+        reasoner = Queued(
+            AgentDecision(response="The goal is complete.", goal_proposal=proposal,
+                          response_requires_goal_commit=True),
+            AssertionError("blanket retry occurred"),
         )
-        histories = {
-            "corrections": (ProgressRecord("correction-1", "corrected"),),
-            "decisions": (ProgressRecord("decision-1", "decided"),),
-            "progress": (ProgressRecord("progress-1", "progressed"),),
-            "evidence": (Evidence("evidence-1", "fact"),),
-            "attempts": (prior_attempt,),
-        }
-        for field_name, history in histories.items():
-            with self.subTest(field=field_name):
-                current = replace(active(), **{field_name: history})
-                snapshot = self.store.load("goal-1")
-                self.store.delete("goal-1", snapshot.revision)
-                self.store.create(current, (), NOW + timedelta(days=1))
-                erased = replace(current, **{field_name: ()})
-                proposed = CapabilityCall("new-call", "capability-a", {})
-                out = self.agent(
-                    Queued([AgentDecision(erased, call=proposed)]),
-                    lambda proposed_call, state: self.fail("dispatch"),
-                ).run("goal-1", 1)
-                self.assertEqual(out.reason, "decision_invalid")
-                self.assertEqual(self.store.load("goal-1").state, current)
+        outcome = self.agent(reasoner).process(conversation(), "goal-1", RETENTION, 2)
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertEqual(len(reasoner.contexts), 1)
 
-    def test_duplicate_call_id_is_rejected_without_dispatch(self):
-        call = CapabilityCall("same", "capability-a", {})
-        prior = CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult("same", "capability-a", CapabilityResultState.SUCCEEDED, {}))
-        self.store.delete("goal-1", 1); self.store.create(active((prior,)), (), NOW + timedelta(days=1))
-        out = self.agent(Queued([AgentDecision(active((prior,)), call=call)]), lambda c,s:self.fail("dispatch")).run("goal-1",1)
-        self.assertEqual(out.reason, "call_id_reused"); self.assertEqual(self.store.load("goal-1").state.attempts,(prior,))
-
-    def test_revision_conflict_propagates_without_overwrite(self):
-        call = CapabilityCall("a", "capability-a", {})
-        other = SQLiteGoalStore(self.path)
-        try:
-            class RacingReasoner:
-                def decide(inner, context):
-                    snapshot = other.load("goal-1")
-                    other.replace(snapshot.state, snapshot.turns, NOW + timedelta(days=2), snapshot.revision)
-                    return AgentDecision(active(), call=call)
-            with self.assertRaises(GoalRevisionConflict):
-                self.agent(RacingReasoner(), lambda c,s:self.fail("dispatch")).run("goal-1",1)
-            self.assertEqual(other.load("goal-1").retention_until, NOW + timedelta(days=2))
-        finally: other.close()
-    def test_k_provider_and_dispatch_error_preserve_checkpoint(self):
-        self.assertEqual(self.agent(Queued(RuntimeError()),lambda c,s:None).run("goal-1",1).state,CoreState.ERROR)
-        call=CapabilityCall("a","capability-a",{}); out=self.agent(Queued([AgentDecision(active(),call=call)]),lambda c,s:(_ for _ in ()).throw(RuntimeError())).run("goal-1",1)
-        self.assertEqual(out.reason,"dispatch_error")
-        pending = self.store.load("goal-1").state.attempts
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0].disposition, CapabilityAttemptDisposition.PENDING)
-        reasoner = Queued(AssertionError("unresolved dispatch reached reasoner"))
-        resumed = self.agent(reasoner, lambda c,s:self.fail("dispatch repeated")).run("goal-1",1)
-        self.assertEqual(resumed.reason, "dispatch_unresolved")
-        self.assertEqual(reasoner.contexts, [])
-
-    def test_dispatch_failure_requires_trusted_reconciliation_before_restart(self):
-        approval = Approval(
-            "approval-1",
-            ApprovalScope("capability-a", {}),
-            ApprovalLifecycle.GRANTED,
-            NOW + timedelta(days=1),
+    def test_rejected_memory_cannot_partially_commit_goal_proposal(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        proposal = GoalProposal(GoalMutationKind.UPDATE,
+                                objective_summary="changed objective")
+        invalid_memory = MemoryProposal(
+            "memory-1", MemoryKind.FACTUAL, "unsupported",
+            ("turn:not-real",), NOW,
         )
-        self.store.delete("goal-1", 1)
-        self.store.create(
-            replace(active(), approvals=(approval,)),
-            (),
-            NOW + timedelta(days=1),
+        outcome = self.agent(Queued(AgentDecision(
+            response="response", goal_proposal=proposal,
+            memory_proposals=(invalid_memory,),
+        ))).process(conversation(), "goal-1", RETENTION, 1)
+        self.assertEqual(outcome.reason, "memory_proposal_invalid")
+        self.assertEqual(self.store.load("goal-1").state.objective.summary,
+                         "Do the work")
+
+    def test_completion_is_core_derived_from_sourced_evidence(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        evidence = Evidence(
+            "evidence-1", "observation", supports=("criterion-1",),
+            source_references=("turn:turn-1",),
         )
-        call = CapabilityCall("call", "capability-a", {}, "approval-1")
-        out = self.agent(
-            Queued([AgentDecision(replace(active(), approvals=(approval,)), call=call)]),
+        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION,
+                                blockers=(), outstanding_work=(),
+                                new_evidence=(evidence,))
+        outcome = self.agent(Queued(AgentDecision(response="Verified and complete.",
+                                                   goal_proposal=proposal,
+                                                   response_requires_goal_commit=True))).process(
+            conversation(), "goal-1", RETENTION, 1,
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.snapshot.state.status, GoalStatus.COMPLETED)
+        self.assertEqual(outcome.snapshot.state.evidence, (evidence,))
+
+    def test_completion_rejects_outstanding_work_even_with_evidence(self) -> None:
+        self.store.create(goal(outstanding_work=(WorkItem("work-1", "verify"),)),
+                          "conversation-1", RETENTION)
+        evidence = Evidence("evidence-1", "fact", supports=("criterion-1",),
+                            source_references=("turn:turn-1",))
+        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION,
+                                new_evidence=(evidence,))
+        outcome = self.agent(Queued(AgentDecision(response="Still working.",
+                                                   goal_proposal=proposal))).process(
+            conversation(), "goal-1", RETENTION, 1,
+        )
+        self.assertEqual(outcome.reason, "goal_proposal_rejected")
+        self.assertEqual(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
+
+    def test_tool_result_reenters_same_core_before_response(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        call = CapabilityCall("call-1", "inspect", {})
+        result = CapabilityResult("call-1", "inspect", CapabilityResultState.SUCCEEDED,
+                                  {"value": 7})
+        attempt = CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED,
+                                    True, result)
+        reasoner = Queued(
+            AgentDecision(call=call),
+            AgentDecision(response="I inspected it; more work remains."),
+        )
+        outcome = self.agent(reasoner, lambda proposed, state: attempt).process(
+            conversation(), "goal-1", RETENTION, 2,
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[1].active_goal.attempts, (attempt,))
+        self.assertEqual(outcome.snapshot.state.status, GoalStatus.ACTIVE)
+
+    def test_provider_validation_error_is_not_retried(self) -> None:
+        reasoner = Queued(DecisionValidationError("malformed"),
+                          AssertionError("retry occurred"))
+        outcome = self.agent(reasoner).process(conversation(), None, RETENTION, 3)
+        self.assertEqual(outcome.reason, "reasoner_error")
+        self.assertEqual(len(reasoner.contexts), 1)
+
+    def test_unresolved_dispatch_survives_restart_and_blocks_repeat(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        call = CapabilityCall("call-1", "inspect", {})
+        outcome = self.agent(
+            Queued(AgentDecision(call=call)),
             lambda proposed, state: (_ for _ in ()).throw(RuntimeError()),
-        ).run("goal-1", 1)
-        self.assertEqual(out.reason, "dispatch_error")
+        ).process(conversation(), "goal-1", RETENTION, 1)
+        self.assertEqual(outcome.reason, "dispatch_error")
         self.store.close()
         self.store = SQLiteGoalStore(self.path)
-        recovered = self.store.load("goal-1")
-        self.assertEqual(
-            recovered.state.approvals[0].lifecycle,
-            ApprovalLifecycle.CLAIMED,
-        )
-        self.assertEqual(
-            recovered.state.attempts[0].disposition,
-            CapabilityAttemptDisposition.PENDING,
-        )
-        reasoner = Queued(AssertionError("unresolved restart reached reasoner"))
-        resumed = self.agent(
-            reasoner,
-            lambda proposed, state: self.fail("unresolved action repeated"),
-        ).run("goal-1", 1)
+        reasoner = Queued(AssertionError("pending action reached model"))
+        resumed = self.agent(reasoner).process(conversation(), "goal-1", RETENTION, 1)
         self.assertEqual(resumed.reason, "dispatch_unresolved")
         self.assertEqual(reasoner.contexts, [])
-        resolved_attempt = CapabilityAttempt(
-            call,
-            CapabilityAttemptDisposition.BROKER_FAILURE,
-            False,
-            CapabilityResult(
-                call.call_id,
-                call.capability_id,
-                CapabilityResultState.FAILED,
-                failure={"code": "dispatch_not_invoked"},
-            ),
-            "dispatch_not_invoked",
-        )
-        reconciled = self.agent(
-            Queued([]),
-            lambda proposed, state: self.fail("reconciliation dispatched"),
-        ).reconcile_dispatch("goal-1", resolved_attempt)
-        self.assertEqual(reconciled.reason, "dispatch_reconciled")
-        self.assertEqual(reconciled.snapshot.state.attempts, (resolved_attempt,))
-        self.assertEqual(
-            reconciled.snapshot.state.approvals[0].lifecycle,
-            ApprovalLifecycle.GRANTED,
-        )
-        completed = complete(reconciled.snapshot.state)
-        continued = self.agent(
-            Queued([AgentDecision(completed, response="done")]),
-            lambda proposed, state: self.fail("completed goal dispatched"),
-        ).run("goal-1", 1)
-        self.assertEqual(continued.state, CoreState.RESPONDED)
 
-    def test_dispatch_reconciliation_rejects_unrelated_evidence(self):
-        call = CapabilityCall("call", "capability-a", {})
-        self.agent(
-            Queued([AgentDecision(active(), call=call)]),
-            lambda proposed, state: (_ for _ in ()).throw(RuntimeError()),
-        ).run("goal-1", 1)
-        unrelated = CapabilityCall("other", "capability-a", {})
-        unrelated_attempt = CapabilityAttempt(
-            unrelated,
-            CapabilityAttemptDisposition.REJECTED,
-            False,
-            reason_code="not_related",
-        )
-        out = self.agent(Queued([]), lambda proposed, state: None).reconcile_dispatch(
-            "goal-1",
-            unrelated_attempt,
-        )
-        self.assertEqual(out.reason, "attempt_invalid")
-        self.assertEqual(
-            self.store.load("goal-1").state.attempts[0].disposition,
-            CapabilityAttemptDisposition.PENDING,
-        )
 
-    def test_j_real_broker_success_consumes_and_reuse_is_rejected(self):
-        approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))
-        self.store.delete("goal-1", 1); self.store.create(replace(active(), approvals=(approval,)), (), NOW + timedelta(days=1))
-        calls = [0]
-        def execute(data):
-            calls[0] += 1
-            return CapabilityResult("first", "capability-a", CapabilityResultState.SUCCEEDED, {})
-        broker = CapabilityBroker(CapabilityRegistry((DEFINITIONS[0],)), SafetyGate({"capability-a": AuthorityPolicy(approval_required=True)}), {"capability-a": execute})
-        def dispatch(call, state):
-            return broker.dispatch(call, AuthorityContext("principal", frozenset(), NOW, state.approvals))
-        first = CapabilityCall("first", "capability-a", {}, "approval-1")
-        first_attempt = CapabilityAttempt(first, CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult("first", "capability-a", CapabilityResultState.SUCCEEDED, {}))
-        second = CapabilityCall("second", "capability-a", {}, "approval-1")
-        rejected = CapabilityAttempt(second, CapabilityAttemptDisposition.REJECTED, False, reason_code="approval_invalid")
-        q = Queued([AgentDecision(replace(active(), approvals=(approval,)), call=first), AgentDecision(replace(active((first_attempt,)), approvals=(replace(approval, lifecycle=ApprovalLifecycle.CONSUMED),)), call=second), AgentDecision(complete(replace(active((first_attempt, rejected)), approvals=(replace(approval, lifecycle=ApprovalLifecycle.CONSUMED),))), response="done")])
-        out = self.agent(q, dispatch).run("goal-1", 3)
-        self.assertEqual(out.state, CoreState.RESPONDED); self.assertEqual(calls[0], 1)
-        self.assertEqual(out.snapshot.state.approvals[0].lifecycle, ApprovalLifecycle.CONSUMED)
-        self.assertEqual(out.snapshot.state.attempts[1], rejected); self.assertEqual(q.contexts[2].goal.attempts[1], rejected)
-
-    def test_provider_cannot_fabricate_or_regrant_approval(self):
-        call = CapabilityCall(
-            "call",
-            "capability-a",
-            {},
-            "approval-1",
-        )
-        granted = Approval(
-            "approval-1",
-            ApprovalScope("capability-a", {}),
-            ApprovalLifecycle.GRANTED,
-            NOW + timedelta(days=1),
-        )
-        cases = (
-            (active(), replace(active(), approvals=(granted,))),
-            (
-                replace(
-                    active(),
-                    approvals=(
-                        replace(granted, lifecycle=ApprovalLifecycle.CONSUMED),
-                    ),
-                ),
-                replace(active(), approvals=(granted,)),
-            ),
-        )
-        for persisted, proposed in cases:
-            with self.subTest(persisted=persisted.approvals):
-                snapshot = self.store.load("goal-1")
-                self.store.delete("goal-1", snapshot.revision)
-                self.store.create(persisted, (), NOW + timedelta(days=1))
-                out = self.agent(
-                    Queued([AgentDecision(proposed, call=call)]),
-                    lambda proposed_call, state: self.fail(
-                        "provider-controlled approval reached dispatch"
-                    ),
-                ).run("goal-1", 1)
-                self.assertEqual(out.reason, "decision_invalid")
-                self.assertEqual(self.store.load("goal-1").state, persisted)
-
-    def test_j_noninvoked_real_broker_paths_leave_approval_granted(self):
-        approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))
-        for policy, implementations, expected in ((AuthorityPolicy(enabled=False), {"capability-a": lambda data: self.fail("execute")}, "policy_denied"), (AuthorityPolicy(approval_required=True), {}, "implementation_missing")):
-            with self.subTest(expected=expected):
-                self.store.delete("goal-1", self.store.load("goal-1").revision); self.store.create(replace(active(), approvals=(approval,)), (), NOW + timedelta(days=1))
-                broker = CapabilityBroker(CapabilityRegistry((DEFINITIONS[0],)), SafetyGate({"capability-a": policy}), implementations)
-                call = CapabilityCall("call", "capability-a", {}, "approval-1")
-                out = self.agent(Queued([AgentDecision(replace(active(), approvals=(approval,)), call=call)]), lambda c,s: broker.dispatch(c, AuthorityContext("principal", frozenset(), NOW, s.approvals))).run("goal-1",1)
-                self.assertEqual(out.snapshot.state.approvals[0].lifecycle, ApprovalLifecycle.GRANTED)
-                self.assertFalse(out.snapshot.state.attempts[0].implementation_invoked)
-
-    def test_overlapping_run_cannot_reuse_claimed_approval(self):
-        approval = Approval(
-            "approval-1",
-            ApprovalScope("capability-a", {}),
-            ApprovalLifecycle.GRANTED,
-            NOW + timedelta(days=1),
-        )
-        self.store.delete("goal-1", 1)
-        self.store.create(
-            replace(active(), approvals=(approval,)),
-            (),
-            NOW + timedelta(days=1),
-        )
-        call = CapabilityCall("first", "capability-a", {}, "approval-1")
-        result = CapabilityResult(
-            "first",
-            "capability-a",
-            CapabilityResultState.SUCCEEDED,
-            {},
-        )
-        attempt = CapabilityAttempt(
-            call,
-            CapabilityAttemptDisposition.EXECUTED,
-            True,
-            result,
-        )
-        overlapping_store = SQLiteGoalStore(self.path)
-        overlapping_reasoner = Queued(
-            AssertionError("claimed approval reached overlapping reasoner")
-        )
-        overlapping = []
-
-        def dispatch(proposed, state):
-            other = CoreAgent(
-                overlapping_store,
-                overlapping_reasoner,
-                lambda inner_call, inner_state: self.fail("approval reused"),
-                DEFINITIONS,
-            ).run("goal-1", 1)
-            overlapping.append(other)
-            return attempt
-
-        try:
-            out = self.agent(
-                Queued([AgentDecision(replace(active(), approvals=(approval,)), call=call)]),
-                dispatch,
-            ).run("goal-1", 1)
-        finally:
-            overlapping_store.close()
-        self.assertEqual(out.state, CoreState.CHECKPOINTED)
-        self.assertEqual(overlapping[0].reason, "dispatch_unresolved")
-        self.assertEqual(overlapping_reasoner.contexts, [])
-        self.assertEqual(
-            out.snapshot.state.approvals[0].lifecycle,
-            ApprovalLifecycle.CONSUMED,
-        )
-        self.assertEqual(out.snapshot.state.attempts, (attempt,))
-
-    def test_c_real_broker_executor_exception_is_invoked_once(self):
-        approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))
-        self.store.delete("goal-1", 1); self.store.create(replace(active(), approvals=(approval,)), (), NOW + timedelta(days=1))
-        calls=[0]
-        def execute(data): calls[0]+=1; raise RuntimeError()
-        broker=CapabilityBroker(CapabilityRegistry((DEFINITIONS[0],)),SafetyGate({"capability-a":AuthorityPolicy(approval_required=True)}),{"capability-a":execute})
-        call=CapabilityCall("call","capability-a",{},"approval-1")
-        out=self.agent(Queued([AgentDecision(replace(active(),approvals=(approval,)),call=call)]),lambda c,s:broker.dispatch(c,AuthorityContext("principal",frozenset(),NOW,s.approvals))).run("goal-1",1)
-        self.assertEqual(calls[0],1); self.assertTrue(out.snapshot.state.attempts[0].implementation_invoked); self.assertEqual(out.snapshot.state.approvals[0].lifecycle,ApprovalLifecycle.CONSUMED)
-
-    def test_j_malformed_real_broker_result_consumes_once(self):
-        approval = Approval("approval-1", ApprovalScope("capability-a", {}), ApprovalLifecycle.GRANTED, NOW + timedelta(days=1))
-        self.store.delete("goal-1", 1); self.store.create(replace(active(), approvals=(approval,)), (), NOW + timedelta(days=1))
-        calls=[0]
-        def execute(data): calls[0]+=1; return object()
-        broker=CapabilityBroker(CapabilityRegistry((DEFINITIONS[0],)),SafetyGate({"capability-a":AuthorityPolicy(approval_required=True)}),{"capability-a":execute})
-        call=CapabilityCall("call","capability-a",{},"approval-1")
-        out=self.agent(Queued([AgentDecision(replace(active(),approvals=(approval,)),call=call)]),lambda c,s:broker.dispatch(c,AuthorityContext("principal",frozenset(),NOW,s.approvals))).run("goal-1",1)
-        self.assertEqual(calls[0],1); self.assertTrue(out.snapshot.state.attempts[0].implementation_invoked); self.assertEqual(out.snapshot.state.approvals[0].lifecycle,ApprovalLifecycle.CONSUMED)
-
-    def test_c_real_broker_attempt_reentry_matrix(self):
-        cases = (
-            ("succeeded", CapabilityResultState.SUCCEEDED, {"value": 1}, None, None),
-            ("partial", CapabilityResultState.PARTIAL, {"value": 1}, {"code": "limited", "detail": "x"}, None),
-            ("failed", CapabilityResultState.FAILED, {}, {"code": "limited", "detail": "x"}, None),
-            ("rejected", None, None, None, "input_invalid"),
-        )
-        for name, result_state, values, failure, expected_reason in cases:
-            with self.subTest(name=name):
-                snapshot = self.store.load("goal-1")
-                self.store.delete("goal-1", snapshot.revision)
-                self.store.create(active(), (), NOW + timedelta(days=1))
-                schema = StructuredSchema(ValueKind.OBJECT, {"value": StructuredSchema(ValueKind.INTEGER)}, (), extra_properties=False)
-                definition = CapabilityDefinition("capability-a", "generic primitive", schema, SCHEMA, SideEffect.NONE, ("limited",))
-                call = CapabilityCall("call-" + name, "capability-a", {} if name != "rejected" else {"value": True})
-                invocations = [0]
-                def execute(data, state=result_state, output=values, issue=failure):
-                    invocations[0] += 1
-                    return CapabilityResult(call.call_id, call.capability_id, state, output or {}, issue, ("evidence-1",))
-                broker = CapabilityBroker(CapabilityRegistry((definition,)), SafetyGate({"capability-a": AuthorityPolicy()}), {"capability-a": execute})
-                class Inspecting:
-                    def __init__(inner): inner.calls = 0; inner.seen = None
-                    def decide(inner, context):
-                        inner.calls += 1
-                        if inner.calls == 1: return AgentDecision(active(), call=call)
-                        inner.seen = context.goal.attempts[0]
-                        return AgentDecision(complete(context.goal), response="done")
-                reasoner = Inspecting()
-                out = CoreAgent(self.store, reasoner, lambda c,s: broker.dispatch(c, AuthorityContext("principal", frozenset(), NOW, s.approvals)), (definition,)).run("goal-1", 2)
-                attempt = reasoner.seen
-                self.assertEqual(out.state, CoreState.RESPONDED)
-                self.assertEqual(attempt.call, call)
-                self.assertEqual(attempt.reason_code, expected_reason)
-                if expected_reason is None:
-                    self.assertEqual(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
-                    self.assertTrue(attempt.implementation_invoked)
-                    self.assertEqual(attempt.result.state, result_state)
-                    self.assertEqual(attempt.result.values, values)
-                    self.assertEqual(attempt.result.failure, failure)
-                    self.assertEqual(attempt.result.evidence_refs, ("evidence-1",))
-                    self.assertEqual(invocations[0], 1)
-                else:
-                    self.assertEqual(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
-                    self.assertFalse(attempt.implementation_invoked)
-                    self.assertEqual(invocations[0], 0)
-
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()

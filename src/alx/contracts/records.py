@@ -61,6 +61,7 @@ def freeze_data(data: StructuredData) -> StructuredData:
 class ConversationOrigin(str, Enum):
     TYPED = "typed"
     SPEECH_TRANSCRIPT = "speech_transcript"
+    ALX_RESPONSE = "alx_response"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,11 +136,17 @@ class Evidence:
     kind: str
     attributes: StructuredData = field(default_factory=dict)
     supports: tuple[str, ...] = ()
+    source_references: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _required(self.evidence_id, "evidence_id")
         _required(self.kind, "kind")
         object.__setattr__(self, "supports", _references(self.supports, "evidence support references"))
+        object.__setattr__(
+            self,
+            "source_references",
+            _references(self.source_references, "evidence source references"),
+        )
         object.__setattr__(self, "attributes", freeze_data(self.attributes))
 
 
@@ -332,6 +339,56 @@ class GoalStopReason(str, Enum):
     CANCELLED = "cancelled"
 
 
+class GoalMutationKind(str, Enum):
+    CREATE = "create"
+    UPDATE = "update"
+    AWAIT_INPUT = "await_input"
+    AWAIT_APPROVAL = "await_approval"
+    BLOCK = "block"
+    CANCEL = "cancel"
+    REQUEST_COMPLETION = "request_completion"
+
+
+@dataclass(frozen=True, slots=True)
+class GoalProposal:
+    """A model-authored suggestion; only the Core may reduce it into goal truth."""
+
+    kind: GoalMutationKind
+    objective_summary: str | None = None
+    success_criteria: tuple[SuccessCriterion, ...] | None = None
+    context: StructuredData | None = None
+    referents: tuple[Referent, ...] | None = None
+    new_decisions: tuple[ProgressRecord, ...] = ()
+    new_corrections: tuple[ProgressRecord, ...] = ()
+    new_progress: tuple[ProgressRecord, ...] = ()
+    blockers: tuple[WorkItem, ...] | None = None
+    outstanding_work: tuple[WorkItem, ...] | None = None
+    new_evidence: tuple[Evidence, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.objective_summary is not None:
+            _required(self.objective_summary, "objective_summary")
+        if self.success_criteria is not None:
+            object.__setattr__(self, "success_criteria", tuple(self.success_criteria))
+        if self.context is not None:
+            object.__setattr__(self, "context", freeze_data(self.context))
+        for name in (
+            "referents",
+            "blockers",
+            "outstanding_work",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, tuple(value))
+        for name in (
+            "new_decisions",
+            "new_corrections",
+            "new_progress",
+            "new_evidence",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+
+
 _STOP_BY_STATUS = {
     GoalStatus.AWAITING_INPUT: GoalStopReason.REQUIRED_INPUT,
     GoalStatus.AWAITING_APPROVAL: GoalStopReason.REQUIRED_APPROVAL,
@@ -400,7 +457,12 @@ class GoalState:
         if self.status is GoalStatus.COMPLETED:
             if self.blockers or self.outstanding_work:
                 raise ValueError("a completed goal cannot retain blockers or outstanding work")
-            supported = {reference for item in self.evidence for reference in item.supports}
+            supported = {
+                reference
+                for item in self.evidence
+                if item.source_references
+                for reference in item.supports
+            }
             missing = {item.criterion_id for item in self.success_criteria} - supported
             if missing:
                 raise ValueError("a completed goal requires evidence for every success criterion")

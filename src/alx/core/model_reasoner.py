@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
 from alx.contracts import (
     AgentDecision,
     CapabilityCall,
+    DecisionValidationError,
     Evidence,
+    GoalMutationKind,
+    GoalProposal,
     GoalState,
-    GoalStatus,
-    GoalStopReason,
     ModelMessage,
     ModelRequest,
     ModelRole,
@@ -22,7 +22,6 @@ from alx.contracts import (
     MemoryProposal,
     MemoryQuery,
     MemorySourceMatch,
-    Objective,
     ProgressRecord,
     ReasoningContext,
     ReasoningModel,
@@ -34,15 +33,24 @@ from alx.contracts import (
 
 
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
-Interpret the complete durable goal and conversation context. Choose either one
-authoritative response or one reusable primitive capability call. Evaluate prior
-results, update the goal honestly, and continue toward it while safe useful work
-remains. Never route by phrase, call an unregistered capability, fabricate evidence, erase
-history, alter approvals, or claim completion without evidence supporting every
-success criterion. You may optionally form memories through semantic judgement;
+Interpret the continuous conversation and the optional active goal. Choose either
+one authoritative response, one reusable primitive capability call, or one memory
+retrieval. Ordinary conversation does not require a goal update. When useful, propose
+a goal mutation separately; the runtime, not you, decides whether it becomes durable
+truth. Request completion rather than authoring completed state. Every proposed item
+of evidence must cite one or more available durable source references exactly as
+supplied. Never route by phrase, call an unregistered capability, fabricate evidence,
+erase history, or alter approvals. A response may depend on a goal commit only when
+the response would become materially false or unsafe if that proposal were rejected.
+You may optionally form memories through semantic judgement;
 never create them by score, keyword, quota, or schedule. Every memory source must
-use an available durable reference exactly as supplied. Return only the required
-structured decision."""
+use an available durable reference exactly as supplied. The runtime owns memory
+timestamps; do not invent one. Factual memory has null
+person_id and null meaning. Relationship memory requires the matching person_id
+and null meaning. Autobiographical memory has null person_id and requires your
+first-person meaning reflection. In a goal update, null replacement fields preserve
+their current values; arrays of new history/evidence contain additions only. Return
+only the required structured decision."""
 
 
 def _plain(value: Any) -> Any:
@@ -96,6 +104,7 @@ def _records(value: Any, record_type: type, field_name: str) -> tuple[Any, ...]:
                     item["kind"],
                     _object_json(item["attributes_json"], "evidence attributes"),
                     _strings(item["supports"], "evidence supports"),
+                    _strings(item["source_references"], "evidence source_references"),
                 )
             )
         else:
@@ -196,8 +205,9 @@ def _capability_schema_payload(schema: StructuredSchema) -> dict[str, Any]:
 
 
 def _context_payload(context: ReasoningContext) -> str:
+    goal = context.active_goal
     payload = {
-        "goal": _state_payload(context.goal),
+        "active_goal": None if goal is None else _state_payload(goal),
         "conversation": [
             {
                 "conversation_id": item.conversation_id,
@@ -216,23 +226,23 @@ def _context_payload(context: ReasoningContext) -> str:
             ),
             *(
                 {"reference": f"evidence:{item.evidence_id}", "person_id": None}
-                for item in context.goal.evidence
+                for item in (() if goal is None else goal.evidence)
             ),
             *(
                 {"reference": f"decision:{item.record_id}", "person_id": None}
-                for item in context.goal.decisions
+                for item in (() if goal is None else goal.decisions)
             ),
             *(
                 {"reference": f"correction:{item.record_id}", "person_id": None}
-                for item in context.goal.corrections
+                for item in (() if goal is None else goal.corrections)
             ),
             *(
                 {"reference": f"progress:{item.record_id}", "person_id": None}
-                for item in context.goal.progress
+                for item in (() if goal is None else goal.progress)
             ),
             *(
                 {"reference": f"attempt:{item.call.call_id}", "person_id": None}
-                for item in context.goal.attempts
+                for item in (() if goal is None else goal.attempts)
                 if item.call is not None
             ),
         ],
@@ -278,46 +288,97 @@ def _array(item_properties: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _strict_object(properties: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": dict(properties),
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
+    return {"anyOf": [{"type": "null"}, dict(schema)]}
+
+
 def decision_schema() -> dict[str, Any]:
     string = {"type": "string"}
     nullable_string = {"type": ["string", "null"]}
     progress = {"id": string, "summary": string, "evidence_refs": {"type": "array", "items": string}}
+    memory_common = {
+        "id": string,
+        "content": string,
+        "source_references": {"type": "array", "items": string},
+        "supersedes_memory_id": nullable_string,
+    }
+    memory_variants = (
+        _strict_object(
+            {
+                **memory_common,
+                "kind": {"type": "string", "const": MemoryKind.FACTUAL.value},
+                "person_id": {"type": "null"},
+                "meaning": {"type": "null"},
+            }
+        ),
+        _strict_object(
+            {
+                **memory_common,
+                "kind": {"type": "string", "const": MemoryKind.RELATIONSHIP.value},
+                "person_id": string,
+                "meaning": {"type": "null"},
+            }
+        ),
+        _strict_object(
+            {
+                **memory_common,
+                "kind": {
+                    "type": "string",
+                    "const": MemoryKind.AUTOBIOGRAPHICAL.value,
+                },
+                "person_id": {"type": "null"},
+                "meaning": string,
+            }
+        ),
+    )
+    goal_update = _strict_object(
+        {
+            "operation": {"type": "string", "enum": [item.value for item in GoalMutationKind]},
+            "objective_summary": nullable_string,
+            "success_criteria": _nullable(_array({"id": string, "description": string})),
+            "context_json": nullable_string,
+            "referents": _nullable(_array({"id": string, "attributes_json": string})),
+            "new_decisions": _array(progress),
+            "new_corrections": _array(progress),
+            "new_progress": _array(progress),
+            "blockers": _nullable(_array({"id": string, "summary": string})),
+            "outstanding_work": _nullable(_array({"id": string, "summary": string})),
+            "new_evidence": _array(
+                {
+                    "id": string,
+                    "kind": string,
+                    "attributes_json": string,
+                    "supports": {"type": "array", "items": string},
+                    "source_references": {"type": "array", "items": string},
+                }
+            ),
+        }
+    )
     properties: dict[str, Any] = {
-        "action": {"type": "string", "enum": ["respond", "call_capability", "retrieve_memories"]},
+        "disposition": {
+            "type": "string",
+            "enum": ["respond", "call_capability", "retrieve_memories"],
+        },
         "response": nullable_string,
+        "response_requires_goal_commit": {"type": "boolean"},
         "call_id": nullable_string,
         "capability_id": nullable_string,
         "arguments_json": nullable_string,
         "approval_id": nullable_string,
-        "objective_summary": string,
-        "success_criteria": _array({"id": string, "description": string}),
-        "context_json": string,
-        "referents": _array({"id": string, "attributes_json": string}),
-        "new_decisions": _array(progress),
-        "new_corrections": _array(progress),
-        "new_progress": _array(progress),
-        "blockers": _array({"id": string, "summary": string}),
-        "outstanding_work": _array({"id": string, "summary": string}),
-        "new_evidence": _array(
-            {
-                "id": string,
-                "kind": string,
-                "attributes_json": string,
-                "supports": {"type": "array", "items": string},
-            }
-        ),
-        "memory_proposals": _array(
-            {
-                "id": string,
-                "kind": {"type": "string", "enum": [item.value for item in MemoryKind]},
-                "content": string,
-                "source_references": {"type": "array", "items": string},
-                "formed_at": string,
-                "person_id": nullable_string,
-                "meaning": nullable_string,
-                "supersedes_memory_id": nullable_string,
-            }
-        ),
+        "goal_update": {"anyOf": [{"type": "null"}, goal_update]},
+        "memory_proposals": {
+            "type": "array",
+            "items": {"anyOf": list(memory_variants)},
+        },
         "memory_query_id": nullable_string,
         "memory_kinds": {"type": "array", "items": {"type": "string", "enum": [item.value for item in MemoryKind]}},
         "memory_ids": {"type": "array", "items": string},
@@ -327,11 +388,6 @@ def decision_schema() -> dict[str, Any]:
         "memory_source_references": {"type": "array", "items": string},
         "memory_source_match": {"type": "string", "enum": [item.value for item in MemorySourceMatch]},
         "memory_include_superseded": {"type": "boolean"},
-        "status": {"type": "string", "enum": [item.value for item in GoalStatus]},
-        "stop_reason": {
-            "type": ["string", "null"],
-            "enum": [None, *[item.value for item in GoalStopReason]],
-        },
     }
     return {
         "type": "object",
@@ -351,6 +407,13 @@ class ModelReasoner:
         self._constitutional_context = f"{laws.strip()}\n\n{identity.strip()}"
 
     def decide(self, context: ReasoningContext) -> AgentDecision:
+        try:
+            return self._decide(context)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            reason = str(error).strip() or type(error).__name__
+            raise DecisionValidationError(reason) from error
+
+    def _decide(self, context: ReasoningContext) -> AgentDecision:
         completion = self._model.complete(
             ModelRequest(
                 (
@@ -360,56 +423,40 @@ class ModelReasoner:
                 ),
                 "alx_core_decision",
                 decision_schema(),
+                context.turns[-1].conversation_id,
             )
         )
         output = completion.output
-        objective = Objective(context.goal.objective.source_reference, output["objective_summary"])
-        new_decisions = _without_reused_ids(
-            context.goal.decisions,
-            _records(output["new_decisions"], ProgressRecord, "new_decisions"),
-            "record_id",
-            "new_decisions",
-        )
-        new_corrections = _without_reused_ids(
-            context.goal.corrections,
-            _records(output["new_corrections"], ProgressRecord, "new_corrections"),
-            "record_id",
-            "new_corrections",
-        )
-        new_progress = _without_reused_ids(
-            context.goal.progress,
-            _records(output["new_progress"], ProgressRecord, "new_progress"),
-            "record_id",
-            "new_progress",
-        )
-        new_evidence = _without_reused_ids(
-            context.goal.evidence,
-            _records(output["new_evidence"], Evidence, "new_evidence"),
-            "evidence_id",
-            "new_evidence",
-        )
-        state = replace(
-            context.goal,
-            objective=objective,
-            success_criteria=_records(output["success_criteria"], SuccessCriterion, "success_criteria"),
-            context=_object_json(output["context_json"], "context_json"),
-            referents=_records(output["referents"], Referent, "referents"),
-            decisions=(*context.goal.decisions, *new_decisions),
-            corrections=(*context.goal.corrections, *new_corrections),
-            progress=(*context.goal.progress, *new_progress),
-            blockers=_records(output["blockers"], WorkItem, "blockers"),
-            outstanding_work=_records(output["outstanding_work"], WorkItem, "outstanding_work"),
-            evidence=(*context.goal.evidence, *new_evidence),
-            status=GoalStatus(output["status"]),
-            stop_reason=None if output["stop_reason"] is None else GoalStopReason(output["stop_reason"]),
-        )
+        disposition = output["disposition"]
+        update = output["goal_update"]
+        proposal = None
+        if update is not None:
+            existing = context.active_goal
+            existing_decisions = () if existing is None else existing.decisions
+            existing_corrections = () if existing is None else existing.corrections
+            existing_progress = () if existing is None else existing.progress
+            existing_evidence = () if existing is None else existing.evidence
+            proposal = GoalProposal(
+                GoalMutationKind(update["operation"]),
+                update["objective_summary"],
+                None if update["success_criteria"] is None else _records(update["success_criteria"], SuccessCriterion, "success_criteria"),
+                None if update["context_json"] is None else _object_json(update["context_json"], "context_json"),
+                None if update["referents"] is None else _records(update["referents"], Referent, "referents"),
+                _without_reused_ids(existing_decisions, _records(update["new_decisions"], ProgressRecord, "new_decisions"), "record_id", "new_decisions"),
+                _without_reused_ids(existing_corrections, _records(update["new_corrections"], ProgressRecord, "new_corrections"), "record_id", "new_corrections"),
+                _without_reused_ids(existing_progress, _records(update["new_progress"], ProgressRecord, "new_progress"), "record_id", "new_progress"),
+                None if update["blockers"] is None else _records(update["blockers"], WorkItem, "blockers"),
+                None if update["outstanding_work"] is None else _records(update["outstanding_work"], WorkItem, "outstanding_work"),
+                _without_reused_ids(existing_evidence, _records(update["new_evidence"], Evidence, "new_evidence"), "evidence_id", "new_evidence"),
+            )
+        memory_formed_at = max(item.occurred_at for item in context.turns)
         memory_proposals = tuple(
             MemoryProposal(
                 item["id"],
                 MemoryKind(item["kind"]),
                 item["content"],
                 _strings(item["source_references"], "memory source_references"),
-                datetime.fromisoformat(item["formed_at"]),
+                memory_formed_at,
                 item["person_id"],
                 item["meaning"],
                 item["supersedes_memory_id"],
@@ -429,7 +476,7 @@ class ModelReasoner:
                 output["memory_include_superseded"],
             )
         )
-        if output["action"] == "retrieve_memories":
+        if disposition == "retrieve_memories":
             if output["response"] is not None or any(
                 output[name] is not None
                 for name in ("call_id", "capability_id", "arguments_json", "approval_id")
@@ -448,12 +495,17 @@ class ModelReasoner:
                 MemorySourceMatch(output["memory_source_match"]),
                 output["memory_include_superseded"],
             )
-            return AgentDecision(state, memory_proposals=memory_proposals, memory_query=query)
-        if output["action"] == "respond":
+            return AgentDecision(memory_proposals=memory_proposals, memory_query=query, goal_proposal=proposal)
+        if disposition == "respond":
             if query_fields_present or any(output[name] is not None for name in ("call_id", "capability_id", "arguments_json", "approval_id")):
                 raise ValueError("a response cannot include another action")
-            return AgentDecision(state, response=output["response"], memory_proposals=memory_proposals)
-        if output["action"] != "call_capability" or output["response"] is not None or query_fields_present:
+            return AgentDecision(
+                response=output["response"],
+                goal_proposal=proposal,
+                response_requires_goal_commit=output["response_requires_goal_commit"],
+                memory_proposals=memory_proposals,
+            )
+        if disposition != "call_capability" or output["response"] is not None or query_fields_present:
             raise ValueError("unknown or contradictory decision action")
         if any(output[name] is None for name in ("call_id", "capability_id", "arguments_json")):
             raise ValueError("a capability decision requires a complete call")
@@ -463,4 +515,6 @@ class ModelReasoner:
             _object_json(output["arguments_json"], "arguments_json"),
             output["approval_id"],
         )
-        return AgentDecision(state, call=call, memory_proposals=memory_proposals)
+        if output["response_requires_goal_commit"]:
+            raise ValueError("a capability call cannot depend on a goal commit response")
+        return AgentDecision(call=call, goal_proposal=proposal, memory_proposals=memory_proposals)

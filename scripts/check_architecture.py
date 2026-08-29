@@ -40,7 +40,7 @@ class Rules:
     source_root: str
     boundaries: frozenset[str]
     allowed_imports: dict[str, frozenset[str]]
-    provider_only_imports: frozenset[str]
+    restricted_external_imports: dict[str, frozenset[str]]
     forbidden_source_names: frozenset[str]
 
 
@@ -83,7 +83,10 @@ def load_rules(root: Path) -> Rules:
         source_root=data["source_root"],
         boundaries=boundaries,
         allowed_imports=allowed,
-        provider_only_imports=frozenset(data["provider_only_imports"]),
+        restricted_external_imports={
+            dependency: frozenset(owners)
+            for dependency, owners in data["restricted_external_imports"].items()
+        },
         forbidden_source_names=frozenset(data["forbidden_source_names"]),
     )
 
@@ -165,10 +168,12 @@ class SourceVisitor(ast.NodeVisitor):
             return
 
         top_level = module_name.split(".", 1)[0]
-        if top_level in self.rules.provider_only_imports and self.owner != "providers":
+        allowed_owners = self.rules.restricted_external_imports.get(top_level)
+        if allowed_owners is not None and self.owner not in allowed_owners:
             self._add(
                 node,
-                f"model-provider dependency {top_level!r} is allowed only in providers",
+                f"restricted dependency {top_level!r} is allowed only in "
+                + ", ".join(sorted(allowed_owners)),
             )
 
         target = _internal_target(module_name)

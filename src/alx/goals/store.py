@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from alx.contracts import (
     Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityResult,
@@ -17,7 +17,7 @@ from alx.contracts import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class GoalStoreError(Exception):
@@ -85,7 +85,10 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
         "outstanding_work": [[item.item_id, item.summary] for item in goal.outstanding_work],
-        "evidence": [[item.evidence_id, item.kind, _data(item.attributes), list(item.supports)] for item in goal.evidence],
+        "evidence": [
+            [item.evidence_id, item.kind, _data(item.attributes), list(item.supports), list(item.source_references)]
+            for item in goal.evidence
+        ],
         "approvals": [
             [item.approval_id, item.scope.capability_id, _data(item.scope.arguments), item.lifecycle.value, _time_to_data(item.expires_at)]
             for item in goal.approvals
@@ -133,7 +136,10 @@ def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
         attempts=_attempts(data),
         blockers=tuple(WorkItem(*item) for item in data["blockers"]),
         outstanding_work=tuple(WorkItem(*item) for item in data["outstanding_work"]),
-        evidence=tuple(Evidence(item[0], item[1], item[2], tuple(item[3])) for item in data["evidence"]),
+        evidence=tuple(
+            Evidence(item[0], item[1], item[2], tuple(item[3]), tuple(item[4]) if len(item) > 4 else ())
+            for item in data["evidence"]
+        ),
         approvals=tuple(
             Approval(item[0], ApprovalScope(item[1], item[2]), ApprovalLifecycle(item[3]), _time_from_data(item[4]))
             for item in data["approvals"]
@@ -143,20 +149,14 @@ def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
     )
 
 
-def _turn_to_data(turn: ConversationTurn) -> str:
-    return json.dumps(
-        [turn.conversation_id, turn.turn_id, turn.origin.value, turn.content, _time_to_data(turn.occurred_at), turn.person_id],
-        separators=(",", ":"),
-    )
-
-
-def _turn_from_data(value: str) -> ConversationTurn:
+def _legacy_turn_from_data(value: str) -> ConversationTurn:
     data = json.loads(value)
-    conversation_id, turn_id, origin, content, occurred_at = data[:5]
-    person_id = None if len(data) == 5 else data[5]
-    parsed = _time_from_data(occurred_at)
-    assert parsed is not None
-    return ConversationTurn(conversation_id, turn_id, ConversationOrigin(origin), content, parsed, person_id)
+    occurred_at = _time_from_data(data[4])
+    assert occurred_at is not None
+    return ConversationTurn(
+        data[0], data[1], ConversationOrigin(data[2]), data[3], occurred_at,
+        None if len(data) == 5 else data[5],
+    )
 
 
 def _memory_proposal_to_data(proposal: MemoryProposal) -> str:
@@ -195,7 +195,9 @@ class SQLiteGoalStore:
     """Small transactional store; it persists facts but never reads their meaning."""
 
     def __init__(self, database_path: str | Path) -> None:
-        self._connection = sqlite3.connect(str(database_path))
+        # Core turns execute on one serialized worker so blocking provider I/O
+        # cannot stall the asyncio voice transport.
+        self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._migrate()
 
@@ -217,61 +219,76 @@ class SQLiteGoalStore:
             return
         with self._connection:
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS goals (goal_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, retention_until TEXT NOT NULL, state_json TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS goals (goal_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, retention_until TEXT NOT NULL, state_json TEXT NOT NULL, conversation_id TEXT)"
             )
+            columns = {
+                item[1]
+                for item in self._connection.execute("PRAGMA table_info(goals)")
+            }
+            if "conversation_id" not in columns:
+                self._connection.execute("ALTER TABLE goals ADD COLUMN conversation_id TEXT")
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS conversation_turns (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, turn_id TEXT NOT NULL, turn_json TEXT NOT NULL, PRIMARY KEY(goal_id, ordinal), UNIQUE(goal_id, turn_id))"
+            )
+            self._connection.execute(
+                "UPDATE goals SET conversation_id = COALESCE(conversation_id, "
+                "(SELECT json_extract(turn_json, '$[0]') FROM conversation_turns "
+                "WHERE conversation_turns.goal_id = goals.goal_id ORDER BY ordinal LIMIT 1), "
+                "'legacy:' || goal_id)"
             )
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS pending_memory_batches (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, goal_revision INTEGER NOT NULL, ordinal INTEGER NOT NULL, proposal_json TEXT NOT NULL, retention_until TEXT NOT NULL, PRIMARY KEY(goal_id, goal_revision, ordinal))"
             )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def create(self, state: GoalState, turns: Iterable[ConversationTurn], retention_until: datetime) -> GoalSnapshot:
+    def create(self, state: GoalState, conversation_id: str, retention_until: datetime) -> GoalSnapshot:
         _aware(retention_until, "retention_until")
-        turn_list = tuple(turns)
+        if not conversation_id.strip():
+            raise ValueError("conversation_id must not be blank")
         try:
             with self._connection:
                 self._connection.execute(
-                    "INSERT INTO goals(goal_id, revision, retention_until, state_json) VALUES (?, ?, ?, ?)",
-                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":"))),
+                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id) VALUES (?, ?, ?, ?, ?)",
+                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id),
                 )
-                self._write_turns(state.goal_id, turn_list)
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
                 raise GoalAlreadyExists(state.goal_id) from error
             raise
-        return GoalSnapshot(state, turn_list, 1, retention_until)
+        return GoalSnapshot(state, conversation_id, 1, retention_until)
 
     def load(self, goal_id: str) -> GoalSnapshot:
         row = self._connection.execute(
-            "SELECT revision, retention_until, state_json FROM goals WHERE goal_id = ?", (goal_id,)
+            "SELECT revision, retention_until, state_json, conversation_id FROM goals WHERE goal_id = ?", (goal_id,)
         ).fetchone()
         if row is None:
             raise GoalNotFound(goal_id)
-        turns = tuple(
-            _turn_from_data(item[0])
-            for item in self._connection.execute(
-                "SELECT turn_json FROM conversation_turns WHERE goal_id = ? ORDER BY ordinal", (goal_id,)
-            )
-        )
-        return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), turns, row[0], _time_from_data(row[1]))  # type: ignore[arg-type]
+        return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), row[3], row[0], _time_from_data(row[1]))  # type: ignore[arg-type]
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]:
-        identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY goal_id").fetchall()
+        identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY rowid").fetchall()
         return tuple(self.load(item[0]) for item in identifiers)
 
-    def replace(self, state: GoalState, turns: Iterable[ConversationTurn], retention_until: datetime, expected_revision: int) -> GoalSnapshot:
+    def legacy_conversation_turns(self) -> tuple[ConversationTurn, ...]:
+        """Expose pre-v4 turns solely for one-way migration to their own store."""
+        rows = self._connection.execute(
+            "SELECT turn_json FROM conversation_turns ORDER BY goal_id, ordinal"
+        ).fetchall()
+        unique: dict[tuple[str, str], ConversationTurn] = {}
+        for (value,) in rows:
+            turn = _legacy_turn_from_data(value)
+            unique.setdefault((turn.conversation_id, turn.turn_id), turn)
+        return tuple(unique.values())
+
+    def replace(self, state: GoalState, retention_until: datetime, expected_revision: int) -> GoalSnapshot:
         _aware(retention_until, "retention_until")
-        turn_list = tuple(turns)
         with self._connection:
-            self._replace_rows(state, turn_list, retention_until, expected_revision)
-        return GoalSnapshot(state, turn_list, expected_revision + 1, retention_until)
+            conversation_id = self._replace_rows(state, retention_until, expected_revision)
+        return GoalSnapshot(state, conversation_id, expected_revision + 1, retention_until)
 
     def replace_with_memory_batch(
         self,
         state: GoalState,
-        turns: Iterable[ConversationTurn],
         retention_until: datetime,
         expected_revision: int,
         proposals: tuple[MemoryProposal, ...],
@@ -281,10 +298,9 @@ class SQLiteGoalStore:
         proposal_list = tuple(proposals)
         if not proposal_list:
             raise ValueError("replace_with_memory_batch requires proposals")
-        turn_list = tuple(turns)
         goal_revision = expected_revision + 1
         with self._connection:
-            self._replace_rows(state, turn_list, retention_until, expected_revision)
+            conversation_id = self._replace_rows(state, retention_until, expected_revision)
             self._connection.executemany(
                 "INSERT INTO pending_memory_batches(goal_id, goal_revision, ordinal, proposal_json, retention_until) VALUES (?, ?, ?, ?, ?)",
                 (
@@ -298,7 +314,7 @@ class SQLiteGoalStore:
                     for ordinal, proposal in enumerate(proposal_list)
                 ),
             )
-        return GoalSnapshot(state, turn_list, goal_revision, retention_until)
+        return GoalSnapshot(state, conversation_id, goal_revision, retention_until)
 
     def pending_memory_batches(self, goal_id: str) -> tuple[PendingMemoryBatch, ...]:
         rows = self._connection.execute(
@@ -367,20 +383,12 @@ class SQLiteGoalStore:
             )
         return identifiers
 
-    def _write_turns(self, goal_id: str, turns: tuple[ConversationTurn, ...]) -> None:
-        for ordinal, turn in enumerate(turns):
-            self._connection.execute(
-                "INSERT INTO conversation_turns(goal_id, ordinal, turn_id, turn_json) VALUES (?, ?, ?, ?)",
-                (goal_id, ordinal, turn.turn_id, _turn_to_data(turn)),
-            )
-
     def _replace_rows(
         self,
         state: GoalState,
-        turns: tuple[ConversationTurn, ...],
         retention_until: datetime,
         expected_revision: int,
-    ) -> None:
+    ) -> str:
         updated = self._connection.execute(
             "UPDATE goals SET revision = revision + 1, retention_until = ?, state_json = ? WHERE goal_id = ? AND revision = ?",
             (_time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), state.goal_id, expected_revision),
@@ -389,5 +397,8 @@ class SQLiteGoalStore:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
                 raise GoalRevisionConflict(state.goal_id)
             raise GoalNotFound(state.goal_id)
-        self._connection.execute("DELETE FROM conversation_turns WHERE goal_id = ?", (state.goal_id,))
-        self._write_turns(state.goal_id, turns)
+        row = self._connection.execute(
+            "SELECT conversation_id FROM goals WHERE goal_id = ?", (state.goal_id,)
+        ).fetchone()
+        assert row is not None
+        return row[0]

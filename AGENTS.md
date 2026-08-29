@@ -54,4 +54,4 @@ Do not reinterpret a workflow as a "tool" to bypass the laws. A tool must repres
 
 ## Current project phase
 
-The accepted architecture is in its enforcement phase. Runtime implementation remains unauthorised until the initial executable gates and protected-branch required checks are active. Integrations, frontend work, and migration from the previous system remain unauthorised until their later gates are satisfied.
+The initial executable gates and protected-branch law check are active. Friedl authorised the first permanent local voice-to-Core runtime and its narrowly scoped provider integrations in `governance/DECISIONS.md` decision D-007. That approval does not authorise domain integrations, production writes, autonomous deployment, or migration of logic from the previous system. Further implementation phases still require their recorded gates and Friedl's approval.
