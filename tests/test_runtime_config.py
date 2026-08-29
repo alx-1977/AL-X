@@ -33,6 +33,8 @@ def environment(**changes: str) -> dict[str, str]:
         "ALX_TTS_MODEL": "tts-model",
         "ALX_TTS_API_KEY": "tts-secret",
         "ALX_TTS_VOICE_ID": "voice-id",
+        "ALX_TTS_PRONUNCIATION_DICTIONARY_ID": "dictionary-id",
+        "ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID": "dictionary-version-id",
     }
     values.update(changes)
     return values
@@ -67,6 +69,8 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(settings.speech_to_text.turn_end_timeout_ms, 4500)
         self.assertEqual(settings.text_to_speech.model, "tts-model")
         self.assertEqual(settings.text_to_speech.voice_id, "voice-id")
+        self.assertEqual(settings.text_to_speech.pronunciation_dictionary_id, "dictionary-id")
+        self.assertEqual(settings.text_to_speech.pronunciation_dictionary_version_id, "dictionary-version-id")
 
     def test_current_provider_key_names_are_compatible_but_generic_keys_win(self) -> None:
         values = environment()
@@ -124,6 +128,12 @@ class RuntimeConfigurationTests(unittest.TestCase):
             RuntimeSettings.from_environment(
                 environment(ALX_REASONING_EFFORT="unlimited")
             )
+
+    def test_pronunciation_dictionary_locator_is_mandatory_and_complete(self) -> None:
+        values = environment()
+        values.pop("ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID")
+        with self.assertRaises(ConfigurationError):
+            RuntimeSettings.from_environment(values)
 
     def test_composition_root_returns_only_neutral_runtime_ports(self) -> None:
         providers = build_runtime_providers(RuntimeSettings.from_environment(environment()))

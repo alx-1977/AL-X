@@ -152,6 +152,8 @@ class TextToSpeechSettings:
     base_url: str
     output_format: str
     timeout_seconds: int
+    pronunciation_dictionary_id: str
+    pronunciation_dictionary_version_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +242,12 @@ class RuntimeSettings:
                 ).rstrip("/"),
                 output_format=environment.get("ALX_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
                 timeout_seconds=_positive_integer(environment, "ALX_TTS_TIMEOUT_SECONDS", 60),
+                pronunciation_dictionary_id=_required(
+                    environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_ID"
+                ),
+                pronunciation_dictionary_version_id=_required(
+                    environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID"
+                ),
             ),
         )
 

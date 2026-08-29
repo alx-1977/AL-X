@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "provider": "elevenlabs",
+  "vocabulary_version": "1.0.0",
+  "dictionary_id": "ZlCeLofc0hxmUesbz79D",
+  "version_id": "PcyGfkIXIQTHSnPlqftx",
+  "rules_count": 33,
+  "verified_model": "eleven_v3",
+  "deployed_and_verified_on": "2026-08-29"
+}

@@ -81,6 +81,8 @@ def build_runtime_providers(
             settings.text_to_speech.base_url,
             settings.text_to_speech.output_format,
             settings.text_to_speech.timeout_seconds,
+            settings.text_to_speech.pronunciation_dictionary_id,
+            settings.text_to_speech.pronunciation_dictionary_version_id,
             telemetry_sink=telemetry_sink,
         ),
     )
