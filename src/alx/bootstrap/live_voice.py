@@ -10,10 +10,16 @@ from pathlib import Path
 from typing import Mapping
 
 from alx.bootstrap.providers import build_runtime_providers
-from alx.bootstrap.mail import build_mail_runtime
+from alx.bootstrap.mail import build_mail_runtime, build_mail_send_runtime
 from alx.bootstrap.reasoning import build_model_reasoner
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
-from alx.config import LiveVoiceSettings, MailSettings, RuntimeSettings
+from alx.config import (
+    ConfigurationError,
+    LiveVoiceSettings,
+    MailSendSettings,
+    MailSettings,
+    RuntimeSettings,
+)
 from alx.contracts import GoalStatus
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
@@ -21,6 +27,9 @@ from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -109,11 +118,27 @@ async def run(repository_root: Path) -> None:
     )
     for definition in mail_runtime.definitions:
         registry.register(definition)
-    broker = CapabilityBroker(
-        registry,
-        SafetyGate(mail_runtime.policies),
-        mail_runtime.executors,
-    )
+    policies = dict(mail_runtime.policies)
+    executors = dict(mail_runtime.executors)
+    permissions = set(mail_runtime.permissions)
+
+    # Replying is authorised by DECISIONS.md D-011 and configured separately, so
+    # a runtime without send settings reads mail without being able to send it.
+    try:
+        send_settings = MailSendSettings.from_environment(environment)
+    except ConfigurationError as error:
+        LOGGER.info("Mail sending unavailable: %s", error)
+    else:
+        send_definitions, send_policies, send_executors, send_permissions = (
+            build_mail_send_runtime(send_settings, lambda: current_call_id[0])
+        )
+        for definition in send_definitions:
+            registry.register(definition)
+        policies.update(send_policies)
+        executors.update(send_executors)
+        permissions.update(send_permissions)
+
+    broker = CapabilityBroker(registry, SafetyGate(policies), executors)
 
     def dispatch(call, state):
         current_call_id[0] = call.call_id
@@ -121,7 +146,7 @@ async def run(repository_root: Path) -> None:
             call,
             AuthorityContext(
                 principal_reference=voice_settings.primary_person_id,
-                granted_permission_references=mail_runtime.permissions,
+                granted_permission_references=frozenset(permissions),
                 evaluated_at=datetime.now(UTC),
                 approvals=() if state is None else state.approvals,
             ),

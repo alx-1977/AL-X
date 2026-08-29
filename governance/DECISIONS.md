@@ -100,3 +100,25 @@ This file records approved product and architecture decisions that guide impleme
 - **Boundary:** This authorises Trash only. It does not authorise permanent deletion, expunge, archive, move to any other mailbox, flag changes, mark-read as an external mutation, sending, or drafting. Each of those remains a separate governed decision.
 - **Not an exception:** This is a deployment authorisation under Law 19, not an exception to any Law. `governance/EXCEPTIONS.md` remains empty.
 - **Review condition:** To be revisited if the approval mechanism changes, if an unapproved move is ever observed, or if permanent-deletion authority is later proposed.
+
+## D-011 — Production mail sending authorised: reply to an existing message
+
+- **Date:** 2026-08-29
+- **Decision owner:** Friedl
+- **Decision:** Friedl authorises the `send_mail_reply` capability to transmit from his configured iCloud identity in the local AL/X runtime. This is the production-deployment authorisation Law 19 requires for a capability that acts on production systems.
+- **Exact scope:** One capability, `send_mail_reply`, sending one reply to an existing message. Nothing else is authorised: no new thread, no forward, no bulk send, no scheduled or unattended send, no attachment.
+- **Why it is needed:** Replying is one of the three original purposes of the email integration, and the one Friedl expects to use most. Without it AL/X can read, dismiss, and trash mail but cannot answer it.
+- **Irreversibility:** Unlike a move to Trash, a transmitted message cannot be recalled. The safeguards below exist because this action cannot be undone.
+- **Required safeguards, verified present:**
+  - the capability is classified `SideEffect.EFFECTFUL`;
+  - it requires a distinct send permission, separate from reading, observing, and trashing;
+  - every send requires its own approval; approving one reply authorises no other;
+  - the approval is bound by equality to the exact arguments, so changing one word of the body, a recipient, the subject, or the threading target invalidates it;
+  - the approval expires after a short configured window, so a stale authorisation cannot send later;
+  - an approval is consumed once used and cannot send a second message;
+  - the sender identity is fixed by configuration; `OutboundReply` has no sender field and no capability accepts one;
+  - a failure carries a sanitised code only, never a credential or message body.
+- **Read-back before sending:** AL/X states the exact reply before asking. Because the approval binds to those exact arguments, the message Friedl hears is the message that leaves, or none is sent.
+- **Boundary:** This authorises replying only. It does not authorise composing new correspondence, forwarding, attachments, contact lookup beyond addresses observed on the message being answered, or any mailbox mutation beyond the recoverable Trash already authorised in D-010.
+- **Not an exception:** This is a deployment authorisation under Law 19, not an exception to any Law. `governance/EXCEPTIONS.md` remains empty.
+- **Review condition:** To be revisited if the approval mechanism changes, if any message is ever sent without a matching approval, if per-reply approval proves unworkable in daily use and a bounded standing authority is proposed, or if sending beyond replies is proposed.

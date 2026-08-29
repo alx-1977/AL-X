@@ -191,6 +191,45 @@ class MailSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class MailSendSettings:
+    """Send authority configuration, deliberately separate from reading.
+
+    The sender identity is fixed here. AL/X may not choose or change it, so no
+    capability accepts a sender argument.
+    """
+
+    address: str
+    secret: str
+    smtp_host: str
+    smtp_port: int
+    timeout_seconds: int
+    approval_ttl_seconds: int
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> "MailSendSettings":
+        return cls(
+            address=_required(environment, "MAIL_ADDRESS"),
+            secret=_required(environment, "MAIL_KEY"),
+            smtp_host=_required(environment, "MAIL_SMTP_HOST"),
+            smtp_port=_integer_in_range(environment, "MAIL_SMTP_PORT", 1, 65535),
+            timeout_seconds=_positive_integer(
+                environment, "ALX_MAIL_SEND_TIMEOUT_SECONDS", 60
+            ),
+            approval_ttl_seconds=_positive_integer(
+                environment, "ALX_MAIL_APPROVAL_TTL_SECONDS", 600
+            ),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"MailSendSettings(address={self.address!r}, secret=<redacted>, "
+            f"smtp_host={self.smtp_host!r}, smtp_port={self.smtp_port!r}, "
+            f"timeout_seconds={self.timeout_seconds!r}, "
+            f"approval_ttl_seconds={self.approval_ttl_seconds!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     reasoning: ReasoningSettings
     speech_to_text: SpeechToTextSettings

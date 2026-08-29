@@ -257,10 +257,38 @@ class NoReplyWorkflowTests(unittest.TestCase):
             set(SEND_DEFINITIONS[0].input_schema.properties) & language_fields
         )
 
-    def test_send_is_not_registered_without_a_governance_decision(self) -> None:
-        """Law 19: production mutation needs a recorded authorisation."""
-        registered = {d.capability_id for d in DEFINITIONS}
-        self.assertNotIn(SEND_MAIL_REPLY, registered)
+    def test_sending_is_separate_from_observation(self) -> None:
+        """Reading must never imply sending."""
+        observation = {d.capability_id for d in DEFINITIONS}
+        self.assertNotIn(SEND_MAIL_REPLY, observation)
+
+    def test_sending_carries_its_own_authorisation_and_permission(self) -> None:
+        """Law 19: production action needs a recorded authorisation."""
+        from alx.bootstrap.mail import (
+            MAIL_READ_PERMISSION, MAIL_SEND_PERMISSION, MAIL_TRASH_PERMISSION,
+        )
+
+        self.assertNotIn(MAIL_SEND_PERMISSION,
+                         {MAIL_READ_PERMISSION, MAIL_TRASH_PERMISSION})
+        decisions = (REPOSITORY_ROOT / "governance/DECISIONS.md").read_text("utf-8")
+        self.assertIn("D-011", decisions)
+        self.assertIn(SEND_MAIL_REPLY, decisions)
+
+    def test_every_send_requires_its_own_expiring_exact_approval(self) -> None:
+        from alx.bootstrap.mail import build_mail_send_runtime
+        from alx.config import MailSendSettings
+
+        settings = MailSendSettings.from_environment({
+            "MAIL_ADDRESS": SELF, "MAIL_KEY": "secret",
+            "MAIL_SMTP_HOST": "smtp.example.test", "MAIL_SMTP_PORT": "587",
+        })
+        _definitions, policies, _executors, permissions = build_mail_send_runtime(
+            settings, lambda: "call-1"
+        )
+        self.assertTrue(policies[SEND_MAIL_REPLY].approval_required)
+        self.assertEqual(sorted(permissions), ["mail.send"])
+        # Ten minutes, as recorded in D-011.
+        self.assertEqual(settings.approval_ttl_seconds, 600)
 
     def test_the_gates_pass_over_the_added_sources(self) -> None:
         from scripts.check_architecture import check_source, load_rules

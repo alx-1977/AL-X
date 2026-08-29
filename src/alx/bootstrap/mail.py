@@ -5,24 +5,33 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
-from alx.config import MailSettings
+from alx.config import MailSendSettings, MailSettings
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
-from alx.providers import ICloudMailAdapter, SQLiteMailObservationState
+from alx.providers import (
+    ICloudMailAdapter,
+    ICloudMailSender,
+    SQLiteMailObservationState,
+)
 from alx.safety import AuthorityPolicy
 from alx.tools import (
     ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     READ_MAIL_MESSAGE,
+    SEND_DEFINITIONS,
+    SEND_MAIL_REPLY,
     build_mail_executors,
+    build_send_executors,
 )
 
 
 MAIL_READ_PERMISSION = "mail.read"
 MAIL_OBSERVATION_PERMISSION = "mail.observation"
 MAIL_TRASH_PERMISSION = "mail.trash"
+# Sending is a separate authority. Granting reading never grants sending.
+MAIL_SEND_PERMISSION = "mail.send"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +42,36 @@ class MailRuntime:
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
+
+
+def build_mail_send_runtime(
+    settings: MailSendSettings,
+    call_id_source: Callable[[], str],
+) -> tuple[tuple[CapabilityDefinition, ...], Mapping[str, AuthorityPolicy], Mapping[str, Any], frozenset[str]]:
+    """Compose the reply capability, authorised by DECISIONS.md D-011.
+
+    Sending is built separately from observation so a runtime can read mail
+    without being able to send it. Every send requires its own exactly scoped,
+    expiring approval.
+    """
+    sender = ICloudMailSender(
+        settings.smtp_host,
+        settings.smtp_port,
+        settings.address,
+        settings.secret,
+        settings.timeout_seconds,
+    )
+    policies = {
+        SEND_MAIL_REPLY: AuthorityPolicy(
+            frozenset({MAIL_SEND_PERMISSION}), approval_required=True
+        ),
+    }
+    return (
+        SEND_DEFINITIONS,
+        policies,
+        build_send_executors(sender, call_id_source),
+        frozenset({MAIL_SEND_PERMISSION}),
+    )
 
 
 def build_mail_runtime(
