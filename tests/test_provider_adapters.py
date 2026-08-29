@@ -446,7 +446,7 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item[1]["transport"] == "http" for item in telemetry))
         await client.aclose()
 
-    async def test_elevenlabs_changes_only_provider_bound_compact_rand_text(self) -> None:
+    async def test_elevenlabs_does_not_interpret_compact_r_number_forms(self) -> None:
         captured = {}
 
         async def respond(request: httpx.Request) -> httpx.Response:
@@ -465,19 +465,15 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
             "dictionary-version-id",
             client,
         )
-        authoritative_response = "The quote is R2000, or R2,000 when formatted."
+        authoritative_response = (
+            "Check resistors R5, R10, and R100. "
+            "The quote is R2000, R2,000, or R2 000.50."
+        )
 
         _ = [chunk async for chunk in adapter.synthesize(authoritative_response)]
 
         sent = json.loads(captured["request"].content)
-        self.assertEqual(
-            sent["text"],
-            "The quote is two thousand rand, or R2,000 when formatted.",
-        )
-        self.assertEqual(
-            authoritative_response,
-            "The quote is R2000, or R2,000 when formatted.",
-        )
+        self.assertEqual(sent["text"], authoritative_response)
         await client.aclose()
 
 

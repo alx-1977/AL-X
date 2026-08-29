@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.providers.elevenlabs_pronunciation import (  # noqa: E402
     ElevenLabsDictionaryManager,
     load_vocabulary,
-    render_spoken_text,
 )
 
 
@@ -50,16 +49,6 @@ class PronunciationVocabularyTests(unittest.TestCase):
         self.assertEqual(deployment["rules_count"], len(vocabulary.rules))
         self.assertTrue(deployment["dictionary_id"])
         self.assertTrue(deployment["version_id"])
-
-    def test_only_failed_compact_rand_format_is_rendered_for_speech(self) -> None:
-        self.assertEqual(render_spoken_text("R2000"), "two thousand rand")
-        self.assertEqual(render_spoken_text("R2,000"), "R2,000")
-        self.assertEqual(render_spoken_text("R2 000.50"), "R2 000.50")
-        written = "The quote is R2,000; rail R5 and reference XR2000 stay distinct."
-        self.assertEqual(
-            render_spoken_text(written),
-            "The quote is R2,000; rail five rand and reference XR2000 stay distinct.",
-        )
 
     def test_remote_dictionary_is_created_from_local_rules_and_returns_locator(self) -> None:
         captured = {}

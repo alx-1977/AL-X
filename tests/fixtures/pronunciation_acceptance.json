@@ -9,7 +9,8 @@
     {"category": "capacitance", "written": "2 F, 10 µF, 100 nF, and 22 pF", "expected_spoken": "two farads, ten microfarads, one hundred nanofarads, and twenty-two picofarads"},
     {"category": "temperature", "written": "85 °C", "expected_spoken": "eighty-five degrees Celsius"},
     {"category": "component", "written": "Fit a 10 kΩ resistor and a 100 nF capacitor.", "expected_spoken": "Fit a ten kilo-ohms resistor and a one hundred nanofarads capacitor."},
-    {"category": "currency", "written": "R2000", "expected_spoken": "two thousand rand"},
+    {"category": "reference", "written": "R5 and R10", "expected_spoken": "R five and R ten"},
+    {"category": "currency", "written": "R2000", "expected_spoken": "R two thousand"},
     {"category": "currency", "written": "R2,000", "expected_spoken": "two thousand rand"},
     {"category": "currency", "written": "R2 000.50", "expected_spoken": "two thousand rand and fifty cents"},
     {"category": "names", "written": "AL/X reviews an Altium PCB BOM for JLCPCB, MPS, DHL, and Xero.", "expected_spoken": "Alex reviews an Altium P C B B O M for J L C P C B, M P S, D H L, and Xero."}

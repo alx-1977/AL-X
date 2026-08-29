@@ -74,3 +74,11 @@ This file records approved product and architecture decisions that guide impleme
 - **Initial rules:** Prefer portable aliases for engineering notation, technical acronyms, and approved names. The remote dictionary is a deployed version, not the source of truth.
 - **Normalization evidence:** With the configured `eleven_v3` voice and native normalization forced on, `R2,000` and `R2 000.50` were rendered naturally, while compact `R2000` was not rendered as rand. Deterministic provider-bound preprocessing is therefore authorised only for the failed compact rand form.
 - **Constraints:** Written/displayed text remains unchanged; dictionary updates are versioned; representative audio is tested against the actual configured model and voice before acceptance. No Law exception is created.
+
+## D-009 — Ambiguous compact R-number speech rendering removed
+
+- **Date:** 2026-08-29
+- **Decision owner:** Friedl
+- **Decision:** Do not interpret compact `R<number>` forms as South African currency in the ElevenLabs adapter. Ambiguous forms such as `R5`, `R10`, `R100`, and `R2000` pass to ElevenLabs unchanged rather than being assigned a meaning outside the Core.
+- **Native normalization:** Continue relying on the configured ElevenLabs model's verified native normalization for unambiguous currency forms such as `R2,000` and `R2 000.50`.
+- **Future boundary:** Contextual speech metadata may be considered later if compact currency becomes important. This decision does not authorise that architecture and creates no Law exception.

@@ -11,7 +11,7 @@
 - A management-only synchronizer creates or versions one persistent ElevenLabs dictionary.
 - Runtime requests carry the authoritative response, the immutable dictionary/version locator, and no dictionary rule body.
 - Written conversation storage and browser display are unchanged.
-- Rand fallback rendering exists only inside the ElevenLabs provider boundary.
+- The ElevenLabs adapter does not interpret ambiguous compact `R<number>` forms.
 - No Core, conversation, frontend, goal, or future Email code owns pronunciation behavior.
 
 ## Native currency normalization
@@ -24,7 +24,7 @@ Audio was generated with the configured voice and `apply_text_normalization` for
 | `R2,000` | `2,000 rand` | Pass |
 | `R2 000.50` | `Two thousand rand and fifty cents` | Pass |
 
-Only the failed compact form is deterministically rendered before synthesis. The original response remains unchanged.
+The failed compact form is deliberately left unchanged because `R<number>` is ambiguous in engineering conversation. The verified unambiguous formats continue through native normalization.
 
 ## Persistent dictionary verification
 
@@ -47,9 +47,9 @@ Each fixture entry was synthesized using the active dictionary and configured `e
 | Capacitance | `2 F, 10 µF, 100 nF, and 22 pF` | `Two farads, 10 microfarads, 100 nanofarads, and 22 picofarads` | Pass |
 | Temperature | `85 °C` | `85 degrees Celsius` | Pass |
 | Component values | `Fit a 10 kΩ resistor and a 100 nF capacitor.` | `Fit a 10 kiloohms resistor and a 100 nanofarads capacitor` | Pass |
-| Compact rand | `R2000` | `2,000 rand` | Pass through scoped provider rendering |
+| Compact R-number | `R2000` | `R 2000` | Passed through unchanged; not interpreted as currency |
 | Comma rand | `R2,000` | `2,000 rand` | Pass through native normalization |
 | Rand and cents | `R2 000.50` | `Two thousand rand and fifty cents` | Pass through native normalization |
 | Names and acronyms | `AL/X reviews an Altium PCB BOM for JLCPCB, MPS, DHL, and Xero.` | `Alex reviews an Altium PCB BOM for JLCPCB, MPS, DHL, and Zero.` | Pass; initialisms normalized in transcript |
 
-No unresolved pronunciation failure remains in vocabulary version 1.0.0. New terminology is added locally, deployed as a new remote version, and re-evaluated before its locator becomes active.
+Adapter regression tests also prove that resistor references `R5` and `R10` pass through unchanged. Compact currency without separators is intentionally unsupported until a contextual design is approved. New terminology is added locally, deployed as a new remote version, and re-evaluated before its locator becomes active.

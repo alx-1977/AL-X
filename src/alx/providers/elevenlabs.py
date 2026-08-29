@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 
 from alx.contracts import AudioChunk
-from alx.providers.elevenlabs_pronunciation import DictionaryLocator, render_spoken_text
+from alx.providers.elevenlabs_pronunciation import DictionaryLocator
 from alx.providers.errors import ProviderError
 
 
@@ -88,7 +88,7 @@ class ElevenLabsSynthesizer:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "text": render_spoken_text(response),
+                    "text": response,
                     "model_id": self._model,
                     "apply_text_normalization": "on",
                     "pronunciation_dictionary_locators": [

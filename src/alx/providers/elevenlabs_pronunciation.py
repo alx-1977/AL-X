@@ -3,22 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
-import re
 from typing import Any
 
 import httpx
-from num2words import num2words
 
 from alx.providers.errors import ProviderError
-
-
-_RAND_AMOUNT = re.compile(
-    r"(?<![A-Za-z0-9])R(?P<amount>\d+(?:\.\d{1,2})?)(?![A-Za-z0-9])"
-    r"(?!,\d{3}(?:\D|$))(?! \d{3}(?:\D|$))(?!\.\d)"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,26 +82,6 @@ def load_vocabulary(path: str | Path) -> PronunciationVocabulary:
         data["description"],
         rules,
     )
-
-
-def render_spoken_text(text: str) -> str:
-    """Render only provider-bound speech; the authoritative response is unchanged."""
-
-    def replace(match: re.Match[str]) -> str:
-        raw = match.group("amount").replace(",", "").replace(" ", "")
-        try:
-            amount = Decimal(raw)
-        except InvalidOperation:
-            return match.group(0)
-        rand = int(amount)
-        cents = int((amount - rand) * 100)
-        spoken = f"{num2words(rand, lang='en')} rand"
-        if cents:
-            unit = "cent" if cents == 1 else "cents"
-            spoken += f" and {num2words(cents, lang='en')} {unit}"
-        return spoken
-
-    return _RAND_AMOUNT.sub(replace, text)
 
 
 class ElevenLabsDictionaryManager:
