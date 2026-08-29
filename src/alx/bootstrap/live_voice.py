@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Mapping
 
 from alx.bootstrap.providers import build_runtime_providers
+from alx.bootstrap.mail import build_mail_runtime
 from alx.bootstrap.reasoning import build_model_reasoner
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
-from alx.config import LiveVoiceSettings, RuntimeSettings
+from alx.config import LiveVoiceSettings, MailSettings, RuntimeSettings
 from alx.contracts import GoalStatus
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
@@ -100,16 +101,29 @@ async def run(repository_root: Path) -> None:
     migrate_legacy_conversations(goal_store, conversation_store)
     memory_store = SQLiteMemoryStore(storage_root / "memories.sqlite3")
     registry = CapabilityRegistry()
-    broker = CapabilityBroker(registry, SafetyGate({}), {})
+    current_call_id = [""]
+    mail_runtime = build_mail_runtime(
+        MailSettings.from_environment(environment),
+        storage_root,
+        lambda: current_call_id[0],
+    )
+    for definition in mail_runtime.definitions:
+        registry.register(definition)
+    broker = CapabilityBroker(
+        registry,
+        SafetyGate(mail_runtime.policies),
+        mail_runtime.executors,
+    )
 
     def dispatch(call, state):
+        current_call_id[0] = call.call_id
         return broker.dispatch(
             call,
             AuthorityContext(
                 principal_reference=voice_settings.primary_person_id,
-                granted_permission_references=frozenset(),
+                granted_permission_references=mail_runtime.permissions,
                 evaluated_at=datetime.now(UTC),
-                approvals=state.approvals,
+                approvals=() if state is None else state.approvals,
             ),
         )
 
@@ -124,6 +138,7 @@ async def run(repository_root: Path) -> None:
         core,
         conversation_store,
         lambda conversation_id: locate_active_goal(goal_store, conversation_id),
+        contextual_events=mail_runtime.source.contextual_events,
     )
     session = VoiceSession(
         gateway,
@@ -133,6 +148,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
         diagnostics=diagnostics,
+        event_source=mail_runtime.source,
     )
     server = LiveVoiceServer(
         session,
@@ -144,6 +160,7 @@ async def run(repository_root: Path) -> None:
     try:
         await server.serve_forever()
     finally:
+        mail_runtime.observations.close()
         conversation_store.close()
         memory_store.close()
         goal_store.close()

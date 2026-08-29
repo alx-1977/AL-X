@@ -2,6 +2,7 @@
 
 from alx.contracts.records import (
     Approval,
+    ApprovalProposal,
     ApprovalLifecycle,
     ApprovalScope,
     BackgroundEvent,
@@ -50,9 +51,17 @@ from alx.contracts.memory import (
     MemorySnapshot,
     MemorySourceMatch,
 )
+from alx.contracts.mail import (
+    BackgroundEventSource,
+    MailAccessError,
+    MailAccount,
+    MailContent,
+    MailObservationControl,
+    MailReference,
+)
 
 __all__ = [
-    "Approval", "ApprovalLifecycle", "ApprovalScope", "BackgroundEvent", "CapabilityCall", "CapabilityAttempt", "CapabilityAttemptDisposition",
+    "Approval", "ApprovalProposal", "ApprovalLifecycle", "ApprovalScope", "BackgroundEvent", "CapabilityCall", "CapabilityAttempt", "CapabilityAttemptDisposition",
     "CapabilityResult", "CapabilityResultState", "ConversationOrigin",
     "ConversationTurn", "Evidence", "GoalMutationKind", "GoalProposal", "GoalState", "GoalStatus", "GoalStopReason",
     "Objective", "ProgressRecord", "Referent", "SuccessCriterion", "WorkItem",
@@ -65,4 +74,6 @@ __all__ = [
     "ReasoningModel",
     "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
+    "BackgroundEventSource", "MailAccessError", "MailAccount", "MailContent",
+    "MailObservationControl", "MailReference",
 ]

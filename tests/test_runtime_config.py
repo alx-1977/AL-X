@@ -71,6 +71,15 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(settings.text_to_speech.voice_id, "voice-id")
         self.assertEqual(settings.text_to_speech.pronunciation_dictionary_id, "dictionary-id")
         self.assertEqual(settings.text_to_speech.pronunciation_dictionary_version_id, "dictionary-version-id")
+        self.assertEqual(settings.text_to_speech.speed, 1.0)
+
+    def test_tts_speed_is_configurable_within_provider_limits(self) -> None:
+        settings = RuntimeSettings.from_environment(
+            environment(ALX_TTS_SPEED="1.15")
+        )
+        self.assertEqual(settings.text_to_speech.speed, 1.15)
+        with self.assertRaises(ConfigurationError):
+            RuntimeSettings.from_environment(environment(ALX_TTS_SPEED="1.21"))
 
     def test_current_provider_key_names_are_compatible_but_generic_keys_win(self) -> None:
         values = environment()

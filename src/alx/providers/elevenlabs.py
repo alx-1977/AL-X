@@ -39,7 +39,10 @@ class ElevenLabsSynthesizer:
         pronunciation_dictionary_version_id: str,
         client: httpx.AsyncClient | None = None,
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
+        speed: float = 1.0,
     ) -> None:
+        if not 0.7 <= speed <= 1.2:
+            raise ValueError("ElevenLabs speed must be between 0.7 and 1.2")
         self._model = model
         self._api_key = api_key
         self._voice_id = voice_id
@@ -51,6 +54,7 @@ class ElevenLabsSynthesizer:
         )
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
         self._telemetry_sink = telemetry_sink
+        self._speed = speed
 
     async def synthesize(
         self,
@@ -91,6 +95,7 @@ class ElevenLabsSynthesizer:
                     "text": response,
                     "model_id": self._model,
                     "apply_text_normalization": "on",
+                    "voice_settings": {"speed": self._speed},
                     "pronunciation_dictionary_locators": [
                         self._pronunciation_dictionary.as_request_value()
                     ],

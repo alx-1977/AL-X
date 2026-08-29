@@ -18,6 +18,7 @@ from alx.bootstrap.live_voice import (  # noqa: E402
 )
 from alx.contracts import (  # noqa: E402
     AudioChunk,
+    BackgroundEvent,
     ConversationOrigin,
     ConversationTurn,
     GoalState,
@@ -63,11 +64,34 @@ class FakeGateway:
         self.outcomes = iter(outcomes)
         self.calls = []
         self.thread_ids = []
+        self.background_calls = []
 
     def receive_conversation_turn(self, turn, step_budget, retention_until):
         self.thread_ids.append(threading.get_ident())
         self.calls.append((turn, step_budget, retention_until))
         return next(self.outcomes)
+
+    def receive_background_event(
+        self, conversation_id, event, step_budget, retention_until
+    ):
+        self.thread_ids.append(threading.get_ident())
+        self.background_calls.append(
+            (conversation_id, event, step_budget, retention_until)
+        )
+        return next(self.outcomes)
+
+
+class FakeEventSource:
+    def __init__(self, event):
+        self.event = event
+        self.delivered = []
+
+    async def events(self):
+        yield self.event
+        await __import__("asyncio").Future()
+
+    def record_delivery(self, event_id):
+        self.delivered.append(event_id)
 
 
 def outcome(
@@ -93,6 +117,50 @@ async def incoming_audio():
 
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_background_event_enters_same_gateway_and_only_core_response_is_spoken(self) -> None:
+        event = BackgroundEvent(
+            "mail:777:2",
+            "mail.message_arrived",
+            NOW,
+            {"mailbox_id": "INBOX", "uid": "2"},
+        )
+        source = FakeEventSource(event)
+        gateway = FakeGateway((outcome(GoalStatus.AWAITING_INPUT, "Mail summary"),))
+        synthesizer = FakeSynthesizer()
+        session = VoiceSession(
+            gateway,
+            FakeTranscriber(()),
+            synthesizer,
+            "friedl",
+            8,
+            3650,
+            clock=lambda: NOW,
+            diagnostics=None,
+            event_source=source,
+        )
+        iterator = session.exchange("conversation-1", incoming_audio())
+        observed = []
+        async for item in iterator:
+            observed.append(item)
+            if item.kind is VoiceEventKind.LISTENING:
+                break
+        import asyncio
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(iterator.__anext__(), timeout=0.01)
+        self.assertEqual(gateway.background_calls[0][1], event)
+        self.assertEqual(synthesizer.responses, ["Mail summary"])
+        self.assertEqual(source.delivered, [event.event_id])
+        self.assertEqual(
+            [item.kind for item in observed],
+            [
+                VoiceEventKind.THINKING,
+                VoiceEventKind.SPEAKING,
+                VoiceEventKind.AUDIO,
+                VoiceEventKind.AUDIO,
+                VoiceEventKind.LISTENING,
+            ],
+        )
+
     async def test_tts_transport_diagnostics_arrive_before_audio(self) -> None:
         diagnostics = VoiceDiagnosticBuffer()
 

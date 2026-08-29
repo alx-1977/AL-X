@@ -80,7 +80,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
         "attempts": [
             [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
-             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.values), _data(item.result.failure), list(item.result.evidence_refs)], item.reason_code]
+             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs)], item.reason_code]
             for item in goal.attempts
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],

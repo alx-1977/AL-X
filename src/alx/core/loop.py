@@ -10,12 +10,12 @@ import logging
 from uuid import uuid4
 
 from alx.contracts import (
-    ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
+    AgentDecision, Approval, ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityDefinition, CapabilityDispatch, ConversationSnapshot,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
-    ReasoningProvider,
+    ReasoningProvider, SideEffect,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -51,7 +51,8 @@ class CoreAgent:
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
 
     def process(self, conversation: ConversationSnapshot, goal_id: str | None,
-                retention_until: datetime, step_budget: int) -> CoreOutcome:
+                retention_until: datetime, step_budget: int,
+                trigger_event_id: str | None = None) -> CoreOutcome:
         """Reason over one durable conversation and its optional attached goal."""
         self._validate_step_budget(step_budget)
         snapshot = None if goal_id is None else self._store.load(goal_id)
@@ -63,6 +64,7 @@ class CoreAgent:
             return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
 
         retrieved_memories: tuple[MemorySnapshot, ...] = ()
+        transient_attempts: tuple[CapabilityAttempt, ...] = ()
         memory_query_ids: set[str] = set()
         for _ in range(step_budget):
             try:
@@ -73,17 +75,48 @@ class CoreAgent:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="clock_error")
             try:
                 decision = self._reasoner.decide(ReasoningContext(
-                    None if snapshot is None else snapshot.state,
-                    conversation.turns, self._capabilities, retrieved_memories,
+                    active_goal=None if snapshot is None else snapshot.state,
+                    turns=conversation.turns,
+                    capabilities=self._capabilities,
+                    memories=retrieved_memories,
+                    events=conversation.events,
+                    transient_attempts=transient_attempts,
+                    conversation_id=conversation.conversation_id,
+                    trigger_event_id=trigger_event_id,
                 ))
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
+            decision = self._without_redundant_approval(decision)
 
             previous = snapshot
             candidate, proposal_error = self._reduce_goal_proposal(
                 snapshot, decision.goal_proposal, conversation,
             )
+            if proposal_error is None and decision.approval_proposal is not None:
+                approval_error = self._approval_proposal_error(
+                    conversation, candidate, decision
+                )
+                if approval_error is not None:
+                    LOGGER.info("Approval proposal rejected: %s", approval_error)
+                    return CoreOutcome(
+                        CoreState.ERROR,
+                        snapshot,
+                        reason="approval_proposal_invalid",
+                    )
+                assert candidate is not None
+                proposed = decision.approval_proposal
+                candidate = replace(
+                    candidate,
+                    approvals=(
+                        *candidate.approvals,
+                        Approval(
+                            proposed.approval_id,
+                            proposed.scope,
+                            ApprovalLifecycle.GRANTED,
+                        ),
+                    ),
+                )
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
                 if decision.response_requires_goal_commit:
@@ -98,7 +131,10 @@ class CoreAgent:
             if memory_error is not None:
                 LOGGER.info("Memory proposal rejected: %s", memory_error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_proposal_invalid")
-            if proposal_error is None and decision.goal_proposal is not None:
+            if proposal_error is None and (
+                decision.goal_proposal is not None
+                or decision.approval_proposal is not None
+            ):
                 assert candidate is not None
                 if previous is None:
                     snapshot = self._store.create(
@@ -134,9 +170,41 @@ class CoreAgent:
                                    reason="goal_proposal_rejected" if proposal_error else None)
 
             if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
-                return CoreOutcome(CoreState.ERROR, snapshot, reason="active_goal_required")
+                definition = next(
+                    (item for item in self._capabilities
+                     if item.capability_id == decision.call.capability_id),
+                    None,
+                )
+                if definition is None or definition.side_effect not in (
+                    SideEffect.NONE,
+                    SideEffect.ATTENTION_STATE,
+                ):
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="active_goal_required")
+                if any(item.call is not None and item.call.call_id == decision.call.call_id
+                       for item in transient_attempts):
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
+                snapshot, committed = self._commit_memories(
+                    snapshot, decision.memory_proposals, retention_until)
+                if not committed:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                try:
+                    attempt = self._dispatch(decision.call, None)
+                except Exception:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_error")
+                if (attempt.call != decision.call
+                        or attempt.disposition is CapabilityAttemptDisposition.PENDING):
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
+                transient_attempts = (*transient_attempts, attempt)
+                continue
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
+            if self._repeats_rejected_call(snapshot.state, decision.call):
+                return CoreOutcome(
+                    CoreState.ERROR,
+                    snapshot,
+                    reason="repeated_rejected_call",
+                )
+            authority_state = snapshot.state
             pending = CapabilityAttempt(decision.call, CapabilityAttemptDisposition.PENDING,
                                         None, reason_code="dispatch_pending")
             approvals = tuple(
@@ -156,7 +224,11 @@ class CoreAgent:
             if not committed:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
             try:
-                attempt = self._dispatch(decision.call, checkpoint)
+                # The durable checkpoint claims the approval before external work
+                # begins, preventing a restart from dispatching it twice. The safety
+                # gate must evaluate the immutable pre-claim authority snapshot,
+                # where the exact approval is still GRANTED.
+                attempt = self._dispatch(decision.call, authority_state)
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_error")
             if attempt.call != decision.call:
@@ -236,6 +308,30 @@ class CoreAgent:
         except (TypeError, ValueError) as error_value:
             return state, str(error_value)
         return updated, None
+
+    @staticmethod
+    def _approval_proposal_error(conversation, state, decision) -> str | None:
+        proposal = decision.approval_proposal
+        call = decision.call
+        if proposal is None:
+            return None
+        if state is None or call is None:
+            return "active_goal_required"
+        if proposal.approval_id != call.approval_id:
+            return "approval_call_id_mismatch"
+        if not proposal.scope.matches(call):
+            return "approval_scope_mismatch"
+        if any(item.approval_id == proposal.approval_id for item in state.approvals):
+            return "approval_id_reused"
+        if not conversation.turns:
+            return "approval_source_missing"
+        source = conversation.turns[-1]
+        if (
+            source.person_id is None
+            or proposal.source_reference != f"turn:{source.turn_id}"
+        ):
+            return "approval_source_not_latest_person_turn"
+        return None
 
     @staticmethod
     def _history_proposal_error(state: GoalState, proposal: GoalProposal) -> str | None:
@@ -323,6 +419,7 @@ class CoreAgent:
                                   state: GoalState, existing: tuple,
                                   proposed: tuple) -> str | None:
         known = {f"turn:{item.turn_id}" for item in conversation.turns}
+        known.update(f"event:{item.event_id}" for item in conversation.events)
         known.update(f"attempt:{item.call.call_id}" for item in state.attempts
                      if item.call is not None
                      and item.disposition is not CapabilityAttemptDisposition.PENDING
@@ -397,7 +494,10 @@ class CoreAgent:
                                          as_of: datetime) -> str | None:
         turns = {f"turn:{item.turn_id}": item.person_id for item in conversation.turns}
         turn_times = {f"turn:{item.turn_id}": item.occurred_at for item in conversation.turns}
-        references = set(turns)
+        event_times = {
+            f"event:{item.event_id}": item.occurred_at for item in conversation.events
+        }
+        references = {*turns, *event_times}
         if state is not None:
             references.update(f"evidence:{item.evidence_id}" for item in state.evidence)
             references.update(f"decision:{item.record_id}" for item in state.decisions)
@@ -412,6 +512,9 @@ class CoreAgent:
                 return "source_reference_unknown"
             if any(proposal.formed_at < turn_times[reference]
                    for reference in proposal.source_references if reference in turn_times):
+                return "formed_before_source"
+            if any(proposal.formed_at < event_times[reference]
+                   for reference in proposal.source_references if reference in event_times):
                 return "formed_before_source"
             if proposal.kind is MemoryKind.RELATIONSHIP:
                 people = [turns[reference] for reference in proposal.source_references
@@ -433,7 +536,19 @@ class CoreAgent:
     def _call_id_exists(state: GoalState, call_id: str) -> bool:
         return any((item.call is not None and item.call.call_id == call_id)
                    or (item.call is None and item.result is not None
-                       and item.result.call_id == call_id) for item in state.attempts)
+                   and item.result.call_id == call_id) for item in state.attempts)
+
+    @staticmethod
+    def _repeats_rejected_call(state: GoalState, call: CapabilityCall) -> bool:
+        """Stop deterministic safety/input rejections from becoming model loops."""
+        return any(
+            item.call is not None
+            and item.disposition is CapabilityAttemptDisposition.REJECTED
+            and item.call.capability_id == call.capability_id
+            and item.call.arguments == call.arguments
+            and item.call.approval_id == call.approval_id
+            for item in state.attempts
+        )
 
     @staticmethod
     def _has_pending_dispatch(state: GoalState) -> bool:
@@ -444,3 +559,27 @@ class CoreAgent:
     def _validate_step_budget(step_budget: int) -> None:
         if step_budget <= 0:
             raise ValueError("step_budget must be positive")
+
+    def _without_redundant_approval(self, decision: AgentDecision) -> AgentDecision:
+        call = decision.call
+        if call is None:
+            return decision
+        definition = next(
+            (item for item in self._capabilities
+             if item.capability_id == call.capability_id),
+            None,
+        )
+        if definition is None or definition.side_effect is SideEffect.EFFECTFUL:
+            return decision
+        if decision.approval_proposal is None and call.approval_id is None:
+            return decision
+        LOGGER.info(
+            "Ignoring redundant approval metadata for %s capability %s",
+            definition.side_effect.value,
+            definition.capability_id,
+        )
+        return replace(
+            decision,
+            call=replace(call, approval_id=None),
+            approval_proposal=None,
+        )

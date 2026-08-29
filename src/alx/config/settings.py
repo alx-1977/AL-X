@@ -69,8 +69,15 @@ def _number_in_range(
     name: str,
     minimum: float,
     maximum: float,
+    fallback: float | None = None,
 ) -> float:
-    raw = _required(environment, name)
+    raw = (
+        _required(environment, name)
+        if fallback is None
+        else environment.get(name, str(fallback)).strip()
+    )
+    if not raw:
+        raise ConfigurationError(f"missing required configuration: {name}")
     try:
         value = float(raw)
     except ValueError as error:
@@ -154,6 +161,33 @@ class TextToSpeechSettings:
     timeout_seconds: int
     pronunciation_dictionary_id: str
     pronunciation_dictionary_version_id: str
+    speed: float
+
+
+@dataclass(frozen=True, slots=True)
+class MailSettings:
+    address: str
+    secret: str
+    imap_host: str
+    imap_port: int
+    poll_seconds: int
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> "MailSettings":
+        return cls(
+            address=_required(environment, "MAIL_ADDRESS"),
+            secret=_required(environment, "MAIL_KEY"),
+            imap_host=_required(environment, "MAIL_IMAP_HOST"),
+            imap_port=_integer_in_range(environment, "MAIL_IMAP_PORT", 1, 65535),
+            poll_seconds=_positive_integer(environment, "ALX_MAIL_POLL_SECONDS", 15),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"MailSettings(address={self.address!r}, secret=<redacted>, "
+            f"imap_host={self.imap_host!r}, imap_port={self.imap_port!r}, "
+            f"poll_seconds={self.poll_seconds!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +281,9 @@ class RuntimeSettings:
                 ),
                 pronunciation_dictionary_version_id=_required(
                     environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID"
+                ),
+                speed=_number_in_range(
+                    environment, "ALX_TTS_SPEED", 0.7, 1.2, 1.0
                 ),
             ),
         )

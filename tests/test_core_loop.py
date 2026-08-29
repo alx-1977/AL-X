@@ -9,7 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import (  # noqa: E402
-    AgentDecision, CapabilityAttempt, CapabilityAttemptDisposition,
+    AgentDecision, ApprovalProposal, ApprovalScope,
+    CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityResult,
     CapabilityResultState, ConversationOrigin, ConversationSnapshot,
     ConversationTurn, DecisionValidationError, Evidence, GoalMutationKind,
@@ -191,12 +192,142 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(reasoner.contexts[1].active_goal.attempts, (attempt,))
         self.assertEqual(outcome.snapshot.state.status, GoalStatus.ACTIVE)
 
+    def test_read_only_tool_can_serve_ordinary_conversation_without_goal(self) -> None:
+        call = CapabilityCall("call-1", "inspect", {})
+        result = CapabilityResult("call-1", "inspect", CapabilityResultState.SUCCEEDED,
+                                  {"value": 7})
+        attempt = CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED,
+                                    True, result)
+        reasoner = Queued(
+            AgentDecision(call=call),
+            AgentDecision(response="I inspected it."),
+        )
+        outcome = self.agent(reasoner, lambda proposed, state: attempt).process(
+            conversation(), None, RETENTION, 2,
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "I inspected it.")
+        self.assertIsNone(outcome.snapshot)
+        self.assertIsNone(reasoner.contexts[1].active_goal)
+        self.assertEqual(reasoner.contexts[1].transient_attempts, (attempt,))
+        self.assertEqual(self.store.list_goals(), ())
+
+    def test_effectful_tool_still_requires_active_goal(self) -> None:
+        effectful = CapabilityDefinition(
+            "change", "Change structured material", SCHEMA, SCHEMA,
+            SideEffect.EFFECTFUL,
+        )
+        call = CapabilityCall("call-1", "change", {})
+        reasoner = Queued(AgentDecision(call=call))
+        agent = CoreAgent(self.store, reasoner, lambda proposed, state: None,
+                          (effectful,), clock=lambda: NOW)
+        outcome = agent.process(conversation(), None, RETENTION, 1)
+        self.assertEqual(outcome.reason, "active_goal_required")
+
+    def test_attention_state_tool_can_serve_ordinary_conversation(self) -> None:
+        attention = CapabilityDefinition(
+            "release_attention", "Release one attention item", SCHEMA, SCHEMA,
+            SideEffect.ATTENTION_STATE,
+        )
+        call = CapabilityCall("call-1", "release_attention", {})
+        result = CapabilityResult(
+            "call-1", "release_attention", CapabilityResultState.SUCCEEDED,
+            {"released": True},
+        )
+        attempt = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True, result,
+        )
+        reasoner = Queued(
+            AgentDecision(call=call),
+            AgentDecision(response="I released it from attention."),
+        )
+        agent = CoreAgent(
+            self.store, reasoner, lambda proposed, state: attempt, (attention,),
+            clock=lambda: NOW,
+        )
+        outcome = agent.process(conversation(), None, RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertIsNone(outcome.snapshot)
+        self.assertEqual(reasoner.contexts[1].transient_attempts, (attempt,))
+
+    def test_redundant_attention_approval_does_not_break_safe_call(self) -> None:
+        attention = CapabilityDefinition(
+            "release_attention", "Release one attention item", SCHEMA, SCHEMA,
+            SideEffect.ATTENTION_STATE,
+        )
+        proposed_call = CapabilityCall(
+            "call-1", "release_attention", {}, "approval-1"
+        )
+        issued = CapabilityCall("call-1", "release_attention", {})
+        result = CapabilityResult(
+            "call-1", "release_attention", CapabilityResultState.SUCCEEDED,
+            {"released": True},
+        )
+        attempt = CapabilityAttempt(
+            issued, CapabilityAttemptDisposition.EXECUTED, True, result,
+        )
+        reasoner = Queued(
+            AgentDecision(
+                call=proposed_call,
+                approval_proposal=ApprovalProposal(
+                    "approval-1",
+                    ApprovalScope("release_attention", {}),
+                    "turn:turn-1",
+                ),
+            ),
+            AgentDecision(response="I released it from attention."),
+        )
+
+        def dispatch(call, state):
+            self.assertEqual(call, issued)
+            self.assertIsNone(state)
+            return attempt
+
+        agent = CoreAgent(
+            self.store, reasoner, dispatch, (attention,), clock=lambda: NOW,
+        )
+        outcome = agent.process(conversation(), None, RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[1].transient_attempts, (attempt,))
+
     def test_provider_validation_error_is_not_retried(self) -> None:
         reasoner = Queued(DecisionValidationError("malformed"),
                           AssertionError("retry occurred"))
         outcome = self.agent(reasoner).process(conversation(), None, RETENTION, 3)
         self.assertEqual(outcome.reason, "reasoner_error")
         self.assertEqual(len(reasoner.contexts), 1)
+
+    def test_same_deterministic_rejection_cannot_loop_through_dispatch(self) -> None:
+        effectful = CapabilityDefinition(
+            "change", "Change structured material", SCHEMA, SCHEMA,
+            SideEffect.EFFECTFUL,
+        )
+        self.store.create(goal(), "conversation-1", RETENTION)
+        first = CapabilityCall("call-1", "change", {}, "approval-1")
+        repeated = CapabilityCall("call-2", "change", {}, "approval-1")
+        reasoner = Queued(
+            AgentDecision(call=first),
+            AgentDecision(call=repeated),
+            AssertionError("third model decision occurred"),
+        )
+        dispatches = []
+
+        def dispatch(call, state):
+            dispatches.append(call)
+            return CapabilityAttempt(
+                call,
+                CapabilityAttemptDisposition.REJECTED,
+                False,
+                reason_code="approval_invalid",
+            )
+
+        agent = CoreAgent(
+            self.store, reasoner, dispatch, (effectful,), clock=lambda: NOW,
+        )
+        outcome = agent.process(conversation(), "goal-1", RETENTION, 3)
+        self.assertEqual(outcome.reason, "repeated_rejected_call")
+        self.assertEqual(dispatches, [first])
+        self.assertEqual(len(reasoner.contexts), 2)
 
     def test_unresolved_dispatch_survives_restart_and_blocks_repeat(self) -> None:
         self.store.create(goal(), "conversation-1", RETENTION)

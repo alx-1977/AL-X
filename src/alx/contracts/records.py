@@ -92,13 +92,14 @@ class BackgroundEvent:
     kind: str
     occurred_at: datetime
     data: StructuredData = field(default_factory=dict)
+    transient_data: StructuredData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _required(self.event_id, "event_id")
         _required(self.kind, "kind")
         object.__setattr__(self, "data", freeze_data(self.data))
+        object.__setattr__(self, "transient_data", freeze_data(self.transient_data))
         _aware(self.occurred_at, "occurred_at")
-
 
 @dataclass(frozen=True, slots=True)
 class Objective:
@@ -211,12 +212,15 @@ class CapabilityResult:
     values: StructuredData = field(default_factory=dict)
     failure: StructuredData | None = None
     evidence_refs: tuple[str, ...] = ()
+    durable_values: StructuredData | None = None
 
     def __post_init__(self) -> None:
         _required(self.call_id, "call_id")
         _required(self.capability_id, "capability_id")
         object.__setattr__(self, "evidence_refs", _references(self.evidence_refs, "evidence references"))
         object.__setattr__(self, "values", freeze_data(self.values))
+        durable_values = self.values if self.durable_values is None else self.durable_values
+        object.__setattr__(self, "durable_values", freeze_data(durable_values))
         if self.failure is not None:
             object.__setattr__(self, "failure", freeze_data(self.failure))
         if self.state is CapabilityResultState.SUCCEEDED and self.failure is not None:
@@ -320,6 +324,19 @@ class Approval:
             and (self.expires_at is None or at <= self.expires_at)
             and self.scope.matches(call)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalProposal:
+    """An exact action approval grounded in the current person's durable turn."""
+
+    approval_id: str
+    scope: ApprovalScope
+    source_reference: str
+
+    def __post_init__(self) -> None:
+        _required(self.approval_id, "approval_id")
+        _required(self.source_reference, "source_reference")
 
 
 class GoalStatus(str, Enum):
