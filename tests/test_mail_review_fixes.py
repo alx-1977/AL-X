@@ -410,16 +410,16 @@ class EventDrivenGoalTests(unittest.TestCase):
 
 
 class TransientRetentionGapTests(unittest.TestCase):
-    """The similarity guard is gone and nothing replaces it yet.
+    """The similarity guard is gone; provenance is wired but not enforced.
 
     Six versions were attempted. Each either leaked when the content was
     fragmented or refused ordinary summaries; the last committed version did
     the latter, so it was actively preventing AL/X from describing a message.
 
     Provenance-based retention in docs/MAIL_RETENTION_PROPOSAL.md is the agreed
-    replacement is approved as D-013, but is not wired into the stores. These
-    tests record the gap honestly so its closure is deliberate rather than
-    assumed.
+    replacement, approved as D-013 and wired into new writes. These tests record
+    the remaining enforcement gap honestly so its closure is deliberate rather
+    than assumed.
     """
 
     def test_no_similarity_guard_remains_in_the_core(self) -> None:
@@ -429,22 +429,23 @@ class TransientRetentionGapTests(unittest.TestCase):
                         "_TRANSIENT_QUOTE_CHARACTERS", "_proposal_reproduces"):
             self.assertNotIn(removed, source)
 
-    def test_a_model_written_body_is_currently_unbounded(self) -> None:
+    def test_no_content_blocker_is_misrepresented_as_expiry_enforcement(self) -> None:
         """Recorded, not asserted as acceptable.
 
-        A body the Core writes into a goal persists for the configured goal
-        retention, which is not enforced by any scheduled purge. Retention will
-        bound this; it does not today.
+        A model-derived copy receives a deadline, but remains reachable because
+        no scheduled purge enforces it. A removed similarity guard is not a
+        substitute for that missing enforcement.
         """
         source = (Path(__file__).resolve().parents[1]
                   / "src/alx/core/loop.py").read_text("utf-8")
         self.assertNotIn("goal_reproduces_transient_content", source)
 
-    def test_the_replacement_design_records_the_unwired_runtime_gap(self) -> None:
+    def test_the_replacement_design_records_the_unenforced_expiry_gap(self) -> None:
         proposal = (Path(__file__).resolve().parents[1]
                     / "docs/MAIL_RETENTION_PROPOSAL.md").read_text("utf-8")
         self.assertIn("Policy approved as D-013", proposal)
-        self.assertIn("not wired into store schemas or write paths", proposal)
+        self.assertIn("Provenance now flows mechanically", proposal)
+        self.assertIn("No scheduled purge enforces those deadlines yet", proposal)
         self.assertIn("provenance", proposal.lower())
         # Raw bodies are still never automatically persisted by the provider.
         mail_tools = (Path(__file__).resolve().parents[1]

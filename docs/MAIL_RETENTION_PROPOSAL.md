@@ -1,8 +1,8 @@
 # Proposal: provenance-based mail retention
 
-**Status:** Policy approved as D-013 by Friedl on 2026-08-30. The
-non-destructive contracts and inventory are implemented; store migration,
-write-path wiring, scheduled deletion, and a first purge are **not** authorised.
+**Status:** Policy approved as D-013 by Friedl on 2026-08-30. Provenance is
+wired through the schemas and authoritative write paths for new records.
+Scheduled deletion and a first purge are **not** authorised or implemented.
 **Supersedes:** the transient-content similarity guard, which is abandoned.
 
 ## Why the previous approach failed
@@ -360,16 +360,14 @@ Nothing is deleted yet. Before any first purge:
 
 ## Decisions still required before activation
 
-Friedl approved D-013 and the non-destructive implementation. Still
+Friedl approved D-013, the schema migration, and write-path wiring. Still
 outstanding:
 
-1. **Authorisation for the schema migration and write-path wiring.** These
-   change designated stores but do not delete retained content.
-2. **Authorisation for scheduled deletion**, conditional on the revised design,
+1. **Authorisation for scheduled deletion**, conditional on the revised design,
    preview controls, failure reporting, tombstones, and tests existing first.
    Automatic destruction of durable state is a stronger act than the current
    Law 15 record describes, and warrants its own decision record.
-3. **Confirmation of the first purge**, after reviewing the dry-run inventory.
+2. **Confirmation of the first purge**, after reviewing the dry-run inventory.
 
 I would not proceed on any of these without a recorded decision.
 
@@ -390,13 +388,13 @@ I would not proceed on any of these without a recorded decision.
 
 ## Decisions this scope adds
 
-Beyond the three already outstanding:
+Beyond the two already outstanding:
 
-4. **Whether to pay for secure erasure.** Enabling `secure_delete` and running
+3. **Whether to pay for secure erasure.** Enabling `secure_delete` and running
    `VACUUM` after a purge narrows deletion from logical inaccessibility toward
    erasure, at a cost in time on every write and every purge. Verified today:
    deleted bytes remain in the database file without it.
-5. **What is relied upon at the model provider.** AL/X cannot delete anything
+4. **What is relied upon at the model provider.** AL/X cannot delete anything
    there. The commitment is to send a retention preference and record which
    provider setting is being trusted, which is disclosure rather than control.
 
@@ -406,9 +404,12 @@ The similarity guard has been removed from the runtime. Its last committed
 version blocked ordinary summaries of a short message, so it was preventing
 legitimate work rather than protecting anything.
 
-The provenance contracts and read-only inventory now replace the guard at the
-design boundary, but they are not wired into store schemas or write paths yet.
-Until that migration is separately authorised and implemented, a body the Core
-writes into a goal persists for the configured goal retention, and no scheduled
-purge enforces D-013. This remains a known, tested gap rather than a solved
-runtime protection.
+Provenance now flows mechanically from mail events and read results into new
+conversation turns, goal revisions, and memory revisions. Their independent
+thirty-day deadline survives restart and cannot be renewed by summarising or
+rewriting the record. Legacy rows remain unclassified rather than guessed.
+
+No scheduled purge enforces those deadlines yet. Content therefore remains
+physically present and application-reachable after its recorded deadline until
+deletion is separately authorised and implemented. This remaining gap is
+recorded and tested rather than described as completed retention.
