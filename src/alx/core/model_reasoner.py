@@ -51,6 +51,9 @@ capability call; cite that turn exactly. A response may depend on a goal commit 
 the response would become materially false or unsafe if that proposal were rejected.
 Approval fields apply only to capabilities whose side_effect is effectful. Calls whose
 side_effect is none or attention_state require null approval fields.
+You never need permission to ask a question. Ask whatever you want, whenever you
+want, as an ordinary response; the goal remains active and you can act on the
+answer on a later turn.
 An effectful capability call requires an active goal. If active_goal is null and you
 choose an effectful call, include a create goal mutation with a concise objective and
 explicit success criteria in the same decision. Do not create a goal merely for an
@@ -422,7 +425,17 @@ def decision_schema() -> dict[str, Any]:
     )
     goal_update = _strict_object(
         {
-            "operation": {"type": "string", "enum": [item.value for item in GoalMutationKind]},
+            # await_approval is deliberately absent. It demands a requested
+            # approval record that nothing creates, so choosing it always
+            # failed. Asking a question needs no goal status of its own: AL/X
+            # simply asks, and the goal stays active across the turn.
+            "operation": {
+                "type": "string",
+                "enum": [
+                    item.value for item in GoalMutationKind
+                    if item is not GoalMutationKind.AWAIT_APPROVAL
+                ],
+            },
             "objective_summary": nullable_string,
             "success_criteria": _nullable(_array({"id": string, "description": string})),
             "context_json": nullable_string,

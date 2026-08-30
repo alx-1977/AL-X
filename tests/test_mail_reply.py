@@ -301,3 +301,35 @@ class NoReplyWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AskingIsFreeTests(unittest.TestCase):
+    """AL/X never needs permission, or a goal status, to ask a question."""
+
+    def test_no_impossible_goal_mutation_is_offered_to_the_model(self) -> None:
+        """Regression: await_approval always failed, so choosing it was a trap.
+
+        It demanded a requested approval record that nothing in the Core
+        creates. AL/X selected it, was refused, retried, and the session ended.
+        """
+        from alx.contracts import GoalMutationKind
+        from alx.core.model_reasoner import decision_schema
+
+        schema = decision_schema()
+        rendered = str(schema)
+        self.assertNotIn(GoalMutationKind.AWAIT_APPROVAL.value, rendered)
+        # Every other mutation remains available; nothing else was narrowed.
+        for kind in GoalMutationKind:
+            if kind is not GoalMutationKind.AWAIT_APPROVAL:
+                self.assertIn(kind.value, rendered)
+
+    def test_the_model_is_told_that_asking_needs_no_permission(self) -> None:
+        source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
+        self.assertIn("never need permission to ask a question", source)
+
+    def test_asking_requires_no_scripted_sequence(self) -> None:
+        """Law 1 and 6: no step may be required before AL/X may speak."""
+        source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
+        for scripted in ("must first", "before asking", "only after",
+                         "step 1", "then ask"):
+            self.assertNotIn(scripted, source.lower())
