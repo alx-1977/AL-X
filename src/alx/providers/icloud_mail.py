@@ -235,17 +235,24 @@ class SQLiteMailObservationState:
                 )
 
     def current(self) -> BackgroundEvent | None:
+        """Return the one observation eligible for delivery.
+
+        A successfully delivered observation remains `presented` until the
+        Core releases it through a structured acknowledgement or Trash action.
+        While it is presented, later pending observations stay queued and do
+        not enter the conversation behind Friedl's back.
+        """
+        presented = self._connection.execute(
+            "SELECT 1 FROM mail_observations WHERE state = 'presented' LIMIT 1"
+        ).fetchone()
+        if presented is not None:
+            return None
         row = self._connection.execute(
             "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
             "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
             "WHERE state = 'current' ORDER BY uid LIMIT 1"
         ).fetchone()
         if row is None:
-            # A message already presented stays available as conversation
-            # context, but it does not hold back later mail. It is only ever
-            # cleared by acknowledging or trashing it, and a message answered
-            # in some other way would otherwise block every announcement after
-            # it for good.
             row = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
@@ -272,19 +279,12 @@ class SQLiteMailObservationState:
             provenance=provenance_from_storage(*row[4:]),
         )
 
-    # How many still-open messages remain available as conversation context.
-    # Every one announced but not yet acknowledged or trashed is a referent
-    # Friedl may mean, so more than one must be carried; the bound keeps the
-    # reasoning context from growing without limit.
+    # One new observation is presented at a time. The bound also keeps context
+    # safe if legacy state contains more than one already-presented observation.
     CONTEXTUAL_EVENT_LIMIT = 5
 
     def contextual_events(self) -> tuple[BackgroundEvent, ...]:
-        """Report the messages still open, most recently announced first.
-
-        The Core decides which one Friedl means. Returning only one would
-        silently choose for it, and choosing the oldest would answer about the
-        wrong message.
-        """
+        """Report the current or already-presented referents, newest first."""
         rows = self._connection.execute(
             "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
             "content_recorded_at, content_expires_at, mail_references FROM mail_observations "

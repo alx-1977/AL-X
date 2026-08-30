@@ -239,26 +239,21 @@ class MailProviderTests(unittest.TestCase):
         recovered = self.state.current()
         self.assertEqual(recovered.provenance.content_expires_at, deadline)
 
-    def test_every_open_message_stays_available_as_a_referent(self) -> None:
-        """Regression: only the oldest open message was carried as context.
-
-        Two messages were announced, AL/X was asked to reply to the second, and
-        she had the first in context instead, so she lost the address and the
-        details of the one she was answering.
-        """
+    def test_later_mail_stays_queued_until_the_presented_item_is_released(self) -> None:
         self.adapter.scan()
         self.imap.items[2] = message("Promotion", "Promo body")
         self.imap.items[3] = message("Parts order", "When do the parts arrive?")
         self.adapter.scan()
         first = self.state.current()
         self.adapter.record_delivery(first.event_id)
+        self.assertIsNone(self.state.current())
+        self.assertEqual(
+            [item.data["subject"] for item in self.adapter.contextual_events()],
+            ["Promotion"],
+        )
+        self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
         second = self.state.current()
-        self.adapter.record_delivery(second.event_id)
-        subjects = [item.data["subject"] for item in self.adapter.contextual_events()]
-        self.assertIn("Parts order", subjects)
-        self.assertIn("Promotion", subjects)
-        # Most recently announced first, so the newest is not buried.
-        self.assertEqual(subjects[0], "Parts order")
+        self.assertEqual(second.data["subject"], "Parts order")
 
     def test_contextual_events_stay_bounded(self) -> None:
         from alx.providers import SQLiteMailObservationState
@@ -277,13 +272,8 @@ class MailProviderTests(unittest.TestCase):
             SQLiteMailObservationState.CONTEXTUAL_EVENT_LIMIT,
         )
 
-    def test_delivered_item_stays_context_without_blocking_later_mail(self) -> None:
-        """One at a time, and a presented item remains the referent.
-
-        It must not hold back later mail for good. It is only cleared by
-        acknowledging or trashing it, so a message answered in some other way
-        would otherwise block every announcement after it permanently.
-        """
+    def test_delivered_item_stays_context_and_blocks_later_delivery(self) -> None:
+        """Delivery confirmation does not mean Friedl finished with the mail."""
         self.adapter.scan()
         self.imap.items[2] = message("First", "First body")
         self.imap.items[3] = message("Second", "Second body")
@@ -293,15 +283,60 @@ class MailProviderTests(unittest.TestCase):
         self.adapter.record_delivery(first.event_id)
         # Still the referent for "reply to that".
         self.assertEqual(self.adapter.contextual_events()[0].data["subject"], "First")
-        # And later mail is still reachable.
-        self.assertEqual(self.state.current().data["uid"], "3")
+        # The later item remains queued rather than being announced back-to-back.
+        self.assertIsNone(self.state.current())
         self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
-        self.assertEqual(self.adapter.contextual_events()[0].data["uid"], "3")
+        self.assertEqual(self.state.current().data["uid"], "3")
         retained = self.state._connection.execute(
             "SELECT event_json FROM mail_observations WHERE uid = 2"
         ).fetchone()[0]
         self.assertNotIn("subject", retained)
         self.assertNotIn("sender", retained)
+
+    def test_presented_item_still_blocks_after_restart(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("First", "First body")
+        self.imap.items[3] = message("Second", "Second body")
+        self.adapter.scan()
+        first = self.state.current()
+        self.adapter.record_delivery(first.event_id)
+        self.state.close()
+        self.state = SQLiteMailObservationState(self.path)
+        self.assertIsNone(self.state.current())
+        self.assertEqual(
+            self.state.contextual_events()[0].data["subject"], "First"
+        )
+        pending = self.state._connection.execute(
+            "SELECT COUNT(*) FROM mail_observations WHERE state = 'pending'"
+        ).fetchone()[0]
+        self.assertEqual(pending, 1)
+
+    def test_legacy_presented_item_blocks_an_already_current_later_item(self) -> None:
+        """Upgrading must not announce a pre-promoted item behind an open one."""
+        self.adapter.scan()
+        self.imap.items[2] = message("First", "First body")
+        self.imap.items[3] = message("Second", "Second body")
+        self.adapter.scan()
+        first = self.state.current()
+        self.adapter.record_delivery(first.event_id)
+        with self.state._connection:
+            self.state._connection.execute(
+                "UPDATE mail_observations SET state = 'current' WHERE uid = 3"
+            )
+        self.assertIsNone(self.state.current())
+        self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
+        self.assertEqual(self.state.current().data["subject"], "Second")
+
+    def test_successful_trash_releases_the_next_item(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("First", "First body")
+        self.imap.items[3] = message("Second", "Second body")
+        self.adapter.scan()
+        first = self.state.current()
+        self.adapter.record_delivery(first.event_id)
+        trash = self.adapter.move_to_trash(MailReference("INBOX", "777", "2"))
+        self.assertEqual(trash, "Deleted Messages")
+        self.assertEqual(self.state.current().data["subject"], "Second")
 
     def test_read_uses_peek_and_trash_is_discovered_then_moved(self) -> None:
         self.adapter.scan()
@@ -352,6 +387,10 @@ class MailPrimitiveTests(unittest.TestCase):
         self.assertEqual(
             definitions[ACKNOWLEDGE_MAIL_MESSAGE].side_effect.value,
             "attention_state",
+        )
+        self.assertIn(
+            "changes no mail item or Seen/Unseen state",
+            definitions[ACKNOWLEDGE_MAIL_MESSAGE].purpose,
         )
         self.assertEqual(
             definitions[MOVE_MAIL_MESSAGE_TO_TRASH].side_effect.value,

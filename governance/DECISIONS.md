@@ -199,3 +199,16 @@ This file records approved product and architecture decisions that guide impleme
 - **Not an exception:** This implements the retention and deletion controls Law 15 requires, and preserves Law 8 correctly: an unfinished goal continues, but private content does not gain indefinite life merely because a goal stays open. `governance/EXCEPTIONS.md` remains empty.
 
 - **Review condition:** To be revisited if thirty days proves wrong in daily use, if re-reading proves disruptive, if secure erasure is proposed, or if any mail-derived record is ever observed outliving its deadline.
+
+## D-014 — Mail attention is paced one item at a time
+
+- **Date:** 2026-08-30
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-08-30.** Friedl approved the pause-first recommendation before adding Seen/Unseen mutation, after discussing the distinction between replying, dismissing, and later mail.
+- **The rule, as Friedl approved it.** Once AL/X announces a mail item, later mail waits until that item is dealt with. Dismissing it, asking for the next item, or a confirmed successful reply releases it. A failed or uncertain reply does not. Moving it to Trash also releases it because the item has left the inbox.
+- **Why it is needed.** Announcing several messages back-to-back gives Friedl no natural space to answer and makes references such as “reply to that” ambiguous. The pause makes the current item stable across silence, other turns, and restarts.
+- **Mechanism.** Observation state, not conversational phrase matching, enforces the pause. A delivered observation remains presented and blocks promotion of pending observations until AL/X uses the existing structured local acknowledgement capability or a successful Trash action acknowledges it. The Core still interprets whether Friedl dismissed an item, completed a reply, or asked to move on; no frontend or mail adapter interprets his language.
+- **Batch handling.** Friedl may still ask AL/X to work through several messages. AL/X handles and releases them one at a time; each newly promoted event returns to the Core for evaluation rather than being hidden inside a fixed adapter workflow.
+- **Boundary.** Local acknowledgement changes attention state only. It does not mark a message Seen, alter flags, move it, delete it, or imply that Friedl has read it. This decision does not authorise the proposed Seen/Unseen behavior, which remains a separate production mutation decision.
+- **Not an exception:** This is deterministic observable behavior explicitly requested and approved under Laws 3 and 16. It does not create an exception to any Law. `governance/EXCEPTIONS.md` remains empty.
+- **Review condition:** Revisit if mail remains stuck after a successful reply, if queued items are announced before release, if batch handling becomes cumbersome, or when Seen/Unseen behavior is proposed for authorisation.

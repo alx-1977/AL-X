@@ -248,6 +248,12 @@ class ModelReasonerTests(unittest.TestCase):
             "Never claim that no later item exists merely because", protocol
         )
         self.assertIn("Use natural person-facing language", protocol)
+        self.assertIn("Mail attention is deliberately one item at a time", protocol)
+        self.assertIn("Do not release it after a failed or uncertain reply", protocol)
+        self.assertIn(
+            "Local acknowledgement changes\nneither Seen/Unseen state nor any mailbox content",
+            protocol,
+        )
         self.assertIn(
             "If active_goal is null and you\nchoose an effectful call, include a create goal",
             protocol,

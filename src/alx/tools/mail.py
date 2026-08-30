@@ -100,7 +100,7 @@ READ_DEFINITION = CapabilityDefinition(
 
 ACKNOWLEDGE_DEFINITION = CapabilityDefinition(
     ACKNOWLEDGE_MAIL_MESSAGE,
-    "Finish handling one current mail notification locally so a later notification can become current, without changing the mail item itself.",
+    "Release one current mail notification after it has been handled, dismissed, or explicitly skipped so a later notification can become current; this changes no mail item or Seen/Unseen state.",
     _input(),
     StructuredSchema(
         ValueKind.OBJECT,
