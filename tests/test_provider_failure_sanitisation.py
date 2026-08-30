@@ -14,9 +14,9 @@ check the object itself, not only its default rendering.
 
 from __future__ import annotations
 
-import logging
 import ssl
 import traceback
+from datetime import UTC, datetime, timedelta
 import unittest
 from typing import Any
 
@@ -324,9 +324,22 @@ class RuntimeLogsAreSanitisedTests(unittest.TestCase):
     Core records a type name and message and never a traceback.
     """
 
-    def test_a_failing_reasoning_request_logs_no_payload(self) -> None:
+    def test_a_mail_bearing_turn_that_fails_logs_no_payload(self) -> None:
+        """The real Core, a real mail body, a failing provider.
+
+        This drives `CoreAgent.process` rather than reproducing its handler,
+        so it keeps testing the boundary if that handler is ever rewritten.
+        """
+        import tempfile
+
+        from alx.core.loop import CoreAgent, CoreState
         from alx.core.model_reasoner import ModelReasoner
-        from alx.contracts import ReasoningContext
+        from alx.contracts import (
+            ConversationOrigin,
+            ConversationSnapshot,
+            ConversationTurn,
+        )
+        from alx.goals import SQLiteGoalStore
 
         class FailingModel:
             """Fails the way the adapters now do: a clean ProviderError."""
@@ -338,40 +351,111 @@ class RuntimeLogsAreSanitisedTests(unittest.TestCase):
                     code = type(error).__name__
                 raise_provider_failure("openai", code)
 
-        reasoner = ModelReasoner(FailingModel(), "laws", "identity")
-        context = ReasoningContext(
-            active_goal=None, turns=(), capabilities=(), conversation_id="c-1"
-        )
+        now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+        retention = now + timedelta(days=1)
+        with tempfile.TemporaryDirectory() as directory:
+            goals = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            core = CoreAgent(
+                goals,
+                ModelReasoner(FailingModel(), "laws", "identity"),
+                lambda call, state: None,
+                (),
+            )
+            conversation = ConversationSnapshot(
+                "conversation-1",
+                (
+                    ConversationTurn(
+                        "conversation-1",
+                        "turn-1",
+                        ConversationOrigin.SPEECH_TRANSCRIPT,
+                        f"Reply to the supplier who wrote: {SECRET}",
+                        now,
+                        "friedl",
+                    ),
+                ),
+                1,
+                retention,
+            )
 
-        with self.assertLogs("alx", level="DEBUG") as captured:
-            # The Core's handler shape: log the type and message, never a trace.
-            try:
-                reasoner.decide(context)
-            except Exception as error:  # noqa: BLE001 - mirrors CoreLoop
-                logging.getLogger("alx.core.loop").info(
-                    "Reasoner decision rejected: %s: %s", type(error).__name__, error
-                )
+            with self.assertLogs("alx", level="DEBUG") as captured:
+                outcome = core.process(conversation, None, retention, 3)
+
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "reasoner_error")
 
         logged = "\n".join(captured.output)
         self.assertNotIn(SECRET, logged)
         self.assertIn("ProviderError", logged)
         self.assertIn("openai provider failure: HTTPStatusError", logged)
 
-    def test_the_source_logs_no_tracebacks_at_all(self) -> None:
-        """No `exc_info`, `format_exc`, or `capture_locals` anywhere in AL/X.
+    def test_the_failing_outcome_carries_no_payload_either(self) -> None:
+        """A diagnostic event returned to the caller is a route too."""
+        import tempfile
 
-        The frame-locals exposure is only reachable through diagnostics AL/X
-        does not produce. If that ever changes, this fails and the boundary
-        must be reconsidered.
+        from alx.core.loop import CoreAgent
+        from alx.core.model_reasoner import ModelReasoner
+        from alx.contracts import (
+            ConversationOrigin,
+            ConversationSnapshot,
+            ConversationTurn,
+        )
+        from alx.goals import SQLiteGoalStore
+
+        class FailingModel:
+            def complete(self, request: Any) -> Any:
+                try:
+                    raise _payload_bearing_error()
+                except httpx.HTTPError as error:
+                    code = type(error).__name__
+                raise_provider_failure("openai", code)
+
+        now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+        retention = now + timedelta(days=1)
+        with tempfile.TemporaryDirectory() as directory:
+            goals = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            core = CoreAgent(
+                goals,
+                ModelReasoner(FailingModel(), "laws", "identity"),
+                lambda call, state: None,
+                (),
+            )
+            conversation = ConversationSnapshot(
+                "conversation-1",
+                (
+                    ConversationTurn(
+                        "conversation-1",
+                        "turn-1",
+                        ConversationOrigin.SPEECH_TRANSCRIPT,
+                        f"Reply to the supplier who wrote: {SECRET}",
+                        now,
+                        "friedl",
+                    ),
+                ),
+                1,
+                retention,
+            )
+            with self.assertLogs("alx", level="DEBUG"):
+                outcome = core.process(conversation, None, retention, 3)
+
+        self.assertNotIn(SECRET, repr(outcome))
+
+    def test_the_boundary_is_enforced_by_the_architecture_gate(self) -> None:
+        """Promise 3 of D-012 is a build gate, not a substring scan here.
+
+        `scripts/check_architecture.py` parses the source and rejects every
+        prohibited diagnostic route; `tests/test_architecture_gates.py` proves
+        it rejects each one. This asserts the live source satisfies it.
         """
-        source_root = Path(__file__).resolve().parents[1] / "src"
-        offenders = []
-        for path in source_root.rglob("*.py"):
-            body = path.read_text(encoding="utf-8")
-            for marker in ("exc_info", "format_exc", "print_exc", "capture_locals"):
-                if marker in body:
-                    offenders.append(f"{path.relative_to(source_root)}: {marker}")
+        from scripts.check_architecture import check_source, load_rules
+
+        root = Path(__file__).resolve().parents[1]
+        offenders = [
+            violation.render()
+            for violation in check_source(root, load_rules(root))
+            if "prohibited diagnostic" in violation.message
+        ]
         self.assertEqual(offenders, [])
+
 
 def _capture(call: Any) -> ProviderError:
     """Run `call` and return the failure with its traceback still attached.

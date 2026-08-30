@@ -211,13 +211,20 @@ rather than implying protection it has not built.
      `__cause__`, no `__context__`, no reachable `request.content`.
   2. **Guaranteed:** ordinary diagnostics stay clean. `format_exception` and
      anything AL/X logs render only a provider name and an error code.
-  3. **Guaranteed by convention, enforced by test:** AL/X produces no
-     tracebacks. A test scans the source for `exc_info`, `format_exc`,
-     `print_exc`, and `capture_locals`, and fails if any appears.
-  4. **Prohibited, not prevented:** exporting a locals-capturing traceback from
-     a payload-carrying path. Nothing in the code can stop an operator or a
-     future error-reporting integration doing this, so it is a rule, and adding
-     such an integration reopens the question.
+  3. **Enforced by the architecture gate.** AL/X produces no tracebacks and
+     calls no error-reporting sink. `scripts/check_architecture.py` parses the
+     source and rejects traceback rendering and frame extraction, `exc_info`,
+     `stack_info` and `capture_locals`, `logger.exception`, assignment to
+     `sys.excepthook`, and sinks such as `capture_exception` and
+     `record_exception`. Gate tests prove each route is rejected.
+  4. **Prohibited by rule, not prevented by code:** exporting a
+     locals-capturing traceback from a payload-carrying path. Nothing can stop
+     an operator running a debugger. Adding an error-reporting or observability
+     integration that receives exception state requires separate privacy review
+     and Friedl's approval.
+
+  This boundary is recorded as governance decision **D-012**, which governs
+  every private payload AL/X processes, not mail alone.
 - **Deletion meaning:** logs rotate by the operator's arrangement; AL/X does
   not manage them.
 - **Configured and tested:** tests assert the first three promises, and two

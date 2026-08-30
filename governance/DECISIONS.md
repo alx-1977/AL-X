@@ -129,3 +129,24 @@ This file records approved product and architecture decisions that guide impleme
 - **Boundary:** This authorises replying only. It does not authorise composing new correspondence, forwarding, attachments, contact lookup beyond addresses observed on the message being answered, or any mailbox mutation beyond the recoverable Trash already authorised in D-010.
 - **Not an exception:** This is a deployment authorisation under Law 19, not an exception to any Law. `governance/EXCEPTIONS.md` remains empty.
 - **Review condition:** To be revisited if the approval mechanism changes, if any message is ever sent without a matching approval, if per-reply approval proves unworkable in daily use and a bounded standing authority is proposed, or if sending beyond replies is proposed.
+
+## D-012 — Diagnostics privacy boundary
+
+- **Date:** 2026-08-30
+- **Decision owner:** Friedl
+- **Decision:** AL/X runtime diagnostics may contain only structured, explicitly selected operational facts such as sanitised codes, identifiers and durations. They may not export exception objects, traceback frames, captured locals, provider request or response objects, credentials, raw user language, domain-document content, or other payload-bearing runtime state.
+
+  Provider failures must shed their underlying request through both `__cause__` and `__context__`. Runtime handlers log sanitised structured failures without tracebacks.
+
+  Adding an error-reporting, crash-reporting or observability integration that receives exception state requires a separate privacy review and Friedl's approval before production use.
+- **Scope:** System-wide. This is not a mail-specific rule. It applies to every private payload AL/X processes: mail bodies, Friedl's speech and its transcription, AL/X's own responses, goal and memory content, and any domain document a future capability handles.
+- **Why it is needed:** The provider adapters chained the underlying HTTP exception onto every failure, so a mail body sent for reasoning stayed reachable on an object that travels up through the Core. Fixing that revealed the larger point: the exception chain was one route among several, and nothing recorded which routes were closed, which were merely unused, and which could be reopened by adding a dependency.
+- **What is guaranteed, and what is not.** These are separate promises and are recorded separately because conflating them produced two successive overclaims:
+  1. **Guaranteed by construction.** A provider failure retains no request. `__cause__` and `__context__` are severed by raising after the handler exits, where there is no active exception to attach. `raise ... from None` is insufficient and is prohibited for this purpose: it clears `__cause__` but the interpreter still records `__context__`.
+  2. **Guaranteed by construction.** Ordinary diagnostics stay clean. `format_exception` and every log AL/X writes render a provider name and an error code only.
+  3. **Enforced by the architecture gate.** AL/X produces no tracebacks and calls no error-reporting sink. `scripts/check_architecture.py` fails the build if the source acquires one.
+  4. **Prohibited by rule, not prevented by code.** Exporting a locals-capturing traceback from a payload-carrying path. Nothing in the code can stop an operator running a debugger or a future integration doing this.
+- **Known limit, recorded honestly.** Severing the exception chain does not empty the stack. A traceback built with `capture_locals=True` walks every frame, and any frame processing a mail body still holds it. Clearing the adapter's own locals would not close this, because the calling Core frame holds the same content independently; a test demonstrates that. Diagnostics capturing locals cannot be made safe at the provider boundary for a stack that is by design processing private material. Promise 3 is what protects the frames, and it holds only while AL/X emits no such diagnostics.
+- **Boundary:** This governs diagnostics and failure handling. It does not authorise or alter retention, deletion, or any mutation, and it makes no promise about what a model provider retains at its own end.
+- **Not an exception:** This is a privacy boundary consistent with Law 15's retention controls, not an exception to any Law. `governance/EXCEPTIONS.md` remains empty.
+- **Review condition:** To be revisited if an error-reporting, crash-reporting or observability integration is proposed, if the architecture gate's prohibited list is changed, or if any payload is ever observed in a diagnostic.
