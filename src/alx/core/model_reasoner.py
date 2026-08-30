@@ -395,7 +395,19 @@ def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
 def decision_schema() -> dict[str, Any]:
     string = {"type": "string"}
     nullable_string = {"type": ["string", "null"]}
-    progress = {"id": string, "summary": string, "evidence_refs": {"type": "array", "items": string}}
+    progress = {
+        "id": string,
+        "summary": string,
+        "evidence_refs": {
+            "type": "array",
+            "items": string,
+            "description": (
+                "Identifiers of evidence items supporting this record. Each must "
+                "already exist in the goal's evidence or be created as new_evidence "
+                "in this same mutation. Empty if the record rests on no evidence."
+            ),
+        },
+    }
     memory_common = {
         "id": string,
         "content": string,
@@ -468,7 +480,15 @@ def decision_schema() -> dict[str, Any]:
                             "or progress identifier. Empty if it proves none."
                         ),
                     },
-                    "source_references": {"type": "array", "items": string},
+                    "source_references": {
+                        "type": "array",
+                        "items": string,
+                        "description": (
+                            "Where this evidence came from, using an available "
+                            "durable reference exactly as supplied: turn:<id>, "
+                            "event:<id>, or attempt:<call_id>."
+                        ),
+                    },
                 }
             ),
         }

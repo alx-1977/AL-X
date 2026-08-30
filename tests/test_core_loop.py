@@ -213,16 +213,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.store.list_goals(), ())
 
     def test_effectful_tool_still_requires_active_goal(self) -> None:
+        """It is refused and never dispatched, but the turn continues.
+
+        Ending the conversation as well would make one rejected goal proposal
+        cost the whole session while changing nothing about what may act.
+        """
         effectful = CapabilityDefinition(
             "change", "Change structured material", SCHEMA, SCHEMA,
             SideEffect.EFFECTFUL,
         )
         call = CapabilityCall("call-1", "change", {})
-        reasoner = Queued(AgentDecision(call=call))
-        agent = CoreAgent(self.store, reasoner, lambda proposed, state: None,
-                          (effectful,), clock=lambda: NOW)
-        outcome = agent.process(conversation(), None, RETENTION, 1)
-        self.assertEqual(outcome.reason, "active_goal_required")
+        dispatched = []
+
+        def dispatch(proposed, state):
+            dispatched.append(proposed)
+            raise AssertionError("an effectful call must not act without a goal")
+
+        reasoner = Queued(
+            AgentDecision(call=call),
+            AgentDecision(response="I cannot do that without a goal."),
+        )
+        agent = CoreAgent(self.store, reasoner, dispatch, (effectful,), clock=lambda: NOW)
+        outcome = agent.process(conversation(), None, RETENTION, 2)
+        self.assertEqual(dispatched, [], "nothing may act without an active goal")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        refused = reasoner.contexts[1].transient_attempts
+        self.assertEqual(refused[0].reason_code, "active_goal_required")
+        self.assertEqual(self.store.list_goals(), ())
 
     def test_attention_state_tool_can_serve_ordinary_conversation(self) -> None:
         attention = CapabilityDefinition(

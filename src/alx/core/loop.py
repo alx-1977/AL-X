@@ -209,7 +209,24 @@ class CoreAgent:
                     SideEffect.NONE,
                     SideEffect.ATTENTION_STATE,
                 ):
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="active_goal_required")
+                    # An effectful call still needs an active goal, so it is
+                    # refused. Ending the conversation as well would make a
+                    # rejected goal proposal cost the whole session while
+                    # changing nothing about what may act.
+                    LOGGER.info(
+                        "Effectful call refused without an active goal: %s",
+                        decision.call.capability_id,
+                    )
+                    transient_attempts = (
+                        *transient_attempts,
+                        CapabilityAttempt(
+                            decision.call,
+                            CapabilityAttemptDisposition.REJECTED,
+                            False,
+                            reason_code="active_goal_required",
+                        ),
+                    )
+                    continue
                 if any(item.call is not None and item.call.call_id == decision.call.call_id
                        for item in transient_attempts):
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
