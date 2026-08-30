@@ -216,7 +216,10 @@ rather than implying protection it has not built.
      source and rejects traceback rendering and frame extraction, `exc_info`,
      `stack_info` and `capture_locals`, `logger.exception`, assignment to
      `sys.excepthook`, and sinks such as `capture_exception` and
-     `record_exception`. Gate tests prove each route is rejected.
+     `record_exception`. Gate tests prove each route is rejected. The gate
+     matches names, not meaning: a sink named `report_failure(error)` would
+     pass it, so this raises the cost of adding one accidentally rather than
+     making it impossible.
   4. **Prohibited by rule, not prevented by code:** exporting a
      locals-capturing traceback from a payload-carrying path. Nothing can stop
      an operator running a debugger. Adding an error-reporting or observability

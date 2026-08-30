@@ -134,6 +134,12 @@ This file records approved product and architecture decisions that guide impleme
 
 - **Date:** 2026-08-30
 - **Decision owner:** Friedl
+- **Status: PROPOSED — awaiting Friedl's explicit approval.** Recorded here so
+  the wording is reviewable, not because approval has been given. The wording
+  originated as a reviewer's recommendation; a reviewer cannot approve a
+  decision under Law 16. Until Friedl approves it in his own words, this
+  section is a proposal and the enforcement built against it stands on the
+  defect fix alone.
 - **Decision:** AL/X runtime diagnostics may contain only structured, explicitly selected operational facts such as sanitised codes, identifiers and durations. They may not export exception objects, traceback frames, captured locals, provider request or response objects, credentials, raw user language, domain-document content, or other payload-bearing runtime state.
 
   Provider failures must shed their underlying request through both `__cause__` and `__context__`. Runtime handlers log sanitised structured failures without tracebacks.
@@ -144,7 +150,9 @@ This file records approved product and architecture decisions that guide impleme
 - **What is guaranteed, and what is not.** These are separate promises and are recorded separately because conflating them produced two successive overclaims:
   1. **Guaranteed by construction.** A provider failure retains no request. `__cause__` and `__context__` are severed by raising after the handler exits, where there is no active exception to attach. `raise ... from None` is insufficient and is prohibited for this purpose: it clears `__cause__` but the interpreter still records `__context__`.
   2. **Guaranteed by construction.** Ordinary diagnostics stay clean. `format_exception` and every log AL/X writes render a provider name and an error code only.
-  3. **Enforced by the architecture gate.** AL/X produces no tracebacks and calls no error-reporting sink. `scripts/check_architecture.py` fails the build if the source acquires one.
+  3. **Enforced by the architecture gate, within a stated limit.** `scripts/check_architecture.py` parses the source and rejects the diagnostic routes it knows: traceback rendering and frame extraction, `exc_info`, `stack_info` and `capture_locals`, `logger.exception`, assignment to `sys.excepthook`, and sinks named `capture_exception`, `record_exception` and similar. Gate tests prove each is rejected.
+
+     **The gate matches names, not meaning.** It cannot recognise every possible error-reporting API. A sink named `report_failure(error)` would pass it. The gate raises the cost of adding one accidentally; it does not make it impossible. This is why promise 4 below is not redundant, and why the separate-review requirement is the actual control rather than a formality.
   4. **Prohibited by rule, not prevented by code.** Exporting a locals-capturing traceback from a payload-carrying path. Nothing in the code can stop an operator running a debugger or a future integration doing this.
 - **Known limit, recorded honestly.** Severing the exception chain does not empty the stack. A traceback built with `capture_locals=True` walks every frame, and any frame processing a mail body still holds it. Clearing the adapter's own locals would not close this, because the calling Core frame holds the same content independently; a test demonstrates that. Diagnostics capturing locals cannot be made safe at the provider boundary for a stack that is by design processing private material. Promise 3 is what protects the frames, and it holds only while AL/X emits no such diagnostics.
 - **Boundary:** This governs diagnostics and failure handling. It does not authorise or alter retention, deletion, or any mutation, and it makes no promise about what a model provider retains at its own end.

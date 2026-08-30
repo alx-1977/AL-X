@@ -354,9 +354,10 @@ class RuntimeLogsAreSanitisedTests(unittest.TestCase):
         now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
         retention = now + timedelta(days=1)
         with tempfile.TemporaryDirectory() as directory:
-            goals = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            self.addCleanup(store.close)
             core = CoreAgent(
-                goals,
+                store,
                 ModelReasoner(FailingModel(), "laws", "identity"),
                 lambda call, state: None,
                 (),
@@ -412,9 +413,10 @@ class RuntimeLogsAreSanitisedTests(unittest.TestCase):
         now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
         retention = now + timedelta(days=1)
         with tempfile.TemporaryDirectory() as directory:
-            goals = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            self.addCleanup(store.close)
             core = CoreAgent(
-                goals,
+                store,
                 ModelReasoner(FailingModel(), "laws", "identity"),
                 lambda call, state: None,
                 (),
