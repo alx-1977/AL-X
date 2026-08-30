@@ -334,6 +334,58 @@ class TransientContentTests(unittest.TestCase):
             )
         )
 
+    def test_stating_a_fact_the_message_contains_is_permitted(self) -> None:
+        """A price or a date cannot be conveyed without repeating characters.
+
+        Judging by an absolute character count refused a genuine summary,
+        because a shared phrase such as a quoted amount is unavoidable. What
+        distinguishes copying from describing is how much of the message is
+        reproduced, not whether any run is shared.
+        """
+        from alx.core.loop import CoreAgent
+
+        body = (
+            "Hi Friedl, thanks for waiting. Revision B is quoted at R14 500 for "
+            "25 units with a ten working day lead time. Let me know if that "
+            "works. Regards, Jan"
+        )
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW, data={"uid": "1"},
+            transient_data={"body_text": body},
+        )
+        with_body = conversation("what did Jan say?", events=(event,))
+        for summary in (
+            "Jan quoted revision B at R14 500 for 25 units, ten day lead time.",
+            "Jan came back with a quote and a lead time.",
+            "The quote is R14 500.",
+        ):
+            with self.subTest(summary=summary):
+                self.assertFalse(
+                    CoreAgent._reproduces_transient_content(with_body, {"v": summary})
+                )
+
+    def test_reproducing_most_of_the_message_is_still_refused(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        body = (
+            "Hi Friedl, thanks for waiting. Revision B is quoted at R14 500 for "
+            "25 units with a ten working day lead time. Let me know if that "
+            "works. Regards, Jan"
+        )
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW, data={"uid": "1"},
+            transient_data={"body_text": body},
+        )
+        with_body = conversation("what did Jan say?", events=(event,))
+        for label, text in (
+            ("half the message", body[: len(body) // 2]),
+            ("the whole message", body),
+        ):
+            with self.subTest(case=label):
+                self.assertTrue(
+                    CoreAgent._reproduces_transient_content(with_body, {"v": text})
+                )
+
     def test_the_core_may_still_describe_the_message_in_its_own_words(self) -> None:
         """The guard must not block legitimate summarisation."""
         reasoner = Queued(AgentDecision(

@@ -537,6 +537,11 @@ class CoreAgent:
     # turn of phrase. Fragments at least this long are counted toward the total
     # the records reproduce between them.
     _TRANSIENT_FRAGMENT_CHARACTERS = 12
+    # How much of a message must be reproduced before it counts as copied
+    # rather than described. Measured against real text: a summary that states
+    # the facts reproduces roughly a quarter of the source, while a verbatim
+    # copy of half the message reproduces half of it.
+    _TRANSIENT_COVERAGE_FRACTION = 0.45
 
     @classmethod
     def _transient_texts(cls, conversation: ConversationSnapshot) -> tuple[str, ...]:
@@ -610,14 +615,27 @@ class CoreAgent:
             # are considered together and every position of the source that any
             # record reproduces is counted once.
             covered = set()
-            for candidate in candidates:
-                for start in range(len(source)):
-                    end = start
-                    while end < len(source) and source[start:end + 1] in candidate:
+            position = 0
+            while position < len(source):
+                longest = 0
+                for candidate in candidates:
+                    end = position
+                    while end < len(source) and source[position:end + 1] in candidate:
                         end += 1
-                    if end - start >= cls._TRANSIENT_FRAGMENT_CHARACTERS:
-                        covered.update(range(start, end))
-            if len(covered) >= window:
+                    longest = max(longest, end - position)
+                if longest >= cls._TRANSIENT_FRAGMENT_CHARACTERS:
+                    covered.update(range(position, position + longest))
+                    position += longest
+                    continue
+                position += 1
+            # Judge by proportion, not a character count. Stating a fact the
+            # message contains, such as a price or a date, necessarily repeats
+            # some of its characters, and a long message would otherwise be
+            # refused for a single shared phrase. Reproducing most of the
+            # message is what distinguishes copying it from describing it.
+            if len(covered) >= max(
+                window, int(len(source) * cls._TRANSIENT_COVERAGE_FRACTION)
+            ):
                 return True
         return False
 
