@@ -1,162 +1,176 @@
 # Proposal: provenance-based mail retention
 
-**Status:** Proposal for Friedl's decision. No code implements this.
+**Status:** Direction approved by Friedl on 2026-08-30. Implementation and
+deletion are **not** authorised. This is the revised design for his decision.
 **Supersedes:** the transient-content similarity guard, which is abandoned.
 
-## Why the current approach failed
+## Why the previous approach failed
 
 The guard tried to detect whether durable text *resembled* a mail body, using
-string similarity. It was attempted six times. Every version was either
-defeated by fragmenting the text, or refused ordinary summaries. Both failures
-were found by review, twice after I had claimed the boundary was closed.
+string similarity. Six versions were attempted. Each was either defeated by
+fragmenting the text or refused ordinary summaries, and twice I claimed the
+boundary was closed when it was not.
 
-The reason is not a tuning error. A faithful one-line summary of a short
-message legitimately shares long runs with it, while a leak can be split into
-single characters. No threshold admits the first and rejects the second.
-Similarity cannot distinguish *describing* from *copying*.
+The cause is not tuning. A faithful summary of a short message legitimately
+shares long runs with it, while a leak can be split into single characters. No
+threshold admits the first and rejects the second.
 
-Two facts make the guard beside the point anyway:
+## What is actually true today, verified
 
-- **`retention_until` is recorded but never enforced.** No scheduled deletion
-  exists in any store. Nothing has ever expired.
-- **The conversation store already holds mail content.** Of 60 retained AL/X
-  responses on this machine, 45 mention mail; they are kept indefinitely and
-  the guard never applied to them.
+- `purge_expired` exists in the goal, conversation, and memory stores, and is
+  covered by tests, but **no runtime code calls it**. Only tests do.
+- Memory retrieval **does** exclude expired records (`retention_until > as_of`),
+  so retention is not entirely decorative. Physical deletion never happens.
+- Goals and conversations load expired records normally.
+- Conversation retention is **one timestamp for the whole conversation**,
+  renewed whenever any turn is appended. In an active conversation, old mail
+  turns effectively never expire.
+- Deleting a turn today would break references: evidence citing `turn:<id>`
+  fails `evidence_source_unknown`, and memory fails `source_reference_unknown`.
 
-So the guard policed one door while the content walked through another, into
-storage with no expiry.
+That last point is why tombstones are a correctness requirement, not a nicety.
 
-## The proposal in one sentence
+## The honest guarantee
 
-Stop trying to detect mail content, and instead give everything derived from
-mail a recorded provenance and an explicit lifetime, so it expires on its own
-unless Friedl decides otherwise.
+An earlier draft said bodies are "never written" and later admitted the Core
+may copy one into a goal. Both cannot be true. The guarantee is:
 
-## What changes
+> **Provider-supplied raw bodies are never automatically persisted.**
+> **Model-derived copies are bounded by provenance retention, not prevented.**
 
-### 1. Raw bodies stay transient and are re-read on demand
+If Friedl wants model-derived copies prevented outright rather than bounded,
+that is a different and harder decision, and this proposal does not deliver it.
 
-A body reaches the Core to be reasoned about and is never written to a store.
-When AL/X needs it again she re-reads it by `MailReference`, exactly as she does
-today. This is already true of the read path; the proposal keeps it and stops
-building around it.
+## Design
 
-**Consequence:** if the message is gone, the body is gone. That is the point.
+### 1. Provenance is mechanical, never judged
 
-### 2. Long-lived goals carry references and structured state, not prose
+Any record produced during a reasoning turn whose context included
+mail-derived content inherits mail provenance. This is propagation, not
+classification: no keyword, model judgement, or content matcher decides it.
 
-A goal about a message keeps the `MailReference`, the participants, the
-threading identifiers, the actions attempted and their outcomes. It does not
-keep a free-text retelling of the message as its objective or progress.
+Over-tagging is deliberate. A record wrongly tagged expires earlier than it
+needed to; a record wrongly untagged persists private content indefinitely.
+The first is a nuisance, the second is the failure this replaces.
 
-AL/X may still describe the message in conversation. The distinction is between
-what she *says* and what the goal *stores* as its durable record.
+### 2. Retention is per record and per turn
 
-### 3. Everything mail-derived carries provenance and a lifetime
+Each conversation turn carries its own provenance and expiry, rather than one
+timestamp for the conversation. Expiring a conversation wholesale would delete
+unrelated context, and the current renew-on-append behaviour means mail turns
+in an active conversation never expire at all.
 
-Each record that exists because of a message is marked as such and given a
-retention period, configurable and separate from ordinary goal retention:
+### 3. Active goals never expire
 
-| What | Suggested lifetime | Why |
-| --- | --- | --- |
-| Raw body | never stored | re-read on demand |
-| Conversation turns mentioning a message | short, days | AL/X's own words, but about private content |
-| Draft reply artifact | until sent, refused, or abandoned | it exists only to be approved |
-| Approval record scope | until consumed or expired | already ten minutes by D-011 |
-| Goal referencing a message | medium, weeks | the work outlives the message |
-| Memory formed from a message | **only with Friedl's approval** | this is the one that should outlive |
+Law 8 requires an unfinished goal to continue. An active mail goal keeps its
+reference and structured work state until it completes, is cancelled, or is
+genuinely blocked. Sensitive prose inside it may expire; the goal itself may
+not silently disappear.
 
-The numbers are placeholders. Choosing them is Friedl's decision, not mine.
+Retention begins when the goal becomes terminal.
 
-### 4. Draft and approval artifacts expire on use
+### 4. Expired content leaves a tombstone
 
-An approved send binds to exact arguments including the body. Once consumed,
-refused, or expired, that exact artifact is deleted rather than left in goal
-state. The evidence that a send happened is kept: identifiers, recipients,
-timestamp, outcome. The wording is not.
+Removing a turn must not orphan the records that cite it. A tombstone retains
+the identifier, timestamp, provenance, and deletion reason, and deletes the
+content. References resolve; the content is gone.
 
-### 5. Long-term promotion is an explicit decision
+Without this, purging breaks goal evidence and memory grounding, as verified
+above.
 
-Anything mail-derived that AL/X judges worth keeping beyond its lifetime is
-proposed to Friedl and kept only if he agrees. Nothing promotes itself, and no
-threshold or score decides it. This is the Law 15 inspection and correction
-control made real rather than nominal.
+### 5. Purging is reliable and inspectable
+
+- runs at startup and periodically;
+- idempotent, so a repeated run is harmless;
+- reports failures rather than skipping silently;
+- can be asked what *would* expire, without deleting anything.
+
+A purge that silently fails is worse than none, because the retention would
+then be believed rather than merely absent.
+
+## Retention periods
+
+Friedl's proposed defaults, recorded for approval:
+
+| Category | Retention |
+| --- | --- |
+| Provider-supplied raw body | never automatically stored; re-read by reference |
+| Mail-derived conversation turn | 30 days, per turn |
+| Draft and approval wording | 10 minutes, or immediately on send, refusal, or abandonment |
+| Active mail goal | no expiry; reference and structured state only |
+| Terminal mail goal | 90 days after completion or cancellation |
+| Non-content audit facts | normal system retention |
+| Mail-derived memory | outlives its source only with Friedl's explicit approval, showing exactly what would be retained; thereafter normal memory policy, inspectable and deletable |
 
 ## Restart and continuity
-
-The concern with removing stored bodies is that AL/X forgets what she was doing.
-She does not, provided she can re-read.
 
 Required evidence before this is accepted:
 
 - an unfinished mail goal survives a restart and AL/X resumes it by re-reading
   the referenced message;
-- she resumes without the body having been stored anywhere;
+- she resumes without the body having been persisted anywhere;
 - expiry of the conversational text does not orphan the goal;
-- a goal whose message has been deleted is resumable as a goal, with the message
-  reported as unavailable rather than invented.
+- a goal whose message was deleted remains resumable, with the message reported
+  unavailable rather than invented;
+- a tombstoned turn still satisfies the references that cite it.
 
 ## Deletion and unavailable messages
 
-These must be explicit, because they will happen routinely.
+- **Friedl deletes the message.** On re-read AL/X reports it unavailable and
+  says so plainly. She does not reconstruct it from her earlier description.
+- **The message moves.** `UIDVALIDITY` or the identifier changes; the existing
+  `identifier_stale` failure applies and must not be retried against a
+  different message.
+- **Conversational text expired, goal remains.** She re-reads for detail, or
+  reports that she cannot.
+- **Memory outlives the message.** Only where Friedl approved the promotion.
 
-- **Friedl deletes the message.** The reference remains valid until the mailbox
-  is re-read. On re-read, AL/X reports it as unavailable and says so plainly.
-  She does not reconstruct it from memory or from her earlier description.
-- **The message is moved.** `UIDVALIDITY` or the identifier changes. The
-  existing `identifier_stale` failure already covers this and must not be
-  silently retried against a different message.
-- **Retention removes the conversational text but the goal remains.** She
-  re-reads to recover detail, or reports that she cannot.
-- **A memory outlives the message.** Permitted only where Friedl approved the
-  promotion, and it must remain inspectable and deletable by him.
+## Migration of content already retained
+
+Nothing is deleted yet. Before any first purge:
+
+1. Apply provenance retroactively to existing records.
+2. Produce a **dry-run inventory** showing exactly what would be removed,
+   including the retained AL/X responses that mention mail.
+3. Friedl reviews that inventory.
+4. Only then is a first purge authorised, and only with his confirmation.
 
 ## Trade-offs, stated plainly
 
 **In favour**
 
-- Solves the actual problem. Content expires because it is mail-derived, not
-  because a matcher recognised it.
-- No false positives. AL/X can summarise, draft, and describe freely.
-- Removes a guard I have got wrong six times.
-- Makes `retention_until` mean something. Today it is decorative.
+- Addresses the cause rather than detecting the symptom.
+- No false positives: AL/X may summarise, draft, and describe freely.
+- Makes retention real. Today only memory retrieval honours it.
+- Removes a guard that was wrong six times.
 
 **Against**
 
-- **AL/X will forget things.** A conversation from three weeks ago about an
-  email may be gone. That is the intended behaviour and it is a real loss.
-- **Re-reading costs time and can fail.** A message deleted since is
-  unrecoverable, where a stored copy would have survived. This is a deliberate
-  privacy-over-continuity choice.
-- **More moving parts than a guard.** Provenance marking, scheduled deletion,
-  and a promotion path are more code than a matcher, and each can be wrong.
-- **Deletion must be reliable.** A purge that silently fails is worse than
-  today, because the retention would then be believed rather than merely absent.
-- **It does not stop the Core writing a body into a goal.** It bounds how long
-  that survives. If Friedl wants that prevented outright, that is a different
-  and harder decision.
+- **AL/X will forget things.** A conversation from a month ago about an email
+  will be gone. Intended, and a real loss.
+- **Re-reading can fail.** A message deleted since is unrecoverable where a
+  stored copy would have survived. A deliberate privacy-over-continuity choice.
+- **More moving parts.** Provenance propagation, per-turn expiry, tombstones,
+  and scheduled deletion are each capable of being wrong.
+- **Over-tagging expires innocent context early.** Accepted deliberately.
+- **It bounds rather than prevents** model-derived copies.
 
 ## What is not proposed
 
-- No similarity matching, in any form.
+- No similarity matching in any form.
 - No classification of messages by sender, subject, or content.
-- No automatic promotion of anything to long-term memory.
+- No automatic promotion to long-term memory.
 - No change to the read, reply, acknowledge, or trash capabilities.
 
-## Decisions that require Friedl's approval before any code
+## Decisions still required before code
 
-1. **Adopt this approach** in place of the similarity guard, accepting that a
-   body written into a goal is time-bounded rather than prevented.
-2. **The retention periods** for each category above. These determine how much
-   AL/X forgets and when.
-3. **Whether memory may outlive a message at all**, and if so on what approval.
-4. **Whether scheduled deletion is authorised**, since it destroys durable state
-   automatically. Law 15 requires inspection, correction, and deletion controls;
-   automatic deletion is a stronger act than the current record describes.
-5. **What happens to existing retained content**, including the 45 stored
-   responses on this machine that mention mail. Leaving them, expiring them, or
-   deleting them now are three different decisions.
+Friedl has approved the direction and the defaults above. Still outstanding:
 
-Items 1, 4, and 5 are the ones I would not proceed on without a recorded
-decision. Items 2 and 3 are product judgements where I can propose values but
-should not choose them.
+1. **Authorisation to implement.** Not yet given.
+2. **Authorisation for scheduled deletion**, conditional on the revised design,
+   preview controls, failure reporting, tombstones, and tests existing first.
+   Automatic destruction of durable state is a stronger act than the current
+   Law 15 record describes, and warrants its own decision record.
+3. **Confirmation of the first purge**, after reviewing the dry-run inventory.
+
+I would not proceed on any of these without a recorded decision.
