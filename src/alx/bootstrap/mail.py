@@ -9,8 +9,11 @@ from typing import Any, Mapping
 
 from alx.config import MailSendSettings, MailSettings
 from alx.contracts import (
+    ApprovalScope,
     CapabilityDefinition,
     CapabilityResult,
+    CapabilityResultState,
+    GoalState,
     MailAccount,
     StructuredData,
 )
@@ -23,6 +26,7 @@ from alx.safety import AuthorityPolicy
 from alx.tools import (
     ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
+    MARK_MAIL_MESSAGE_SEEN,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     READ_MAIL_MESSAGE,
     SEND_DEFINITIONS,
@@ -35,6 +39,7 @@ from alx.tools import (
 MAIL_READ_PERMISSION = "mail.read"
 MAIL_OBSERVATION_PERMISSION = "mail.observation"
 MAIL_TRASH_PERMISSION = "mail.trash"
+MAIL_SEEN_PERMISSION = "mail.seen"
 # Sending is a separate authority. Granting reading never grants sending.
 MAIL_SEND_PERMISSION = "mail.send"
 
@@ -47,6 +52,56 @@ class MailRuntime:
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
+
+
+def mail_post_reply_standing_scopes(
+    state: GoalState | None,
+) -> tuple[ApprovalScope, ...]:
+    """Derive exact mailbox scopes from confirmed reply evidence.
+
+    The source attachment fact is produced by the send primitive from the
+    message it actually answered. Model assertions cannot create these scopes.
+    """
+    if state is None:
+        return ()
+    scopes: list[ApprovalScope] = []
+    invoked_trash = {
+        tuple(attempt.call.arguments.get(name) for name in (
+            "mailbox_id", "uid_validity", "uid"
+        ))
+        for attempt in state.attempts
+        if attempt.call is not None
+        and attempt.call.capability_id == MOVE_MAIL_MESSAGE_TO_TRASH
+        and attempt.implementation_invoked
+    }
+    for attempt in state.attempts:
+        if (
+            attempt.call is None
+            or attempt.call.capability_id != SEND_MAIL_REPLY
+            or attempt.result is None
+            or attempt.result.state is not CapabilityResultState.SUCCEEDED
+            or attempt.result.values.get("accepted") is not True
+            or not isinstance(
+                attempt.result.values.get("source_has_attachments"), bool
+            )
+        ):
+            continue
+        reference = {
+            name: attempt.call.arguments.get(name)
+            for name in ("mailbox_id", "uid_validity", "uid")
+        }
+        if any(not isinstance(value, str) or not value for value in reference.values()):
+            continue
+        scopes.append(ApprovalScope(MARK_MAIL_MESSAGE_SEEN, reference))
+        reference_key = tuple(reference[name] for name in (
+            "mailbox_id", "uid_validity", "uid"
+        ))
+        if (
+            attempt.result.values.get("source_has_attachments") is False
+            and reference_key not in invoked_trash
+        ):
+            scopes.append(ApprovalScope(MOVE_MAIL_MESSAGE_TO_TRASH, reference))
+    return tuple(scopes)
 
 
 def build_mail_send_runtime(
@@ -99,8 +154,15 @@ def build_mail_runtime(
         ACKNOWLEDGE_MAIL_MESSAGE: AuthorityPolicy(
             frozenset({MAIL_OBSERVATION_PERMISSION})
         ),
+        MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(
+            frozenset({MAIL_SEEN_PERMISSION}),
+            approval_required=True,
+            standing_scope_allowed=True,
+        ),
         MOVE_MAIL_MESSAGE_TO_TRASH: AuthorityPolicy(
-            frozenset({MAIL_TRASH_PERMISSION}), approval_required=True
+            frozenset({MAIL_TRASH_PERMISSION}),
+            approval_required=True,
+            standing_scope_allowed=True,
         ),
     }
     return MailRuntime(
@@ -110,6 +172,11 @@ def build_mail_runtime(
         policies,
         build_mail_executors(source, source, call_id_source),
         frozenset(
-            {MAIL_READ_PERMISSION, MAIL_OBSERVATION_PERMISSION, MAIL_TRASH_PERMISSION}
+            {
+                MAIL_READ_PERMISSION,
+                MAIL_OBSERVATION_PERMISSION,
+                MAIL_SEEN_PERMISSION,
+                MAIL_TRASH_PERMISSION,
+            }
         ),
     )

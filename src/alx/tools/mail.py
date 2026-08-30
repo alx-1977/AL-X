@@ -29,6 +29,7 @@ from alx.contracts.provenance import RetentionPolicy
 
 READ_MAIL_MESSAGE = "read_mail_message"
 ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
+MARK_MAIL_MESSAGE_SEEN = "mark_mail_message_seen"
 MOVE_MAIL_MESSAGE_TO_TRASH = "move_mail_message_to_trash"
 SEND_MAIL_REPLY = "send_mail_reply"
 
@@ -42,12 +43,14 @@ _FAILURES = (
     "observation_unavailable",
     "trash_unavailable",
     "move_failed",
+    "flag_update_failed",
     "recipients_refused",
     "send_rejected",
     "send_outcome_unknown",
 )
 
 _STRING = StructuredSchema(ValueKind.STRING)
+_BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
 _REFERENCE_PROPERTIES = {
     "mailbox_id": _STRING,
     "uid_validity": _STRING,
@@ -87,10 +90,12 @@ READ_DEFINITION = CapabilityDefinition(
             "carbon_copy": StructuredSchema(ValueKind.ARRAY, items=_STRING),
             "message_id": _STRING,
             "reply_references": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "has_attachments": _BOOLEAN,
         },
         (
             "reference", "subject", "sender", "received_at", "body",
             "recipients", "carbon_copy", "reply_references",
+            "has_attachments",
         ),
         extra_properties=False,
     ),
@@ -109,6 +114,20 @@ ACKNOWLEDGE_DEFINITION = CapabilityDefinition(
         extra_properties=False,
     ),
     SideEffect.ATTENTION_STATE,
+    _FAILURES,
+)
+
+MARK_SEEN_DEFINITION = CapabilityDefinition(
+    MARK_MAIL_MESSAGE_SEEN,
+    "Set the standard Seen flag on one identified mail item without moving, deleting, replying to, or otherwise changing it.",
+    _input(),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, "seen": _BOOLEAN},
+        ("reference", "seen"),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
     _FAILURES,
 )
 
@@ -156,10 +175,12 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
             "recipients_refused": _ADDRESS_LIST,
             "subject": _STRING,
             "in_reply_to": _STRING,
+            "source_has_attachments": _BOOLEAN,
         },
         (
             "transmitted_message_id", "accepted", "sender_address",
             "recipients_accepted", "recipients_refused", "subject",
+            "source_has_attachments",
         ),
         extra_properties=False,
     ),
@@ -167,11 +188,15 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
-DEFINITIONS = (READ_DEFINITION, ACKNOWLEDGE_DEFINITION, TRASH_DEFINITION)
+DEFINITIONS = (
+    READ_DEFINITION,
+    ACKNOWLEDGE_DEFINITION,
+    MARK_SEEN_DEFINITION,
+    TRASH_DEFINITION,
+)
 
-# Sending is irreversible and has no recorded production-deployment
-# authorisation, so it is defined but deliberately not part of the registered
-# set. Composing it into a runtime requires a governance decision first.
+# Sending is irreversible and configured separately under D-011, so a runtime
+# without send credentials can still read mail without being able to transmit.
 SEND_DEFINITIONS = (SEND_REPLY_DEFINITION,)
 
 
@@ -284,6 +309,7 @@ def build_mail_executors(
             "carbon_copy": tuple(content.participants.carbon_copy),
             "message_id": content.threading.message_id,
             "reply_references": content.threading.reply_references(),
+            "has_attachments": content.has_attachments,
         }
         return CapabilityResult(
             call_id_source(),
@@ -328,9 +354,25 @@ def build_mail_executors(
             },
         )
 
+    def mark_seen(arguments: StructuredData) -> CapabilityResult:
+        try:
+            reference = _reference(arguments)
+            account.mark_seen(reference)
+        except ValueError:
+            return failed(MARK_MAIL_MESSAGE_SEEN, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(MARK_MAIL_MESSAGE_SEEN, error.code)
+        return CapabilityResult(
+            call_id_source(),
+            MARK_MAIL_MESSAGE_SEEN,
+            CapabilityResultState.SUCCEEDED,
+            {"reference": _reference_values(reference), "seen": True},
+        )
+
     return {
         READ_MAIL_MESSAGE: read,
         ACKNOWLEDGE_MAIL_MESSAGE: acknowledge,
+        MARK_MAIL_MESSAGE_SEEN: mark_seen,
         MOVE_MAIL_MESSAGE_TO_TRASH: move_to_trash,
     }
 
@@ -382,6 +424,7 @@ def build_send_executors(
             "recipients_accepted": tuple(outcome.recipients_accepted),
             "recipients_refused": tuple(outcome.recipients_refused),
             "subject": reply.subject,
+            "source_has_attachments": source.has_attachments,
         }
         if reply.in_reply_to:
             values["in_reply_to"] = reply.in_reply_to

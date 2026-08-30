@@ -35,6 +35,7 @@ NOW = datetime(2026, 8, 29, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=30)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
 TRASH = "move_mail_message_to_trash"
+SEEN = "mark_mail_message_seen"
 ARGS = {"mailbox_id": "INBOX", "uid": "58603", "uid_validity": "1376545928"}
 DEFINITION = CapabilityDefinition(TRASH, "move one message to trash", SCHEMA, SCHEMA,
                                   SideEffect.EFFECTFUL)
@@ -261,17 +262,21 @@ class TrashAuthorisationTests(unittest.TestCase):
 
     def test_trash_requires_its_own_permission_and_an_approval(self) -> None:
         from alx.bootstrap.mail import (
-            MAIL_READ_PERMISSION, MAIL_TRASH_PERMISSION,
+            MAIL_READ_PERMISSION, MAIL_SEEN_PERMISSION, MAIL_TRASH_PERMISSION,
         )
 
         self.assertNotEqual(MAIL_TRASH_PERMISSION, MAIL_READ_PERMISSION)
+        self.assertEqual(
+            len({MAIL_READ_PERMISSION, MAIL_SEEN_PERMISSION, MAIL_TRASH_PERMISSION}),
+            3,
+        )
 
-    def test_only_trash_carries_external_side_effects(self) -> None:
+    def test_only_authorised_mail_mutations_carry_external_side_effects(self) -> None:
         from alx.tools import DEFINITIONS
 
         effectful = [item.capability_id for item in DEFINITIONS
                      if item.side_effect is SideEffect.EFFECTFUL]
-        self.assertEqual(effectful, [TRASH])
+        self.assertEqual(effectful, [SEEN, TRASH])
 
     def test_no_permanent_deletion_is_reachable(self) -> None:
         source = (Path(__file__).resolve().parents[1]
@@ -284,6 +289,8 @@ class TrashAuthorisationTests(unittest.TestCase):
                      / "governance/DECISIONS.md").read_text("utf-8")
         self.assertIn("D-010", decisions)
         self.assertIn(TRASH, decisions)
+        self.assertIn("D-015", decisions)
+        self.assertIn(SEEN, decisions)
 
 
 if __name__ == "__main__":

@@ -249,11 +249,12 @@ class ModelReasonerTests(unittest.TestCase):
         )
         self.assertIn("Use natural person-facing language", protocol)
         self.assertIn("Mail attention is deliberately one item at a time", protocol)
-        self.assertIn("Do not release it after a failed or uncertain reply", protocol)
+        self.assertIn("A failed\nor uncertain reply does not release it", protocol)
         self.assertIn(
-            "Local acknowledgement changes\nneither Seen/Unseen state nor any mailbox content",
+            "Dismissing it or asking to move\non uses local acknowledgement and deliberately leaves the message Unseen",
             protocol,
         )
+        self.assertIn("These exact post-reply\nactions have standing authority", protocol)
         self.assertIn(
             "If active_goal is null and you\nchoose an effectful call, include a create goal",
             protocol,

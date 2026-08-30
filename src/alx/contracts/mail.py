@@ -76,6 +76,11 @@ class MailContent:
     body: str
     participants: MailParticipants = MailParticipants()
     threading: MailThreading = MailThreading()
+    has_attachments: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.has_attachments, bool):
+            raise TypeError("has_attachments must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +171,8 @@ class MailAccessError(Exception):
 
 class MailAccount(Protocol):
     def read(self, reference: MailReference) -> MailContent: ...
+
+    def mark_seen(self, reference: MailReference) -> None: ...
 
     def move_to_trash(self, reference: MailReference) -> str: ...
 

@@ -45,6 +45,7 @@ from alx.safety import (  # noqa: E402
 from alx.tools import (  # noqa: E402
     ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
+    MARK_MAIL_MESSAGE_SEEN,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     READ_MAIL_MESSAGE,
     build_mail_executors,
@@ -66,10 +67,27 @@ def message(subject: str, body: str) -> bytes:
     ).encode()
 
 
+def message_with_attachment(subject: str, body: str) -> bytes:
+    return (
+        f"Message-ID: <{subject}@example.test>\r\n"
+        f"Subject: {subject}\r\n"
+        "From: Supplier <supplier@example.test>\r\n"
+        "Date: Sat, 29 Aug 2026 10:00:00 +0200\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: multipart/mixed; boundary=part\r\n\r\n"
+        "--part\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+        f"{body}\r\n"
+        "--part\r\nContent-Type: application/pdf\r\n"
+        "Content-Disposition: attachment; filename=quote.pdf\r\n\r\n"
+        "PDF\r\n--part--\r\n"
+    ).encode()
+
+
 class FakeImap:
     def __init__(self) -> None:
         self.items = {1: message("Old", "Old body")}
         self.commands = []
+        self.store_status = "OK"
 
     def login(self, address, secret):
         self.commands.append(("LOGIN", address, secret))
@@ -94,6 +112,8 @@ class FakeImap:
             return "OK", [(b"metadata", self.items[uid]), b")"]
         if operation == "MOVE":
             return "OK", [b""]
+        if operation == "STORE":
+            return self.store_status, [b""]
         raise AssertionError(operation)
 
     def list(self):
@@ -103,6 +123,7 @@ class FakeImap:
 class FakeAccount:
     def __init__(self) -> None:
         self.acknowledged = []
+        self.seen = []
         self.trashed = []
 
     def read(self, reference):
@@ -110,6 +131,9 @@ class FakeAccount:
 
     def acknowledge(self, reference):
         self.acknowledged.append(reference)
+
+    def mark_seen(self, reference):
+        self.seen.append(reference)
 
     def move_to_trash(self, reference):
         self.trashed.append(reference)
@@ -178,6 +202,58 @@ class MailProviderTests(unittest.TestCase):
         rendered = repr(self.imap.commands)
         self.assertIn("BODY.PEEK[]", rendered)
         self.assertNotIn("STORE", rendered)
+
+    def test_read_reports_attachment_presence_without_changing_seen(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message_with_attachment("Quote", "Attached quote")
+        self.adapter.scan()
+        content = self.adapter.read(MailReference("INBOX", "777", "2"))
+        self.assertTrue(content.has_attachments)
+        self.assertNotIn("STORE", repr(self.imap.commands))
+
+    def test_mark_seen_sets_only_the_seen_flag(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("Handled", "Done")
+        self.adapter.scan()
+        event = self.state.current()
+        self.adapter.record_delivery(event.event_id)
+        self.adapter.mark_seen(MailReference("INBOX", "777", "2"))
+        stores = [item for item in self.imap.commands
+                  if item[0:2] == ("UID", "STORE")]
+        self.assertEqual(
+            stores,
+            [("UID", "STORE", "2", "+FLAGS.SILENT", r"(\Seen)")],
+        )
+        self.assertFalse(any(item[0:2] == ("UID", "MOVE")
+                             for item in self.imap.commands))
+        self.assertIsNone(self.state.current())
+        self.assertEqual(self.state.contextual_events()[0].data["uid"], "2")
+
+    def test_mark_seen_failure_is_structured_and_does_not_release_attention(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("Handled", "Done")
+        self.adapter.scan()
+        event = self.state.current()
+        self.adapter.record_delivery(event.event_id)
+        self.imap.store_status = "NO"
+        current = ["seen-1"]
+        result = build_mail_executors(
+            self.adapter, self.adapter, lambda: current[0]
+        )[MARK_MAIL_MESSAGE_SEEN]({
+            "mailbox_id": "INBOX", "uid_validity": "777", "uid": "2",
+        })
+        self.assertEqual(result.failure["code"], "flag_update_failed")
+        self.assertEqual(self.state.contextual_events()[0].data["uid"], "2")
+
+    def test_local_dismissal_leaves_the_message_unseen(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("Later", "Come back to this")
+        self.adapter.scan()
+        event = self.state.current()
+        self.adapter.record_delivery(event.event_id)
+        self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
+        self.assertFalse(any(item[0:2] == ("UID", "STORE")
+                             for item in self.imap.commands))
 
     def test_unconfirmed_event_is_offered_again_to_a_new_voice_session(self) -> None:
         import asyncio
@@ -377,11 +453,15 @@ class MailPrimitiveTests(unittest.TestCase):
         executors = build_mail_executors(account, account, lambda: current[0])
         arguments = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2"}
         acknowledged = executors[ACKNOWLEDGE_MAIL_MESSAGE](arguments)
+        current[0] = "call-seen"
+        seen = executors[MARK_MAIL_MESSAGE_SEEN](arguments)
         current[0] = "call-2"
         trashed = executors[MOVE_MAIL_MESSAGE_TO_TRASH](arguments)
         self.assertTrue(acknowledged.values["acknowledged"])
+        self.assertTrue(seen.values["seen"])
         self.assertTrue(trashed.values["moved"])
         self.assertEqual(len(account.acknowledged), 1)
+        self.assertEqual(len(account.seen), 1)
         self.assertEqual(len(account.trashed), 1)
         definitions = {item.capability_id: item for item in DEFINITIONS}
         self.assertEqual(
@@ -396,6 +476,29 @@ class MailPrimitiveTests(unittest.TestCase):
             definitions[MOVE_MAIL_MESSAGE_TO_TRASH].side_effect.value,
             "effectful",
         )
+
+    def test_seen_and_trash_keep_approval_and_allow_only_exact_standing_scopes(self) -> None:
+        from alx.bootstrap.mail import build_mail_runtime
+        from alx.config import MailSettings
+
+        directory = tempfile.TemporaryDirectory()
+        try:
+            runtime = build_mail_runtime(
+                MailSettings(
+                    "friedl@example.test", "secret", "imap.example.test", 993, 15
+                ),
+                Path(directory.name),
+                lambda: "call-1",
+            )
+            for capability_id in (
+                MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH,
+            ):
+                policy = runtime.policies[capability_id]
+                self.assertTrue(policy.approval_required)
+                self.assertTrue(policy.standing_scope_allowed)
+            runtime.observations.close()
+        finally:
+            directory.cleanup()
 
     def test_goal_store_never_serializes_transient_mail_body(self) -> None:
         directory = tempfile.TemporaryDirectory()

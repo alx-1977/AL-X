@@ -47,13 +47,14 @@ class FakeSender:
 class FakeAccount:
     """A source message the reply must answer, per D-011."""
 
-    def __init__(self, participants=None, threading=None) -> None:
+    def __init__(self, participants=None, threading=None, has_attachments=False) -> None:
         from alx.contracts import MailParticipants, MailThreading
 
         self.participants = participants or MailParticipants(
             sender="Jan <jan@example.test>", recipients=(SELF,)
         )
         self.threading = threading or MailThreading("<parent@example.test>", "", ())
+        self.has_attachments = has_attachments
 
     def read(self, reference):
         from alx.contracts import MailContent
@@ -61,6 +62,7 @@ class FakeAccount:
         return MailContent(
             reference, "Panel revision", "Jan <jan@example.test>", "now", "body",
             self.participants, self.threading,
+            self.has_attachments,
         )
 
     def move_to_trash(self, reference):
@@ -221,6 +223,12 @@ class SendExecutorTests(unittest.TestCase):
         result = executor(FakeSender())(ARGUMENTS)
         self.assertTrue(SEND_DEFINITIONS[0].output_schema.accepts(result.values))
 
+    def test_reply_result_reports_attachment_evidence_from_the_source(self) -> None:
+        result = executor(
+            FakeSender(), FakeAccount(has_attachments=True)
+        )(ARGUMENTS)
+        self.assertTrue(result.values["source_has_attachments"])
+
     def test_the_transport_never_retries_internally(self) -> None:
         tree = ast.parse(
             (REPOSITORY_ROOT / "src/alx/providers/icloud_mail_send.py").read_text("utf-8")
@@ -232,6 +240,270 @@ class SendExecutorTests(unittest.TestCase):
              and not isinstance(getattr(n, "target", None), ast.Name)],
             [], "transmission must not loop",
         )
+
+
+class PostReplyStandingAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def state(has_attachments=False, result_state=CapabilityResultState.SUCCEEDED,
+              accepted=True, extra_attempts=()):
+        from alx.contracts import (
+            CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall,
+            CapabilityResult, GoalState, Objective, SuccessCriterion,
+        )
+
+        call = CapabilityCall("send-1", SEND_MAIL_REPLY, ARGUMENTS, "approval-1")
+        result = CapabilityResult(
+            "send-1",
+            SEND_MAIL_REPLY,
+            result_state,
+            {} if result_state is CapabilityResultState.FAILED else {
+                "accepted": accepted,
+                "source_has_attachments": has_attachments,
+            },
+            failure=(
+                {"code": "send_rejected"}
+                if result_state is CapabilityResultState.FAILED else None
+            ),
+        )
+        sent = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True, result
+        )
+        return GoalState(
+            "goal-1",
+            Objective("turn:turn-1", "Reply"),
+            (SuccessCriterion("criterion-1", "handled"),),
+            attempts=(sent, *extra_attempts),
+        )
+
+    def test_successful_attachment_free_reply_grants_exact_seen_and_trash_scopes(self) -> None:
+        from alx.bootstrap.mail import mail_post_reply_standing_scopes
+        from alx.tools import MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH
+
+        scopes = mail_post_reply_standing_scopes(self.state(False))
+        expected = {
+            (MARK_MAIL_MESSAGE_SEEN, "2"),
+            (MOVE_MAIL_MESSAGE_TO_TRASH, "2"),
+        }
+        self.assertEqual(
+            {(item.capability_id, item.arguments["uid"]) for item in scopes},
+            expected,
+        )
+
+    def test_attachment_reply_grants_seen_but_never_automatic_trash(self) -> None:
+        from alx.bootstrap.mail import mail_post_reply_standing_scopes
+        from alx.tools import MARK_MAIL_MESSAGE_SEEN
+
+        scopes = mail_post_reply_standing_scopes(self.state(True))
+        self.assertEqual([item.capability_id for item in scopes],
+                         [MARK_MAIL_MESSAGE_SEEN])
+
+    def test_partial_failed_or_unaccepted_reply_grants_nothing(self) -> None:
+        from alx.bootstrap.mail import mail_post_reply_standing_scopes
+
+        for state in (
+            self.state(result_state=CapabilityResultState.PARTIAL),
+            self.state(result_state=CapabilityResultState.FAILED),
+            self.state(accepted=False),
+        ):
+            self.assertEqual(mail_post_reply_standing_scopes(state), ())
+
+    def test_missing_attachment_evidence_grants_nothing(self) -> None:
+        from alx.bootstrap.mail import mail_post_reply_standing_scopes
+
+        state = self.state(False)
+        attempt = state.attempts[0]
+        from alx.contracts import (
+            CapabilityAttempt, CapabilityResult, GoalState,
+        )
+        unknown = CapabilityAttempt(
+            attempt.call,
+            attempt.disposition,
+            attempt.implementation_invoked,
+            CapabilityResult(
+                "send-1", SEND_MAIL_REPLY, CapabilityResultState.SUCCEEDED,
+                {"accepted": True},
+            ),
+        )
+        state = GoalState(
+            state.goal_id,
+            state.objective,
+            state.success_criteria,
+            attempts=(unknown,),
+        )
+        self.assertEqual(mail_post_reply_standing_scopes(state), ())
+
+    def test_scope_survives_restart_and_cannot_target_another_message(self) -> None:
+        import tempfile
+        from datetime import UTC, datetime, timedelta
+        from alx.bootstrap.mail import (
+            MAIL_SEEN_PERMISSION, mail_post_reply_standing_scopes,
+        )
+        from alx.contracts import CapabilityCall
+        from alx.goals import SQLiteGoalStore
+        from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate, SafetyState
+        from alx.tools import MARK_MAIL_MESSAGE_SEEN
+
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        now = datetime(2026, 8, 30, tzinfo=UTC)
+        try:
+            store.create(self.state(False), "conversation-1", now + timedelta(days=1))
+            recovered = store.load("goal-1").state
+            scopes = mail_post_reply_standing_scopes(recovered)
+            gate = SafetyGate({
+                MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(
+                    frozenset({MAIL_SEEN_PERMISSION}),
+                    approval_required=True,
+                    standing_scope_allowed=True,
+                )
+            })
+            authority = AuthorityContext(
+                "friedl", frozenset({MAIL_SEEN_PERMISSION}), now,
+                standing_scopes=scopes,
+            )
+            exact = CapabilityCall("seen-1", MARK_MAIL_MESSAGE_SEEN, {
+                "mailbox_id": "INBOX", "uid_validity": "1", "uid": "2",
+            })
+            wrong = CapabilityCall("seen-2", MARK_MAIL_MESSAGE_SEEN, {
+                "mailbox_id": "INBOX", "uid_validity": "1", "uid": "3",
+            })
+            self.assertEqual(gate.evaluate(exact, authority).state, SafetyState.ALLOWED)
+            self.assertEqual(
+                gate.evaluate(wrong, authority).state,
+                SafetyState.APPROVAL_REQUIRED,
+            )
+        finally:
+            store.close()
+            directory.cleanup()
+
+    def test_automatic_trash_scope_is_not_reissued_after_an_invocation(self) -> None:
+        from alx.bootstrap.mail import mail_post_reply_standing_scopes
+        from alx.contracts import (
+            CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall,
+            CapabilityResult,
+        )
+        from alx.tools import MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH
+
+        trash_call = CapabilityCall(
+            "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH,
+            {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"},
+        )
+        attempted = CapabilityAttempt(
+            trash_call,
+            CapabilityAttemptDisposition.EXECUTED,
+            True,
+            CapabilityResult(
+                "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH,
+                CapabilityResultState.FAILED, failure={"code": "move_failed"},
+            ),
+        )
+        scopes = mail_post_reply_standing_scopes(
+            self.state(False, extra_attempts=(attempted,))
+        )
+        self.assertEqual([item.capability_id for item in scopes],
+                         [MARK_MAIL_MESSAGE_SEEN])
+
+    def test_each_post_reply_result_returns_to_core_before_the_next_action(self) -> None:
+        import tempfile
+        from datetime import UTC, datetime, timedelta
+        from alx.bootstrap.mail import (
+            MAIL_SEEN_PERMISSION, MAIL_TRASH_PERMISSION,
+            mail_post_reply_standing_scopes,
+        )
+        from alx.capabilities import CapabilityBroker, CapabilityRegistry
+        from alx.contracts import (
+            AgentDecision, CapabilityCall, CapabilityResult,
+            ConversationSnapshot,
+        )
+        from alx.core import CoreAgent, CoreState
+        from alx.goals import SQLiteGoalStore
+        from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
+        from alx.tools import (
+            DEFINITIONS, MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH,
+        )
+
+        now = datetime(2026, 8, 30, tzinfo=UTC)
+        reference = {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"}
+        seen_call = CapabilityCall("seen-1", MARK_MAIL_MESSAGE_SEEN, reference)
+        trash_call = CapabilityCall(
+            "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH, reference
+        )
+        calls = []
+
+        def seen(_arguments):
+            calls.append(MARK_MAIL_MESSAGE_SEEN)
+            return CapabilityResult(
+                "seen-1", MARK_MAIL_MESSAGE_SEEN,
+                CapabilityResultState.SUCCEEDED,
+                {"reference": reference, "seen": True},
+            )
+
+        def trash(_arguments):
+            calls.append(MOVE_MAIL_MESSAGE_TO_TRASH)
+            return CapabilityResult(
+                "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH,
+                CapabilityResultState.SUCCEEDED,
+                {"reference": reference, "trash_mailbox_id": "Trash", "moved": True},
+            )
+
+        selected = tuple(item for item in DEFINITIONS if item.capability_id in {
+            MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH,
+        })
+        broker = CapabilityBroker(
+            CapabilityRegistry(selected),
+            SafetyGate({
+                MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(
+                    frozenset({MAIL_SEEN_PERMISSION}),
+                    approval_required=True,
+                    standing_scope_allowed=True,
+                ),
+                MOVE_MAIL_MESSAGE_TO_TRASH: AuthorityPolicy(
+                    frozenset({MAIL_TRASH_PERMISSION}),
+                    approval_required=True,
+                    standing_scope_allowed=True,
+                ),
+            }),
+            {MARK_MAIL_MESSAGE_SEEN: seen, MOVE_MAIL_MESSAGE_TO_TRASH: trash},
+        )
+        reasoner = Queued(
+            AgentDecision(call=seen_call),
+            AgentDecision(call=trash_call),
+            AgentDecision(response="Handled."),
+        )
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        try:
+            store.create(self.state(False), "conversation-1", now + timedelta(days=1))
+
+            def dispatch(call, state):
+                return broker.dispatch(call, AuthorityContext(
+                    "friedl",
+                    frozenset({MAIL_SEEN_PERMISSION, MAIL_TRASH_PERMISSION}),
+                    now,
+                    standing_scopes=mail_post_reply_standing_scopes(state),
+                ))
+
+            outcome = CoreAgent(store, reasoner, dispatch, selected).process(
+                ConversationSnapshot(
+                    "conversation-1", (), 1, now + timedelta(days=1)
+                ),
+                "goal-1",
+                now + timedelta(days=1),
+                3,
+            )
+            self.assertEqual(outcome.state, CoreState.RESPONDED)
+            self.assertEqual(calls, [MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH])
+            self.assertEqual(
+                reasoner.contexts[1].active_goal.attempts[-1].call.capability_id,
+                MARK_MAIL_MESSAGE_SEEN,
+            )
+            self.assertEqual(
+                reasoner.contexts[2].active_goal.attempts[-1].call.capability_id,
+                MOVE_MAIL_MESSAGE_TO_TRASH,
+            )
+        finally:
+            store.close()
+            directory.cleanup()
 
 
 class NoReplyWorkflowTests(unittest.TestCase):

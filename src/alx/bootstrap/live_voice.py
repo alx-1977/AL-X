@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Mapping
 
 from alx.bootstrap.providers import build_runtime_providers
-from alx.bootstrap.mail import build_mail_runtime, build_mail_send_runtime
+from alx.bootstrap.mail import (
+    build_mail_runtime,
+    build_mail_send_runtime,
+    mail_post_reply_standing_scopes,
+)
 from alx.bootstrap.reasoning import build_model_reasoner
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
@@ -153,6 +157,7 @@ async def run(repository_root: Path) -> None:
                 granted_permission_references=frozenset(permissions),
                 evaluated_at=datetime.now(UTC),
                 approvals=() if state is None else state.approvals,
+                standing_scopes=mail_post_reply_standing_scopes(state),
             ),
         )
 

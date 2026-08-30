@@ -3,6 +3,7 @@
 from alx.tools.mail import (
     ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
+    MARK_MAIL_MESSAGE_SEEN,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     SEND_DEFINITIONS,
     SEND_MAIL_REPLY,
@@ -14,6 +15,7 @@ from alx.tools.mail import (
 __all__ = [
     "ACKNOWLEDGE_MAIL_MESSAGE",
     "DEFINITIONS",
+    "MARK_MAIL_MESSAGE_SEEN",
     "MOVE_MAIL_MESSAGE_TO_TRASH",
     "SEND_DEFINITIONS",
     "SEND_MAIL_REPLY",

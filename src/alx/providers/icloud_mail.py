@@ -72,6 +72,19 @@ def _plain_body(item) -> str:
     return "\n".join(line.strip() for line in selected.splitlines() if line.strip())
 
 
+def _has_attachments(item) -> bool:
+    """Report explicit MIME attachments without treating an HTML body as one."""
+    candidates = item.walk() if item.is_multipart() else (item,)
+    return any(
+        not part.is_multipart()
+        and (
+            part.get_content_disposition() == "attachment"
+            or part.get_filename() is not None
+        )
+        for part in candidates
+    )
+
+
 # RFC 5322 message identifiers are angle-addr tokens.
 _MESSAGE_ID_PATTERN = re.compile(r"<[^<>\s]+>")
 
@@ -428,7 +441,10 @@ class ICloudMailAdapter:
                 )
                 try:
                     content = await asyncio.to_thread(self.read, reference)
-                    transient_data = {"body": content.body}
+                    transient_data = {
+                        "body": content.body,
+                        "has_attachments": content.has_attachments,
+                    }
                 except MailAccessError as error:
                     transient_data = {"content_unavailable": error.code}
                 yield BackgroundEvent(
@@ -472,6 +488,7 @@ class ICloudMailAdapter:
                     in_reply_to=_identifier(parsed.get("In-Reply-To")),
                     references=_identifiers(parsed.get("References")),
                 ),
+                _has_attachments(parsed),
             )
         finally:
             self._close(connection)
@@ -525,6 +542,25 @@ class ICloudMailAdapter:
                 raise MailAccessError("move_failed")
             self._observations.acknowledge(reference)
             return trash
+        finally:
+            self._close(connection)
+
+    def mark_seen(self, reference: MailReference) -> None:
+        """Set only the standard IMAP Seen flag on one stable message reference."""
+        connection = self._open()
+        try:
+            status, _ = connection.select(
+                self._quoted(reference.mailbox_id), readonly=False
+            )
+            if status != "OK":
+                raise MailAccessError("mailbox_unavailable")
+            if _uid_validity(connection) != reference.uid_validity:
+                raise MailAccessError("identifier_stale")
+            status, _ = connection.uid(
+                "STORE", reference.uid, "+FLAGS.SILENT", r"(\Seen)"
+            )
+            if status != "OK":
+                raise MailAccessError("flag_update_failed")
         finally:
             self._close(connection)
 
