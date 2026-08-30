@@ -103,7 +103,7 @@ class CoreAgent:
 
             previous = snapshot
             candidate, proposal_error = self._reduce_goal_proposal(
-                snapshot, decision.goal_proposal, conversation,
+                snapshot, decision.goal_proposal, conversation, trigger_event_id,
             )
             if proposal_error is None and decision.approval_proposal is not None:
                 approval_error = self._approval_proposal_error(
@@ -317,8 +317,18 @@ class CoreAgent:
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="dispatch_reconciled")
 
     @staticmethod
-    def _objective_source(conversation: ConversationSnapshot) -> str:
-        """Name what a goal arose from: a person's turn, or the event itself."""
+    def _objective_source(
+        conversation: ConversationSnapshot, trigger_event_id: str | None
+    ) -> str:
+        """Name what this goal actually arose from.
+
+        A turn begun by an arriving event names that event. Preferring the
+        latest person turn regardless attributed an event-driven goal to
+        whatever was last said, which in an established conversation is
+        unrelated to the message that triggered it.
+        """
+        if trigger_event_id is not None:
+            return f"event:{trigger_event_id}"
         for item in reversed(conversation.turns):
             if item.person_id is not None:
                 return f"turn:{item.turn_id}"
@@ -330,17 +340,10 @@ class CoreAgent:
 
     def _reduce_goal_proposal(self, snapshot: GoalSnapshot | None,
                               proposal: GoalProposal | None,
-                              conversation: ConversationSnapshot) -> tuple[GoalState | None, str | None]:
+                              conversation: ConversationSnapshot,
+                              trigger_event_id: str | None = None) -> tuple[GoalState | None, str | None]:
         if proposal is None:
             return None if snapshot is None else snapshot.state, None
-        # Every durable field is checked once, here, rather than per field at
-        # each call site, so a new field cannot silently become another path
-        # for transient content to reach durable state.
-        if self._proposal_reproduces_transient_content(conversation, proposal):
-            return (
-                None if snapshot is None else snapshot.state,
-                "goal_reproduces_transient_content",
-            )
         if snapshot is None:
             if proposal.kind is not GoalMutationKind.CREATE:
                 return None, "goal_missing"
@@ -355,7 +358,7 @@ class CoreAgent:
                     # A goal begun by an arriving event has no person turn to
                     # attribute it to, and attributing it to an unrelated
                     # earlier turn would misstate where it came from.
-                    self._objective_source(conversation),
+                    self._objective_source(conversation, trigger_event_id),
                     proposal.objective_summary,
                 ),
                 proposal.success_criteria,
@@ -553,195 +556,6 @@ class CoreAgent:
                            stop_reason=GoalStopReason.CANCELLED)
         return state
 
-    # Transient material is shown to the model so it can speak about a message,
-    # but it was promised never to enter durable state. A model-authored record
-    # can otherwise carry the body across that boundary by quoting it, so any
-    # durable text reproducing a substantial run of transient content is
-    # refused. This checks content, not provenance.
-    # A quoted run this long is treated as reproduction. It is deliberately
-    # short, because a leak is not always a long block: a one-line code or
-    # account number is the most sensitive thing a message can carry.
-    _TRANSIENT_QUOTE_CHARACTERS = 24
-    # How much of a message must be reproduced before it counts as copied
-    # rather than described. Measured against real text: fragmented copies of a
-    # body reproduce essentially all of it, a summary reaches about half, and
-    # her own words about a quarter.
-    _TRANSIENT_COVERAGE_FRACTION = 0.75
-    # The shortest reproduced run that counts toward coverage.
-    _TRANSIENT_RUN_CHARACTERS = 2
-
-    @classmethod
-    def _transient_texts(cls, conversation: ConversationSnapshot) -> tuple[str, ...]:
-        collected: list[str] = []
-
-        def walk(value: object) -> None:
-            if isinstance(value, str):
-                # Every transient string is a source, however short. A brief
-                # body is not less private than a long one.
-                if value.strip():
-                    collected.append(value)
-                return
-            if isinstance(value, Mapping):
-                for nested in value.values():
-                    walk(nested)
-                return
-            if isinstance(value, (tuple, list)):
-                for nested in value:
-                    walk(nested)
-
-        for event in conversation.events:
-            walk(event.transient_data)
-        return tuple(collected)
-
-    @classmethod
-    def _durable_texts(cls, value: object) -> list[str]:
-        found: list[str] = []
-        if isinstance(value, str):
-            found.append(value)
-        elif isinstance(value, Mapping):
-            # Keys are persisted too, so content hidden in a key is still
-            # durable content.
-            for key, nested in value.items():
-                if isinstance(key, str):
-                    found.append(key)
-                found.extend(cls._durable_texts(nested))
-        elif isinstance(value, (tuple, list)):
-            for nested in value:
-                found.extend(cls._durable_texts(nested))
-        return found
-
-    @classmethod
-    def _assembles_from(cls, compact: str, candidates: Sequence[str]) -> bool:
-        """Report whether the records hold every part of the source between them.
-
-        The source is consumed greedily using the longest piece any record can
-        supply at each position. Splitting it more finely or scattering the
-        pieces among unrelated records does not help, because the pieces still
-        have to appear somewhere for the source to be recoverable.
-        """
-        pieces = ["".join(item.split()) for item in candidates]
-        pieces = [item for item in pieces if item]
-        if not pieces:
-            return False
-        position = 0
-        while position < len(compact):
-            longest = 0
-            for piece in pieces:
-                end = position
-                while end < len(compact) and compact[position:end + 1] in piece:
-                    end += 1
-                longest = max(longest, end - position)
-            if not longest:
-                return False
-            position += longest
-        return True
-
-    @classmethod
-    def _proposal_reproduces_transient_content(
-        cls, conversation: ConversationSnapshot, proposal: GoalProposal
-    ) -> bool:
-        """Check every durable field of a goal proposal, not only its evidence.
-
-        The goal store persists the objective, context, referents, decisions,
-        corrections, progress, blockers and outstanding work as well as the
-        evidence, so guarding evidence alone left the body a straightforward
-        path into durable state through any of the others.
-        """
-        texts: list[object] = [proposal.objective_summary, proposal.context]
-        for records in (
-            proposal.success_criteria, proposal.referents, proposal.new_decisions,
-            proposal.new_corrections, proposal.new_progress, proposal.blockers,
-            proposal.outstanding_work, proposal.new_evidence,
-        ):
-            for item in records or ():
-                texts.extend(
-                    getattr(item, name, None)
-                    for name in ("summary", "description", "kind", "attributes")
-                )
-        return cls._reproduces_transient_content(
-            conversation, [item for item in texts if item is not None]
-        )
-
-    @classmethod
-    def _reproduces_transient_content(
-        cls, conversation: ConversationSnapshot, values: object
-    ) -> bool:
-        """Report whether durable text reproduces transient content.
-
-        Reproduction is judged per durable string and by content, not by block
-        size. A short transient body copied whole is caught, and so is a long
-        body divided among several short records, because each fragment is
-        still compared against the whole source.
-        """
-        sources = [" ".join(item.split()) for item in cls._transient_texts(conversation)]
-        sources = [item for item in sources if item]
-        if not sources:
-            return False
-        window = cls._TRANSIENT_QUOTE_CHARACTERS
-        candidates = [
-            " ".join(item.split())
-            for item in cls._durable_texts(values)
-            if item.strip()
-        ]
-        if not candidates:
-            return False
-        # Records are also judged as one document. Splitting a body into small
-        # pieces spreads it across records, but the pieces still sit together in
-        # the proposal, so joining them restores what was copied. This closes
-        # fragmentation at every size rather than at whichever minimum run
-        # length happens to be configured.
-        combined = " ".join(candidates)
-        stripped = "".join(combined.split())
-        # Order is not guaranteed, and pieces can be interleaved with unrelated
-        # records, so the same text is also assembled from the pieces sorted by
-        # position within each source below.
-        for source in sources:
-            # A short source copied whole is reproduction in full, whichever
-            # single record carries it.
-            compact = "".join(source.split())
-            if len(source) <= window:
-                if (
-                    any(source in item for item in candidates)
-                    or compact in stripped
-                    or cls._assembles_from(compact, candidates)
-                ):
-                    return True
-                continue
-            # Reassembled fragments reproduce the source even when no single
-            # record holds a meaningful run of it.
-            if compact in stripped:
-                return True
-            # Pieces may arrive in any order and interleaved with unrelated
-            # records, so the source is also walked directly: if every part of
-            # it appears among the records, they hold it between them however
-            # it was scattered.
-            if cls._assembles_from(compact, candidates):
-                return True
-            # Otherwise measure how much of the source these records reproduce
-            # between them, judged as a proportion. Stating a fact the message
-            # contains, such as a price or a date, necessarily repeats some of
-            # its characters; reproducing most of the message is what
-            # distinguishes copying it from describing it.
-            covered = set()
-            position = 0
-            while position < len(source):
-                longest = 0
-                for candidate in candidates:
-                    end = position
-                    while end < len(source) and source[position:end + 1] in candidate:
-                        end += 1
-                    longest = max(longest, end - position)
-                if longest >= cls._TRANSIENT_RUN_CHARACTERS:
-                    covered.update(range(position, position + longest))
-                    position += longest
-                    continue
-                position += 1
-            if len(covered) >= max(
-                window, int(len(source) * cls._TRANSIENT_COVERAGE_FRACTION)
-            ):
-                return True
-        return False
-
     @staticmethod
     def _evidence_grounding_error(conversation: ConversationSnapshot,
                                   state: GoalState, existing: tuple,
@@ -765,8 +579,6 @@ class CoreAgent:
                 return "evidence_source_unknown"
             if any(reference not in criteria for reference in item.supports):
                 return "evidence_support_unknown"
-            if CoreAgent._reproduces_transient_content(conversation, item.attributes):
-                return "evidence_reproduces_transient_content"
             known.add(f"evidence:{item.evidence_id}")
         return None
 
@@ -875,10 +687,6 @@ class CoreAgent:
                           if reference in turns]
                 if not people or any(person_id != proposal.person_id for person_id in people):
                     return "relationship_person_mismatch"
-            if CoreAgent._reproduces_transient_content(
-                conversation, (proposal.content, proposal.meaning)
-            ):
-                return "memory_reproduces_transient_content"
         return None
 
     @staticmethod

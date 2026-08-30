@@ -179,294 +179,6 @@ class ApprovalReleaseTests(unittest.TestCase):
         self.assertEqual(len(dispatched), 1, "the refused action must not repeat")
 
 
-class TransientContentTests(unittest.TestCase):
-    """A mail body shown to the model must not reach durable state."""
-
-    BODY = (
-        "Thanks for waiting. Revision B is quoted at R14 500 for 25 units, with a "
-        "ten working day lead time, and we can start production once you confirm "
-        "the order in writing."
-    )
-
-    def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
-
-    def tearDown(self) -> None:
-        self.store.close()
-        self.directory.cleanup()
-
-    def conversation_with_body(self) -> ConversationSnapshot:
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW,
-            data={"uid": "58603", "subject": "Re: Panel revision B quote"},
-            transient_data={"body_text": self.BODY},
-        )
-        return conversation("what does that one say?", events=(event,))
-
-    def agent(self, reasoner) -> CoreAgent:
-        return CoreAgent(self.store, reasoner, lambda call, state: None, (DEFINITION,),
-                         clock=lambda: NOW, identifier_factory=lambda: "goal-1")
-
-    def test_evidence_quoting_the_body_is_refused(self) -> None:
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
-                kind=GoalMutationKind.CREATE,
-                objective_summary="Answer about the quote",
-                success_criteria=(SuccessCriterion("criterion-1", "answered"),),
-                new_evidence=(Evidence("evidence-1", "mail",
-                                       attributes={"quoted": self.BODY},
-                                       supports=("criterion-1",),
-                                       source_references=("event:event-1",)),)),
-            response="Here is what it says.",
-            response_requires_goal_commit=True,
-        ))
-        outcome = self.agent(reasoner).process(
-            self.conversation_with_body(), None, RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
-
-    def test_a_memory_quoting_the_body_is_refused(self) -> None:
-        reasoner = Queued(AgentDecision(
-            response="Noted.",
-            memory_proposals=(MemoryProposal(
-                "memory-1", MemoryKind.FACTUAL, self.BODY,
-                ("event:event-1",), NOW),),
-        ))
-        outcome = self.agent(reasoner).process(
-            self.conversation_with_body(), None, RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "memory_proposal_invalid")
-
-    def test_a_short_body_copied_verbatim_is_refused(self) -> None:
-        """Regression: a body under the window bypassed the guard entirely.
-
-        A one-line code or account number is the most sensitive thing a
-        message can carry, so brevity must not grant an exemption.
-        """
-        short = "Bank OTP is 449281. Do not share it."
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW,
-            data={"uid": "58610", "subject": "Verification"},
-            transient_data={"body_text": short},
-        )
-        conversation_with_short = conversation("what does it say?", events=(event,))
-        reasoner = Queued(AgentDecision(
-            response="Noted.",
-            memory_proposals=(MemoryProposal(
-                "memory-1", MemoryKind.FACTUAL, short, ("event:event-1",), NOW),),
-        ))
-        outcome = self.agent(reasoner).process(
-            conversation_with_short, None, RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "memory_proposal_invalid")
-
-    def test_a_body_split_across_short_records_is_refused(self) -> None:
-        """Regression: dividing a body into sub-window fragments bypassed it."""
-        chunks = [self.BODY[index:index + 90] for index in range(0, len(self.BODY), 90)]
-        self.assertGreater(len(chunks), 1)
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
-                kind=GoalMutationKind.CREATE,
-                objective_summary="Answer about the quote",
-                success_criteria=(SuccessCriterion("criterion-1", "answered"),),
-                new_evidence=(Evidence(
-                    "evidence-1", "mail",
-                    attributes={"part_one": chunks[0], "part_two": chunks[1]},
-                    supports=("criterion-1",),
-                    source_references=("event:event-1",)),)),
-            response="Here is what it says.",
-            response_requires_goal_commit=True,
-        ))
-        outcome = self.agent(reasoner).process(
-            self.conversation_with_body(), None, RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
-
-    def test_a_body_split_into_fragments_below_the_window_is_refused(self) -> None:
-        """Regression: fragments shorter than the window each said nothing.
-
-        Judging every durable string alone let a long body be divided into
-        pieces that individually looked harmless, so bank details, references
-        and account numbers persisted verbatim.
-        """
-        body = (
-            "Bank transfer reference 88213 for R14 500 to account 62 8891 4432, "
-            "confirm by Friday."
-        )
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW,
-            data={"uid": "58620", "subject": "Payment"},
-            transient_data={"body_text": body},
-        )
-        fragments = [body[index:index + 20] for index in range(0, len(body), 20)]
-        self.assertGreater(len(fragments), 3)
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
-                kind=GoalMutationKind.CREATE,
-                objective_summary="Note the payment",
-                success_criteria=(SuccessCriterion("criterion-1", "noted"),),
-                new_evidence=(Evidence(
-                    "evidence-1", "mail",
-                    attributes={f"part_{i}": item for i, item in enumerate(fragments)},
-                    supports=("criterion-1",),
-                    source_references=("event:event-1",)),)),
-            response="Noted.",
-            response_requires_goal_commit=True,
-        ))
-        outcome = self.agent(reasoner).process(
-            conversation("what does it say?", events=(event,)), None, RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
-
-    def test_fragments_spread_across_separate_records_are_refused(self) -> None:
-        """Splitting across several evidence items must not evade the guard."""
-        from alx.core.loop import CoreAgent
-
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW, data={"uid": "1"},
-            transient_data={"body_text": self.BODY},
-        )
-        conversation_with_body = conversation("read it", events=(event,))
-        halves = [self.BODY[: len(self.BODY) // 2], self.BODY[len(self.BODY) // 2 :]]
-        self.assertTrue(
-            CoreAgent._reproduces_transient_content(
-                conversation_with_body,
-                {"first": halves[0], "second": halves[1]},
-            )
-        )
-
-    def test_stating_a_fact_the_message_contains_is_permitted(self) -> None:
-        """A price or a date cannot be conveyed without repeating characters.
-
-        Judging by an absolute character count refused a genuine summary,
-        because a shared phrase such as a quoted amount is unavoidable. What
-        distinguishes copying from describing is how much of the message is
-        reproduced, not whether any run is shared.
-        """
-        from alx.core.loop import CoreAgent
-
-        body = (
-            "Hi Friedl, thanks for waiting. Revision B is quoted at R14 500 for "
-            "25 units with a ten working day lead time. Let me know if that "
-            "works. Regards, Jan"
-        )
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW, data={"uid": "1"},
-            transient_data={"body_text": body},
-        )
-        with_body = conversation("what did Jan say?", events=(event,))
-        for summary in (
-            "Jan quoted revision B at R14 500 for 25 units, ten day lead time.",
-            "Jan came back with a quote and a lead time.",
-            "The quote is R14 500.",
-        ):
-            with self.subTest(summary=summary):
-                self.assertFalse(
-                    CoreAgent._reproduces_transient_content(with_body, {"v": summary})
-                )
-
-    def test_reproducing_most_of_the_message_is_still_refused(self) -> None:
-        from alx.core.loop import CoreAgent
-
-        body = (
-            "Hi Friedl, thanks for waiting. Revision B is quoted at R14 500 for "
-            "25 units with a ten working day lead time. Let me know if that "
-            "works. Regards, Jan"
-        )
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW, data={"uid": "1"},
-            transient_data={"body_text": body},
-        )
-        with_body = conversation("what did Jan say?", events=(event,))
-        for label, text in (
-            ("half the message", body[: len(body) // 2]),
-            ("the whole message", body),
-        ):
-            with self.subTest(case=label):
-                self.assertTrue(
-                    CoreAgent._reproduces_transient_content(with_body, {"v": text})
-                )
-
-    def test_fragments_of_any_size_are_refused(self) -> None:
-        """Regression: every minimum run length left a hole below it.
-
-        A body divided just under whichever threshold was configured passed
-        while still carrying an account number. The records are now also joined
-        and compared as one document, which no fragment size defeats.
-        """
-        from alx.core.loop import CoreAgent
-
-        body = (
-            "Bank transfer reference 88213 for R14 500 to account 62 8891 4432, "
-            "confirm by Friday."
-        )
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW, data={"uid": "1"},
-            transient_data={"body_text": body},
-        )
-        with_body = conversation("read it", events=(event,))
-        for size in (1, 2, 3, 5, 8, 11, 12, 20, 40):
-            with self.subTest(fragment_size=size):
-                pieces = {
-                    f"part_{index}": body[index:index + size]
-                    for index in range(0, len(body), size)
-                }
-                self.assertTrue(
-                    CoreAgent._reproduces_transient_content(with_body, pieces)
-                )
-
-    def test_a_short_secret_split_across_records_is_refused(self) -> None:
-        from alx.core.loop import CoreAgent
-
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW, data={"uid": "1"},
-            transient_data={"body_text": "OTP is 449281."},
-        )
-        with_body = conversation("read it", events=(event,))
-        self.assertTrue(
-            CoreAgent._reproduces_transient_content(
-                with_body, {"a": "OTP is", "b": " 449281."}
-            )
-        )
-
-    def test_the_core_may_still_describe_the_message_in_its_own_words(self) -> None:
-        """The guard must not block legitimate summarisation."""
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
-                kind=GoalMutationKind.CREATE,
-                objective_summary="Answer about the quote",
-                success_criteria=(SuccessCriterion("criterion-1", "answered"),),
-                new_evidence=(Evidence("evidence-1", "mail",
-                                       attributes={"gist": "The board house quoted revision B."},
-                                       supports=("criterion-1",),
-                                       source_references=("event:event-1",)),)),
-            response="They quoted revision B with a ten day lead time.",
-            response_requires_goal_commit=True,
-        ))
-        outcome = self.agent(reasoner).process(
-            self.conversation_with_body(), None, RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-
-    def test_durable_event_data_remains_usable(self) -> None:
-        """Only transient content is guarded; durable event data is not."""
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
-                kind=GoalMutationKind.CREATE,
-                objective_summary="Track the message",
-                success_criteria=(SuccessCriterion("criterion-1", "tracked"),),
-                new_evidence=(Evidence("evidence-1", "mail",
-                                       attributes={"subject": "Re: Panel revision B quote"},
-                                       supports=("criterion-1",),
-                                       source_references=("event:event-1",)),)),
-            response="Tracked.",
-            response_requires_goal_commit=True,
-        ))
-        outcome = self.agent(reasoner).process(
-            self.conversation_with_body(), None, RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-
-
 class MailboxQuotingTests(unittest.TestCase):
     """Regression: an unquoted Trash name made every real move fail.
 
@@ -631,107 +343,43 @@ class SessionResilienceTests(unittest.TestCase):
         )
 
 
-class DurableFieldCoverageTests(unittest.TestCase):
-    """Every durable field is guarded, not only evidence and memory."""
-
-    BODY = (
-        "Bank transfer reference 88213 for R14 500 to account 62 8891 4432, "
-        "confirm by Friday."
-    )
-
-    def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
-
-    def tearDown(self) -> None:
-        self.store.close()
-        self.directory.cleanup()
-
-    def _conversation(self):
-        event = BackgroundEvent(
-            "event-1", "mail.observed", NOW, data={"uid": "1"},
-            transient_data={"body_text": self.BODY},
-        )
-        return conversation("read it", events=(event,))
-
-    def _attempt(self, **proposal):
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(kind=GoalMutationKind.CREATE, **proposal),
-            response="Noted.", response_requires_goal_commit=True,
-        ))
-        outcome = CoreAgent(
-            self.store, reasoner, lambda call, state: None, (),
-            clock=lambda: NOW, identifier_factory=lambda: "goal-1",
-        ).process(self._conversation(), None, RETENTION, 2)
-        stored = sqlite3.connect(
-            str(Path(self.directory.name) / "goals.sqlite3")
-        ).execute("SELECT state_json FROM goals").fetchone()
-        return outcome, (stored[0] if stored else "")
-
-    def test_a_body_cannot_persist_through_any_durable_field(self) -> None:
-        """Regression: only evidence and memory were guarded.
-
-        The objective, criteria, context, referents, decisions, corrections,
-        progress, blockers and outstanding work are all persisted, so a body
-        supplied as any of them reached durable state unchecked.
-        """
-        criterion = SuccessCriterion("criterion-1", "done")
-        cases = {
-            "objective": dict(objective_summary=self.BODY,
-                              success_criteria=(criterion,)),
-            "success criterion": dict(objective_summary="Handle",
-                                      success_criteria=(SuccessCriterion("c", self.BODY),)),
-            "context": dict(objective_summary="Handle", success_criteria=(criterion,),
-                            context={"note": self.BODY}),
-            "progress": dict(objective_summary="Handle", success_criteria=(criterion,),
-                             new_progress=(ProgressRecord("p1", self.BODY),)),
-            "decision": dict(objective_summary="Handle", success_criteria=(criterion,),
-                             new_decisions=(ProgressRecord("d1", self.BODY),)),
-            "blocker": dict(objective_summary="Handle", success_criteria=(criterion,),
-                            blockers=(WorkItem("b1", self.BODY),)),
-            "outstanding work": dict(objective_summary="Handle",
-                                     success_criteria=(criterion,),
-                                     outstanding_work=(WorkItem("w1", self.BODY),)),
-        }
-        for label, proposal in cases.items():
-            with self.subTest(field=label):
-                self.setUp()
-                outcome, stored = self._attempt(**proposal)
-                self.assertEqual(outcome.state, CoreState.ERROR)
-                self.assertNotIn(self.BODY, stored)
-                self.tearDown()
-
-    def test_content_hidden_in_a_mapping_key_is_refused(self) -> None:
-        from alx.core.loop import CoreAgent as Core
-
-        pieces = {self.BODY[i:i + 10]: "x" for i in range(0, len(self.BODY), 10)}
-        self.assertTrue(
-            Core._reproduces_transient_content(self._conversation(), pieces)
-        )
-
-    def test_single_characters_among_unrelated_records_are_refused(self) -> None:
-        from alx.core.loop import CoreAgent as Core
-
-        pieces: dict[str, str] = {}
-        for index, character in enumerate(self.BODY):
-            pieces[f"a{index}"] = character
-            pieces[f"z{index}"] = "~"
-        self.assertTrue(
-            Core._reproduces_transient_content(self._conversation(), pieces)
-        )
-
-    def test_shuffled_fragments_are_refused(self) -> None:
-        from alx.core.loop import CoreAgent as Core
-
-        pieces = [self.BODY[i:i + 7] for i in range(0, len(self.BODY), 7)]
-        scattered = {f"k{index}": value for index, value in enumerate(reversed(pieces))}
-        self.assertTrue(
-            Core._reproduces_transient_content(self._conversation(), scattered)
-        )
-
-
 class EventDrivenGoalTests(unittest.TestCase):
     """A goal begun by arriving mail must not crash or be misattributed."""
+
+    def test_an_event_goal_in_an_established_conversation_names_the_event(self) -> None:
+        """Regression: the latest person turn was preferred unconditionally.
+
+        A message arriving during an ongoing conversation had its goal
+        attributed to whatever was last said, which is unrelated to the message
+        that triggered it. The previous test only covered an empty
+        conversation, so it proved nothing about this case.
+        """
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        event = BackgroundEvent("event-1", "mail.observed", NOW, data={"uid": "1"})
+        earlier = ConversationTurn(
+            "conversation-1", "old-turn", ConversationOrigin.TYPED,
+            "unrelated conversation from earlier", NOW, "friedl",
+        )
+        snapshot = ConversationSnapshot(
+            "conversation-1", (earlier,), 1, RETENTION, (event,)
+        )
+        reasoner = Queued(AgentDecision(
+            goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE, objective_summary="Handle the mail",
+                success_criteria=(SuccessCriterion("criterion-1", "handled"),)),
+            response="New mail arrived.", response_requires_goal_commit=True,
+        ))
+        outcome = CoreAgent(
+            store, reasoner, lambda call, state: None, (),
+            clock=lambda: NOW, identifier_factory=lambda: "goal-1",
+        ).process(snapshot, None, RETENTION, 2, trigger_event_id="event-1")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(
+            store.load("goal-1").state.objective.source_reference, "event:event-1"
+        )
+        store.close()
+        directory.cleanup()
 
     def test_a_goal_from_an_event_alone_names_the_event(self) -> None:
         """Regression: creation always used the last conversation turn.
@@ -759,3 +407,44 @@ class EventDrivenGoalTests(unittest.TestCase):
         )
         store.close()
         directory.cleanup()
+
+
+class TransientRetentionGapTests(unittest.TestCase):
+    """The similarity guard is gone and nothing replaces it yet.
+
+    Six versions were attempted. Each either leaked when the content was
+    fragmented or refused ordinary summaries; the last committed version did
+    the latter, so it was actively preventing AL/X from describing a message.
+
+    Provenance-based retention in docs/MAIL_RETENTION_PROPOSAL.md is the agreed
+    replacement and is not yet authorised for implementation. These tests
+    record the gap honestly so its closure is deliberate rather than assumed.
+    """
+
+    def test_no_similarity_guard_remains_in_the_core(self) -> None:
+        source = (Path(__file__).resolve().parents[1]
+                  / "src/alx/core/loop.py").read_text("utf-8")
+        for removed in ("_reproduces_transient_content", "_assembles_from",
+                        "_TRANSIENT_QUOTE_CHARACTERS", "_proposal_reproduces"):
+            self.assertNotIn(removed, source)
+
+    def test_a_model_written_body_is_currently_unbounded(self) -> None:
+        """Recorded, not asserted as acceptable.
+
+        A body the Core writes into a goal persists for the configured goal
+        retention, which is not enforced by any scheduled purge. Retention will
+        bound this; it does not today.
+        """
+        source = (Path(__file__).resolve().parents[1]
+                  / "src/alx/core/loop.py").read_text("utf-8")
+        self.assertNotIn("goal_reproduces_transient_content", source)
+
+    def test_the_replacement_design_is_recorded_and_unauthorised(self) -> None:
+        proposal = (Path(__file__).resolve().parents[1]
+                    / "docs/MAIL_RETENTION_PROPOSAL.md").read_text("utf-8")
+        self.assertIn("Implementation and", proposal)
+        self.assertIn("provenance", proposal.lower())
+        # Raw bodies are still never automatically persisted by the provider.
+        mail_tools = (Path(__file__).resolve().parents[1]
+                      / "src/alx/tools/mail.py").read_text("utf-8")
+        self.assertIn("durable_values=durable", mail_tools)

@@ -30,24 +30,45 @@ threshold admits the first and rejects the second.
 
 That last point is why tombstones are a correctness requirement, not a nicety.
 
-## The honest guarantee
+## The honest guarantee, and its exact scope
 
 An earlier draft said bodies are "never written" and later admitted the Core
 may copy one into a goal. Both cannot be true. The guarantee is:
 
-> **Provider-supplied raw bodies are never automatically persisted.**
+> **A provider-supplied raw body is never automatically written to AL/X's**
+> **designated durable application records: the goal, conversation, and memory**
+> **stores.**
 > **Model-derived copies are bounded by provenance retention, not prevented.**
+
+"Never persisted anywhere" would be a broader claim than this design can
+support. It says nothing about:
+
+- what the model provider retains of a request containing the body;
+- application logs, exception traces, or diagnostics;
+- temporary files or process memory;
+- SQLite write-ahead logs and freed pages, where deleted bytes can survive;
+- any backup of those files.
+
+Each is a separate surface. Before activation this design must state, for each,
+whether it is in scope and what happens there. Claiming otherwise would repeat
+the mistake of the similarity guard: asserting a boundary wider than the code
+actually holds.
 
 If Friedl wants model-derived copies prevented outright rather than bounded,
 that is a different and harder decision, and this proposal does not deliver it.
 
 ## Design
 
-### 1. Provenance is mechanical, never judged
+### 1. Provenance is mechanical and transitive
 
-Any record produced during a reasoning turn whose context included
-mail-derived content inherits mail provenance. This is propagation, not
-classification: no keyword, model judgement, or content matcher decides it.
+Provenance is the union of the provenance carried by every input to a record:
+the events, tool results, prior goal revisions, referenced artifacts, and
+conversation turns in scope. It is not merely whether mail content happened to
+appear in the current model context, because that is lost across a restart or
+behind an intermediate structured record.
+
+This is propagation, not classification: no keyword, model judgement, or
+content matcher decides it.
 
 Over-tagging is deliberate. A record wrongly tagged expires earlier than it
 needed to; a record wrongly untagged persists private content indefinitely.
@@ -60,16 +81,24 @@ timestamp for the conversation. Expiring a conversation wholesale would delete
 unrelated context, and the current renew-on-append behaviour means mail turns
 in an active conversation never expire at all.
 
-### 3. Active goals never expire
+### 3. Active goals never expire, but prose inside them does
 
-Law 8 requires an unfinished goal to continue. An active mail goal keeps its
-reference and structured work state until it completes, is cancelled, or is
-genuinely blocked. Sensitive prose inside it may expire; the goal itself may
-not silently disappear.
+An earlier draft said both that prose inside an active goal may expire and that
+retention begins only at terminal state. Those conflict. They are two lifetimes,
+not one:
 
-Retention begins when the goal becomes terminal.
+- **The goal container and its structured reference state** — identifiers,
+  participants, threading, attempts and outcomes — survive while the goal is
+  active, as Law 8 requires. Retention on the container begins only when the
+  goal becomes terminal.
+- **Mail-derived prose within that goal** — objective wording, progress
+  summaries, evidence attributes — expires on its own schedule regardless of
+  whether the goal is still active, and is replaced by a tombstone.
 
-### 4. Expired content leaves a tombstone
+An active goal therefore ages into a reference-only record: still workable,
+because AL/X re-reads the message, but no longer carrying its content.
+
+### 4. Expired content leaves a tombstone, which is not evidence
 
 Removing a turn must not orphan the records that cite it. A tombstone retains
 the identifier, timestamp, provenance, and deletion reason, and deletes the
@@ -78,12 +107,27 @@ content. References resolve; the content is gone.
 Without this, purging breaks goal evidence and memory grounding, as verified
 above.
 
+A tombstone preserves **identity, not evidence**. Referential integrity is not
+sufficiency: once the content is gone the citation no longer supports any claim
+that rested on it. AL/X must treat a tombstoned source as *"this existed, its
+content is unavailable"*, re-read the message where she can, and never complete
+a goal or assert a conclusion resting solely on unavailable evidence. The
+existing completion rule already requires sourced evidence for every success
+criterion; that rule must count a tombstone as unsourced.
+
 ### 5. Purging is reliable and inspectable
 
 - runs at startup and periodically;
 - idempotent, so a repeated run is harmless;
 - reports failures rather than skipping silently;
 - can be asked what *would* expire, without deleting anything.
+
+**"Physical deletion" needs a precise promise.** Deleting a SQLite row does not
+erase the bytes: they can persist in freed pages, the write-ahead log, and any
+backup. This design promises **logical inaccessibility** through the
+application's own interfaces. Secure erasure of underlying storage, and the
+expiry of backups, are separate commitments that must be stated explicitly
+before activation rather than implied by the word "deleted".
 
 A purge that silently fails is worse than none, because the retention would
 then be believed rather than merely absent.
@@ -174,3 +218,14 @@ Friedl has approved the direction and the defaults above. Still outstanding:
 3. **Confirmation of the first purge**, after reviewing the dry-run inventory.
 
 I would not proceed on any of these without a recorded decision.
+
+## Current state, recorded honestly
+
+The similarity guard has been removed from the runtime. Its last committed
+version blocked ordinary summaries of a short message, so it was preventing
+legitimate work rather than protecting anything.
+
+Nothing replaces it yet. Until provenance retention is implemented and
+authorised, a body the Core writes into a goal persists for the configured goal
+retention, and no scheduled purge enforces that retention. This is a known,
+recorded gap rather than a solved problem, and tests assert that it is open.

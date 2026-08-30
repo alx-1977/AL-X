@@ -191,34 +191,38 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(second.transient_data["body"], "Transient body")
         self.assertEqual(self.state.current().data["uid"], "2")
 
-    def test_a_failed_header_fetch_does_not_skip_that_message(self) -> None:
-        """Regression: the cursor advanced past a message that failed to fetch.
+    def test_the_cursor_advances_across_non_contiguous_identifiers(self) -> None:
+        """Regression: the cursor required the next identifier to be last + 1.
 
-        If one identifier failed while a later one succeeded, the cursor moved
-        beyond the gap and that message was never observed again.
+        IMAP identifiers increase but need not be contiguous, so a permanent
+        gap left by a deleted message stalled the cursor and every later
+        message was fetched again on every scan. The previous test encoded that
+        same contiguity assumption.
         """
         self.adapter.scan()
-        self.state.discover(
-            "INBOX", "777",
-            ((3, {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "3",
-                  "observed_at": "2026-08-30T10:00:00+00:00"}),),
-        )
-        cursor = self.state._connection.execute(
+        event = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "3",
+                 "observed_at": "2026-08-30T10:00:00+00:00"}
+        self.state.discover("INBOX", "777", ((3, event),), (3,))
+        self.assertEqual(self._cursor(), 3)
+
+    def test_the_cursor_stops_before_an_identifier_that_failed(self) -> None:
+        """A message whose headers failed this scan must be retried."""
+        self.adapter.scan()
+        event = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "7",
+                 "observed_at": "2026-08-30T10:00:00+00:00"}
+        # 5 was attempted and failed; 7 succeeded.
+        self.state.discover("INBOX", "777", ((7, event),), (5, 7))
+        self.assertLess(self._cursor(), 5, "the failed message must be retried")
+        # Once it succeeds the cursor moves past both.
+        recovered = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "5",
+                     "observed_at": "2026-08-30T10:01:00+00:00"}
+        self.state.discover("INBOX", "777", ((5, recovered), (7, event)), (5, 7))
+        self.assertEqual(self._cursor(), 7)
+
+    def _cursor(self) -> int:
+        return self.state._connection.execute(
             "SELECT last_uid FROM mail_cursor WHERE mailbox_id = 'INBOX'"
         ).fetchone()[0]
-        self.assertLess(cursor, 3, "the cursor must not pass the missing message")
-        # The message that failed is still offered on a later scan.
-        self.state.discover(
-            "INBOX", "777",
-            ((2, {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2",
-                  "observed_at": "2026-08-30T10:01:00+00:00"}),),
-        )
-        pending = {
-            row[0] for row in self.state._connection.execute(
-                "SELECT uid FROM mail_observations WHERE state = 'pending'"
-            )
-        }
-        self.assertIn(2, pending)
 
     def test_every_open_message_stays_available_as_a_referent(self) -> None:
         """Regression: only the oldest open message was carried as context.

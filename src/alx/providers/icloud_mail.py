@@ -162,6 +162,7 @@ class SQLiteMailObservationState:
         mailbox_id: str,
         uid_validity: str,
         found: tuple[tuple[int, dict[str, str]], ...],
+        attempted: tuple[int, ...] = (),
     ) -> None:
         row = self._connection.execute(
             "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
@@ -170,13 +171,17 @@ class SQLiteMailObservationState:
         if row is None or row[0] != uid_validity:
             raise MailAccessError("cursor_unavailable")
         last_uid = int(row[1])
-        # The cursor only advances past identifiers actually recorded. A header
-        # fetch that failed this round leaves a gap, and advancing beyond it
-        # would skip that message permanently rather than retrying it.
-        recorded = sorted(uid for uid, _ in found if uid > last_uid)
+        # The cursor advances across the identifiers this scan actually tried,
+        # stopping before the first that failed so it is retried next time.
+        # IMAP identifiers increase but need not be contiguous, so a permanent
+        # gap left by a deleted message must not stall the cursor forever.
+        recorded = {uid for uid, _ in found}
+        considered = sorted(
+            uid for uid in (attempted or recorded) if uid > last_uid
+        )
         highest = last_uid
-        for uid in recorded:
-            if uid != highest + 1:
+        for uid in considered:
+            if uid not in recorded:
                 break
             highest = uid
         with self._connection:
@@ -359,8 +364,9 @@ class ICloudMailAdapter:
                     "received_at": str(parsed.get("Date", "")),
                     "observed_at": datetime.now(UTC).isoformat(),
                 }))
-            if found:
-                self._observations.discover("INBOX", validity, tuple(found))
+            self._observations.discover(
+                "INBOX", validity, tuple(found), tuple(identifiers)
+            )
         finally:
             self._close(connection)
 
