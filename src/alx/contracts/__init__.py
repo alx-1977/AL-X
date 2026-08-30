@@ -25,6 +25,13 @@ from alx.contracts.records import (
     SuccessCriterion,
     WorkItem,
 )
+from alx.contracts.provenance import (
+    ContentOrigin,
+    ContentProvenance,
+    ContentTombstone,
+    ExpiryReason,
+    RetentionPolicy,
+)
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
 from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, PendingMemoryBatch, ReasoningContext, ReasoningProvider
 from alx.contracts.records import StructuredData
@@ -66,6 +73,11 @@ from alx.contracts.mail import (
 )
 
 __all__ = [
+    "RetentionPolicy",
+    "ExpiryReason",
+    "ContentTombstone",
+    "ContentProvenance",
+    "ContentOrigin",
     "Approval", "ApprovalProposal", "ApprovalLifecycle", "ApprovalScope", "BackgroundEvent", "CapabilityCall", "CapabilityAttempt", "CapabilityAttemptDisposition",
     "CapabilityResult", "CapabilityResultState", "ConversationOrigin",
     "ConversationTurn", "Evidence", "GoalMutationKind", "GoalProposal", "GoalState", "GoalStatus", "GoalStopReason",
