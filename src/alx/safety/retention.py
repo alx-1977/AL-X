@@ -20,16 +20,14 @@ reported as UNCLASSIFIED rather than assumed safe or assumed mail.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
 from alx.contracts.provenance import (
-    ContentOrigin,
     ContentProvenance,
     ContentTombstone,
     ExpiryReason,
-    RetentionPolicy,
 )
 
 
@@ -52,18 +50,20 @@ class RecordSurvey:
 
     store: str
     record_id: str
-    classification: Classification
     provenance: ContentProvenance | None = None
-    recorded_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.store.strip() or not self.record_id.strip():
             raise ValueError("a surveyed record requires a store and an identifier")
-        if (
-            self.classification is Classification.MAIL_DERIVED
-            and self.provenance is None
+        if self.provenance is not None and not isinstance(
+            self.provenance, ContentProvenance
         ):
-            raise ValueError("a mail-derived record requires its provenance")
+            raise TypeError("provenance must be ContentProvenance or None")
+
+    @property
+    def classification(self) -> Classification:
+        """Derive classification so it cannot contradict provenance."""
+        return classify(self.provenance)
 
     def would_expire_at(self, at: datetime) -> bool:
         """Whether a purge running at `at` would remove this record's content."""
@@ -114,7 +114,7 @@ def classify(provenance: ContentProvenance | None) -> Classification:
     """Classify one record from its provenance, if it has any."""
     if provenance is None:
         return Classification.UNCLASSIFIED
-    if provenance.origin is ContentOrigin.MAIL_MESSAGE:
+    if provenance.governed_by_retention():
         return Classification.MAIL_DERIVED
     return Classification.NOT_MAIL_DERIVED
 
@@ -127,28 +127,29 @@ def tombstone_for(record: RecordSurvey, expired_at: datetime) -> ContentTombston
     """
     if record.provenance is None:
         raise ValueError("a record without provenance has no content to expire")
+    if not record.provenance.governed_by_retention():
+        raise ValueError("only mail-derived content receives a D-013 tombstone")
+    if not record.provenance.is_expired(expired_at):
+        raise ValueError("live content cannot be replaced by a tombstone")
     return ContentTombstone(
         record_id=record.record_id,
-        origin=record.provenance.origin,
+        origins=record.provenance.origins,
         recorded_at=record.provenance.recorded_at,
         expired_at=expired_at,
         reason=ExpiryReason.RETENTION_ELAPSED,
-        source_reference=record.provenance.source_reference,
+        mail_references=record.provenance.mail_references,
     )
 
 
 def preview_purge(
     records: tuple[RecordSurvey, ...],
     at: datetime,
-    policy: RetentionPolicy | None = None,
 ) -> PurgePreview:
     """Compute what a purge at `at` would do. Removes nothing.
 
-    `policy` is accepted so a preview can be run against a proposed lifetime
-    without changing the configured one; the deadline already stamped on each
-    record is what decides expiry.
+    The deadline stamped on each record is authoritative. D-013 permits no
+    alternate lifetime to inject at preview time.
     """
-    _ = policy or RetentionPolicy()
     expiring = tuple(item for item in records if item.would_expire_at(at))
     return PurgePreview(
         evaluated_at=at,

@@ -1,18 +1,13 @@
-"""Where a durable record came from, and when its content must expire.
+"""Mechanical provenance and retention facts for durable content.
 
-Governance decision D-013. Friedl clears his mail as it arrives, but reading a
-message writes fragments of it into AL/X's own stores on his Mac, and nothing
-made those copies expire. This records, per record, what a record was derived
-from and when its content dies, so a deadline can be enforced instead of
-inferred.
+Governance decision D-013 requires every durable record derived from mail to
+expire thirty days after it is written. Provenance is therefore a union of
+derivation sources, not a caller-selected label and not a judgement made from
+the record's wording. Authorship and derivation are deliberately separate: a
+record authored by AL/X can still be derived from one or more mail messages.
 
-The safeguard this replaces tried to detect mail content by comparing text for
-resemblance. That failed six times, because no threshold separates a faithful
-summary of a short message from a copied fragment. Provenance does not try to
-recognise content. It records that a record was *derived from* a message when
-the message was read, and expires it on that basis regardless of how it reads.
-
-Nothing here deletes anything. These are the facts a purge would act on.
+Nothing in this module deletes or writes durable state. It defines the facts
+that the stores will persist in the next, separately reviewed slice.
 """
 
 from __future__ import annotations
@@ -20,8 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import Iterable
 
-from alx.contracts.records import StructuredData, freeze_data
+from alx.contracts.mail import MailReference
+
+
+MAIL_CONTENT_LIFETIME = timedelta(days=30)
 
 
 def _required(value: str, name: str) -> None:
@@ -34,14 +33,27 @@ def _aware(value: datetime, name: str) -> None:
         raise ValueError(f"{name} must be timezone aware")
 
 
-class ContentOrigin(str, Enum):
-    """What a durable record's content was derived from.
+def _origins(values: Iterable["ContentOrigin"]) -> frozenset["ContentOrigin"]:
+    result = frozenset(values)
+    if not result:
+        raise ValueError("content provenance requires at least one origin")
+    if any(not isinstance(item, ContentOrigin) for item in result):
+        raise TypeError("origins must contain only ContentOrigin values")
+    return result
 
-    `MAIL_MESSAGE` is the origin D-013 governs. The others exist so a record
-    without mail provenance is stated as such rather than merely lacking a
-    field, which would make an unstamped record indistinguishable from one
-    deliberately marked as carrying no mail content.
-    """
+
+def _mail_references(values: Iterable[MailReference]) -> tuple[MailReference, ...]:
+    result: list[MailReference] = []
+    for item in values:
+        if not isinstance(item, MailReference):
+            raise TypeError("mail references must contain only MailReference values")
+        if item not in result:
+            result.append(item)
+    return tuple(result)
+
+
+class ContentOrigin(str, Enum):
+    """A mechanical derivation source, not the author of the final wording."""
 
     MAIL_MESSAGE = "mail_message"
     PERSON = "person"
@@ -58,118 +70,172 @@ class ExpiryReason(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ContentProvenance:
-    """One durable record's origin and its content's own deadline.
+    """The transitive sources of one durable record and its own deadline.
 
-    The deadline belongs to the content, not to the goal that cites it. A goal
-    may outlive its content; D-013 requires that it does rather than holding
-    the content alive. `source_reference` is the durable mail reference, which
-    survives expiry as the bookmark AL/X re-reads from.
+    `origins` is the union of every input provenance plus the author of the new
+    record. `mail_references` contains only typed, content-free bookmarks. If
+    any input was mail-derived, `MAIL_MESSAGE` and at least one bookmark must
+    survive the union and D-013's deadline is mandatory.
     """
 
-    origin: ContentOrigin
-    content_expires_at: datetime
+    origins: frozenset[ContentOrigin]
     recorded_at: datetime
-    source_reference: StructuredData | None = None
+    mail_references: tuple[MailReference, ...] = ()
+    content_expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        _aware(self.content_expires_at, "content_expires_at")
+        object.__setattr__(self, "origins", _origins(self.origins))
+        object.__setattr__(
+            self, "mail_references", _mail_references(self.mail_references)
+        )
         _aware(self.recorded_at, "recorded_at")
-        if self.content_expires_at <= self.recorded_at:
-            raise ValueError("content must expire after it was recorded")
-        if self.origin is ContentOrigin.MAIL_MESSAGE and self.source_reference is None:
+        mail_derived = ContentOrigin.MAIL_MESSAGE in self.origins
+        if mail_derived != bool(self.mail_references):
             raise ValueError(
-                "mail-derived content requires the reference it can be re-read from"
+                "mail origin and typed mail references must be present together"
             )
-        if self.source_reference is not None:
-            object.__setattr__(
-                self, "source_reference", freeze_data(self.source_reference)
+        if mail_derived:
+            if self.content_expires_at is None:
+                raise ValueError("mail-derived content requires an expiry")
+            _aware(self.content_expires_at, "content_expires_at")
+            if self.content_expires_at > self.recorded_at + MAIL_CONTENT_LIFETIME:
+                raise ValueError(
+                    "D-013 allows at most thirty days from the moment content is "
+                    "recorded; a later deadline would extend a message's life"
+                )
+        elif self.content_expires_at is not None:
+            raise ValueError(
+                "D-013 content expiry is reserved for mail-derived records"
             )
 
     def is_expired(self, at: datetime) -> bool:
         _aware(at, "at")
-        return self.content_expires_at <= at
+        return (
+            self.content_expires_at is not None
+            and self.content_expires_at <= at
+        )
 
     def governed_by_retention(self) -> bool:
-        """Whether D-013's deadline applies to this record."""
-        return self.origin is ContentOrigin.MAIL_MESSAGE
+        return ContentOrigin.MAIL_MESSAGE in self.origins
 
 
 @dataclass(frozen=True, slots=True)
 class ContentTombstone:
-    """What remains once a record's content has expired.
-
-    D-013: "a bookmark, not a copy". This carries the record's identity, where
-    the message can be re-read from, and when and why the content went. It
-    carries **no subject, no summary, and no extracted fact** — those are the
-    content, and structure is not a retention loophole.
-
-    A tombstone is deliberately not evidence. `Evidence` records support a
-    success criterion; a tombstone records that support has been lost. Anything
-    that consumed the expired content must treat its criterion as unsupported
-    until AL/X re-reads the message.
-    """
+    """A content-free bookmark left after mail-derived content expires."""
 
     record_id: str
-    origin: ContentOrigin
+    origins: frozenset[ContentOrigin]
     recorded_at: datetime
     expired_at: datetime
     reason: ExpiryReason
-    source_reference: StructuredData | None = None
+    mail_references: tuple[MailReference, ...]
 
     def __post_init__(self) -> None:
         _required(self.record_id, "record_id")
+        object.__setattr__(self, "origins", _origins(self.origins))
+        object.__setattr__(
+            self, "mail_references", _mail_references(self.mail_references)
+        )
         _aware(self.recorded_at, "recorded_at")
         _aware(self.expired_at, "expired_at")
-        if self.source_reference is not None:
-            object.__setattr__(
-                self, "source_reference", freeze_data(self.source_reference)
-            )
+        if self.expired_at < self.recorded_at:
+            raise ValueError("content cannot expire before it was recorded")
+        if ContentOrigin.MAIL_MESSAGE not in self.origins:
+            raise ValueError("D-013 tombstones are only for mail-derived content")
+        if not self.mail_references:
+            raise ValueError("a mail tombstone requires a re-readable reference")
 
     def is_evidence(self) -> bool:
-        """Always false. Present so the intent is stated, not assumed."""
         return False
 
 
 @dataclass(frozen=True, slots=True)
 class RetentionPolicy:
-    """The configured lifetime of mail-derived content.
+    """The exact mail-content lifetime approved in D-013."""
 
-    D-013 sets thirty days. It is configuration rather than a constant because
-    the decision records a review condition for it, but it is not open-ended:
-    a policy longer than the decision authorises is refused here rather than
-    silently honoured.
-    """
-
-    mail_content_lifetime: timedelta = field(default=timedelta(days=30))
+    mail_content_lifetime: timedelta = field(default=MAIL_CONTENT_LIFETIME)
 
     def __post_init__(self) -> None:
-        if self.mail_content_lifetime <= timedelta(0):
-            raise ValueError("mail content lifetime must be positive")
-        if self.mail_content_lifetime > timedelta(days=30):
+        if self.mail_content_lifetime != MAIL_CONTENT_LIFETIME:
             raise ValueError(
-                "D-013 authorises at most thirty days for mail-derived content; "
-                "a longer lifetime requires a new decision"
+                "D-013 authorises exactly thirty days for mail-derived content; "
+                "a different lifetime requires a new decision"
             )
 
     def expires_at(self, recorded_at: datetime) -> datetime:
         _aware(recorded_at, "recorded_at")
         return recorded_at + self.mail_content_lifetime
 
-    def stamp(
+    def direct_mail(
         self,
-        origin: ContentOrigin,
         recorded_at: datetime,
-        source_reference: StructuredData | None = None,
+        references: Iterable[MailReference],
     ) -> ContentProvenance:
-        """Build the provenance a newly written record carries.
-
-        Re-reading a message calls this again and gets a fresh deadline. It
-        never renews an existing record, or touching a message would defeat
-        the policy.
-        """
+        """Seed provenance from a fresh primitive mail read."""
+        refs = _mail_references(references)
+        if not refs:
+            raise ValueError("a direct mail record requires a mail reference")
         return ContentProvenance(
-            origin=origin,
-            content_expires_at=self.expires_at(recorded_at),
+            origins=frozenset({ContentOrigin.MAIL_MESSAGE}),
             recorded_at=recorded_at,
-            source_reference=source_reference,
+            mail_references=refs,
+            content_expires_at=self.expires_at(recorded_at),
+        )
+
+    def non_mail(
+        self, origin: ContentOrigin, recorded_at: datetime
+    ) -> ContentProvenance:
+        """Seed content known mechanically not to come from a mail read."""
+        if origin is ContentOrigin.MAIL_MESSAGE:
+            raise ValueError("mail provenance must be seeded with direct_mail")
+        return ContentProvenance(
+            origins=frozenset({origin}),
+            recorded_at=recorded_at,
+        )
+
+    def derive(
+        self,
+        author: ContentOrigin,
+        recorded_at: datetime,
+        inputs: Iterable[ContentProvenance],
+    ) -> ContentProvenance:
+        """Union every input mechanically into a newly authored record.
+
+        A fresh record receives its own deadline, as D-013 specifies. Store
+        rewrites of an existing logical record must preserve that record's
+        provenance rather than calling this method again; otherwise an update
+        would silently renew its clock.
+        """
+        if author is ContentOrigin.MAIL_MESSAGE:
+            raise ValueError("MAIL_MESSAGE is a source, not an author")
+        origins = {author}
+        references: list[MailReference] = []
+        provided = tuple(inputs)
+        for item in provided:
+            if not isinstance(item, ContentProvenance):
+                raise TypeError("inputs must contain only ContentProvenance values")
+            origins.update(item.origins)
+            for reference in item.mail_references:
+                if reference not in references:
+                    references.append(reference)
+        mail_derived = ContentOrigin.MAIL_MESSAGE in origins
+        # A derived record inherits the earliest deadline among its mail-derived
+        # inputs, never a fresh thirty days. D-013 is explicit that re-reading
+        # must not renew an existing record: without this, AL/X summarising a
+        # thread every few weeks would carry one message's content indefinitely,
+        # each summary honestly stamped and each one thirty days newer.
+        inherited = [
+            item.content_expires_at
+            for item in provided
+            if item.content_expires_at is not None
+        ]
+        deadline: datetime | None = None
+        if mail_derived:
+            fresh = self.expires_at(recorded_at)
+            deadline = min([fresh, *inherited]) if inherited else fresh
+        return ContentProvenance(
+            origins=frozenset(origins),
+            recorded_at=recorded_at,
+            mail_references=tuple(references),
+            content_expires_at=deadline,
         )

@@ -1,7 +1,8 @@
 # Proposal: provenance-based mail retention
 
-**Status:** Direction approved by Friedl on 2026-08-30. Implementation and
-deletion are **not** authorised. This is the revised design for his decision.
+**Status:** Policy approved as D-013 by Friedl on 2026-08-30. The
+non-destructive contracts and inventory are implemented; store migration,
+write-path wiring, scheduled deletion, and a first purge are **not** authorised.
 **Supersedes:** the transient-content similarity guard, which is abandoned.
 
 ## Why the previous approach failed
@@ -157,7 +158,8 @@ Required evidence before this is accepted:
 - expiry of the conversational text does not orphan the goal;
 - a goal whose message was deleted remains resumable, with the message reported
   unavailable rather than invented;
-- a tombstoned turn still satisfies the references that cite it.
+- a tombstoned turn still resolves the references that cite it, while no
+  longer satisfying their evidentiary claim.
 
 ## Scope: where mail content can reach
 
@@ -285,9 +287,8 @@ rather than implying protection it has not built.
   store. A 135-character progress note is free text, and a short quotation
   from a mail body would fit inside it comfortably. Length and schema cannot
   tell a written summary from a copied fragment — the same limit that defeated
-  the similarity guard. Classifying that file requires comparing its contents
-  against retained mail during the later inventory, which this scope does not
-  authorise. Until then the goal backup is unclassified, not confirmed clean.
+  the similarity guard. The goal backup therefore remains unclassified; AL/X
+  will not infer provenance by comparing its contents against retained mail.
 - **Proposed boundary:** backups inherit the retention of what they copy. A
   backup older than the longest retention it contains is itself expired, and
   maintenance copies are either recorded for expiry or not taken.
@@ -321,10 +322,13 @@ rather than implying protection it has not built.
 
 Nothing is deleted yet. Before any first purge:
 
-1. Apply provenance retroactively to existing records.
-2. Produce a **dry-run inventory** showing exactly what would be removed,
-   including the retained AL/X responses that mention mail.
-3. Friedl reviews that inventory.
+1. Produce a **dry-run inventory** of every content-bearing record and backup.
+   Legacy records remain explicitly unclassified: provenance cannot be
+   reconstructed reliably from their wording.
+2. Friedl decides whether those legacy records remain, receive an explicit
+   owner-supplied classification, or expire as a whole cohort. AL/X does not
+   infer that decision by content comparison.
+3. Friedl reviews the resulting purge preview.
 4. Only then is a first purge authorised, and only with his confirmation.
 
 ## Trade-offs, stated plainly
@@ -354,11 +358,13 @@ Nothing is deleted yet. Before any first purge:
 - No automatic promotion to long-term memory.
 - No change to the read, reply, acknowledge, or trash capabilities.
 
-## Decisions still required before code
+## Decisions still required before activation
 
-Friedl has approved the direction and the defaults above. Still outstanding:
+Friedl approved D-013 and the non-destructive implementation. Still
+outstanding:
 
-1. **Authorisation to implement.** Not yet given.
+1. **Authorisation for the schema migration and write-path wiring.** These
+   change designated stores but do not delete retained content.
 2. **Authorisation for scheduled deletion**, conditional on the revised design,
    preview controls, failure reporting, tombstones, and tests existing first.
    Automatic destruction of durable state is a stronger act than the current
@@ -367,21 +373,20 @@ Friedl has approved the direction and the defaults above. Still outstanding:
 
 I would not proceed on any of these without a recorded decision.
 
-## What the scope changes about the plan
+## Findings resolved separately from retention
 
-Two findings above are not retention questions and should be treated separately:
-
-1. **The exception chain is a live leak, today.** It does not wait for
-   retention to be implemented, and it is small to fix. I would treat it as a
-   defect to correct now rather than part of this design, subject to Friedl's
-   agreement.
-2. **Four backup files exist outside any policy**, created by me during
+1. **The exception chain retained provider requests.** This was fixed
+   separately and is governed by D-012; ordinary diagnostics and AL/X's logs
+   expose sanitised provider/error codes only. Locals-capturing diagnostics
+   remain prohibited rather than made safe.
+2. **Four backup files exist outside any policy**, created during
    maintenance in this session. Three copy the observation store, which has no
    body column and so cannot hold one. The fourth copies the goal store, whose
    free-text fields are **unclassified**: short enough to be summaries, long
    enough to hold a quoted fragment, and not separable by inspection. All four
-   should be listed in the dry-run inventory, and the goal backup classified by
-   content comparison before anyone treats it as body-free.
+   are listed in the dry-run inventory. The goal backup must remain
+   unclassified unless Friedl supplies a classification or chooses a policy for
+   the whole legacy cohort; content comparison cannot establish provenance.
 
 ## Decisions this scope adds
 
@@ -401,7 +406,9 @@ The similarity guard has been removed from the runtime. Its last committed
 version blocked ordinary summaries of a short message, so it was preventing
 legitimate work rather than protecting anything.
 
-Nothing replaces it yet. Until provenance retention is implemented and
-authorised, a body the Core writes into a goal persists for the configured goal
-retention, and no scheduled purge enforces that retention. This is a known,
-recorded gap rather than a solved problem, and tests assert that it is open.
+The provenance contracts and read-only inventory now replace the guard at the
+design boundary, but they are not wired into store schemas or write paths yet.
+Until that migration is separately authorised and implemented, a body the Core
+writes into a goal persists for the configured goal retention, and no scheduled
+purge enforces D-013. This remains a known, tested gap rather than a solved
+runtime protection.

@@ -1,25 +1,21 @@
-"""Retention by provenance: the replacement for the removed similarity guard.
-
-Governance decision D-013. Mail-derived content expires thirty days after it
-is written, whether or not a goal is still open. What survives is a reference,
-not a copy.
-
-This phase is non-destructive by authorisation: it stamps, classifies and
-previews, and deletes nothing. Several tests below exist to prove that claim
-rather than state it.
-"""
+"""D-013 provenance, tombstone, and non-destructive inventory evidence."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from alx.contracts.mail import MailReference  # noqa: E402
 from alx.contracts.provenance import (  # noqa: E402
     ContentOrigin,
     ContentProvenance,
@@ -30,197 +26,481 @@ from alx.contracts.provenance import (  # noqa: E402
 from alx.safety.retention import (  # noqa: E402
     Classification,
     RecordSurvey,
-    classify,
     preview_purge,
     tombstone_for,
 )
+from scripts.inventory_retention import (  # noqa: E402
+    InventorySchemaError,
+    _read_only,
+    retention_horizon,
+    survey,
+)
+
 
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
-REFERENCE = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2"}
+REFERENCE = MailReference("INBOX", "777", "2")
+SECOND_REFERENCE = MailReference("INBOX", "777", "9")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SECRET = "ARTIFICIAL-MAIL-CONTENT-6ec4"
 
 
 def _mail_record(record_id: str, written_days_ago: int) -> RecordSurvey:
-    provenance = RetentionPolicy().stamp(
-        ContentOrigin.MAIL_MESSAGE, NOW - timedelta(days=written_days_ago), REFERENCE
+    provenance = RetentionPolicy().direct_mail(
+        NOW - timedelta(days=written_days_ago), (REFERENCE,)
     )
-    return RecordSurvey("goals.sqlite3", record_id, Classification.MAIL_DERIVED, provenance)
+    return RecordSurvey("goals.sqlite3:goal_state", record_id, provenance)
 
 
 class RetentionPolicyTests(unittest.TestCase):
-    def test_the_deadline_is_thirty_days(self) -> None:
+    def test_the_deadline_is_exactly_thirty_days(self) -> None:
         policy = RetentionPolicy()
         self.assertEqual(policy.expires_at(NOW), NOW + timedelta(days=30))
+        for lifetime in (timedelta(seconds=1), timedelta(days=29), timedelta(days=31)):
+            with self.subTest(lifetime=lifetime), self.assertRaises(ValueError):
+                RetentionPolicy(lifetime)
 
-    def test_a_longer_lifetime_than_the_decision_is_refused(self) -> None:
-        """A policy may be configured, but not beyond what D-013 authorises."""
-        with self.assertRaises(ValueError) as caught:
-            RetentionPolicy(timedelta(days=90))
-        self.assertIn("D-013", str(caught.exception))
+    def test_direct_mail_requires_typed_content_free_references(self) -> None:
+        with self.assertRaises(TypeError):
+            RetentionPolicy().direct_mail(NOW, ({"body": SECRET},))  # type: ignore[arg-type]
 
-    def test_content_is_live_before_the_deadline_and_expired_after(self) -> None:
-        provenance = RetentionPolicy().stamp(ContentOrigin.MAIL_MESSAGE, NOW, REFERENCE)
-        self.assertFalse(provenance.is_expired(NOW + timedelta(days=29)))
-        self.assertTrue(provenance.is_expired(NOW + timedelta(days=31)))
-
-    def test_mail_content_must_carry_the_reference_it_is_reread_from(self) -> None:
-        """Without a bookmark, expiry would lose the message rather than the copy."""
+    def test_non_mail_content_cannot_claim_a_mail_reference(self) -> None:
         with self.assertRaises(ValueError):
             ContentProvenance(
-                origin=ContentOrigin.MAIL_MESSAGE,
-                content_expires_at=NOW + timedelta(days=30),
+                origins=frozenset({ContentOrigin.ALX}),
                 recorded_at=NOW,
+                mail_references=(REFERENCE,),
             )
 
-    def test_rereading_starts_a_new_clock_and_never_renews_the_old_record(self) -> None:
-        """Otherwise touching a message would defeat the deadline."""
+    def test_transitive_derivation_unions_every_origin_and_mail_reference(self) -> None:
         policy = RetentionPolicy()
-        first = policy.stamp(ContentOrigin.MAIL_MESSAGE, NOW, REFERENCE)
+        first = policy.direct_mail(NOW, (REFERENCE,))
+        second = policy.direct_mail(NOW, (SECOND_REFERENCE, REFERENCE))
+        person = policy.non_mail(ContentOrigin.PERSON, NOW)
+        derived = policy.derive(
+            ContentOrigin.ALX,
+            NOW + timedelta(hours=1),
+            (first, person, second),
+        )
+        self.assertEqual(
+            derived.origins,
+            frozenset(
+                {ContentOrigin.MAIL_MESSAGE, ContentOrigin.PERSON, ContentOrigin.ALX}
+            ),
+        )
+        self.assertEqual(derived.mail_references, (REFERENCE, SECOND_REFERENCE))
+        self.assertTrue(derived.governed_by_retention())
+        # The inherited deadline, not a fresh thirty days from the derivation.
+        self.assertEqual(derived.content_expires_at, NOW + timedelta(days=30))
+
+    def test_alx_authorship_does_not_erase_mail_derivation(self) -> None:
+        source = RetentionPolicy().direct_mail(NOW, (REFERENCE,))
+        derived = RetentionPolicy().derive(
+            ContentOrigin.ALX, NOW + timedelta(minutes=1), (source,)
+        )
+        record = RecordSurvey("goals.sqlite3:goal_state", "goal-1", derived)
+        self.assertEqual(record.classification, Classification.MAIL_DERIVED)
+
+    def test_rereading_starts_a_new_clock_without_mutating_the_old_record(self) -> None:
+        policy = RetentionPolicy()
+        first = policy.direct_mail(NOW, (REFERENCE,))
         later = NOW + timedelta(days=20)
-        second = policy.stamp(ContentOrigin.MAIL_MESSAGE, later, REFERENCE)
-        self.assertEqual(second.content_expires_at, later + timedelta(days=30))
+        second = policy.direct_mail(later, (REFERENCE,))
         self.assertEqual(first.content_expires_at, NOW + timedelta(days=30))
+        self.assertEqual(second.content_expires_at, later + timedelta(days=30))
 
 
-class GoalOutlivesItsContentTests(unittest.TestCase):
-    """D-013 chose Option B: the deadline is not suspended by an open goal."""
-
-    def test_content_expires_while_its_goal_is_still_open(self) -> None:
-        record = _mail_record("goal-1", written_days_ago=31)
-        self.assertTrue(record.would_expire_at(NOW))
-
-    def test_content_that_is_not_mail_derived_is_not_governed(self) -> None:
-        """Friedl's own words are not on this clock."""
-        provenance = ContentProvenance(
-            origin=ContentOrigin.PERSON,
-            content_expires_at=NOW - timedelta(days=1),
-            recorded_at=NOW - timedelta(days=400),
+class SurveyAndTombstoneTests(unittest.TestCase):
+    def test_classification_is_derived_and_cannot_be_supplied_separately(self) -> None:
+        mail = RetentionPolicy().direct_mail(NOW, (REFERENCE,))
+        self.assertEqual(
+            RecordSurvey("store", "record", mail).classification,
+            Classification.MAIL_DERIVED,
         )
-        record = RecordSurvey(
-            "goals.sqlite3", "goal-2", classify(provenance), provenance
-        )
-        self.assertEqual(record.classification, Classification.NOT_MAIL_DERIVED)
-        self.assertFalse(record.would_expire_at(NOW))
+        with self.assertRaises(TypeError):
+            RecordSurvey(  # type: ignore[call-arg]
+                "store", "record", Classification.NOT_MAIL_DERIVED, mail
+            )
 
-
-class TombstoneTests(unittest.TestCase):
-    def test_a_tombstone_carries_a_reference_and_no_content(self) -> None:
-        """D-013: no subject, no summary, no extracted fact."""
+    def test_a_tombstone_has_no_arbitrary_content_field(self) -> None:
         stone = tombstone_for(_mail_record("goal-1", 31), NOW)
-        rendered = repr(stone)
-        for content in ("subject", "summary", "body", "price", "quote"):
-            self.assertNotIn(content, rendered.lower())
-        self.assertEqual(stone.source_reference["uid"], "2")
+        self.assertEqual(
+            {item.name for item in fields(stone)},
+            {
+                "record_id",
+                "origins",
+                "recorded_at",
+                "expired_at",
+                "reason",
+                "mail_references",
+            },
+        )
+        self.assertEqual(stone.mail_references, (REFERENCE,))
+        self.assertNotIn(SECRET, repr(stone))
+
+    def test_a_tombstone_rejects_untyped_or_content_bearing_references(self) -> None:
+        with self.assertRaises(TypeError):
+            ContentTombstone(
+                "record",
+                frozenset({ContentOrigin.MAIL_MESSAGE}),
+                NOW,
+                NOW + timedelta(days=31),
+                ExpiryReason.RETENTION_ELAPSED,
+                ({"body": SECRET},),  # type: ignore[arg-type]
+            )
+
+    def test_live_or_non_mail_content_cannot_be_tombstoned(self) -> None:
+        with self.assertRaises(ValueError):
+            tombstone_for(_mail_record("recent", 1), NOW)
+        person = RetentionPolicy().non_mail(ContentOrigin.PERSON, NOW)
+        with self.assertRaises(ValueError):
+            tombstone_for(RecordSurvey("store", "person", person), NOW)
 
     def test_a_tombstone_is_not_evidence(self) -> None:
-        """It records that support was lost, and cannot supply support."""
         stone = tombstone_for(_mail_record("goal-1", 31), NOW)
         self.assertFalse(stone.is_evidence())
         self.assertFalse(hasattr(stone, "supports"))
 
-    def test_a_tombstone_records_why_the_content_went(self) -> None:
-        stone = tombstone_for(_mail_record("goal-1", 31), NOW)
-        self.assertEqual(stone.reason, ExpiryReason.RETENTION_ELAPSED)
-
-    def test_a_record_without_provenance_has_no_tombstone(self) -> None:
-        record = RecordSurvey("goals.sqlite3", "old", Classification.UNCLASSIFIED)
-        with self.assertRaises(ValueError):
-            tombstone_for(record, NOW)
-
-
-class PurgePreviewTests(unittest.TestCase):
-    def test_the_preview_separates_expired_from_live(self) -> None:
-        preview = preview_purge(
-            (_mail_record("old", 31), _mail_record("recent", 5)), NOW
-        )
+    def test_preview_never_expires_unclassified_records(self) -> None:
+        legacy = RecordSurvey("store", "legacy")
+        preview = preview_purge((legacy, _mail_record("old", 31)), NOW)
+        self.assertEqual(preview.unclassified, (legacy,))
         self.assertEqual([item.record_id for item in preview.would_expire], ["old"])
-
-    def test_the_preview_leaves_one_tombstone_per_expired_record(self) -> None:
-        preview = preview_purge((_mail_record("old", 31),), NOW)
-        self.assertEqual(len(preview.tombstones), 1)
-        self.assertIsInstance(preview.tombstones[0], ContentTombstone)
-
-    def test_unclassified_records_are_reported_and_never_expired(self) -> None:
-        """Records predating provenance must not be purged on a guess."""
-        record = RecordSurvey("goals.sqlite3", "legacy", Classification.UNCLASSIFIED)
-        preview = preview_purge((record,), NOW)
-        self.assertEqual(len(preview.unclassified), 1)
-        self.assertEqual(preview.would_expire, ())
-
-    def test_the_preview_is_not_destructive(self) -> None:
-        self.assertFalse(preview_purge((_mail_record("old", 31),), NOW).is_destructive())
-
-    def test_the_rendered_summary_carries_no_content(self) -> None:
-        rendered = preview_purge((_mail_record("old", 31),), NOW).render()
-        self.assertNotIn("body", rendered.lower())
-        self.assertIn("mail-derived expired: 1", rendered)
+        self.assertFalse(preview.is_destructive())
 
 
-class InventoryIsReadOnlyTests(unittest.TestCase):
-    """The inventory must be provably non-destructive, not merely intended so."""
+def _execute(path: Path, statements: tuple[tuple[str, tuple[object, ...]], ...]) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            for statement, values in statements:
+                connection.execute(statement, values)
+    finally:
+        connection.close()
 
-    def test_running_the_inventory_leaves_every_database_byte_identical(self) -> None:
+
+def _legacy_runtime(root: Path) -> Path:
+    runtime = root / ".alx/runtime"
+    backup = runtime / "backup"
+    backup.mkdir(parents=True)
+    _execute(
+        runtime / "conversations.sqlite3",
+        (
+            (
+                "CREATE TABLE conversations (conversation_id TEXT, retention_until TEXT)",
+                (),
+            ),
+            (
+                "CREATE TABLE conversation_turns (conversation_id TEXT, turn_id TEXT, turn_json TEXT)",
+                (),
+            ),
+            ("INSERT INTO conversations VALUES (?, ?)", ("c1", "2036-01-01T00:00:00+00:00")),
+            ("INSERT INTO conversation_turns VALUES (?, ?, ?)", ("c1", "t1", SECRET)),
+            ("INSERT INTO conversation_turns VALUES (?, ?, ?)", ("c1", "t2", SECRET)),
+        ),
+    )
+    goal_statements = (
+        ("CREATE TABLE goals (goal_id TEXT, state_json TEXT, retention_until TEXT)", ()),
+        (
+            "CREATE TABLE conversation_turns (goal_id TEXT, turn_id TEXT, turn_json TEXT)",
+            (),
+        ),
+        (
+            "CREATE TABLE pending_memory_batches (goal_id TEXT, goal_revision INTEGER, ordinal INTEGER, proposal_json TEXT)",
+            (),
+        ),
+        ("INSERT INTO goals VALUES (?, ?, ?)", ("g1", SECRET, "2036-01-01T00:00:00+00:00")),
+        ("INSERT INTO conversation_turns VALUES (?, ?, ?)", ("g1", "t1", SECRET)),
+        ("INSERT INTO pending_memory_batches VALUES (?, ?, ?, ?)", ("g1", 1, 0, SECRET)),
+    )
+    _execute(runtime / "goals.sqlite3", goal_statements)
+    _execute(backup / "goals.legacy.bak", goal_statements)
+    _execute(
+        runtime / "memories.sqlite3",
+        (
+            ("CREATE TABLE memories (memory_id TEXT, retention_until TEXT)", ()),
+            (
+                "CREATE TABLE memory_revisions (memory_id TEXT, revision INTEGER, revision_json TEXT)",
+                (),
+            ),
+            ("INSERT INTO memories VALUES (?, ?)", ("m1", "2036-01-01T00:00:00+00:00")),
+            ("INSERT INTO memory_revisions VALUES (?, ?, ?)", ("m1", 1, SECRET)),
+        ),
+    )
+    _execute(
+        runtime / "mail-observations.sqlite3",
+        (
+            (
+                "CREATE TABLE mail_observations (mailbox_id TEXT, uid_validity TEXT, uid INTEGER, event_json TEXT)",
+                (),
+            ),
+            ("INSERT INTO mail_observations VALUES (?, ?, ?, ?)", ("INBOX", "777", 2, SECRET)),
+        ),
+    )
+    return runtime
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class InventoryTests(unittest.TestCase):
+    def test_every_content_bearing_table_and_backup_is_surveyed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = _legacy_runtime(Path(directory))
+            records = survey(runtime)
+        counts: dict[str, int] = {}
+        for record in records:
+            kind = record.store.rsplit(":", 1)[1]
+            counts[kind] = counts.get(kind, 0) + 1
+        self.assertEqual(
+            counts,
+            {
+                "conversation_turn": 2,
+                "goal_state": 2,
+                "legacy_goal_turn": 2,
+                "pending_memory": 2,
+                "memory_revision": 1,
+                "mail_observation": 1,
+            },
+        )
+        self.assertEqual(len(records), 10)
+        self.assertTrue(all(item.classification is Classification.UNCLASSIFIED for item in records))
+
+    def test_inventory_reads_real_stamped_metadata_without_fabricating_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / ".alx/runtime"
+            runtime.mkdir(parents=True)
+            path = runtime / "goals.sqlite3"
+            recorded = NOW.isoformat()
+            expires = (NOW + timedelta(days=30)).isoformat()
+            references = json.dumps(
+                [
+                    {
+                        "mailbox_id": REFERENCE.mailbox_id,
+                        "uid_validity": REFERENCE.uid_validity,
+                        "uid": REFERENCE.uid,
+                    }
+                ]
+            )
+            _execute(
+                path,
+                (
+                    (
+                        "CREATE TABLE goals (goal_id TEXT, state_json TEXT, content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT)",
+                        (),
+                    ),
+                    (
+                        "INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            "g1",
+                            SECRET,
+                            json.dumps(["mail_message", "alx"]),
+                            recorded,
+                            expires,
+                            references,
+                        ),
+                    ),
+                ),
+            )
+            record = survey(runtime)[0]
+        assert record.provenance is not None
+        self.assertEqual(record.provenance.recorded_at, NOW)
+        self.assertEqual(record.provenance.mail_references, (REFERENCE,))
+        self.assertEqual(record.classification, Classification.MAIL_DERIVED)
+
+    def test_inventory_rejects_coerced_mail_reference_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / ".alx/runtime"
+            runtime.mkdir(parents=True)
+            _execute(
+                runtime / "goals.sqlite3",
+                (
+                    (
+                        "CREATE TABLE goals (goal_id TEXT, state_json TEXT, content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT)",
+                        (),
+                    ),
+                    (
+                        "INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            "g1",
+                            SECRET,
+                            json.dumps(["mail_message"]),
+                            NOW.isoformat(),
+                            (NOW + timedelta(days=30)).isoformat(),
+                            json.dumps(
+                                [
+                                    {
+                                        "mailbox_id": "INBOX",
+                                        "uid_validity": "777",
+                                        "uid": 2,
+                                    }
+                                ]
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            with self.assertRaises(InventorySchemaError):
+                survey(runtime)
+
+    def test_partial_provenance_schema_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / ".alx/runtime"
+            runtime.mkdir(parents=True)
+            _execute(
+                runtime / "goals.sqlite3",
+                (
+                    (
+                        "CREATE TABLE goals (goal_id TEXT, state_json TEXT, content_origins TEXT)",
+                        (),
+                    ),
+                ),
+            )
+            with self.assertRaises(InventorySchemaError):
+                survey(runtime)
+
+    def test_an_unregistered_json_content_surface_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / ".alx/runtime"
+            runtime.mkdir(parents=True)
+            _execute(
+                runtime / "future.sqlite3",
+                (
+                    (
+                        "CREATE TABLE future_records (record_id TEXT, payload_json TEXT)",
+                        (),
+                    ),
+                ),
+            )
+            with self.assertRaises(InventorySchemaError):
+                survey(runtime)
+
+    def test_read_only_connection_rejects_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = _legacy_runtime(Path(directory))
+            connection = _read_only(runtime / "goals.sqlite3")
+            try:
+                with self.assertRaises(sqlite3.OperationalError):
+                    connection.execute("DELETE FROM goals")
+            finally:
+                connection.close()
+
+    def test_subprocess_leaves_all_live_and_backup_files_byte_identical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runtime = root / ".alx/runtime"
-            runtime.mkdir(parents=True)
-            for name in ("goals.sqlite3", "conversations.sqlite3", "memories.sqlite3"):
-                source = REPOSITORY_ROOT / ".alx/runtime" / name
-                if source.exists():
-                    (runtime / name).write_bytes(source.read_bytes())
-            if not any(runtime.iterdir()):
-                self.skipTest("no runtime stores to inventory")
-
-            before = {p.name: p.read_bytes() for p in runtime.iterdir()}
+            runtime = _legacy_runtime(root)
+            paths = sorted(path for path in runtime.rglob("*") if path.is_file())
+            before = {path.relative_to(runtime): _digest(path) for path in paths}
             result = subprocess.run(
-                [sys.executable, "scripts/inventory_retention.py", "--root", str(root)],
+                [
+                    sys.executable,
+                    "scripts/inventory_retention.py",
+                    "--root",
+                    str(root),
+                    "--at",
+                    NOW.isoformat(),
+                ],
                 cwd=REPOSITORY_ROOT,
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            after = {p.name: p.read_bytes() for p in runtime.iterdir()}
+            after = {path.relative_to(runtime): _digest(path) for path in paths}
+        self.assertEqual(before, after)
+        self.assertIn("records surveyed:     10", result.stdout)
+        self.assertNotIn(SECRET, result.stdout)
+        self.assertIn("Every database and backup was opened read-only", result.stdout)
 
-        self.assertEqual(before, after, "the inventory modified a database")
-        self.assertIn("Nothing was modified", result.stdout)
+    def test_horizon_uses_the_requested_evaluation_time_and_includes_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = _legacy_runtime(Path(directory))
+            horizons = retention_horizon(runtime, NOW)
+        labels = {label for label, _low, _high in horizons}
+        self.assertIn("goals.sqlite3:goals", labels)
+        self.assertIn("backup/goals.legacy.bak:goals", labels)
 
-    def test_the_inventory_issues_no_sql_that_writes(self) -> None:
-        """Read-only mode enforces this; the intent is checked too.
 
-        Checked against the SQL string literals rather than the whole file, so
-        prose in a docstring is not mistaken for a statement.
-        """
-        import ast
+class DerivationCannotExtendAMessagesLifeTests(unittest.TestCase):
+    """D-013: re-reading must not renew an existing record's deadline.
 
-        source = (REPOSITORY_ROOT / "scripts/inventory_retention.py").read_text()
-        writes = ("DELETE", "DROP", "UPDATE", "INSERT", "VACUUM", "ALTER", "REPLACE")
-        offenders = []
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                text = node.value.upper()
-                if "SELECT" not in text and "PRAGMA" not in text:
-                    continue
-                offenders.extend(word for word in writes if word in text)
-            elif isinstance(node, ast.JoinedStr):
-                rendered = "".join(
-                    part.value.upper()
-                    for part in node.values
-                    if isinstance(part, ast.Constant) and isinstance(part.value, str)
-                )
-                offenders.extend(word for word in writes if word in rendered)
-        self.assertEqual(offenders, [])
+    Provenance is transitive, so a summary of a mail-derived record is itself
+    mail-derived. If each summary took a fresh thirty days, AL/X revisiting a
+    thread every few weeks would keep one message's content alive forever,
+    with every record honestly stamped and the policy quietly defeated.
+    """
 
-    def test_the_inventory_reports_unclassified_records_honestly(self) -> None:
-        """Every record predating provenance must be reported, not assumed safe."""
-        result = subprocess.run(
-            [sys.executable, "scripts/inventory_retention.py"],
-            cwd=REPOSITORY_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
+    def test_a_summary_inherits_the_deadline_it_was_derived_from(self) -> None:
+        policy = RetentionPolicy()
+        source = policy.direct_mail(NOW, (REFERENCE,))
+        summary = policy.derive(
+            ContentOrigin.ALX, NOW + timedelta(days=29), (source,)
         )
-        self.assertIn("unclassified", result.stdout)
-        self.assertIn("Purging requires a separate authorisation", result.stdout)
+        self.assertEqual(summary.content_expires_at, source.content_expires_at)
+
+    def test_repeated_derivation_never_extends_the_original_deadline(self) -> None:
+        policy = RetentionPolicy()
+        record = policy.direct_mail(NOW, (REFERENCE,))
+        deadline = record.content_expires_at
+        for step in range(1, 19):
+            record = policy.derive(
+                ContentOrigin.ALX, NOW + timedelta(days=20 * step), (record,)
+            )
+        self.assertEqual(record.content_expires_at, deadline)
+        self.assertTrue(record.governed_by_retention())
+
+    def test_the_earliest_deadline_wins_across_several_sources(self) -> None:
+        """Merging an older message with a newer one cannot revive the older."""
+        policy = RetentionPolicy()
+        older = policy.direct_mail(NOW, (REFERENCE,))
+        newer = policy.direct_mail(NOW + timedelta(days=10), (SECOND_REFERENCE,))
+        merged = policy.derive(
+            ContentOrigin.ALX, NOW + timedelta(days=10), (older, newer)
+        )
+        self.assertEqual(merged.content_expires_at, older.content_expires_at)
+
+    def test_a_fresh_read_still_starts_its_own_thirty_days(self) -> None:
+        """Re-reading the message itself creates a new record, which is allowed."""
+        policy = RetentionPolicy()
+        first = policy.direct_mail(NOW, (REFERENCE,))
+        later = policy.direct_mail(NOW + timedelta(days=20), (REFERENCE,))
+        self.assertEqual(later.content_expires_at, NOW + timedelta(days=50))
+        self.assertEqual(first.content_expires_at, NOW + timedelta(days=30))
+
+
+class FailingClosedIsLegibleTests(unittest.TestCase):
+    """Refusing to run must say so plainly, not crash.
+
+    This is a script Friedl runs. A raw traceback would bury the one fact that
+    matters: the inventory stopped rather than report a partial count, because
+    an uncounted content column looks exactly like an empty one.
+    """
+
+    def test_an_uninventoried_content_column_exits_with_a_clear_message(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / ".alx/runtime"
+            runtime.mkdir(parents=True)
+            connection = sqlite3.connect(runtime / "goals.sqlite3")
+            try:
+                connection.execute(
+                    "CREATE TABLE future_notes (id TEXT PRIMARY KEY, note_json TEXT)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = subprocess.run(
+                [sys.executable, "scripts/inventory_retention.py", "--root", str(root)],
+                cwd=REPOSITORY_ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Inventory refused to run", result.stdout)
+        self.assertIn("future_notes.note_json", result.stdout)
+        self.assertIn("No store was modified", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

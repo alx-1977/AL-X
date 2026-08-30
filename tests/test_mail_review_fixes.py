@@ -417,8 +417,9 @@ class TransientRetentionGapTests(unittest.TestCase):
     the latter, so it was actively preventing AL/X from describing a message.
 
     Provenance-based retention in docs/MAIL_RETENTION_PROPOSAL.md is the agreed
-    replacement and is not yet authorised for implementation. These tests
-    record the gap honestly so its closure is deliberate rather than assumed.
+    replacement is approved as D-013, but is not wired into the stores. These
+    tests record the gap honestly so its closure is deliberate rather than
+    assumed.
     """
 
     def test_no_similarity_guard_remains_in_the_core(self) -> None:
@@ -439,10 +440,11 @@ class TransientRetentionGapTests(unittest.TestCase):
                   / "src/alx/core/loop.py").read_text("utf-8")
         self.assertNotIn("goal_reproduces_transient_content", source)
 
-    def test_the_replacement_design_is_recorded_and_unauthorised(self) -> None:
+    def test_the_replacement_design_records_the_unwired_runtime_gap(self) -> None:
         proposal = (Path(__file__).resolve().parents[1]
                     / "docs/MAIL_RETENTION_PROPOSAL.md").read_text("utf-8")
-        self.assertIn("Implementation and", proposal)
+        self.assertIn("Policy approved as D-013", proposal)
+        self.assertIn("not wired into store schemas or write paths", proposal)
         self.assertIn("provenance", proposal.lower())
         # Raw bodies are still never automatically persisted by the provider.
         mail_tools = (Path(__file__).resolve().parents[1]
