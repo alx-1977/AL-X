@@ -197,12 +197,32 @@ rather than implying protection it has not built.
   expose it, and normal AL/X execution catches the failure and logs only a
   sanitised code. The defect is that the object retains the content, so richer
   diagnostics or an error-reporting integration would surface it.
-- **Proposed boundary:** break the exception chain at the provider adapter for
-  requests carrying mail content, so no retained frame holds the payload.
+  **Second correction:** I then overclaimed in the other direction, writing
+  that breaking the chain leaves "no retained frame holding the payload". That
+  is false. Severing `__cause__` and `__context__` cleans the exception
+  *object*, but a traceback built with `capture_locals=True` walks every frame
+  in the stack, and any frame that was processing a mail body still holds it.
+  Clearing the adapter's own locals would not close this: the calling Core
+  frame holds the same content independently, as a test now demonstrates.
+  Diagnostics that capture locals cannot be made safe at the provider boundary
+  for a stack that is, by design, processing private material.
+- **Proposed boundary,** stated as four separate promises rather than one:
+  1. **Guaranteed:** the exception object retains no provider request. No
+     `__cause__`, no `__context__`, no reachable `request.content`.
+  2. **Guaranteed:** ordinary diagnostics stay clean. `format_exception` and
+     anything AL/X logs render only a provider name and an error code.
+  3. **Guaranteed by convention, enforced by test:** AL/X produces no
+     tracebacks. A test scans the source for `exc_info`, `format_exc`,
+     `print_exc`, and `capture_locals`, and fails if any appears.
+  4. **Prohibited, not prevented:** exporting a locals-capturing traceback from
+     a payload-carrying path. Nothing in the code can stop an operator or a
+     future error-reporting integration doing this, so it is a rule, and adding
+     such an integration reopens the question.
 - **Deletion meaning:** logs rotate by the operator's arrangement; AL/X does
   not manage them.
-- **Configured and tested:** a test asserts that a provider failure carrying a
-  mail body exposes neither the body nor a chained request containing it.
+- **Configured and tested:** tests assert the first three promises, and two
+  further tests deliberately prove the frame-locals exposure is real, so the
+  limit is recorded in the suite rather than left implicit.
 
 ### Temporary and process storage
 
@@ -245,14 +265,19 @@ rather than implying protection it has not built.
     `received_at`, `observed_at` — a reference and its envelope, no body. The
     longest field in any of them is 98 characters.
   - One is a copy of the goal store. Its conversation turns hold identifiers
-    and codes only, longest 90 characters; the substantial records are goal
-    states, whose longest field is a 135-character progress note.
+    and codes only, longest 90 characters. Its goal states are **unclassified
+    free text**: objectives, progress notes, decisions and corrections, the
+    longest being 135 characters.
 
-  So these particular files are not mail-body copies. That is a fact about
-  what happened to be stored when they were taken, not a guarantee: a goal
-  state is free text an earlier design step could have filled with a quoted
-  body, and a later backup could. The boundary below is needed because the
-  next copy has no such assurance.
+  What this inventory does and does not establish. It shows the observation
+  store has no body column and cannot hold one, so those three files are
+  structurally body-free. It does **not** establish the same for the goal
+  store. A 135-character progress note is free text, and a short quotation
+  from a mail body would fit inside it comfortably. Length and schema cannot
+  tell a written summary from a copied fragment — the same limit that defeated
+  the similarity guard. Classifying that file requires comparing its contents
+  against retained mail during the later inventory, which this scope does not
+  authorise. Until then the goal backup is unclassified, not confirmed clean.
 - **Proposed boundary:** backups inherit the retention of what they copy. A
   backup older than the longest retention it contains is itself expired, and
   maintenance copies are either recorded for expiry or not taken.
@@ -341,10 +366,12 @@ Two findings above are not retention questions and should be treated separately:
    defect to correct now rather than part of this design, subject to Friedl's
    agreement.
 2. **Four backup files exist outside any policy**, created by me during
-   maintenance in this session. Inventoried without reading bodies, they hold
-   references, envelopes, and goal state — not mail bodies. That is what these
-   four happen to contain, not a property the format guarantees, so they should
-   be listed in the dry-run inventory rather than quietly inherited.
+   maintenance in this session. Three copy the observation store, which has no
+   body column and so cannot hold one. The fourth copies the goal store, whose
+   free-text fields are **unclassified**: short enough to be summaries, long
+   enough to hold a quoted fragment, and not separable by inspection. All four
+   should be listed in the dry-run inventory, and the goal backup classified by
+   content comparison before anyone treats it as body-free.
 
 ## Decisions this scope adds
 

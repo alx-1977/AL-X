@@ -14,6 +14,7 @@ check the object itself, not only its default rendering.
 
 from __future__ import annotations
 
+import logging
 import ssl
 import traceback
 import unittest
@@ -219,15 +220,171 @@ class AdapterBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self._assert_clean(caught.exception)
 
     def _assert_clean(self, failure: ProviderError) -> None:
+        """Assert the boundary this fix actually guarantees.
+
+        `unittest.assertRaises` sets `__traceback__` to None on the exception
+        it stores, so a check written against `caught.exception` inspects a
+        traceback with no frames and passes regardless. These assertions are
+        about the exception object itself, which survives that stripping.
+
+        Frame locals are deliberately not asserted here. See
+        `FrameLocalsAreOutsideTheBoundaryTests` for why that is not a promise
+        this layer can make.
+        """
         self.assertIsNone(failure.__cause__)
         self.assertIsNone(failure.__context__)
         self.assertNotIn(SECRET, _reachable_text(failure))
+        formatted = "".join(
+            traceback.format_exception(type(failure), failure, failure.__traceback__)
+        )
+        self.assertNotIn(SECRET, formatted)
+
+
+
+class FrameLocalsAreOutsideTheBoundaryTests(unittest.TestCase):
+    """Record what this fix does not promise, so no one relies on it.
+
+    A traceback built with `capture_locals=True` walks every frame in the
+    stack and renders its variables. Any frame that was processing a mail body
+    when the call failed still holds it: the adapter that built the request,
+    and above it the Core turn that passed the body down. Clearing the
+    adapter's own locals would not change that, because the caller's frame
+    holds the same content independently.
+
+    So richer diagnostics over a stack handling private material cannot be
+    made safe at the provider boundary. The boundary that is enforceable is
+    the exception object: no cause, no context, no retained request. What
+    protects the frames is that AL/X logs only sanitised codes and never
+    exports a traceback with captured locals from a payload-carrying path.
+    """
+
+    def test_capture_locals_still_reaches_the_payload(self) -> None:
+        from alx.providers import OpenAIReasoningModel
+
+        failure = _capture(
+            lambda: OpenAIReasoningModel(
+                "model", "unused", "https://model.invalid", 10, _failing_client(),
+                streaming=False,
+            ).complete(_model_request())
+        )
         detailed = "".join(
             traceback.TracebackException(
                 type(failure), failure, failure.__traceback__, capture_locals=True
             ).format()
         )
-        self.assertNotIn(SECRET, detailed)
+        self.assertIn(SECRET, detailed)
+
+    def test_the_callers_frame_holds_it_independently(self) -> None:
+        """Proves clearing adapter locals would not close this."""
+        from alx.providers import OpenAIReasoningModel
+
+        adapter = OpenAIReasoningModel(
+            "model", "unused", "https://model.invalid", 10, _failing_client(),
+            streaming=False,
+        )
+
+        def a_core_turn(body: str) -> Any:
+            from alx.contracts import ModelMessage, ModelRequest, ModelRole
+
+            return adapter.complete(
+                ModelRequest(
+                    (ModelMessage(ModelRole.USER, body),), "alx_decision",
+                    {"type": "object"},
+                )
+            )
+
+        failure = _capture(lambda: a_core_turn(SECRET))
+        frames = traceback.TracebackException(
+            type(failure), failure, failure.__traceback__, capture_locals=True
+        ).stack
+        holding = [f.name for f in frames if SECRET in str(f.locals)]
+        self.assertIn("a_core_turn", holding)
+
+    def test_ordinary_diagnostics_stay_clean(self) -> None:
+        """The default rendering, which is what any log actually prints."""
+        from alx.providers import OpenAIReasoningModel
+
+        failure = _capture(
+            lambda: OpenAIReasoningModel(
+                "model", "unused", "https://model.invalid", 10, _failing_client(),
+                streaming=False,
+            ).complete(_model_request())
+        )
+        formatted = "".join(
+            traceback.format_exception(type(failure), failure, failure.__traceback__)
+        )
+        self.assertNotIn(SECRET, formatted)
+
+
+class RuntimeLogsAreSanitisedTests(unittest.TestCase):
+    """End to end: a failing reasoning request must log only sanitised codes.
+
+    This is what actually protects the frames. The exception boundary keeps
+    the payload off the object; this keeps it out of the logs, because the
+    Core records a type name and message and never a traceback.
+    """
+
+    def test_a_failing_reasoning_request_logs_no_payload(self) -> None:
+        from alx.core.model_reasoner import ModelReasoner
+        from alx.contracts import ReasoningContext
+
+        class FailingModel:
+            """Fails the way the adapters now do: a clean ProviderError."""
+
+            def complete(self, request: Any) -> Any:
+                try:
+                    raise _payload_bearing_error()
+                except httpx.HTTPError as error:
+                    code = type(error).__name__
+                raise_provider_failure("openai", code)
+
+        reasoner = ModelReasoner(FailingModel(), "laws", "identity")
+        context = ReasoningContext(
+            active_goal=None, turns=(), capabilities=(), conversation_id="c-1"
+        )
+
+        with self.assertLogs("alx", level="DEBUG") as captured:
+            # The Core's handler shape: log the type and message, never a trace.
+            try:
+                reasoner.decide(context)
+            except Exception as error:  # noqa: BLE001 - mirrors CoreLoop
+                logging.getLogger("alx.core.loop").info(
+                    "Reasoner decision rejected: %s: %s", type(error).__name__, error
+                )
+
+        logged = "\n".join(captured.output)
+        self.assertNotIn(SECRET, logged)
+        self.assertIn("ProviderError", logged)
+        self.assertIn("openai provider failure: HTTPStatusError", logged)
+
+    def test_the_source_logs_no_tracebacks_at_all(self) -> None:
+        """No `exc_info`, `format_exc`, or `capture_locals` anywhere in AL/X.
+
+        The frame-locals exposure is only reachable through diagnostics AL/X
+        does not produce. If that ever changes, this fails and the boundary
+        must be reconsidered.
+        """
+        source_root = Path(__file__).resolve().parents[1] / "src"
+        offenders = []
+        for path in source_root.rglob("*.py"):
+            body = path.read_text(encoding="utf-8")
+            for marker in ("exc_info", "format_exc", "print_exc", "capture_locals"):
+                if marker in body:
+                    offenders.append(f"{path.relative_to(source_root)}: {marker}")
+        self.assertEqual(offenders, [])
+
+def _capture(call: Any) -> ProviderError:
+    """Run `call` and return the failure with its traceback still attached.
+
+    `assertRaises` discards the traceback, which would make any frame-level
+    assertion vacuous. Tests that need real frames use this instead.
+    """
+    try:
+        call()
+    except ProviderError as failure:
+        assert failure.__traceback__ is not None
+        return failure
+    raise AssertionError("no provider failure was raised")
 
 
 def _model_request() -> Any:
