@@ -700,3 +700,75 @@ class ApprovalSlipDoesNotEndTheSessionTests(unittest.TestCase):
     def test_the_model_is_told_the_identifiers_must_match(self) -> None:
         source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
         self.assertIn("same identifier the call carries", source)
+
+
+class AttentionAndTidyingGuidanceTests(unittest.TestCase):
+    """Both are AL/X's judgement, expressed as guidance, never encoded rules."""
+
+    @staticmethod
+    def _instructions() -> str:
+        return (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
+
+    def test_she_may_weigh_how_much_attention_an_event_deserves(self) -> None:
+        source = self._instructions()
+        self.assertIn("Judge whether an event is worth his attention", source)
+        self.assertIn("never a rule about a sender or a subject", source)
+
+    def test_nothing_classifies_mail_by_sender_or_subject(self) -> None:
+        """Law 1: a filter on wording would be keyword routing."""
+        from alx.tools import DEFINITIONS
+        import ast
+
+        for relative_path in (
+            "src/alx/tools/mail.py",
+            "src/alx/providers/icloud_mail.py",
+            "src/alx/core/loop.py",
+        ):
+            tree = ast.parse((REPOSITORY_ROOT / relative_path).read_text("utf-8"))
+            literals = {
+                node.value.lower()
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            for marketing in ("promotion", "promotional", "newsletter", "unsubscribe",
+                              "no-reply", "noreply", "marketing", "spam"):
+                self.assertNotIn(marketing, literals, f"{relative_path} classifies mail")
+        # No capability decides importance either.
+        for definition in DEFINITIONS:
+            for forbidden in ("promotional", "important", "priority", "filter"):
+                self.assertNotIn(forbidden, definition.capability_id)
+
+    def test_every_message_still_reaches_her_unfiltered(self) -> None:
+        """Nothing is suppressed before she sees it; she only chooses emphasis."""
+        import ast
+
+        tree = ast.parse(
+            (REPOSITORY_ROOT / "src/alx/providers/icloud_mail.py").read_text("utf-8")
+        )
+        discover = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "discover"
+        )
+        rendered = ast.unparse(discover).lower()
+        for filtering in ("subject", "sender", "from", "skip", "ignore"):
+            self.assertNotIn(f"if {filtering}", rendered)
+
+    def test_clearing_a_handled_message_is_offered_not_assumed(self) -> None:
+        source = self._instructions()
+        self.assertIn("you\nmay offer to clear it from his inbox", source)
+        self.assertIn("Offer; do not\nassume", source)
+
+    def test_no_sequence_ties_clearing_to_sending(self) -> None:
+        """Law 6: deleting after replying must not be an encoded step."""
+        source = self._instructions()
+        for sequenced in ("after sending, ", "then delete", "always delete",
+                          "must delete", "once sent, delete"):
+            self.assertNotIn(sequenced, source.lower())
+        # And no code couples the two capabilities.
+        import ast
+
+        tree = ast.parse((REPOSITORY_ROOT / "src/alx/tools/mail.py").read_text("utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "send_reply":
+                rendered = ast.unparse(node)
+                self.assertNotIn("trash", rendered.lower())
