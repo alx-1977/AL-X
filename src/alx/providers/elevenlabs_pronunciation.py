@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from alx.providers.errors import ProviderError
+from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +122,11 @@ class ElevenLabsDictionaryManager:
             response.raise_for_status()
             result = response.json()
         except (httpx.HTTPError, ValueError) as error:
-            raise ProviderError("elevenlabs", type(error).__name__) from error
+            error_code = type(error).__name__
+        else:
+            error_code = ""
+        if error_code:
+            raise_provider_failure("elevenlabs", error_code)
         deployed_dictionary_id = dictionary_id or result.get("id")
         version_id = result.get("version_id")
         if not isinstance(deployed_dictionary_id, str) or not isinstance(version_id, str):

@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from alx.contracts import ModelCompletion, ModelRequest
-from alx.providers.errors import ProviderError
+from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 LOGGER = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ class OpenAIReasoningModel:
                 duration,
                 error_code,
             )
-            raise ProviderError("openai", error_code) from error
+        raise_provider_failure("openai", error_code)
 
     def _stream(
         self,

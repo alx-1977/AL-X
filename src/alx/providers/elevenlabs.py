@@ -12,7 +12,7 @@ import httpx
 
 from alx.contracts import AudioChunk
 from alx.providers.elevenlabs_pronunciation import DictionaryLocator
-from alx.providers.errors import ProviderError
+from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 def _media_type(output_format: str) -> str:
@@ -142,7 +142,10 @@ class ElevenLabsSynthesizer:
                         sequence += 1
                 yield AudioChunk(stream_id, sequence, b"", media_type, final=True)
         except httpx.HTTPError as error:
-            raise ProviderError("elevenlabs", type(error).__name__) from error
+            error_code = type(error).__name__
+        else:
+            return
+        raise_provider_failure("elevenlabs", error_code)
 
     def _emit_telemetry(
         self,

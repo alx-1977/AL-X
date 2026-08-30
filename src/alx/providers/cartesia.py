@@ -14,7 +14,7 @@ import certifi
 import websockets
 
 from alx.contracts import AudioChunk, TranscriptionEvent, TranscriptionState
-from alx.providers.errors import ProviderError
+from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 class CartesiaTranscriber:
@@ -84,7 +84,10 @@ class CartesiaTranscriber:
         except ProviderError:
             raise
         except Exception as error:
-            raise ProviderError("cartesia", type(error).__name__) from error
+            error_code = type(error).__name__
+        else:
+            return
+        raise_provider_failure("cartesia", error_code)
 
     async def _send_audio(self, socket: Any, chunks: AsyncIterable[AudioChunk]) -> None:
         async for chunk in chunks:
@@ -100,8 +103,12 @@ class CartesiaTranscriber:
             raise ProviderError("cartesia", "unexpected_binary_event")
         try:
             body = json.loads(raw_event)
-        except json.JSONDecodeError as error:
-            raise ProviderError("cartesia", "invalid_event") from error
+        except json.JSONDecodeError:
+            malformed = True
+        else:
+            malformed = False
+        if malformed:
+            raise_provider_failure("cartesia", "invalid_event")
         event_type = body.get("type")
         if event_type == "error":
             raise ProviderError("cartesia", "remote_error")

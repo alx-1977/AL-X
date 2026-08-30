@@ -188,11 +188,15 @@ rather than implying protection it has not built.
   statement carries codes, identifiers, and durations. Provider failures are
   reduced to an exception type or error code before being logged.
 - **But:** a provider exception is raised `from error`, chaining the underlying
-  httpx exception, which retains the request object. Verified on this machine:
-  a formatted traceback of the chained pair **prints the request body**, and it
-  is also reachable as `__cause__.request.content`. Any unhandled traceback
-  reaching a log or a console would therefore expose a mail body. This is the
-  one place where content escapes today.
+  httpx exception, which retains the request object. Verified: the body is
+  reachable as `__cause__.request.content`, and a traceback formatted with
+  `capture_locals=True` prints it.
+  **Correction:** I previously wrote that any formatted traceback exposes the
+  body. That was wrong, and came from a test whose own source line contained
+  the literal, which tracebacks print. An ordinary `format_exception` does not
+  expose it, and normal AL/X execution catches the failure and logs only a
+  sanitised code. The defect is that the object retains the content, so richer
+  diagnostics or an error-reporting integration would surface it.
 - **Proposed boundary:** break the exception chain at the provider adapter for
   requests carrying mail content, so no retained frame holds the payload.
 - **Deletion meaning:** logs rotate by the operator's arrangement; AL/X does
@@ -232,9 +236,23 @@ rather than implying protection it has not built.
 
 ### Backups
 
-- **Does mail content reach it?** Yes. Four `.bak` copies of the goal and
-  observation stores exist under `.alx/runtime/backup/`, created during this
-  session's maintenance. They are outside any retention policy.
+- **Does mail content reach it?** Not today, but nothing prevents it tomorrow.
+  Four `.bak` files exist under `.alx/runtime/backup/`, created during this
+  session's maintenance, and all four sit outside any retention policy.
+  Inventoried by schema and field length, without reading any body:
+  - Three are copies of the mail observation store. Each observation carries
+    `mailbox_id`, `uid_validity`, `uid`, `message_id`, `sender`, `subject`,
+    `received_at`, `observed_at` — a reference and its envelope, no body. The
+    longest field in any of them is 98 characters.
+  - One is a copy of the goal store. Its conversation turns hold identifiers
+    and codes only, longest 90 characters; the substantial records are goal
+    states, whose longest field is a 135-character progress note.
+
+  So these particular files are not mail-body copies. That is a fact about
+  what happened to be stored when they were taken, not a guarantee: a goal
+  state is free text an earlier design step could have filled with a quoted
+  body, and a later backup could. The boundary below is needed because the
+  next copy has no such assurance.
 - **Proposed boundary:** backups inherit the retention of what they copy. A
   backup older than the longest retention it contains is itself expired, and
   maintenance copies are either recorded for expiry or not taken.
@@ -323,8 +341,10 @@ Two findings above are not retention questions and should be treated separately:
    defect to correct now rather than part of this design, subject to Friedl's
    agreement.
 2. **Four backup files exist outside any policy**, created by me during
-   maintenance in this session. They contain goal and observation state. They
-   should be listed in the dry-run inventory rather than quietly inherited.
+   maintenance in this session. Inventoried without reading bodies, they hold
+   references, envelopes, and goal state — not mail bodies. That is what these
+   four happen to contain, not a property the format guarantees, so they should
+   be listed in the dry-run inventory rather than quietly inherited.
 
 ## Decisions this scope adds
 

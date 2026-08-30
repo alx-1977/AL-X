@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 
 from alx.contracts import ModelCompletion, ModelRequest
-from alx.providers.errors import ProviderError
+from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 LOGGER = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ class XAIReasoningModel:
             )
             return completion
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            error_code = type(error).__name__
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -121,15 +122,15 @@ class XAIReasoningModel:
                     "provider": "xai",
                     "model": self._model,
                     "duration_ms": round(duration * 1000),
-                    "error_type": type(error).__name__,
+                    "error_type": error_code,
                 },
             )
             LOGGER.info(
                 "Reasoning provider request failed after %.3f seconds: %s",
                 duration,
-                type(error).__name__,
+                error_code,
             )
-            raise ProviderError("xai", type(error).__name__) from error
+        raise_provider_failure("xai", error_code)
 
     def _stream(
         self,
