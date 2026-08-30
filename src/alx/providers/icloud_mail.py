@@ -221,12 +221,25 @@ class SQLiteMailObservationState:
             data,
         )
 
+    # How many still-open messages remain available as conversation context.
+    # Every one announced but not yet acknowledged or trashed is a referent
+    # Friedl may mean, so more than one must be carried; the bound keeps the
+    # reasoning context from growing without limit.
+    CONTEXTUAL_EVENT_LIMIT = 5
+
     def contextual_events(self) -> tuple[BackgroundEvent, ...]:
-        row = self._connection.execute(
+        """Report the messages still open, most recently announced first.
+
+        The Core decides which one Friedl means. Returning only one would
+        silently choose for it, and choosing the oldest would answer about the
+        wrong message.
+        """
+        rows = self._connection.execute(
             "SELECT mailbox_id, uid_validity, uid, event_json FROM mail_observations "
-            "WHERE state IN ('current', 'presented') ORDER BY uid LIMIT 1"
-        ).fetchone()
-        return () if row is None else (self._event(row),)
+            "WHERE state IN ('current', 'presented') ORDER BY uid DESC LIMIT ?",
+            (self.CONTEXTUAL_EVENT_LIMIT,),
+        ).fetchall()
+        return tuple(self._event(row) for row in rows)
 
     def record_delivery(self, event_id: str) -> None:
         parts = event_id.split(":")

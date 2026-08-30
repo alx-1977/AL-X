@@ -578,3 +578,19 @@ class Queued:
     def decide(self, context):
         self.contexts.append(context)
         return self.decisions.pop(0)
+
+
+class DraftWordingTests(unittest.TestCase):
+    """She must say the finished message, not a description of it."""
+
+    def test_the_model_is_told_to_say_the_finished_wording(self) -> None:
+        source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
+        self.assertIn("word for word as it", source)
+        self.assertIn("rather than a description of what you intend to write", source)
+
+    def test_no_wording_is_scripted_for_her(self) -> None:
+        """Law 1: state the requirement, never supply the sentence."""
+        source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
+        for scripted in ('say "i will send', "i'll reply:", "shall i send that",
+                         "here is the draft"):
+            self.assertNotIn(scripted, source.lower())

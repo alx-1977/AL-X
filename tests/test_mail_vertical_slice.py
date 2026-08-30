@@ -191,6 +191,44 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(second.transient_data["body"], "Transient body")
         self.assertEqual(self.state.current().data["uid"], "2")
 
+    def test_every_open_message_stays_available_as_a_referent(self) -> None:
+        """Regression: only the oldest open message was carried as context.
+
+        Two messages were announced, AL/X was asked to reply to the second, and
+        she had the first in context instead, so she lost the address and the
+        details of the one she was answering.
+        """
+        self.adapter.scan()
+        self.imap.items[2] = message("Promotion", "Promo body")
+        self.imap.items[3] = message("Parts order", "When do the parts arrive?")
+        self.adapter.scan()
+        first = self.state.current()
+        self.adapter.record_delivery(first.event_id)
+        second = self.state.current()
+        self.adapter.record_delivery(second.event_id)
+        subjects = [item.data["subject"] for item in self.adapter.contextual_events()]
+        self.assertIn("Parts order", subjects)
+        self.assertIn("Promotion", subjects)
+        # Most recently announced first, so the newest is not buried.
+        self.assertEqual(subjects[0], "Parts order")
+
+    def test_contextual_events_stay_bounded(self) -> None:
+        from alx.providers import SQLiteMailObservationState
+
+        self.adapter.scan()
+        for uid in range(2, 12):
+            self.imap.items[uid] = message(f"Subject {uid}", "body")
+        self.adapter.scan()
+        for _ in range(10):
+            item = self.state.current()
+            if item is None:
+                break
+            self.adapter.record_delivery(item.event_id)
+        self.assertLessEqual(
+            len(self.adapter.contextual_events()),
+            SQLiteMailObservationState.CONTEXTUAL_EVENT_LIMIT,
+        )
+
     def test_delivered_item_stays_context_without_blocking_later_mail(self) -> None:
         """One at a time, and a presented item remains the referent.
 
