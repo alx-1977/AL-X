@@ -386,6 +386,48 @@ class TransientContentTests(unittest.TestCase):
                     CoreAgent._reproduces_transient_content(with_body, {"v": text})
                 )
 
+    def test_fragments_of_any_size_are_refused(self) -> None:
+        """Regression: every minimum run length left a hole below it.
+
+        A body divided just under whichever threshold was configured passed
+        while still carrying an account number. The records are now also joined
+        and compared as one document, which no fragment size defeats.
+        """
+        from alx.core.loop import CoreAgent
+
+        body = (
+            "Bank transfer reference 88213 for R14 500 to account 62 8891 4432, "
+            "confirm by Friday."
+        )
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW, data={"uid": "1"},
+            transient_data={"body_text": body},
+        )
+        with_body = conversation("read it", events=(event,))
+        for size in (1, 2, 3, 5, 8, 11, 12, 20, 40):
+            with self.subTest(fragment_size=size):
+                pieces = {
+                    f"part_{index}": body[index:index + size]
+                    for index in range(0, len(body), size)
+                }
+                self.assertTrue(
+                    CoreAgent._reproduces_transient_content(with_body, pieces)
+                )
+
+    def test_a_short_secret_split_across_records_is_refused(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW, data={"uid": "1"},
+            transient_data={"body_text": "OTP is 449281."},
+        )
+        with_body = conversation("read it", events=(event,))
+        self.assertTrue(
+            CoreAgent._reproduces_transient_content(
+                with_body, {"a": "OTP is", "b": " 449281."}
+            )
+        )
+
     def test_the_core_may_still_describe_the_message_in_its_own_words(self) -> None:
         """The guard must not block legitimate summarisation."""
         reasoner = Queued(AgentDecision(

@@ -533,15 +533,13 @@ class CoreAgent:
     # short, because a leak is not always a long block: a one-line code or
     # account number is the most sensitive thing a message can carry.
     _TRANSIENT_QUOTE_CHARACTERS = 24
-    # A run this long is a meaningful piece of the source rather than a common
-    # turn of phrase. Fragments at least this long are counted toward the total
-    # the records reproduce between them.
-    _TRANSIENT_FRAGMENT_CHARACTERS = 12
     # How much of a message must be reproduced before it counts as copied
-    # rather than described. Measured against real text: a summary that states
-    # the facts reproduces roughly a quarter of the source, while a verbatim
-    # copy of half the message reproduces half of it.
-    _TRANSIENT_COVERAGE_FRACTION = 0.45
+    # rather than described. Measured against real text: fragmented copies of a
+    # body reproduce essentially all of it, a summary reaches about half, and
+    # her own words about a quarter.
+    _TRANSIENT_COVERAGE_FRACTION = 0.75
+    # The shortest reproduced run that counts toward coverage.
+    _TRANSIENT_RUN_CHARACTERS = 2
 
     @classmethod
     def _transient_texts(cls, conversation: ConversationSnapshot) -> tuple[str, ...]:
@@ -602,18 +600,31 @@ class CoreAgent:
         ]
         if not candidates:
             return False
+        # Records are also judged as one document. Splitting a body into small
+        # pieces spreads it across records, but the pieces still sit together in
+        # the proposal, so joining them restores what was copied. This closes
+        # fragmentation at every size rather than at whichever minimum run
+        # length happens to be configured.
+        combined = " ".join(candidates)
+        stripped = "".join(combined.split())
         for source in sources:
             # A short source copied whole is reproduction in full, whichever
             # single record carries it.
             if len(source) <= window:
-                if any(source in item for item in candidates):
+                if any(source in item for item in candidates) or (
+                    "".join(source.split()) in stripped
+                ):
                     return True
                 continue
+            # Reassembled fragments reproduce the source even when no single
+            # record holds a meaningful run of it.
+            if "".join(source.split()) in stripped:
+                return True
             # Otherwise measure how much of the source these records reproduce
-            # between them. Judging each record alone let a long body be split
-            # into fragments that individually said nothing, so the fragments
-            # are considered together and every position of the source that any
-            # record reproduces is counted once.
+            # between them, judged as a proportion. Stating a fact the message
+            # contains, such as a price or a date, necessarily repeats some of
+            # its characters; reproducing most of the message is what
+            # distinguishes copying it from describing it.
             covered = set()
             position = 0
             while position < len(source):
@@ -623,16 +634,11 @@ class CoreAgent:
                     while end < len(source) and source[position:end + 1] in candidate:
                         end += 1
                     longest = max(longest, end - position)
-                if longest >= cls._TRANSIENT_FRAGMENT_CHARACTERS:
+                if longest >= cls._TRANSIENT_RUN_CHARACTERS:
                     covered.update(range(position, position + longest))
                     position += longest
                     continue
                 position += 1
-            # Judge by proportion, not a character count. Stating a fact the
-            # message contains, such as a price or a date, necessarily repeats
-            # some of its characters, and a long message would otherwise be
-            # refused for a single shared phrase. Reproducing most of the
-            # message is what distinguishes copying it from describing it.
             if len(covered) >= max(
                 window, int(len(source) * cls._TRANSIENT_COVERAGE_FRACTION)
             ):
