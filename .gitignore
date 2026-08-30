@@ -4,6 +4,7 @@
 !.env.example
 
 # Local/runtime state
+.alx/
 *.db
 *.sqlite
 *.sqlite3
