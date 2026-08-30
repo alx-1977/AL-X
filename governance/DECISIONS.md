@@ -134,12 +134,16 @@ This file records approved product and architecture decisions that guide impleme
 
 - **Date:** 2026-08-30
 - **Decision owner:** Friedl
-- **Status: PROPOSED — awaiting Friedl's explicit approval.** Recorded here so
-  the wording is reviewable, not because approval has been given. The wording
-  originated as a reviewer's recommendation; a reviewer cannot approve a
-  decision under Law 16. Until Friedl approves it in his own words, this
-  section is a proposal and the enforcement built against it stands on the
-  defect fix alone.
+- **Status: APPROVED by Friedl, 2026-08-30.** Approved on the plain-language
+  statement of the rule: *when AL/X hits an error, she writes down what went
+  wrong, never what she was working on.* Friedl approved that, having been
+  told the two consequences it carries: diagnosis is harder because failures
+  report a code rather than content, and any future crash-reporting or
+  monitoring tool needs his approval before use. The wording below is a
+  reviewer's draft that Friedl accepted; the remaining detail records how the
+  rule is enforced and where enforcement is imperfect, and adds no obligation
+  beyond the rule itself. Friedl noted this may be revisited if it proves
+  inconvenient in practice.
 - **Decision:** AL/X runtime diagnostics may contain only structured, explicitly selected operational facts such as sanitised codes, identifiers and durations. They may not export exception objects, traceback frames, captured locals, provider request or response objects, credentials, raw user language, domain-document content, or other payload-bearing runtime state.
 
   Provider failures must shed their underlying request through both `__cause__` and `__context__`. Runtime handlers log sanitised structured failures without tracebacks.
