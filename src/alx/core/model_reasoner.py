@@ -47,7 +47,9 @@ in the same mutation; it is not for decision, correction, or progress record
 identifiers, and evidence supporting no criterion must leave it empty. Never route by phrase, call an unregistered capability, fabricate evidence,
 erase history, or alter approvals. You may propose one exact action approval only
 when the latest retained person turn explicitly authorizes that same consequential
-capability call; cite that turn exactly. A response may depend on a goal commit only when
+capability call; cite that turn exactly. The proposal's approval_id must be the
+same identifier the call carries, and its capability_id and arguments_json must
+match the call exactly, since the approval authorizes that one action alone. A response may depend on a goal commit only when
 the response would become materially false or unsafe if that proposal were rejected.
 Approval fields apply only to capabilities whose side_effect is effectful. Calls whose
 side_effect is none or attention_state require null approval fields.
@@ -476,10 +478,31 @@ def decision_schema() -> dict[str, Any]:
             {"type": "null"},
             _strict_object(
                 {
-                    "approval_id": string,
-                    "capability_id": string,
-                    "arguments_json": string,
-                    "source_reference": string,
+                    "approval_id": {
+                        "type": "string",
+                        "description": (
+                            "The same identifier the capability call carries in "
+                            "its approval_id field. They must be identical."
+                        ),
+                    },
+                    "capability_id": {
+                        "type": "string",
+                        "description": "Must equal the call's capability_id.",
+                    },
+                    "arguments_json": {
+                        "type": "string",
+                        "description": (
+                            "Must equal the call's arguments_json exactly. The "
+                            "approval authorizes that one action alone."
+                        ),
+                    },
+                    "source_reference": {
+                        "type": "string",
+                        "description": (
+                            "The latest person turn authorizing this action, as "
+                            "turn:<turn_id>."
+                        ),
+                    },
                 }
             ),
         ]

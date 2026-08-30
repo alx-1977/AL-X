@@ -110,12 +110,27 @@ class CoreAgent:
                     conversation, candidate, decision
                 )
                 if approval_error is not None:
+                    # A malformed approval authorises nothing, so the action is
+                    # refused and the reason returned to the Core. Ending the
+                    # conversation instead would make one slip cost the whole
+                    # session while changing nothing about what may be sent.
                     LOGGER.info("Approval proposal rejected: %s", approval_error)
-                    return CoreOutcome(
-                        CoreState.ERROR,
-                        snapshot,
-                        reason="approval_proposal_invalid",
+                    refusal = CapabilityAttempt(
+                        decision.call,
+                        CapabilityAttemptDisposition.REJECTED,
+                        False,
+                        reason_code=approval_error,
                     )
+                    if snapshot is not None:
+                        snapshot = self._store.replace(
+                            replace(
+                                snapshot.state,
+                                attempts=(*snapshot.state.attempts, refusal),
+                            ),
+                            snapshot.retention_until,
+                            snapshot.revision,
+                        )
+                    continue
                 assert candidate is not None
                 proposed = decision.approval_proposal
                 candidate = replace(

@@ -477,13 +477,18 @@ class UnheardTextTests(unittest.TestCase):
         ))
         directory = tempfile.TemporaryDirectory()
         store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        # A second decision, because a refused approval no longer ends the turn.
+        reasoner.decisions.append(AgentDecision(response="I cannot send that yet."))
         outcome = CoreAgent(
             store, reasoner, dispatch, (definition,),
             clock=lambda: now, identifier_factory=lambda: "goal-1",
-        ).process(conversation, None, now + timedelta(days=1), 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "approval_proposal_invalid")
+        ).process(conversation, None, now + timedelta(days=1), 3)
+        # The send is refused and nothing leaves, but the conversation survives.
         self.assertEqual(dispatched, [], "nothing may be transmitted")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "I cannot send that yet.")
+        # The Core reasoned again after the refusal rather than ending the turn.
+        self.assertEqual(len(reasoner.contexts), 2)
         store.close()
         directory.cleanup()
 
@@ -594,3 +599,71 @@ class DraftWordingTests(unittest.TestCase):
         for scripted in ('say "i will send', "i'll reply:", "shall i send that",
                          "here is the draft"):
             self.assertNotIn(scripted, source.lower())
+
+
+class ApprovalSlipDoesNotEndTheSessionTests(unittest.TestCase):
+    """A malformed approval refuses the action, not the conversation."""
+
+    def test_a_mismatched_approval_id_is_refused_but_the_turn_continues(self) -> None:
+        """Regression: one formatting slip closed the voice session.
+
+        The model gave the approval and the call different identifiers, and
+        nothing had told it they must match.
+        """
+        import tempfile
+        from datetime import UTC, datetime, timedelta
+        from alx.contracts import (
+            AgentDecision, ApprovalProposal, ApprovalScope, CapabilityCall,
+            CapabilityDefinition, ConversationOrigin, ConversationSnapshot,
+            ConversationTurn, GoalMutationKind, GoalProposal, StructuredSchema,
+            SuccessCriterion, ValueKind,
+        )
+        from alx.core import CoreAgent, CoreState
+        from alx.goals import SQLiteGoalStore
+
+        now = datetime(2026, 8, 30, tzinfo=UTC)
+        schema = StructuredSchema(ValueKind.OBJECT)
+        definition = CapabilityDefinition(
+            SEND_MAIL_REPLY, "reply", schema, schema, SideEffect.EFFECTFUL
+        )
+        arguments = {"to": ("john@example.test",), "body": "Heard wording."}
+        turns = (
+            ConversationTurn("c", "t1", ConversationOrigin.ALX_RESPONSE,
+                             "Heard wording.", now, None),
+            ConversationTurn("c", "t2", ConversationOrigin.TYPED,
+                             "Yes, send it.", now, "friedl"),
+        )
+        conversation = ConversationSnapshot("c", turns, 2, now + timedelta(days=1))
+        dispatched = []
+
+        def dispatch(proposed, state):
+            dispatched.append(proposed)
+            raise AssertionError("an unapproved action must not be dispatched")
+
+        reasoner = Queued(
+            AgentDecision(
+                goal_proposal=GoalProposal(
+                    kind=GoalMutationKind.CREATE, objective_summary="Reply",
+                    success_criteria=(SuccessCriterion("criterion-1", "sent"),)),
+                call=CapabilityCall("call-1", SEND_MAIL_REPLY, arguments, "approval-1"),
+                # Deliberately mismatched: the slip seen live.
+                approval_proposal=ApprovalProposal(
+                    "approval-2", ApprovalScope(SEND_MAIL_REPLY, arguments), "turn:t2"),
+            ),
+            AgentDecision(response="Let me try that again."),
+        )
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        outcome = CoreAgent(
+            store, reasoner, dispatch, (definition,),
+            clock=lambda: now, identifier_factory=lambda: "goal-1",
+        ).process(conversation, None, now + timedelta(days=1), 3)
+        self.assertEqual(dispatched, [], "nothing may be sent without an approval")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(len(reasoner.contexts), 2, "the Core must get another turn")
+        store.close()
+        directory.cleanup()
+
+    def test_the_model_is_told_the_identifiers_must_match(self) -> None:
+        source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
+        self.assertIn("same identifier the call carries", source)
