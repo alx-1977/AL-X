@@ -83,6 +83,66 @@ def message_with_attachment(subject: str, body: str) -> bytes:
     ).encode()
 
 
+def alternative_message(subject: str) -> bytes:
+    return (
+        f"Message-ID: <{subject}@example.test>\r\n"
+        f"Subject: {subject}\r\n"
+        "From: Supplier <supplier@example.test>\r\n"
+        "Date: Sat, 29 Aug 2026 10:00:00 +0200\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: multipart/alternative; boundary=alternative\r\n\r\n"
+        "--alternative\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+        "Plain body\r\n"
+        "--alternative\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+        "<p>HTML body</p>\r\n"
+        "--alternative--\r\n"
+    ).encode()
+
+
+def inline_image_message(subject: str, *, filename: bool) -> bytes:
+    disposition = (
+        "Content-Disposition: inline; filename=logo.png\r\n"
+        if filename else "Content-Disposition: inline\r\n"
+    )
+    return (
+        f"Message-ID: <{subject}@example.test>\r\n"
+        f"Subject: {subject}\r\n"
+        "From: Supplier <supplier@example.test>\r\n"
+        "Date: Sat, 29 Aug 2026 10:00:00 +0200\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: multipart/related; boundary=related\r\n\r\n"
+        "--related\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+        "<p>Body<img src=\"cid:logo\"></p>\r\n"
+        "--related\r\nContent-Type: image/png\r\n"
+        "Content-ID: <logo>\r\n"
+        f"{disposition}\r\n"
+        "image-bytes\r\n--related--\r\n"
+    ).encode()
+
+
+def forwarded_message_with_attachment(subject: str) -> bytes:
+    return (
+        f"Message-ID: <{subject}@example.test>\r\n"
+        f"Subject: {subject}\r\n"
+        "From: Supplier <supplier@example.test>\r\n"
+        "Date: Sat, 29 Aug 2026 10:00:00 +0200\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: multipart/mixed; boundary=outer\r\n\r\n"
+        "--outer\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+        "Forwarded message follows\r\n"
+        "--outer\r\nContent-Type: message/rfc822\r\n\r\n"
+        "From: Other <other@example.test>\r\n"
+        "Subject: Original\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: multipart/mixed; boundary=inner\r\n\r\n"
+        "--inner\r\nContent-Type: text/plain\r\n\r\nOriginal body\r\n"
+        "--inner\r\nContent-Type: application/pdf\r\n"
+        "Content-Disposition: attachment; filename=original.pdf\r\n\r\n"
+        "PDF\r\n--inner--\r\n"
+        "--outer--\r\n"
+    ).encode()
+
+
 class FakeImap:
     def __init__(self) -> None:
         self.items = {1: message("Old", "Old body")}
@@ -210,6 +270,36 @@ class MailProviderTests(unittest.TestCase):
         content = self.adapter.read(MailReference("INBOX", "777", "2"))
         self.assertTrue(content.has_attachments)
         self.assertNotIn("STORE", repr(self.imap.commands))
+
+    def _attachment_fact(self, raw_message: bytes) -> bool:
+        self.adapter.scan()
+        self.imap.items[2] = raw_message
+        self.adapter.scan()
+        return self.adapter.read(
+            MailReference("INBOX", "777", "2")
+        ).has_attachments
+
+    def test_plain_text_is_not_an_attachment(self) -> None:
+        self.assertFalse(self._attachment_fact(message("Plain", "Plain body")))
+
+    def test_html_alternative_body_is_not_an_attachment(self) -> None:
+        """Regression: counting any extra MIME body part silently keeps normal mail."""
+        self.assertFalse(self._attachment_fact(alternative_message("Alternative")))
+
+    def test_inline_image_with_filename_is_kept_as_an_attachment(self) -> None:
+        self.assertTrue(self._attachment_fact(
+            inline_image_message("Named logo", filename=True)
+        ))
+
+    def test_inline_image_without_filename_is_not_a_user_attachment(self) -> None:
+        self.assertFalse(self._attachment_fact(
+            inline_image_message("Unnamed logo", filename=False)
+        ))
+
+    def test_forwarded_attachment_is_found_recursively(self) -> None:
+        self.assertTrue(self._attachment_fact(
+            forwarded_message_with_attachment("Forwarded")
+        ))
 
     def test_mark_seen_sets_only_the_seen_flag(self) -> None:
         self.adapter.scan()
