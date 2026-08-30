@@ -162,3 +162,40 @@ This file records approved product and architecture decisions that guide impleme
 - **Boundary:** This governs diagnostics and failure handling. It does not authorise or alter retention, deletion, or any mutation, and it makes no promise about what a model provider retains at its own end.
 - **Not an exception:** This is a privacy boundary consistent with Law 15's retention controls, not an exception to any Law. `governance/EXCEPTIONS.md` remains empty.
 - **Review condition:** To be revisited if an error-reporting, crash-reporting or observability integration is proposed, if the architecture gate's prohibited list is changed, or if any payload is ever observed in a diagnostic.
+
+## D-013 — Mail retention: content expires on schedule, a reference survives
+
+- **Date:** 2026-08-30
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-08-30.** Approved on the plain-language statement of the rule, below, having been told what it costs.
+
+- **The rule, as Friedl approved it.** *When AL/X reads an email, fragments of it end up written to her own database on this Mac. Those copies expire thirty days after they are written, whether or not she is still working on something. What survives is a bookmark, not a copy: enough to know a message was there and to go and read it again from iCloud. If it is gone from iCloud, it is gone, and she says so rather than guessing.*
+
+- **Why it is needed.** Friedl does not keep mail: he receives it, acts on it, and clears it. But clearing the inbox never removed AL/X's local copies, and nothing enforced a deadline on them. This makes her copies behave the way his inbox already does. It also replaces a safeguard that was removed: a string-similarity guard that tried to stop mail content reaching durable state and could not be made to work, because no threshold separates a faithful summary from a copied fragment. Retention by provenance replaces detection by resemblance.
+
+- **What Friedl was told it costs.** On a task running longer than the retention window, AL/X may have to re-read a message she would otherwise have remembered. That will look like forgetfulness and is not. Given that his mail tasks complete in minutes against a thirty day window, this is expected to be rare.
+
+- **The deadline.** Thirty days from the moment a record is written. Friedl chose this knowing it is generous for how he works, on the basis that the missing control was enforcement, not the number.
+
+- **Exact scope of what expires.** Every durable record derived from a mail message, whatever its shape:
+  - the body, quoted passages, and any prose AL/X wrote that carries the message's content;
+  - **structured facts equally**: prices, dates, account numbers, quoted terms, extracted fields. Structure is not a retention loophole. If it could be extracted first and kept forever, the rule would mean nothing.
+  - The raw provider body remains transient throughout and is never durable in the first place.
+
+- **What survives as a tombstone.** The durable mail reference (mailbox, UID validity, UID), the record's own identity, its provenance, its timestamps, and the reason it expired. Nothing else: **no subject, no summary, no extracted fact**, unless separately authorised.
+
+- **A tombstone is not evidence.** It preserves identity so AL/X knows something was there. It cannot support a claim. If expired content supported a completion criterion, that criterion becomes unsupported until she re-reads the message or finds other evidence.
+
+- **Re-reading starts a new clock.** A newly created record gets its own independent thirty days. Re-reading never renews an expired record, or the deadline would be defeated by touching a message.
+
+- **If the message is gone from iCloud, it is gone.** AL/X must not reconstruct expired content from memory, inference, or context. She continues on other evidence if she has it, or is genuinely blocked and says so.
+
+- **What "expires" means.** Logical inaccessibility through AL/X: the record is removed and she cannot reach it. It is **not** secure byte erasure. Deleted bytes remain in the database file until overwritten, verified on this system. Turning that into erasure would require enabling `secure_delete` and running `VACUUM`, which carries a cost on every write and remains a separate decision.
+
+- **Keeping something longer requires Friedl.** If particular mail-derived information should outlive its deadline, it takes his explicit approval, such as an approved promotion into durable memory. There is no automatic path.
+
+- **Boundary.** This decides the policy. It does not by itself authorise activating scheduled deletion or running a first purge over existing records; those remain separate authorisations on recorded evidence. It governs mail-derived records and makes no claim about what a model provider retains at its own end.
+
+- **Not an exception:** This implements the retention and deletion controls Law 15 requires, and preserves Law 8 correctly: an unfinished goal continues, but private content does not gain indefinite life merely because a goal stays open. `governance/EXCEPTIONS.md` remains empty.
+
+- **Review condition:** To be revisited if thirty days proves wrong in daily use, if re-reading proves disruptive, if secure erasure is proposed, or if any mail-derived record is ever observed outliving its deadline.
