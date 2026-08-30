@@ -129,6 +129,51 @@ def _internal_target(module_name: str | None) -> str | None:
     return parts[1]
 
 
+# Diagnostics that would carry payload-bearing runtime state out of AL/X.
+# Recorded as governance decision D-012, the diagnostics privacy boundary.
+# A provider request holds a mail body, Friedl's speech, or AL/X's own words;
+# an exception object, a traceback frame, or captured locals can carry any of
+# them. AL/X may report sanitised codes, identifiers and durations, never the
+# state itself.
+PROHIBITED_DIAGNOSTIC_CALLS = {
+    # Renders a traceback, which prints source lines and can capture locals.
+    "format_exception": "traceback rendering",
+    "format_exc": "traceback rendering",
+    "print_exception": "traceback rendering",
+    "print_exc": "traceback rendering",
+    "format_tb": "traceback rendering",
+    "print_tb": "traceback rendering",
+    "extract_tb": "traceback frame extraction",
+    "extract_stack": "traceback frame extraction",
+    "format_stack": "traceback frame extraction",
+    "print_stack": "traceback frame extraction",
+    "TracebackException": "traceback rendering",
+    "StackSummary": "traceback frame extraction",
+    # Logs the active exception and its traceback.
+    "exception": "logging an exception with its traceback",
+    # Hands exception state to an error-reporting or observability sink.
+    "capture_exception": "error-reporting sink",
+    "capture_message": "error-reporting sink",
+    "record_exception": "error-reporting sink",
+    "set_exception": "error-reporting sink",
+    "notify_exception": "error-reporting sink",
+}
+
+# Passing a live exception to a logger, rather than a sanitised code.
+PROHIBITED_DIAGNOSTIC_KEYWORDS = {
+    "exc_info": "logging an exception with its traceback",
+    "capture_locals": "capturing frame locals",
+    "stack_info": "logging a stack trace",
+}
+
+# Replacing the interpreter's own handler, which renders a full traceback.
+PROHIBITED_DIAGNOSTIC_ATTRIBUTES = {
+    "excepthook": "installing an exception hook",
+    "unraisablehook": "installing an exception hook",
+    "threading_excepthook": "installing an exception hook",
+}
+
+
 class SourceVisitor(ast.NodeVisitor):
     def __init__(self, relative_path: str, owner: str, rules: Rules) -> None:
         self.relative_path = relative_path
@@ -255,7 +300,34 @@ class SourceVisitor(ast.NodeVisitor):
             self._add(node, "raw-language match against fixed text is prohibited")
         self.generic_visit(node)
 
+    def _check_diagnostics(self, node: ast.Call) -> None:
+        """Reject diagnostics that would export payload-bearing state (D-012)."""
+        if isinstance(node.func, ast.Attribute):
+            called = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            called = node.func.id
+        else:
+            called = ""
+        route = PROHIBITED_DIAGNOSTIC_CALLS.get(called)
+        if route is not None:
+            self._add(
+                node,
+                f"prohibited diagnostic ({route}): {called} may carry private "
+                "runtime state; report a sanitised code instead (D-012)",
+            )
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                continue
+            route = PROHIBITED_DIAGNOSTIC_KEYWORDS.get(keyword.arg)
+            if route is not None:
+                self._add(
+                    node,
+                    f"prohibited diagnostic ({route}): {keyword.arg}= may carry "
+                    "private runtime state; report a sanitised code instead (D-012)",
+                )
+
     def visit_Call(self, node: ast.Call) -> None:
+        self._check_diagnostics(node)
         if isinstance(node.func, ast.Attribute):
             method = node.func.attr
             if method in {"startswith", "endswith"} and _contains_language_identifier(
@@ -269,6 +341,17 @@ class SourceVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            for child in ast.walk(target):
+                if isinstance(child, ast.Attribute):
+                    route = PROHIBITED_DIAGNOSTIC_ATTRIBUTES.get(child.attr)
+                    if route is not None:
+                        self._add(
+                            node,
+                            f"prohibited diagnostic ({route}): {child.attr} renders "
+                            "a full traceback; handle failures with sanitised "
+                            "codes instead (D-012)",
+                        )
         if isinstance(node.value, ast.Dict) and any(
             _contains_string_literal(key) for key in node.value.keys if key is not None
         ):

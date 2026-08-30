@@ -152,7 +152,6 @@ class XAIAdapterTests(unittest.TestCase):
         self.assertNotIn("very-secret", str(caught.exception))
         self.assertNotIn("remote body", str(caught.exception))
 
-
 class OpenAIAdapterTests(unittest.TestCase):
     def test_responses_request_preserves_neutral_structured_contract(self) -> None:
         captured = {}
@@ -294,6 +293,60 @@ class OpenAIAdapterTests(unittest.TestCase):
         self.assertNotIn("very-secret", str(caught.exception))
         self.assertNotIn("remote body", str(caught.exception))
 
+    def test_stream_failure_reports_only_sanitized_structural_code(self) -> None:
+        telemetry = []
+
+        def fail(request: httpx.Request) -> httpx.Response:
+            event = {"type": "response.incomplete", "private": "must not escape"}
+            return httpx.Response(200, text=f"data: {json.dumps(event)}\n\n")
+
+        client = httpx.Client(transport=httpx.MockTransport(fail))
+        adapter = OpenAIReasoningModel(
+            "model", "very-secret", "https://example", 10, client,
+            streaming=True,
+            telemetry_sink=lambda key, values: telemetry.append(values),
+        )
+        request = ModelRequest(
+            (ModelMessage(ModelRole.USER, "private request"),),
+            "result", {"type": "object"}, "conversation-1",
+        )
+        with self.assertRaises(ProviderError) as caught:
+            adapter.complete(request)
+        self.assertEqual(caught.exception.reason, "response_incomplete")
+        self.assertEqual(telemetry[0]["error_code"], "response_incomplete")
+        self.assertNotIn("private", str(caught.exception))
+        self.assertNotIn("very-secret", str(caught.exception))
+
+    def test_failed_stream_exposes_code_but_never_private_message(self) -> None:
+        def fail(request: httpx.Request) -> httpx.Response:
+            event = {
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "server_error",
+                        "message": "private provider detail must not escape",
+                    }
+                },
+            }
+            return httpx.Response(200, text=f"data: {json.dumps(event)}\n\n")
+
+        client = httpx.Client(transport=httpx.MockTransport(fail))
+        adapter = OpenAIReasoningModel(
+            "model", "very-secret", "https://example", 10, client,
+            streaming=True,
+        )
+        request = ModelRequest(
+            (ModelMessage(ModelRole.USER, "private request"),),
+            "result", {"type": "object"}, "conversation-1",
+        )
+        with self.assertRaises(ProviderError) as caught:
+            adapter.complete(request)
+        self.assertEqual(
+            caught.exception.reason, "response_failed_server_error"
+        )
+        self.assertNotIn("provider detail", str(caught.exception))
+        self.assertNotIn("very-secret", str(caught.exception))
+
 
 class FakeSocket:
     def __init__(self, events):
@@ -420,9 +473,15 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
             sent,
             {
                 "text": "ALX response",
-                "model_id": "configured-tts",
-                "apply_text_normalization": "on",
-                "pronunciation_dictionary_locators": [
+            "model_id": "configured-tts",
+            "apply_text_normalization": "on",
+            "voice_settings": {
+                "speed": 1.0,
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "use_speaker_boost": True,
+            },
+            "pronunciation_dictionary_locators": [
                     {
                         "pronunciation_dictionary_id": "dictionary-id",
                         "version_id": "dictionary-version-id",
@@ -474,6 +533,35 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         sent = json.loads(captured["request"].content)
         self.assertEqual(sent["text"], authoritative_response)
+        await client.aclose()
+
+    async def test_elevenlabs_sends_configured_voice_speed(self) -> None:
+        captured = {}
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return httpx.Response(200, content=b"spoken-audio")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        adapter = ElevenLabsSynthesizer(
+            "configured-tts", "secret", "preferred-voice",
+            "https://speech.example", "mp3_44100_128", 10,
+            "dictionary-id", "dictionary-version-id", client,
+            speed=1.15,
+        )
+        _ = [chunk async for chunk in adapter.synthesize("ALX response")]
+        sent = json.loads(captured["request"].content)
+        # Sending voice_settings replaces the whole object, so every field the
+        # voice relies on must be present, not only the one being configured.
+        self.assertEqual(
+            sent["voice_settings"],
+            {
+                "speed": 1.15,
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "use_speaker_boost": True,
+            },
+        )
         await client.aclose()
 
 

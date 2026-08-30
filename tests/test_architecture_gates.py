@@ -219,3 +219,119 @@ class GovernanceGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiagnosticsPrivacyBoundaryTests(ArchitectureGateTests):
+    """The gate must reject every route that exports payload-bearing state.
+
+    Governance decision D-012. Each test is a mutation: it introduces one
+    prohibited diagnostic and asserts the gate rejects it. Without these the
+    gate could silently stop enforcing and nothing would notice.
+
+    The routes matter because AL/X processes private material in ordinary
+    operation — a mail body sent for reasoning, Friedl's speech sent for
+    transcription — and any of these would carry it out of the runtime.
+    """
+
+    def test_logging_an_exception_with_its_traceback_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "import logging\n\n\n"
+            "def run(error: Exception) -> None:\n"
+            "    logging.getLogger('alx').exception('failed')\n",
+            "prohibited diagnostic",
+        )
+
+    def test_exc_info_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "import logging\n\n\n"
+            "def run() -> None:\n"
+            "    logging.getLogger('alx').info('failed', exc_info=True)\n",
+            "exc_info",
+        )
+
+    def test_formatting_a_traceback_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "import traceback\n\n\n"
+            "def run(error: Exception) -> str:\n"
+            "    return ''.join(traceback.format_exception(error))\n",
+            "format_exception",
+        )
+
+    def test_printing_a_traceback_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "import traceback\n\n\n"
+            "def run() -> None:\n"
+            "    traceback.print_exc()\n",
+            "print_exc",
+        )
+
+    def test_capturing_frame_locals_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "import traceback\n\n\n"
+            "def run(error: Exception) -> object:\n"
+            "    return traceback.TracebackException(\n"
+            "        type(error), error, None, capture_locals=True\n"
+            "    )\n",
+            "capture_locals",
+        )
+
+    def test_extracting_stack_frames_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "import traceback\n\n\n"
+            "def run(error: Exception) -> object:\n"
+            "    return traceback.extract_tb(error.__traceback__)\n",
+            "extract_tb",
+        )
+
+    def test_installing_an_exception_hook_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "import sys\n\n\n"
+            "def install(handler: object) -> None:\n"
+            "    sys.excepthook = handler\n",
+            "excepthook",
+        )
+
+    def test_an_error_reporting_sink_is_rejected(self) -> None:
+        """A future observability integration must not slip in unreviewed."""
+        self.assert_rejected(
+            "core/step.py",
+            "def report(client: object, error: Exception) -> None:\n"
+            "    client.capture_exception(error)\n",
+            "capture_exception",
+        )
+
+    def test_recording_an_exception_on_a_span_is_rejected(self) -> None:
+        self.assert_rejected(
+            "core/step.py",
+            "def report(span: object, error: Exception) -> None:\n"
+            "    span.record_exception(error)\n",
+            "record_exception",
+        )
+
+    def test_sanitised_reporting_is_accepted(self) -> None:
+        """The boundary forbids payload, not diagnosis: codes remain allowed."""
+        messages = self.inspect(
+            "core/step.py",
+            "import logging\n\n\n"
+            "def run(error: Exception) -> None:\n"
+            "    logging.getLogger('alx').info(\n"
+            "        'step failed: %s', type(error).__name__\n"
+            "    )\n",
+        )
+        self.assertEqual([], messages)
+
+    def test_the_live_source_carries_no_prohibited_diagnostic(self) -> None:
+        """The repository itself must satisfy the boundary, not just samples."""
+        messages = [
+            violation.render()
+            for violation in check_source(REPOSITORY_ROOT, self.rules)
+            if "prohibited diagnostic" in violation.message
+        ]
+        self.assertEqual([], messages)

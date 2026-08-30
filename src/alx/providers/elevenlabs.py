@@ -12,7 +12,7 @@ import httpx
 
 from alx.contracts import AudioChunk
 from alx.providers.elevenlabs_pronunciation import DictionaryLocator
-from alx.providers.errors import ProviderError
+from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 def _media_type(output_format: str) -> str:
@@ -39,7 +39,18 @@ class ElevenLabsSynthesizer:
         pronunciation_dictionary_version_id: str,
         client: httpx.AsyncClient | None = None,
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
+        speed: float = 1.0,
+        stability: float = 0.5,
+        similarity_boost: float = 0.75,
+        speaker_boost: bool = True,
     ) -> None:
+        if not 0.7 <= speed <= 1.2:
+            raise ValueError("ElevenLabs speed must be between 0.7 and 1.2")
+        for name, value in (
+            ("stability", stability), ("similarity_boost", similarity_boost)
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"ElevenLabs {name} must be between 0.0 and 1.0")
         self._model = model
         self._api_key = api_key
         self._voice_id = voice_id
@@ -51,6 +62,14 @@ class ElevenLabsSynthesizer:
         )
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
         self._telemetry_sink = telemetry_sink
+        self._speed = speed
+        # Sending voice_settings replaces the whole object, so every field the
+        # voice relies on must be supplied. Omitting them fell back to API
+        # defaults rather than the voice's own, which let short utterances
+        # drift in tone.
+        self._stability = stability
+        self._similarity_boost = similarity_boost
+        self._speaker_boost = speaker_boost
 
     async def synthesize(
         self,
@@ -91,6 +110,12 @@ class ElevenLabsSynthesizer:
                     "text": response,
                     "model_id": self._model,
                     "apply_text_normalization": "on",
+                    "voice_settings": {
+                        "speed": self._speed,
+                        "stability": self._stability,
+                        "similarity_boost": self._similarity_boost,
+                        "use_speaker_boost": self._speaker_boost,
+                    },
                     "pronunciation_dictionary_locators": [
                         self._pronunciation_dictionary.as_request_value()
                     ],
@@ -117,7 +142,10 @@ class ElevenLabsSynthesizer:
                         sequence += 1
                 yield AudioChunk(stream_id, sequence, b"", media_type, final=True)
         except httpx.HTTPError as error:
-            raise ProviderError("elevenlabs", type(error).__name__) from error
+            error_code = type(error).__name__
+        else:
+            return
+        raise_provider_failure("elevenlabs", error_code)
 
     def _emit_telemetry(
         self,

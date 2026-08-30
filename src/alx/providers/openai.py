@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping
 from time import monotonic
 from typing import Any
@@ -11,10 +12,16 @@ from typing import Any
 import httpx
 
 from alx.contracts import ModelCompletion, ModelRequest
-from alx.providers.errors import ProviderError
+from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _OpenAIProtocolError(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def _json_value(value: Any) -> Any:
@@ -105,7 +112,7 @@ class OpenAIReasoningModel:
                 timings = {}
             output = json.loads(content)
             if not isinstance(output, dict):
-                raise ValueError("structured output is not an object")
+                raise _OpenAIProtocolError("structured_output_not_object")
             if not isinstance(usage, dict):
                 usage = {}
             completion = ModelCompletion("openai", model, output, usage)
@@ -119,6 +126,7 @@ class OpenAIReasoningModel:
             LOGGER.info("Reasoning provider request completed in %.3f seconds", duration)
             return completion
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            error_code = self._safe_error_code(error)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -128,14 +136,15 @@ class OpenAIReasoningModel:
                     "model": self._model,
                     "duration_ms": round(duration * 1000),
                     "error_type": type(error).__name__,
+                    "error_code": error_code,
                 },
             )
             LOGGER.info(
                 "Reasoning provider request failed after %.3f seconds: %s",
                 duration,
-                type(error).__name__,
+                error_code,
             )
-            raise ProviderError("openai", type(error).__name__) from error
+        raise_provider_failure("openai", error_code)
 
     def _stream(
         self,
@@ -179,7 +188,7 @@ class OpenAIReasoningModel:
                 elif event_type == "response.completed":
                     result = event.get("response")
                     if not isinstance(result, dict):
-                        raise ValueError("completed response event is malformed")
+                        raise _OpenAIProtocolError("completed_event_malformed")
                     completed = True
                     model = result.get("model") or model
                     service_tier = result.get("service_tier") or service_tier
@@ -193,9 +202,11 @@ class OpenAIReasoningModel:
                                 first_content_at = now
                             parts.append(fallback)
                 elif event_type in ("response.failed", "response.incomplete"):
-                    raise ValueError(str(event_type))
+                    raise _OpenAIProtocolError(
+                        self._failure_event_code(event, str(event_type))
+                    )
         if not completed:
-            raise ValueError("response stream ended before completion")
+            raise _OpenAIProtocolError("stream_ended_before_completion")
         finished_at = monotonic()
         timings = {
             "first_event_seconds": (
@@ -216,7 +227,7 @@ class OpenAIReasoningModel:
     def _response_text(body: Mapping[str, Any]) -> str:
         output = body.get("output")
         if not isinstance(output, list):
-            raise ValueError("response output is missing")
+            raise _OpenAIProtocolError("response_output_missing")
         parts: list[str] = []
         for item in output:
             if not isinstance(item, Mapping) or item.get("type") != "message":
@@ -228,13 +239,40 @@ class OpenAIReasoningModel:
                 if not isinstance(part, Mapping):
                     continue
                 if part.get("type") == "refusal":
-                    raise ValueError("model refused structured response")
+                    raise _OpenAIProtocolError("structured_response_refused")
                 text = part.get("text")
                 if part.get("type") == "output_text" and isinstance(text, str):
                     parts.append(text)
         if not parts:
-            raise ValueError("response contains no output text")
+            raise _OpenAIProtocolError("response_output_text_missing")
         return "".join(parts)
+
+    @staticmethod
+    def _safe_error_code(error: Exception) -> str:
+        if isinstance(error, _OpenAIProtocolError):
+            return error.code
+        if isinstance(error, json.JSONDecodeError):
+            return "structured_json_invalid"
+        if isinstance(error, httpx.HTTPError):
+            return type(error).__name__
+        if isinstance(error, KeyError):
+            return "response_field_missing"
+        if isinstance(error, TypeError):
+            return "response_type_invalid"
+        return "response_value_invalid"
+
+    @staticmethod
+    def _failure_event_code(event: Mapping[str, Any], event_type: str) -> str:
+        base = event_type.replace(".", "_")
+        response = event.get("response")
+        error = response.get("error") if isinstance(response, Mapping) else None
+        code = error.get("code") if isinstance(error, Mapping) else None
+        if (
+            isinstance(code, str)
+            and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code)
+        ):
+            return f"{base}_{code.replace('.', '_').replace('-', '_').lower()}"
+        return base
 
     @staticmethod
     def _nested_integer(data: Mapping[str, Any], *path: str) -> int:

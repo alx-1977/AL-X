@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Mapping
 
-from alx.contracts import Approval, CapabilityCall
+from alx.contracts import Approval, ApprovalScope, CapabilityCall
 
 
 def _aware(value: datetime) -> None:
@@ -20,6 +20,7 @@ class AuthorityPolicy:
     permission_references: frozenset[str] = frozenset()
     approval_required: bool = False
     enabled: bool = True
+    standing_scope_allowed: bool = False
 
     def __post_init__(self) -> None:
         references = frozenset(self.permission_references)
@@ -34,6 +35,7 @@ class AuthorityContext:
     granted_permission_references: frozenset[str]
     evaluated_at: datetime
     approvals: tuple[Approval, ...] = ()
+    standing_scopes: tuple[ApprovalScope, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.principal_reference.strip():
@@ -44,6 +46,10 @@ class AuthorityContext:
             raise ValueError("granted permission references must be non-blank strings")
         object.__setattr__(self, "granted_permission_references", references)
         object.__setattr__(self, "approvals", tuple(self.approvals))
+        scopes = tuple(self.standing_scopes)
+        if any(not isinstance(item, ApprovalScope) for item in scopes):
+            raise TypeError("standing scopes must be ApprovalScope records")
+        object.__setattr__(self, "standing_scopes", scopes)
 
 
 class SafetyState(str, Enum):
@@ -77,6 +83,10 @@ class SafetyGate:
             return SafetyOutcome(SafetyState.DENIED, "permission_missing")
         if not policy.approval_required:
             return SafetyOutcome(SafetyState.ALLOWED, "permitted")
+        if call.approval_id is None and policy.standing_scope_allowed and any(
+            item.matches(call) for item in authority.standing_scopes
+        ):
+            return SafetyOutcome(SafetyState.ALLOWED, "standing_scope")
         if call.approval_id is None:
             return SafetyOutcome(SafetyState.APPROVAL_REQUIRED, "approval_required")
         if any(item.approval_id == call.approval_id and item.permits(call, authority.evaluated_at) for item in authority.approvals):

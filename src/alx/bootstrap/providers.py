@@ -84,5 +84,9 @@ def build_runtime_providers(
             settings.text_to_speech.pronunciation_dictionary_id,
             settings.text_to_speech.pronunciation_dictionary_version_id,
             telemetry_sink=telemetry_sink,
+            speed=settings.text_to_speech.speed,
+            stability=settings.text_to_speech.stability,
+            similarity_boost=settings.text_to_speech.similarity_boost,
+            speaker_boost=settings.text_to_speech.speaker_boost,
         ),
     )

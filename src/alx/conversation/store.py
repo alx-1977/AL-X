@@ -8,9 +8,16 @@ from datetime import datetime
 from pathlib import Path
 
 from alx.contracts import ConversationOrigin, ConversationSnapshot, ConversationTurn
+from alx.contracts.provenance import provenance_from_storage, provenance_to_storage
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PROVENANCE_COLUMNS = (
+    "content_origins",
+    "content_recorded_at",
+    "content_expires_at",
+    "mail_references",
+)
 
 
 class ConversationStoreError(Exception):
@@ -60,6 +67,19 @@ def _turn_from_json(value: str) -> ConversationTurn:
     )
 
 
+def _turn_from_row(row: tuple[str, str | None, str | None, str | None, str | None]) -> ConversationTurn:
+    turn = _turn_from_json(row[0])
+    return ConversationTurn(
+        turn.conversation_id,
+        turn.turn_id,
+        turn.origin,
+        turn.content,
+        turn.occurred_at,
+        turn.person_id,
+        provenance_from_storage(*row[1:]),
+    )
+
+
 class SQLiteConversationStore:
     """Stores conversation independently; it never interprets or routes content."""
 
@@ -68,6 +88,12 @@ class SQLiteConversationStore:
         # cannot stall the asyncio voice transport.
         self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.execute("PRAGMA foreign_keys = ON")
+        version = self._connection.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            self._connection.close()
+            raise ConversationStoreError(
+                f"conversation database schema {version} is newer than supported schema {SCHEMA_VERSION}"
+            )
         with self._connection:
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS conversations "
@@ -77,8 +103,20 @@ class SQLiteConversationStore:
                 "CREATE TABLE IF NOT EXISTS conversation_turns "
                 "(conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE, "
                 "ordinal INTEGER NOT NULL, turn_id TEXT NOT NULL, turn_json TEXT NOT NULL, "
+                "content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT, "
                 "PRIMARY KEY(conversation_id, ordinal), UNIQUE(conversation_id, turn_id))"
             )
+            columns = {
+                item[1]
+                for item in self._connection.execute(
+                    "PRAGMA table_info(conversation_turns)"
+                )
+            }
+            for column in PROVENANCE_COLUMNS:
+                if column not in columns:
+                    self._connection.execute(
+                        f'ALTER TABLE conversation_turns ADD COLUMN "{column}" TEXT'
+                    )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -106,9 +144,11 @@ class SQLiteConversationStore:
         if row is None:
             raise ConversationNotFound(conversation_id)
         turns = tuple(
-            _turn_from_json(item[0])
+            _turn_from_row(item)
             for item in self._connection.execute(
-                "SELECT turn_json FROM conversation_turns WHERE conversation_id = ? ORDER BY ordinal",
+                "SELECT turn_json, content_origins, content_recorded_at, "
+                "content_expires_at, mail_references FROM conversation_turns "
+                "WHERE conversation_id = ? ORDER BY ordinal",
                 (conversation_id,),
             )
         )
@@ -143,9 +183,19 @@ class SQLiteConversationStore:
                 "SELECT COUNT(*) FROM conversation_turns WHERE conversation_id = ?",
                 (turn.conversation_id,),
             ).fetchone()[0]
+            provenance = provenance_to_storage(turn.provenance)
             self._connection.execute(
-                "INSERT INTO conversation_turns(conversation_id, ordinal, turn_id, turn_json) VALUES (?, ?, ?, ?)",
-                (turn.conversation_id, ordinal, turn.turn_id, _turn_to_json(turn)),
+                "INSERT INTO conversation_turns"
+                "(conversation_id, ordinal, turn_id, turn_json, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    turn.conversation_id,
+                    ordinal,
+                    turn.turn_id,
+                    _turn_to_json(turn),
+                    *provenance,
+                ),
             )
         return self.load(turn.conversation_id)
 

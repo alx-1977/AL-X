@@ -8,6 +8,8 @@ from typing import Protocol
 
 from alx.contracts.capabilities import CapabilityDefinition
 from alx.contracts.records import (
+    ApprovalProposal,
+    BackgroundEvent,
     CapabilityAttempt,
     CapabilityCall,
     ConversationTurn,
@@ -15,6 +17,7 @@ from alx.contracts.records import (
     GoalState,
 )
 from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
+from alx.contracts.provenance import ContentProvenance
 
 
 class DecisionValidationError(ValueError):
@@ -33,6 +36,7 @@ class GoalSnapshot:
     conversation_id: str
     revision: int
     retention_until: datetime
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         if self.revision <= 0:
@@ -52,6 +56,7 @@ class ConversationSnapshot:
     turns: tuple[ConversationTurn, ...]
     revision: int
     retention_until: datetime
+    events: tuple[BackgroundEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.conversation_id.strip():
@@ -61,6 +66,7 @@ class ConversationSnapshot:
         if self.retention_until.tzinfo is None or self.retention_until.utcoffset() is None:
             raise ValueError("retention_until must be timezone-aware")
         object.__setattr__(self, "turns", tuple(self.turns))
+        object.__setattr__(self, "events", tuple(self.events))
         if any(turn.conversation_id != self.conversation_id for turn in self.turns):
             raise ValueError("all turns must belong to the snapshot conversation")
 
@@ -98,11 +104,27 @@ class ReasoningContext:
     turns: tuple[ConversationTurn, ...]
     capabilities: tuple[CapabilityDefinition, ...]
     memories: tuple[MemorySnapshot, ...] = ()
+    events: tuple[BackgroundEvent, ...] = ()
+    transient_attempts: tuple[CapabilityAttempt, ...] = ()
+    conversation_id: str | None = None
+    trigger_event_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "memories", tuple(self.memories))
+        object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "transient_attempts", tuple(self.transient_attempts))
+        conversation_id = self.conversation_id
+        if conversation_id is None and self.turns:
+            conversation_id = self.turns[-1].conversation_id
+        if conversation_id is None or not conversation_id.strip():
+            raise ValueError("reasoning context requires a conversation identifier")
+        object.__setattr__(self, "conversation_id", conversation_id)
+        if self.trigger_event_id is not None and not any(
+            item.event_id == self.trigger_event_id for item in self.events
+        ):
+            raise ValueError("trigger event must be present in reasoning context")
 
 @dataclass(frozen=True, slots=True)
 class AgentDecision:
@@ -112,6 +134,7 @@ class AgentDecision:
     response_requires_goal_commit: bool = False
     memory_proposals: tuple[MemoryProposal, ...] = ()
     memory_query: MemoryQuery | None = None
+    approval_proposal: ApprovalProposal | None = None
 
     def __post_init__(self) -> None:
         if sum(item is not None for item in (self.call, self.response, self.memory_query)) != 1:
@@ -120,6 +143,8 @@ class AgentDecision:
             raise ValueError("response must not be blank")
         if self.response_requires_goal_commit and self.response is None:
             raise ValueError("only a response can depend on a goal commit")
+        if self.approval_proposal is not None and self.call is None:
+            raise ValueError("an approval proposal requires an exact capability call")
         object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
@@ -136,6 +161,7 @@ class DurableGoalStore(Protocol):
         state: GoalState,
         conversation_id: str,
         retention_until: datetime,
+        provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot: ...
 
     def load(self, goal_id: str) -> GoalSnapshot: ...
@@ -145,6 +171,7 @@ class DurableGoalStore(Protocol):
         state: GoalState,
         retention_until: datetime,
         expected_revision: int,
+        provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot: ...
 
     def replace_with_memory_batch(
@@ -153,6 +180,7 @@ class DurableGoalStore(Protocol):
         retention_until: datetime,
         expected_revision: int,
         proposals: tuple[MemoryProposal, ...],
+        provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot: ...
 
     def pending_memory_batches(
@@ -183,7 +211,6 @@ class DurableConversationStore(Protocol):
         expected_revision: int,
     ) -> ConversationSnapshot: ...
 
-
 class DurableMemoryStore(Protocol):
     def remember(
         self,
@@ -205,4 +232,4 @@ class DurableMemoryStore(Protocol):
 
 
 class CapabilityDispatch(Protocol):
-    def __call__(self, call: CapabilityCall, state: GoalState) -> CapabilityAttempt: ...
+    def __call__(self, call: CapabilityCall, state: GoalState | None) -> CapabilityAttempt: ...

@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from alx.contracts.provenance import ContentProvenance
 
 
 def _required(value: str, field_name: str) -> None:
@@ -130,6 +134,7 @@ class MemoryProposal:
     person_id: str | None = None
     meaning: str | None = None
     supersedes_memory_id: str | None = None
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.memory_id, "memory_id")
@@ -154,6 +159,11 @@ class MemoryProposal:
             _required(self.supersedes_memory_id, "supersedes_memory_id")
             if self.supersedes_memory_id == self.memory_id:
                 raise ValueError("a memory cannot supersede itself")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
+
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("memory provenance must be ContentProvenance or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +175,7 @@ class MemoryCorrection:
     source_references: tuple[str, ...]
     corrected_at: datetime
     meaning: str | None = None
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.content, "content")
@@ -173,6 +184,11 @@ class MemoryCorrection:
         _aware(self.corrected_at, "corrected_at")
         if self.meaning is not None:
             _required(self.meaning, "meaning")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
+
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("memory provenance must be ContentProvenance or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +199,7 @@ class MemoryRevision:
     recorded_at: datetime
     reason: str | None = None
     meaning: str | None = None
+    provenance: ContentProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)

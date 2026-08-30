@@ -10,9 +10,20 @@ from pathlib import Path
 from typing import Mapping
 
 from alx.bootstrap.providers import build_runtime_providers
+from alx.bootstrap.mail import (
+    build_mail_runtime,
+    build_mail_send_runtime,
+    mail_post_reply_standing_scopes,
+)
 from alx.bootstrap.reasoning import build_model_reasoner
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
-from alx.config import LiveVoiceSettings, RuntimeSettings
+from alx.config import (
+    ConfigurationError,
+    LiveVoiceSettings,
+    MailSendSettings,
+    MailSettings,
+    RuntimeSettings,
+)
 from alx.contracts import GoalStatus
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
@@ -20,6 +31,9 @@ from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -100,16 +114,50 @@ async def run(repository_root: Path) -> None:
     migrate_legacy_conversations(goal_store, conversation_store)
     memory_store = SQLiteMemoryStore(storage_root / "memories.sqlite3")
     registry = CapabilityRegistry()
-    broker = CapabilityBroker(registry, SafetyGate({}), {})
+    current_call_id = [""]
+    mail_runtime = build_mail_runtime(
+        MailSettings.from_environment(environment),
+        storage_root,
+        lambda: current_call_id[0],
+    )
+    for definition in mail_runtime.definitions:
+        registry.register(definition)
+    policies = dict(mail_runtime.policies)
+    executors = dict(mail_runtime.executors)
+    permissions = set(mail_runtime.permissions)
+
+    # Replying is authorised by DECISIONS.md D-011 and configured separately, so
+    # a runtime without send settings reads mail without being able to send it.
+    approval_ttl_seconds: int | None = None
+    try:
+        send_settings = MailSendSettings.from_environment(environment)
+    except ConfigurationError as error:
+        LOGGER.info("Mail sending unavailable: %s", error)
+    else:
+        approval_ttl_seconds = send_settings.approval_ttl_seconds
+        send_definitions, send_policies, send_executors, send_permissions = (
+            build_mail_send_runtime(
+                send_settings, mail_runtime.source, lambda: current_call_id[0]
+            )
+        )
+        for definition in send_definitions:
+            registry.register(definition)
+        policies.update(send_policies)
+        executors.update(send_executors)
+        permissions.update(send_permissions)
+
+    broker = CapabilityBroker(registry, SafetyGate(policies), executors)
 
     def dispatch(call, state):
+        current_call_id[0] = call.call_id
         return broker.dispatch(
             call,
             AuthorityContext(
                 principal_reference=voice_settings.primary_person_id,
-                granted_permission_references=frozenset(),
+                granted_permission_references=frozenset(permissions),
                 evaluated_at=datetime.now(UTC),
-                approvals=state.approvals,
+                approvals=() if state is None else state.approvals,
+                standing_scopes=mail_post_reply_standing_scopes(state),
             ),
         )
 
@@ -119,11 +167,13 @@ async def run(repository_root: Path) -> None:
         dispatch,
         registry.list_definitions(),
         memory_store,
+        approval_ttl_seconds=approval_ttl_seconds,
     )
     gateway = ConversationGateway(
         core,
         conversation_store,
         lambda conversation_id: locate_active_goal(goal_store, conversation_id),
+        contextual_events=mail_runtime.source.contextual_events,
     )
     session = VoiceSession(
         gateway,
@@ -133,6 +183,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
         diagnostics=diagnostics,
+        event_source=mail_runtime.source,
     )
     server = LiveVoiceServer(
         session,
@@ -144,6 +195,7 @@ async def run(repository_root: Path) -> None:
     try:
         await server.serve_forever()
     finally:
+        mail_runtime.observations.close()
         conversation_store.close()
         memory_store.close()
         goal_store.close()

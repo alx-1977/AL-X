@@ -16,9 +16,20 @@ from alx.contracts import (
     MemorySnapshot,
     MemorySourceMatch,
 )
+from alx.contracts.provenance import (
+    ContentProvenance,
+    provenance_from_storage,
+    provenance_to_storage,
+)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PROVENANCE_COLUMNS = (
+    "content_origins",
+    "content_recorded_at",
+    "content_expires_at",
+    "mail_references",
+)
 
 
 class MemoryStoreError(Exception):
@@ -68,7 +79,10 @@ def _encode_revision(revision: MemoryRevision) -> str:
     )
 
 
-def _decode_revision(value: str) -> MemoryRevision:
+def _decode_revision(
+    value: str,
+    provenance: ContentProvenance | None = None,
+) -> MemoryRevision:
     data = json.loads(value)
     return MemoryRevision(
         revision=data["revision"],
@@ -77,6 +91,7 @@ def _decode_revision(value: str) -> MemoryRevision:
         recorded_at=datetime.fromisoformat(data["recorded_at"]),
         reason=data["reason"],
         meaning=data["meaning"],
+        provenance=provenance,
     )
 
 
@@ -108,8 +123,19 @@ class SQLiteMemoryStore:
                 "CREATE TABLE IF NOT EXISTS memories (memory_id TEXT PRIMARY KEY, kind TEXT NOT NULL, person_id TEXT, supersedes_memory_id TEXT, retention_until TEXT NOT NULL)"
             )
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS memory_revisions (memory_id TEXT NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE, revision INTEGER NOT NULL, revision_json TEXT NOT NULL, PRIMARY KEY(memory_id, revision))"
+                "CREATE TABLE IF NOT EXISTS memory_revisions (memory_id TEXT NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE, revision INTEGER NOT NULL, revision_json TEXT NOT NULL, content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT, PRIMARY KEY(memory_id, revision))"
             )
+            columns = {
+                item[1]
+                for item in self._connection.execute(
+                    "PRAGMA table_info(memory_revisions)"
+                )
+            }
+            for column in PROVENANCE_COLUMNS:
+                if column not in columns:
+                    self._connection.execute(
+                        f'ALTER TABLE memory_revisions ADD COLUMN "{column}" TEXT'
+                    )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def create(self, proposal: MemoryProposal, retention_until: datetime) -> MemorySnapshot:
@@ -156,9 +182,11 @@ class SQLiteMemoryStore:
         if row is None:
             raise MemoryNotFound(memory_id)
         revisions = tuple(
-            _decode_revision(item[0])
+            _decode_revision(item[0], provenance_from_storage(*item[1:]))
             for item in self._connection.execute(
-                "SELECT revision_json FROM memory_revisions WHERE memory_id = ? ORDER BY revision",
+                "SELECT revision_json, content_origins, content_recorded_at, "
+                "content_expires_at, mail_references FROM memory_revisions "
+                "WHERE memory_id = ? ORDER BY revision",
                 (memory_id,),
             )
         )
@@ -240,6 +268,10 @@ class SQLiteMemoryStore:
             correction.corrected_at,
             correction.reason,
             correction.meaning,
+            correction.provenance or current.current.provenance,
+        )
+        self._validate_replacement_provenance(
+            current.current.provenance, revision.provenance
         )
         try:
             with self._connection:
@@ -250,8 +282,13 @@ class SQLiteMemoryStore:
                 if cursor.rowcount != 1:
                     raise MemoryRevisionConflict(memory_id)
                 self._connection.execute(
-                    "INSERT INTO memory_revisions(memory_id, revision, revision_json) VALUES (?, ?, ?)",
-                    (memory_id, revision.revision, _encode_revision(revision)),
+                    "INSERT INTO memory_revisions(memory_id, revision, revision_json, content_origins, content_recorded_at, content_expires_at, mail_references) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        memory_id,
+                        revision.revision,
+                        _encode_revision(revision),
+                        *provenance_to_storage(revision.provenance),
+                    ),
                 )
         except sqlite3.IntegrityError as error:
             raise MemoryRevisionConflict(memory_id) from error
@@ -297,14 +334,20 @@ class SQLiteMemoryStore:
             proposal.source_references,
             proposal.formed_at,
             meaning=proposal.meaning,
+            provenance=proposal.provenance,
         )
         self._connection.execute(
             "INSERT INTO memories(memory_id, kind, person_id, supersedes_memory_id, retention_until) VALUES (?, ?, ?, ?, ?)",
             (proposal.memory_id, proposal.kind.value, proposal.person_id, proposal.supersedes_memory_id, retention_until.isoformat()),
         )
         self._connection.execute(
-            "INSERT INTO memory_revisions(memory_id, revision, revision_json) VALUES (?, ?, ?)",
-            (proposal.memory_id, 1, _encode_revision(revision)),
+            "INSERT INTO memory_revisions(memory_id, revision, revision_json, content_origins, content_recorded_at, content_expires_at, mail_references) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                proposal.memory_id,
+                1,
+                _encode_revision(revision),
+                *provenance_to_storage(proposal.provenance),
+            ),
         )
 
     @staticmethod
@@ -322,5 +365,26 @@ class SQLiteMemoryStore:
             and initial.source_references == proposal.source_references
             and initial.recorded_at == proposal.formed_at
             and initial.meaning == proposal.meaning
+            and initial.provenance == proposal.provenance
             and existing.retention_until == retention_until
         )
+
+    @staticmethod
+    def _validate_replacement_provenance(
+        existing: ContentProvenance | None,
+        proposed: ContentProvenance | None,
+    ) -> None:
+        if existing is None:
+            return
+        if proposed is None or not existing.origins.issubset(proposed.origins):
+            raise ValueError("memory correction cannot discard provenance origins")
+        if not set(existing.mail_references).issubset(proposed.mail_references):
+            raise ValueError("memory correction cannot discard mail references")
+        if (
+            existing.content_expires_at is not None
+            and (
+                proposed.content_expires_at is None
+                or proposed.content_expires_at > existing.content_expires_at
+            )
+        ):
+            raise ValueError("memory correction cannot extend content retention")

@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Mapping, TypeAlias
+from typing import Mapping, TypeAlias, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from alx.contracts.provenance import ContentProvenance
 
 
 StructuredValue: TypeAlias = None | bool | int | float | str | tuple["StructuredValue", ...] | Mapping[str, "StructuredValue"]
@@ -74,6 +77,7 @@ class ConversationTurn:
     content: str
     occurred_at: datetime
     person_id: str | None = None
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.conversation_id, "conversation_id")
@@ -82,6 +86,11 @@ class ConversationTurn:
         _aware(self.occurred_at, "occurred_at")
         if self.person_id is not None:
             _required(self.person_id, "person_id")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
+
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("turn provenance must be ContentProvenance or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,13 +101,20 @@ class BackgroundEvent:
     kind: str
     occurred_at: datetime
     data: StructuredData = field(default_factory=dict)
+    transient_data: StructuredData = field(default_factory=dict)
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.event_id, "event_id")
         _required(self.kind, "kind")
         object.__setattr__(self, "data", freeze_data(self.data))
+        object.__setattr__(self, "transient_data", freeze_data(self.transient_data))
         _aware(self.occurred_at, "occurred_at")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
 
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("event provenance must be ContentProvenance or None")
 
 @dataclass(frozen=True, slots=True)
 class Objective:
@@ -211,12 +227,16 @@ class CapabilityResult:
     values: StructuredData = field(default_factory=dict)
     failure: StructuredData | None = None
     evidence_refs: tuple[str, ...] = ()
+    durable_values: StructuredData | None = None
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.call_id, "call_id")
         _required(self.capability_id, "capability_id")
         object.__setattr__(self, "evidence_refs", _references(self.evidence_refs, "evidence references"))
         object.__setattr__(self, "values", freeze_data(self.values))
+        durable_values = self.values if self.durable_values is None else self.durable_values
+        object.__setattr__(self, "durable_values", freeze_data(durable_values))
         if self.failure is not None:
             object.__setattr__(self, "failure", freeze_data(self.failure))
         if self.state is CapabilityResultState.SUCCEEDED and self.failure is not None:
@@ -225,6 +245,11 @@ class CapabilityResult:
             raise ValueError("a failed result requires structured failure details")
         if self.state is CapabilityResultState.PARTIAL and not self.values:
             raise ValueError("a partial result requires available structured values")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
+
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("result provenance must be ContentProvenance or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +345,19 @@ class Approval:
             and (self.expires_at is None or at <= self.expires_at)
             and self.scope.matches(call)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalProposal:
+    """An exact action approval grounded in the current person's durable turn."""
+
+    approval_id: str
+    scope: ApprovalScope
+    source_reference: str
+
+    def __post_init__(self) -> None:
+        _required(self.approval_id, "approval_id")
+        _required(self.source_reference, "source_reference")
 
 
 class GoalStatus(str, Enum):

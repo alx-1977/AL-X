@@ -89,9 +89,10 @@ def _structured(value: Any) -> bool:
 
 
 class SideEffect(str, Enum):
-    """Technical metadata only: no effect, or an external/state effect."""
+    """Technical effect class; never conversational intent or workflow routing."""
 
     NONE = "none"
+    ATTENTION_STATE = "attention_state"
     EFFECTFUL = "effectful"
 
 

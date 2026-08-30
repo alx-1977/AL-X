@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,20 @@ from alx.contracts import (
     PendingMemoryBatch, ProgressRecord, Referent, SuccessCriterion, WorkItem,
     GoalSnapshot,
 )
+from alx.contracts.provenance import (
+    ContentProvenance,
+    provenance_from_storage,
+    provenance_to_storage,
+)
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+PROVENANCE_COLUMNS = (
+    "content_origins",
+    "content_recorded_at",
+    "content_expires_at",
+    "mail_references",
+)
 
 
 class GoalStoreError(Exception):
@@ -80,7 +92,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
         "attempts": [
             [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
-             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.values), _data(item.result.failure), list(item.result.evidence_refs)], item.reason_code]
+             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs)], item.reason_code]
             for item in goal.attempts
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
@@ -219,7 +231,7 @@ class SQLiteGoalStore:
             return
         with self._connection:
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS goals (goal_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, retention_until TEXT NOT NULL, state_json TEXT NOT NULL, conversation_id TEXT)"
+                "CREATE TABLE IF NOT EXISTS goals (goal_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, retention_until TEXT NOT NULL, state_json TEXT NOT NULL, conversation_id TEXT, content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT)"
             )
             columns = {
                 item[1]
@@ -227,6 +239,11 @@ class SQLiteGoalStore:
             }
             if "conversation_id" not in columns:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN conversation_id TEXT")
+            for column in PROVENANCE_COLUMNS:
+                if column not in columns:
+                    self._connection.execute(
+                        f'ALTER TABLE goals ADD COLUMN "{column}" TEXT'
+                    )
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS conversation_turns (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, turn_id TEXT NOT NULL, turn_json TEXT NOT NULL, PRIMARY KEY(goal_id, ordinal), UNIQUE(goal_id, turn_id))"
             )
@@ -237,33 +254,51 @@ class SQLiteGoalStore:
                 "'legacy:' || goal_id)"
             )
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS pending_memory_batches (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, goal_revision INTEGER NOT NULL, ordinal INTEGER NOT NULL, proposal_json TEXT NOT NULL, retention_until TEXT NOT NULL, PRIMARY KEY(goal_id, goal_revision, ordinal))"
+                "CREATE TABLE IF NOT EXISTS pending_memory_batches (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, goal_revision INTEGER NOT NULL, ordinal INTEGER NOT NULL, proposal_json TEXT NOT NULL, retention_until TEXT NOT NULL, content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT, PRIMARY KEY(goal_id, goal_revision, ordinal))"
             )
+            pending_columns = {
+                item[1]
+                for item in self._connection.execute(
+                    "PRAGMA table_info(pending_memory_batches)"
+                )
+            }
+            for column in PROVENANCE_COLUMNS:
+                if column not in pending_columns:
+                    self._connection.execute(
+                        f'ALTER TABLE pending_memory_batches ADD COLUMN "{column}" TEXT'
+                    )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def create(self, state: GoalState, conversation_id: str, retention_until: datetime) -> GoalSnapshot:
+    def create(
+        self,
+        state: GoalState,
+        conversation_id: str,
+        retention_until: datetime,
+        provenance: ContentProvenance | None = None,
+    ) -> GoalSnapshot:
         _aware(retention_until, "retention_until")
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
         try:
             with self._connection:
+                encoded = provenance_to_storage(provenance)
                 self._connection.execute(
-                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id) VALUES (?, ?, ?, ?, ?)",
-                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id),
+                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded),
                 )
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
                 raise GoalAlreadyExists(state.goal_id) from error
             raise
-        return GoalSnapshot(state, conversation_id, 1, retention_until)
+        return GoalSnapshot(state, conversation_id, 1, retention_until, provenance)
 
     def load(self, goal_id: str) -> GoalSnapshot:
         row = self._connection.execute(
-            "SELECT revision, retention_until, state_json, conversation_id FROM goals WHERE goal_id = ?", (goal_id,)
+            "SELECT revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references FROM goals WHERE goal_id = ?", (goal_id,)
         ).fetchone()
         if row is None:
             raise GoalNotFound(goal_id)
-        return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), row[3], row[0], _time_from_data(row[1]))  # type: ignore[arg-type]
+        return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), row[3], row[0], _time_from_data(row[1]), provenance_from_storage(*row[4:]))  # type: ignore[arg-type]
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]:
         identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY rowid").fetchall()
@@ -280,11 +315,25 @@ class SQLiteGoalStore:
             unique.setdefault((turn.conversation_id, turn.turn_id), turn)
         return tuple(unique.values())
 
-    def replace(self, state: GoalState, retention_until: datetime, expected_revision: int) -> GoalSnapshot:
+    def replace(
+        self,
+        state: GoalState,
+        retention_until: datetime,
+        expected_revision: int,
+        provenance: ContentProvenance | None = None,
+    ) -> GoalSnapshot:
         _aware(retention_until, "retention_until")
         with self._connection:
-            conversation_id = self._replace_rows(state, retention_until, expected_revision)
-        return GoalSnapshot(state, conversation_id, expected_revision + 1, retention_until)
+            conversation_id, retained_provenance = self._replace_rows(
+                state, retention_until, expected_revision, provenance
+            )
+        return GoalSnapshot(
+            state,
+            conversation_id,
+            expected_revision + 1,
+            retention_until,
+            retained_provenance,
+        )
 
     def replace_with_memory_batch(
         self,
@@ -292,6 +341,7 @@ class SQLiteGoalStore:
         retention_until: datetime,
         expected_revision: int,
         proposals: tuple[MemoryProposal, ...],
+        provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot:
         """Commit a goal revision and its exact memory intent in one transaction."""
         _aware(retention_until, "retention_until")
@@ -300,9 +350,11 @@ class SQLiteGoalStore:
             raise ValueError("replace_with_memory_batch requires proposals")
         goal_revision = expected_revision + 1
         with self._connection:
-            conversation_id = self._replace_rows(state, retention_until, expected_revision)
+            conversation_id, retained_provenance = self._replace_rows(
+                state, retention_until, expected_revision, provenance
+            )
             self._connection.executemany(
-                "INSERT INTO pending_memory_batches(goal_id, goal_revision, ordinal, proposal_json, retention_until) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pending_memory_batches(goal_id, goal_revision, ordinal, proposal_json, retention_until, content_origins, content_recorded_at, content_expires_at, mail_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     (
                         state.goal_id,
@@ -310,22 +362,29 @@ class SQLiteGoalStore:
                         ordinal,
                         _memory_proposal_to_data(proposal),
                         _time_to_data(retention_until),
+                        *provenance_to_storage(proposal.provenance),
                     )
                     for ordinal, proposal in enumerate(proposal_list)
                 ),
             )
-        return GoalSnapshot(state, conversation_id, goal_revision, retention_until)
+        return GoalSnapshot(
+            state,
+            conversation_id,
+            goal_revision,
+            retention_until,
+            retained_provenance,
+        )
 
     def pending_memory_batches(self, goal_id: str) -> tuple[PendingMemoryBatch, ...]:
         rows = self._connection.execute(
-            "SELECT goal_revision, proposal_json, retention_until FROM pending_memory_batches WHERE goal_id = ? ORDER BY goal_revision, ordinal",
+            "SELECT goal_revision, proposal_json, retention_until, content_origins, content_recorded_at, content_expires_at, mail_references FROM pending_memory_batches WHERE goal_id = ? ORDER BY goal_revision, ordinal",
             (goal_id,),
         ).fetchall()
         batches: list[PendingMemoryBatch] = []
         current_revision: int | None = None
         current_retention: datetime | None = None
         current_proposals: list[MemoryProposal] = []
-        for goal_revision, proposal_json, retention_value in rows:
+        for goal_revision, proposal_json, retention_value, *provenance_values in rows:
             if current_revision is not None and goal_revision != current_revision:
                 assert current_retention is not None
                 batches.append(
@@ -339,7 +398,12 @@ class SQLiteGoalStore:
                 current_proposals = []
             current_revision = goal_revision
             current_retention = _time_from_data(retention_value)
-            current_proposals.append(_memory_proposal_from_data(proposal_json))
+            current_proposals.append(
+                replace(
+                    _memory_proposal_from_data(proposal_json),
+                    provenance=provenance_from_storage(*provenance_values),
+                )
+            )
         if current_revision is not None:
             assert current_retention is not None
             batches.append(
@@ -388,10 +452,43 @@ class SQLiteGoalStore:
         state: GoalState,
         retention_until: datetime,
         expected_revision: int,
-    ) -> str:
+        provenance: ContentProvenance | None,
+    ) -> tuple[str, ContentProvenance | None]:
+        existing_row = self._connection.execute(
+            "SELECT content_origins, content_recorded_at, content_expires_at, "
+            "mail_references FROM goals WHERE goal_id = ?",
+            (state.goal_id,),
+        ).fetchone()
+        if existing_row is None:
+            raise GoalNotFound(state.goal_id)
+        existing = provenance_from_storage(*existing_row)
+        retained = existing if provenance is None else provenance
+        if existing is not None and provenance is not None:
+            if not existing.origins.issubset(provenance.origins):
+                raise ValueError("goal replacement cannot discard provenance origins")
+            if not set(existing.mail_references).issubset(provenance.mail_references):
+                raise ValueError("goal replacement cannot discard mail references")
+            if (
+                existing.content_expires_at is not None
+                and (
+                    provenance.content_expires_at is None
+                    or provenance.content_expires_at > existing.content_expires_at
+                )
+            ):
+                raise ValueError("goal replacement cannot extend content retention")
+        encoded = provenance_to_storage(retained)
         updated = self._connection.execute(
-            "UPDATE goals SET revision = revision + 1, retention_until = ?, state_json = ? WHERE goal_id = ? AND revision = ?",
-            (_time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), state.goal_id, expected_revision),
+            "UPDATE goals SET revision = revision + 1, retention_until = ?, "
+            "state_json = ?, content_origins = ?, content_recorded_at = ?, "
+            "content_expires_at = ?, mail_references = ? "
+            "WHERE goal_id = ? AND revision = ?",
+            (
+                _time_to_data(retention_until),
+                json.dumps(_goal_to_data(state), separators=(",", ":")),
+                *encoded,
+                state.goal_id,
+                expected_revision,
+            ),
         ).rowcount
         if not updated:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
@@ -401,4 +498,4 @@ class SQLiteGoalStore:
             "SELECT conversation_id FROM goals WHERE goal_id = ?", (state.goal_id,)
         ).fetchone()
         assert row is not None
-        return row[0]
+        return row[0], retained

@@ -22,8 +22,8 @@ OUTPUT = StructuredSchema(ValueKind.OBJECT, {"ok": StructuredSchema(ValueKind.BO
 def definition(identifier: str = "capability-1") -> CapabilityDefinition:
     return CapabilityDefinition(identifier, "describes one reusable external ability", INPUT, OUTPUT, SideEffect.NONE, ("unavailable",))
 
-def authority(*, permissions: frozenset[str] = frozenset({"permission-1"}), approvals: tuple[Approval, ...] = ()) -> AuthorityContext:
-    return AuthorityContext("principal-1", permissions, NOW, approvals)
+def authority(*, permissions: frozenset[str] = frozenset({"permission-1"}), approvals: tuple[Approval, ...] = (), standing_scopes: tuple[ApprovalScope, ...] = ()) -> AuthorityContext:
+    return AuthorityContext("principal-1", permissions, NOW, approvals, standing_scopes)
 
 class SchemaTests(unittest.TestCase):
     def test_nested_schema_and_bool_number_edges(self) -> None:
@@ -77,6 +77,44 @@ class RegistryAndBrokerTests(unittest.TestCase):
         outcome = broker.dispatch(CapabilityCall("call-1", "capability-1", {"value": 1}, "approval-1"), authority(approvals=(approval,)))
         self.assertEqual(outcome.result, CapabilityResult("call-1", "capability-1", CapabilityResultState.SUCCEEDED, {"ok": True}))
         self.assertEqual(calls[0], 1)
+
+    def test_exact_standing_scope_is_an_alternative_to_conversational_approval(self) -> None:
+        policy = AuthorityPolicy(
+            frozenset({"permission-1"}),
+            approval_required=True,
+            standing_scope_allowed=True,
+        )
+        gate = SafetyGate({"capability-1": policy})
+        exact = ApprovalScope("capability-1", {"value": 1})
+        call = CapabilityCall("call-1", "capability-1", {"value": 1})
+        outcome = gate.evaluate(call, authority(standing_scopes=(exact,)))
+        self.assertEqual(outcome.state, SafetyState.ALLOWED)
+        self.assertEqual(outcome.reason, "standing_scope")
+        wrong = CapabilityCall("call-2", "capability-1", {"value": 2})
+        self.assertEqual(
+            gate.evaluate(wrong, authority(standing_scopes=(exact,))).state,
+            SafetyState.APPROVAL_REQUIRED,
+        )
+        bogus = CapabilityCall(
+            "call-3", "capability-1", {"value": 1}, "not-a-standing-id"
+        )
+        self.assertEqual(
+            gate.evaluate(bogus, authority(standing_scopes=(exact,))).state,
+            SafetyState.DENIED,
+        )
+
+    def test_standing_scope_is_ignored_unless_the_policy_explicitly_allows_it(self) -> None:
+        gate = SafetyGate({
+            "capability-1": AuthorityPolicy(
+                frozenset({"permission-1"}), approval_required=True
+            )
+        })
+        call = CapabilityCall("call-1", "capability-1", {"value": 1})
+        scope = ApprovalScope("capability-1", {"value": 1})
+        self.assertEqual(
+            gate.evaluate(call, authority(standing_scopes=(scope,))).state,
+            SafetyState.APPROVAL_REQUIRED,
+        )
 
     def test_denied_wrong_scope_and_expired_approvals_never_execute(self) -> None:
         calls = [0]

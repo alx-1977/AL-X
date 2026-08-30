@@ -2,6 +2,7 @@
 
 from alx.contracts.records import (
     Approval,
+    ApprovalProposal,
     ApprovalLifecycle,
     ApprovalScope,
     BackgroundEvent,
@@ -23,6 +24,13 @@ from alx.contracts.records import (
     Referent,
     SuccessCriterion,
     WorkItem,
+)
+from alx.contracts.provenance import (
+    ContentOrigin,
+    ContentProvenance,
+    ContentTombstone,
+    ExpiryReason,
+    RetentionPolicy,
 )
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
 from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, PendingMemoryBatch, ReasoningContext, ReasoningProvider
@@ -50,9 +58,27 @@ from alx.contracts.memory import (
     MemorySnapshot,
     MemorySourceMatch,
 )
+from alx.contracts.mail import (
+    BackgroundEventSource,
+    MailAccessError,
+    MailAccount,
+    MailContent,
+    MailObservationControl,
+    MailParticipants,
+    MailReference,
+    MailSendError,
+    MailThreading,
+    OutboundReply,
+    ReplyOutcome,
+)
 
 __all__ = [
-    "Approval", "ApprovalLifecycle", "ApprovalScope", "BackgroundEvent", "CapabilityCall", "CapabilityAttempt", "CapabilityAttemptDisposition",
+    "RetentionPolicy",
+    "ExpiryReason",
+    "ContentTombstone",
+    "ContentProvenance",
+    "ContentOrigin",
+    "Approval", "ApprovalProposal", "ApprovalLifecycle", "ApprovalScope", "BackgroundEvent", "CapabilityCall", "CapabilityAttempt", "CapabilityAttemptDisposition",
     "CapabilityResult", "CapabilityResultState", "ConversationOrigin",
     "ConversationTurn", "Evidence", "GoalMutationKind", "GoalProposal", "GoalState", "GoalStatus", "GoalStopReason",
     "Objective", "ProgressRecord", "Referent", "SuccessCriterion", "WorkItem",
@@ -65,4 +91,7 @@ __all__ = [
     "ReasoningModel",
     "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
+    "BackgroundEventSource", "MailAccessError", "MailAccount", "MailContent",
+    "MailObservationControl", "MailParticipants", "MailReference",
+    "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
 ]

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     AudioChunk,
+    BackgroundEventSource,
     ConversationOrigin,
     ConversationTurn,
     SpeechSynthesizer,
@@ -92,6 +93,7 @@ class VoiceSession:
         clock: Callable[[], datetime] | None = None,
         identifier_factory: Callable[[], str] | None = None,
         diagnostics: VoiceDiagnosticBuffer | None = None,
+        event_source: BackgroundEventSource | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")
@@ -108,6 +110,7 @@ class VoiceSession:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._diagnostics = diagnostics
+        self._event_source = event_source
         self._core_turn_lock = asyncio.Lock()
 
     async def exchange(
@@ -117,82 +120,136 @@ class VoiceSession:
     ) -> AsyncIterator[VoiceEvent]:
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
-        async for transcription in self._transcriber.transcribe(audio):
-            LOGGER.info("Cartesia event received: %s", transcription.state.value)
-            if transcription.state is TranscriptionState.PARTIAL:
-                yield VoiceEvent(VoiceEventKind.HEARING)
-                continue
+        incoming: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
 
-            now = self._clock()
-            if now.tzinfo is None or now.utcoffset() is None:
-                yield VoiceEvent(VoiceEventKind.ERROR, reason="clock_error")
-                return
-            turn = ConversationTurn(
-                conversation_id=conversation_id,
-                turn_id=self._identifier_factory(),
-                origin=ConversationOrigin.SPEECH_TRANSCRIPT,
-                content=transcription.content,
-                occurred_at=now,
-                person_id=self._person_id,
-            )
-            yield VoiceEvent(VoiceEventKind.THINKING)
-            LOGGER.info("Authoritative Core turn started")
+        async def receive_transcriptions() -> None:
             try:
-                async with self._core_turn_lock:
-                    outcome = await asyncio.to_thread(
-                        self._gateway.receive_conversation_turn,
-                        turn,
-                        self._step_budget,
-                        now + timedelta(days=self._retention_days),
-                    )
+                async for item in self._transcriber.transcribe(audio):
+                    await incoming.put(("transcription", item))
+                await incoming.put(("transcription_end", None))
             except Exception:
+                await incoming.put(("error", "speech_transcription_error"))
+
+        async def receive_events() -> None:
+            assert self._event_source is not None
+            try:
+                async for item in self._event_source.events():
+                    await incoming.put(("background", item))
+            except Exception:
+                await incoming.put(("error", "background_event_error"))
+
+        tasks = [asyncio.create_task(receive_transcriptions())]
+        if self._event_source is not None:
+            tasks.append(asyncio.create_task(receive_events()))
+        try:
+            while True:
+                kind, item = await incoming.get()
+                if kind == "error":
+                    yield VoiceEvent(VoiceEventKind.ERROR, reason=item)
+                    # A background observation failure leaves speech intact, so the
+                    # conversation continues rather than ending. The observation
+                    # task has stopped; it is restarted so mail is still watched.
+                    if item == "background_event_error" and self._event_source is not None:
+                        LOGGER.info("Restarting background observation after failure")
+                        tasks.append(asyncio.create_task(receive_events()))
+                        yield VoiceEvent(VoiceEventKind.LISTENING)
+                        continue
+                    return
+                if kind == "transcription_end":
+                    if self._event_source is None:
+                        return
+                    continue
+                if kind == "transcription" and item.state is TranscriptionState.PARTIAL:
+                    LOGGER.info("Cartesia event received: %s", item.state.value)
+                    yield VoiceEvent(VoiceEventKind.HEARING)
+                    continue
+
+                now = self._clock()
+                if now.tzinfo is None or now.utcoffset() is None:
+                    yield VoiceEvent(VoiceEventKind.ERROR, reason="clock_error")
+                    return
+                yield VoiceEvent(VoiceEventKind.THINKING)
+                LOGGER.info("Authoritative Core turn started: %s", kind)
+                try:
+                    async with self._core_turn_lock:
+                        if kind == "background":
+                            outcome = await asyncio.to_thread(
+                                self._gateway.receive_background_event,
+                                conversation_id,
+                                item,
+                                self._step_budget,
+                                now + timedelta(days=self._retention_days),
+                            )
+                        else:
+                            LOGGER.info("Cartesia event received: %s", item.state.value)
+                            turn = ConversationTurn(
+                                conversation_id=conversation_id,
+                                turn_id=self._identifier_factory(),
+                                origin=ConversationOrigin.SPEECH_TRANSCRIPT,
+                                content=item.content,
+                                occurred_at=now,
+                                person_id=self._person_id,
+                            )
+                            outcome = await asyncio.to_thread(
+                                self._gateway.receive_conversation_turn,
+                                turn,
+                                self._step_budget,
+                                now + timedelta(days=self._retention_days),
+                            )
+                except Exception:
+                    yield VoiceEvent(
+                        VoiceEventKind.ERROR, reason="conversation_gateway_error"
+                    )
+                    return
+
+                delivered = True
+                async for response_event in self._response_events(
+                    conversation_id, outcome
+                ):
+                    if response_event.kind is VoiceEventKind.ERROR:
+                        delivered = False
+                    yield response_event
+                if kind == "background" and delivered:
+                    assert self._event_source is not None
+                    await asyncio.to_thread(
+                        self._event_source.record_delivery, item.event_id
+                    )
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _response_events(self, conversation_id, outcome):
+        if self._diagnostics is not None:
+            for diagnostic in self._diagnostics.drain(conversation_id):
+                yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=diagnostic)
+        LOGGER.info(
+            "Authoritative Core turn finished: state=%s reason=%s response=%s",
+            outcome.state.value,
+            outcome.reason,
+            outcome.response is not None,
+        )
+        if outcome.response is None:
+            yield VoiceEvent(
+                VoiceEventKind.ERROR,
+                reason=outcome.reason or "authoritative_response_missing",
+            )
+            yield VoiceEvent(VoiceEventKind.LISTENING)
+            return
+        yield VoiceEvent(VoiceEventKind.SPEAKING)
+        LOGGER.info("Speech synthesis started")
+        try:
+            async for chunk in self._synthesizer.synthesize(
+                outcome.response, conversation_id
+            ):
                 if self._diagnostics is not None:
                     for diagnostic in self._diagnostics.drain(conversation_id):
                         yield VoiceEvent(
-                            VoiceEventKind.DIAGNOSTIC,
-                            diagnostic=diagnostic,
+                            VoiceEventKind.DIAGNOSTIC, diagnostic=diagnostic
                         )
-                yield VoiceEvent(VoiceEventKind.ERROR, reason="conversation_gateway_error")
-                return
-
-            if self._diagnostics is not None:
-                for diagnostic in self._diagnostics.drain(conversation_id):
-                    yield VoiceEvent(
-                        VoiceEventKind.DIAGNOSTIC,
-                        diagnostic=diagnostic,
-                    )
-
-            LOGGER.info(
-                "Authoritative Core turn finished: state=%s reason=%s response=%s",
-                outcome.state.value,
-                outcome.reason,
-                outcome.response is not None,
-            )
-
-            if outcome.response is None:
-                yield VoiceEvent(
-                    VoiceEventKind.ERROR,
-                    reason=outcome.reason or "authoritative_response_missing",
-                )
-                yield VoiceEvent(VoiceEventKind.LISTENING)
-                continue
-
-            yield VoiceEvent(VoiceEventKind.SPEAKING)
-            LOGGER.info("Speech synthesis started")
-            try:
-                async for chunk in self._synthesizer.synthesize(
-                    outcome.response,
-                    conversation_id,
-                ):
-                    if self._diagnostics is not None:
-                        for diagnostic in self._diagnostics.drain(conversation_id):
-                            yield VoiceEvent(
-                                VoiceEventKind.DIAGNOSTIC,
-                                diagnostic=diagnostic,
-                            )
-                    yield VoiceEvent(VoiceEventKind.AUDIO, audio=chunk)
-            except Exception:
-                yield VoiceEvent(VoiceEventKind.ERROR, reason="speech_synthesis_error")
-                return
-            LOGGER.info("Speech synthesis completed")
-            yield VoiceEvent(VoiceEventKind.LISTENING)
+                yield VoiceEvent(VoiceEventKind.AUDIO, audio=chunk)
+        except Exception:
+            yield VoiceEvent(VoiceEventKind.ERROR, reason="speech_synthesis_error")
+            return
+        LOGGER.info("Speech synthesis completed")
+        yield VoiceEvent(VoiceEventKind.LISTENING)

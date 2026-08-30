@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import (  # noqa: E402
-    AgentDecision, ConversationOrigin, ConversationTurn,
+    AgentDecision, ContentOrigin, ConversationOrigin, ConversationTurn,
 )
 from alx.conversation import (  # noqa: E402
     ConversationGateway, ConversationNotFound, ConversationRevisionConflict,
@@ -82,7 +82,12 @@ class ConversationGatewayTests(unittest.TestCase):
         gateway.receive_conversation_turn(second, 1, RETENTION)
         self.assertEqual(len(reasoner.contexts), 2)
         self.assertEqual(len(reasoner.contexts[1].turns), 3)
-        self.assertEqual(reasoner.contexts[1].turns[-1], second)
+        persisted_second = reasoner.contexts[1].turns[-1]
+        self.assertEqual(persisted_second.content, second.content)
+        self.assertEqual(
+            persisted_second.provenance.origins,
+            frozenset({ContentOrigin.PERSON}),
+        )
 
     def test_user_turn_survives_reasoning_failure(self) -> None:
         class Failure:
@@ -93,7 +98,13 @@ class ConversationGatewayTests(unittest.TestCase):
                                 "Keep this", NOW)
         outcome = self.gateway(Failure()).receive_conversation_turn(turn, 1, RETENTION)
         self.assertEqual(outcome.reason, "reasoner_error")
-        self.assertEqual(self.conversations.load("conversation-1").turns, (turn,))
+        recovered = self.conversations.load("conversation-1").turns
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0].content, turn.content)
+        self.assertEqual(
+            recovered[0].provenance.origins,
+            frozenset({ContentOrigin.PERSON}),
+        )
 
     def test_restart_revision_and_delete_controls_are_independent_of_goals(self) -> None:
         created = self.conversations.create("conversation-1", RETENTION)
