@@ -383,11 +383,19 @@ class CoreAgent:
         ]
         if not authored:
             return False
-        spoken = " ".join(
-            " ".join(item.content.split())
-            for item in conversation.turns
-            if item.origin is ConversationOrigin.ALX_RESPONSE
+        # Only what AL/X said most recently counts. Scanning every turn she has
+        # ever spoken let a draft from earlier in the conversation satisfy the
+        # rule, so an answer to a later, unrelated question authorised a send
+        # she had not just proposed. The wording must be in the message she
+        # just gave him, immediately before he answered.
+        latest = next(
+            (
+                item for item in reversed(conversation.turns)
+                if item.origin is ConversationOrigin.ALX_RESPONSE
+            ),
+            None,
         )
+        spoken = "" if latest is None else " ".join(latest.content.split())
         return any(
             " ".join(item.split()) not in spoken for item in authored
         )

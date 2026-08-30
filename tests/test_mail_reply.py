@@ -413,6 +413,39 @@ class UnheardTextTests(unittest.TestCase):
             )
         )
 
+    def test_a_draft_from_earlier_in_the_conversation_no_longer_counts(self) -> None:
+        """Regression: a stale draft satisfied the rule.
+
+        She proposed wording, the send failed, and three turns later an answer
+        to a different question authorised it. The wording must be in what she
+        just said, not merely something she once said.
+        """
+        from alx.core.loop import CoreAgent
+
+        body = "The parts should arrive on Monday or Tuesday."
+        conversation = self._conversation(
+            (True, f"I will reply: {body} Shall I send that?"),
+            (False, "Yeah, that's fine."),
+            (True, "That did not go through."),
+            (True, "The message came from your ASU address. Reply to that one?"),
+            (False, "Yes please."),
+        )
+        self.assertTrue(
+            CoreAgent._unheard_authored_text(conversation, self._call(body))
+        )
+
+    def test_wording_she_just_said_is_permitted(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        body = "The parts should arrive on Monday or Tuesday."
+        conversation = self._conversation(
+            (True, f"I will send: {body} Shall I?"),
+            (False, "Yes please."),
+        )
+        self.assertFalse(
+            CoreAgent._unheard_authored_text(conversation, self._call(body))
+        )
+
     def test_his_own_words_do_not_count_as_her_having_said_it(self) -> None:
         """Only what AL/X said counts; echoing his instruction is not enough."""
         from alx.core.loop import CoreAgent
