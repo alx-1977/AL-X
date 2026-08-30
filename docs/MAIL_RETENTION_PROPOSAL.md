@@ -152,11 +152,106 @@ Required evidence before this is accepted:
 
 - an unfinished mail goal survives a restart and AL/X resumes it by re-reading
   the referenced message;
-- she resumes without the body having been persisted anywhere;
+- she resumes without the body having been written to the designated durable
+  stores named in the scope below;
 - expiry of the conversational text does not orphan the goal;
 - a goal whose message was deleted remains resumable, with the message reported
   unavailable rather than invented;
 - a tombstoned turn still satisfies the references that cite it.
+
+## Scope: where mail content can reach
+
+Every surface below was inspected on this machine. "In scope" means this design
+commits to a boundary there; "out of scope" means it does not, and says so
+rather than implying protection it has not built.
+
+### Model provider
+
+- **Does mail content reach it?** Yes. The body is sent in the reasoning
+  request so the Core can reason about it. This is unavoidable while a model
+  does the reasoning.
+- **Current behaviour:** no retention or zero-data-retention flag is sent. What
+  OpenAI keeps is governed by their account defaults, which AL/X neither sets
+  nor observes.
+- **Proposed boundary:** send an explicit retention preference where the
+  provider supports one, and record in configuration which provider setting is
+  relied upon. AL/X cannot delete provider-side data, so this is a
+  configuration and disclosure commitment, not a deletion one.
+- **Deletion meaning:** neither. Out of AL/X's control.
+- **Configured and tested:** the request payload is asserted to carry the
+  configured retention preference. Provider-side behaviour cannot be tested
+  from here and must not be claimed.
+
+### Application logs and exceptions
+
+- **Does mail content reach it?** Not through logging. Every inspected log
+  statement carries codes, identifiers, and durations. Provider failures are
+  reduced to an exception type or error code before being logged.
+- **But:** a provider exception is raised `from error`, chaining the underlying
+  httpx exception, which retains the request object. Verified on this machine:
+  a formatted traceback of the chained pair **prints the request body**, and it
+  is also reachable as `__cause__.request.content`. Any unhandled traceback
+  reaching a log or a console would therefore expose a mail body. This is the
+  one place where content escapes today.
+- **Proposed boundary:** break the exception chain at the provider adapter for
+  requests carrying mail content, so no retained frame holds the payload.
+- **Deletion meaning:** logs rotate by the operator's arrangement; AL/X does
+  not manage them.
+- **Configured and tested:** a test asserts that a provider failure carrying a
+  mail body exposes neither the body nor a chained request containing it.
+
+### Temporary and process storage
+
+- **Does mail content reach it?** In process memory while a turn runs, which is
+  unavoidable. No temporary files are written by the mail path.
+- **Proposed boundary:** no temporary file may carry a body. Backups made
+  during maintenance are covered separately below.
+- **Deletion meaning:** process memory is reclaimed by the runtime; no promise
+  of erasure is made.
+- **Configured and tested:** a test asserts the mail path writes no file
+  outside the designated stores.
+
+### SQLite databases
+
+- **Does mail content reach it?** The observation store holds references only,
+  verified: its records contain `mailbox_id`, `uid_validity`, and `uid`. The
+  conversation, goal, and memory stores can hold model-derived text about a
+  message, which is what provenance retention will bound.
+- **Current behaviour:** journal mode is `delete`, so no `.wal` files persist;
+  rollback journals exist transiently during writes. `secure_delete` is off.
+- **Verified:** after `DELETE` and commit, the deleted bytes were still present
+  in the database file.
+- **Proposed boundary:** the designated stores are in scope for provenance
+  retention. Deleted rows become logically inaccessible.
+- **Deletion meaning:** **logical inaccessibility, not secure erasure.**
+  Enabling `secure_delete` and running `VACUUM` after a purge would narrow this
+  and both cost time; whether to pay that is Friedl's decision.
+- **Configured and tested:** a test asserts a purged record is unreachable
+  through every store interface. A test asserting byte-level absence would be
+  claiming erasure this design does not promise.
+
+### Backups
+
+- **Does mail content reach it?** Yes. Four `.bak` copies of the goal and
+  observation stores exist under `.alx/runtime/backup/`, created during this
+  session's maintenance. They are outside any retention policy.
+- **Proposed boundary:** backups inherit the retention of what they copy. A
+  backup older than the longest retention it contains is itself expired, and
+  maintenance copies are either recorded for expiry or not taken.
+- **Deletion meaning:** logical inaccessibility, same as the stores.
+- **Configured and tested:** the dry-run inventory lists backup files and their
+  ages alongside the records they would contain.
+
+### Exports and other integrations
+
+- **Does mail content reach it?** No export path exists today. Speech synthesis
+  receives AL/X's response, which may describe a message; ElevenLabs retention
+  is governed by their account settings, as with the reasoning provider.
+- **Proposed boundary:** any future export must declare its provenance handling
+  before it is built. The synthesis provider is disclosed, not controlled.
+- **Deletion meaning:** out of AL/X's control.
+- **Configured and tested:** a test asserts no capability writes mail content
+  to a path outside the designated stores.
 
 ## Deletion and unavailable messages
 
@@ -218,6 +313,30 @@ Friedl has approved the direction and the defaults above. Still outstanding:
 3. **Confirmation of the first purge**, after reviewing the dry-run inventory.
 
 I would not proceed on any of these without a recorded decision.
+
+## What the scope changes about the plan
+
+Two findings above are not retention questions and should be treated separately:
+
+1. **The exception chain is a live leak, today.** It does not wait for
+   retention to be implemented, and it is small to fix. I would treat it as a
+   defect to correct now rather than part of this design, subject to Friedl's
+   agreement.
+2. **Four backup files exist outside any policy**, created by me during
+   maintenance in this session. They contain goal and observation state. They
+   should be listed in the dry-run inventory rather than quietly inherited.
+
+## Decisions this scope adds
+
+Beyond the three already outstanding:
+
+4. **Whether to pay for secure erasure.** Enabling `secure_delete` and running
+   `VACUUM` after a purge narrows deletion from logical inaccessibility toward
+   erasure, at a cost in time on every write and every purge. Verified today:
+   deleted bytes remain in the database file without it.
+5. **What is relied upon at the model provider.** AL/X cannot delete anything
+   there. The commitment is to send a retention preference and record which
+   provider setting is being trusted, which is disclosure rather than control.
 
 ## Current state, recorded honestly
 
