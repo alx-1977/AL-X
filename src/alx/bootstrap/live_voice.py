@@ -124,11 +124,13 @@ async def run(repository_root: Path) -> None:
 
     # Replying is authorised by DECISIONS.md D-011 and configured separately, so
     # a runtime without send settings reads mail without being able to send it.
+    approval_ttl_seconds: int | None = None
     try:
         send_settings = MailSendSettings.from_environment(environment)
     except ConfigurationError as error:
         LOGGER.info("Mail sending unavailable: %s", error)
     else:
+        approval_ttl_seconds = send_settings.approval_ttl_seconds
         send_definitions, send_policies, send_executors, send_permissions = (
             build_mail_send_runtime(send_settings, lambda: current_call_id[0])
         )
@@ -158,6 +160,7 @@ async def run(repository_root: Path) -> None:
         dispatch,
         registry.list_definitions(),
         memory_store,
+        approval_ttl_seconds=approval_ttl_seconds,
     )
     gateway = ConversationGateway(
         core,

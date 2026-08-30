@@ -333,3 +333,248 @@ class AskingIsFreeTests(unittest.TestCase):
         for scripted in ("must first", "before asking", "only after",
                          "step 1", "then ask"):
             self.assertNotIn(scripted, source.lower())
+
+
+class UnheardTextTests(unittest.TestCase):
+    """AL/X cannot send outward wording Friedl has never heard from her.
+
+    This is a property of the artifact, not an ordering rule. She may draft,
+    ask, argue, or abandon a message in any order and needs no permission to
+    speak. She simply cannot transmit words he never heard, which is what stops
+    her reporting one message and sending another.
+    """
+
+    @staticmethod
+    def _conversation(*turns):
+        from datetime import UTC, datetime, timedelta
+        from alx.contracts import (
+            ConversationOrigin, ConversationSnapshot, ConversationTurn,
+        )
+
+        now = datetime(2026, 8, 30, tzinfo=UTC)
+        built = tuple(
+            ConversationTurn(
+                "conversation-1", f"turn-{index + 1}",
+                ConversationOrigin.ALX_RESPONSE if spoken_by_alx
+                else ConversationOrigin.TYPED,
+                text, now, None if spoken_by_alx else "friedl",
+            )
+            for index, (spoken_by_alx, text) in enumerate(turns)
+        )
+        return ConversationSnapshot(
+            "conversation-1", built, len(built), now + timedelta(days=1)
+        )
+
+    @staticmethod
+    def _call(body: str):
+        from alx.contracts import CapabilityCall
+
+        return CapabilityCall(
+            "call-1", SEND_MAIL_REPLY,
+            {"to": ("john@example.test",), "subject": "Re: Part", "body": body},
+            "approval-1",
+        )
+
+    def test_wording_he_never_heard_is_refused(self) -> None:
+        """The exact failure observed live: sent first, quoted afterwards."""
+        from alx.core.loop import CoreAgent
+
+        conversation = self._conversation(
+            (False, "You can let John know the part will be here tomorrow."),
+        )
+        self.assertTrue(
+            CoreAgent._unheard_authored_text(
+                conversation, self._call("Hi John, the part arrives tomorrow.")
+            )
+        )
+
+    def test_wording_he_has_heard_is_permitted(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        drafted = "Hi John, I have checked and the part should arrive tomorrow."
+        conversation = self._conversation(
+            (False, "Let John know the part will be here tomorrow."),
+            (True, f"I will send: {drafted} Shall I?"),
+            (False, "Yes, send it."),
+        )
+        self.assertFalse(
+            CoreAgent._unheard_authored_text(conversation, self._call(drafted))
+        )
+
+    def test_reformatted_whitespace_still_counts_as_heard(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        conversation = self._conversation(
+            (True, "I will send: Hi John,  the part\narrives tomorrow."),
+        )
+        self.assertFalse(
+            CoreAgent._unheard_authored_text(
+                conversation, self._call("Hi John, the part arrives tomorrow.")
+            )
+        )
+
+    def test_his_own_words_do_not_count_as_her_having_said_it(self) -> None:
+        """Only what AL/X said counts; echoing his instruction is not enough."""
+        from alx.core.loop import CoreAgent
+
+        body = "The part will be here tomorrow."
+        conversation = self._conversation((False, body))
+        self.assertTrue(
+            CoreAgent._unheard_authored_text(conversation, self._call(body))
+        )
+
+    def test_a_capability_carrying_no_authored_text_is_unaffected(self) -> None:
+        """Reading, acknowledging and trashing are untouched by this rule."""
+        from alx.contracts import CapabilityCall
+        from alx.core.loop import CoreAgent
+
+        conversation = self._conversation((False, "Trash that one."))
+        for capability_id in ("read_mail_message", "move_mail_message_to_trash"):
+            call = CapabilityCall(
+                "call-1", capability_id,
+                {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"},
+            )
+            self.assertFalse(CoreAgent._unheard_authored_text(conversation, call))
+
+    def test_the_core_refuses_a_send_carrying_unheard_wording(self) -> None:
+        """Exercises the enforcement path, not just the helper."""
+        import tempfile
+        from datetime import UTC, datetime, timedelta
+        from alx.contracts import (
+            AgentDecision, ApprovalProposal, ApprovalScope, CapabilityCall,
+            CapabilityDefinition, ConversationOrigin, ConversationSnapshot,
+            ConversationTurn, GoalMutationKind, GoalProposal, StructuredSchema,
+            SuccessCriterion, ValueKind,
+        )
+        from alx.core import CoreAgent, CoreState
+        from alx.goals import SQLiteGoalStore
+
+        now = datetime(2026, 8, 30, tzinfo=UTC)
+        schema = StructuredSchema(ValueKind.OBJECT)
+        definition = CapabilityDefinition(
+            SEND_MAIL_REPLY, "reply", schema, schema, SideEffect.EFFECTFUL
+        )
+        arguments = {"to": ("john@example.test",), "subject": "Re: Part",
+                     "body": "Hi John, the part arrives tomorrow."}
+        turns = (
+            ConversationTurn("c", "t1", ConversationOrigin.TYPED,
+                             "Let John know the part arrives tomorrow.", now, "friedl"),
+        )
+        conversation = ConversationSnapshot("c", turns, 1, now + timedelta(days=1))
+        dispatched: list[CapabilityCall] = []
+
+        def dispatch(proposed, state):
+            dispatched.append(proposed)
+            raise AssertionError("unheard wording must never be dispatched")
+
+        reasoner = Queued(AgentDecision(
+            goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE, objective_summary="Reply",
+                success_criteria=(SuccessCriterion("criterion-1", "sent"),)),
+            call=CapabilityCall("call-1", SEND_MAIL_REPLY, arguments, "approval-1"),
+            approval_proposal=ApprovalProposal(
+                "approval-1", ApprovalScope(SEND_MAIL_REPLY, arguments), "turn:t1"),
+        ))
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        outcome = CoreAgent(
+            store, reasoner, dispatch, (definition,),
+            clock=lambda: now, identifier_factory=lambda: "goal-1",
+        ).process(conversation, None, now + timedelta(days=1), 2)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "approval_proposal_invalid")
+        self.assertEqual(dispatched, [], "nothing may be transmitted")
+        store.close()
+        directory.cleanup()
+
+    def test_the_rule_imposes_no_ordering_or_state(self) -> None:
+        """Law 1 and 6: nothing requires a step before AL/X may speak or act."""
+        source = (REPOSITORY_ROOT / "src/alx/core/loop.py").read_text("utf-8")
+        for scripted in ("must first", "step_one", "awaiting_read_back",
+                         "pending_confirmation", "read_back_state"):
+            self.assertNotIn(scripted, source.lower())
+
+
+class ApprovalExpiryTests(unittest.TestCase):
+    """D-011 promises a ten minute window; it must actually be applied."""
+
+    def test_a_granted_approval_carries_the_configured_expiry(self) -> None:
+        import tempfile
+        from datetime import UTC, datetime, timedelta
+        from alx.contracts import (
+            AgentDecision, ApprovalProposal, ApprovalScope, CapabilityCall,
+            CapabilityDefinition, ConversationOrigin, ConversationSnapshot,
+            ConversationTurn, GoalMutationKind, GoalProposal, StructuredSchema,
+            SuccessCriterion, ValueKind,
+        )
+        from alx.core import CoreAgent
+        from alx.goals import SQLiteGoalStore
+
+        now = datetime(2026, 8, 30, tzinfo=UTC)
+        schema = StructuredSchema(ValueKind.OBJECT)
+        definition = CapabilityDefinition(
+            "act", "one action", schema, schema, SideEffect.EFFECTFUL
+        )
+        arguments = {"value": "heard text"}
+        call = CapabilityCall("call-1", "act", arguments, "approval-1")
+        turns = (
+            ConversationTurn("c", "t1", ConversationOrigin.TYPED, "do it", now, "friedl"),
+        )
+        conversation = ConversationSnapshot("c", turns, 1, now + timedelta(days=1))
+        reasoner = Queued(
+            AgentDecision(
+                goal_proposal=GoalProposal(
+                    kind=GoalMutationKind.CREATE, objective_summary="Act",
+                    success_criteria=(SuccessCriterion("criterion-1", "done"),)),
+                call=call,
+                approval_proposal=ApprovalProposal(
+                    "approval-1", ApprovalScope("act", arguments), "turn:t1"),
+            ),
+            AgentDecision(response="Done."),
+        )
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        from alx.contracts import (
+            CapabilityAttempt, CapabilityAttemptDisposition, CapabilityResult,
+            CapabilityResultState,
+        )
+
+        def dispatch(proposed, state):
+            return CapabilityAttempt(
+                proposed, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(proposed.call_id, proposed.capability_id,
+                                 CapabilityResultState.SUCCEEDED, {}),
+            )
+
+        agent = CoreAgent(
+            store, reasoner, dispatch, (definition,),
+            clock=lambda: now, identifier_factory=lambda: "goal-1",
+            approval_ttl_seconds=600,
+        )
+        agent.process(conversation, None, now + timedelta(days=1), 2)
+        approval = store.load("goal-1").state.approvals[0]
+        self.assertEqual(approval.expires_at, now + timedelta(minutes=10))
+        store.close()
+        directory.cleanup()
+
+    def test_a_non_positive_window_is_refused(self) -> None:
+        import tempfile
+        from alx.core import CoreAgent
+        from alx.goals import SQLiteGoalStore
+
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        with self.assertRaises(ValueError):
+            CoreAgent(store, None, None, (), approval_ttl_seconds=0)
+        store.close()
+        directory.cleanup()
+
+
+class Queued:
+    def __init__(self, *decisions) -> None:
+        self.decisions = list(decisions)
+        self.contexts = []
+
+    def decide(self, context):
+        self.contexts.append(context)
+        return self.decisions.pop(0)

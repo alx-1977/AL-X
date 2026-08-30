@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 import logging
 from uuid import uuid4
@@ -12,6 +12,7 @@ from uuid import uuid4
 from alx.contracts import (
     AgentDecision, Approval, ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityDefinition, CapabilityDispatch, CapabilityResult,
+    ConversationOrigin,
     CapabilityResultState, ConversationSnapshot,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, MemoryKind,
@@ -42,7 +43,8 @@ class CoreAgent:
                  capabilities: tuple[CapabilityDefinition, ...],
                  memory_store: DurableMemoryStore | None = None,
                  clock: Callable[[], datetime] | None = None,
-                 identifier_factory: Callable[[], str] | None = None) -> None:
+                 identifier_factory: Callable[[], str] | None = None,
+                 approval_ttl_seconds: int | None = None) -> None:
         self._store = store
         self._reasoner = reasoner
         self._dispatch = dispatch
@@ -50,6 +52,9 @@ class CoreAgent:
         self._memory_store = memory_store
         self._clock = clock or (lambda: datetime.now(UTC))
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
+        if approval_ttl_seconds is not None and approval_ttl_seconds <= 0:
+            raise ValueError("approval_ttl_seconds must be positive")
+        self._approval_ttl_seconds = approval_ttl_seconds
 
     def process(self, conversation: ConversationSnapshot, goal_id: str | None,
                 retention_until: datetime, step_budget: int,
@@ -121,6 +126,9 @@ class CoreAgent:
                             proposed.approval_id,
                             proposed.scope,
                             ApprovalLifecycle.GRANTED,
+                            # A stale authorisation must not act later.
+                            None if self._approval_ttl_seconds is None
+                            else now + timedelta(seconds=self._approval_ttl_seconds),
                         ),
                     ),
                 )
@@ -338,6 +346,37 @@ class CoreAgent:
             return state, str(error_value)
         return updated, None
 
+    # Text AL/X composed herself and is about to send outward must already have
+    # reached Friedl in something she said. This is a property of the artifact,
+    # not an ordering rule: she may draft, ask, argue, or change her mind in any
+    # order, and needs no permission to speak. She simply cannot transmit words
+    # he never heard, which is what stops her reporting one message and sending
+    # another.
+    _AUTHORED_TEXT_ARGUMENTS = frozenset({"body", "body_text"})
+
+    @staticmethod
+    def _unheard_authored_text(
+        conversation: ConversationSnapshot, call: CapabilityCall
+    ) -> bool:
+        """Report whether an outbound call carries text Friedl has not heard."""
+        authored = [
+            value
+            for name, value in call.arguments.items()
+            if name in CoreAgent._AUTHORED_TEXT_ARGUMENTS
+            and isinstance(value, str)
+            and value.strip()
+        ]
+        if not authored:
+            return False
+        spoken = " ".join(
+            " ".join(item.content.split())
+            for item in conversation.turns
+            if item.origin is ConversationOrigin.ALX_RESPONSE
+        )
+        return any(
+            " ".join(item.split()) not in spoken for item in authored
+        )
+
     @staticmethod
     def _approval_proposal_error(conversation, state, decision) -> str | None:
         proposal = decision.approval_proposal
@@ -360,6 +399,8 @@ class CoreAgent:
             or proposal.source_reference != f"turn:{source.turn_id}"
         ):
             return "approval_source_not_latest_person_turn"
+        if CoreAgent._unheard_authored_text(conversation, call):
+            return "approval_covers_unheard_text"
         return None
 
     @staticmethod
