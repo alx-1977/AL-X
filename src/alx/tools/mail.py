@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
+
+from email.utils import getaddresses
 
 from alx.contracts import (
     CapabilityDefinition,
@@ -11,6 +13,7 @@ from alx.contracts import (
     CapabilityResultState,
     MailAccessError,
     MailAccount,
+    MailContent,
     MailObservationControl,
     MailReference,
     MailSendError,
@@ -132,14 +135,13 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
     StructuredSchema(
         ValueKind.OBJECT,
         {
+            **_REFERENCE_PROPERTIES,
             "to": _ADDRESS_LIST,
             "carbon_copy": _ADDRESS_LIST,
             "subject": _STRING,
             "body": _STRING,
-            "in_reply_to": _STRING,
-            "references": _ADDRESS_LIST,
         },
-        ("to", "subject", "body"),
+        (*_REFERENCE_PROPERTIES, "to", "subject", "body"),
         extra_properties=False,
     ),
     StructuredSchema(
@@ -185,23 +187,46 @@ def _addresses(arguments: StructuredData, field_name: str) -> tuple[str, ...]:
     return tuple(found)
 
 
-def _outbound_reply(arguments: StructuredData) -> OutboundReply:
-    """Read a structured reply. No field names or carries a sender identity."""
+def _outbound_reply(arguments: StructuredData, source: MailContent) -> OutboundReply:
+    """Read a structured reply against the message it answers.
+
+    Threading and the permitted recipients come from the source message rather
+    than from the arguments, so the reply cannot become new correspondence to
+    an address the message never carried.
+    """
     subject = arguments.get("subject")
     body = arguments.get("body")
-    in_reply_to = arguments.get("in_reply_to", "")
-    for name, value in (("subject", subject), ("body", body),
-                        ("in_reply_to", in_reply_to)):
+    for name, value in (("subject", subject), ("body", body)):
         if not isinstance(value, str):
             raise ValueError(f"{name} must be a string")
+    observed = [
+        address
+        for address in (
+            source.participants.reply_to,
+            source.participants.sender,
+            *source.participants.recipients,
+            *source.participants.carbon_copy,
+        )
+        if address and "@" in address
+    ]
     return OutboundReply(
         to=_addresses(arguments, "to"),
         subject=subject,
         body=body,
-        in_reply_to=in_reply_to,
-        references=_addresses(arguments, "references"),
+        in_reply_to=source.threading.message_id,
+        references=source.threading.reply_references(),
         carbon_copy=_addresses(arguments, "carbon_copy"),
+        permitted_recipients=tuple(_plain_addresses(observed)),
     )
+
+
+def _plain_addresses(values: Sequence[str]) -> tuple[str, ...]:
+    """Reduce observed header values to bare addresses."""
+    found: list[str] = []
+    for _display, address in getaddresses(list(values)):
+        if address and address not in found:
+            found.append(address)
+    return tuple(found)
 
 
 def _reference(arguments: StructuredData) -> MailReference:
@@ -307,6 +332,7 @@ def build_mail_executors(
 
 def build_send_executors(
     sender: Any,
+    account: MailAccount,
     call_id_source: Callable[[], str],
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     """Bind the reply primitive to one configured sending identity.
@@ -317,7 +343,17 @@ def build_send_executors(
 
     def send_reply(arguments: StructuredData) -> CapabilityResult:
         try:
-            reply = _outbound_reply(arguments)
+            # The source message is read here so its threading and its observed
+            # addresses constrain the reply, rather than the model asserting
+            # them. D-011 authorises replying to an existing message only.
+            source = account.read(_reference(arguments))
+        except (ValueError, MailAccessError) as error:
+            return CapabilityResult(
+                call_id_source(), SEND_MAIL_REPLY, CapabilityResultState.FAILED,
+                failure={"code": getattr(error, "code", "arguments_unusable")},
+            )
+        try:
+            reply = _outbound_reply(arguments, source)
         except ValueError:
             return CapabilityResult(
                 call_id_source(),

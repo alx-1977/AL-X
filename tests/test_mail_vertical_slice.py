@@ -191,6 +191,35 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(second.transient_data["body"], "Transient body")
         self.assertEqual(self.state.current().data["uid"], "2")
 
+    def test_a_failed_header_fetch_does_not_skip_that_message(self) -> None:
+        """Regression: the cursor advanced past a message that failed to fetch.
+
+        If one identifier failed while a later one succeeded, the cursor moved
+        beyond the gap and that message was never observed again.
+        """
+        self.adapter.scan()
+        self.state.discover(
+            "INBOX", "777",
+            ((3, {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "3",
+                  "observed_at": "2026-08-30T10:00:00+00:00"}),),
+        )
+        cursor = self.state._connection.execute(
+            "SELECT last_uid FROM mail_cursor WHERE mailbox_id = 'INBOX'"
+        ).fetchone()[0]
+        self.assertLess(cursor, 3, "the cursor must not pass the missing message")
+        # The message that failed is still offered on a later scan.
+        self.state.discover(
+            "INBOX", "777",
+            ((2, {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2",
+                  "observed_at": "2026-08-30T10:01:00+00:00"}),),
+        )
+        pending = {
+            row[0] for row in self.state._connection.execute(
+                "SELECT uid FROM mail_observations WHERE state = 'pending'"
+            )
+        }
+        self.assertIn(2, pending)
+
     def test_every_open_message_stays_available_as_a_referent(self) -> None:
         """Regression: only the oldest open message was carried as context.
 

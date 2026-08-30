@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alx.config import MailSendSettings, MailSettings
-from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
+from alx.contracts import (
+    CapabilityDefinition,
+    CapabilityResult,
+    MailAccount,
+    StructuredData,
+)
 from alx.providers import (
     ICloudMailAdapter,
     ICloudMailSender,
@@ -46,6 +51,7 @@ class MailRuntime:
 
 def build_mail_send_runtime(
     settings: MailSendSettings,
+    account: MailAccount,
     call_id_source: Callable[[], str],
 ) -> tuple[tuple[CapabilityDefinition, ...], Mapping[str, AuthorityPolicy], Mapping[str, Any], frozenset[str]]:
     """Compose the reply capability, authorised by DECISIONS.md D-011.
@@ -69,7 +75,7 @@ def build_mail_send_runtime(
     return (
         SEND_DEFINITIONS,
         policies,
-        build_send_executors(sender, call_id_source),
+        build_send_executors(sender, account, call_id_source),
         frozenset({MAIL_SEND_PERMISSION}),
     )
 

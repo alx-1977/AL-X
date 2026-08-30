@@ -8,6 +8,7 @@ five consecutive rejected Trash attempts.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,7 @@ from alx.contracts import (  # noqa: E402
     ConversationOrigin, ConversationSnapshot, ConversationTurn, Evidence,
     GoalMutationKind, GoalProposal, MemoryKind, MemoryProposal, SideEffect,
     StructuredSchema, SuccessCriterion, ValueKind,
+    ProgressRecord, WorkItem,
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
@@ -627,3 +629,133 @@ class SessionResilienceTests(unittest.TestCase):
             any(isinstance(node, ast.While) for node in ast.walk(handler)),
             "a recoverable failure must re-enter the exchange",
         )
+
+
+class DurableFieldCoverageTests(unittest.TestCase):
+    """Every durable field is guarded, not only evidence and memory."""
+
+    BODY = (
+        "Bank transfer reference 88213 for R14 500 to account 62 8891 4432, "
+        "confirm by Friday."
+    )
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.directory.cleanup()
+
+    def _conversation(self):
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW, data={"uid": "1"},
+            transient_data={"body_text": self.BODY},
+        )
+        return conversation("read it", events=(event,))
+
+    def _attempt(self, **proposal):
+        reasoner = Queued(AgentDecision(
+            goal_proposal=GoalProposal(kind=GoalMutationKind.CREATE, **proposal),
+            response="Noted.", response_requires_goal_commit=True,
+        ))
+        outcome = CoreAgent(
+            self.store, reasoner, lambda call, state: None, (),
+            clock=lambda: NOW, identifier_factory=lambda: "goal-1",
+        ).process(self._conversation(), None, RETENTION, 2)
+        stored = sqlite3.connect(
+            str(Path(self.directory.name) / "goals.sqlite3")
+        ).execute("SELECT state_json FROM goals").fetchone()
+        return outcome, (stored[0] if stored else "")
+
+    def test_a_body_cannot_persist_through_any_durable_field(self) -> None:
+        """Regression: only evidence and memory were guarded.
+
+        The objective, criteria, context, referents, decisions, corrections,
+        progress, blockers and outstanding work are all persisted, so a body
+        supplied as any of them reached durable state unchecked.
+        """
+        criterion = SuccessCriterion("criterion-1", "done")
+        cases = {
+            "objective": dict(objective_summary=self.BODY,
+                              success_criteria=(criterion,)),
+            "success criterion": dict(objective_summary="Handle",
+                                      success_criteria=(SuccessCriterion("c", self.BODY),)),
+            "context": dict(objective_summary="Handle", success_criteria=(criterion,),
+                            context={"note": self.BODY}),
+            "progress": dict(objective_summary="Handle", success_criteria=(criterion,),
+                             new_progress=(ProgressRecord("p1", self.BODY),)),
+            "decision": dict(objective_summary="Handle", success_criteria=(criterion,),
+                             new_decisions=(ProgressRecord("d1", self.BODY),)),
+            "blocker": dict(objective_summary="Handle", success_criteria=(criterion,),
+                            blockers=(WorkItem("b1", self.BODY),)),
+            "outstanding work": dict(objective_summary="Handle",
+                                     success_criteria=(criterion,),
+                                     outstanding_work=(WorkItem("w1", self.BODY),)),
+        }
+        for label, proposal in cases.items():
+            with self.subTest(field=label):
+                self.setUp()
+                outcome, stored = self._attempt(**proposal)
+                self.assertEqual(outcome.state, CoreState.ERROR)
+                self.assertNotIn(self.BODY, stored)
+                self.tearDown()
+
+    def test_content_hidden_in_a_mapping_key_is_refused(self) -> None:
+        from alx.core.loop import CoreAgent as Core
+
+        pieces = {self.BODY[i:i + 10]: "x" for i in range(0, len(self.BODY), 10)}
+        self.assertTrue(
+            Core._reproduces_transient_content(self._conversation(), pieces)
+        )
+
+    def test_single_characters_among_unrelated_records_are_refused(self) -> None:
+        from alx.core.loop import CoreAgent as Core
+
+        pieces: dict[str, str] = {}
+        for index, character in enumerate(self.BODY):
+            pieces[f"a{index}"] = character
+            pieces[f"z{index}"] = "~"
+        self.assertTrue(
+            Core._reproduces_transient_content(self._conversation(), pieces)
+        )
+
+    def test_shuffled_fragments_are_refused(self) -> None:
+        from alx.core.loop import CoreAgent as Core
+
+        pieces = [self.BODY[i:i + 7] for i in range(0, len(self.BODY), 7)]
+        scattered = {f"k{index}": value for index, value in enumerate(reversed(pieces))}
+        self.assertTrue(
+            Core._reproduces_transient_content(self._conversation(), scattered)
+        )
+
+
+class EventDrivenGoalTests(unittest.TestCase):
+    """A goal begun by arriving mail must not crash or be misattributed."""
+
+    def test_a_goal_from_an_event_alone_names_the_event(self) -> None:
+        """Regression: creation always used the last conversation turn.
+
+        With no person turns this raised IndexError, and with unrelated turns
+        present the objective was attributed to one of them instead.
+        """
+        directory = tempfile.TemporaryDirectory()
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        event = BackgroundEvent("event-1", "mail.observed", NOW, data={"uid": "1"})
+        snapshot = ConversationSnapshot("conversation-1", (), 1, RETENTION, (event,))
+        reasoner = Queued(AgentDecision(
+            goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE, objective_summary="Handle the mail",
+                success_criteria=(SuccessCriterion("criterion-1", "handled"),)),
+            response="New mail arrived.", response_requires_goal_commit=True,
+        ))
+        outcome = CoreAgent(
+            store, reasoner, lambda call, state: None, (),
+            clock=lambda: NOW, identifier_factory=lambda: "goal-1",
+        ).process(snapshot, None, RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(
+            store.load("goal-1").state.objective.source_reference, "event:event-1"
+        )
+        store.close()
+        directory.cleanup()

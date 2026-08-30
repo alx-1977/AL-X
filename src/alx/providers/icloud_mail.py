@@ -170,7 +170,15 @@ class SQLiteMailObservationState:
         if row is None or row[0] != uid_validity:
             raise MailAccessError("cursor_unavailable")
         last_uid = int(row[1])
-        highest = max((uid for uid, _ in found), default=last_uid)
+        # The cursor only advances past identifiers actually recorded. A header
+        # fetch that failed this round leaves a gap, and advancing beyond it
+        # would skip that message permanently rather than retrying it.
+        recorded = sorted(uid for uid, _ in found if uid > last_uid)
+        highest = last_uid
+        for uid in recorded:
+            if uid != highest + 1:
+                break
+            highest = uid
         with self._connection:
             for uid, event_data in found:
                 if uid <= last_uid:

@@ -85,6 +85,12 @@ class OutboundReply:
     Every value a send would transmit is present and inspectable, so the
     artifact approved is the artifact that leaves. There is no sender field:
     the identity is configuration and may not be chosen.
+
+    DECISIONS.md D-011 authorises replying to an existing message and nothing
+    else, so a reply must identify the message it answers and may only reach
+    addresses observed on that message. Without those constraints this record
+    could carry new correspondence to an arbitrary recipient, which is outside
+    the recorded authority.
     """
 
     to: tuple[str, ...]
@@ -93,13 +99,33 @@ class OutboundReply:
     in_reply_to: str = ""
     references: tuple[str, ...] = ()
     carbon_copy: tuple[str, ...] = ()
+    permitted_recipients: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "to", tuple(self.to))
         object.__setattr__(self, "references", tuple(self.references))
         object.__setattr__(self, "carbon_copy", tuple(self.carbon_copy))
+        object.__setattr__(
+            self, "permitted_recipients", tuple(self.permitted_recipients)
+        )
         if not self.to:
             raise ValueError("a reply requires at least one recipient")
+        if not self.in_reply_to.strip():
+            raise ValueError("a reply must identify the message it answers")
+        if self.in_reply_to not in self.references:
+            raise ValueError("a reply must cite the message it answers")
+        allowed = {item.lower() for item in self.permitted_recipients}
+        if not allowed:
+            raise ValueError("a reply requires the addresses observed on its source")
+        unknown = sorted(
+            address for address in (*self.to, *self.carbon_copy)
+            if address.lower() not in allowed
+        )
+        if unknown:
+            raise ValueError(
+                "a reply may only reach addresses observed on the message it "
+                f"answers: {', '.join(unknown)}"
+            )
         for address in (*self.to, *self.carbon_copy):
             if "@" not in address or address.strip() != address:
                 raise ValueError("every recipient must be a complete address")

@@ -132,7 +132,9 @@ async def run(repository_root: Path) -> None:
     else:
         approval_ttl_seconds = send_settings.approval_ttl_seconds
         send_definitions, send_policies, send_executors, send_permissions = (
-            build_mail_send_runtime(send_settings, lambda: current_call_id[0])
+            build_mail_send_runtime(
+                send_settings, mail_runtime.source, lambda: current_call_id[0]
+            )
         )
         for definition in send_definitions:
             registry.register(definition)

@@ -44,16 +44,42 @@ class FakeSender:
         )
 
 
-def executor(sender):
-    return build_send_executors(sender, lambda: "call-1")[SEND_MAIL_REPLY]
+class FakeAccount:
+    """A source message the reply must answer, per D-011."""
+
+    def __init__(self, participants=None, threading=None) -> None:
+        from alx.contracts import MailParticipants, MailThreading
+
+        self.participants = participants or MailParticipants(
+            sender="Jan <jan@example.test>", recipients=(SELF,)
+        )
+        self.threading = threading or MailThreading("<parent@example.test>", "", ())
+
+    def read(self, reference):
+        from alx.contracts import MailContent
+
+        return MailContent(
+            reference, "Panel revision", "Jan <jan@example.test>", "now", "body",
+            self.participants, self.threading,
+        )
+
+    def move_to_trash(self, reference):
+        raise NotImplementedError
+
+
+def executor(sender, account=None):
+    return build_send_executors(
+        sender, account or FakeAccount(), lambda: "call-1"
+    )[SEND_MAIL_REPLY]
 
 
 ARGUMENTS = {
+    "mailbox_id": "INBOX",
+    "uid_validity": "1",
+    "uid": "2",
     "to": ("jan@example.test",),
     "subject": "Re: Panel revision",
     "body": "I will be there tomorrow at 2pm.",
-    "in_reply_to": "<parent@example.test>",
-    "references": ("<root@example.test>", "<parent@example.test>"),
 }
 
 
@@ -86,6 +112,7 @@ class ThreadingTests(unittest.TestCase):
             body="Confirmed.",
             in_reply_to=long_id,
             references=(long_id,),
+            permitted_recipients=("jan@example.test",),
         )
         rendered = sender.build_message(reply, long_id).as_string()
         self.assertNotIn("=?utf-8?", rendered)
@@ -99,7 +126,11 @@ class ThreadingTests(unittest.TestCase):
             self.assertNotIn(field_name, definition.input_schema.properties)
         sender = ICloudMailSender("smtp.example.test", 587, SELF, "secret")
         rendered = sender.build_message(
-            OutboundReply(to=("jan@example.test",), subject="s", body="b"),
+            OutboundReply(
+                to=("jan@example.test",), subject="s", body="b",
+                in_reply_to="<p@example.test>", references=("<p@example.test>",),
+                permitted_recipients=("jan@example.test",),
+            ),
             "<x@example.test>",
         ).as_string()
         self.assertIn(f"From: {SELF}", rendered)
@@ -144,7 +175,9 @@ class SendExecutorTests(unittest.TestCase):
         sent = sender.sent[0]
         self.assertEqual(sent.to, ("jan@example.test",))
         self.assertEqual(sent.body, "I will be there tomorrow at 2pm.")
+        # Threading is derived from the message answered, not asserted.
         self.assertEqual(sent.in_reply_to, "<parent@example.test>")
+        self.assertIn("<parent@example.test>", sent.references)
         self.assertEqual(result.values["sender_address"], SELF)
 
     def test_an_incomplete_address_is_refused_before_sending(self) -> None:
@@ -283,7 +316,7 @@ class NoReplyWorkflowTests(unittest.TestCase):
             "MAIL_SMTP_HOST": "smtp.example.test", "MAIL_SMTP_PORT": "587",
         })
         _definitions, policies, _executors, permissions = build_mail_send_runtime(
-            settings, lambda: "call-1"
+            settings, FakeAccount(), lambda: "call-1"
         )
         self.assertTrue(policies[SEND_MAIL_REPLY].approval_required)
         self.assertEqual(sorted(permissions), ["mail.send"])
@@ -369,9 +402,10 @@ class UnheardTextTests(unittest.TestCase):
     def _call(body: str):
         from alx.contracts import CapabilityCall
 
+        # Subject is composed text too, so a heard draft states it.
         return CapabilityCall(
             "call-1", SEND_MAIL_REPLY,
-            {"to": ("john@example.test",), "subject": "Re: Part", "body": body},
+            {"to": ("john@example.test",), "body": body},
             "approval-1",
         )
 
@@ -525,12 +559,53 @@ class UnheardTextTests(unittest.TestCase):
         store.close()
         directory.cleanup()
 
-    def test_the_rule_imposes_no_ordering_or_state(self) -> None:
-        """Law 1 and 6: nothing requires a step before AL/X may speak or act."""
-        source = (REPOSITORY_ROOT / "src/alx/core/loop.py").read_text("utf-8")
-        for scripted in ("must first", "step_one", "awaiting_read_back",
-                         "pending_confirmation", "read_back_state"):
-            self.assertNotIn(scripted, source.lower())
+    def test_the_ordering_constrains_sending_only(self) -> None:
+        """The rule orders sending. It must order nothing else.
+
+        An earlier version of this test searched the source for five forbidden
+        strings, which proved nothing about behaviour. It now exercises the
+        behaviour: asking, drafting and reconsidering are unconstrained, and
+        only the send is bound to the wording just stated.
+        """
+        from alx.core.loop import CoreAgent
+
+        body = "The parts arrive on Monday."
+        # She may speak in any order, including twice with no answer between.
+        free = self._conversation(
+            (True, "Shall I look at that?"),
+            (True, "Actually, let me check something first."),
+            (False, "Go on."),
+        )
+        # No send is proposed, so nothing is constrained at all.
+        from alx.contracts import CapabilityCall
+
+        unrelated = CapabilityCall(
+            "call-1", "read_mail_message",
+            {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"},
+        )
+        self.assertFalse(CoreAgent._unheard_authored_text(free, unrelated))
+        # A send is bound to the wording she just stated, and nothing else.
+        just_said = self._conversation(
+            (True, f"I will send: {body} Shall I?"),
+            (False, "Yes."),
+        )
+        self.assertFalse(
+            CoreAgent._unheard_authored_text(just_said, self._call(body))
+        )
+
+    def test_no_goal_status_or_lifecycle_governs_the_rule(self) -> None:
+        """It is a check at the moment of sending, not a state to pass through."""
+        import ast
+
+        tree = ast.parse((REPOSITORY_ROOT / "src/alx/core/loop.py").read_text("utf-8"))
+        function = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_unheard_authored_text"
+        )
+        rendered = ast.unparse(function)
+        for stateful in ("GoalStatus", "ApprovalLifecycle", "AWAITING", "status ="):
+            self.assertNotIn(stateful, rendered)
 
 
 class ApprovalExpiryTests(unittest.TestCase):

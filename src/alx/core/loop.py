@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -316,11 +316,31 @@ class CoreAgent:
         snapshot = self._finalize_dispatch(snapshot, attempt)
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="dispatch_reconciled")
 
+    @staticmethod
+    def _objective_source(conversation: ConversationSnapshot) -> str:
+        """Name what a goal arose from: a person's turn, or the event itself."""
+        for item in reversed(conversation.turns):
+            if item.person_id is not None:
+                return f"turn:{item.turn_id}"
+        if conversation.events:
+            return f"event:{conversation.events[-1].event_id}"
+        if conversation.turns:
+            return f"turn:{conversation.turns[-1].turn_id}"
+        return f"conversation:{conversation.conversation_id}"
+
     def _reduce_goal_proposal(self, snapshot: GoalSnapshot | None,
                               proposal: GoalProposal | None,
                               conversation: ConversationSnapshot) -> tuple[GoalState | None, str | None]:
         if proposal is None:
             return None if snapshot is None else snapshot.state, None
+        # Every durable field is checked once, here, rather than per field at
+        # each call site, so a new field cannot silently become another path
+        # for transient content to reach durable state.
+        if self._proposal_reproduces_transient_content(conversation, proposal):
+            return (
+                None if snapshot is None else snapshot.state,
+                "goal_reproduces_transient_content",
+            )
         if snapshot is None:
             if proposal.kind is not GoalMutationKind.CREATE:
                 return None, "goal_missing"
@@ -331,7 +351,13 @@ class CoreAgent:
                 return None, creation_error
             state = GoalState(
                 self._identifier_factory(),
-                Objective(f"turn:{conversation.turns[-1].turn_id}", proposal.objective_summary),
+                Objective(
+                    # A goal begun by an arriving event has no person turn to
+                    # attribute it to, and attributing it to an unrelated
+                    # earlier turn would misstate where it came from.
+                    self._objective_source(conversation),
+                    proposal.objective_summary,
+                ),
                 proposal.success_criteria,
                 context={} if proposal.context is None else proposal.context,
                 referents=() if proposal.referents is None else proposal.referents,
@@ -384,7 +410,10 @@ class CoreAgent:
     # order, and needs no permission to speak. She simply cannot transmit words
     # he never heard, which is what stops her reporting one message and sending
     # another.
-    _AUTHORED_TEXT_ARGUMENTS = frozenset({"body", "body_text"})
+    # Every argument whose value AL/X composes rather than copies from a
+    # message. A recipient or subject he never heard is as much a surprise as
+    # a body he never heard.
+    _AUTHORED_TEXT_ARGUMENTS = frozenset({"body", "body_text", "subject"})
 
     @staticmethod
     def _unheard_authored_text(
@@ -570,12 +599,68 @@ class CoreAgent:
         if isinstance(value, str):
             found.append(value)
         elif isinstance(value, Mapping):
-            for nested in value.values():
+            # Keys are persisted too, so content hidden in a key is still
+            # durable content.
+            for key, nested in value.items():
+                if isinstance(key, str):
+                    found.append(key)
                 found.extend(cls._durable_texts(nested))
         elif isinstance(value, (tuple, list)):
             for nested in value:
                 found.extend(cls._durable_texts(nested))
         return found
+
+    @classmethod
+    def _assembles_from(cls, compact: str, candidates: Sequence[str]) -> bool:
+        """Report whether the records hold every part of the source between them.
+
+        The source is consumed greedily using the longest piece any record can
+        supply at each position. Splitting it more finely or scattering the
+        pieces among unrelated records does not help, because the pieces still
+        have to appear somewhere for the source to be recoverable.
+        """
+        pieces = ["".join(item.split()) for item in candidates]
+        pieces = [item for item in pieces if item]
+        if not pieces:
+            return False
+        position = 0
+        while position < len(compact):
+            longest = 0
+            for piece in pieces:
+                end = position
+                while end < len(compact) and compact[position:end + 1] in piece:
+                    end += 1
+                longest = max(longest, end - position)
+            if not longest:
+                return False
+            position += longest
+        return True
+
+    @classmethod
+    def _proposal_reproduces_transient_content(
+        cls, conversation: ConversationSnapshot, proposal: GoalProposal
+    ) -> bool:
+        """Check every durable field of a goal proposal, not only its evidence.
+
+        The goal store persists the objective, context, referents, decisions,
+        corrections, progress, blockers and outstanding work as well as the
+        evidence, so guarding evidence alone left the body a straightforward
+        path into durable state through any of the others.
+        """
+        texts: list[object] = [proposal.objective_summary, proposal.context]
+        for records in (
+            proposal.success_criteria, proposal.referents, proposal.new_decisions,
+            proposal.new_corrections, proposal.new_progress, proposal.blockers,
+            proposal.outstanding_work, proposal.new_evidence,
+        ):
+            for item in records or ():
+                texts.extend(
+                    getattr(item, name, None)
+                    for name in ("summary", "description", "kind", "attributes")
+                )
+        return cls._reproduces_transient_content(
+            conversation, [item for item in texts if item is not None]
+        )
 
     @classmethod
     def _reproduces_transient_content(
@@ -607,18 +692,30 @@ class CoreAgent:
         # length happens to be configured.
         combined = " ".join(candidates)
         stripped = "".join(combined.split())
+        # Order is not guaranteed, and pieces can be interleaved with unrelated
+        # records, so the same text is also assembled from the pieces sorted by
+        # position within each source below.
         for source in sources:
             # A short source copied whole is reproduction in full, whichever
             # single record carries it.
+            compact = "".join(source.split())
             if len(source) <= window:
-                if any(source in item for item in candidates) or (
-                    "".join(source.split()) in stripped
+                if (
+                    any(source in item for item in candidates)
+                    or compact in stripped
+                    or cls._assembles_from(compact, candidates)
                 ):
                     return True
                 continue
             # Reassembled fragments reproduce the source even when no single
             # record holds a meaningful run of it.
-            if "".join(source.split()) in stripped:
+            if compact in stripped:
+                return True
+            # Pieces may arrive in any order and interleaved with unrelated
+            # records, so the source is also walked directly: if every part of
+            # it appears among the records, they hold it between them however
+            # it was scattered.
+            if cls._assembles_from(compact, candidates):
                 return True
             # Otherwise measure how much of the source these records reproduce
             # between them, judged as a proportion. Stating a fact the message
