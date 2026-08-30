@@ -533,6 +533,10 @@ class CoreAgent:
     # short, because a leak is not always a long block: a one-line code or
     # account number is the most sensitive thing a message can carry.
     _TRANSIENT_QUOTE_CHARACTERS = 24
+    # A run this long is a meaningful piece of the source rather than a common
+    # turn of phrase. Fragments at least this long are counted toward the total
+    # the records reproduce between them.
+    _TRANSIENT_FRAGMENT_CHARACTERS = 12
 
     @classmethod
     def _transient_texts(cls, conversation: ConversationSnapshot) -> tuple[str, ...]:
@@ -586,24 +590,35 @@ class CoreAgent:
         if not sources:
             return False
         window = cls._TRANSIENT_QUOTE_CHARACTERS
-        for candidate in cls._durable_texts(values):
-            normalised = " ".join(candidate.split())
-            if not normalised:
+        candidates = [
+            " ".join(item.split())
+            for item in cls._durable_texts(values)
+            if item.strip()
+        ]
+        if not candidates:
+            return False
+        for source in sources:
+            # A short source copied whole is reproduction in full, whichever
+            # single record carries it.
+            if len(source) <= window:
+                if any(source in item for item in candidates):
+                    return True
                 continue
-            for source in sources:
-                # A short source copied in full is reproduction in full.
-                if len(source) <= window:
-                    if source in normalised:
-                        return True
-                    continue
-                # Otherwise any sufficiently long shared run is reproduction,
-                # whichever side the fragment came from.
-                shortest = min(len(normalised), len(source))
-                if shortest < window:
-                    continue
-                for start in range(0, len(normalised) - window + 1):
-                    if normalised[start:start + window] in source:
-                        return True
+            # Otherwise measure how much of the source these records reproduce
+            # between them. Judging each record alone let a long body be split
+            # into fragments that individually said nothing, so the fragments
+            # are considered together and every position of the source that any
+            # record reproduces is counted once.
+            covered = set()
+            for candidate in candidates:
+                for start in range(len(source)):
+                    end = start
+                    while end < len(source) and source[start:end + 1] in candidate:
+                        end += 1
+                    if end - start >= cls._TRANSIENT_FRAGMENT_CHARACTERS:
+                        covered.update(range(start, end))
+            if len(covered) >= window:
+                return True
         return False
 
     @staticmethod

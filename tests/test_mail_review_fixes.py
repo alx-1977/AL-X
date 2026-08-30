@@ -281,6 +281,59 @@ class TransientContentTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
 
+    def test_a_body_split_into_fragments_below_the_window_is_refused(self) -> None:
+        """Regression: fragments shorter than the window each said nothing.
+
+        Judging every durable string alone let a long body be divided into
+        pieces that individually looked harmless, so bank details, references
+        and account numbers persisted verbatim.
+        """
+        body = (
+            "Bank transfer reference 88213 for R14 500 to account 62 8891 4432, "
+            "confirm by Friday."
+        )
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW,
+            data={"uid": "58620", "subject": "Payment"},
+            transient_data={"body_text": body},
+        )
+        fragments = [body[index:index + 20] for index in range(0, len(body), 20)]
+        self.assertGreater(len(fragments), 3)
+        reasoner = Queued(AgentDecision(
+            goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE,
+                objective_summary="Note the payment",
+                success_criteria=(SuccessCriterion("criterion-1", "noted"),),
+                new_evidence=(Evidence(
+                    "evidence-1", "mail",
+                    attributes={f"part_{i}": item for i, item in enumerate(fragments)},
+                    supports=("criterion-1",),
+                    source_references=("event:event-1",)),)),
+            response="Noted.",
+            response_requires_goal_commit=True,
+        ))
+        outcome = self.agent(reasoner).process(
+            conversation("what does it say?", events=(event,)), None, RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+
+    def test_fragments_spread_across_separate_records_are_refused(self) -> None:
+        """Splitting across several evidence items must not evade the guard."""
+        from alx.core.loop import CoreAgent
+
+        event = BackgroundEvent(
+            "event-1", "mail.observed", NOW, data={"uid": "1"},
+            transient_data={"body_text": self.BODY},
+        )
+        conversation_with_body = conversation("read it", events=(event,))
+        halves = [self.BODY[: len(self.BODY) // 2], self.BODY[len(self.BODY) // 2 :]]
+        self.assertTrue(
+            CoreAgent._reproduces_transient_content(
+                conversation_with_body,
+                {"first": halves[0], "second": halves[1]},
+            )
+        )
+
     def test_the_core_may_still_describe_the_message_in_its_own_words(self) -> None:
         """The guard must not block legitimate summarisation."""
         reasoner = Queued(AgentDecision(
