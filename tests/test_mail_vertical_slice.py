@@ -191,7 +191,13 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(second.transient_data["body"], "Transient body")
         self.assertEqual(self.state.current().data["uid"], "2")
 
-    def test_delivered_item_blocks_the_queue_until_core_acknowledges_it(self) -> None:
+    def test_delivered_item_stays_context_without_blocking_later_mail(self) -> None:
+        """One at a time, and a presented item remains the referent.
+
+        It must not hold back later mail for good. It is only cleared by
+        acknowledging or trashing it, so a message answered in some other way
+        would otherwise block every announcement after it permanently.
+        """
         self.adapter.scan()
         self.imap.items[2] = message("First", "First body")
         self.imap.items[3] = message("Second", "Second body")
@@ -199,16 +205,17 @@ class MailProviderTests(unittest.TestCase):
         first = self.state.current()
         self.assertEqual(first.data["uid"], "2")
         self.adapter.record_delivery(first.event_id)
-        self.assertIsNone(self.state.current())
+        # Still the referent for "reply to that".
         self.assertEqual(self.adapter.contextual_events()[0].data["subject"], "First")
+        # And later mail is still reachable.
+        self.assertEqual(self.state.current().data["uid"], "3")
         self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
-        self.assertEqual(self.adapter.contextual_events(), ())
+        self.assertEqual(self.adapter.contextual_events()[0].data["uid"], "3")
         retained = self.state._connection.execute(
             "SELECT event_json FROM mail_observations WHERE uid = 2"
         ).fetchone()[0]
         self.assertNotIn("subject", retained)
         self.assertNotIn("sender", retained)
-        self.assertEqual(self.state.current().data["uid"], "3")
 
     def test_read_uses_peek_and_trash_is_discovered_then_moved(self) -> None:
         self.adapter.scan()

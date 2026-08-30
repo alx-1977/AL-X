@@ -192,10 +192,11 @@ class SQLiteMailObservationState:
             "WHERE state = 'current' ORDER BY uid LIMIT 1"
         ).fetchone()
         if row is None:
-            if self._connection.execute(
-                "SELECT 1 FROM mail_observations WHERE state = 'presented' LIMIT 1"
-            ).fetchone():
-                return None
+            # A message already presented stays available as conversation
+            # context, but it does not hold back later mail. It is only ever
+            # cleared by acknowledging or trashing it, and a message answered
+            # in some other way would otherwise block every announcement after
+            # it for good.
             row = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json FROM mail_observations "
                 "WHERE state = 'pending' ORDER BY uid LIMIT 1"
