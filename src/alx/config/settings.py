@@ -162,6 +162,9 @@ class TextToSpeechSettings:
     pronunciation_dictionary_id: str
     pronunciation_dictionary_version_id: str
     speed: float
+    stability: float
+    similarity_boost: float
+    speaker_boost: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +326,15 @@ class RuntimeSettings:
                 ),
                 speed=_number_in_range(
                     environment, "ALX_TTS_SPEED", 0.7, 1.2, 1.0
+                ),
+                stability=_number_in_range(
+                    environment, "ALX_TTS_STABILITY", 0.0, 1.0, 0.5
+                ),
+                similarity_boost=_number_in_range(
+                    environment, "ALX_TTS_SIMILARITY_BOOST", 0.0, 1.0, 0.75
+                ),
+                speaker_boost=_boolean(
+                    environment, "ALX_TTS_SPEAKER_BOOST", True
                 ),
             ),
         )

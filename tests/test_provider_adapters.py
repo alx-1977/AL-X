@@ -475,7 +475,12 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "text": "ALX response",
             "model_id": "configured-tts",
             "apply_text_normalization": "on",
-            "voice_settings": {"speed": 1.0},
+            "voice_settings": {
+                "speed": 1.0,
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "use_speaker_boost": True,
+            },
             "pronunciation_dictionary_locators": [
                     {
                         "pronunciation_dictionary_id": "dictionary-id",
@@ -546,7 +551,17 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         _ = [chunk async for chunk in adapter.synthesize("ALX response")]
         sent = json.loads(captured["request"].content)
-        self.assertEqual(sent["voice_settings"], {"speed": 1.15})
+        # Sending voice_settings replaces the whole object, so every field the
+        # voice relies on must be present, not only the one being configured.
+        self.assertEqual(
+            sent["voice_settings"],
+            {
+                "speed": 1.15,
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "use_speaker_boost": True,
+            },
+        )
         await client.aclose()
 
 
