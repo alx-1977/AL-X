@@ -19,10 +19,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts.mail import MailReference  # noqa: E402
 from alx.contracts.provenance import (  # noqa: E402
-    ContentOrigin,
     ContentProvenance,
+    provenance_from_storage,
 )
 from alx.safety.retention import RecordSurvey, preview_purge  # noqa: E402
 
@@ -151,45 +150,16 @@ def _provenance_state(columns: frozenset[str], store: str) -> bool:
     return bool(present)
 
 
-def _mail_reference(value: object) -> MailReference:
-    if not isinstance(value, dict) or set(value) != {
-        "mailbox_id",
-        "uid_validity",
-        "uid",
-    }:
-        raise InventorySchemaError("mail provenance contains an invalid reference")
-    if any(not isinstance(value[field], str) for field in value):
-        raise InventorySchemaError("mail provenance reference fields must be strings")
-    try:
-        return MailReference(
-            mailbox_id=value["mailbox_id"],
-            uid_validity=value["uid_validity"],
-            uid=value["uid"],
-        )
-    except (TypeError, ValueError) as error:
-        raise InventorySchemaError("mail provenance contains an invalid reference") from error
-
-
-def _decode_provenance(row: tuple[object, ...], offset: int) -> ContentProvenance:
+def _decode_provenance(
+    row: tuple[object, ...], offset: int
+) -> ContentProvenance | None:
     origins_value, recorded_value, expires_value, references_value = row[offset:]
-    if origins_value is None or recorded_value is None or references_value is None:
-        raise InventorySchemaError("stamped provenance contains null required metadata")
     try:
-        raw_origins = json.loads(str(origins_value))
-        raw_references = json.loads(str(references_value))
-        if not isinstance(raw_origins, list) or not isinstance(raw_references, list):
-            raise TypeError
-        origins = frozenset(ContentOrigin(str(item)) for item in raw_origins)
-        references = tuple(_mail_reference(item) for item in raw_references)
-        return ContentProvenance(
-            origins=origins,
-            recorded_at=datetime.fromisoformat(str(recorded_value)),
-            mail_references=references,
-            content_expires_at=(
-                None
-                if expires_value is None
-                else datetime.fromisoformat(str(expires_value))
-            ),
+        return provenance_from_storage(
+            None if origins_value is None else str(origins_value),
+            None if recorded_value is None else str(recorded_value),
+            None if expires_value is None else str(expires_value),
+            None if references_value is None else str(references_value),
         )
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise InventorySchemaError("stamped provenance is malformed") from error

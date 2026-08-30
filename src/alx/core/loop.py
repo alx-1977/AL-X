@@ -18,6 +18,7 @@ from alx.contracts import (
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
+    ContentOrigin, ContentProvenance, RetentionPolicy,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class CoreOutcome:
     snapshot: GoalSnapshot | None = None
     response: str | None = None
     reason: str | None = None
+    response_provenance: ContentProvenance | None = None
 
 
 class CoreAgent:
@@ -85,6 +87,13 @@ class CoreAgent:
                     raise ValueError("Core clock must be timezone-aware")
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="clock_error")
+            decision_provenance = self._derived_provenance(
+                now,
+                conversation,
+                snapshot,
+                retrieved_memories,
+                transient_attempts,
+            )
             try:
                 decision = self._reasoner.decide(ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,
@@ -100,6 +109,13 @@ class CoreAgent:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
             decision = self._without_redundant_approval(decision)
+            decision = replace(
+                decision,
+                memory_proposals=tuple(
+                    replace(item, provenance=decision_provenance)
+                    for item in decision.memory_proposals
+                ),
+            )
 
             previous = snapshot
             candidate, proposal_error = self._reduce_goal_proposal(
@@ -129,6 +145,7 @@ class CoreAgent:
                             ),
                             snapshot.retention_until,
                             snapshot.revision,
+                            decision_provenance,
                         )
                     continue
                 assert candidate is not None
@@ -168,10 +185,18 @@ class CoreAgent:
                 assert candidate is not None
                 if previous is None:
                     snapshot = self._store.create(
-                        candidate, conversation.conversation_id, retention_until)
+                        candidate,
+                        conversation.conversation_id,
+                        retention_until,
+                        decision_provenance,
+                    )
                 else:
                     snapshot = self._store.replace(
-                        candidate, previous.retention_until, previous.revision)
+                        candidate,
+                        previous.retention_until,
+                        previous.revision,
+                        decision_provenance,
+                    )
 
             if decision.memory_query is not None:
                 if decision.memory_query.query_id in memory_query_ids:
@@ -196,8 +221,13 @@ class CoreAgent:
                     snapshot, decision.memory_proposals, retention_until)
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
-                return CoreOutcome(CoreState.RESPONDED, snapshot, response=decision.response,
-                                   reason="goal_proposal_rejected" if proposal_error else None)
+                return CoreOutcome(
+                    CoreState.RESPONDED,
+                    snapshot,
+                    response=decision.response,
+                    reason="goal_proposal_rejected" if proposal_error else None,
+                    response_provenance=decision_provenance,
+                )
 
             if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
                 definition = next(
@@ -265,7 +295,7 @@ class CoreAgent:
                                  attempts=(*snapshot.state.attempts, pending),
                                  approvals=approvals)
             snapshot = self._store.replace(checkpoint, snapshot.retention_until,
-                                           snapshot.revision)
+                                           snapshot.revision, decision_provenance)
             snapshot, committed = self._commit_memories(
                 snapshot, decision.memory_proposals, retention_until)
             if not committed:
@@ -280,7 +310,7 @@ class CoreAgent:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_error")
             if attempt.call != decision.call:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
-            snapshot = self._finalize_dispatch(snapshot, attempt)
+            snapshot = self._finalize_dispatch(snapshot, attempt, now)
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
 
     def _close_interrupted_dispatch(self, snapshot: GoalSnapshot) -> GoalSnapshot:
@@ -303,7 +333,7 @@ class CoreAgent:
             "dispatch_interrupted",
         )
         LOGGER.info("Closing interrupted dispatch for %s", call.capability_id)
-        return self._finalize_dispatch(snapshot, closed)
+        return self._finalize_dispatch(snapshot, closed, self._clock())
 
     def reconcile_dispatch(self, goal_id: str, attempt: CapabilityAttempt) -> CoreOutcome:
         snapshot = self._store.load(goal_id)
@@ -313,7 +343,7 @@ class CoreAgent:
             return CoreOutcome(CoreState.ERROR, snapshot, reason="pending_dispatch_missing")
         if attempt.disposition is CapabilityAttemptDisposition.PENDING or attempt.call != pending[0].call:
             return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
-        snapshot = self._finalize_dispatch(snapshot, attempt)
+        snapshot = self._finalize_dispatch(snapshot, attempt, self._clock())
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="dispatch_reconciled")
 
     @staticmethod
@@ -605,8 +635,12 @@ class CoreAgent:
             return False
         return True
 
-    def _finalize_dispatch(self, snapshot: GoalSnapshot,
-                           attempt: CapabilityAttempt) -> GoalSnapshot:
+    def _finalize_dispatch(
+        self,
+        snapshot: GoalSnapshot,
+        attempt: CapabilityAttempt,
+        recorded_at: datetime,
+    ) -> GoalSnapshot:
         assert attempt.call is not None
         consumed = self._approval_is_spent(attempt)
         approvals = tuple(
@@ -621,7 +655,25 @@ class CoreAgent:
         updated = replace(snapshot.state,
                           attempts=(*snapshot.state.attempts[:-1], attempt),
                           approvals=approvals)
-        return self._store.replace(updated, snapshot.retention_until, snapshot.revision)
+        inputs = tuple(
+            item
+            for item in (
+                snapshot.provenance,
+                None if attempt.result is None else attempt.result.provenance,
+            )
+            if item is not None
+        )
+        provenance = (
+            None
+            if not inputs
+            else RetentionPolicy().derive(ContentOrigin.ALX, recorded_at, inputs)
+        )
+        return self._store.replace(
+            updated,
+            snapshot.retention_until,
+            snapshot.revision,
+            provenance,
+        )
 
     def _commit_memories(self, snapshot: GoalSnapshot | None,
                          proposals: tuple[MemoryProposal, ...],
@@ -635,7 +687,12 @@ class CoreAgent:
                 self._memory_store.remember_many(proposals, retention_until)
                 return None, True
             updated = self._store.replace_with_memory_batch(
-                snapshot.state, snapshot.retention_until, snapshot.revision, proposals)
+                snapshot.state,
+                snapshot.retention_until,
+                snapshot.revision,
+                proposals,
+                snapshot.provenance,
+            )
             return updated, self._flush_pending_memory_batches(updated.state.goal_id)
         except Exception:
             return snapshot, False
@@ -652,6 +709,34 @@ class CoreAgent:
         except Exception:
             return False
         return True
+
+    @staticmethod
+    def _derived_provenance(
+        recorded_at: datetime,
+        conversation: ConversationSnapshot,
+        snapshot: GoalSnapshot | None,
+        memories: tuple[MemorySnapshot, ...],
+        transient_attempts: tuple[CapabilityAttempt, ...],
+    ) -> ContentProvenance:
+        """Mechanically union every durable and transient reasoning input."""
+        inputs: list[ContentProvenance] = [
+            item
+            for item in (
+                *(turn.provenance for turn in conversation.turns),
+                *(event.provenance for event in conversation.events),
+                None if snapshot is None else snapshot.provenance,
+                *(memory.current.provenance for memory in memories),
+                *(
+                    None if attempt.result is None else attempt.result.provenance
+                    for attempt in transient_attempts
+                ),
+            )
+            if item is not None
+        ]
+        policy = RetentionPolicy()
+        if not inputs:
+            return policy.non_mail(ContentOrigin.ALX, recorded_at)
+        return policy.derive(ContentOrigin.ALX, recorded_at, inputs)
 
     @staticmethod
     def _memory_proposal_grounding_error(conversation: ConversationSnapshot,

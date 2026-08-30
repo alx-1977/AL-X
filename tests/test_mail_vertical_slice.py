@@ -30,6 +30,7 @@ from alx.contracts import (  # noqa: E402
     MailContent,
     MailReference,
     Objective,
+    RetentionPolicy,
     SuccessCriterion,
 )
 from alx.conversation import ConversationGateway, SQLiteConversationStore  # noqa: E402
@@ -128,9 +129,8 @@ class Queued:
 class MailProviderTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        self.state = SQLiteMailObservationState(
-            Path(self.directory.name) / "observations.sqlite3"
-        )
+        self.path = Path(self.directory.name) / "observations.sqlite3"
+        self.state = SQLiteMailObservationState(self.path)
         self.imap = FakeImap()
         self.adapter = ICloudMailAdapter(
             "imap.example.test",
@@ -224,6 +224,21 @@ class MailProviderTests(unittest.TestCase):
             "SELECT last_uid FROM mail_cursor WHERE mailbox_id = 'INBOX'"
         ).fetchone()[0]
 
+    def test_observation_restart_recovers_mail_provenance(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("Provenance", "private body")
+        self.adapter.scan()
+        current = self.state.current()
+        self.assertEqual(
+            current.provenance.mail_references,
+            (MailReference("INBOX", "777", "2"),),
+        )
+        deadline = current.provenance.content_expires_at
+        self.state.close()
+        self.state = SQLiteMailObservationState(self.path)
+        recovered = self.state.current()
+        self.assertEqual(recovered.provenance.content_expires_at, deadline)
+
     def test_every_open_message_stays_available_as_a_referent(self) -> None:
         """Regression: only the oldest open message was carried as context.
 
@@ -315,6 +330,11 @@ class MailPrimitiveTests(unittest.TestCase):
         result = read({"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2"})
         self.assertEqual(result.values["body"], "private body")
         self.assertNotIn("body", result.durable_values)
+        self.assertEqual(result.provenance.mail_references, (MailReference("INBOX", "777", "2"),))
+        self.assertEqual(
+            result.provenance.content_expires_at,
+            result.provenance.recorded_at + timedelta(days=30),
+        )
 
     def test_acknowledge_and_trash_are_separate_primitive_effects(self) -> None:
         account = FakeAccount()
@@ -391,6 +411,9 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             NOW,
             {"mailbox_id": "INBOX", "uid": "2"},
             {"body": "private body"},
+            RetentionPolicy().direct_mail(
+                NOW, (MailReference("INBOX", "777", "2"),)
+            ),
         )
         try:
             outcome = gateway.receive_background_event(
@@ -402,6 +425,14 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             recovered = conversations.load("conversation-1")
             self.assertEqual(recovered.events, ())
             self.assertEqual(recovered.turns[-1].origin, ConversationOrigin.ALX_RESPONSE)
+            self.assertEqual(
+                recovered.turns[-1].provenance.mail_references,
+                (MailReference("INBOX", "777", "2"),),
+            )
+            self.assertEqual(
+                recovered.turns[-1].provenance.content_expires_at,
+                NOW + timedelta(days=30),
+            )
         finally:
             conversations.close()
             goals.close()

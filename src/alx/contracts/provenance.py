@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+import json
 from typing import Iterable
 
 from alx.contracts.mail import MailReference
@@ -58,6 +59,7 @@ class ContentOrigin(str, Enum):
     MAIL_MESSAGE = "mail_message"
     PERSON = "person"
     ALX = "alx"
+    EXTERNAL = "external"
 
 
 class ExpiryReason(str, Enum):
@@ -239,3 +241,72 @@ class RetentionPolicy:
             mail_references=tuple(references),
             content_expires_at=deadline,
         )
+
+
+def provenance_to_storage(
+    provenance: ContentProvenance | None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Encode provenance into the four nullable columns used by every store."""
+    if provenance is None:
+        return None, None, None, None
+    origins = json.dumps(
+        sorted(item.value for item in provenance.origins), separators=(",", ":")
+    )
+    references = json.dumps(
+        [
+            {
+                "mailbox_id": item.mailbox_id,
+                "uid_validity": item.uid_validity,
+                "uid": item.uid,
+            }
+            for item in provenance.mail_references
+        ],
+        separators=(",", ":"),
+    )
+    return (
+        origins,
+        provenance.recorded_at.isoformat(),
+        None
+        if provenance.content_expires_at is None
+        else provenance.content_expires_at.isoformat(),
+        references,
+    )
+
+
+def provenance_from_storage(
+    origins_value: str | None,
+    recorded_value: str | None,
+    expires_value: str | None,
+    references_value: str | None,
+) -> ContentProvenance | None:
+    """Decode one store row, leaving wholly unstamped legacy rows unclassified."""
+    values = (origins_value, recorded_value, expires_value, references_value)
+    if all(item is None for item in values):
+        return None
+    if origins_value is None or recorded_value is None or references_value is None:
+        raise ValueError("partially stamped provenance is invalid")
+    raw_origins = json.loads(origins_value)
+    raw_references = json.loads(references_value)
+    if not isinstance(raw_origins, list) or not isinstance(raw_references, list):
+        raise ValueError("persisted provenance must contain JSON arrays")
+    references: list[MailReference] = []
+    for item in raw_references:
+        if not isinstance(item, dict) or set(item) != {
+            "mailbox_id",
+            "uid_validity",
+            "uid",
+        }:
+            raise ValueError("persisted mail provenance reference is invalid")
+        if any(not isinstance(item[name], str) for name in item):
+            raise ValueError("persisted mail provenance fields must be strings")
+        references.append(
+            MailReference(item["mailbox_id"], item["uid_validity"], item["uid"])
+        )
+    return ContentProvenance(
+        origins=frozenset(ContentOrigin(item) for item in raw_origins),
+        recorded_at=datetime.fromisoformat(recorded_value),
+        mail_references=tuple(references),
+        content_expires_at=(
+            None if expires_value is None else datetime.fromisoformat(expires_value)
+        ),
+    )

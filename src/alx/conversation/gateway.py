@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
@@ -10,6 +11,7 @@ from uuid import uuid4
 from alx.contracts import (
     BackgroundEvent, ConversationOrigin, ConversationSnapshot, ConversationTurn,
     DurableConversationStore,
+    ContentOrigin, RetentionPolicy,
 )
 from alx.conversation.store import ConversationNotFound
 from alx.core import CoreAgent, CoreOutcome, CoreState
@@ -54,6 +56,16 @@ class ConversationGateway:
         """Persist a turn, then pass the same durable thread to the sole Core."""
         if step_budget <= 0:
             raise ValueError("step_budget must be positive")
+        if turn.provenance is None:
+            origin = (
+                ContentOrigin.ALX
+                if turn.origin is ConversationOrigin.ALX_RESPONSE
+                else ContentOrigin.PERSON
+            )
+            turn = replace(
+                turn,
+                provenance=RetentionPolicy().non_mail(origin, turn.occurred_at),
+            )
         try:
             conversation = self._conversation_store.load(turn.conversation_id)
         except ConversationNotFound:
@@ -75,6 +87,7 @@ class ConversationGateway:
                 ConversationOrigin.ALX_RESPONSE,
                 outcome.response,
                 self._clock(),
+                provenance=outcome.response_provenance,
             )
             self._conversation_store.append(
                 response_turn,
@@ -93,6 +106,13 @@ class ConversationGateway:
         """Persist safe event metadata, then give the sole Core its transient facts."""
         if step_budget <= 0:
             raise ValueError("step_budget must be positive")
+        if event.provenance is None:
+            event = replace(
+                event,
+                provenance=RetentionPolicy().non_mail(
+                    ContentOrigin.EXTERNAL, event.occurred_at
+                ),
+            )
         try:
             conversation = self._conversation_store.load(conversation_id)
         except ConversationNotFound:
@@ -114,6 +134,7 @@ class ConversationGateway:
                 ConversationOrigin.ALX_RESPONSE,
                 outcome.response,
                 self._clock(),
+                provenance=outcome.response_provenance,
             )
             self._conversation_store.append(
                 response_turn,

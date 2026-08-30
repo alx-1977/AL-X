@@ -26,6 +26,11 @@ from alx.contracts import (
     MailReference,
     MailThreading,
 )
+from alx.contracts.provenance import (
+    RetentionPolicy,
+    provenance_from_storage,
+    provenance_to_storage,
+)
 
 
 ConnectionFactory = Callable[..., Any]
@@ -126,9 +131,26 @@ class SQLiteMailObservationState:
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS mail_observations "
                 "(mailbox_id TEXT NOT NULL, uid_validity TEXT NOT NULL, uid INTEGER NOT NULL, "
-                "event_json TEXT NOT NULL, state TEXT NOT NULL, "
+                "event_json TEXT NOT NULL, state TEXT NOT NULL, content_origins TEXT, "
+                "content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT, "
                 "PRIMARY KEY(mailbox_id, uid_validity, uid))"
             )
+            columns = {
+                item[1]
+                for item in self._connection.execute(
+                    "PRAGMA table_info(mail_observations)"
+                )
+            }
+            for column in (
+                "content_origins",
+                "content_recorded_at",
+                "content_expires_at",
+                "mail_references",
+            ):
+                if column not in columns:
+                    self._connection.execute(
+                        f'ALTER TABLE mail_observations ADD COLUMN "{column}" TEXT'
+                    )
 
     def close(self) -> None:
         self._connection.close()
@@ -188,10 +210,23 @@ class SQLiteMailObservationState:
             for uid, event_data in found:
                 if uid <= last_uid:
                     continue
+                reference = MailReference(mailbox_id, uid_validity, str(uid))
+                observed_at = datetime.fromisoformat(event_data["observed_at"])
+                provenance = provenance_to_storage(
+                    RetentionPolicy().direct_mail(observed_at, (reference,))
+                )
                 self._connection.execute(
                     "INSERT OR IGNORE INTO mail_observations"
-                    "(mailbox_id, uid_validity, uid, event_json, state) VALUES (?, ?, ?, ?, 'pending')",
-                    (mailbox_id, uid_validity, uid, json.dumps(event_data, separators=(",", ":"))),
+                    "(mailbox_id, uid_validity, uid, event_json, state, "
+                    "content_origins, content_recorded_at, content_expires_at, "
+                    "mail_references) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                    (
+                        mailbox_id,
+                        uid_validity,
+                        uid,
+                        json.dumps(event_data, separators=(",", ":")),
+                        *provenance,
+                    ),
                 )
             if highest > last_uid:
                 self._connection.execute(
@@ -201,7 +236,8 @@ class SQLiteMailObservationState:
 
     def current(self) -> BackgroundEvent | None:
         row = self._connection.execute(
-            "SELECT mailbox_id, uid_validity, uid, event_json FROM mail_observations "
+            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+            "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
             "WHERE state = 'current' ORDER BY uid LIMIT 1"
         ).fetchone()
         if row is None:
@@ -211,7 +247,8 @@ class SQLiteMailObservationState:
             # in some other way would otherwise block every announcement after
             # it for good.
             row = self._connection.execute(
-                "SELECT mailbox_id, uid_validity, uid, event_json FROM mail_observations "
+                "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
                 "WHERE state = 'pending' ORDER BY uid LIMIT 1"
             ).fetchone()
             if row is None:
@@ -232,6 +269,7 @@ class SQLiteMailObservationState:
             "mail.message_arrived",
             datetime.fromisoformat(data["observed_at"]),
             data,
+            provenance=provenance_from_storage(*row[4:]),
         )
 
     # How many still-open messages remain available as conversation context.
@@ -248,7 +286,8 @@ class SQLiteMailObservationState:
         wrong message.
         """
         rows = self._connection.execute(
-            "SELECT mailbox_id, uid_validity, uid, event_json FROM mail_observations "
+            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+            "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
             "WHERE state IN ('current', 'presented') ORDER BY uid DESC LIMIT ?",
             (self.CONTEXTUAL_EVENT_LIMIT,),
         ).fetchall()
@@ -398,6 +437,7 @@ class ICloudMailAdapter:
                     current.occurred_at,
                     current.data,
                     transient_data,
+                    current.provenance,
                 )
             await asyncio.sleep(self._poll_seconds)
 

@@ -17,6 +17,7 @@ from alx.contracts.records import (
     GoalState,
 )
 from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
+from alx.contracts.provenance import ContentProvenance
 
 
 class DecisionValidationError(ValueError):
@@ -35,6 +36,7 @@ class GoalSnapshot:
     conversation_id: str
     revision: int
     retention_until: datetime
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         if self.revision <= 0:
@@ -159,6 +161,7 @@ class DurableGoalStore(Protocol):
         state: GoalState,
         conversation_id: str,
         retention_until: datetime,
+        provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot: ...
 
     def load(self, goal_id: str) -> GoalSnapshot: ...
@@ -168,6 +171,7 @@ class DurableGoalStore(Protocol):
         state: GoalState,
         retention_until: datetime,
         expected_revision: int,
+        provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot: ...
 
     def replace_with_memory_batch(
@@ -176,6 +180,7 @@ class DurableGoalStore(Protocol):
         retention_until: datetime,
         expected_revision: int,
         proposals: tuple[MemoryProposal, ...],
+        provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot: ...
 
     def pending_memory_batches(

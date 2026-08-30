@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Mapping, TypeAlias
+from typing import Mapping, TypeAlias, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from alx.contracts.provenance import ContentProvenance
 
 
 StructuredValue: TypeAlias = None | bool | int | float | str | tuple["StructuredValue", ...] | Mapping[str, "StructuredValue"]
@@ -74,6 +77,7 @@ class ConversationTurn:
     content: str
     occurred_at: datetime
     person_id: str | None = None
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.conversation_id, "conversation_id")
@@ -82,6 +86,11 @@ class ConversationTurn:
         _aware(self.occurred_at, "occurred_at")
         if self.person_id is not None:
             _required(self.person_id, "person_id")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
+
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("turn provenance must be ContentProvenance or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +102,7 @@ class BackgroundEvent:
     occurred_at: datetime
     data: StructuredData = field(default_factory=dict)
     transient_data: StructuredData = field(default_factory=dict)
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.event_id, "event_id")
@@ -100,6 +110,11 @@ class BackgroundEvent:
         object.__setattr__(self, "data", freeze_data(self.data))
         object.__setattr__(self, "transient_data", freeze_data(self.transient_data))
         _aware(self.occurred_at, "occurred_at")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
+
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("event provenance must be ContentProvenance or None")
 
 @dataclass(frozen=True, slots=True)
 class Objective:
@@ -213,6 +228,7 @@ class CapabilityResult:
     failure: StructuredData | None = None
     evidence_refs: tuple[str, ...] = ()
     durable_values: StructuredData | None = None
+    provenance: ContentProvenance | None = None
 
     def __post_init__(self) -> None:
         _required(self.call_id, "call_id")
@@ -229,6 +245,11 @@ class CapabilityResult:
             raise ValueError("a failed result requires structured failure details")
         if self.state is CapabilityResultState.PARTIAL and not self.values:
             raise ValueError("a partial result requires available structured values")
+        if self.provenance is not None:
+            from alx.contracts.provenance import ContentProvenance
+
+            if not isinstance(self.provenance, ContentProvenance):
+                raise TypeError("result provenance must be ContentProvenance or None")
 
 
 @dataclass(frozen=True, slots=True)

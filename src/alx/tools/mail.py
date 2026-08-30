@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, Mapping, Sequence
 
 from email.utils import getaddresses
@@ -23,6 +24,7 @@ from alx.contracts import (
     StructuredSchema,
     ValueKind,
 )
+from alx.contracts.provenance import RetentionPolicy
 
 
 READ_MAIL_MESSAGE = "read_mail_message"
@@ -251,7 +253,9 @@ def build_mail_executors(
     account: MailAccount,
     observations: MailObservationControl,
     call_id_source: Callable[[], str],
+    clock: Callable[[], datetime] | None = None,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
+    now = clock or (lambda: datetime.now(UTC))
     def failed(capability_id: str, code: str) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
@@ -287,6 +291,7 @@ def build_mail_executors(
             CapabilityResultState.SUCCEEDED,
             {**durable, "body": content.body},
             durable_values=durable,
+            provenance=RetentionPolicy().direct_mail(now(), (content.reference,)),
         )
 
     def acknowledge(arguments: StructuredData) -> CapabilityResult:
