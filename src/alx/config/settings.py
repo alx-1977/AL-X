@@ -280,9 +280,70 @@ class XeroSettings:
         )
 
 
+
+def _specialist_settings(
+    environment: Mapping[str, str], core_provider: str
+) -> "ReasoningSettings":
+    """Configure the specialist independently, defaulting to the Core provider.
+
+    Extraction is a bounded structured question, so it defaults to the lowest
+    reasoning setting that still returns reliable structured output. Nothing
+    here changes the Core.
+    """
+    provider = environment.get(
+        "ALX_SPECIALIST_PROVIDER", core_provider
+    ).strip().lower() or core_provider
+    key_name = {"openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY"}.get(
+        provider, "ALX_SPECIALIST_API_KEY"
+    )
+    base_name = {"openai": "OPENAI_BASE_URL", "xai": "XAI_BASE_URL"}.get(
+        provider, "ALX_SPECIALIST_BASE_URL"
+    )
+    base_fallback = {
+        "openai": "https://api.openai.com",
+        "xai": "https://api.x.ai",
+    }.get(provider)
+    return ReasoningSettings(
+        provider=provider,
+        model=_configured(
+            environment,
+            "ALX_SPECIALIST_MODEL",
+            "ALX_REASONING_MODEL",
+        ),
+        # Defaults to the Core provider's credential; only a specialist on a
+        # different provider needs a key of its own.
+        api_key=_configured(
+            environment,
+            "ALX_SPECIALIST_API_KEY",
+            key_name,
+            environment.get("ALX_REASONING_API_KEY", "").strip() or None,
+        ),
+        base_url=_configured(
+            environment,
+            "ALX_SPECIALIST_BASE_URL",
+            base_name,
+            base_fallback
+            or environment.get("ALX_REASONING_BASE_URL", "").strip()
+            or "",
+        ).rstrip("/"),
+        timeout_seconds=_positive_integer(
+            environment, "ALX_SPECIALIST_TIMEOUT_SECONDS", 60
+        ),
+        streaming=_boolean(environment, "ALX_SPECIALIST_STREAMING", False),
+        service_tier=environment.get(
+            "ALX_SPECIALIST_SERVICE_TIER", "default"
+        ).strip().lower(),
+        effort=environment.get("ALX_SPECIALIST_EFFORT", "none").strip().lower(),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     reasoning: ReasoningSettings
+    # Bounded extraction does not need Core-level reasoning, and reasoning
+    # tokens were the dominant cost. The specialist is configured separately so
+    # tuning it never disturbs the Core.
+    specialist: ReasoningSettings
     speech_to_text: SpeechToTextSettings
     text_to_speech: TextToSpeechSettings
 
@@ -323,6 +384,7 @@ class RuntimeSettings:
                     "ALX_REASONING_EFFORT", "medium"
                 ).strip().lower(),
             ),
+            specialist=_specialist_settings(environment, reasoning_provider),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
                 model=_required(environment, "ALX_STT_MODEL"),

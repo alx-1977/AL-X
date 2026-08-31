@@ -199,6 +199,32 @@ class SecondReasoningPathTests(unittest.TestCase):
         self.assertIsNone(captured.exception.__cause__)
 
 
+class TelemetrySeparationTests(unittest.TestCase):
+    """Specialist calls are counted apart from Core reasoning calls."""
+
+    def test_it_records_under_its_own_task_not_the_conversation(self) -> None:
+        model = FakeModel()
+        extract_invoice(ModelSpecialist(model), INVOICE_TEXT)
+        request = model.requests[0]
+        self.assertEqual(request.affinity_key, "extract_supplier_invoice")
+        self.assertNotIn("conversation", request.affinity_key)
+
+    def test_it_never_counts_against_the_bill_reasoning_ceiling(self) -> None:
+        """A specialist call must not consume the Core's four-call budget."""
+        import tempfile
+
+        from alx.observability import XERO_BILL_BUDGET, SQLiteUsageRecorder
+
+        with tempfile.TemporaryDirectory() as directory:
+            usage = SQLiteUsageRecorder(Path(directory) / "usage.sqlite3")
+            usage.set_budget("conversation-1", XERO_BILL_BUDGET)
+            call = {"code": "reasoning.completed", "model": "m"}
+            for _ in range(10):
+                usage.record("extract_supplier_invoice", call)
+            self.assertEqual(usage.task("conversation-1")["calls"], 0)
+            usage.check("conversation-1")
+
+
 class ExtractionTests(unittest.TestCase):
     def test_a_clean_invoice_verifies(self) -> None:
         result = extract_invoice(ModelSpecialist(FakeModel()), INVOICE_TEXT)

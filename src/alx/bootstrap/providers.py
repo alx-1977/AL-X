@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -16,11 +18,53 @@ from alx.providers import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeProviders:
     reasoning: ReasoningModel
+    # Configured independently of the Core. None when the configured
+    # specialist provider has no adapter, which disables specialist work
+    # rather than sending it to the Core.
+    specialist: ReasoningModel | None
     speech_to_text: SpeechTranscriber
     text_to_speech: SpeechSynthesizer
+
+
+
+def _build_reasoning_model(
+    settings, telemetry_sink
+) -> ReasoningModel | None:
+    """Build a model for the specialist, or None when it cannot be built.
+
+    Returning None disables specialist work. It must never be answered by the
+    Core instead: that is the expensive path this exists to avoid, and a silent
+    fallback would hide the misconfiguration.
+    """
+    if settings.provider == "openai":
+        return OpenAIReasoningModel(
+            settings.model,
+            settings.api_key,
+            settings.base_url,
+            settings.timeout_seconds,
+            streaming=settings.streaming,
+            service_tier=settings.service_tier,
+            reasoning_effort=settings.effort,
+            telemetry_sink=telemetry_sink,
+        )
+    if settings.provider == "xai":
+        return XAIReasoningModel(
+            settings.model,
+            settings.api_key,
+            settings.base_url,
+            settings.timeout_seconds,
+            streaming=settings.streaming,
+            service_tier=settings.service_tier,
+            telemetry_sink=telemetry_sink,
+        )
+    LOGGER.info("Specialist adapter is not installed: %s", settings.provider)
+    return None
 
 
 def build_runtime_providers(
@@ -52,6 +96,8 @@ def build_runtime_providers(
         raise ConfigurationError(
             f"reasoning provider adapter is not installed: {settings.reasoning.provider}"
         )
+    specialist = _build_reasoning_model(settings.specialist, telemetry_sink)
+
     if settings.speech_to_text.provider != "cartesia":
         raise ConfigurationError(
             f"speech-to-text provider adapter is not installed: {settings.speech_to_text.provider}"
@@ -62,6 +108,7 @@ def build_runtime_providers(
         )
     return RuntimeProviders(
         reasoning=reasoning,
+        specialist=specialist,
         speech_to_text=CartesiaTranscriber(
             settings.speech_to_text.model,
             settings.speech_to_text.api_key,

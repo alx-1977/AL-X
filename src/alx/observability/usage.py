@@ -43,8 +43,9 @@ class ExecutionBudget:
         return self.stop_above + self.recovery_allowance
 
 
-# A routine supplier bill is one decision and one execution. Anything beyond
-# four calls is not a slow success, it is a loop.
+# A routine supplier bill is one or two Core reasoning calls: one to start it
+# and one to report. Anything beyond four is not a slow success, it is a loop.
+# Specialist calls are counted separately and are not subject to this ceiling.
 XERO_BILL_BUDGET = ExecutionBudget(expected=2, warn_above=2, stop_above=4)
 
 

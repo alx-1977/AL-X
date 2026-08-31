@@ -162,16 +162,24 @@ async def run(repository_root: Path) -> None:
     except ConfigurationError as error:
         LOGGER.info("Xero unavailable: %s", error)
     else:
-        # Extraction is a bounded question, so it goes to a specialist rather
-        # than through the Core with AL/X's whole world attached.
-        specialist = ModelSpecialist(providers.reasoning)
+        # Extraction is a bounded question, so it goes to a specialist with
+        # its own model and reasoning effort. When no specialist is configured
+        # the extractor stays absent and capture refuses: answering it through
+        # the Core is the expensive path this exists to avoid.
+        specialist = (
+            None if providers.specialist is None
+            else ModelSpecialist(providers.specialist)
+        )
         xero_runtime = build_xero_runtime(
             xero_settings,
             storage_root,
             mail_runtime.source,
             lambda: current_call_id[0],
-            lambda text, context_line: extract_invoice(
-                specialist, text, context_line
+            None if specialist is None
+            else (
+                lambda text, context_line: extract_invoice(
+                    specialist, text, context_line
+                )
             ),
         )
         for definition in xero_runtime.definitions:

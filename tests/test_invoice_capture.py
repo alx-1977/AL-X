@@ -316,8 +316,23 @@ class NoFallbackTests(unittest.TestCase):
 
     def test_the_live_runtime_supplies_the_specialist_extractor(self) -> None:
         source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
-        self.assertIn("ModelSpecialist(providers.reasoning)", source)
+        self.assertIn("ModelSpecialist(providers.specialist)", source)
         self.assertIn("extract_invoice(", source)
+
+    def test_the_live_runtime_never_extracts_through_the_core_model(self) -> None:
+        """A silent fallback to the Core is the cost this exists to avoid."""
+        source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
+        self.assertNotIn("ModelSpecialist(providers.reasoning)", source)
+
+    def test_an_unavailable_specialist_disables_extraction(self) -> None:
+        from alx.bootstrap.providers import _build_reasoning_model
+        from alx.config import ReasoningSettings
+
+        settings = ReasoningSettings(
+            "unknown-vendor", "m", "k", "https://example.test", 10, False,
+            "default", "none",
+        )
+        self.assertIsNone(_build_reasoning_model(settings, None))
 
     def test_capture_without_an_extractor_refuses_rather_than_planning(self) -> None:
         """A misconfigured runtime must not silently fall back to Core steps."""
