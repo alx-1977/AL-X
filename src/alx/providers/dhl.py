@@ -11,8 +11,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from pypdf import PdfReader
+from pypdf.errors import LimitReachedError
 
 from alx.contracts import DhlDocumentError
+from alx.providers.pdf_limits import enforce_pdf_decode_limits
 
 
 TOLERANCE = Decimal("0.01")
@@ -210,6 +212,7 @@ def _runs_by_page(payload: bytes) -> list[list[_Run]]:
     exceeded = ""
     total_runs = [0]
     try:
+        enforce_pdf_decode_limits()
         reader = PdfReader(io.BytesIO(payload), strict=True)
         if len(reader.pages) > _WORKSHEET_PAGES:
             raise _BoundExceeded("worksheet_too_many_pages")
@@ -254,6 +257,8 @@ def _runs_by_page(payload: bytes) -> list[list[_Run]]:
             pages.append(current)
     except _BoundExceeded as error:
         exceeded = error.code
+    except LimitReachedError:
+        exceeded = "worksheet_content_too_large"
     except Exception:
         invalid_pdf = True
     if invalid_pdf:

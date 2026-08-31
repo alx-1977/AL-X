@@ -38,6 +38,10 @@ from alx.contracts.provenance import (
     provenance_from_storage,
     provenance_to_storage,
 )
+from alx.providers.pdf_limits import (
+    PDF_DECODED_STREAM_BYTES,
+    enforce_pdf_decode_limits,
+)
 
 
 ConnectionFactory = Callable[..., Any]
@@ -152,6 +156,7 @@ def _attachment_text(media_type: str, payload: bytes, charset: str | None) -> st
         try:
             from pypdf import PdfReader
 
+            enforce_pdf_decode_limits()
             reader = PdfReader(io.BytesIO(payload), strict=True)
             if len(reader.pages) > _DOCUMENT_PAGES:
                 return ""
@@ -160,9 +165,15 @@ def _attachment_text(media_type: str, payload: bytes, charset: str | None) -> st
             # page that is large on the wire is refused before that work.
             extracted: list[str] = []
             characters = 0
+            decoded_bytes = 0
             for page in reader.pages:
                 if not _page_within_bounds(page):
                     return ""
+                contents = page.get_contents()
+                if contents is not None:
+                    decoded_bytes += len(contents.get_data())
+                    if decoded_bytes > _DOCUMENT_DECODED_CONTENT_BYTES:
+                        return ""
                 text = page.extract_text()
                 if not text:
                     continue
@@ -195,47 +206,18 @@ def _mail_attachment(attachment_id: str, part) -> tuple[MailAttachment, bytes]:
 
 # A mail attachment is untrusted input, and its text is extracted before any
 # capability sees it, so the limits belong here rather than in one consumer.
-# A PDF's own size is the only figure knowable before pypdf decodes anything:
-# a page's /Length is often absent, and get_contents() decodes to answer, so a
-# 1MB file expanded to 8MB and 255MB of memory while a per-page check looked
-# on. Bounding the file caps what any compression ratio can reach. The retained
-# V1 worksheets are about 1.5KB; a scanned multi-page invoice is a few MB.
+# Bound the transport size before parsing.  This does not bound decompression:
+# a tiny stored stream can have an extreme expansion ratio, so pdf_limits also
+# caps pypdf's decoded output.  The retained V1 worksheets are about 1.5KB; a
+# scanned multi-page invoice is a few MB.
 _DOCUMENT_BYTES = 25 * 1024 * 1024
 _PDF_BYTES = 8 * 1024 * 1024
-# What a page may hold once expanded. A page is refused on the bytes stored on
-# the wire multiplied by the worst ratio worth honouring, so nothing is
-# decompressed to find out: a 1MB bomb reached 255MB while a check that called
-# get_contents() looked on, because that call decodes to answer.
+# Refuse an unusually large stored page before decoding it.  This is only a
+# fast preflight; the independent decoded-output ceiling is the bomb defence.
 _PAGE_STORED_BYTES = 512 * 1024
 _DOCUMENT_PAGES = 200
 _DOCUMENT_TEXT_CHARACTERS = 2_000_000
-
-# A page compressing far beyond this is not a document, it is a decompression
-# bomb: the retained V1 worksheets sit near 3:1.
-_DOCUMENT_EXPANSION_RATIO = 50
-
-
-def _stream_within_bounds(page) -> bool:
-    """Refuse a page whose stored stream is too large or too compressible.
-
-    Reading the raw indirect object avoids pypdf decoding the stream to answer,
-    which is what made the earlier check useless: a 3MB file expanded to 24MB
-    and 58MB of memory before the comparison ran.
-    """
-    raw = page.get("/Contents")
-    streams = raw if isinstance(raw, list) else [raw]
-    stored = 0
-    for item in streams:
-        if item is None:
-            continue
-        try:
-            obj = item.get_object() if hasattr(item, "get_object") else item
-            stored += int(obj.get("/Length", 0) or 0)
-        except Exception:
-            return False
-    # A page whose stored bytes could expand past the ceiling is refused
-    # without expanding it, so no decompression bomb reaches the decoder.
-    return stored * _DOCUMENT_EXPANSION_RATIO <= _DOCUMENT_CONTENT_BYTES
+_DOCUMENT_DECODED_CONTENT_BYTES = PDF_DECODED_STREAM_BYTES
 
 
 _ARCHIVE_MEMBER_LIMIT = 100

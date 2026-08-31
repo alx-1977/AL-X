@@ -382,6 +382,7 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
             _PAGE_STORED_BYTES,
             _attachment_text,
         )
+        from alx.providers.dhl import _runs_by_page
 
         self.assertEqual(
             _attachment_text("application/pdf", b"%PDF-" + b"x" * _DOCUMENT_BYTES, None),
@@ -413,14 +414,10 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
         # A decompression bomb: small on the wire, large once decoded. A check
         # that calls get_contents() cannot catch this, because that call
         # decodes the stream to answer.
-        expanded = (
-            "BT "
-            + " ".join(
-                f"/F1 8 Tf 1 0 0 1 {index % 600} {index % 700} Tm (r{index}) Tj"
-                for index in range(200_000)
-            )
-            + " ET"
-        ).encode()
+        # Repetition gives this stream an extreme expansion ratio: unlike the
+        # earlier test, it remains far below the stored-byte ceiling and would
+        # therefore reach pypdf unless the decoder itself is bounded.
+        expanded = b"q\n" * (12 * 1024 * 1024)
         compressed = zlib.compress(expanded)
         stream = StreamObject()
         stream._data = compressed
@@ -434,6 +431,10 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
             len(hostile), _DOCUMENT_BYTES, "the bomb must be small on the wire"
         )
         self.assertGreater(len(expanded), _PAGE_STORED_BYTES)
+        self.assertLess(
+            len(compressed), _PAGE_STORED_BYTES,
+            "the bomb must pass the stored-byte preflight",
+        )
 
         import time
         import tracemalloc
@@ -449,6 +450,16 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0, "the bomb was decoded before being refused")
         self.assertLess(
             peak, 20_000_000, "the bomb was expanded in memory before refusal"
+        )
+
+        started = time.monotonic()
+        with self.assertRaises(DhlDocumentError) as captured:
+            _runs_by_page(hostile)
+        self.assertEqual(captured.exception.code, "worksheet_content_too_large")
+        self.assertLess(
+            time.monotonic() - started,
+            2.0,
+            "the DHL parser decoded the bomb before refusing it",
         )
 
     def test_a_real_attachment_still_yields_its_text(self) -> None:
