@@ -56,8 +56,16 @@ def build_xero_runtime(
     )
     adapter = XeroAccountingAdapter(oauth, settings.timeout_seconds)
     read_policy = AuthorityPolicy(frozenset({XERO_READ_PERMISSION}))
+    # D-018. Friedl weighed the risk of an incorrect bill against re-proving
+    # carried-over V1 behaviour and authorised unattended supplier-bill writes
+    # of any amount. A bill is not a payment and is reversible in Xero. The
+    # structural safeguards are unchanged: balanced lines, account and tax
+    # identifiers validated against the live organisation, duplicate refusal,
+    # hash-bound attachments verified byte-for-byte, and read-back after every
+    # write. Payment and bank scopes remain unrequested.
     write_policy = AuthorityPolicy(
-        frozenset({XERO_BILL_WRITE_PERMISSION}), approval_required=True
+        frozenset({XERO_BILL_WRITE_PERMISSION}),
+        approval_required=not settings.unattended_bill_writes,
     )
     policies = {
         SEARCH_XERO_CONTACTS: read_policy,

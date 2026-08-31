@@ -39,7 +39,7 @@ from alx.contracts import (  # noqa: E402
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
-from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
+from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.providers.xero import (  # noqa: E402
     ACCOUNTING_URL,
     SQLiteXeroOAuth,
@@ -270,10 +270,66 @@ class XeroPrimitiveTests(unittest.TestCase):
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(result.values["invoice_id"], "bill-1")
 
+    def test_d018_unattended_writes_proceed_without_an_approval(self) -> None:
+        """D-018: Friedl authorised unattended supplier-bill writes.
+
+        The authority changes; the accounting safeguards do not. Reads stay
+        non-effectful and the bill-write permission is still required, so the
+        capability cannot run for an unpermitted principal.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_xero_runtime(
+                XeroSettings(
+                    "id", "secret", "http://localhost/callback", "", 10, 300, True
+                ),
+                Path(directory),
+                self.mail,
+                lambda: "call",
+            )
+        gate = SafetyGate(runtime.policies)
+        for capability_id in (
+            CREATE_XERO_DRAFT_BILL,
+            UPDATE_XERO_DRAFT_BILL,
+            ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+            AUTHORISE_XERO_BILL,
+        ):
+            with self.subTest(capability_id=capability_id):
+                self.assertFalse(runtime.policies[capability_id].approval_required)
+                call = CapabilityCall("call-1", capability_id, {})
+                permitted = AuthorityContext(
+                    "friedl",
+                    frozenset({XERO_READ_PERMISSION, XERO_BILL_WRITE_PERMISSION}),
+                    datetime(2026, 8, 31, tzinfo=UTC),
+                )
+                self.assertEqual(
+                    gate.evaluate(call, permitted).state, SafetyState.ALLOWED
+                )
+                unpermitted = AuthorityContext(
+                    "someone-else",
+                    frozenset({XERO_READ_PERMISSION}),
+                    datetime(2026, 8, 31, tzinfo=UTC),
+                )
+                self.assertEqual(
+                    gate.evaluate(call, unpermitted).state, SafetyState.DENIED
+                )
+
+    def test_d018_does_not_weaken_any_accounting_safeguard(self) -> None:
+        """Unattended authority must not let bad accounting data through."""
+        unbalanced = self.executors[CREATE_XERO_DRAFT_BILL](
+            {**draft_arguments(), "expected_total": "999.99"}
+        )
+        self.assertEqual(unbalanced.failure["code"], "arguments_unusable")
+        self.assertEqual(self.xero.created, [])
+
+        self.xero.existing = self.xero.current
+        duplicate = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
+        self.assertEqual(duplicate.failure["code"], "duplicate_found")
+        self.assertEqual(self.xero.created, [])
+
     def test_runtime_requires_approval_for_every_xero_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300),
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300, False),
                 Path(directory),
                 self.mail,
                 lambda: "call",
@@ -348,7 +404,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 registry.register(definition)
             current_call_id = [""]
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600),
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600, False),
                 Path(directory),
                 self.mail,
                 lambda: current_call_id[0],
@@ -559,6 +615,51 @@ class XeroAccountingAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer access-token")
         self.assertEqual(kwargs["json"], {"Invoices": [bill]})
         self.assertEqual(kwargs["timeout"], 17)
+
+    def test_discarded_bill_does_not_block_recreating_the_invoice_number(self) -> None:
+        """A deleted or voided bill is not an existing bill.
+
+        Xero retains discarded invoices, so a re-captured supplier invoice
+        must not be refused as a duplicate after Friedl deleted it.
+        """
+        for status in ("DELETED", "VOIDED"):
+            with self.subTest(status=status):
+                response = self.response(
+                    {
+                        "Invoices": [
+                            {
+                                "InvoiceID": "discarded-1",
+                                "InvoiceNumber": "655",
+                                "Type": "ACCPAY",
+                                "Status": status,
+                                "Contact": {"ContactID": "contact-1"},
+                            }
+                        ]
+                    }
+                )
+                with patch("httpx.request", return_value=response):
+                    self.assertIsNone(self.adapter.find_bill("655", "contact-1"))
+
+    def test_live_bill_still_blocks_a_duplicate_invoice_number(self) -> None:
+        for status in ("DRAFT", "AUTHORISED", "PAID"):
+            with self.subTest(status=status):
+                response = self.response(
+                    {
+                        "Invoices": [
+                            {
+                                "InvoiceID": "live-1",
+                                "InvoiceNumber": "655",
+                                "Type": "ACCPAY",
+                                "Status": status,
+                                "Contact": {"ContactID": "contact-1"},
+                            }
+                        ]
+                    }
+                )
+                with patch("httpx.request", return_value=response):
+                    found = self.adapter.find_bill("655", "contact-1")
+                self.assertIsNotNone(found)
+                self.assertEqual(found["InvoiceID"], "live-1")
 
     def test_duplicate_lookup_uses_documented_collection_filters(self) -> None:
         response = self.response(

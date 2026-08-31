@@ -22,7 +22,12 @@ LOGGER = logging.getLogger(__name__)
 
 # A dropped speech transport ends one exchange, not the conversation. The person
 # may simply have been silent while the provider timed the socket out.
-RECOVERABLE_TRANSPORT_REASONS = frozenset({"speech_transcription_error"})
+# A step-budget stop is a durable checkpoint, not a failed session. The Core
+# has persisted the goal and can continue it on the next turn, so the transport
+# must keep listening instead of hanging up on work that is still in progress.
+RECOVERABLE_TRANSPORT_REASONS = frozenset(
+    {"speech_transcription_error", "budget_exhausted"}
+)
 
 
 class LiveVoiceServer:

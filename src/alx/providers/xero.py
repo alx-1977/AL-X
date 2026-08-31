@@ -26,6 +26,11 @@ TOKEN_URL = "https://identity.xero.com/connect/token"
 CONNECTIONS_URL = "https://api.xero.com/connections"
 ACCOUNTING_URL = "https://api.xero.com/api.xro/2.0"
 
+# Xero retains discarded invoices rather than removing them. A discarded bill
+# is not an existing bill, so it must not block re-creating the same supplier
+# invoice number.
+_DISCARDED_STATUSES = frozenset({"DELETED", "VOIDED"})
+
 # External protocol identifiers. D-016 deliberately excludes contact writes,
 # payments, bank transactions, journals, reports, payroll, and sales work.
 XERO_SCOPES = (
@@ -438,6 +443,7 @@ class XeroAccountingAdapter:
             if (
                 item.get("Type") != "ACCPAY"
                 or str(item.get("InvoiceNumber") or "") != invoice_number
+                or str(item.get("Status") or "") in _DISCARDED_STATUSES
             ):
                 continue
             contact = item.get("Contact")

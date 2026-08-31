@@ -334,6 +334,16 @@ class SessionResilienceTests(unittest.TestCase):
                        "goal_proposal_invalid", "voice_transport_error"):
             self.assertNotIn(reason, RECOVERABLE_TRANSPORT_REASONS)
 
+    def test_a_step_budget_checkpoint_keeps_the_conversation_open(self) -> None:
+        """Reaching the step budget is durable progress, not a failure.
+
+        The Core persists the goal and can continue it, so a long multi-step
+        task must not hang up the voice transport mid-goal.
+        """
+        from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
+
+        self.assertIn("budget_exhausted", RECOVERABLE_TRANSPORT_REASONS)
+
     def test_the_handler_resumes_rather_than_returning_once(self) -> None:
         import ast
 

@@ -240,6 +240,7 @@ class XeroSettings:
     tenant_id: str
     timeout_seconds: int
     approval_ttl_seconds: int
+    unattended_bill_writes: bool
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
@@ -254,6 +255,11 @@ class XeroSettings:
             approval_ttl_seconds=_positive_integer(
                 environment, "ALX_XERO_APPROVAL_TTL_SECONDS", 600
             ),
+            # D-018. Friedl authorised unattended supplier-bill writes. The
+            # default stays attended so the authority is an explicit choice.
+            unattended_bill_writes=_boolean(
+                environment, "ALX_XERO_UNATTENDED_BILL_WRITES", False
+            ),
         )
 
     def __repr__(self) -> str:
@@ -262,7 +268,8 @@ class XeroSettings:
             f"client_secret=<redacted>, redirect_uri={self.redirect_uri!r}, "
             f"tenant_id={self.tenant_id!r}, "
             f"timeout_seconds={self.timeout_seconds!r}, "
-            f"approval_ttl_seconds={self.approval_ttl_seconds!r})"
+            f"approval_ttl_seconds={self.approval_ttl_seconds!r}, "
+            f"unattended_bill_writes={self.unattended_bill_writes!r})"
         )
 
 
