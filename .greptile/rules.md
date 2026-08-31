@@ -1,6 +1,6 @@
 # AL/X constitutional review mandate
 
-`LAWS_OF_ALX.md` is the sole canonical law text. Review the whole change against all 19 Laws and the accepted architecture, including semantic behaviour that deterministic gates may miss.
+`LAWS_OF_ALX.md` is the sole canonical law text. Review the whole change against every law in that file and the accepted architecture, including semantic behaviour that deterministic gates may miss.
 
 For every meaningful change, ask:
 

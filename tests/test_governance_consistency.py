@@ -42,6 +42,22 @@ class ConsistencyGateTests(unittest.TestCase):
         self.assertIn(old, text, f"{relative_path} no longer contains the anchor")
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
+    def checksum_greptile(self) -> None:
+        """Re-sign the Greptile files so the checksum does not mask the test."""
+        import hashlib
+
+        lines = []
+        for relative_path in (
+            ".greptile/config.json",
+            ".greptile/files.json",
+            ".greptile/rules.md",
+        ):
+            digest = hashlib.sha256((self.root / relative_path).read_bytes()).hexdigest()
+            lines.append(f"{digest}  {relative_path}")
+        (self.root / "governance/GREPTILE.sha256").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
     def violations(self) -> list[str]:
         return check_repository(self.root)
 
@@ -96,6 +112,51 @@ class ConsistencyGateTests(unittest.TestCase):
             any("prohibited-capability example" in item for item in self.violations()),
             "the superseded blueprint example must fail the check",
         )
+
+    def test_greptiles_mandate_cannot_name_a_law_count_that_is_wrong(self) -> None:
+        """Review finding: Greptile was still told to review "all 19 Laws".
+
+        It reviews against the laws its mandate names, so an invalid mandate
+        would have produced an invalid constitutional review, and no gate
+        noticed. The checksum alone does not help: it only proves the file was
+        not changed, not that what it says is true.
+        """
+        self.rewrite(
+            ".greptile/rules.md",
+            "Review the whole change against every law in that file",
+            "Review the whole change against all 19 Laws",
+        )
+        self.checksum_greptile()
+        self.assertTrue(
+            any("claims 19 laws exist" in item for item in self.violations()),
+            "a mandate naming a law count that does not exist must fail",
+        )
+
+    def test_a_live_document_naming_a_deleted_law_is_rejected(self) -> None:
+        for relative_path, anchor, replacement in (
+            (
+                "TODO.md",
+                "A candidate for AL/X's own sandbox capability invention",
+                "A candidate for AL/X's own sandbox work under Law 19",
+            ),
+            (
+                "docs/PERSISTENT_RESEARCH_NOTEBOOK_BRIEF.md",
+                "but it remains a separately governed capability whose deployment needs",
+                "but it remains a separately governed capability under Law 19 needs",
+            ),
+        ):
+            with self.subTest(document=relative_path):
+                self.setUp()
+                self.rewrite(relative_path, anchor, replacement)
+                self.assertTrue(
+                    any("do not exist in" in item for item in self.violations()),
+                    f"{relative_path} naming a deleted law must fail",
+                )
+
+    def test_naming_a_law_that_does_exist_still_passes(self) -> None:
+        """The check must not simply forbid mentioning laws."""
+        self.rewrite("TODO.md", "## Retention", "## Retention\n\nLaw 3 applies here.")
+        self.assertEqual(self.violations(), [])
 
     def test_every_law_in_the_canonical_text_is_enforced(self) -> None:
         laws = (REPOSITORY_ROOT / "LAWS_OF_ALX.md").read_text(encoding="utf-8")

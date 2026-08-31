@@ -352,6 +352,47 @@ def check_repository(root: Path) -> list[str]:
                 "carry that law's title"
             )
 
+    # Greptile reviews against the laws this file names. Instructing it to
+    # review "all 19 Laws" after the rewrite would have produced an invalid
+    # constitutional review, and no gate noticed. Any live document that names
+    # a law must name one that exists; governance/DECISIONS.md is excluded
+    # because it records decisions as they were approved at the time.
+    for relative_path in (
+        ".greptile/rules.md",
+        ".greptile/config.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+        "TODO.md",
+        "IDENTITY_AND_MEMORY.md",
+        "docs/ARCHITECTURE_BLUEPRINT.md",
+        "docs/FOUNDATION_PROOF.md",
+        "docs/TECHNICAL_PLAN.md",
+        "docs/MAIL_RETENTION_PROPOSAL.md",
+        "docs/PERSISTENT_RESEARCH_NOTEBOOK_BRIEF.md",
+        "docs/XERO_EMAIL_BILLS_IMPLEMENTATION.md",
+    ):
+        path = root / relative_path
+        if not path.is_file():
+            continue
+        document = path.read_text(encoding="utf-8")
+        named = {
+            int(value)
+            for value in re.findall(r"\bLaws? (\d+)\b", document)
+        }
+        unknown = sorted(named - set(law_numbers))
+        if unknown:
+            violations.append(
+                f"{relative_path}: names law(s) that do not exist in "
+                f"LAWS_OF_ALX.md: {', '.join(str(item) for item in unknown)}"
+            )
+        counted = re.search(r"\ball (\d+) Laws\b", document)
+        if counted and int(counted.group(1)) != len(law_numbers):
+            violations.append(
+                f"{relative_path}: claims {counted.group(1)} laws exist, "
+                f"but LAWS_OF_ALX.md has {len(law_numbers)}"
+            )
+
     blueprint = _read(root, "docs/ARCHITECTURE_BLUEPRINT.md", violations)
     if "process_DHL_invoice_workflow` would encode a journey" in blueprint:
         violations.append(

@@ -23,7 +23,7 @@
   policy choice no invoice contains, so history-based rules fail on suppliers
   whose work varies and a model asked to pick one guesses. VAT is unaffected,
   but the P&L loses expense-category detail.
-  A candidate for AL/X's own sandbox work under Law 19 once enough real bills
+  A candidate for AL/X's own sandbox capability invention once enough real bills
   exist to learn from. Not a blocker; revisit before year-end.
 
 ## Reasoning ceiling gaps

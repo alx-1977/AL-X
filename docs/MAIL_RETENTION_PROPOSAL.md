@@ -90,7 +90,7 @@ not one:
 
 - **The goal container and its structured reference state** — identifiers,
   participants, threading, attempts and outcomes — survive while the goal is
-  active, as Law 8 requires. Retention on the container begins only when the
+  active, as Law 1 requires. Retention on the container begins only when the
   goal becomes terminal.
 - **Mail-derived prose within that goal** — objective wording, progress
   summaries, evidence attributes — expires on its own schedule regardless of
@@ -366,7 +366,7 @@ outstanding:
 1. **Authorisation for scheduled deletion**, conditional on the revised design,
    preview controls, failure reporting, tombstones, and tests existing first.
    Automatic destruction of durable state is a stronger act than the current
-   Law 15 record describes, and warrants its own decision record.
+   durable-context record describes, and warrants its own decision record.
 2. **Confirmation of the first purge**, after reviewing the dry-run inventory.
 
 I would not proceed on any of these without a recorded decision.

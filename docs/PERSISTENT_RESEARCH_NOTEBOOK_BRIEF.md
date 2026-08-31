@@ -62,7 +62,8 @@ The notebook must allow AL/X, through the one authoritative Core, to:
   capabilities provide evidence; the notebook records structured research
   material and provenance.
 - A later isolated experiment workspace may provide artifacts and test results,
-  but it remains a separately governed capability under Law 19.
+  but it remains a separately governed capability whose deployment needs
+  Friedl's authority.
 - Nothing stored in or retrieved from the notebook grants permissions, changes
   production data, deploys a capability, or weakens review and approval gates.
 
