@@ -267,6 +267,71 @@ class FakeMail:
         )
 
 
+class UntrustedDocumentBoundTests(unittest.TestCase):
+    """A mail attachment is untrusted input.
+
+    Greptile finding: a document handed over directly, rather than through the
+    bounded archive path, was parsed with no byte, row, page or run limit, so
+    one large or pathological CSV or PDF could exhaust memory or CPU and take
+    the local runtime down.
+    """
+
+    def test_an_oversized_csv_is_refused_before_parsing(self) -> None:
+        from alx.providers.dhl import _DOCUMENT_BYTES, _parse_invoices
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_invoices(b"x" * (_DOCUMENT_BYTES + 1))
+        self.assertEqual(captured.exception.code, "invoice_too_large")
+
+    def test_an_oversized_pdf_is_refused_before_parsing(self) -> None:
+        from alx.providers.dhl import _DOCUMENT_BYTES, _runs_by_page
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _runs_by_page(b"%PDF-" + b"x" * _DOCUMENT_BYTES)
+        self.assertEqual(captured.exception.code, "worksheet_too_large")
+
+    def test_a_csv_with_too_many_rows_is_refused(self) -> None:
+        from alx.providers.dhl import _INVOICE_ROWS, _parse_invoices
+
+        header = "Invoice Number,Line Type\n"
+        rows = "".join(f"INV{index},S\n" for index in range(_INVOICE_ROWS + 5))
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_invoices((header + rows).encode())
+        self.assertEqual(captured.exception.code, "invoice_too_many_rows")
+
+    def test_too_many_customs_documents_are_refused(self) -> None:
+        from alx.providers.dhl import _CUSTOMS_DOCUMENTS
+
+        analyzer = DhlImportAnalyzerAdapter()
+        payloads = [b"%PDF-"] * (_CUSTOMS_DOCUMENTS + 1)
+        for label, call in (
+            ("analyze", lambda: analyzer.analyze_customs(payloads)),
+            ("reconcile", lambda: analyzer.reconcile(mybill_csv(), payloads)),
+        ):
+            with self.subTest(path=label):
+                with self.assertRaises(DhlDocumentError) as captured:
+                    call()
+                self.assertEqual(
+                    captured.exception.code, "too_many_customs_documents"
+                )
+
+    def test_a_bound_failure_names_the_limit_not_the_document(self) -> None:
+        """A refusal must not carry the private document into the error."""
+        from alx.providers.dhl import _DOCUMENT_BYTES, _parse_invoices
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_invoices(b"secret-invoice-content" * (_DOCUMENT_BYTES // 8))
+        self.assertNotIn("secret", str(captured.exception))
+        self.assertIsNone(captured.exception.__cause__)
+
+    def test_an_ordinary_document_still_parses(self) -> None:
+        """The bounds must not refuse real work."""
+        result = DhlImportAnalyzerAdapter().reconcile(
+            mybill_csv(), [worksheet_pdf(), sad500_pdf()]
+        )
+        self.assertTrue(result["reconciled"])
+
+
 class DhlPrimitiveTests(unittest.TestCase):
     def test_result_carries_transitive_mail_provenance(self) -> None:
         mail = FakeMail()

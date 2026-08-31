@@ -16,6 +16,33 @@ from alx.contracts import DhlDocumentError
 
 
 TOLERANCE = Decimal("0.01")
+
+# A mail attachment is untrusted input. The archive path already bounds what it
+# will expand; a document handed over directly was parsed without any limit, so
+# one large or pathological CSV or PDF could exhaust memory or CPU and take the
+# local runtime down. These mirror the archive member limits.
+_DOCUMENT_BYTES = 25 * 1024 * 1024
+_INVOICE_ROWS = 20_000
+_WORKSHEET_PAGES = 100
+_WORKSHEET_RUNS = 200_000
+_CUSTOMS_DOCUMENTS = 100
+
+
+class _BoundExceeded(Exception):
+    """Carry a bound failure past the broad PDF error handler."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def _bounded(payload: bytes, name: str) -> bytes:
+    """Refuse a document too large to parse before parsing any of it."""
+    if not isinstance(payload, (bytes, bytearray)):
+        raise DhlDocumentError(f"{name}_invalid")
+    if len(payload) > _DOCUMENT_BYTES:
+        raise DhlDocumentError(f"{name}_too_large")
+    return bytes(payload)
 _MONEY_PATTERN = r"[\d,]+\.\d{2}"
 _SERVICE_CODES = frozenset({"WC", "WE"})
 _KNOWN_CODES = frozenset({"XX", "XB", *_SERVICE_CODES})
@@ -115,6 +142,7 @@ def _charges(row: Mapping[str, Any]) -> tuple[Charge, ...]:
 
 
 def _parse_invoices(payload: bytes) -> tuple[Invoice, ...]:
+    payload = _bounded(payload, "invoice")
     invalid_encoding = False
     text = ""
     try:
@@ -123,7 +151,12 @@ def _parse_invoices(payload: bytes) -> tuple[Invoice, ...]:
         invalid_encoding = True
     if invalid_encoding:
         raise DhlDocumentError("invoice_encoding_invalid")
-    rows = list(csv.DictReader(io.StringIO(text)))
+    reader = csv.DictReader(io.StringIO(text))
+    rows = []
+    for row in reader:
+        if len(rows) >= _INVOICE_ROWS:
+            raise DhlDocumentError("invoice_too_many_rows")
+        rows.append(row)
     if not rows or "Invoice Number" not in (rows[0] or {}):
         raise DhlDocumentError("invoice_format_invalid")
     headers: dict[str, Mapping[str, Any]] = {}
@@ -164,12 +197,17 @@ def _parse_invoices(payload: bytes) -> tuple[Invoice, ...]:
 
 
 def _runs_by_page(payload: bytes) -> list[list[_Run]]:
+    payload = _bounded(payload, "worksheet")
     pages: list[list[_Run]] = []
     if not payload.startswith(b"%PDF-"):
         raise DhlDocumentError("worksheet_pdf_invalid")
     invalid_pdf = False
+    exceeded = ""
+    total_runs = 0
     try:
         reader = PdfReader(io.BytesIO(payload), strict=True)
+        if len(reader.pages) > _WORKSHEET_PAGES:
+            raise _BoundExceeded("worksheet_too_many_pages")
         for page_index, page in enumerate(reader.pages):
             current: list[_Run] = []
 
@@ -185,11 +223,18 @@ def _runs_by_page(payload: bytes) -> list[list[_Run]]:
                     )
 
             page.extract_text(visitor_text=visitor)
+            total_runs += len(current)
+            if total_runs > _WORKSHEET_RUNS:
+                raise _BoundExceeded("worksheet_too_many_runs")
             pages.append(current)
+    except _BoundExceeded as error:
+        exceeded = error.code
     except Exception:
         invalid_pdf = True
     if invalid_pdf:
         raise DhlDocumentError("worksheet_pdf_invalid")
+    if exceeded:
+        raise DhlDocumentError(exceeded)
     return pages
 
 
@@ -303,6 +348,8 @@ class DhlImportAnalyzerAdapter:
     def analyze_customs(
         self, customs_documents: Sequence[bytes]
     ) -> Mapping[str, Any]:
+        if len(customs_documents) > _CUSTOMS_DOCUMENTS:
+            raise DhlDocumentError("too_many_customs_documents")
         classified = tuple(
             _classify_customs_document(payload) for payload in customs_documents
         )
@@ -374,6 +421,8 @@ class DhlImportAnalyzerAdapter:
         customs_documents: Sequence[bytes],
         invoice_number: str = "",
     ) -> Mapping[str, Any]:
+        if len(customs_documents) > _CUSTOMS_DOCUMENTS:
+            raise DhlDocumentError("too_many_customs_documents")
         invoices = _parse_invoices(invoice_document)
         if invoice_number:
             selected = [item for item in invoices if item.invoice_number == invoice_number]
