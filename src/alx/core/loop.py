@@ -46,7 +46,8 @@ class CoreAgent:
                  memory_store: DurableMemoryStore | None = None,
                  clock: Callable[[], datetime] | None = None,
                  identifier_factory: Callable[[], str] | None = None,
-                 approval_ttl_seconds: int | None = None) -> None:
+                 approval_ttl_seconds: int | None = None,
+                 budget_check: Callable[[str], None] | None = None) -> None:
         self._store = store
         self._reasoner = reasoner
         self._dispatch = dispatch
@@ -57,6 +58,9 @@ class CoreAgent:
         if approval_ttl_seconds is not None and approval_ttl_seconds <= 0:
             raise ValueError("approval_ttl_seconds must be positive")
         self._approval_ttl_seconds = approval_ttl_seconds
+        # Raises before another reasoning call when a routine task has run
+        # away, so the ceiling prevents spend rather than reporting it.
+        self._budget_check = budget_check or (lambda _task_id: None)
 
     def process(self, conversation: ConversationSnapshot, goal_id: str | None,
                 retention_until: datetime, step_budget: int,
@@ -94,6 +98,13 @@ class CoreAgent:
                 retrieved_memories,
                 transient_attempts,
             )
+            try:
+                self._budget_check(conversation.conversation_id)
+            except Exception as error:
+                LOGGER.warning("Reasoning stopped by execution budget: %s", error)
+                return CoreOutcome(
+                    CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
+                )
             try:
                 decision = self._reasoner.decide(ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,

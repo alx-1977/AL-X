@@ -26,7 +26,7 @@ LOGGER = logging.getLogger(__name__)
 # has persisted the goal and can continue it on the next turn, so the transport
 # must keep listening instead of hanging up on work that is still in progress.
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
-    {"speech_transcription_error", "budget_exhausted"}
+    {"speech_transcription_error", "budget_exhausted", "budget_exceeded"}
 )
 
 

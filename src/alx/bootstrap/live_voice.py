@@ -7,7 +7,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 from alx.bootstrap.providers import build_runtime_providers
 from alx.bootstrap.mail import (
@@ -32,6 +32,7 @@ from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteCo
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
+from alx.observability import SQLiteUsageRecorder
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
 
@@ -111,7 +112,14 @@ async def run(repository_root: Path) -> None:
     storage_root.mkdir(parents=True, exist_ok=True)
 
     diagnostics = VoiceDiagnosticBuffer()
-    providers = build_runtime_providers(provider_settings, diagnostics.publish)
+    usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
+
+    def telemetry(task_id: str, values: Mapping[str, Any]) -> None:
+        """Development panel and durable record see the same measurement."""
+        diagnostics.publish(task_id, values)
+        usage.record(task_id, values)
+
+    providers = build_runtime_providers(provider_settings, telemetry)
     goal_store = SQLiteGoalStore(storage_root / "goals.sqlite3")
     conversation_store = SQLiteConversationStore(storage_root / "conversations.sqlite3")
     migrate_legacy_conversations(goal_store, conversation_store)
@@ -205,6 +213,7 @@ async def run(repository_root: Path) -> None:
         registry.list_definitions(),
         memory_store,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
+        budget_check=usage.check,
     )
     gateway = ConversationGateway(
         core,

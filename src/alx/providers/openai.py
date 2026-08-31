@@ -309,6 +309,9 @@ class OpenAIReasoningModel:
             "cached_tokens": self._nested_integer(
                 usage, "input_tokens_details", "cached_tokens"
             ),
+            "cache_write_tokens": self._nested_integer(
+                usage, "input_tokens_details", "cache_write_tokens"
+            ),
             "reasoning_tokens": self._nested_integer(
                 usage, "output_tokens_details", "reasoning_tokens"
             ),
