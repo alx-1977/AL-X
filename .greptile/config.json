@@ -33,7 +33,7 @@
     {
       "id": "alx-primitive-tool-boundary",
       "severity": "high",
-      "rule": "Capabilities must be language-blind, with structured inputs and results, and perform one reusable outcome. Under Law 2 a capability may contain whatever deterministic mechanical steps that outcome requires, so several steps in one capability are lawful and need no exception. Flag raw user language at capability boundaries, a capability that interprets what Friedl wants, decides business meaning, resolves genuine ambiguity instead of returning it, or declares a goal complete; and flag a new capability justified only by new wording."
+      "rule": "Capabilities must be language-blind, with structured inputs and results, and perform one reusable outcome. Under Law 2 a capability may contain whatever deterministic mechanical steps that outcome requires, so several steps in one capability are lawful and need no exception; but Law 2 also says a capability may not contain a complete user journey, so flag one that spans what the person set out to do end to end rather than achieving a single outcome within it. Flag raw user language at capability boundaries, a capability that interprets what Friedl wants, decides business meaning, resolves genuine ambiguity instead of returning it, or declares a goal complete; and flag a new capability justified only by new wording."
     },
     {
       "id": "alx-durable-goal-loop",

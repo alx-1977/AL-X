@@ -366,6 +366,72 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
             elapsed, 2.0, "the document was parsed before it was refused"
         )
 
+    def test_the_production_extraction_path_is_bounded(self) -> None:
+        """Codex finding: the bounds were on the wrong layer.
+
+        The mail adapter extracts a PDF's text before any capability sees it,
+        and that extraction was unbounded. Every earlier test used FakeMail, so
+        none of them touched the path a real attachment actually takes.
+        """
+        from alx.providers.icloud_mail import (
+            _DOCUMENT_BYTES,
+            _DOCUMENT_CONTENT_BYTES,
+            _attachment_text,
+        )
+
+        self.assertEqual(
+            _attachment_text("application/pdf", b"%PDF-" + b"x" * _DOCUMENT_BYTES, None),
+            "",
+            "an oversized PDF must not be extracted",
+        )
+
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=612, height=792)
+        font = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+        )
+        commands = ["BT"] + [
+            f"/F1 8 Tf 1 0 0 1 {index % 600} {index % 700} Tm (r{index}) Tj"
+            for index in range(600_000)
+        ] + ["ET"]
+        stream = DecodedStreamObject()
+        stream.set_data("\n".join(commands).encode())
+        page[NameObject("/Contents")] = stream
+        output = io.BytesIO()
+        writer.write(output)
+        hostile = output.getvalue()
+        self.assertGreater(len(hostile), _DOCUMENT_CONTENT_BYTES)
+
+        import time
+
+        started = time.monotonic()
+        self.assertEqual(
+            _attachment_text("application/pdf", hostile, None),
+            "",
+            "a page too large on the wire must not be extracted",
+        )
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_a_real_attachment_still_yields_its_text(self) -> None:
+        """The bounds must not stop a genuine worksheet being read."""
+        from alx.providers.icloud_mail import _attachment_text
+
+        fixture = (
+            Path(__file__).parent
+            / "fixtures"
+            / "dhl"
+            / "worksheet_dfm_20260421_sanitized.pdf"
+        )
+        text = _attachment_text("application/pdf", fixture.read_bytes(), None)
+        self.assertIn("CUSTOMS WORKSHEET", text.upper())
+
     def test_the_real_v1_worksheets_are_well_inside_the_bounds(self) -> None:
         """The limits must not refuse a genuine customs worksheet."""
         from alx.providers.dhl import _parse_worksheet

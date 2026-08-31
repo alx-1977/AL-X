@@ -116,13 +116,32 @@ def _attachment_text(media_type: str, payload: bytes, charset: str | None) -> st
     if media_type == "application/pdf":
         if not payload.startswith(b"%PDF-"):
             return ""
+        if len(payload) > _DOCUMENT_BYTES:
+            return ""
         try:
             from pypdf import PdfReader
 
-            return "\n".join(
-                text for page in PdfReader(io.BytesIO(payload), strict=True).pages
-                if (text := page.extract_text())
-            )
+            reader = PdfReader(io.BytesIO(payload), strict=True)
+            if len(reader.pages) > _DOCUMENT_PAGES:
+                return ""
+            # Every PDF attachment reaches this path, not only a DHL one, and
+            # a page's content stream is decoded before any text appears. A
+            # page that is large on the wire is refused before that work.
+            extracted: list[str] = []
+            characters = 0
+            for page in reader.pages:
+                contents = page.get_contents()
+                stored = None if contents is None else contents.get_object()
+                if len(getattr(stored, "_data", b"") or b"") > _DOCUMENT_CONTENT_BYTES:
+                    return ""
+                text = page.extract_text()
+                if not text:
+                    continue
+                characters += len(text)
+                if characters > _DOCUMENT_TEXT_CHARACTERS:
+                    return ""
+                extracted.append(text)
+            return "\n".join(extracted)
         except Exception:
             return ""
     return ""
@@ -144,6 +163,13 @@ def _mail_attachment(attachment_id: str, part) -> tuple[MailAttachment, bytes]:
         payload,
     )
 
+
+# A mail attachment is untrusted input, and its text is extracted before any
+# capability sees it, so the limits belong here rather than in one consumer.
+_DOCUMENT_BYTES = 25 * 1024 * 1024
+_DOCUMENT_PAGES = 200
+_DOCUMENT_CONTENT_BYTES = 4 * 1024 * 1024
+_DOCUMENT_TEXT_CHARACTERS = 2_000_000
 
 _ARCHIVE_MEMBER_LIMIT = 100
 _ARCHIVE_MEMBER_BYTES = 25 * 1024 * 1024

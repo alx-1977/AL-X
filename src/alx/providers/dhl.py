@@ -216,7 +216,17 @@ def _runs_by_page(payload: bytes) -> list[list[_Run]]:
         content_bytes = 0
         for page in reader.pages:
             contents = page.get_contents()
-            content_bytes += len(contents.get_data()) if contents is not None else 0
+            if contents is None:
+                continue
+            # get_data() decodes the stream, so a small compressed page could
+            # expand before the comparison. The stored bytes are measured
+            # first, and only a page that is small on the wire is decoded.
+            stored = contents.get_object()
+            raw = getattr(stored, "_data", b"") or b""
+            content_bytes += len(raw)
+            if content_bytes > _WORKSHEET_CONTENT_BYTES:
+                raise _BoundExceeded("worksheet_content_too_large")
+            content_bytes += len(contents.get_data()) - len(raw)
             if content_bytes > _WORKSHEET_CONTENT_BYTES:
                 raise _BoundExceeded("worksheet_content_too_large")
         for page_index, page in enumerate(reader.pages):
