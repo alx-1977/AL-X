@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -200,7 +200,45 @@ def _without_reused_ids(
     return proposed
 
 
+# A long-running goal accumulates every attempt and its full result values.
+# Resending all of them makes each reasoning call more expensive than the last,
+# so the prompt carries the recent ones verbatim and the rest as a compact
+# summary. This projects what is sent; the durable record keeps everything.
+VERBATIM_ATTEMPTS = 8
+VERBATIM_HISTORY = 12
+
+
+def _older_attempt_summary(items: Sequence[Any]) -> dict[str, Any] | None:
+    """Compact older attempts into counts and outcomes, preserving order."""
+    if not items:
+        return None
+    outcomes: dict[str, int] = {}
+    failures: list[str] = []
+    for item in items:
+        capability_id = None if item.call is None else item.call.capability_id
+        state = None if item.result is None else item.result.state.value
+        key = f"{capability_id or 'unknown'}:{state or item.disposition.value}"
+        outcomes[key] = outcomes.get(key, 0) + 1
+        if item.result is not None and item.result.failure is not None:
+            code = str(item.result.failure.get("code") or "")
+            if code and code not in failures:
+                failures.append(code)
+    return {
+        "count": len(items),
+        "note": "older attempts, summarised; ask for detail if it matters",
+        "outcomes": outcomes,
+        "failure_codes": failures,
+    }
+
+
+def _recent(items: Sequence[Any], limit: int) -> list[Any]:
+    return list(items[-limit:]) if len(items) > limit else list(items)
+
+
 def _state_payload(state: GoalState) -> dict[str, Any]:
+    attempts = tuple(state.attempts)
+    recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
+    older_attempts = attempts[: len(attempts) - len(recent_attempts)]
     return {
         "goal_id": state.goal_id,
         "objective": {
@@ -226,8 +264,9 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
         ],
         "progress": [
             {"id": item.record_id, "summary": item.summary, "evidence_refs": list(item.evidence_refs)}
-            for item in state.progress
+            for item in _recent(state.progress, VERBATIM_HISTORY)
         ],
+        "older_progress_count": max(0, len(state.progress) - VERBATIM_HISTORY),
         "attempts": [
             {
                 "call_id": None if item.call is None else item.call.call_id,
@@ -237,8 +276,9 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
                 "result_values": None if item.result is None else _plain(item.result.values),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
             }
-            for item in state.attempts
+            for item in recent_attempts
         ],
+        "older_attempts": _older_attempt_summary(older_attempts),
         "blockers": [{"id": item.item_id, "summary": item.summary} for item in state.blockers],
         "outstanding_work": [
             {"id": item.item_id, "summary": item.summary} for item in state.outstanding_work
