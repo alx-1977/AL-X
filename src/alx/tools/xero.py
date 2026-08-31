@@ -530,10 +530,13 @@ def _draft_mismatch(
     def money(value: Any) -> Decimal:
         return Decimal(str(value if value not in (None, "") else "0"))
 
-    # Only a draft may be resumed. Reading the status here rather than trusting
-    # the earlier search means a bill authorised in between is refused.
+    # D-018 requires a DRAFT bill for authorisation. D-019 separately names
+    # DRAFT or SUBMITTED for discarding, so the distinction is deliberate: a
+    # submitted bill is awaiting someone's approval and is not this capability's
+    # to authorise. Reading the status here rather than trusting the earlier
+    # search means a bill changed in between is refused.
     status = str(existing.get("Status") or "")
-    if status not in ("DRAFT", "SUBMITTED"):
+    if status != "DRAFT":
         return f"it is {status or 'in an unknown state'}, not a draft"
 
     requested_total = sum(
@@ -625,9 +628,11 @@ def _draft_mismatch(
             # Two lines can multiply to the same amount from different
             # quantities, so the parts are compared as well as the product.
             for part, part_label in (("Quantity", "quantity"), ("UnitAmount", "unit amount")):
-                if was.get(part) is not None and money(was.get(part)) != money(
-                    wanted.get(part)
-                ):
+                # Absent evidence is not agreement: a line that does not state
+                # its quantity cannot be verified as the requested one.
+                if was.get(part) is None:
+                    return f"line {index} states no {part_label} to verify"
+                if money(was.get(part)) != money(wanted.get(part)):
                     return (
                         f"line {index} {part_label} is {was.get(part)!r}, "
                         f"not {wanted.get(part)!r}"

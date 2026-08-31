@@ -521,6 +521,91 @@ class StaleDraftTests(unittest.TestCase):
                     f"{label} was reported as matching",
                 )
 
+    def test_a_submitted_bill_is_not_this_capability_to_authorise(self) -> None:
+        """D-018 requires a DRAFT for authorisation.
+
+        D-019 separately names DRAFT or SUBMITTED for discarding, so the
+        distinction is deliberate: a submitted bill awaits someone's approval.
+        """
+        from alx.tools.xero import _draft_mismatch
+
+        requested = {
+            "InvoiceNumber": "n",
+            "Date": "2026-08-20",
+            "DueDate": "2026-09-20",
+            "CurrencyCode": "ZAR",
+            "Reference": "r",
+            "LineAmountTypes": "NoTax",
+            "Contact": {"ContactID": "c"},
+            "LineItems": [
+                {
+                    "AccountCode": "310",
+                    "TaxType": "NONE",
+                    "Quantity": 1,
+                    "UnitAmount": 180,
+                    "Description": "d",
+                    "TaxAmount": 0,
+                }
+            ],
+        }
+        line = {
+            "AccountCode": "310",
+            "TaxType": "NONE",
+            "LineAmount": 180.0,
+            "Quantity": 1,
+            "UnitAmount": 180,
+            "Description": "d",
+            "TaxAmount": 0.0,
+        }
+        draft = {**requested, "Status": "DRAFT", "Total": 180.0, "LineItems": [line]}
+        self.assertEqual(_draft_mismatch(draft, requested), "")
+        self.assertIn(
+            "not a draft", _draft_mismatch({**draft, "Status": "SUBMITTED"}, requested)
+        )
+
+    def test_a_line_that_states_no_quantity_cannot_be_verified(self) -> None:
+        """Absent evidence is not agreement."""
+        from alx.tools.xero import _draft_mismatch
+
+        requested = {
+            "InvoiceNumber": "n",
+            "Date": "2026-08-20",
+            "DueDate": "2026-09-20",
+            "CurrencyCode": "ZAR",
+            "Reference": "r",
+            "LineAmountTypes": "NoTax",
+            "Contact": {"ContactID": "c"},
+            "LineItems": [
+                {
+                    "AccountCode": "310",
+                    "TaxType": "NONE",
+                    "Quantity": 1,
+                    "UnitAmount": 180,
+                    "Description": "d",
+                    "TaxAmount": 0,
+                }
+            ],
+        }
+        for missing in ("Quantity", "UnitAmount"):
+            with self.subTest(missing=missing):
+                line = {
+                    "AccountCode": "310",
+                    "TaxType": "NONE",
+                    "LineAmount": 180.0,
+                    "Quantity": 1,
+                    "UnitAmount": 180,
+                    "Description": "d",
+                    "TaxAmount": 0.0,
+                }
+                line.pop(missing)
+                stored = {
+                    **requested,
+                    "Status": "DRAFT",
+                    "Total": 180.0,
+                    "LineItems": [line],
+                }
+                self.assertIn("to verify", _draft_mismatch(stored, requested))
+
     def test_a_xero_serialised_date_is_compared_not_skipped(self) -> None:
         """Xero returns its own date format; it must be read, not ignored."""
         from alx.contracts import xero_date
