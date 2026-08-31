@@ -324,6 +324,59 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
         self.assertNotIn("secret", str(captured.exception))
         self.assertIsNone(captured.exception.__cause__)
 
+    def test_a_hostile_page_is_refused_before_the_work_is_done(self) -> None:
+        """Greptile finding: the run limit was checked too late.
+
+        pypdf decodes a page's whole content stream before the visitor sees a
+        single run, so aborting on the first run of a hostile page still cost
+        twelve seconds. Measuring the stream first takes milliseconds.
+        """
+        import time
+
+        from alx.providers.dhl import _WORKSHEET_RUNS, _runs_by_page
+
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=612, height=792)
+        font = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+        )
+        commands = ["BT"] + [
+            f"/F1 8 Tf 1 0 0 1 {index % 600} {index % 700} Tm (r{index}) Tj"
+            for index in range(_WORKSHEET_RUNS * 3)
+        ] + ["ET"]
+        stream = DecodedStreamObject()
+        stream.set_data("\n".join(commands).encode())
+        page[NameObject("/Contents")] = stream
+        output = io.BytesIO()
+        writer.write(output)
+
+        started = time.monotonic()
+        with self.assertRaises(DhlDocumentError) as captured:
+            _runs_by_page(output.getvalue())
+        elapsed = time.monotonic() - started
+        self.assertEqual(captured.exception.code, "worksheet_content_too_large")
+        self.assertLess(
+            elapsed, 2.0, "the document was parsed before it was refused"
+        )
+
+    def test_the_real_v1_worksheets_are_well_inside_the_bounds(self) -> None:
+        """The limits must not refuse a genuine customs worksheet."""
+        from alx.providers.dhl import _parse_worksheet
+
+        for path in sorted(
+            (Path(__file__).parent / "fixtures" / "dhl").glob("worksheet_*.pdf")
+        ):
+            with self.subTest(fixture=path.name):
+                worksheet = _parse_worksheet(path.read_bytes())
+                self.assertTrue(worksheet.declaration)
+
     def test_an_ordinary_document_still_parses(self) -> None:
         """The bounds must not refuse real work."""
         result = DhlImportAnalyzerAdapter().reconcile(

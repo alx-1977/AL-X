@@ -25,6 +25,11 @@ _DOCUMENT_BYTES = 25 * 1024 * 1024
 _INVOICE_ROWS = 20_000
 _WORKSHEET_PAGES = 100
 _WORKSHEET_RUNS = 200_000
+# pypdf decodes a page's whole content stream before the visitor sees a single
+# run, so no per-run check can prevent the work: aborting on the first run of a
+# hostile page still cost twelve seconds. The stream is measured first, which
+# takes milliseconds. A real worksheet is tens of kilobytes.
+_WORKSHEET_CONTENT_BYTES = 4 * 1024 * 1024
 _CUSTOMS_DOCUMENTS = 100
 
 
@@ -203,29 +208,39 @@ def _runs_by_page(payload: bytes) -> list[list[_Run]]:
         raise DhlDocumentError("worksheet_pdf_invalid")
     invalid_pdf = False
     exceeded = ""
-    total_runs = 0
+    total_runs = [0]
     try:
         reader = PdfReader(io.BytesIO(payload), strict=True)
         if len(reader.pages) > _WORKSHEET_PAGES:
             raise _BoundExceeded("worksheet_too_many_pages")
+        content_bytes = 0
+        for page in reader.pages:
+            contents = page.get_contents()
+            content_bytes += len(contents.get_data()) if contents is not None else 0
+            if content_bytes > _WORKSHEET_CONTENT_BYTES:
+                raise _BoundExceeded("worksheet_content_too_large")
         for page_index, page in enumerate(reader.pages):
             current: list[_Run] = []
 
             def visitor(text, _cm, tm, _font, _size, *, _page=page_index) -> None:
                 stripped = text.strip()
-                if stripped:
-                    current.append(
-                        _Run(
-                            round(tm[5], 1) - _page * 100_000,
-                            round(tm[4], 1),
-                            stripped,
-                        )
+                if not stripped:
+                    return
+                # Counting only after the page finished let one page with
+                # millions of runs be retained in full before the limit was
+                # noticed, so the ceiling is enforced as each run arrives.
+                if total_runs[0] >= _WORKSHEET_RUNS:
+                    raise _BoundExceeded("worksheet_too_many_runs")
+                total_runs[0] += 1
+                current.append(
+                    _Run(
+                        round(tm[5], 1) - _page * 100_000,
+                        round(tm[4], 1),
+                        stripped,
                     )
+                )
 
             page.extract_text(visitor_text=visitor)
-            total_runs += len(current)
-            if total_runs > _WORKSHEET_RUNS:
-                raise _BoundExceeded("worksheet_too_many_runs")
             pages.append(current)
     except _BoundExceeded as error:
         exceeded = error.code
