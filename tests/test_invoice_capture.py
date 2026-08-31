@@ -416,11 +416,15 @@ class StaleDraftTests(unittest.TestCase):
         }
         stored = {
             **requested,
+            "Status": "DRAFT",
+            "Total": 180.0,
             "LineItems": [
                 {
                     "AccountCode": "310",
                     "TaxType": "NONE",
                     "LineAmount": 180.0,
+                    "Quantity": 1,
+                    "UnitAmount": 180,
                     "Description": "d",
                     "TaxAmount": 0.0,
                 }
@@ -435,6 +439,98 @@ class StaleDraftTests(unittest.TestCase):
             _draft_mismatch({**stored, "Contact": {"ContactID": "other"}}, requested),
         )
         self.assertIn("could not be read back", _draft_mismatch(None, requested))
+
+    def test_the_comparison_never_fails_open(self) -> None:
+        """Review finding: a bill matching on nothing returned no mismatch.
+
+        Dates in Xero's serialised form were skipped rather than compared, and
+        the fresh status, total, quantity and unit amount were not checked at
+        all, so an AUTHORISED bill totalling 999 with 1970 dates passed as
+        matching a 180 draft.
+        """
+        from alx.tools.xero import _draft_mismatch
+
+        requested = {
+            "InvoiceNumber": "n",
+            "Date": "2026-08-20",
+            "DueDate": "2026-09-20",
+            "CurrencyCode": "ZAR",
+            "Reference": "r",
+            "LineAmountTypes": "NoTax",
+            "Contact": {"ContactID": "c"},
+            "LineItems": [
+                {
+                    "AccountCode": "310",
+                    "TaxType": "NONE",
+                    "Quantity": 1,
+                    "UnitAmount": 180,
+                    "Description": "d",
+                    "TaxAmount": 0,
+                }
+            ],
+        }
+        matching = {
+            **requested,
+            "Status": "DRAFT",
+            "Total": 180.0,
+            "LineItems": [
+                {
+                    "AccountCode": "310",
+                    "TaxType": "NONE",
+                    "LineAmount": 180.0,
+                    "Quantity": 1,
+                    "UnitAmount": 180,
+                    "Description": "d",
+                    "TaxAmount": 0.0,
+                }
+            ],
+        }
+        self.assertEqual(_draft_mismatch(matching, requested), "")
+
+        split = [
+            {
+                "AccountCode": "310",
+                "TaxType": "NONE",
+                "LineAmount": 180.0,
+                "Quantity": 2,
+                "UnitAmount": 90,
+                "Description": "d",
+                "TaxAmount": 0.0,
+            }
+        ]
+        for label, stored in (
+            ("the reviewer's whole case", {
+                **matching,
+                "Status": "AUTHORISED",
+                "Total": 999.00,
+                "Date": "/Date(0+0000)/",
+                "DueDate": "/Date(0+0000)/",
+                "LineItems": split,
+            }),
+            ("already authorised", {**matching, "Status": "AUTHORISED"}),
+            ("no status at all", {**matching, "Status": ""}),
+            ("a different total", {**matching, "Total": 999.0}),
+            ("the same product from different parts", {**matching, "LineItems": split}),
+            ("a date that cannot be read", {**matching, "Date": "rubbish"}),
+            ("an empty date", {**matching, "DueDate": ""}),
+        ):
+            with self.subTest(stored=label):
+                self.assertNotEqual(
+                    _draft_mismatch(stored, requested),
+                    "",
+                    f"{label} was reported as matching",
+                )
+
+    def test_a_xero_serialised_date_is_compared_not_skipped(self) -> None:
+        """Xero returns its own date format; it must be read, not ignored."""
+        from alx.contracts import xero_date
+
+        self.assertEqual(xero_date("2026-08-20"), "2026-08-20")
+        self.assertEqual(xero_date("/Date(1788134400000+0000)/"), "2026-08-31")
+        self.assertEqual(xero_date("/Date(0+0000)/"), "1970-01-01")
+        for unreadable in ("rubbish", "", "/Date(nonsense)/"):
+            with self.subTest(value=unreadable):
+                self.assertIsNone(xero_date(unreadable))
 
     def test_an_unaltered_draft_still_resumes(self) -> None:
         """Idempotency must survive the stricter check."""

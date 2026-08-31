@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -22,6 +23,7 @@ from alx.contracts import (
     SpecialistError,
     XeroAccessError,
     XeroAccountingAccount,
+    xero_date,
 )
 from alx.specialists import is_supplier_bill, prior_coding, resolve_supplier
 
@@ -528,6 +530,32 @@ def _draft_mismatch(
     def money(value: Any) -> Decimal:
         return Decimal(str(value if value not in (None, "") else "0"))
 
+    # Only a draft may be resumed. Reading the status here rather than trusting
+    # the earlier search means a bill authorised in between is refused.
+    status = str(existing.get("Status") or "")
+    if status not in ("DRAFT", "SUBMITTED"):
+        return f"it is {status or 'in an unknown state'}, not a draft"
+
+    requested_total = sum(
+        (
+            money(item.get("Quantity")) * money(item.get("UnitAmount"))
+            + (
+                money(item.get("TaxAmount"))
+                if str(requested.get("LineAmountTypes") or "") == "Exclusive"
+                else Decimal("0")
+            )
+            for item in requested.get("LineItems") or []
+        ),
+        Decimal("0"),
+    )
+    try:
+        if money(existing.get("Total")) != requested_total:
+            return (
+                f"its total is {existing.get('Total')!r}, not {requested_total}"
+            )
+    except InvalidOperation:
+        return f"its total {existing.get('Total')!r} is unreadable"
+
     for field, label in (
         ("InvoiceNumber", "invoice number"),
         ("Date", "date"),
@@ -538,11 +566,16 @@ def _draft_mismatch(
     ):
         was = str(existing.get(field) or "").strip()
         wanted = str(requested.get(field) or "").strip()
-        # Xero returns dates in its own serialised form, so compare the date
-        # only when the stored value is the plain ISO text that was sent.
-        if field in ("Date", "DueDate") and was and not was[:1].isdigit():
+        if field in ("Date", "DueDate"):
+            normalised = xero_date(was)
+            # Skipping an unrecognised date let a bill dated /Date(0+0000)/
+            # pass as matching, so an unreadable date fails closed instead.
+            if normalised is None:
+                return f"its {label} {was!r} cannot be read as a date"
+            if normalised != wanted[:10]:
+                return f"its {label} is {normalised!r}, not {wanted[:10]!r}"
             continue
-        if was[:10] != wanted[:10] if field in ("Date", "DueDate") else was != wanted:
+        if was != wanted:
             return f"its {label} is {was!r}, not {wanted!r}"
 
     stored_contact = existing.get("Contact")
@@ -589,6 +622,16 @@ def _draft_mismatch(
                 wanted.get("UnitAmount")
             ):
                 return f"line {index} amount differs"
+            # Two lines can multiply to the same amount from different
+            # quantities, so the parts are compared as well as the product.
+            for part, part_label in (("Quantity", "quantity"), ("UnitAmount", "unit amount")):
+                if was.get(part) is not None and money(was.get(part)) != money(
+                    wanted.get(part)
+                ):
+                    return (
+                        f"line {index} {part_label} is {was.get(part)!r}, "
+                        f"not {wanted.get(part)!r}"
+                    )
             if money(was.get("TaxAmount")) != money(wanted.get("TaxAmount")):
                 return (
                     f"line {index} tax amount is {was.get('TaxAmount')!r}, "

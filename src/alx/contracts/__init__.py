@@ -75,7 +75,7 @@ from alx.contracts.mail import (
     OutboundReply,
     ReplyOutcome,
 )
-from alx.contracts.xero import XeroAccessError, XeroAccountingAccount
+from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
@@ -102,6 +102,7 @@ __all__ = [
     "MailObservationControl", "MailParticipants", "MailReference",
     "MailSearchCriteria", "MailSearchResult",
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
+    "xero_date",
     "XeroAccessError", "XeroAccountingAccount",
     "DhlDocumentError", "DhlImportAnalyzer",
 ]

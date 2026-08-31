@@ -2,7 +2,39 @@
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime
 from typing import Any, Mapping, Protocol
+
+# Xero's serialised date form, an external protocol format.
+_SERIALISED_DATE = re.compile(r"/Date\((-?\d+)([+-]\d{4})?\)/")
+
+
+def xero_date(value: str) -> str | None:
+    """Normalise a Xero date to plain ISO text, or None when unreadable.
+
+    Xero sends either ISO text or its serialised /Date(ms+offset)/ form. This
+    decodes one external wire format; treating an unrecognised value as
+    matching let a bill dated 1970 pass as current.
+    """
+    serialised = str(value or "").strip()
+    if not serialised:
+        return None
+    if (
+        len(serialised) >= 10
+        and serialised[:4].isdigit()
+        and serialised[4:5] == "-"
+    ):
+        return serialised[:10]
+    match = _SERIALISED_DATE.fullmatch(serialised)
+    if match:
+        try:
+            return datetime.fromtimestamp(
+                int(match.group(1)) / 1000, UTC
+            ).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
 
 
 class XeroAccessError(Exception):
