@@ -26,6 +26,7 @@ from alx.config import XeroSettings  # noqa: E402
 from alx.observability import XERO_BILL_BUDGET  # noqa: E402
 from alx.tools import (  # noqa: E402
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+    CAPTURE_SUPPLIER_INVOICE,
     LIST_XERO_ACCOUNTS,
     LIST_XERO_TAX_RATES,
     SEARCH_XERO_CONTACTS,
@@ -66,10 +67,11 @@ class RoutineCatalogueTests(unittest.TestCase):
         writes = self.offered & (
             RECOVERY_ONLY_CAPABILITIES | BILL_EXECUTION_CAPABILITIES
         )
-        self.assertEqual(writes, {EXECUTE_XERO_BILL})
+        self.assertEqual(writes, {CAPTURE_SUPPLIER_INVOICE})
 
     def test_the_old_step_by_step_write_path_is_not_offered(self) -> None:
         for capability_id in (
+            EXECUTE_XERO_BILL,
             CREATE_XERO_DRAFT_BILL,
             UPDATE_XERO_DRAFT_BILL,
             ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
@@ -135,6 +137,7 @@ class ArmedBudgetTests(unittest.TestCase):
 
     def test_any_bill_capability_arms_the_ceiling_not_only_the_commit(self) -> None:
         """Arming on the commit was too late; a task reached seven calls first."""
+        self.assertIn(CAPTURE_SUPPLIER_INVOICE, BILL_TASK_CAPABILITIES)
         self.assertIn(EXECUTE_XERO_BILL, BILL_TASK_CAPABILITIES)
         for capability_id in (
             SEARCH_XERO_CONTACTS,
@@ -162,7 +165,7 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
                 usage.check(conversation_id)
 
             def dispatch(capability_id: str) -> None:
-                if capability_id in BILL_EXECUTION_CAPABILITIES:
+                if capability_id in BILL_TASK_CAPABILITIES:
                     usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
 
             call = {
@@ -182,7 +185,7 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
             )
 
             # Committing a bill declares the task routine.
-            dispatch(EXECUTE_XERO_BILL)
+            dispatch(CAPTURE_SUPPLIER_INVOICE)
             self.assertEqual(
                 usage.task("conversation-1")["budget_state"], "expected"
             )

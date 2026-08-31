@@ -14,6 +14,7 @@ from alx.safety import AuthorityPolicy
 from alx.tools import (
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
     AUTHORISE_XERO_BILL,
+    CAPTURE_SUPPLIER_INVOICE,
     EXECUTE_XERO_BILL,
     DELETE_XERO_DRAFT_BILL,
     CREATE_XERO_DRAFT_BILL,
@@ -38,10 +39,11 @@ XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
 # be reasoned through step by step, which is what made one invoice cost eight
 # reasoning calls. They stay dispatchable for an explicit recovery, but they
 # are withheld from the catalogue AL/X plans from.
-BILL_EXECUTION_CAPABILITIES = frozenset({EXECUTE_XERO_BILL})
+BILL_EXECUTION_CAPABILITIES = frozenset({CAPTURE_SUPPLIER_INVOICE})
 
 RECOVERY_ONLY_CAPABILITIES = frozenset(
     {
+        EXECUTE_XERO_BILL,
         CREATE_XERO_DRAFT_BILL,
         UPDATE_XERO_DRAFT_BILL,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
@@ -80,6 +82,7 @@ def build_xero_runtime(
     storage_root: Path,
     mail_account: MailAccount,
     call_id_source: Callable[[], str],
+    extractor: Callable[[str, str], Mapping[str, Any]] | None = None,
 ) -> XeroRuntime:
     oauth = SQLiteXeroOAuth(
         storage_root / "xero.sqlite3",
@@ -118,6 +121,7 @@ def build_xero_runtime(
         CREATE_XERO_DRAFT_BILL: write_policy,
         UPDATE_XERO_DRAFT_BILL: write_policy,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: write_policy,
+        CAPTURE_SUPPLIER_INVOICE: write_policy,
         EXECUTE_XERO_BILL: write_policy,
         DELETE_XERO_DRAFT_BILL: delete_policy,
         AUTHORISE_XERO_BILL: write_policy,
@@ -136,7 +140,7 @@ def build_xero_runtime(
             if item.capability_id in RECOVERY_ONLY_CAPABILITIES
         ),
         policies,
-        build_xero_executors(adapter, mail_account, call_id_source),
+        build_xero_executors(adapter, mail_account, call_id_source, extractor),
         frozenset(
             {
                 XERO_READ_PERMISSION,

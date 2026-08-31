@@ -19,9 +19,11 @@ from alx.contracts import (
     StructuredData,
     StructuredSchema,
     ValueKind,
+    SpecialistError,
     XeroAccessError,
     XeroAccountingAccount,
 )
+from alx.specialists import prior_coding, resolve_supplier
 
 
 SEARCH_XERO_CONTACTS = "search_xero_contacts"
@@ -32,6 +34,7 @@ READ_XERO_BILL = "read_xero_bill"
 CREATE_XERO_DRAFT_BILL = "create_xero_draft_bill"
 UPDATE_XERO_DRAFT_BILL = "update_xero_draft_bill"
 ATTACH_MAIL_DOCUMENT_TO_XERO_BILL = "attach_mail_document_to_xero_bill"
+CAPTURE_SUPPLIER_INVOICE = "capture_supplier_invoice"
 EXECUTE_XERO_BILL = "execute_xero_bill"
 DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
 AUTHORISE_XERO_BILL = "authorise_xero_bill"
@@ -261,6 +264,44 @@ _SOURCE_DOCUMENT = _object(
     ("mailbox_id", "uid_validity", "uid", "attachment_id", "expected_sha256"),
 )
 
+CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
+    CAPTURE_SUPPLIER_INVOICE,
+    "Read one identified mail attachment as a supplier invoice, resolve its supplier and accounting treatment from this organisation's own records, and commit the bill when every one of those is unambiguous; otherwise return what is unresolved without acting.",
+    _object(
+        {
+            "mailbox_id": _STRING,
+            "uid_validity": _STRING,
+            "uid": _STRING,
+            "attachment_id": _STRING,
+            "expected_sha256": _STRING,
+            "context_line": _STRING,
+            "authorise": _BOOLEAN,
+        },
+        (
+            "mailbox_id",
+            "uid_validity",
+            "uid",
+            "attachment_id",
+            "expected_sha256",
+            "authorise",
+        ),
+    ),
+    _object(
+        {
+            "completed": _BOOLEAN,
+            "returned_for": _STRING,
+            "detail": _STRING,
+            "invoice": _ANY_OBJECT,
+            "bill": _BILL_RESULT,
+            "attached": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "steps": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+        },
+        ("completed", "returned_for", "detail", "invoice", "bill", "attached", "steps"),
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES + ("document_has_no_text", "not_an_invoice", "extraction_unverified"),
+)
+
 EXECUTE_BILL_DEFINITION = CapabilityDefinition(
     EXECUTE_XERO_BILL,
     "Commit one accounts-payable bill whose supplier, lines, amounts, account codes and tax types were already decided, then attach the named source documents, read it back and verify it. Returns without acting whenever the outcome is not objectively determined.",
@@ -338,6 +379,7 @@ DEFINITIONS = (
     CREATE_DRAFT_DEFINITION,
     UPDATE_DRAFT_DEFINITION,
     ATTACH_DOCUMENT_DEFINITION,
+    CAPTURE_INVOICE_DEFINITION,
     EXECUTE_BILL_DEFINITION,
     DELETE_DRAFT_DEFINITION,
     AUTHORISE_BILL_DEFINITION,
@@ -581,6 +623,7 @@ def build_xero_executors(
     account: XeroAccountingAccount,
     mail: MailAccount,
     call_id_source: Callable[[], str],
+    extractor: Callable[[str, str], Mapping[str, Any]] | None = None,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     def failed(capability_id: str, code: str) -> CapabilityResult:
         return CapabilityResult(
@@ -930,6 +973,133 @@ def build_xero_executors(
                 )
             return failed(EXECUTE_XERO_BILL, error.code)
 
+    def capture_invoice(arguments: StructuredData) -> CapabilityResult:
+        """Read a document, resolve it against records, and commit if certain.
+
+        Extraction is a bounded specialist question, supplier and accounting
+        treatment come from this organisation's own history, and the commit is
+        the same execute path. Nothing here interprets what Friedl wants, and
+        anything without one objectively correct answer returns to AL/X rather
+        than being guessed.
+        """
+        steps: list[str] = []
+
+        def returned(reason: str, detail: str, invoice: Mapping[str, Any] | None = None):
+            return CapabilityResult(
+                call_id_source(),
+                CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.SUCCEEDED,
+                {
+                    "completed": False,
+                    "returned_for": reason,
+                    "detail": detail,
+                    "invoice": dict(invoice or {}),
+                    "bill": _bill_values(None),
+                    "attached": (),
+                    "steps": tuple(steps),
+                },
+            )
+
+        if extractor is None:
+            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+        try:
+            reference = MailReference(
+                _required(arguments, "mailbox_id"),
+                _required(arguments, "uid_validity"),
+                _required(arguments, "uid"),
+            )
+            digest = _sha256(arguments.get("expected_sha256"), "expected_sha256")
+            authorise_requested = arguments.get("authorise")
+            if not isinstance(authorise_requested, bool):
+                raise ValueError("authorise")
+            context_line = arguments.get("context_line", "")
+            if not isinstance(context_line, str):
+                raise ValueError("context_line")
+            attachment, _content = mail.read_attachment(
+                reference, _required(arguments, "attachment_id")
+            )
+            if attachment.sha256 != digest:
+                return failed(CAPTURE_SUPPLIER_INVOICE, "source_mismatch")
+            steps.append("read_source_document")
+
+            invoice = extractor(attachment.text, context_line)
+            steps.append("extracted_invoice")
+            if invoice["document_type"] not in ("supplier_invoice", "supplier_bill"):
+                return failed(CAPTURE_SUPPLIER_INVOICE, "not_an_invoice")
+            if not invoice["verified"]:
+                return returned(
+                    "extraction_unverified",
+                    "; ".join(invoice["problems"]),
+                    invoice,
+                )
+
+            contact = resolve_supplier(
+                account.search_contacts(invoice["supplier_name"]),
+                invoice["supplier_name"],
+            )
+            steps.append("resolved_supplier")
+            if not contact["resolved"]:
+                return returned("supplier_unresolved", contact["reason"], invoice)
+
+            history = account.bills_for_contact(contact["contact_id"])
+            coding = prior_coding(history)
+            steps.append("looked_up_prior_coding")
+            if not coding["resolved"]:
+                return returned("coding_unresolved", coding["reason"], invoice)
+        except ValueError:
+            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+        except SpecialistError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+        except XeroAccessError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+
+        # Everything is unambiguous, so the same commit path runs directly
+        # rather than returning to AL/X to be told to do what is already known.
+        outcome = execute_bill(
+            {
+                "contact_id": contact["contact_id"],
+                "invoice_number": invoice["invoice_number"],
+                "date": invoice["invoice_date"],
+                "due_date": invoice["due_date"] or invoice["invoice_date"],
+                "currency": invoice["currency"],
+                "reference": context_line or attachment.filename,
+                "line_amount_types": coding["line_amount_types"] or "NoTax",
+                "expected_total": invoice["total"],
+                "line_items": [
+                    {
+                        "description": invoice["description"] or "Supplier invoice",
+                        "quantity": "1",
+                        "unit_amount": invoice["subtotal"] or invoice["total"],
+                        "account_code": coding["account_code"],
+                        "tax_type": coding["tax_type"],
+                        "tax_amount": invoice["tax_amount"] or "0",
+                    }
+                ],
+                "source_documents": [dict(arguments)],
+                "authorise": authorise_requested,
+            }
+        )
+        steps.append("executed_bill")
+        if outcome.state is not CapabilityResultState.SUCCEEDED:
+            return CapabilityResult(
+                call_id_source(),
+                CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.FAILED,
+                failure=dict(outcome.failure or {"code": "request_rejected"}),
+            )
+        return CapabilityResult(
+            call_id_source(),
+            CAPTURE_SUPPLIER_INVOICE,
+            CapabilityResultState.SUCCEEDED,
+            {
+                **outcome.values,
+                "invoice": invoice,
+                "steps": (*steps, *outcome.values["steps"]),
+            },
+        )
+
     def delete_draft(arguments: StructuredData) -> CapabilityResult:
         def operation() -> Mapping[str, Any]:
             invoice_id = _required(arguments, "invoice_id")
@@ -999,6 +1169,7 @@ def build_xero_executors(
         CREATE_XERO_DRAFT_BILL: create_draft,
         UPDATE_XERO_DRAFT_BILL: update_draft,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: attach_document,
+        CAPTURE_SUPPLIER_INVOICE: capture_invoice,
         EXECUTE_XERO_BILL: execute_bill,
         DELETE_XERO_DRAFT_BILL: delete_draft,
         AUTHORISE_XERO_BILL: authorise,

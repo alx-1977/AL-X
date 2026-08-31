@@ -33,6 +33,7 @@ from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
 from alx.observability import XERO_BILL_BUDGET, SQLiteUsageRecorder
+from alx.specialists import ModelSpecialist, extract_invoice
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
 
@@ -161,11 +162,17 @@ async def run(repository_root: Path) -> None:
     except ConfigurationError as error:
         LOGGER.info("Xero unavailable: %s", error)
     else:
+        # Extraction is a bounded question, so it goes to a specialist rather
+        # than through the Core with AL/X's whole world attached.
+        specialist = ModelSpecialist(providers.reasoning)
         xero_runtime = build_xero_runtime(
             xero_settings,
             storage_root,
             mail_runtime.source,
             lambda: current_call_id[0],
+            lambda text, context_line: extract_invoice(
+                specialist, text, context_line
+            ),
         )
         for definition in xero_runtime.definitions:
             registry.register(definition)

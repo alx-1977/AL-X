@@ -455,6 +455,30 @@ class XeroAccountingAdapter:
                 return item
         return None
 
+    def bills_for_contact(self, contact_id: str) -> tuple[Mapping[str, Any], ...]:
+        """Return a supplier's live bills, newest first, for coding precedent.
+
+        Discarded bills are excluded: a deleted bill is not evidence of how a
+        supplier is treated.
+        """
+        body = self._request(
+            "GET",
+            "/Invoices?"
+            + urlencode(
+                {
+                    "ContactIDs": contact_id,
+                    "where": 'Type=="ACCPAY"',
+                    "order": "UpdatedDateUTC DESC",
+                }
+            ),
+        )
+        return tuple(
+            item
+            for item in self._items(body, "Invoices")
+            if item.get("Type") == "ACCPAY"
+            and str(item.get("Status") or "") not in _DISCARDED_STATUSES
+        )
+
     def read_bill(self, invoice_id: str) -> Mapping[str, Any] | None:
         body = self._request(
             "GET", f"/Invoices/{quote(invoice_id, safe='')}", allow_not_found=True
