@@ -507,7 +507,7 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
 
 
 class NoReplyWorkflowTests(unittest.TestCase):
-    """Law 1, 5 and 6: one primitive, no journey, no phrase routing."""
+    """Laws 1 and 2: one outcome, no journey, no phrase routing."""
 
     SOURCES = (
         "src/alx/tools/mail.py",
@@ -568,7 +568,7 @@ class NoReplyWorkflowTests(unittest.TestCase):
         self.assertNotIn(SEND_MAIL_REPLY, observation)
 
     def test_sending_carries_its_own_authorisation_and_permission(self) -> None:
-        """Law 19: production action needs a recorded authorisation."""
+        """Law 3: production action needs a recorded authorisation."""
         from alx.bootstrap.mail import (
             MAIL_READ_PERMISSION, MAIL_SEND_PERMISSION, MAIL_TRASH_PERMISSION,
         )
@@ -633,7 +633,7 @@ class AskingIsFreeTests(unittest.TestCase):
         self.assertIn("never need permission to ask a question", source)
 
     def test_asking_requires_no_scripted_sequence(self) -> None:
-        """Law 1 and 6: no step may be required before AL/X may speak."""
+        """Laws 1 and 2: no step may be required before AL/X may speak."""
         source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
         for scripted in ("must first", "before asking", "only after",
                          "step 1", "then ask"):
@@ -1106,7 +1106,7 @@ class AttentionAndTidyingGuidanceTests(unittest.TestCase):
         self.assertIn("Offer; do not\nassume", source)
 
     def test_no_sequence_ties_clearing_to_sending(self) -> None:
-        """Law 6: deleting after replying must not be an encoded step."""
+        """Law 1: deleting after replying must not be an encoded step."""
         source = self._instructions()
         for sequenced in ("after sending, ", "then delete", "always delete",
                           "must delete", "once sent, delete"):

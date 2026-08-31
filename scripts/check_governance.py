@@ -305,16 +305,17 @@ def check_repository(root: Path) -> list[str]:
             violations.append(f"missing required file: {relative_path}")
 
     laws = _read(root, "LAWS_OF_ALX.md", violations)
-    law_numbers = [int(value) for value in re.findall(r"^### Law (\d+)\b", laws, re.MULTILINE)]
-    if law_numbers != list(range(1, 20)):
-        violations.append("LAWS_OF_ALX.md: expected exactly Laws 1 through 19 in order")
+    law_numbers = [int(value) for value in re.findall(r"^## Law (\d+)\b", laws, re.MULTILINE)]
+    if law_numbers != [1, 2, 3]:
+        violations.append("LAWS_OF_ALX.md: expected exactly Laws 1 through 3 in order")
     _require_markers(
         laws,
         "LAWS_OF_ALX.md",
         (
-            "Law 19 — AL/X may improve and invent capabilities",
+            "Law 1 — AL/X decides meaning",
+            "Law 2 — Code executes known procedures",
+            "Law 3 — Ambiguity returns to AL/X",
             "Ideas are permissive. Experimentation is isolated. Deployment is governed.",
-            "Law 19 approved",
         ),
         violations,
     )
