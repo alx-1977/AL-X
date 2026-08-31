@@ -307,16 +307,39 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
 
 
 def _capability_schema_payload(schema: StructuredSchema) -> dict[str, Any]:
-    return {
-        "kind": schema.kind.value,
-        "properties": {
+    """Describe an input schema without spelling out empty fields.
+
+    A scalar carried four empty values per occurrence, which is most of the
+    catalogue. Omitting them changes nothing a caller can observe: an absent
+    key means the empty default it always had.
+    """
+    payload: dict[str, Any] = {"kind": schema.kind.value}
+    if schema.properties:
+        payload["properties"] = {
             key: _capability_schema_payload(value)
             for key, value in schema.properties.items()
-        },
-        "required": list(schema.required),
-        "items": None if schema.items is None else _capability_schema_payload(schema.items),
-        "extra_properties": schema.extra_properties,
-    }
+        }
+    if schema.required:
+        payload["required"] = list(schema.required)
+    if schema.items is not None:
+        payload["items"] = _capability_schema_payload(schema.items)
+    if not schema.extra_properties:
+        payload["extra_properties"] = False
+    return payload
+
+
+def _result_fields(schema: StructuredSchema) -> Any:
+    """Name what a result contains rather than restating its whole schema.
+
+    Planning needs to know which capability to use and what it takes. The full
+    shape of a result is evident when the result actually arrives, so the
+    catalogue lists its field names instead of a nested schema.
+    """
+    if schema.properties:
+        return sorted(schema.properties)
+    if schema.items is not None:
+        return [f"array of {schema.items.kind.value}"]
+    return schema.kind.value
 
 
 def _attempt_payload(item: Any) -> dict[str, Any]:
@@ -332,8 +355,21 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
     }
 
 
+def _shared_failure_codes(capabilities: Sequence[Any]) -> frozenset[str]:
+    """Codes every capability can return, stated once instead of per entry."""
+    sets = [frozenset(item.possible_failure_codes) for item in capabilities]
+    if len(sets) < 2:
+        return frozenset()
+    return frozenset.intersection(*sets)
+
+
+def _failure_codes(item: Any, shared: frozenset[str]) -> list[str]:
+    return sorted(frozenset(item.possible_failure_codes) - shared)
+
+
 def _context_payload(context: ReasoningContext) -> str:
     goal = context.active_goal
+    shared_failure_codes = _shared_failure_codes(context.capabilities)
     payload = {
         "current_trigger": {
             "kind": (
@@ -424,12 +460,15 @@ def _context_payload(context: ReasoningContext) -> str:
                 "id": item.capability_id,
                 "purpose": item.purpose,
                 "side_effect": item.side_effect.value,
-                "possible_failure_codes": list(item.possible_failure_codes),
+                "failure_codes": _failure_codes(item, shared_failure_codes),
                 "input_schema": _capability_schema_payload(item.input_schema),
-                "output_schema": _capability_schema_payload(item.output_schema),
+                "result_fields": _result_fields(item.output_schema),
             }
             for item in context.capabilities
         ],
+        # Most capabilities repeat the same failure codes, so they are stated
+        # once and each capability lists only what it adds.
+        "shared_failure_codes": sorted(shared_failure_codes),
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
