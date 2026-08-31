@@ -15,3 +15,13 @@
   decisions in `docs/PERSISTENT_RESEARCH_NOTEBOOK_BRIEF.md`; approve the final
   retention, authority, privacy, resource, and resumption boundaries before
   runtime implementation.
+
+## Expense account coding
+
+- [ ] Revisit posting every supplier bill to one Cost of Sales account.
+  Friedl chose this deliberately so capture works unattended: the account is a
+  policy choice no invoice contains, so history-based rules fail on suppliers
+  whose work varies and a model asked to pick one guesses. VAT is unaffected,
+  but the P&L loses expense-category detail.
+  A candidate for AL/X's own sandbox work under Law 19 once enough real bills
+  exist to learn from. Not a blocker; revisit before year-end.
