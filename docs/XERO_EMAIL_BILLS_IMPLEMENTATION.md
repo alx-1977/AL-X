@@ -1,17 +1,17 @@
 # Xero Email Bills — Implementation Evidence
 
-**Status:** Implemented locally under D-016; production OAuth connection and
-real Xero writes have not been exercised in this change.
+**Status:** Implemented locally under D-016 and D-017; production OAuth
+connection and real Xero writes have not been exercised in this change.
 
 ## Goal and scope
 
-AL/X can inspect supplier-invoice attachments received through the existing
-iCloud mail capability, prepare an accounts-payable bill, create it as a Xero
-draft, attach the exact source document, authorise the matching draft, and read
-the result back. The first specialised analysis preserves V1's useful DHL
-behaviour: parse a MyBill GDB CSV, parse the positional totals in SARS Customs
-Worksheets, reconcile duty, import VAT and DHL service charges, and refuse
-unknown or inconsistent money.
+AL/X can search historical supplier mail by structured criteria, traverse
+bounded nested ZIP attachments, prepare an accounts-payable bill, create or
+update it as a Xero draft, attach exact source documents, authorise the matching
+draft, and read the result back. The specialised analysis preserves V1's useful
+DHL behaviour: analyse a Customs Worksheet plus its matching SAD 500 before the
+invoice arrives, create a provisional proposal, and later reconcile the MyBill
+GDB CSV against the same evidence while refusing unknown or inconsistent money.
 
 This does not add general Xero conversation, contact mutation, payments, bank
 reconciliation, sales invoices, quotes, purchase orders, journals, reports or
@@ -21,14 +21,16 @@ payroll.
 
 - Raw person language still enters only the Conversation Gateway and Core.
 - Mail, DHL and Xero receive structured identifiers and values only.
-- Mail attachment listing and reading are reusable primitives. Attachment text
+- Mail search, attachment listing and attachment reading are reusable
+  primitives. Search selects the mailbox read-only, uses `BODY.PEEK`, and does
+  not change observation state. Attachment text
   is transient; stable metadata is retained under D-013 provenance.
-- ZIP members are exposed as bounded virtual attachments. The archive is never
+- Nested ZIP members are exposed as bounded virtual attachments. The archive is never
   extracted to disk, path components are discarded, and member count and byte
   limits prevent an unbounded archive expansion.
-- DHL reconciliation is a deterministic document-analysis primitive with no
-  Xero or conversational authority.
-- Xero lookup, draft creation, source attachment, authorisation and read-back
+- DHL customs analysis and reconciliation are deterministic document-analysis
+  primitives with no Xero or conversational authority.
+- Xero lookup, draft creation/update, source attachment, authorisation and read-back
   remain separate primitives. Every result returns to the Core.
 - OAuth state and tokens are durable across restart. Tokens are encrypted with
   an independent local key restricted to the current user; refresh rotation is
@@ -38,10 +40,14 @@ payroll.
 
 D-016 records Friedl's product and deployment decision. Every Xero write still
 requires an exact, expiring approval. No unattended standing authority exists.
-The draft primitive refuses unbalanced lines and an existing supplier/invoice
-pair. Authorisation refuses a missing bill, a non-draft, a changed invoice
-number or total, and a bill without a supporting attachment. Xero acceptance
-does not prove completion; the separate read primitive exists for verification.
+The draft primitives refuse unbalanced lines, account/tax pairs absent from the
+live configured organisation, and an existing supplier/invoice pair. Duplicate
+lookup uses Xero's documented `InvoiceNumbers` and `ContactIDs` collection
+filters. Authorisation refuses a missing bill, a non-draft, a changed invoice
+number or total, and any explicitly required attachment whose bytes cannot be
+read back from Xero with the approved SHA-256 digest. `HasAttachments` alone is
+not proof. Malformed money returned by Xero fails closed. Xero acceptance does
+not prove completion; the separate read primitive exists for verification.
 
 No production Xero request was made while implementing or testing this slice.
 
@@ -65,28 +71,49 @@ call and are not written to an AL/X artifact directory.
 Scheduled enforcement of those expiry dates remains the explicit item in
 `TODO.md`; this change does not activate deletion or perform a purge.
 
+## V1 fixture and archive evidence
+
+The positional worksheet parser was exercised read-only against both retained
+V1 fixtures:
+
+- SHA-256 `05645ee75f300b3b81e5be4ce9d1a3ab2eac9a65e996997cfa96535e52f56b8e`
+  → declaration `DFM202604215028901`, waybill `8339567983`, duty `15.60`, VAT
+  `1100.55`, total `1116.15`.
+- SHA-256 `7ae9f4cc3a7235db8104b076f8a7bf3c2bb02d14126dfde52abf9f1a2e05e1e6`
+  → declaration `DFM202607195025382`, waybill `7096903730`, duty `38.25`, VAT
+  `168.75`, total `207.00`.
+
+The retained V1 DHL archive set was inspected without extraction to disk. Its
+nested paths expose the expected eight Customs Worksheets and eight SAD 500
+documents, all of which are identified by content; unrelated and malformed PDF
+members are refused rather than treated as customs evidence. The evidence also
+confirmed that SAD 500 identity must be matched by declaration number rather
+than by the first 10-digit value in the document.
+
 ## Known limits
 
 - Text-layer PDFs are supported. Scanned image-only invoices need a separately
   reviewed OCR/document-vision capability.
 - A missing Xero contact blocks rather than creating one; contact mutation is
   outside D-016.
-- DHL reconciliation currently waits until the invoice CSV and all relevant
-  Customs Worksheets are available. It does not create V1's provisional
-  worksheet-only draft.
-- At least one source document must be attached before authorisation. The Core
-  remains responsible for attaching every relevant DHL document, including the
-  invoice, worksheet and SAD 500, before claiming the goal complete.
+- The customs-first primitive requires one Customs Worksheet and its matching
+  SAD 500. It proposes V1's `DHL-WAYBILL-<waybill>` provisional identifier; an
+  independently approved Xero draft call creates it, and a later independently
+  approved update call replaces the same draft with the final MyBill values.
+- The Core remains responsible for attaching every required DHL document,
+  including invoice, worksheet and SAD 500, and supplies each exact filename
+  and digest to authorisation. No provider privately sequences that workflow.
 - The initial OAuth connection requires running `scripts/connect_xero.py` and
   completing Xero's browser consent. This is authentication, not a second
   conversational path.
 
 ## Change evidence
 
-- **Primitives added:** list/read mail attachments; reconcile DHL import
+- **Primitives added:** structured mail search; list/read nested mail
+  attachments; analyse customs-first DHL evidence; reconcile final DHL import
   documents; search Xero contacts; list accounts and tax rates; find/read an AP
-  bill; create a draft AP bill; attach an exact mail document; authorise an AP
-  bill.
+  bill; create/update a draft AP bill; attach an exact mail document; authorise
+  an AP bill.
 - **New primitive justification:** mail attachments and Xero accounting effects
   are external capabilities AL/X did not possess.
 - **Raw-language flow:** person → Conversation Gateway → Core → structured

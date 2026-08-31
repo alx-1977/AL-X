@@ -17,7 +17,11 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject  # n
 
 from alx.contracts import DhlDocumentError, MailAttachment  # noqa: E402
 from alx.providers import DhlImportAnalyzerAdapter  # noqa: E402
-from alx.tools import RECONCILE_DHL_IMPORT_DOCUMENTS, build_dhl_executors  # noqa: E402
+from alx.tools import (  # noqa: E402
+    ANALYZE_DHL_CUSTOMS_DOCUMENTS,
+    RECONCILE_DHL_IMPORT_DOCUMENTS,
+    build_dhl_executors,
+)
 
 
 def mybill_csv(*, vat: str = "1100.55") -> bytes:
@@ -96,10 +100,33 @@ ET""".encode()
     return output.getvalue()
 
 
+def sad500_pdf(*, declaration: str = "DFM202604215028901") -> bytes:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    stream = DecodedStreamObject()
+    stream.set_data(
+        f"BT /F1 10 Tf 1 0 0 1 100 760 Tm (SAD 500 CUSTOMS DECLARATION {declaration}) Tj ET".encode()
+    )
+    page[NameObject("/Contents")] = stream
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
 class DhlAnalyzerTests(unittest.TestCase):
     def test_v1_customs_rules_produce_a_balanced_bill_proposal(self) -> None:
         result = DhlImportAnalyzerAdapter().reconcile(
-            mybill_csv(), [worksheet_pdf()]
+            mybill_csv(), [worksheet_pdf(), sad500_pdf()]
         )
         self.assertTrue(result["reconciled"])
         self.assertEqual(result["invoice_number"], "CPTZR00026033")
@@ -116,14 +143,14 @@ class DhlAnalyzerTests(unittest.TestCase):
 
     def test_mismatched_vat_refuses_reconciliation(self) -> None:
         result = DhlImportAnalyzerAdapter().reconcile(
-            mybill_csv(), [worksheet_pdf(vat="1100.53", total="1116.13")]
+            mybill_csv(), [worksheet_pdf(vat="1100.53", total="1116.13"), sad500_pdf()]
         )
         self.assertFalse(result["reconciled"])
         self.assertTrue(any("VAT mismatch" in item for item in result["errors"]))
 
     def test_unknown_charge_code_is_never_swept_into_an_account(self) -> None:
         payload = mybill_csv().replace(b",WC,DUTY TAX PROCESSING,200.00", b",ZZ,UNKNOWN,200.00")
-        result = DhlImportAnalyzerAdapter().reconcile(payload, [worksheet_pdf()])
+        result = DhlImportAnalyzerAdapter().reconcile(payload, [worksheet_pdf(), sad500_pdf()])
         self.assertFalse(result["reconciled"])
         self.assertTrue(any("unrecognised charge code" in item for item in result["errors"]))
 
@@ -140,6 +167,7 @@ class FakeMail:
         self.payloads = {
             "invoice": ("invoice.csv", "text/csv", mybill_csv()),
             "worksheet": ("worksheet.pdf", "application/pdf", worksheet_pdf()),
+            "sad": ("sad500.pdf", "application/pdf", sad500_pdf()),
         }
 
     def read_attachment(self, _reference, attachment_id):
@@ -176,15 +204,37 @@ class DhlPrimitiveTests(unittest.TestCase):
         result = executor(
             {
                 "invoice_document": source("invoice", "10"),
-                "customs_documents": [source("worksheet", "11")],
+                "customs_documents": [source("worksheet", "11"), source("sad", "12")],
             }
         )
         self.assertTrue(result.values["reconciled"])
         self.assertIsNotNone(result.provenance)
         self.assertEqual(
             {(item.uid_validity, item.uid) for item in result.provenance.mail_references},
-            {("777", "10"), ("777", "11")},
+            {("777", "10"), ("777", "11"), ("777", "12")},
         )
+
+    def test_customs_first_stage_produces_verified_provisional_bill(self) -> None:
+        mail = FakeMail()
+
+        def source(attachment_id: str, uid: str) -> dict:
+            payload = mail.payloads[attachment_id][2]
+            return {
+                "mailbox_id": "INBOX", "uid_validity": "777", "uid": uid,
+                "attachment_id": attachment_id,
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+
+        executor = build_dhl_executors(mail, DhlImportAnalyzerAdapter(), lambda: "call-1")[ANALYZE_DHL_CUSTOMS_DOCUMENTS]
+        result = executor({"customs_documents": [source("worksheet", "11"), source("sad", "12")]})
+        self.assertTrue(result.values["verified"])
+        self.assertEqual(result.values["provisional_invoice_number"], "DHL-WAYBILL-1234567890")
+        self.assertEqual({item["kind"] for item in result.values["documents"]}, {"customs_worksheet", "sad_500"})
+
+    def test_missing_sad500_is_refused(self) -> None:
+        with self.assertRaises(DhlDocumentError) as captured:
+            DhlImportAnalyzerAdapter().analyze_customs([worksheet_pdf()])
+        self.assertEqual(captured.exception.code, "customs_evidence_ambiguous")
 
     def test_hash_mismatch_stops_before_analysis(self) -> None:
         mail = FakeMail()

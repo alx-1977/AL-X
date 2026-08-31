@@ -10,6 +10,7 @@ from alx.contracts import CapabilityDefinition, CapabilityResult, MailAccount, S
 from alx.providers import DhlImportAnalyzerAdapter
 from alx.safety import AuthorityPolicy
 from alx.tools import (
+    ANALYZE_DHL_CUSTOMS_DOCUMENTS,
     DHL_DEFINITIONS,
     RECONCILE_DHL_IMPORT_DOCUMENTS,
     build_dhl_executors,
@@ -34,6 +35,9 @@ def build_dhl_runtime(
     return DhlRuntime(
         DHL_DEFINITIONS,
         {
+            ANALYZE_DHL_CUSTOMS_DOCUMENTS: AuthorityPolicy(
+                frozenset({DHL_DOCUMENT_PERMISSION})
+            ),
             RECONCILE_DHL_IMPORT_DOCUMENTS: AuthorityPolicy(
                 frozenset({DHL_DOCUMENT_PERMISSION})
             )

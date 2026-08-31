@@ -24,6 +24,7 @@ from alx.contracts.provenance import RetentionPolicy
 
 
 RECONCILE_DHL_IMPORT_DOCUMENTS = "reconcile_dhl_import_documents"
+ANALYZE_DHL_CUSTOMS_DOCUMENTS = "analyze_dhl_customs_documents"
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
@@ -50,10 +51,80 @@ _LINE = StructuredSchema(
     ("category", "description", "amount", "claimable"),
     extra_properties=False,
 )
+_DOCUMENT_EVIDENCE = StructuredSchema(
+    ValueKind.OBJECT,
+    {"kind": _STRING, "source": _SOURCE},
+    ("kind", "source"),
+    extra_properties=False,
+)
+
+_FAILURES = (
+    "arguments_unusable",
+    "attachment_unavailable",
+    "source_mismatch",
+    "invoice_encoding_invalid",
+    "invoice_format_invalid",
+    "invoice_header_missing",
+    "invoice_unavailable",
+    "invoice_selection_required",
+    "invoice_number_unavailable",
+    "worksheet_pdf_invalid",
+    "not_customs_worksheet",
+    "worksheet_identity_missing",
+    "worksheet_identity_ambiguous",
+    "worksheet_total_missing",
+    "not_sad500",
+    "sad500_identity_ambiguous",
+    "customs_document_unrecognised",
+    "customs_evidence_ambiguous",
+)
+
+ANALYZE_DEFINITION = CapabilityDefinition(
+    ANALYZE_DHL_CUSTOMS_DOCUMENTS,
+    "Analyse one exact DHL Customs Worksheet and its matching SAD 500 before the MyBill invoice exists; return a provisional evidence proposal without changing mail or Xero.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"customs_documents": StructuredSchema(ValueKind.ARRAY, items=_SOURCE)},
+        ("customs_documents",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "verified": _BOOLEAN,
+            "provisional_invoice_number": _STRING,
+            "currency": _STRING,
+            "total": _STRING,
+            "waybill": _STRING,
+            "declaration": _STRING,
+            "reference": _STRING,
+            "lines": StructuredSchema(ValueKind.ARRAY, items=_LINE),
+            "documents": StructuredSchema(ValueKind.ARRAY, items=_DOCUMENT_EVIDENCE),
+            "errors": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "warnings": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+        },
+        (
+            "verified",
+            "provisional_invoice_number",
+            "currency",
+            "total",
+            "waybill",
+            "declaration",
+            "reference",
+            "lines",
+            "documents",
+            "errors",
+            "warnings",
+        ),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
 
 DEFINITION = CapabilityDefinition(
     RECONCILE_DHL_IMPORT_DOCUMENTS,
-    "Deterministically reconcile one DHL MyBill CSV attachment with the exact SARS customs worksheet attachments supplied for its shipments; return a bill proposal without changing mail or Xero.",
+    "Deterministically reconcile one DHL MyBill CSV attachment with the exact Customs Worksheet and SAD 500 attachments supplied for its shipments; return a bill proposal without changing mail or Xero.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -77,6 +148,7 @@ DEFINITION = CapabilityDefinition(
             "declarations": StructuredSchema(ValueKind.ARRAY, items=_STRING),
             "reference": _STRING,
             "lines": StructuredSchema(ValueKind.ARRAY, items=_LINE),
+            "documents": StructuredSchema(ValueKind.ARRAY, items=_DOCUMENT_EVIDENCE),
             "errors": StructuredSchema(ValueKind.ARRAY, items=_STRING),
             "warnings": StructuredSchema(ValueKind.ARRAY, items=_STRING),
         },
@@ -91,30 +163,17 @@ DEFINITION = CapabilityDefinition(
             "declarations",
             "reference",
             "lines",
+            "documents",
             "errors",
             "warnings",
         ),
         extra_properties=False,
     ),
     SideEffect.NONE,
-    (
-        "arguments_unusable",
-        "attachment_unavailable",
-        "source_mismatch",
-        "invoice_encoding_invalid",
-        "invoice_format_invalid",
-        "invoice_header_missing",
-        "invoice_unavailable",
-        "invoice_selection_required",
-        "invoice_number_unavailable",
-        "worksheet_pdf_invalid",
-        "not_customs_worksheet",
-        "worksheet_identity_missing",
-        "worksheet_total_missing",
-    ),
+    _FAILURES,
 )
 
-DEFINITIONS = (DEFINITION,)
+DEFINITIONS = (ANALYZE_DEFINITION, DEFINITION)
 
 
 def _required(values: Mapping[str, Any], name: str) -> str:
@@ -140,6 +199,34 @@ def _read_source(
     return reference, payload
 
 
+def _normalised_source(values: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        name: _required(values, name)
+        for name in (
+            "mailbox_id",
+            "uid_validity",
+            "uid",
+            "attachment_id",
+            "expected_sha256",
+        )
+    }
+
+
+def _with_document_evidence(
+    values: Mapping[str, Any], sources: list[dict[str, str]]
+) -> dict[str, Any]:
+    kinds = values.get("document_kinds")
+    if not isinstance(kinds, (tuple, list)) or len(kinds) != len(sources):
+        raise DhlDocumentError("customs_evidence_ambiguous")
+    output = dict(values)
+    output.pop("document_kinds", None)
+    output["documents"] = tuple(
+        {"kind": str(kind), "source": source}
+        for kind, source in zip(kinds, sources, strict=True)
+    )
+    return output
+
+
 def build_dhl_executors(
     mail: MailAccount,
     analyzer: DhlImportAnalyzer,
@@ -148,8 +235,49 @@ def build_dhl_executors(
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
+    def failure(capability_id: str, code: str) -> CapabilityResult:
+        return CapabilityResult(
+            call_id_source(),
+            capability_id,
+            CapabilityResultState.FAILED,
+            failure={"code": code},
+        )
+
+    def analyze_customs(arguments: StructuredData) -> CapabilityResult:
+        references: list[MailReference] = []
+        sources: list[dict[str, str]] = []
+        try:
+            customs_sources = arguments.get("customs_documents")
+            if not isinstance(customs_sources, (tuple, list)) or not customs_sources:
+                raise ValueError("customs_documents")
+            payloads: list[bytes] = []
+            for source in customs_sources:
+                if not isinstance(source, Mapping):
+                    raise ValueError("customs_documents")
+                reference, payload = _read_source(mail, source)
+                references.append(reference)
+                sources.append(_normalised_source(source))
+                payloads.append(payload)
+            values = _with_document_evidence(
+                analyzer.analyze_customs(payloads), sources
+            )
+        except ValueError:
+            return failure(ANALYZE_DHL_CUSTOMS_DOCUMENTS, "arguments_unusable")
+        except MailAccessError as error:
+            return failure(ANALYZE_DHL_CUSTOMS_DOCUMENTS, error.code)
+        except DhlDocumentError as error:
+            return failure(ANALYZE_DHL_CUSTOMS_DOCUMENTS, error.code)
+        return CapabilityResult(
+            call_id_source(),
+            ANALYZE_DHL_CUSTOMS_DOCUMENTS,
+            CapabilityResultState.SUCCEEDED,
+            values,
+            provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
+        )
+
     def reconcile(arguments: StructuredData) -> CapabilityResult:
         references: list[MailReference] = []
+        sources: list[dict[str, str]] = []
         try:
             invoice_source = arguments.get("invoice_document")
             customs_sources = arguments.get("customs_documents")
@@ -165,34 +293,23 @@ def build_dhl_executors(
                     raise ValueError("customs_documents")
                 reference, payload = _read_source(mail, source)
                 references.append(reference)
+                sources.append(_normalised_source(source))
                 customs_payloads.append(payload)
             invoice_number = arguments.get("invoice_number", "")
             if not isinstance(invoice_number, str):
                 raise ValueError("invoice_number")
-            values = analyzer.reconcile(
-                invoice_payload, customs_payloads, invoice_number.strip()
+            values = _with_document_evidence(
+                analyzer.reconcile(
+                    invoice_payload, customs_payloads, invoice_number.strip()
+                ),
+                sources,
             )
         except ValueError:
-            return CapabilityResult(
-                call_id_source(),
-                RECONCILE_DHL_IMPORT_DOCUMENTS,
-                CapabilityResultState.FAILED,
-                failure={"code": "arguments_unusable"},
-            )
+            return failure(RECONCILE_DHL_IMPORT_DOCUMENTS, "arguments_unusable")
         except MailAccessError as error:
-            return CapabilityResult(
-                call_id_source(),
-                RECONCILE_DHL_IMPORT_DOCUMENTS,
-                CapabilityResultState.FAILED,
-                failure={"code": error.code},
-            )
+            return failure(RECONCILE_DHL_IMPORT_DOCUMENTS, error.code)
         except DhlDocumentError as error:
-            return CapabilityResult(
-                call_id_source(),
-                RECONCILE_DHL_IMPORT_DOCUMENTS,
-                CapabilityResultState.FAILED,
-                failure={"code": error.code},
-            )
+            return failure(RECONCILE_DHL_IMPORT_DOCUMENTS, error.code)
         return CapabilityResult(
             call_id_source(),
             RECONCILE_DHL_IMPORT_DOCUMENTS,
@@ -201,4 +318,7 @@ def build_dhl_executors(
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
         )
 
-    return {RECONCILE_DHL_IMPORT_DOCUMENTS: reconcile}
+    return {
+        ANALYZE_DHL_CUSTOMS_DOCUMENTS: analyze_customs,
+        RECONCILE_DHL_IMPORT_DOCUMENTS: reconcile,
+    }

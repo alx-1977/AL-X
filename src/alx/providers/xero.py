@@ -7,6 +7,7 @@ import hashlib
 import os
 import secrets
 import sqlite3
+import stat
 import threading
 import time
 from dataclasses import dataclass
@@ -100,16 +101,50 @@ class SQLiteXeroOAuth:
     def _token_key(path: Path) -> bytes:
         """Keep token encryption independent from OAuth-secret rotation."""
         try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            existing = path.lstat()
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)
+        ):
+            _raise_clean("token_key_invalid")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags, 0o600)
         except FileExistsError:
             pass
+        except OSError:
+            _raise_clean("token_key_invalid")
         else:
             try:
                 os.write(descriptor, Fernet.generate_key())
             finally:
                 os.close(descriptor)
-        os.chmod(path, 0o600)
-        key = path.read_bytes().strip()
+        read_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            read_flags |= os.O_NOFOLLOW
+        descriptor = -1
+        try:
+            descriptor = os.open(path, read_flags)
+            current = os.fstat(descriptor)
+            named = path.lstat()
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or stat.S_ISLNK(named.st_mode)
+                or (current.st_dev, current.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                _raise_clean("token_key_invalid")
+            os.fchmod(descriptor, 0o600)
+            key = os.read(descriptor, 4096).strip()
+        except XeroAccessError:
+            raise
+        except OSError:
+            _raise_clean("token_key_invalid")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         try:
             Fernet(key)
         except (TypeError, ValueError):
@@ -329,20 +364,24 @@ class XeroAccountingAdapter:
         content: bytes | None = None,
         media_type: str = "application/json",
         allow_not_found: bool = False,
+        binary: bool = False,
     ) -> Any:
         connection = self._oauth.connection()
         failure = ""
         response = None
         try:
+            headers = {
+                "Authorization": f"Bearer {connection.access_token}",
+                "Xero-tenant-id": connection.tenant_id,
+                "Accept": "application/octet-stream" if binary else "application/json",
+                "Content-Type": media_type,
+            }
+            if binary:
+                headers["contentType"] = media_type
             response = httpx.request(
                 method,
                 f"{ACCOUNTING_URL}{path}",
-                headers={
-                    "Authorization": f"Bearer {connection.access_token}",
-                    "Xero-tenant-id": connection.tenant_id,
-                    "Accept": "application/json",
-                    "Content-Type": media_type,
-                },
+                headers=headers,
                 json=dict(json_body) if json_body is not None else None,
                 content=content,
                 timeout=self._timeout_seconds,
@@ -361,6 +400,8 @@ class XeroAccountingAdapter:
             _raise_clean("rate_limited")
         if response.status_code >= 400:
             _raise_clean("request_rejected")
+        if binary:
+            return bytes(response.content)
         body: Any = None
         try:
             body = response.json()
@@ -388,12 +429,16 @@ class XeroAccountingAdapter:
     def find_bill(
         self, invoice_number: str, contact_id: str = ""
     ) -> Mapping[str, Any] | None:
-        body = self._request(
-            "GET", f"/Invoices/{quote(invoice_number, safe='')}", allow_not_found=True
-        )
-        items = self._items(body, "Invoices") if body is not None else ()
+        parameters: dict[str, str] = {"InvoiceNumbers": invoice_number}
+        if contact_id:
+            parameters["ContactIDs"] = contact_id
+        body = self._request("GET", f"/Invoices?{urlencode(parameters)}")
+        items = self._items(body, "Invoices")
         for item in items:
-            if item.get("Type") != "ACCPAY":
+            if (
+                item.get("Type") != "ACCPAY"
+                or str(item.get("InvoiceNumber") or "") != invoice_number
+            ):
                 continue
             contact = item.get("Contact")
             candidate_contact = (
@@ -409,11 +454,30 @@ class XeroAccountingAdapter:
             "GET", f"/Invoices/{quote(invoice_id, safe='')}", allow_not_found=True
         )
         items = self._items(body, "Invoices") if body is not None else ()
-        return items[0] if items and items[0].get("Type") == "ACCPAY" else None
+        return (
+            items[0]
+            if items
+            and items[0].get("Type") == "ACCPAY"
+            and str(items[0].get("InvoiceID") or "") == invoice_id
+            else None
+        )
 
     def create_draft_bill(self, bill: Mapping[str, Any]) -> Mapping[str, Any]:
         body = self._request(
             "POST", "/Invoices", json_body={"Invoices": [dict(bill)]}
+        )
+        items = self._items(body, "Invoices")
+        if not items:
+            _raise_clean("response_invalid")
+        return items[0]
+
+    def update_draft_bill(
+        self, invoice_id: str, bill: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        body = self._request(
+            "POST",
+            f"/Invoices/{quote(invoice_id, safe='')}",
+            json_body={"Invoices": [{**dict(bill), "InvoiceID": invoice_id}]},
         )
         items = self._items(body, "Invoices")
         if not items:
@@ -431,6 +495,24 @@ class XeroAccountingAdapter:
         )
         items = self._items(body, "Attachments")
         return items[0] if items else {"FileName": filename}
+
+    def list_bill_attachments(
+        self, invoice_id: str
+    ) -> tuple[Mapping[str, Any], ...]:
+        body = self._request(
+            "GET", f"/Invoices/{quote(invoice_id, safe='')}/Attachments"
+        )
+        return self._items(body, "Attachments")
+
+    def read_bill_attachment(
+        self, invoice_id: str, attachment_id: str, media_type: str
+    ) -> bytes:
+        return self._request(
+            "GET",
+            f"/Invoices/{quote(invoice_id, safe='')}/Attachments/{quote(attachment_id, safe='')}",
+            media_type=media_type,
+            binary=True,
+        )
 
     def authorise_bill(self, invoice_id: str) -> Mapping[str, Any]:
         body = self._request(

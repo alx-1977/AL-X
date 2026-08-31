@@ -30,6 +30,10 @@ class XeroAccountingAccount(Protocol):
 
     def create_draft_bill(self, bill: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
+    def update_draft_bill(
+        self, invoice_id: str, bill: Mapping[str, Any]
+    ) -> Mapping[str, Any]: ...
+
     def attach_bill_document(
         self,
         invoice_id: str,
@@ -37,5 +41,13 @@ class XeroAccountingAccount(Protocol):
         media_type: str,
         content: bytes,
     ) -> Mapping[str, Any]: ...
+
+    def list_bill_attachments(
+        self, invoice_id: str
+    ) -> tuple[Mapping[str, Any], ...]: ...
+
+    def read_bill_attachment(
+        self, invoice_id: str, attachment_id: str, media_type: str
+    ) -> bytes: ...
 
     def authorise_bill(self, invoice_id: str) -> Mapping[str, Any]: ...

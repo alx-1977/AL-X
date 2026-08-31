@@ -15,6 +15,7 @@ from alx.tools import (
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
     AUTHORISE_XERO_BILL,
     CREATE_XERO_DRAFT_BILL,
+    UPDATE_XERO_DRAFT_BILL,
     FIND_XERO_BILL,
     LIST_XERO_ACCOUNTS,
     LIST_XERO_TAX_RATES,
@@ -65,6 +66,7 @@ def build_xero_runtime(
         FIND_XERO_BILL: read_policy,
         READ_XERO_BILL: read_policy,
         CREATE_XERO_DRAFT_BILL: write_policy,
+        UPDATE_XERO_DRAFT_BILL: write_policy,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: write_policy,
         AUTHORISE_XERO_BILL: write_policy,
     }

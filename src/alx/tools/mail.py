@@ -18,6 +18,7 @@ from alx.contracts import (
     MailContent,
     MailObservationControl,
     MailReference,
+    MailSearchCriteria,
     MailSendError,
     OutboundReply,
     SideEffect,
@@ -29,6 +30,7 @@ from alx.contracts.provenance import RetentionPolicy
 
 
 READ_MAIL_MESSAGE = "read_mail_message"
+SEARCH_MAIL_MESSAGES = "search_mail_messages"
 LIST_MAIL_ATTACHMENTS = "list_mail_attachments"
 READ_MAIL_ATTACHMENT = "read_mail_attachment"
 ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
@@ -43,7 +45,9 @@ _FAILURES = (
     "mailbox_unavailable",
     "identifier_stale",
     "message_unavailable",
+    "search_failed",
     "attachment_unavailable",
+    "archive_unsafe",
     "observation_unavailable",
     "trash_unavailable",
     "move_failed",
@@ -102,6 +106,58 @@ READ_DEFINITION = CapabilityDefinition(
             "recipients", "carbon_copy", "reply_references",
             "has_attachments",
         ),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+_SEARCH_ITEM = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "reference": _REFERENCE,
+        "subject": _STRING,
+        "sender": _STRING,
+        "received_at": _STRING,
+        "has_attachments": _BOOLEAN,
+        "seen": _BOOLEAN,
+    },
+    (
+        "reference",
+        "subject",
+        "sender",
+        "received_at",
+        "has_attachments",
+        "seen",
+    ),
+    extra_properties=False,
+)
+
+SEARCH_DEFINITION = CapabilityDefinition(
+    SEARCH_MAIL_MESSAGES,
+    "Search one mailbox with structured sender, subject, date, Seen-state and attachment criteria; return stable message references without changing mail or notification state.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "mailbox_id": _STRING,
+            "sender": _STRING,
+            "subject": _STRING,
+            "date_from": _STRING,
+            "date_to": _STRING,
+            "seen_state": _STRING,
+            "has_attachments": _BOOLEAN,
+            "limit": _INTEGER,
+        },
+        ("mailbox_id",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "messages": StructuredSchema(ValueKind.ARRAY, items=_SEARCH_ITEM),
+            "truncated": _BOOLEAN,
+        },
+        ("messages", "truncated"),
         extra_properties=False,
     ),
     SideEffect.NONE,
@@ -241,6 +297,7 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
 )
 
 DEFINITIONS = (
+    SEARCH_DEFINITION,
     READ_DEFINITION,
     LIST_ATTACHMENTS_DEFINITION,
     READ_ATTACHMENT_DEFINITION,
@@ -328,6 +385,13 @@ def _reference_values(reference: MailReference) -> dict[str, str]:
     }
 
 
+def _optional_string(arguments: StructuredData, name: str, default: str = "") -> str:
+    value = arguments.get(name, default)
+    if not isinstance(value, str):
+        raise ValueError(name)
+    return value.strip()
+
+
 def _attachment_values(attachment: MailAttachment) -> dict[str, Any]:
     return {
         "attachment_id": attachment.attachment_id,
@@ -383,6 +447,56 @@ def build_mail_executors(
             {**durable, "body": content.body},
             durable_values=durable,
             provenance=RetentionPolicy().direct_mail(now(), (content.reference,)),
+        )
+
+    def search(arguments: StructuredData) -> CapabilityResult:
+        try:
+            has_attachments = arguments.get("has_attachments")
+            if has_attachments is not None and not isinstance(has_attachments, bool):
+                raise ValueError("has_attachments")
+            limit = arguments.get("limit", 50)
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise ValueError("limit")
+            criteria = MailSearchCriteria(
+                _optional_string(arguments, "mailbox_id"),
+                _optional_string(arguments, "sender"),
+                _optional_string(arguments, "subject"),
+                _optional_string(arguments, "date_from"),
+                _optional_string(arguments, "date_to"),
+                _optional_string(arguments, "seen_state", "any"),
+                has_attachments,
+                limit,
+            )
+            messages, truncated = account.search(criteria)
+        except (TypeError, ValueError):
+            return failed(SEARCH_MAIL_MESSAGES, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(SEARCH_MAIL_MESSAGES, error.code)
+        values = {
+            "messages": tuple(
+                {
+                    "reference": _reference_values(item.reference),
+                    "subject": item.subject,
+                    "sender": item.sender,
+                    "received_at": item.received_at,
+                    "has_attachments": item.has_attachments,
+                    "seen": item.seen,
+                }
+                for item in messages
+            ),
+            "truncated": truncated,
+        }
+        references = tuple(item.reference for item in messages)
+        return CapabilityResult(
+            call_id_source(),
+            SEARCH_MAIL_MESSAGES,
+            CapabilityResultState.SUCCEEDED,
+            values,
+            provenance=(
+                RetentionPolicy().direct_mail(now(), references)
+                if references
+                else None
+            ),
         )
 
     def acknowledge(arguments: StructuredData) -> CapabilityResult:
@@ -473,6 +587,7 @@ def build_mail_executors(
         )
 
     return {
+        SEARCH_MAIL_MESSAGES: search,
         READ_MAIL_MESSAGE: read,
         LIST_MAIL_ATTACHMENTS: list_attachments,
         READ_MAIL_ATTACHMENT: read_attachment,

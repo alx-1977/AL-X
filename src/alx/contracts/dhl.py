@@ -14,6 +14,10 @@ class DhlDocumentError(Exception):
 
 
 class DhlImportAnalyzer(Protocol):
+    def analyze_customs(
+        self, customs_documents: Sequence[bytes]
+    ) -> Mapping[str, Any]: ...
+
     def reconcile(
         self,
         invoice_document: bytes,

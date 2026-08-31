@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -29,6 +30,7 @@ LIST_XERO_TAX_RATES = "list_xero_tax_rates"
 FIND_XERO_BILL = "find_xero_bill"
 READ_XERO_BILL = "read_xero_bill"
 CREATE_XERO_DRAFT_BILL = "create_xero_draft_bill"
+UPDATE_XERO_DRAFT_BILL = "update_xero_draft_bill"
 ATTACH_MAIL_DOCUMENT_TO_XERO_BILL = "attach_mail_document_to_xero_bill"
 AUTHORISE_XERO_BILL = "authorise_xero_bill"
 
@@ -47,7 +49,9 @@ _FAILURES = (
     "bill_not_found",
     "duplicate_found",
     "bill_not_draft",
+    "account_mapping_invalid",
     "supporting_document_missing",
+    "supporting_document_mismatch",
     "source_mismatch",
     "attachment_unavailable",
 )
@@ -112,6 +116,24 @@ _LINE_ITEM = _object(
     ("description", "quantity", "unit_amount", "account_code", "tax_type", "tax_amount"),
 )
 
+_DRAFT_PROPERTIES = {
+    "contact_id": _STRING,
+    "invoice_number": _STRING,
+    "date": _STRING,
+    "due_date": _STRING,
+    "currency": _STRING,
+    "reference": _STRING,
+    "line_amount_types": _STRING,
+    "expected_total": _STRING,
+    "line_items": StructuredSchema(ValueKind.ARRAY, items=_LINE_ITEM),
+}
+_DRAFT_REQUIRED = tuple(_DRAFT_PROPERTIES)
+
+_REQUIRED_ATTACHMENT = _object(
+    {"filename": _STRING, "sha256": _STRING},
+    ("filename", "sha256"),
+)
+
 SEARCH_CONTACTS_DEFINITION = CapabilityDefinition(
     SEARCH_XERO_CONTACTS,
     "Search existing contacts in the configured Xero organisation without creating or changing one.",
@@ -163,28 +185,27 @@ READ_BILL_DEFINITION = CapabilityDefinition(
 CREATE_DRAFT_DEFINITION = CapabilityDefinition(
     CREATE_XERO_DRAFT_BILL,
     "Create one DRAFT accounts-payable bill from explicit, balanced structured values; refuse an existing invoice number.",
+    _object(_DRAFT_PROPERTIES, _DRAFT_REQUIRED),
+    _BILL_RESULT,
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
+UPDATE_DRAFT_DEFINITION = CapabilityDefinition(
+    UPDATE_XERO_DRAFT_BILL,
+    "Update one exact DRAFT accounts-payable bill from explicit, balanced structured values after verifying its current invoice number and total.",
     _object(
         {
-            "contact_id": _STRING,
-            "invoice_number": _STRING,
-            "date": _STRING,
-            "due_date": _STRING,
-            "currency": _STRING,
-            "reference": _STRING,
-            "line_amount_types": _STRING,
-            "expected_total": _STRING,
-            "line_items": StructuredSchema(ValueKind.ARRAY, items=_LINE_ITEM),
+            "invoice_id": _STRING,
+            "expected_current_invoice_number": _STRING,
+            "expected_current_total": _STRING,
+            **_DRAFT_PROPERTIES,
         },
         (
-            "contact_id",
-            "invoice_number",
-            "date",
-            "due_date",
-            "currency",
-            "reference",
-            "line_amount_types",
-            "expected_total",
-            "line_items",
+            "invoice_id",
+            "expected_current_invoice_number",
+            "expected_current_total",
+            *_DRAFT_REQUIRED,
         ),
     ),
     _BILL_RESULT,
@@ -216,11 +237,12 @@ ATTACH_DOCUMENT_DEFINITION = CapabilityDefinition(
     _object(
         {
             "invoice_id": _STRING,
+            "attachment_id": _STRING,
             "filename": _STRING,
             "sha256": _STRING,
             "attached": _BOOLEAN,
         },
-        ("invoice_id", "filename", "sha256", "attached"),
+        ("invoice_id", "attachment_id", "filename", "sha256", "attached"),
     ),
     SideEffect.EFFECTFUL,
     _FAILURES,
@@ -234,8 +256,16 @@ AUTHORISE_BILL_DEFINITION = CapabilityDefinition(
             "invoice_id": _STRING,
             "invoice_number": _STRING,
             "expected_total": _STRING,
+            "required_attachments": StructuredSchema(
+                ValueKind.ARRAY, items=_REQUIRED_ATTACHMENT
+            ),
         },
-        ("invoice_id", "invoice_number", "expected_total"),
+        (
+            "invoice_id",
+            "invoice_number",
+            "expected_total",
+            "required_attachments",
+        ),
     ),
     _BILL_RESULT,
     SideEffect.EFFECTFUL,
@@ -249,6 +279,7 @@ DEFINITIONS = (
     FIND_BILL_DEFINITION,
     READ_BILL_DEFINITION,
     CREATE_DRAFT_DEFINITION,
+    UPDATE_DRAFT_DEFINITION,
     ATTACH_DOCUMENT_DEFINITION,
     AUTHORISE_BILL_DEFINITION,
 )
@@ -274,10 +305,15 @@ def _decimal(value: Any, name: str) -> Decimal:
 
 
 def _money(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        raise XeroAccessError("response_invalid")
     try:
-        return format(Decimal(str(value or "0")).quantize(Decimal("0.01")), "f")
-    except InvalidOperation:
-        return "0.00"
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise XeroAccessError("response_invalid") from None
+    if not parsed.is_finite():
+        raise XeroAccessError("response_invalid")
+    return format(parsed.quantize(Decimal("0.01")), "f")
 
 
 def _bill_values(bill: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -296,18 +332,31 @@ def _bill_values(bill: Mapping[str, Any] | None) -> dict[str, Any]:
             "has_attachments": False,
         }
     contact = bill.get("Contact") if isinstance(bill.get("Contact"), Mapping) else {}
+    invoice_id = str(bill.get("InvoiceID") or "")
+    invoice_number = str(bill.get("InvoiceNumber") or "")
+    contact_id = str(contact.get("ContactID") or "")
+    status = str(bill.get("Status") or "")
+    has_attachments = bill.get("HasAttachments")
+    if (
+        not invoice_id
+        or not invoice_number
+        or not contact_id
+        or not status
+        or not isinstance(has_attachments, bool)
+    ):
+        raise XeroAccessError("response_invalid")
     return {
         "found": True,
-        "invoice_id": str(bill.get("InvoiceID") or ""),
-        "invoice_number": str(bill.get("InvoiceNumber") or ""),
-        "contact_id": str(contact.get("ContactID") or ""),
+        "invoice_id": invoice_id,
+        "invoice_number": invoice_number,
+        "contact_id": contact_id,
         "contact_name": str(contact.get("Name") or ""),
-        "status": str(bill.get("Status") or ""),
+        "status": status,
         "currency": str(bill.get("CurrencyCode") or ""),
         "total": _money(bill.get("Total")),
         "amount_due": _money(bill.get("AmountDue")),
         "reference": str(bill.get("Reference") or ""),
-        "has_attachments": bool(bill.get("HasAttachments")),
+        "has_attachments": has_attachments,
     }
 
 
@@ -329,7 +378,7 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
         quantity = _decimal(item.get("quantity"), "quantity")
         unit_amount = _decimal(item.get("unit_amount"), "unit_amount")
         tax_amount = _decimal(item.get("tax_amount"), "tax_amount")
-        if quantity <= 0 or unit_amount < 0 or tax_amount < 0:
+        if quantity <= 0 or tax_amount < 0:
             raise ValueError("line_items")
         base = quantity * unit_amount
         total += base + tax_amount if line_amount_types == "Exclusive" else base
@@ -344,6 +393,125 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
             }
         )
     return output, total.quantize(Decimal("0.01"))
+
+
+def _validate_line_mappings(
+    account: XeroAccountingAccount,
+    lines: Sequence[Mapping[str, Any]],
+    line_amount_types: str,
+) -> None:
+    """Fail before a write when a code/tax pair is not live in this tenant."""
+    active_accounts: dict[str, Mapping[str, Any]] = {}
+    for item in account.list_accounts():
+        code = str(item.get("Code") or "")
+        if code and str(item.get("Status") or "") == "ACTIVE":
+            if code in active_accounts:
+                raise XeroAccessError("account_mapping_invalid")
+            active_accounts[code] = item
+    active_taxes = {
+        str(item.get("TaxType") or "")
+        for item in account.list_tax_rates()
+        if str(item.get("Status") or "") == "ACTIVE"
+    }
+    for line in lines:
+        code = str(line.get("AccountCode") or "")
+        tax_type = str(line.get("TaxType") or "")
+        configured = active_accounts.get(code)
+        if configured is None:
+            raise XeroAccessError("account_mapping_invalid")
+        default_tax = str(configured.get("TaxType") or "")
+        if line_amount_types == "NoTax":
+            valid_pair = tax_type == "NONE"
+        else:
+            valid_pair = bool(default_tax) and tax_type == default_tax
+        if not valid_pair or (tax_type != "NONE" and tax_type not in active_taxes):
+            raise XeroAccessError("account_mapping_invalid")
+
+
+def _draft_payload(
+    arguments: StructuredData,
+    account: XeroAccountingAccount,
+) -> tuple[dict[str, Any], Decimal]:
+    contact_id = _required(arguments, "contact_id")
+    invoice_number = _required(arguments, "invoice_number")
+    issue_date = _required(arguments, "date")
+    due_date = _required(arguments, "due_date")
+    date.fromisoformat(issue_date)
+    date.fromisoformat(due_date)
+    expected_total = _decimal(arguments.get("expected_total"), "expected_total")
+    if expected_total <= 0:
+        raise ValueError("expected_total")
+    lines, calculated_total = _line_items(arguments)
+    if calculated_total != expected_total.quantize(Decimal("0.01")):
+        raise ValueError("expected_total")
+    line_amount_types = _required(arguments, "line_amount_types")
+    _validate_line_mappings(account, lines, line_amount_types)
+    return (
+        {
+            "Type": "ACCPAY",
+            "Contact": {"ContactID": contact_id},
+            "InvoiceNumber": invoice_number,
+            "Date": issue_date,
+            "DueDate": due_date,
+            "CurrencyCode": _required(arguments, "currency"),
+            "Reference": _required(arguments, "reference"),
+            "LineAmountTypes": line_amount_types,
+            "LineItems": lines,
+            "Status": "DRAFT",
+        },
+        expected_total.quantize(Decimal("0.01")),
+    )
+
+
+def _sha256(value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(name)
+    digest = value.strip().lower()
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError(name)
+    return digest
+
+
+def _required_attachment_values(
+    arguments: StructuredData,
+) -> tuple[tuple[str, str], ...]:
+    values = arguments.get("required_attachments")
+    if not isinstance(values, (tuple, list)) or not values:
+        raise ValueError("required_attachments")
+    found: list[tuple[str, str]] = []
+    for item in values:
+        if not isinstance(item, Mapping):
+            raise ValueError("required_attachments")
+        filename = _required(item, "filename")
+        digest = _sha256(item.get("sha256"), "sha256")
+        if (filename, digest) in found:
+            raise ValueError("required_attachments")
+        found.append((filename, digest))
+    return tuple(found)
+
+
+def _verified_attachment(
+    account: XeroAccountingAccount,
+    invoice_id: str,
+    filename: str,
+    digest: str,
+) -> Mapping[str, Any]:
+    candidates = tuple(
+        item
+        for item in account.list_bill_attachments(invoice_id)
+        if str(item.get("FileName") or "") == filename
+    )
+    for item in candidates:
+        attachment_id = str(item.get("AttachmentID") or "")
+        media_type = str(item.get("MimeType") or "")
+        if not attachment_id or not media_type:
+            continue
+        payload = account.read_bill_attachment(invoice_id, attachment_id, media_type)
+        if hashlib.sha256(payload).hexdigest() == digest:
+            return item
+    raise XeroAccessError(
+        "supporting_document_missing" if not candidates else "supporting_document_mismatch"
+    )
 
 
 def build_xero_executors(
@@ -445,37 +613,61 @@ def build_xero_executors(
 
     def create_draft(arguments: StructuredData) -> CapabilityResult:
         def operation() -> Mapping[str, Any]:
-            contact_id = _required(arguments, "contact_id")
-            invoice_number = _required(arguments, "invoice_number")
-            issue_date = _required(arguments, "date")
-            due_date = _required(arguments, "due_date")
-            date.fromisoformat(issue_date)
-            date.fromisoformat(due_date)
-            expected_total = _decimal(arguments.get("expected_total"), "expected_total")
-            lines, calculated_total = _line_items(arguments)
-            if calculated_total != expected_total.quantize(Decimal("0.01")):
-                raise ValueError("expected_total")
+            bill, expected_total = _draft_payload(arguments, account)
+            contact_id = str(bill["Contact"]["ContactID"])
+            invoice_number = str(bill["InvoiceNumber"])
             if account.find_bill(invoice_number, contact_id) is not None:
                 raise XeroAccessError("duplicate_found")
-            bill = {
-                "Type": "ACCPAY",
-                "Contact": {"ContactID": contact_id},
-                "InvoiceNumber": invoice_number,
-                "Date": issue_date,
-                "DueDate": due_date,
-                "CurrencyCode": _required(arguments, "currency"),
-                "Reference": _required(arguments, "reference"),
-                "LineAmountTypes": _required(arguments, "line_amount_types"),
-                "LineItems": lines,
-                "Status": "DRAFT",
-            }
             created = account.create_draft_bill(bill)
             values = _bill_values(created)
-            if values["invoice_number"] != invoice_number or Decimal(values["total"]) != expected_total:
+            if (
+                values["invoice_number"] != invoice_number
+                or values["contact_id"] != contact_id
+                or values["status"] != "DRAFT"
+                or Decimal(values["total"]) != expected_total
+            ):
                 raise XeroAccessError("source_mismatch")
             return values
 
         return invoke(CREATE_XERO_DRAFT_BILL, operation)
+
+    def update_draft(arguments: StructuredData) -> CapabilityResult:
+        def operation() -> Mapping[str, Any]:
+            invoice_id = _required(arguments, "invoice_id")
+            expected_current_number = _required(
+                arguments, "expected_current_invoice_number"
+            )
+            expected_current_total = _decimal(
+                arguments.get("expected_current_total"), "expected_current_total"
+            ).quantize(Decimal("0.01"))
+            current = _bill_values(account.read_bill(invoice_id))
+            if not current["found"]:
+                raise XeroAccessError("bill_not_found")
+            if current["status"] != "DRAFT":
+                raise XeroAccessError("bill_not_draft")
+            if (
+                current["invoice_number"] != expected_current_number
+                or Decimal(current["total"]) != expected_current_total
+            ):
+                raise XeroAccessError("source_mismatch")
+            bill, expected_total = _draft_payload(arguments, account)
+            contact_id = str(bill["Contact"]["ContactID"])
+            invoice_number = str(bill["InvoiceNumber"])
+            duplicate = account.find_bill(invoice_number, contact_id)
+            if duplicate is not None and str(duplicate.get("InvoiceID") or "") != invoice_id:
+                raise XeroAccessError("duplicate_found")
+            updated = _bill_values(account.update_draft_bill(invoice_id, bill))
+            if (
+                updated["invoice_id"] != invoice_id
+                or updated["invoice_number"] != invoice_number
+                or updated["contact_id"] != contact_id
+                or updated["status"] != "DRAFT"
+                or Decimal(updated["total"]) != expected_total
+            ):
+                raise XeroAccessError("source_mismatch")
+            return updated
+
+        return invoke(UPDATE_XERO_DRAFT_BILL, operation)
 
     def attach_document(arguments: StructuredData) -> CapabilityResult:
         try:
@@ -488,13 +680,19 @@ def build_xero_executors(
             attachment, content = mail.read_attachment(
                 reference, _required(arguments, "attachment_id")
             )
-            if attachment.sha256 != _required(arguments, "expected_sha256"):
+            expected_sha256 = _sha256(
+                arguments.get("expected_sha256"), "expected_sha256"
+            )
+            if attachment.sha256 != expected_sha256:
                 return failed(ATTACH_MAIL_DOCUMENT_TO_XERO_BILL, "source_mismatch")
             account.attach_bill_document(
                 invoice_id,
                 attachment.filename,
                 attachment.media_type,
                 content,
+            )
+            verified = _verified_attachment(
+                account, invoice_id, attachment.filename, expected_sha256
             )
         except ValueError:
             return failed(ATTACH_MAIL_DOCUMENT_TO_XERO_BILL, "arguments_unusable")
@@ -508,6 +706,7 @@ def build_xero_executors(
             CapabilityResultState.SUCCEEDED,
             {
                 "invoice_id": invoice_id,
+                "attachment_id": str(verified.get("AttachmentID") or ""),
                 "filename": attachment.filename,
                 "sha256": attachment.sha256,
                 "attached": True,
@@ -519,6 +718,7 @@ def build_xero_executors(
             invoice_id = _required(arguments, "invoice_id")
             invoice_number = _required(arguments, "invoice_number")
             expected_total = _decimal(arguments.get("expected_total"), "expected_total")
+            required_attachments = _required_attachment_values(arguments)
             current = _bill_values(account.read_bill(invoice_id))
             if not current["found"]:
                 raise XeroAccessError("bill_not_found")
@@ -531,7 +731,18 @@ def build_xero_executors(
                 or Decimal(current["total"]) != expected_total
             ):
                 raise XeroAccessError("source_mismatch")
-            return _bill_values(account.authorise_bill(invoice_id))
+            for filename, digest in required_attachments:
+                _verified_attachment(account, invoice_id, filename, digest)
+            authorised = _bill_values(account.authorise_bill(invoice_id))
+            if (
+                authorised["invoice_id"] != invoice_id
+                or authorised["invoice_number"] != invoice_number
+                or authorised["status"] != "AUTHORISED"
+                or Decimal(authorised["total"]) != expected_total
+                or not authorised["has_attachments"]
+            ):
+                raise XeroAccessError("source_mismatch")
+            return authorised
 
         return invoke(AUTHORISE_XERO_BILL, operation)
 
@@ -542,6 +753,7 @@ def build_xero_executors(
         FIND_XERO_BILL: find_bill,
         READ_XERO_BILL: read_bill,
         CREATE_XERO_DRAFT_BILL: create_draft,
+        UPDATE_XERO_DRAFT_BILL: update_draft,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: attach_document,
         AUTHORISE_XERO_BILL: authorise,
     }

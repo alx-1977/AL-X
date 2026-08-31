@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import io
+import hashlib
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,7 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts import CapabilityResultState, MailReference  # noqa: E402
+from alx.contracts import CapabilityResultState, MailAccessError, MailReference  # noqa: E402
 from alx.providers import ICloudMailAdapter, SQLiteMailObservationState  # noqa: E402
 from alx.tools import (  # noqa: E402
     LIST_MAIL_ATTACHMENTS,
@@ -58,6 +59,39 @@ def zip_message() -> bytes:
         "--part\r\nContent-Type: application/zip\r\n"
         "Content-Transfer-Encoding: base64\r\n"
         "Content-Disposition: attachment; filename=customs.zip\r\n\r\n"
+        f"{encoded}\r\n--part--\r\n"
+    ).encode()
+
+
+def nested_zip_message() -> bytes:
+    worksheet = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(worksheet)
+    sad = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(sad)
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as archive:
+        archive.writestr("docs/worksheet.pdf", worksheet.getvalue())
+        archive.writestr("docs/SAD_500.pdf", sad.getvalue())
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w") as archive:
+        archive.writestr("shipment/customs-documents.zip", inner.getvalue())
+    import base64
+
+    encoded = base64.encodebytes(outer.getvalue()).decode("ascii")
+    return (
+        "Message-ID: <nested-dhl@example.test>\r\n"
+        "Subject: Nested DHL documents\r\n"
+        "From: DHL <documents@example.test>\r\n"
+        "Date: Sun, 30 Aug 2026 10:00:00 +0200\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: multipart/mixed; boundary=part\r\n\r\n"
+        "--part\r\nContent-Type: application/zip\r\n"
+        "Content-Transfer-Encoding: base64\r\n"
+        "Content-Disposition: attachment; filename=delivery.zip\r\n\r\n"
         f"{encoded}\r\n--part--\r\n"
     ).encode()
 
@@ -188,6 +222,55 @@ class MailAttachmentTests(unittest.TestCase):
         )
         self.assertEqual(reread.sha256, csv_attachment.sha256)
         self.assertEqual(payload, b"invoice,total\nDHL-1,100.00\n")
+
+    def test_nested_zip_members_are_reachable_by_stable_identifiers(self) -> None:
+        state = SQLiteMailObservationState(
+            Path(self.directory.name) / "nested-observations.sqlite3"
+        )
+        self.addCleanup(state.close)
+        account = ICloudMailAdapter(
+            "imap.example.test", 993, "friedl@example.test", "secret", state, 1,
+            connection_factory=lambda *args, **kwargs: FakeImap(nested_zip_message()),
+        )
+        attachments = account.list_attachments(self.reference)
+        self.assertEqual(
+            [item.filename for item in attachments],
+            ["delivery.zip", "customs-documents.zip", "worksheet.pdf", "SAD_500.pdf"],
+        )
+        worksheet = attachments[2]
+        self.assertEqual(worksheet.attachment_id.count(":"), 2)
+        reread, payload = account.read_attachment(self.reference, worksheet.attachment_id)
+        self.assertEqual(reread.sha256, worksheet.sha256)
+        self.assertTrue(payload.startswith(b"%PDF"))
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), worksheet.sha256)
+
+    def test_archive_over_member_limit_is_refused_instead_of_undercounted(self) -> None:
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for index in range(101):
+                bundle.writestr(f"document-{index}.txt", "x")
+        import base64
+
+        encoded = base64.encodebytes(archive.getvalue()).decode("ascii")
+        raw = (
+            "Subject: Too many documents\r\nMIME-Version: 1.0\r\n"
+            "Content-Type: multipart/mixed; boundary=x\r\n\r\n"
+            "--x\r\nContent-Type: application/zip\r\n"
+            "Content-Transfer-Encoding: base64\r\n"
+            "Content-Disposition: attachment; filename=documents.zip\r\n\r\n"
+            f"{encoded}\r\n--x--\r\n"
+        ).encode()
+        state = SQLiteMailObservationState(
+            Path(self.directory.name) / "unsafe-observations.sqlite3"
+        )
+        self.addCleanup(state.close)
+        account = ICloudMailAdapter(
+            "imap.example.test", 993, "friedl@example.test", "secret", state, 1,
+            connection_factory=lambda *args, **kwargs: FakeImap(raw),
+        )
+        with self.assertRaises(MailAccessError) as captured:
+            account.list_attachments(self.reference)
+        self.assertEqual(captured.exception.code, "archive_unsafe")
 
     def test_pdf_invoice_text_is_extracted_only_when_the_attachment_is_read(self) -> None:
         writer = PdfWriter()
