@@ -336,6 +336,21 @@ def check_repository(root: Path) -> list[str]:
             "docs/LAW_ENFORCEMENT.md: defines gates for laws that do not exist "
             f"in LAWS_OF_ALX.md: {', '.join(str(item) for item in stale)}"
         )
+    enforced = {
+        int(value) for value in re.findall(r"^\| (\d+)", enforcement, re.MULTILINE)
+    }
+    missing = sorted(set(law_numbers) - enforced)
+    if missing:
+        violations.append(
+            "docs/LAW_ENFORCEMENT.md: no gate is defined for law(s) "
+            f"{', '.join(str(item) for item in missing)}"
+        )
+    for number, title in re.findall(r"^## Law (\d+) — (.+)$", laws, re.MULTILINE):
+        if f"| {number} — {title.strip()} |" not in enforcement:
+            violations.append(
+                f"docs/LAW_ENFORCEMENT.md: its row for law {number} does not "
+                "carry that law's title"
+            )
 
     blueprint = _read(root, "docs/ARCHITECTURE_BLUEPRINT.md", violations)
     if "process_DHL_invoice_workflow` would encode a journey" in blueprint:

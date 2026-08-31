@@ -13,6 +13,7 @@ from alx.bootstrap.providers import build_runtime_providers
 from alx.bootstrap.mail import (
     build_mail_runtime,
     build_mail_send_runtime,
+    captured_invoice_filing_scopes,
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.reasoning import build_model_reasoner
@@ -235,7 +236,10 @@ async def run(repository_root: Path) -> None:
                 granted_permission_references=frozenset(permissions),
                 evaluated_at=datetime.now(UTC),
                 approvals=() if state is None else state.approvals,
-                standing_scopes=mail_post_reply_standing_scopes(state),
+                standing_scopes=(
+                    *mail_post_reply_standing_scopes(state),
+                    *captured_invoice_filing_scopes(state),
+                ),
             ),
         )
         # A finished bill closes its ceiling window, so the next invoice gets

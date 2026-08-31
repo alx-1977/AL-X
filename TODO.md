@@ -25,3 +25,20 @@
   but the P&L loses expense-category detail.
   A candidate for AL/X's own sandbox work under Law 19 once enough real bills
   exist to learn from. Not a blocker; revisit before year-end.
+
+## Reasoning ceiling gaps
+
+- [ ] The budget window and its recovery state live only in memory, so a
+  restart mid-bill loses the ceiling until the next bill capability is
+  reached. Recorded rather than fixed: it cannot post a wrong bill, but it
+  weakens the guardrail across a restart.
+- [ ] Mail search and read calls made before the first Xero capability fall
+  outside the ceiling, which is how two bills reached twelve Core calls. The
+  ceiling covers the bill, not the work of finding it.
+
+## Provider limitations
+
+- [ ] ALX_SPECIALIST_EFFORT has no effect on xAI: that transport accepts no
+  reasoning-effort parameter. Non-default values are logged as ignored, and
+  medium passes silently because it is the effective default. The setting only
+  changes behaviour on OpenAI.

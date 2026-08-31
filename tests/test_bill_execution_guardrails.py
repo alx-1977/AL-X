@@ -248,6 +248,31 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
                         "a bill task spent more than the ceiling allows",
                     )
 
+    def test_only_a_completed_capture_closes_the_window(self) -> None:
+        """Settling after a refusal would hand the same bill a fresh ceiling."""
+        import ast
+
+        source = (
+            REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py"
+        ).read_text()
+        self.assertIn("and _completed(attempt)", source)
+
+        namespace: dict = {}
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "_completed":
+                exec(compile(ast.Module([node], []), "<ast>", "exec"), namespace)
+        completed = namespace["_completed"]
+
+        class Attempt:
+            def __init__(self, values):
+                self.result = type("R", (), {"values": values})()
+
+        self.assertTrue(completed(Attempt({"completed": True})))
+        self.assertFalse(completed(Attempt({"completed": False})))
+        self.assertFalse(completed(Attempt({})))
+        self.assertFalse(completed(type("A", (), {"result": None})()))
+
     def test_a_conversation_without_a_bill_is_never_capped(self) -> None:
         from alx.observability import SQLiteUsageRecorder
 

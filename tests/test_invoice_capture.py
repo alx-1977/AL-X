@@ -356,6 +356,86 @@ class StaleDraftTests(unittest.TestCase):
         self.assertFalse(result.values["completed"])
         self.assertIn("line(s)", result.values["detail"])
 
+    def test_every_stated_field_must_match_before_resuming(self) -> None:
+        """Review finding: only account, tax type and amount were compared.
+
+        A draft with the wrong dates, currency, reference, line amount type,
+        description and tax amount was authorised because its total matched.
+        """
+        line = {
+            "AccountCode": "310",
+            "TaxType": "NONE",
+            "LineAmount": 180.0,
+            "Description": "Electronic components",
+            "TaxAmount": 0.0,
+        }
+        for label, change in (
+            ("date", {"Date": "1999-01-01"}),
+            ("due date", {"DueDate": "1999-01-01"}),
+            ("reference", {"Reference": "wrong reference"}),
+            ("line amount type", {"LineAmountTypes": "Inclusive"}),
+            ("description", {"LineItems": [{**line, "Description": "Wrong purchase"}]}),
+            ("tax amount", {"LineItems": [{**line, "TaxAmount": 99.0}]}),
+        ):
+            with self.subTest(altered=label):
+                capture, invoice_id = self.existing_draft(**change)
+                result = capture(arguments())
+                self.assertFalse(
+                    result.values["completed"],
+                    f"a draft with a changed {label} was authorised",
+                )
+                self.assertEqual(
+                    result.values["returned_for"], "existing_draft_differs"
+                )
+                self.assertNotEqual(
+                    self.xero.bills[invoice_id]["Status"], "AUTHORISED"
+                )
+
+    def test_the_whole_draft_is_read_back_not_the_search_projection(self) -> None:
+        """A search result carries less than the bill actually holds."""
+        from alx.tools.xero import _draft_mismatch
+
+        requested = {
+            "InvoiceNumber": "n",
+            "Date": "2026-08-20",
+            "DueDate": "2026-09-20",
+            "CurrencyCode": "ZAR",
+            "Reference": "r",
+            "LineAmountTypes": "NoTax",
+            "Contact": {"ContactID": "c"},
+            "LineItems": [
+                {
+                    "AccountCode": "310",
+                    "TaxType": "NONE",
+                    "Quantity": 1,
+                    "UnitAmount": 180,
+                    "Description": "d",
+                    "TaxAmount": 0,
+                }
+            ],
+        }
+        stored = {
+            **requested,
+            "LineItems": [
+                {
+                    "AccountCode": "310",
+                    "TaxType": "NONE",
+                    "LineAmount": 180.0,
+                    "Description": "d",
+                    "TaxAmount": 0.0,
+                }
+            ],
+        }
+        self.assertEqual(_draft_mismatch(stored, requested), "")
+        self.assertIn(
+            "currency", _draft_mismatch({**stored, "CurrencyCode": "USD"}, requested)
+        )
+        self.assertIn(
+            "different supplier",
+            _draft_mismatch({**stored, "Contact": {"ContactID": "other"}}, requested),
+        )
+        self.assertIn("could not be read back", _draft_mismatch(None, requested))
+
     def test_an_unaltered_draft_still_resumes(self) -> None:
         """Idempotency must survive the stricter check."""
         capture = self.build()

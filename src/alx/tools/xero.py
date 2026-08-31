@@ -511,24 +511,66 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
     return output, total.quantize(Decimal("0.01"))
 
 
-def _line_mismatch(
-    existing: Mapping[str, Any] | None, requested: Sequence[Mapping[str, Any]]
+def _draft_mismatch(
+    existing: Mapping[str, Any] | None, requested: Mapping[str, Any]
 ) -> str:
-    """Report the first way an existing draft differs from what was requested.
+    """Report the first way an existing draft differs from the requested bill.
 
-    Only the fields that decide where money lands are compared: a draft is
-    resumed to finish work, not to adopt whatever it happens to contain.
+    Comparing selected fields let a draft with the wrong dates, currency,
+    reference, description and tax amount be authorised because its total still
+    matched. Every field the request states is compared, so resuming a draft
+    means finishing the requested bill rather than adopting whatever the draft
+    happens to contain.
     """
+    if existing is None:
+        return "the draft could not be read back"
+
+    def money(value: Any) -> Decimal:
+        return Decimal(str(value if value not in (None, "") else "0"))
+
+    for field, label in (
+        ("InvoiceNumber", "invoice number"),
+        ("Date", "date"),
+        ("DueDate", "due date"),
+        ("CurrencyCode", "currency"),
+        ("Reference", "reference"),
+        ("LineAmountTypes", "line amount type"),
+    ):
+        was = str(existing.get(field) or "").strip()
+        wanted = str(requested.get(field) or "").strip()
+        # Xero returns dates in its own serialised form, so compare the date
+        # only when the stored value is the plain ISO text that was sent.
+        if field in ("Date", "DueDate") and was and not was[:1].isdigit():
+            continue
+        if was[:10] != wanted[:10] if field in ("Date", "DueDate") else was != wanted:
+            return f"its {label} is {was!r}, not {wanted!r}"
+
+    stored_contact = existing.get("Contact")
+    stored_contact_id = (
+        str(stored_contact.get("ContactID") or "")
+        if isinstance(stored_contact, Mapping) else ""
+    )
+    wanted_contact = requested.get("Contact")
+    wanted_contact_id = (
+        str(wanted_contact.get("ContactID") or "")
+        if isinstance(wanted_contact, Mapping) else ""
+    )
+    if stored_contact_id != wanted_contact_id:
+        return "it is against a different supplier"
+
     stored = [
-        item for item in (existing or {}).get("LineItems") or []
+        item for item in existing.get("LineItems") or []
         if isinstance(item, Mapping)
     ]
-    if len(stored) != len(requested):
-        return f"it has {len(stored)} line(s), not {len(requested)}"
-    for index, (was, wanted) in enumerate(zip(stored, requested), start=1):
+    wanted_lines = list(requested.get("LineItems") or [])
+    if len(stored) != len(wanted_lines):
+        return f"it has {len(stored)} line(s), not {len(wanted_lines)}"
+
+    for index, (was, wanted) in enumerate(zip(stored, wanted_lines), start=1):
         for field, label in (
             ("AccountCode", "account"),
             ("TaxType", "tax type"),
+            ("Description", "description"),
         ):
             if str(was.get(field) or "") != str(wanted.get(field) or ""):
                 return (
@@ -539,16 +581,19 @@ def _line_mismatch(
             # Xero returns LineAmount; a stored line may carry only its
             # quantity and unit amount, so accept whichever is present.
             stored_amount = (
-                Decimal(str(was["LineAmount"]))
+                money(was["LineAmount"])
                 if was.get("LineAmount") is not None
-                else Decimal(str(was.get("Quantity") or "0"))
-                * Decimal(str(was.get("UnitAmount") or "0"))
+                else money(was.get("Quantity")) * money(was.get("UnitAmount"))
             )
-            if stored_amount != (
-                Decimal(str(wanted.get("Quantity") or "0"))
-                * Decimal(str(wanted.get("UnitAmount") or "0"))
+            if stored_amount != money(wanted.get("Quantity")) * money(
+                wanted.get("UnitAmount")
             ):
                 return f"line {index} amount differs"
+            if money(was.get("TaxAmount")) != money(wanted.get("TaxAmount")):
+                return (
+                    f"line {index} tax amount is {was.get('TaxAmount')!r}, "
+                    f"not {wanted.get('TaxAmount')!r}"
+                )
         except InvalidOperation:
             return f"line {index} amount is unreadable"
     return ""
@@ -944,11 +989,13 @@ def build_xero_executors(
                         f"{current['total']}, not {expected_total}",
                         existing,
                     )
-                # Matching the total is not enough to authorise a draft. A
-                # draft whose account, tax type or lines differ from what was
-                # requested was authorised as correct in review, so the lines
-                # themselves must match before this commits to them.
-                mismatch = _line_mismatch(existing, bill_payload["LineItems"])
+                # Matching the total is not enough to authorise a draft. The
+                # whole draft is compared against the requested bill, read
+                # fresh rather than from the search projection, because a
+                # search result carries less than the bill actually holds.
+                mismatch = _draft_mismatch(
+                    account.read_bill(current["invoice_id"]), bill_payload
+                )
                 if mismatch:
                     return returned(
                         "existing_draft_differs",
