@@ -67,6 +67,8 @@ class SQLiteUsageRecorder:
         self._path = path
         self._lock = Lock()
         self._budgets: dict[str, ExecutionBudget] = {}
+        # Call id the ceiling starts counting from, per task.
+        self._windows: dict[str, int] = {}
         self._recovery: set[str] = set()
         database = self._db()
         try:
@@ -101,10 +103,41 @@ class SQLiteUsageRecorder:
         return database
 
     def set_budget(self, task_id: str, budget: ExecutionBudget) -> None:
-        """Declare that a task is routine work with a known call ceiling."""
+        """Declare that a task is routine work with a known call ceiling.
+
+        A conversation is not a task. It may already carry hours of unrelated
+        reasoning, and counting that against a bill's ceiling stopped a bill
+        mid-task at 26 calls when only five belonged to it. The window opens
+        here: only calls recorded from this point count.
+        """
         with self._lock:
+            if task_id in self._budgets:
+                # An already-budgeted task keeps its window, so reaching for a
+                # second bill capability does not hand the task a fresh ceiling.
+                self._budgets[task_id] = budget
+                self._recovery.discard(task_id)
+                return
             self._budgets[task_id] = budget
+            self._windows[task_id] = self._window_start(task_id)
             self._recovery.discard(task_id)
+
+    def _window_start(self, task_id: str) -> int:
+        """Open the window before the call that reached for the capability.
+
+        Arming happens while dispatching, so the reasoning call that chose to
+        act has already been recorded. That call is the first step of the bill
+        task and must count against its ceiling.
+        """
+        database = self._db()
+        try:
+            latest = database.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM reasoning_calls "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+        finally:
+            database.close()
+        return max(0, int(latest) - 1)
 
     def enter_recovery(self, task_id: str) -> None:
         """Record that AL/X is handling ambiguity or a failure on this task.
@@ -175,8 +208,27 @@ class SQLiteUsageRecorder:
         with self._lock:
             budget = self._budgets.get(task_id)
             recovering = task_id in self._recovery
-        values["budget_state"] = self._state(values["calls"], budget, recovering)
+            since = self._windows.get(task_id, 0)
+        # The ceiling applies to the budgeted window, not the whole task.
+        budgeted = (
+            values["calls"] if budget is None else self._calls_since(task_id, since)
+        )
+        values["budgeted_calls"] = budgeted
+        values["budget_state"] = self._state(budgeted, budget, recovering)
         return values
+
+    def _calls_since(self, task_id: str, since: int) -> int:
+        database = self._db()
+        try:
+            return int(
+                database.execute(
+                    "SELECT COUNT(*) FROM reasoning_calls "
+                    "WHERE task_id = ? AND id > ?",
+                    (task_id, since),
+                ).fetchone()[0]
+            )
+        finally:
+            database.close()
 
     @staticmethod
     def _cost(values: Mapping[str, Any], models: tuple[str, ...]) -> float | None:
@@ -217,14 +269,8 @@ class SQLiteUsageRecorder:
             if budget is None:
                 return
             recovering = task_id in self._recovery
-        database = self._db()
-        try:
-            calls = database.execute(
-                "SELECT COUNT(*) FROM reasoning_calls WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()[0]
-        finally:
-            database.close()
+            since = self._windows.get(task_id, 0)
+        calls = self._calls_since(task_id, since)
         limit = budget.recovery_limit if recovering else budget.stop_above
         if calls >= limit:
             raise BudgetExceeded(task_id, calls, limit)

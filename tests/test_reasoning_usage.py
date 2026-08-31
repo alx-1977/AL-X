@@ -125,6 +125,56 @@ class ExecutionBudgetTests(unittest.TestCase):
         self.assertEqual(captured.exception.calls, 4)
         self.assertEqual(captured.exception.limit, 4)
 
+    def test_earlier_conversation_history_is_not_charged_to_the_bill(self) -> None:
+        """A conversation is not a task.
+
+        A live bill was stopped at "26 reasoning calls exceeds limit 4" when
+        only five belonged to it; the rest was hours of unrelated conversation
+        on the same id. The ceiling counts from where the budget armed.
+        """
+        for _ in range(21):
+            self.recorder.record("conversation-1", call())
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+
+        # 21 unrelated calls stay out; the last one is the call that reached
+        # for the capability, and that first step belongs to the bill task.
+        self.assertEqual(self.recorder.task("conversation-1")["calls"], 21)
+        self.assertEqual(self.recorder.task("conversation-1")["budgeted_calls"], 1)
+        self.assertEqual(
+            self.recorder.task("conversation-1")["budget_state"], "expected"
+        )
+
+        for _ in range(XERO_BILL_BUDGET.stop_above - 1):
+            self.recorder.check("conversation-1")
+            self.recorder.record("conversation-1", call())
+        with self.assertRaises(BudgetExceeded) as captured:
+            self.recorder.check("conversation-1")
+        self.assertEqual(
+            captured.exception.calls,
+            XERO_BILL_BUDGET.stop_above,
+            "the ceiling must count the task's own calls, not the conversation's",
+        )
+
+    def test_rearming_keeps_the_original_window(self) -> None:
+        """Reaching for a second bill capability must not reset the ceiling."""
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        for _ in range(3):
+            self.recorder.record("task-1", call())
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        self.assertEqual(self.recorder.task("task-1")["budgeted_calls"], 3)
+
+    def test_the_full_task_total_is_still_reported(self) -> None:
+        """Windowing the ceiling must not hide what the task actually spent."""
+        for _ in range(5):
+            self.recorder.record("task-1", call())
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        self.recorder.record("task-1", call())
+        rollup = self.recorder.task("task-1")
+        self.assertEqual(rollup["calls"], 6)
+        # The deciding call plus the one after it.
+        self.assertEqual(rollup["budgeted_calls"], 2)
+        self.assertEqual(rollup["input_tokens"], 27943 * 6)
+
     def test_an_unbudgeted_task_is_never_stopped(self) -> None:
         for _ in range(20):
             self.recorder.record("task-1", call())
