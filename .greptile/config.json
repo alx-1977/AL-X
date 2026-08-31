@@ -18,7 +18,7 @@
     {
       "id": "alx-dynamic-reasoning",
       "severity": "high",
-      "rule": "Flag behaviour prescribed through phrases, keywords, regexes, intent enums, routes, fixed sequences, decision trees, domain workflows, coded fallbacks, or exact-wording tests. Code may structure capabilities, memory, evidence, and safety boundaries; it may not encode AL/X's reasoning path."
+      "rule": "Flag behaviour prescribed through phrases, keywords, regexes, intent enums, routes, decision trees over what Friedl meant, coded fallbacks that choose a different goal, or exact-wording tests. Code may structure capabilities, memory, evidence and safety boundaries, and under Law 2 a capability may execute a fixed sequence of mechanical steps to achieve one reusable outcome; that is permitted and needs no exception. What code may not do is encode AL/X's reasoning path: prescribing which capability she uses, deciding on her behalf what a request means, or choosing the next goal for her."
     },
     {
       "id": "alx-no-unapproved-hardcoding",
