@@ -32,6 +32,7 @@ READ_XERO_BILL = "read_xero_bill"
 CREATE_XERO_DRAFT_BILL = "create_xero_draft_bill"
 UPDATE_XERO_DRAFT_BILL = "update_xero_draft_bill"
 ATTACH_MAIL_DOCUMENT_TO_XERO_BILL = "attach_mail_document_to_xero_bill"
+DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
 AUTHORISE_XERO_BILL = "authorise_xero_bill"
 
 _FAILURES = (
@@ -248,6 +249,22 @@ ATTACH_DOCUMENT_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+DELETE_DRAFT_DEFINITION = CapabilityDefinition(
+    DELETE_XERO_DRAFT_BILL,
+    "Discard one exact DRAFT accounts-payable bill after verifying its invoice number and total; refuse a bill that is not a draft.",
+    _object(
+        {
+            "invoice_id": _STRING,
+            "invoice_number": _STRING,
+            "expected_total": _STRING,
+        },
+        ("invoice_id", "invoice_number", "expected_total"),
+    ),
+    _BILL_RESULT,
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
 AUTHORISE_BILL_DEFINITION = CapabilityDefinition(
     AUTHORISE_XERO_BILL,
     "Authorise one exact DRAFT Xero bill only after its invoice number and total match the supplied expected values.",
@@ -281,6 +298,7 @@ DEFINITIONS = (
     CREATE_DRAFT_DEFINITION,
     UPDATE_DRAFT_DEFINITION,
     ATTACH_DOCUMENT_DEFINITION,
+    DELETE_DRAFT_DEFINITION,
     AUTHORISE_BILL_DEFINITION,
 )
 
@@ -717,6 +735,33 @@ def build_xero_executors(
             },
         )
 
+    def delete_draft(arguments: StructuredData) -> CapabilityResult:
+        def operation() -> Mapping[str, Any]:
+            invoice_id = _required(arguments, "invoice_id")
+            invoice_number = _required(arguments, "invoice_number")
+            expected_total = _decimal(arguments.get("expected_total"), "expected_total")
+            current = _bill_values(account.read_bill(invoice_id))
+            if not current["found"]:
+                raise XeroAccessError("bill_not_found")
+            # Only a draft may be discarded. An authorised bill is an accounting
+            # entry whose reversal is not covered by this capability.
+            if current["status"] not in ("DRAFT", "SUBMITTED"):
+                raise XeroAccessError("bill_not_draft")
+            if (
+                current["invoice_number"] != invoice_number
+                or Decimal(current["total"]) != expected_total
+            ):
+                raise XeroAccessError("source_mismatch")
+            deleted = _bill_values(account.delete_draft_bill(invoice_id))
+            if (
+                deleted["invoice_id"] != invoice_id
+                or deleted["status"] != "DELETED"
+            ):
+                raise XeroAccessError("source_mismatch")
+            return deleted
+
+        return invoke(DELETE_XERO_DRAFT_BILL, operation)
+
     def authorise(arguments: StructuredData) -> CapabilityResult:
         def operation() -> Mapping[str, Any]:
             invoice_id = _required(arguments, "invoice_id")
@@ -759,5 +804,6 @@ def build_xero_executors(
         CREATE_XERO_DRAFT_BILL: create_draft,
         UPDATE_XERO_DRAFT_BILL: update_draft,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: attach_document,
+        DELETE_XERO_DRAFT_BILL: delete_draft,
         AUTHORISE_XERO_BILL: authorise,
     }

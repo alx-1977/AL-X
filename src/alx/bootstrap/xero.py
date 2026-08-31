@@ -14,6 +14,7 @@ from alx.safety import AuthorityPolicy
 from alx.tools import (
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
     AUTHORISE_XERO_BILL,
+    DELETE_XERO_DRAFT_BILL,
     CREATE_XERO_DRAFT_BILL,
     UPDATE_XERO_DRAFT_BILL,
     FIND_XERO_BILL,
@@ -28,6 +29,7 @@ from alx.tools import (
 
 XERO_READ_PERMISSION = "xero.read"
 XERO_BILL_WRITE_PERMISSION = "xero.bill.write"
+XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,13 @@ def build_xero_runtime(
         frozenset({XERO_BILL_WRITE_PERMISSION}),
         approval_required=not settings.unattended_bill_writes,
     )
+    # D-019. Discarding a bill is a different act from preparing one, so it
+    # carries its own permission and its own approval setting. Friedl scoped
+    # this to drafts; voiding an authorised bill is not authorised here.
+    delete_policy = AuthorityPolicy(
+        frozenset({XERO_BILL_DELETE_PERMISSION}),
+        approval_required=not settings.unattended_bill_deletes,
+    )
     policies = {
         SEARCH_XERO_CONTACTS: read_policy,
         LIST_XERO_ACCOUNTS: read_policy,
@@ -76,6 +85,7 @@ def build_xero_runtime(
         CREATE_XERO_DRAFT_BILL: write_policy,
         UPDATE_XERO_DRAFT_BILL: write_policy,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: write_policy,
+        DELETE_XERO_DRAFT_BILL: delete_policy,
         AUTHORISE_XERO_BILL: write_policy,
     }
     return XeroRuntime(
@@ -84,5 +94,11 @@ def build_xero_runtime(
         XERO_DEFINITIONS,
         policies,
         build_xero_executors(adapter, mail_account, call_id_source),
-        frozenset({XERO_READ_PERMISSION, XERO_BILL_WRITE_PERMISSION}),
+        frozenset(
+            {
+                XERO_READ_PERMISSION,
+                XERO_BILL_WRITE_PERMISSION,
+                XERO_BILL_DELETE_PERMISSION,
+            }
+        ),
     )

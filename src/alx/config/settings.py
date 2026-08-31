@@ -241,6 +241,7 @@ class XeroSettings:
     timeout_seconds: int
     approval_ttl_seconds: int
     unattended_bill_writes: bool
+    unattended_bill_deletes: bool
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
@@ -260,6 +261,11 @@ class XeroSettings:
             unattended_bill_writes=_boolean(
                 environment, "ALX_XERO_UNATTENDED_BILL_WRITES", False
             ),
+            # D-019. Discarding a draft is requested, not routine, so it
+            # defaults to asking even where bill writes run unattended.
+            unattended_bill_deletes=_boolean(
+                environment, "ALX_XERO_UNATTENDED_BILL_DELETES", False
+            ),
         )
 
     def __repr__(self) -> str:
@@ -269,7 +275,8 @@ class XeroSettings:
             f"tenant_id={self.tenant_id!r}, "
             f"timeout_seconds={self.timeout_seconds!r}, "
             f"approval_ttl_seconds={self.approval_ttl_seconds!r}, "
-            f"unattended_bill_writes={self.unattended_bill_writes!r})"
+            f"unattended_bill_writes={self.unattended_bill_writes!r}, "
+            f"unattended_bill_deletes={self.unattended_bill_deletes!r})"
         )
 
 

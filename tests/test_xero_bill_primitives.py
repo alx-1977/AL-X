@@ -15,6 +15,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.xero import (  # noqa: E402
+    XERO_BILL_DELETE_PERMISSION,
     XERO_BILL_WRITE_PERMISSION,
     XERO_READ_PERMISSION,
     build_xero_runtime,
@@ -50,6 +51,7 @@ from alx.tools import (  # noqa: E402
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
     AUTHORISE_XERO_BILL,
     CREATE_XERO_DRAFT_BILL,
+    DELETE_XERO_DRAFT_BILL,
     READ_XERO_BILL,
     UPDATE_XERO_DRAFT_BILL,
     XERO_DEFINITIONS,
@@ -61,6 +63,7 @@ class FakeXero:
     def __init__(self) -> None:
         self.existing = None
         self.created = []
+        self.deleted = []
         self.attachments = []
         self.attachment_records = []
         self.current = {
@@ -118,6 +121,11 @@ class FakeXero:
 
     def read_bill_attachment(self, _invoice_id, attachment_id, _media_type):
         return next(content for record, content in self.attachment_records if record["AttachmentID"] == attachment_id)
+
+    def delete_draft_bill(self, _invoice_id):
+        self.deleted.append(_invoice_id)
+        self.current = {**self.current, "Status": "DELETED"}
+        return self.current
 
     def authorise_bill(self, _invoice_id):
         self.current = {**self.current, "Status": "AUTHORISED"}
@@ -315,6 +323,66 @@ class XeroPrimitiveTests(unittest.TestCase):
         self.assertEqual(result.failure["code"], "account_mapping_invalid")
         self.assertEqual(self.xero.created, [])
 
+    def test_a_draft_bill_can_be_discarded_when_it_matches(self) -> None:
+        result = self.executors[DELETE_XERO_DRAFT_BILL](
+            {
+                "invoice_id": "bill-1",
+                "invoice_number": "SUP-42",
+                "expected_total": "1250.00",
+            }
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(result.values["status"], "DELETED")
+        self.assertEqual(self.xero.deleted, ["bill-1"])
+
+    def test_an_authorised_bill_is_never_discarded(self) -> None:
+        """D-019 covers drafts only. Voiding an accounting entry is not authorised."""
+        for status in ("AUTHORISED", "PAID", "VOIDED"):
+            with self.subTest(status=status):
+                self.xero.deleted.clear()
+                self.xero.current = {**self.xero.current, "Status": status}
+                result = self.executors[DELETE_XERO_DRAFT_BILL](
+                    {
+                        "invoice_id": "bill-1",
+                        "invoice_number": "SUP-42",
+                        "expected_total": "1250.00",
+                    }
+                )
+                self.assertEqual(result.failure["code"], "bill_not_draft")
+                self.assertEqual(self.xero.deleted, [])
+
+    def test_a_mismatched_draft_is_never_discarded(self) -> None:
+        """The wrong bill must not be discarded on a mis-identified id."""
+        for wrong in (
+            {"invoice_number": "SUP-99", "expected_total": "1250.00"},
+            {"invoice_number": "SUP-42", "expected_total": "999.99"},
+        ):
+            with self.subTest(**wrong):
+                self.xero.deleted.clear()
+                result = self.executors[DELETE_XERO_DRAFT_BILL](
+                    {"invoice_id": "bill-1", **wrong}
+                )
+                self.assertEqual(result.failure["code"], "source_mismatch")
+                self.assertEqual(self.xero.deleted, [])
+
+    def test_discarding_a_draft_asks_before_acting_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_xero_runtime(
+                XeroSettings(
+                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False
+                ),
+                Path(directory),
+                self.mail,
+                lambda: "call",
+            )
+        # Unattended bill writes must not silently carry deletion with them.
+        self.assertFalse(runtime.policies[CREATE_XERO_DRAFT_BILL].approval_required)
+        self.assertTrue(runtime.policies[DELETE_XERO_DRAFT_BILL].approval_required)
+        self.assertIn(
+            XERO_BILL_DELETE_PERMISSION,
+            runtime.policies[DELETE_XERO_DRAFT_BILL].permission_references,
+        )
+
     def test_unknown_live_account_is_refused_before_write(self) -> None:
         self.xero.list_accounts = lambda: ()
         result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
@@ -342,7 +410,7 @@ class XeroPrimitiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
                 XeroSettings(
-                    "id", "secret", "http://localhost/callback", "", 10, 300, True
+                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False
                 ),
                 Path(directory),
                 self.mail,
@@ -391,19 +459,26 @@ class XeroPrimitiveTests(unittest.TestCase):
     def test_runtime_requires_approval_for_every_xero_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300, False),
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300, False, False),
                 Path(directory),
                 self.mail,
                 lambda: "call",
             )
         self.assertEqual(
             runtime.permissions,
-            frozenset({XERO_READ_PERMISSION, XERO_BILL_WRITE_PERMISSION}),
+            frozenset(
+                {
+                    XERO_READ_PERMISSION,
+                    XERO_BILL_WRITE_PERMISSION,
+                    XERO_BILL_DELETE_PERMISSION,
+                }
+            ),
         )
         for capability_id in (
             CREATE_XERO_DRAFT_BILL,
             UPDATE_XERO_DRAFT_BILL,
             ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+            DELETE_XERO_DRAFT_BILL,
             AUTHORISE_XERO_BILL,
         ):
             self.assertTrue(runtime.policies[capability_id].approval_required)
@@ -466,7 +541,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 registry.register(definition)
             current_call_id = [""]
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600, False),
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600, False, False),
                 Path(directory),
                 self.mail,
                 lambda: current_call_id[0],

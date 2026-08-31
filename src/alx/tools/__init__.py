@@ -17,6 +17,7 @@ from alx.tools.mail import (
 from alx.tools.xero import (
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
     AUTHORISE_XERO_BILL,
+    DELETE_XERO_DRAFT_BILL,
     CREATE_XERO_DRAFT_BILL,
     UPDATE_XERO_DRAFT_BILL,
     DEFINITIONS as XERO_DEFINITIONS,
@@ -49,6 +50,7 @@ __all__ = [
     "build_send_executors",
     "ATTACH_MAIL_DOCUMENT_TO_XERO_BILL",
     "AUTHORISE_XERO_BILL",
+    "DELETE_XERO_DRAFT_BILL",
     "CREATE_XERO_DRAFT_BILL",
     "UPDATE_XERO_DRAFT_BILL",
     "XERO_DEFINITIONS",

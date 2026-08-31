@@ -269,3 +269,14 @@ This file records approved product and architecture decisions that guide impleme
 - **Configuration.** The authority is carried by `ALX_XERO_UNATTENDED_BILL_WRITES`, which defaults to attended. Unattended operation is an explicit deployment choice, not a code default, and can be withdrawn by changing one environment value.
 - **Unproven at approval.** No bill had been created by V2 in Xero when this was approved. Friedl accepted that risk for the first four bills. The duplicate-detection defect found on 2026-08-31 is fixed and covered by tests.
 - **Review condition.** Revisit if an incorrect bill is created, a duplicate reaches Xero, an attachment is attached to the wrong bill, a read-back mismatch occurs, or Friedl decides an amount threshold or a return to attended writes is warranted.
+
+## D-019 — Discarding a draft supplier bill on request
+
+- **Date:** 2026-08-31
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-08-31.** Friedl asked that AL/X be able to delete a bill when he asks her to, and chose to start with drafts after being shown that Xero treats a draft deletion and an authorised void as materially different acts.
+- **Scope.** AL/X may discard one exact accounts-payable bill whose current status is DRAFT or SUBMITTED. She must first read the bill and verify its invoice number and total against the values she was working from, and must verify afterwards that Xero recorded the discard.
+- **Explicitly excluded.** Voiding an AUTHORISED, PAID or already discarded bill is not authorised by this decision. That reverses an accounting entry, cannot be undone, and may affect a filed VAT period. A non-draft is refused with `bill_not_draft`. Extending to voiding requires a separate decision.
+- **Authority.** Discarding carries its own permission, `xero.bill.delete`, and its own approval setting, `ALX_XERO_UNATTENDED_BILL_DELETES`, defaulting to attended. The unattended bill-write authority in D-018 deliberately does not carry deletion with it: creating a wrong bill is undone by discarding it, while discarding the wrong bill destroys prepared work. A test asserts that unattended writes leave deletion attended.
+- **Primitive justification.** Discarding a bill is an external Xero effect AL/X did not previously possess. It is not a rewording of creation, update or authorisation. It requires no additional OAuth scope; `accounting.invoices` already covers it.
+- **Review condition.** Revisit if a bill is discarded that Friedl did not intend, if a non-draft reaches the discard path, or if Friedl decides voiding authorised bills should also be available.

@@ -520,6 +520,20 @@ class XeroAccountingAdapter:
             binary=True,
         )
 
+    def delete_draft_bill(self, invoice_id: str) -> Mapping[str, Any]:
+        """Discard one draft bill. Xero records DELETED, it does not remove."""
+        body = self._request(
+            "POST",
+            f"/Invoices/{quote(invoice_id, safe='')}",
+            json_body={
+                "Invoices": [{"InvoiceID": invoice_id, "Status": "DELETED"}]
+            },
+        )
+        items = self._items(body, "Invoices")
+        if not items:
+            _raise_clean("response_invalid")
+        return items[0]
+
     def authorise_bill(self, invoice_id: str) -> Mapping[str, Any]:
         body = self._request(
             "POST",
