@@ -16,7 +16,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.reasoning import build_model_reasoner
-from alx.bootstrap.xero import build_xero_runtime
+from alx.bootstrap.xero import BILL_EXECUTION_CAPABILITIES, build_xero_runtime
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
@@ -32,7 +32,7 @@ from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteCo
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
-from alx.observability import SQLiteUsageRecorder
+from alx.observability import XERO_BILL_BUDGET, SQLiteUsageRecorder
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
 
@@ -113,6 +113,13 @@ async def run(repository_root: Path) -> None:
 
     diagnostics = VoiceDiagnosticBuffer()
     usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
+    # The Core names the conversation on every budget check, so a dispatch can
+    # arm the ceiling for the task that is actually running.
+    current_conversation_id = [""]
+
+    def budget_check(conversation_id: str) -> None:
+        current_conversation_id[0] = conversation_id
+        usage.check(conversation_id)
 
     def telemetry(task_id: str, values: Mapping[str, Any]) -> None:
         """Development panel and durable record see the same measurement."""
@@ -191,6 +198,10 @@ async def run(repository_root: Path) -> None:
 
     def dispatch(call, state):
         current_call_id[0] = call.call_id
+        # Committing a bill declares the task routine, so the reasoning ceiling
+        # applies from here on. Ordinary conversation stays unbudgeted.
+        if call.capability_id in BILL_EXECUTION_CAPABILITIES:
+            usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
         return broker.dispatch(
             call,
             AuthorityContext(
@@ -213,7 +224,7 @@ async def run(repository_root: Path) -> None:
         registry.list_definitions(),
         memory_store,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
-        budget_check=usage.check,
+        budget_check=budget_check,
     )
     gateway = ConversationGateway(
         core,

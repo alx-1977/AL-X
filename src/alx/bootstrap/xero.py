@@ -32,12 +32,29 @@ XERO_READ_PERMISSION = "xero.read"
 XERO_BILL_WRITE_PERMISSION = "xero.bill.write"
 XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
 
+# Committing a bill is one outcome, so AL/X is offered one way to do it.
+# Creating, attaching and authorising separately are the deterministic steps
+# inside that outcome, not competing plans: offering both lets a routine bill
+# be reasoned through step by step, which is what made one invoice cost eight
+# reasoning calls. They stay dispatchable for an explicit recovery, but they
+# are withheld from the catalogue AL/X plans from.
+BILL_EXECUTION_CAPABILITIES = frozenset({EXECUTE_XERO_BILL})
+RECOVERY_ONLY_CAPABILITIES = frozenset(
+    {
+        CREATE_XERO_DRAFT_BILL,
+        UPDATE_XERO_DRAFT_BILL,
+        ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+        AUTHORISE_XERO_BILL,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class XeroRuntime:
     oauth: SQLiteXeroOAuth
     adapter: XeroAccountingAdapter
     definitions: tuple[CapabilityDefinition, ...]
+    recovery_definitions: tuple[CapabilityDefinition, ...]
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
@@ -93,7 +110,16 @@ def build_xero_runtime(
     return XeroRuntime(
         oauth,
         adapter,
-        XERO_DEFINITIONS,
+        tuple(
+            item
+            for item in XERO_DEFINITIONS
+            if item.capability_id not in RECOVERY_ONLY_CAPABILITIES
+        ),
+        tuple(
+            item
+            for item in XERO_DEFINITIONS
+            if item.capability_id in RECOVERY_ONLY_CAPABILITIES
+        ),
         policies,
         build_xero_executors(adapter, mail_account, call_id_source),
         frozenset(
