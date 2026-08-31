@@ -35,6 +35,7 @@ from alx.contracts.provenance import (
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
 from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, PendingMemoryBatch, ReasoningContext, ReasoningProvider
 from alx.contracts.records import StructuredData
+from alx.contracts.specialists import SpecialistError, SpecialistModel, SpecialistQuestion
 from alx.contracts.speech import (
     AudioChunk,
     SpeechSynthesizer,
@@ -89,6 +90,7 @@ __all__ = [
     "Objective", "ProgressRecord", "Referent", "SuccessCriterion", "WorkItem",
     "CapabilityDefinition", "SideEffect", "StructuredSchema", "ValueKind",
     "StructuredData",
+    "SpecialistError", "SpecialistModel", "SpecialistQuestion",
     "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "PendingMemoryBatch", "ReasoningContext", "ReasoningProvider",
     "AudioChunk", "SpeechSynthesizer", "SpeechTranscriber", "TranscriptionEvent",
     "TranscriptionState",

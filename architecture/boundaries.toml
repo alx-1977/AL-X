@@ -13,6 +13,7 @@ boundaries = [
   "providers",
   "interfaces",
   "observability",
+  "specialists",
   "bootstrap",
   "config",
 ]
@@ -45,6 +46,7 @@ tools = ["contracts"]
 providers = ["contracts"]
 interfaces = ["contracts", "conversation"]
 observability = []
+specialists = ["contracts"]
 bootstrap = [
   "contracts",
   "core",
@@ -57,6 +59,7 @@ bootstrap = [
   "providers",
   "interfaces",
   "observability",
+  "specialists",
   "config",
 ]
 config = []
