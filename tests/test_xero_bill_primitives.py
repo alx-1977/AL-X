@@ -383,6 +383,54 @@ class XeroPrimitiveTests(unittest.TestCase):
             runtime.policies[DELETE_XERO_DRAFT_BILL].permission_references,
         )
 
+    def test_a_fresh_create_response_is_not_treated_as_invalid(self) -> None:
+        """Xero omits fields a new bill cannot have yet.
+
+        A real bill was created in Xero and then reported to Friedl as not
+        posted, because the create response carried no HasAttachments and no
+        AmountDue. Reporting a completed write as a failure is the worst
+        direction to be wrong in: nothing was attached or authorised, and the
+        bill was left stranded as a draft.
+        """
+        from alx.tools.xero import _bill_values
+
+        fresh = {
+            "Type": "ACCPAY",
+            "InvoiceID": "bill-1",
+            "InvoiceNumber": "2026/2027-04",
+            "Status": "DRAFT",
+            "Total": 24900.0,
+            "Contact": {"ContactID": "contact-1", "Name": "Supplier"},
+        }
+        values = _bill_values(fresh)
+        self.assertTrue(values["found"])
+        self.assertEqual(values["total"], "24900.00")
+        self.assertEqual(values["amount_due"], "24900.00")
+        self.assertIs(values["has_attachments"], False)
+
+    def test_a_genuinely_bad_response_still_fails_closed(self) -> None:
+        """Tolerating absent optional fields must not tolerate bad money."""
+        from alx.tools.xero import _bill_values
+
+        base = {
+            "Type": "ACCPAY",
+            "InvoiceID": "bill-1",
+            "InvoiceNumber": "SUP-42",
+            "Status": "DRAFT",
+            "Total": 100.0,
+            "Contact": {"ContactID": "contact-1"},
+        }
+        for label, bill in (
+            ("total unreadable", {**base, "Total": "about a hundred"}),
+            ("total absent", {k: v for k, v in base.items() if k != "Total"}),
+            ("attachments flag not a boolean", {**base, "HasAttachments": "yes"}),
+            ("amount due unreadable", {**base, "AmountDue": "later"}),
+            ("no invoice number", {**base, "InvoiceNumber": ""}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(XeroAccessError):
+                    _bill_values(bill)
+
     def test_unknown_live_account_is_refused_before_write(self) -> None:
         self.xero.list_accounts = lambda: ()
         result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())

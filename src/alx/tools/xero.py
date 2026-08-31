@@ -405,7 +405,17 @@ def _decimal(value: Any, name: str) -> Decimal:
     return parsed
 
 
-def _money(value: Any) -> str:
+def _money(value: Any, absent: str | None = None) -> str:
+    """Convert a Xero money field, failing closed on anything unreadable.
+
+    Xero omits some money fields on a create response: a draft that has had no
+    payment carries no AmountDue. An absent optional field is normal and takes
+    the supplied default, while an absent required field, or a value that
+    cannot be read as money, is still a failure. Treating the two the same
+    reported a bill as unposted after Xero had already created it.
+    """
+    if value is None and absent is not None:
+        return absent
     if value is None or isinstance(value, bool):
         raise XeroAccessError("response_invalid")
     try:
@@ -437,7 +447,11 @@ def _bill_values(bill: Mapping[str, Any] | None) -> dict[str, Any]:
     invoice_number = str(bill.get("InvoiceNumber") or "")
     contact_id = str(contact.get("ContactID") or "")
     status = str(bill.get("Status") or "")
-    has_attachments = bill.get("HasAttachments")
+    # A freshly created bill has no attachments, and Xero can omit the flag
+    # rather than send false. Treating that as an invalid response reported a
+    # bill as unposted after Xero had already created it, which is the worst
+    # direction to be wrong in.
+    has_attachments = bill.get("HasAttachments", False)
     if (
         not invoice_id
         or not invoice_number
@@ -455,7 +469,8 @@ def _bill_values(bill: Mapping[str, Any] | None) -> dict[str, Any]:
         "status": status,
         "currency": str(bill.get("CurrencyCode") or ""),
         "total": _money(bill.get("Total")),
-        "amount_due": _money(bill.get("AmountDue")),
+        # A draft with no payment against it carries no AmountDue.
+        "amount_due": _money(bill.get("AmountDue"), absent=_money(bill.get("Total"))),
         "reference": str(bill.get("Reference") or ""),
         "has_attachments": has_attachments,
     }
