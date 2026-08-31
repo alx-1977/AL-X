@@ -34,6 +34,10 @@ from alx.contracts import (
 )
 
 
+# Every conversation sends the same stable prefix, so they share one cache
+# rather than each warming a separate one.
+CACHE_KEY = "alx-core-v1"
+
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
 Interpret the continuous conversation and the optional active goal. Choose either
 one authoritative response, one reusable primitive capability call, or one memory
@@ -355,6 +359,37 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
     }
 
 
+def _catalogue_payload(capabilities: Sequence[Any]) -> str:
+    """Serialise the capability catalogue on its own.
+
+    The catalogue is identical between calls, but it used to sit in the same
+    message as the goal and conversation, which change constantly. A cache only
+    reuses an unchanged prefix, so anything volatile in front of the catalogue
+    stopped it from ever being reused. It is now its own stable message.
+    """
+    shared = _shared_failure_codes(capabilities)
+    return json.dumps(
+        {
+            "capabilities": [
+                {
+                    "id": item.capability_id,
+                    "purpose": item.purpose,
+                    "side_effect": item.side_effect.value,
+                    "failure_codes": _failure_codes(item, shared),
+                    "input_schema": _capability_schema_payload(item.input_schema),
+                    "result_fields": _result_fields(item.output_schema),
+                }
+                for item in capabilities
+            ],
+            # Most capabilities repeat the same failure codes, so they are
+            # stated once and each capability lists only what it adds.
+            "shared_failure_codes": sorted(shared),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def _shared_failure_codes(capabilities: Sequence[Any]) -> frozenset[str]:
     """Codes every capability can return, stated once instead of per entry."""
     sets = [frozenset(item.possible_failure_codes) for item in capabilities]
@@ -455,20 +490,6 @@ def _context_payload(context: ReasoningContext) -> str:
             }
             for item in context.memories
         ],
-        "capabilities": [
-            {
-                "id": item.capability_id,
-                "purpose": item.purpose,
-                "side_effect": item.side_effect.value,
-                "failure_codes": _failure_codes(item, shared_failure_codes),
-                "input_schema": _capability_schema_payload(item.input_schema),
-                "result_fields": _result_fields(item.output_schema),
-            }
-            for item in context.capabilities
-        ],
-        # Most capabilities repeat the same failure codes, so they are stated
-        # once and each capability lists only what it adds.
-        "shared_failure_codes": sorted(shared_failure_codes),
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
@@ -706,13 +727,19 @@ class ModelReasoner:
         completion = self._model.complete(
             ModelRequest(
                 (
+                    # Stable prefix first, volatile task material last, so a
+                    # cache can reuse everything up to the changing content.
                     ModelMessage(ModelRole.SYSTEM, self._constitutional_context),
                     ModelMessage(ModelRole.SYSTEM, PROTOCOL_INSTRUCTIONS),
+                    ModelMessage(
+                        ModelRole.SYSTEM, _catalogue_payload(context.capabilities)
+                    ),
                     ModelMessage(ModelRole.USER, _context_payload(context)),
                 ),
                 "alx_core_decision",
                 decision_schema(),
                 context.conversation_id,
+                CACHE_KEY,
             )
         )
         output = completion.output

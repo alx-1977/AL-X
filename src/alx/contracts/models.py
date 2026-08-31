@@ -37,6 +37,10 @@ class ModelRequest:
     output_schema_name: str
     output_schema: StructuredData
     affinity_key: str | None = None
+    # Routes a request to a cache holding the same stable prefix. Every
+    # conversation sends an identical prefix, so keying this per conversation
+    # would split one reusable cache into many that never get reused.
+    cache_key: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
