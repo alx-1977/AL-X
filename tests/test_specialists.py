@@ -424,7 +424,7 @@ class SupplierResolutionTests(unittest.TestCase):
             "Cape Town Shuttle",
         )
         self.assertFalse(result["resolved"])
-        self.assertIn("several contacts match", result["reason"])
+        self.assertIn("no contact is named", result["reason"])
 
     def test_an_exact_name_wins_over_a_partial_list(self) -> None:
         result = resolve_supplier(
@@ -437,6 +437,40 @@ class SupplierResolutionTests(unittest.TestCase):
     def test_no_match_returns_to_alx(self) -> None:
         result = resolve_supplier([], "SAMTEC")
         self.assertFalse(result["resolved"])
+
+    def test_a_different_company_is_never_accepted(self) -> None:
+        """Review finding: one unrelated result was declared unambiguous.
+
+        Falling back from an exact match to whatever the search returned
+        resolved "Expected Supplier" to "Completely Different Company". With
+        unattended writes that posts a bill against the wrong company.
+        """
+        result = resolve_supplier(
+            [
+                {
+                    "Name": "Completely Different Company",
+                    "ContactID": "wrong",
+                    "ContactStatus": "ACTIVE",
+                }
+            ],
+            "Expected Supplier",
+        )
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["contact_id"], "")
+        self.assertIn("Completely Different Company", result["reason"])
+
+    def test_a_near_miss_is_not_a_match(self) -> None:
+        for stored, wanted in (
+            ("SAMTEC EUROPE", "SAMTEC"),
+            ("SAMTEC", "SAMTEC INC"),
+            ("Cape Shuttle's and Tours", "Cape Town Shuttles and Tour"),
+        ):
+            with self.subTest(stored=stored, wanted=wanted):
+                result = resolve_supplier(
+                    [{"Name": stored, "ContactID": "c", "ContactStatus": "ACTIVE"}],
+                    wanted,
+                )
+                self.assertFalse(result["resolved"])
 
 
 if __name__ == "__main__":

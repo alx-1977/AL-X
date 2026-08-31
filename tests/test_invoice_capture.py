@@ -304,6 +304,71 @@ class DefaultAccountTests(unittest.TestCase):
         self.assertEqual(result.values["returned_for"], "coding_unresolved")
 
 
+class StaleDraftTests(unittest.TestCase):
+    """Review finding: an altered draft was authorised as correct.
+
+    Resuming checked only supplier, invoice number, status and total, so a
+    draft whose account had been changed to something else was authorised and
+    reported complete. Matching the total is not enough to commit to a bill.
+    """
+
+    def build(self):
+        self.xero = FakeXero()
+        self.xero.accounts = ({"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},)
+        return build_xero_executors(
+            self.xero, FakeMail(), lambda: "call-1", lambda *_: extracted(), "310", "INPUT3"
+        )[CAPTURE_SUPPLIER_INVOICE]
+
+    def existing_draft(self, **changes):
+        capture = self.build()
+        capture(arguments())
+        invoice_id = next(iter(self.xero.bills))
+        self.xero.bills[invoice_id]["Status"] = "DRAFT"
+        self.xero.bills[invoice_id].update(changes)
+        return capture, invoice_id
+
+    def test_a_draft_with_a_changed_account_is_never_authorised(self) -> None:
+        capture, invoice_id = self.existing_draft(
+            LineItems=[{"AccountCode": "WRONG", "TaxType": "NONE", "LineAmount": 180.0}]
+        )
+        result = capture(arguments())
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "existing_draft_differs")
+        self.assertIn("account", result.values["detail"])
+        self.assertNotEqual(self.xero.bills[invoice_id]["Status"], "AUTHORISED")
+
+    def test_a_draft_with_a_changed_tax_type_is_never_authorised(self) -> None:
+        capture, _ = self.existing_draft(
+            LineItems=[{"AccountCode": "310", "TaxType": "INPUT3", "LineAmount": 180.0}]
+        )
+        result = capture(arguments())
+        self.assertFalse(result.values["completed"])
+        self.assertIn("tax type", result.values["detail"])
+
+    def test_a_draft_with_extra_lines_is_never_authorised(self) -> None:
+        capture, _ = self.existing_draft(
+            LineItems=[
+                {"AccountCode": "310", "TaxType": "NONE", "LineAmount": 90.0},
+                {"AccountCode": "310", "TaxType": "NONE", "LineAmount": 90.0},
+            ]
+        )
+        result = capture(arguments())
+        self.assertFalse(result.values["completed"])
+        self.assertIn("line(s)", result.values["detail"])
+
+    def test_an_unaltered_draft_still_resumes(self) -> None:
+        """Idempotency must survive the stricter check."""
+        capture = self.build()
+        capture(arguments())
+        created = len(self.xero.bills)
+        invoice_id = next(iter(self.xero.bills))
+        self.xero.bills[invoice_id]["Status"] = "DRAFT"
+        result = capture(arguments())
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(len(self.xero.bills), created, "a retry duplicated the bill")
+        self.assertIn("resumed_existing_draft", result.values["steps"])
+
+
 class ProcessedFilingTests(unittest.TestCase):
     """A captured invoice's mail is filed rather than left in the inbox."""
 
@@ -403,7 +468,7 @@ class ReturnsToCoreTests(unittest.TestCase):
         result = capture(arguments())
         self.assertFalse(result.values["completed"])
         self.assertEqual(result.values["returned_for"], "supplier_unresolved")
-        self.assertIn("several contacts match", result.values["detail"])
+        self.assertIn("no contact is named", result.values["detail"])
         self.assertEqual(self.xero.created, 0)
 
     def test_a_supplier_with_no_history_returns_to_core(self) -> None:

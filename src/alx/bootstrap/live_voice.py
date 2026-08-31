@@ -65,6 +65,13 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
     return values
 
 
+def _completed(attempt) -> bool:
+    """True only when a capture actually finished its work."""
+    result = getattr(attempt, "result", None)
+    values = getattr(result, "values", None)
+    return bool(values and values.get("completed") is True)
+
+
 def locate_active_goal(store: SQLiteGoalStore, conversation_id: str) -> str | None:
     """Select the latest Core-active goal using durable state, never wording."""
     candidates = [
@@ -231,10 +238,11 @@ async def run(repository_root: Path) -> None:
                 standing_scopes=mail_post_reply_standing_scopes(state),
             ),
         )
-        # A finished bill closes its ceiling window. Two invoices in one
-        # conversation shared a single ceiling, so the second was refused for
-        # the first one's calls.
-        if call.capability_id in BILL_EXECUTION_CAPABILITIES:
+        # A finished bill closes its ceiling window, so the next invoice gets
+        # its own. Only a completed capture counts: settling after a refusal
+        # or a returned ambiguity would hand the same bill a fresh ceiling and
+        # let it keep reasoning.
+        if call.capability_id in BILL_EXECUTION_CAPABILITIES and _completed(attempt):
             usage.settle(current_conversation_id[0])
         return attempt
 

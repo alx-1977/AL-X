@@ -320,6 +320,30 @@ def check_repository(root: Path) -> list[str]:
         violations,
     )
 
+    # The three-law rewrite left the enforcement specification describing gates
+    # for laws that no longer exist, and both gates passed anyway. A document
+    # that binds implementers must not contradict the canonical law text.
+    enforcement = _read(root, "docs/LAW_ENFORCEMENT.md", violations)
+    stale = sorted(
+        {
+            int(value)
+            for value in re.findall(r"^\| (\d+)", enforcement, re.MULTILINE)
+        }
+        - set(law_numbers)
+    )
+    if stale:
+        violations.append(
+            "docs/LAW_ENFORCEMENT.md: defines gates for laws that do not exist "
+            f"in LAWS_OF_ALX.md: {', '.join(str(item) for item in stale)}"
+        )
+
+    blueprint = _read(root, "docs/ARCHITECTURE_BLUEPRINT.md", violations)
+    if "process_DHL_invoice_workflow` would encode a journey" in blueprint:
+        violations.append(
+            "docs/ARCHITECTURE_BLUEPRINT.md: its prohibited-capability example "
+            "predates Law 2 and contradicts it"
+        )
+
     agents = _read(root, "AGENTS.md", violations)
     _require_markers(
         agents,

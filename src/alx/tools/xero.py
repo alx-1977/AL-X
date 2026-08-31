@@ -511,6 +511,49 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
     return output, total.quantize(Decimal("0.01"))
 
 
+def _line_mismatch(
+    existing: Mapping[str, Any] | None, requested: Sequence[Mapping[str, Any]]
+) -> str:
+    """Report the first way an existing draft differs from what was requested.
+
+    Only the fields that decide where money lands are compared: a draft is
+    resumed to finish work, not to adopt whatever it happens to contain.
+    """
+    stored = [
+        item for item in (existing or {}).get("LineItems") or []
+        if isinstance(item, Mapping)
+    ]
+    if len(stored) != len(requested):
+        return f"it has {len(stored)} line(s), not {len(requested)}"
+    for index, (was, wanted) in enumerate(zip(stored, requested), start=1):
+        for field, label in (
+            ("AccountCode", "account"),
+            ("TaxType", "tax type"),
+        ):
+            if str(was.get(field) or "") != str(wanted.get(field) or ""):
+                return (
+                    f"line {index} {label} is {was.get(field)!r}, "
+                    f"not {wanted.get(field)!r}"
+                )
+        try:
+            # Xero returns LineAmount; a stored line may carry only its
+            # quantity and unit amount, so accept whichever is present.
+            stored_amount = (
+                Decimal(str(was["LineAmount"]))
+                if was.get("LineAmount") is not None
+                else Decimal(str(was.get("Quantity") or "0"))
+                * Decimal(str(was.get("UnitAmount") or "0"))
+            )
+            if stored_amount != (
+                Decimal(str(wanted.get("Quantity") or "0"))
+                * Decimal(str(wanted.get("UnitAmount") or "0"))
+            ):
+                return f"line {index} amount differs"
+        except InvalidOperation:
+            return f"line {index} amount is unreadable"
+    return ""
+
+
 def _decimal_or_zero(value: str) -> Decimal:
     try:
         return Decimal(value or "0")
@@ -901,6 +944,18 @@ def build_xero_executors(
                         f"{current['total']}, not {expected_total}",
                         existing,
                     )
+                # Matching the total is not enough to authorise a draft. A
+                # draft whose account, tax type or lines differ from what was
+                # requested was authorised as correct in review, so the lines
+                # themselves must match before this commits to them.
+                mismatch = _line_mismatch(existing, bill_payload["LineItems"])
+                if mismatch:
+                    return returned(
+                        "existing_draft_differs",
+                        f"the existing draft for {invoice_number} does not match "
+                        f"the requested bill: {mismatch}",
+                        existing,
+                    )
                 invoice_id = current["invoice_id"]
                 steps.append("resumed_existing_draft")
             else:
@@ -1091,6 +1146,10 @@ def build_xero_executors(
                 "contact_id": contact["contact_id"],
                 "invoice_number": invoice["invoice_number"],
                 "date": invoice["invoice_date"],
+                # Xero requires a due date. Where the invoice states none,
+                # due on receipt is the conservative reading: it can make a
+                # bill look due sooner, never hide one that is overdue. V1 made
+                # the same choice, and it is recorded in D-020.
                 "due_date": invoice["due_date"] or invoice["invoice_date"],
                 "currency": invoice["currency"],
                 "reference": context_line or attachment.filename,

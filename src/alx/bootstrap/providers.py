@@ -54,6 +54,14 @@ def _build_reasoning_model(
             telemetry_sink=telemetry_sink,
         )
     if settings.provider == "xai":
+        # The xAI transport takes no reasoning-effort parameter, so the
+        # configured effort cannot be honoured there. Saying so is better than
+        # leaving a setting that looks active and is not.
+        if settings.effort not in ("", "medium"):
+            LOGGER.info(
+                "Specialist reasoning effort %r is not supported by xai and is ignored",
+                settings.effort,
+            )
         return XAIReasoningModel(
             settings.model,
             settings.api_key,

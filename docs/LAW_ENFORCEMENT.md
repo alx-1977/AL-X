@@ -44,25 +44,12 @@ Any proposal must name the concrete module that owns each boundary. Two owners f
 
 | Law | Automated evidence required | Human evidence required |
 | --- | --- | --- |
-| 1 | Static checks reject phrase/keyword/regex intent routing and embedded environment-specific behaviour outside approved constant/config boundaries. | Explain every newly encoded constant and why it is universal, protocol-mandated, configurable, or explicitly approved. |
-| 2 | Agent-loop tests prove multi-step planning, tool composition, result evaluation, replanning after failure, verification, and constructive challenge. | Demonstrate that AL/X can advance a goal without Friedl prescribing each step. |
-| 3 | Architecture tests prove all conversational inputs reach the same ingress and agent authority; no feature may emit an independent assistant response. | List every input and output surface and trace it through the single path. |
-| 4 | Boundary tests reject raw user language in tool, route, integration, and frontend domain interfaces. | Explain any component that processes domain documents and prove it does not interpret Friedl's intent. |
-| 5 | Capability-schema checks require structured inputs/results and reject trigger vocabulary and bundled journey definitions. | Justify each new capability as a reusable primitive. |
-| 6 | Dependency and integration tests prove application code cannot privately sequence domain workflows outside the agent loop. | Describe how AL/X dynamically chooses the demonstrated sequence. |
-| 7 | Behavioural tests inspect persisted goal objective, context, decisions, progress, blockers, and outstanding work across turns. | Show how a request creates or updates a goal. |
-| 8 | Continuation tests prove AL/X keeps working after intermediate results and stops only for an allowed terminal condition. | Identify the terminal condition and evidence for it. |
-| 9 | Tool-loop tests prove every result re-enters AL/X before another action or final conclusion. | Trace at least one multi-tool result chain. |
-| 10 | Frontend boundary tests reject domain capability selection, workflow orchestration, and authoritative goal/conversation state in client code. | Review frontend changes for presentation/input responsibility only. |
-| 11 | Paraphrase tests use meaning-equivalent wording, follow-ups, corrections, and different styles without code-path-specific expectations. | Confirm no production change was needed for new wording. |
-| 12 | Registry checks require a capability justification and reject duplicate or workflow-shaped tools. | Approve the primitive boundary of every new tool. |
-| 13 | Tests prove requests are not limited to a fixed intent enumeration; the catalogue describes capabilities only. | Review schemas and prompts for hidden intent menus. |
-| 14 | Agent tests prove zero, one, and multiple tool calls are possible in one active goal, including replanning. | Demonstrate a genuine multi-capability goal. |
-| 15 | Restart tests prove durable recovery; data-policy tests cover inspection, correction, deletion, and retention controls. | Approve the context data model and retention policy. |
-| 16 | CI verifies that every exception identifier exists in `governance/EXCEPTIONS.md` and matches its exact scope and expiry/review condition. | Friedl explicitly approves each exception before implementation. |
-| 17 | Test-policy checks reject suites whose behavioural coverage depends only on exact trigger phrases or intent labels. | Review scenarios for varied language, interruptions, corrections, and restarts. |
-| 18 | CI makes all implemented law gates required and prevents silent skipping. | Record evidence for any law that cannot yet be mechanically verified. |
-| 19 | Sandbox-boundary tests prove experiments cannot self-register, increase permissions, modify production systems, or use production-data operations other than explicitly scoped reads. Deployment tests require a separately governed capability record and authority decision. | Review the experiment's isolation, resource and privacy controls, production-data scope, evidence, and proposed deployment; Friedl alone authorises production deployment. |
+| 1 — AL/X decides meaning | Static checks reject raw-language parameters, phrase and regex routing, intent/action/command naming, frontend domain authority, and parallel conversation paths. Agent-loop tests prove planning, replanning after failure, and multi-capability goals. Paraphrase tests use meaning-equivalent wording without code-path-specific expectations. | Trace every input surface through the single ingress. Confirm no production change was needed for new wording. Explain any component that reads domain documents and show it does not interpret Friedl's intent. |
+| 2 — Code executes known procedures | Capability-schema checks require structured inputs and results and reject trigger vocabulary. Dependency and architecture tests prove module boundaries and provider isolation. | Justify each capability as one reusable outcome. A deterministic sequence longer than a single external call requires Friedl's recorded decision naming it. |
+| 3 — Ambiguity returns to AL/X | Tests prove every condition without one objectively correct outcome returns rather than resolving itself, that consequential actions are gated by the recorded authority, and that goals, decisions and progress survive restart. | Identify what the capability refuses to decide and why. Approve the retained data and its retention policy. |
+
+A change fails if any applicable gate fails. Where a law cannot be checked
+automatically, compliance requires recorded evidence in the pull request.
 
 ## Required test scenarios for every conversational capability
 

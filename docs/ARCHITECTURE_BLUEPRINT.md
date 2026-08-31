@@ -67,7 +67,7 @@ The registry describes the reusable things AL/X can do. Each capability has a st
 
 The broker validates a proposed call, invokes the selected capability, records the outcome, and returns it to the Core Agent. It cannot select a workflow or interpret Friedl's words.
 
-A capability such as `read_message` or `create_draft` can be composed into many goals. A capability such as `process_DHL_invoice_workflow` would encode a journey and is prohibited unless Friedl explicitly approves it as an exception.
+A capability such as `read_message` or `create_draft` can be composed into many goals. A capability is prohibited when it interprets what Friedl wants or decides business meaning, not merely because it performs several mechanical steps toward one outcome. Under Law 2 a capability may contain whatever deterministic steps its outcome requires; a deterministic sequence longer than a single external call must be named in an approved decision, as `capture_supplier_invoice` is in D-020.
 
 ### 5. Safety and Authority Gate
 

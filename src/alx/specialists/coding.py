@@ -105,7 +105,14 @@ def _unresolved(reason: str) -> dict[str, Any]:
 def resolve_supplier(
     contacts: Sequence[Mapping[str, Any]], supplier_name: str
 ) -> dict[str, Any]:
-    """Match a supplier only where exactly one candidate is unambiguous."""
+    """Match a supplier only on its own name, never on what a search returned.
+
+    Falling back from an exact match to whatever active contacts came back
+    resolved "Expected Supplier" to "Completely Different Company" whenever the
+    search returned one unrelated result. With unattended writes that posts a
+    bill against the wrong company, so only the supplier's own name may
+    identify it.
+    """
     wanted = supplier_name.strip().casefold()
     if not wanted:
         return {"resolved": False, "contact_id": "", "reason": "no supplier name"}
@@ -115,12 +122,19 @@ def resolve_supplier(
         for item in contacts
         if str(item.get("ContactStatus") or "ACTIVE") == "ACTIVE"
     ]
-    exact = [
+    candidates = [
         item for item in active if str(item.get("Name") or "").strip().casefold() == wanted
     ]
-    candidates = exact or active
     if not candidates:
-        return {"resolved": False, "contact_id": "", "reason": "no matching contact"}
+        near = sorted(str(item.get("Name") or "") for item in active)
+        return {
+            "resolved": False,
+            "contact_id": "",
+            "reason": (
+                f"no contact is named {supplier_name!r}"
+                + (f"; the search returned {', '.join(near)}" if near else "")
+            ),
+        }
     if len(candidates) > 1:
         names = sorted(str(item.get("Name") or "") for item in candidates)
         return {

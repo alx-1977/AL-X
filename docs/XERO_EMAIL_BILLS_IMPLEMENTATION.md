@@ -1,7 +1,8 @@
 # Xero Email Bills — Implementation Evidence
 
-**Status:** Implemented locally under D-016 and D-017; production OAuth
-connection and real Xero writes have not been exercised in this change.
+**Status:** Implemented under D-016, D-017, D-018, D-019 and D-020. Real bills
+have been created, attached and authorised in the live FireFli organisation.
+Bill writes run unattended under D-018; only discarding a draft still asks.
 
 ## Goal and scope
 
@@ -39,8 +40,9 @@ payroll.
 
 ## Safety and authority
 
-D-016 records Friedl's product and deployment decision. Every Xero write still
-requires an exact, expiring approval. No unattended standing authority exists.
+D-016 records Friedl's product and deployment decision, and D-018 replaced the
+per-write approval with configured standing authority for supplier bills.
+Discarding a draft keeps its own permission and asks by default.
 The draft primitives refuse unbalanced lines, account/tax pairs absent from the
 live configured organisation, and an existing supplier/invoice pair. Duplicate
 lookup uses Xero's documented `InvoiceNumbers` and `ContactIDs` collection
@@ -50,7 +52,8 @@ read back from Xero with the approved SHA-256 digest. `HasAttachments` alone is
 not proof. Malformed money returned by Xero fails closed. Xero acceptance does
 not prove completion; the separate read primitive exists for verification.
 
-No production Xero request was made while implementing or testing this slice.
+Production Xero writes have since been made: two supplier bills were created,
+attached, authorised and read back, and their source mail filed.
 
 ## Goal state and restart behaviour
 
