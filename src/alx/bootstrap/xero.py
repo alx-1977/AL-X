@@ -14,6 +14,7 @@ from alx.safety import AuthorityPolicy
 from alx.tools import (
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
     AUTHORISE_XERO_BILL,
+    EXECUTE_XERO_BILL,
     DELETE_XERO_DRAFT_BILL,
     CREATE_XERO_DRAFT_BILL,
     UPDATE_XERO_DRAFT_BILL,
@@ -85,6 +86,7 @@ def build_xero_runtime(
         CREATE_XERO_DRAFT_BILL: write_policy,
         UPDATE_XERO_DRAFT_BILL: write_policy,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: write_policy,
+        EXECUTE_XERO_BILL: write_policy,
         DELETE_XERO_DRAFT_BILL: delete_policy,
         AUTHORISE_XERO_BILL: write_policy,
     }

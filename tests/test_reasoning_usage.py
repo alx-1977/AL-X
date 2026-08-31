@@ -131,16 +131,33 @@ class ExecutionBudgetTests(unittest.TestCase):
         self.recorder.check("task-1")
         self.assertEqual(self.recorder.task("task-1")["budget_state"], "unbudgeted")
 
-    def test_declared_recovery_lifts_the_ceiling(self) -> None:
-        """Genuine ambiguity handling is real work, not a runaway loop."""
+    def test_declared_recovery_extends_the_ceiling_but_does_not_remove_it(self) -> None:
+        """Ambiguity handling is real work, but no path reasons without a ceiling."""
         self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
-        for _ in range(5):
+        for _ in range(4):
             self.recorder.record("task-1", call())
         with self.assertRaises(BudgetExceeded):
             self.recorder.check("task-1")
+
         self.recorder.enter_recovery("task-1")
         self.recorder.check("task-1")
+        self.recorder.record("task-1", call())
         self.assertEqual(self.recorder.task("task-1")["budget_state"], "recovering")
+        for _ in range(XERO_BILL_BUDGET.recovery_allowance - 1):
+            self.recorder.check("task-1")
+            self.recorder.record("task-1", call())
+
+        # The recovery allowance is now spent; reasoning stops again.
+        with self.assertRaises(BudgetExceeded) as captured:
+            self.recorder.check("task-1")
+        self.assertEqual(captured.exception.limit, XERO_BILL_BUDGET.recovery_limit)
+        self.assertEqual(self.recorder.task("task-1")["budget_state"], "stopped")
+
+    def test_no_budget_allows_an_unlimited_recovery(self) -> None:
+        for budget in (XERO_BILL_BUDGET, ExecutionBudget(1, 1, 1)):
+            with self.subTest(budget=budget):
+                self.assertGreater(budget.recovery_allowance, 0)
+                self.assertGreater(budget.recovery_limit, budget.stop_above)
 
     def test_a_new_budget_clears_a_previous_recovery(self) -> None:
         self.recorder.set_budget("task-1", XERO_BILL_BUDGET)

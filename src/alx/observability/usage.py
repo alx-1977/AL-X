@@ -28,10 +28,19 @@ class ExecutionBudget:
     expected: int
     warn_above: int
     stop_above: int
+    # Declared recovery buys a bounded allowance, never an open budget. No
+    # execution path may reason without a ceiling.
+    recovery_allowance: int = 2
 
     def __post_init__(self) -> None:
         if not 0 < self.expected <= self.warn_above <= self.stop_above:
             raise ValueError("budget must be 0 < expected <= warn_above <= stop_above")
+        if self.recovery_allowance <= 0:
+            raise ValueError("recovery_allowance must be positive")
+
+    @property
+    def recovery_limit(self) -> int:
+        return self.stop_above + self.recovery_allowance
 
 
 # A routine supplier bill is one decision and one execution. Anything beyond
@@ -184,7 +193,8 @@ class SQLiteUsageRecorder:
         if budget is None:
             return "unbudgeted"
         if recovering:
-            return "recovering"
+            # Matches check(): the next call is refused once calls reach the limit.
+            return "stopped" if calls >= budget.recovery_limit else "recovering"
         if calls > budget.stop_above:
             return "stopped"
         if calls > budget.warn_above:
@@ -199,8 +209,9 @@ class SQLiteUsageRecorder:
         """
         with self._lock:
             budget = self._budgets.get(task_id)
-            if budget is None or task_id in self._recovery:
+            if budget is None:
                 return
+            recovering = task_id in self._recovery
         database = self._db()
         try:
             calls = database.execute(
@@ -209,8 +220,9 @@ class SQLiteUsageRecorder:
             ).fetchone()[0]
         finally:
             database.close()
-        if calls >= budget.stop_above:
-            raise BudgetExceeded(task_id, calls, budget.stop_above)
+        limit = budget.recovery_limit if recovering else budget.stop_above
+        if calls >= limit:
+            raise BudgetExceeded(task_id, calls, limit)
 
     def sink(self, task_id: str, values: Mapping[str, Any]) -> None:
         """Telemetry-sink signature, so the provider needs no new wiring."""

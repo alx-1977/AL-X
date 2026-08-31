@@ -32,6 +32,7 @@ READ_XERO_BILL = "read_xero_bill"
 CREATE_XERO_DRAFT_BILL = "create_xero_draft_bill"
 UPDATE_XERO_DRAFT_BILL = "update_xero_draft_bill"
 ATTACH_MAIL_DOCUMENT_TO_XERO_BILL = "attach_mail_document_to_xero_bill"
+EXECUTE_XERO_BILL = "execute_xero_bill"
 DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
 AUTHORISE_XERO_BILL = "authorise_xero_bill"
 
@@ -249,6 +250,45 @@ ATTACH_DOCUMENT_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+_SOURCE_DOCUMENT = _object(
+    {
+        "mailbox_id": _STRING,
+        "uid_validity": _STRING,
+        "uid": _STRING,
+        "attachment_id": _STRING,
+        "expected_sha256": _STRING,
+    },
+    ("mailbox_id", "uid_validity", "uid", "attachment_id", "expected_sha256"),
+)
+
+EXECUTE_BILL_DEFINITION = CapabilityDefinition(
+    EXECUTE_XERO_BILL,
+    "Commit one accounts-payable bill whose supplier, lines, amounts, account codes and tax types were already decided, then attach the named source documents, read it back and verify it. Returns without acting whenever the outcome is not objectively determined.",
+    _object(
+        {
+            **_DRAFT_PROPERTIES,
+            "source_documents": StructuredSchema(
+                ValueKind.ARRAY, items=_SOURCE_DOCUMENT
+            ),
+            "authorise": _BOOLEAN,
+        },
+        (*_DRAFT_REQUIRED, "source_documents", "authorise"),
+    ),
+    _object(
+        {
+            "completed": _BOOLEAN,
+            "returned_for": _STRING,
+            "detail": _STRING,
+            "bill": _BILL_RESULT,
+            "attached": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "steps": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+        },
+        ("completed", "returned_for", "detail", "bill", "attached", "steps"),
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
 DELETE_DRAFT_DEFINITION = CapabilityDefinition(
     DELETE_XERO_DRAFT_BILL,
     "Discard one exact DRAFT accounts-payable bill after verifying its invoice number and total; refuse a bill that is not a draft.",
@@ -298,6 +338,7 @@ DEFINITIONS = (
     CREATE_DRAFT_DEFINITION,
     UPDATE_DRAFT_DEFINITION,
     ATTACH_DOCUMENT_DEFINITION,
+    EXECUTE_BILL_DEFINITION,
     DELETE_DRAFT_DEFINITION,
     AUTHORISE_BILL_DEFINITION,
 )
@@ -735,6 +776,160 @@ def build_xero_executors(
             },
         )
 
+    def execute_bill(arguments: StructuredData) -> CapabilityResult:
+        """Commit values AL/X already decided; return whenever judgment is needed.
+
+        Every step here is mechanical: the supplier, lines, amounts, account
+        codes and tax types arrive already chosen. Nothing in this function
+        selects accounting meaning, and any condition without one objectively
+        correct outcome stops and returns to AL/X.
+        """
+        steps: list[str] = []
+        attached: list[str] = []
+
+        def returned(reason: str, detail: str, bill: Mapping[str, Any] | None = None):
+            return CapabilityResult(
+                call_id_source(),
+                EXECUTE_XERO_BILL,
+                CapabilityResultState.SUCCEEDED,
+                {
+                    "completed": False,
+                    "returned_for": reason,
+                    "detail": detail,
+                    "bill": _bill_values(bill),
+                    "attached": tuple(attached),
+                    "steps": tuple(steps),
+                },
+            )
+
+        try:
+            documents = arguments.get("source_documents")
+            if not isinstance(documents, (tuple, list)) or not documents:
+                raise ValueError("source_documents")
+            authorise_requested = arguments.get("authorise")
+            if not isinstance(authorise_requested, bool):
+                raise ValueError("authorise")
+            bill_payload, expected_total = _draft_payload(arguments, account)
+            contact_id = str(bill_payload["Contact"]["ContactID"])
+            invoice_number = str(bill_payload["InvoiceNumber"])
+            steps.append("validated_supplied_values")
+
+            # Idempotency. A prior attempt may have created this bill before
+            # failing, so an existing draft for the same supplier and invoice
+            # number is resumed rather than duplicated. Anything already beyond
+            # draft is an outcome only AL/X may judge.
+            existing = account.find_bill(invoice_number, contact_id)
+            current = _bill_values(existing)
+            if current["found"]:
+                if current["status"] != "DRAFT":
+                    return returned(
+                        "duplicate_bill",
+                        f"a {current['status']} bill already exists for {invoice_number}",
+                        existing,
+                    )
+                if Decimal(current["total"]) != expected_total:
+                    return returned(
+                        "duplicate_bill",
+                        f"an existing draft for {invoice_number} totals "
+                        f"{current['total']}, not {expected_total}",
+                        existing,
+                    )
+                invoice_id = current["invoice_id"]
+                steps.append("resumed_existing_draft")
+            else:
+                created = _bill_values(account.create_draft_bill(bill_payload))
+                if (
+                    created["invoice_number"] != invoice_number
+                    or Decimal(created["total"]) != expected_total
+                ):
+                    raise XeroAccessError("source_mismatch")
+                invoice_id = created["invoice_id"]
+                steps.append("created_draft")
+
+            stored = {
+                str(item.get("FileName") or "")
+                for item in account.list_bill_attachments(invoice_id)
+            }
+            for document in documents:
+                if not isinstance(document, Mapping):
+                    raise ValueError("source_documents")
+                reference = MailReference(
+                    _required(document, "mailbox_id"),
+                    _required(document, "uid_validity"),
+                    _required(document, "uid"),
+                )
+                digest = _sha256(document.get("expected_sha256"), "expected_sha256")
+                attachment, content = mail.read_attachment(
+                    reference, _required(document, "attachment_id")
+                )
+                if attachment.sha256 != digest:
+                    return returned(
+                        "attachment_mismatch",
+                        f"{attachment.filename} does not match the approved digest",
+                        account.read_bill(invoice_id),
+                    )
+                # Re-attaching the same filename would duplicate it on retry.
+                if attachment.filename not in stored:
+                    account.attach_bill_document(
+                        invoice_id, attachment.filename, attachment.media_type, content
+                    )
+                    stored.add(attachment.filename)
+                _verified_attachment(
+                    account, invoice_id, attachment.filename, digest
+                )
+                attached.append(attachment.filename)
+            steps.append("attached_and_verified_documents")
+
+            if authorise_requested:
+                account.authorise_bill(invoice_id)
+                steps.append("authorised")
+
+            final = _bill_values(account.read_bill(invoice_id))
+            steps.append("read_back")
+            expected_status = "AUTHORISED" if authorise_requested else "DRAFT"
+            if (
+                not final["found"]
+                or final["invoice_id"] != invoice_id
+                or final["invoice_number"] != invoice_number
+                or final["contact_id"] != contact_id
+                or Decimal(final["total"]) != expected_total
+                or final["status"] != expected_status
+                or not final["has_attachments"]
+            ):
+                return returned(
+                    "read_back_mismatch",
+                    "the committed bill does not match the requested values",
+                    account.read_bill(invoice_id),
+                )
+            steps.append("verified")
+            return CapabilityResult(
+                call_id_source(),
+                EXECUTE_XERO_BILL,
+                CapabilityResultState.SUCCEEDED,
+                {
+                    "completed": True,
+                    "returned_for": "",
+                    "detail": "",
+                    "bill": final,
+                    "attached": tuple(attached),
+                    "steps": tuple(steps),
+                },
+            )
+        except ValueError:
+            return failed(EXECUTE_XERO_BILL, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(EXECUTE_XERO_BILL, error.code)
+        except XeroAccessError as error:
+            # account_mapping_invalid means AL/X supplied an account or tax type
+            # this organisation does not have. Choosing a replacement would be
+            # deciding accounting meaning, so it returns to her instead.
+            if error.code == "account_mapping_invalid":
+                return returned(
+                    "account_or_tax_unresolved",
+                    "a supplied account code or tax type is not active in this organisation",
+                )
+            return failed(EXECUTE_XERO_BILL, error.code)
+
     def delete_draft(arguments: StructuredData) -> CapabilityResult:
         def operation() -> Mapping[str, Any]:
             invoice_id = _required(arguments, "invoice_id")
@@ -804,6 +999,7 @@ def build_xero_executors(
         CREATE_XERO_DRAFT_BILL: create_draft,
         UPDATE_XERO_DRAFT_BILL: update_draft,
         ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: attach_document,
+        EXECUTE_XERO_BILL: execute_bill,
         DELETE_XERO_DRAFT_BILL: delete_draft,
         AUTHORISE_XERO_BILL: authorise,
     }
