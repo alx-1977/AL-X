@@ -174,6 +174,8 @@ class MailSettings:
     imap_host: str
     imap_port: int
     poll_seconds: int
+    # Where a processed supplier invoice is filed. Blank leaves mail in place.
+    processed_mailbox: str
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "MailSettings":
@@ -183,13 +185,17 @@ class MailSettings:
             imap_host=_required(environment, "MAIL_IMAP_HOST"),
             imap_port=_integer_in_range(environment, "MAIL_IMAP_PORT", 1, 65535),
             poll_seconds=_positive_integer(environment, "ALX_MAIL_POLL_SECONDS", 15),
+            processed_mailbox=environment.get(
+                "ALX_MAIL_PROCESSED_MAILBOX", ""
+            ).strip(),
         )
 
     def __repr__(self) -> str:
         return (
             f"MailSettings(address={self.address!r}, secret=<redacted>, "
             f"imap_host={self.imap_host!r}, imap_port={self.imap_port!r}, "
-            f"poll_seconds={self.poll_seconds!r})"
+            f"poll_seconds={self.poll_seconds!r}, "
+            f"processed_mailbox={self.processed_mailbox!r})"
         )
 
 

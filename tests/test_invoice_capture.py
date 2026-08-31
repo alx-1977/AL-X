@@ -304,6 +304,65 @@ class DefaultAccountTests(unittest.TestCase):
         self.assertEqual(result.values["returned_for"], "coding_unresolved")
 
 
+class ProcessedFilingTests(unittest.TestCase):
+    """A captured invoice's mail is filed rather than left in the inbox."""
+
+    def test_filing_needs_a_configured_mailbox(self) -> None:
+        """The destination is configured, never chosen by AL/X."""
+        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE, build_mail_executors
+
+        class Mail:
+            def __init__(self) -> None:
+                self.filed = []
+
+            def file_message(self, reference, mailbox):
+                self.filed.append((reference.uid, mailbox))
+                return mailbox
+
+        mail = Mail()
+        unconfigured = build_mail_executors(
+            mail, mail, lambda: "call-1"
+        )[FILE_PROCESSED_MAIL_MESSAGE]
+        result = unconfigured(
+            {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "12"}
+        )
+        self.assertEqual(result.failure["code"], "mailbox_unavailable")
+        self.assertEqual(mail.filed, [], "nothing may move without a destination")
+
+    def test_a_configured_mailbox_receives_the_message(self) -> None:
+        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE, build_mail_executors
+
+        class Mail:
+            def __init__(self) -> None:
+                self.filed = []
+
+            def file_message(self, reference, mailbox):
+                self.filed.append((reference.uid, mailbox))
+                return mailbox
+
+        mail = Mail()
+        configured = build_mail_executors(
+            mail, mail, lambda: "call-1", processed_mailbox="FireFli/Processed"
+        )[FILE_PROCESSED_MAIL_MESSAGE]
+        result = configured(
+            {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "12"}
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["filed"])
+        self.assertEqual(result.values["mailbox_id"], "FireFli/Processed")
+        self.assertEqual(mail.filed, [("12", "FireFli/Processed")])
+
+    def test_filing_takes_no_destination_from_alx(self) -> None:
+        """AL/X cannot file a message somewhere of her own choosing."""
+        from alx.tools.mail import FILE_DEFINITION
+
+        self.assertNotIn("mailbox", FILE_DEFINITION.input_schema.properties)
+        self.assertEqual(
+            set(FILE_DEFINITION.input_schema.properties),
+            {"mailbox_id", "uid_validity", "uid"},
+        )
+
+
 class ReturnsToCoreTests(unittest.TestCase):
     """Only genuine ambiguity reaches AL/X, and it reaches her with the facts."""
 

@@ -28,6 +28,7 @@ from alx.tools import (
     DEFINITIONS,
     MARK_MAIL_MESSAGE_SEEN,
     LIST_MAIL_ATTACHMENTS,
+    FILE_PROCESSED_MAIL_MESSAGE,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     READ_MAIL_MESSAGE,
     READ_MAIL_ATTACHMENT,
@@ -170,13 +171,25 @@ def build_mail_runtime(
             approval_required=True,
             standing_scope_allowed=True,
         ),
+        # Filing a processed invoice moves it within the same account to a
+        # configured folder. Nothing is deleted and the destination is not
+        # AL/X's to choose, so it is housekeeping rather than a consequential
+        # act needing its own approval.
+        FILE_PROCESSED_MAIL_MESSAGE: AuthorityPolicy(
+            frozenset({MAIL_TRASH_PERMISSION}),
+        ),
     }
     return MailRuntime(
         source,
         observations,
         DEFINITIONS,
         policies,
-        build_mail_executors(source, source, call_id_source),
+        build_mail_executors(
+            source,
+            source,
+            call_id_source,
+            processed_mailbox=settings.processed_mailbox,
+        ),
         frozenset(
             {
                 MAIL_READ_PERMISSION,

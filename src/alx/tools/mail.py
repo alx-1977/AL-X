@@ -36,6 +36,7 @@ READ_MAIL_ATTACHMENT = "read_mail_attachment"
 ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
 MARK_MAIL_MESSAGE_SEEN = "mark_mail_message_seen"
 MOVE_MAIL_MESSAGE_TO_TRASH = "move_mail_message_to_trash"
+FILE_PROCESSED_MAIL_MESSAGE = "file_processed_mail_message"
 SEND_MAIL_REPLY = "send_mail_reply"
 
 _FAILURES = (
@@ -239,6 +240,20 @@ MARK_SEEN_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+FILE_DEFINITION = CapabilityDefinition(
+    FILE_PROCESSED_MAIL_MESSAGE,
+    "Move one identified mail item to the configured processed mailbox once its invoice is in Xero; the destination is configured, not chosen.",
+    _input(),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, "mailbox_id": _STRING, "filed": StructuredSchema(ValueKind.BOOLEAN)},
+        ("reference", "mailbox_id", "filed"),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
 TRASH_DEFINITION = CapabilityDefinition(
     MOVE_MAIL_MESSAGE_TO_TRASH,
     "Move one identified mail item to the account's recoverable Trash mailbox.",
@@ -303,6 +318,7 @@ DEFINITIONS = (
     READ_ATTACHMENT_DEFINITION,
     ACKNOWLEDGE_DEFINITION,
     MARK_SEEN_DEFINITION,
+    FILE_DEFINITION,
     TRASH_DEFINITION,
 )
 
@@ -408,6 +424,7 @@ def build_mail_executors(
     observations: MailObservationControl,
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
+    processed_mailbox: str = "",
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
     def failed(capability_id: str, code: str) -> CapabilityResult:
@@ -552,6 +569,27 @@ def build_mail_executors(
             provenance=RetentionPolicy().direct_mail(now(), (reference,)),
         )
 
+    def file_processed(arguments: StructuredData) -> CapabilityResult:
+        if not processed_mailbox:
+            return failed(FILE_PROCESSED_MAIL_MESSAGE, "mailbox_unavailable")
+        try:
+            reference = _reference(arguments)
+            destination = account.file_message(reference, processed_mailbox)
+        except ValueError:
+            return failed(FILE_PROCESSED_MAIL_MESSAGE, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(FILE_PROCESSED_MAIL_MESSAGE, error.code)
+        return CapabilityResult(
+            call_id_source(),
+            FILE_PROCESSED_MAIL_MESSAGE,
+            CapabilityResultState.SUCCEEDED,
+            {
+                "reference": _reference_values(reference),
+                "mailbox_id": destination,
+                "filed": True,
+            },
+        )
+
     def move_to_trash(arguments: StructuredData) -> CapabilityResult:
         try:
             reference = _reference(arguments)
@@ -593,6 +631,7 @@ def build_mail_executors(
         READ_MAIL_ATTACHMENT: read_attachment,
         ACKNOWLEDGE_MAIL_MESSAGE: acknowledge,
         MARK_MAIL_MESSAGE_SEEN: mark_seen,
+        FILE_PROCESSED_MAIL_MESSAGE: file_processed,
         MOVE_MAIL_MESSAGE_TO_TRASH: move_to_trash,
     }
 

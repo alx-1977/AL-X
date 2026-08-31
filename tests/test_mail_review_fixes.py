@@ -276,7 +276,9 @@ class TrashAuthorisationTests(unittest.TestCase):
 
         effectful = [item.capability_id for item in DEFINITIONS
                      if item.side_effect is SideEffect.EFFECTFUL]
-        self.assertEqual(effectful, [SEEN, TRASH])
+        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE
+
+        self.assertEqual(effectful, [SEEN, FILE_PROCESSED_MAIL_MESSAGE, TRASH])
 
     def test_no_permanent_deletion_is_reachable(self) -> None:
         source = (Path(__file__).resolve().parents[1]

@@ -69,6 +69,8 @@ class SQLiteUsageRecorder:
         self._budgets: dict[str, ExecutionBudget] = {}
         # Call id the ceiling starts counting from, per task.
         self._windows: dict[str, int] = {}
+        # Tasks whose work finished, so the next one starts a fresh window.
+        self._settled: dict[str, bool] = {}
         self._recovery: set[str] = set()
         database = self._db()
         try:
@@ -111,12 +113,13 @@ class SQLiteUsageRecorder:
         here: only calls recorded from this point count.
         """
         with self._lock:
-            if task_id in self._budgets:
-                # An already-budgeted task keeps its window, so reaching for a
-                # second bill capability does not hand the task a fresh ceiling.
+            if task_id in self._budgets and not self._settled.get(task_id, False):
+                # An unfinished task keeps its window, so reaching for a second
+                # capability within one bill does not hand it a fresh ceiling.
                 self._budgets[task_id] = budget
                 self._recovery.discard(task_id)
                 return
+            self._settled.pop(task_id, None)
             self._budgets[task_id] = budget
             self._windows[task_id] = self._window_start(task_id)
             self._recovery.discard(task_id)
@@ -138,6 +141,17 @@ class SQLiteUsageRecorder:
         finally:
             database.close()
         return max(0, int(latest) - 1)
+
+    def settle(self, task_id: str) -> None:
+        """Mark the budgeted work complete so the next one counts afresh.
+
+        Two invoices processed in one conversation shared a single ceiling, so
+        the second was refused for the first one's calls. A completed piece of
+        work closes its window; the next capability call opens a new one.
+        """
+        with self._lock:
+            if task_id in self._budgets:
+                self._settled[task_id] = True
 
     def enter_recovery(self, task_id: str) -> None:
         """Record that AL/X is handling ambiguity or a failure on this task.

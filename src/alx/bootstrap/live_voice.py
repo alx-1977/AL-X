@@ -16,7 +16,11 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.reasoning import build_model_reasoner
-from alx.bootstrap.xero import BILL_TASK_CAPABILITIES, build_xero_runtime
+from alx.bootstrap.xero import (
+    BILL_EXECUTION_CAPABILITIES,
+    BILL_TASK_CAPABILITIES,
+    build_xero_runtime,
+)
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
@@ -217,7 +221,7 @@ async def run(repository_root: Path) -> None:
         # ceiling applies from the first one rather than from the commit.
         if call.capability_id in BILL_TASK_CAPABILITIES:
             usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
-        return broker.dispatch(
+        attempt = broker.dispatch(
             call,
             AuthorityContext(
                 principal_reference=voice_settings.primary_person_id,
@@ -227,6 +231,12 @@ async def run(repository_root: Path) -> None:
                 standing_scopes=mail_post_reply_standing_scopes(state),
             ),
         )
+        # A finished bill closes its ceiling window. Two invoices in one
+        # conversation shared a single ceiling, so the second was refused for
+        # the first one's calls.
+        if call.capability_id in BILL_EXECUTION_CAPABILITIES:
+            usage.settle(current_conversation_id[0])
+        return attempt
 
     approval_windows = tuple(
         value for value in (approval_ttl_seconds, xero_approval_ttl_seconds)

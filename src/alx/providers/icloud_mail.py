@@ -796,6 +796,31 @@ class ICloudMailAdapter:
         finally:
             self._close(connection)
 
+    def file_message(self, reference: MailReference, mailbox: str) -> str:
+        """Move one message to a named mailbox, releasing mail attention.
+
+        Filing a processed invoice is not deletion: the message stays in the
+        account, and the mailbox is configured rather than chosen by AL/X.
+        """
+        if not isinstance(mailbox, str) or not mailbox.strip():
+            raise MailAccessError("mailbox_unavailable")
+        connection = self._open()
+        try:
+            status, _ = connection.select(
+                self._quoted(reference.mailbox_id), readonly=False
+            )
+            if status != "OK":
+                raise MailAccessError("mailbox_unavailable")
+            if _uid_validity(connection) != reference.uid_validity:
+                raise MailAccessError("identifier_stale")
+            status, _ = connection.uid("MOVE", reference.uid, self._quoted(mailbox))
+            if status != "OK":
+                raise MailAccessError("move_failed")
+            self._observations.acknowledge(reference)
+            return mailbox
+        finally:
+            self._close(connection)
+
     def move_to_trash(self, reference: MailReference) -> str:
         connection = self._open()
         try:

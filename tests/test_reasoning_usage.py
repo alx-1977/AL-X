@@ -175,6 +175,38 @@ class ExecutionBudgetTests(unittest.TestCase):
         self.assertEqual(rollup["budgeted_calls"], 2)
         self.assertEqual(rollup["input_tokens"], 27943 * 6)
 
+    def test_a_second_bill_gets_its_own_ceiling(self) -> None:
+        """Two invoices in one conversation shared a single ceiling.
+
+        The second bill was refused for the first one's calls, so processing a
+        run of invoices stopped after the first.
+        """
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        for _ in range(XERO_BILL_BUDGET.stop_above):
+            self.recorder.check("conversation-1")
+            self.recorder.record("conversation-1", call())
+        with self.assertRaises(BudgetExceeded):
+            self.recorder.check("conversation-1")
+
+        # The first bill is done; the next one starts its own window.
+        self.recorder.settle("conversation-1")
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        self.recorder.check("conversation-1")
+        self.assertLessEqual(
+            self.recorder.task("conversation-1")["budgeted_calls"],
+            1,
+            "a new bill must not inherit the previous bill's spend",
+        )
+        self.assertEqual(self.recorder.task("conversation-1")["calls"], 4)
+
+    def test_settling_does_not_reset_an_unfinished_bill(self) -> None:
+        """Only completed work closes a window."""
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        for _ in range(3):
+            self.recorder.record("task-1", call())
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        self.assertEqual(self.recorder.task("task-1")["budgeted_calls"], 3)
+
     def test_an_unbudgeted_task_is_never_stopped(self) -> None:
         for _ in range(20):
             self.recorder.record("task-1", call())
