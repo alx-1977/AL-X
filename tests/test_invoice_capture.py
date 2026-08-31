@@ -203,6 +203,38 @@ class RoutineCaptureTests(unittest.TestCase):
         self.assertEqual(line["TaxType"], "NONE")
 
 
+class RealDocumentTypeTests(unittest.TestCase):
+    """The live failure: a genuine invoice refused as not_an_invoice."""
+
+    def build(self, document_type: str):
+        self.xero = FakeXero()
+        return build_xero_executors(
+            self.xero,
+            FakeMail(),
+            lambda: "call-1",
+            lambda *_: extracted(document_type=document_type),
+        )[CAPTURE_SUPPLIER_INVOICE]
+
+    def test_a_document_calling_itself_an_invoice_is_captured(self) -> None:
+        for document_type in ("invoice", "Invoice", "tax invoice", "supplier bill"):
+            with self.subTest(document_type=document_type):
+                capture = self.build(document_type)
+                result = capture(arguments())
+                self.assertTrue(
+                    result.values["completed"],
+                    "a real invoice was refused for its wording",
+                )
+                self.assertEqual(self.xero.created, 1)
+
+    def test_a_statement_or_credit_note_still_stops_the_bill_path(self) -> None:
+        for document_type in ("statement", "credit note", "quotation"):
+            with self.subTest(document_type=document_type):
+                capture = self.build(document_type)
+                result = capture(arguments())
+                self.assertEqual(result.failure["code"], "not_an_invoice")
+                self.assertEqual(self.xero.created, 0)
+
+
 class ReturnsToCoreTests(unittest.TestCase):
     """Only genuine ambiguity reaches AL/X, and it reaches her with the facts."""
 

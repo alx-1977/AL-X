@@ -7,6 +7,7 @@ from alx.specialists.invoice import (
     checked_invoice,
     extract_invoice,
     invoice_question,
+    is_supplier_bill,
 )
 from alx.specialists.runner import ModelSpecialist, json_schema
 
@@ -17,6 +18,7 @@ __all__ = [
     "checked_invoice",
     "extract_invoice",
     "invoice_question",
+    "is_supplier_bill",
     "json_schema",
     "prior_coding",
     "resolve_supplier",

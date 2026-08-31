@@ -23,7 +23,7 @@ from alx.contracts import (
     XeroAccessError,
     XeroAccountingAccount,
 )
-from alx.specialists import prior_coding, resolve_supplier
+from alx.specialists import is_supplier_bill, prior_coding, resolve_supplier
 
 
 SEARCH_XERO_CONTACTS = "search_xero_contacts"
@@ -1024,7 +1024,7 @@ def build_xero_executors(
 
             invoice = extractor(attachment.text, context_line)
             steps.append("extracted_invoice")
-            if invoice["document_type"] not in ("supplier_invoice", "supplier_bill"):
+            if not is_supplier_bill(invoice["document_type"]):
                 return failed(CAPTURE_SUPPLIER_INVOICE, "not_an_invoice")
             if not invoice["verified"]:
                 return returned(

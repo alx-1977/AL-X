@@ -17,6 +17,42 @@ from alx.specialists.runner import json_schema
 
 EXTRACT_INVOICE = "extract_supplier_invoice"
 
+# The instruction asks what the document appears to be, so the answer is a
+# free description rather than a fixed token. Matching two exact strings
+# rejected a real invoice that described itself as "invoice", so the decision
+# is made on what the document says it is, not on one expected spelling.
+_NOT_A_BILL = (
+    "credit note",
+    "credit_note",
+    "creditnote",
+    "quote",
+    "quotation",
+    "purchase order",
+    "purchase_order",
+    "statement",
+    "remittance",
+    "delivery note",
+    "delivery_note",
+    "receipt",
+    "proforma",
+    "pro forma",
+)
+
+
+def is_supplier_bill(document_type: str) -> bool:
+    """Decide whether an extracted document is a bill AL/X may post.
+
+    A statement, quote or credit note is a different accounting document and
+    must not become a bill. Anything that calls itself an invoice or bill, in
+    whatever wording, is one.
+    """
+    value = document_type.strip().casefold().replace("-", " ")
+    if not value:
+        return False
+    if any(marker in value for marker in _NOT_A_BILL):
+        return False
+    return "invoice" in value or "bill" in value
+
 INSTRUCTION = """Read the supplier invoice text and return its fields exactly as
 printed. Report only what the document states.
 

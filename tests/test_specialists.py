@@ -28,6 +28,7 @@ from alx.specialists import (  # noqa: E402
     checked_invoice,
     extract_invoice,
     invoice_question,
+    is_supplier_bill,
     prior_coding,
     resolve_supplier,
 )
@@ -261,6 +262,53 @@ class ExtractionTests(unittest.TestCase):
     def test_the_context_line_is_offered_for_the_invoice_number(self) -> None:
         question = invoice_question(INVOICE_TEXT, "Invoice 18300777.pdf")
         self.assertIn("Invoice 18300777.pdf", question.bounded_material)
+
+
+class DocumentClassificationTests(unittest.TestCase):
+    """A real invoice was refused for describing itself in different words.
+
+    AL/X reported "automatic capture did not recognise the PDF as an invoice"
+    for a document whose text extracted cleanly and whose totals she then read
+    out correctly. The check matched two exact strings.
+    """
+
+    def test_an_invoice_is_recognised_however_it_is_worded(self) -> None:
+        for value in (
+            "supplier_invoice",
+            "supplier invoice",
+            "invoice",
+            "Invoice",
+            "INVOICE",
+            "tax invoice",
+            "tax_invoice",
+            "supplier_bill",
+            "bill",
+            "vendor invoice",
+        ):
+            with self.subTest(document_type=value):
+                self.assertTrue(is_supplier_bill(value))
+
+    def test_another_accounting_document_never_becomes_a_bill(self) -> None:
+        for value in (
+            "credit note",
+            "credit_note",
+            "quote",
+            "quotation",
+            "purchase order",
+            "statement",
+            "remittance advice",
+            "delivery note",
+            "receipt",
+            "proforma invoice",
+            "pro forma invoice",
+        ):
+            with self.subTest(document_type=value):
+                self.assertFalse(is_supplier_bill(value))
+
+    def test_an_unknown_or_missing_type_is_refused(self) -> None:
+        for value in ("", "   ", "letter", "newsletter", "photograph"):
+            with self.subTest(document_type=value):
+                self.assertFalse(is_supplier_bill(value))
 
 
 class PriorCodingTests(unittest.TestCase):
