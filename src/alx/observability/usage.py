@@ -75,6 +75,7 @@ class SQLiteUsageRecorder:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL,
                     occurred_at TEXT NOT NULL,
+                    provider TEXT NOT NULL,
                     model TEXT NOT NULL,
                     reasoning_effort TEXT NOT NULL,
                     service_tier TEXT NOT NULL,
@@ -107,8 +108,9 @@ class SQLiteUsageRecorder:
     def enter_recovery(self, task_id: str) -> None:
         """Record that AL/X is handling ambiguity or a failure on this task.
 
-        Recovery is genuine extra work, so the ceiling no longer applies. Only
-        the Core may declare it; a provider or tool cannot lift its own limit.
+        Recovery is genuine extra work, so it buys a bounded allowance of
+        further calls rather than an open budget. Only the Core may declare it;
+        a provider or tool cannot lift its own limit.
         """
         with self._lock:
             self._recovery.add(task_id)
@@ -119,13 +121,14 @@ class SQLiteUsageRecorder:
         database = self._db()
         try:
             database.execute(
-                "INSERT INTO reasoning_calls(task_id, occurred_at, model, "
+                "INSERT INTO reasoning_calls(task_id, occurred_at, provider, model, "
                 "reasoning_effort, service_tier, input_tokens, cached_tokens, "
                 "cache_write_tokens, output_tokens, reasoning_tokens, duration_ms) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     datetime.now(UTC).isoformat(),
+                    str(values.get("provider") or ""),
                     str(values.get("model") or ""),
                     str(values.get("reasoning_effort") or ""),
                     str(values.get("service_tier") or ""),
@@ -155,17 +158,18 @@ class SQLiteUsageRecorder:
                 "FROM reasoning_calls WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
-            models = tuple(
-                str(item["model"])
-                for item in database.execute(
-                    "SELECT DISTINCT model FROM reasoning_calls WHERE task_id = ?",
-                    (task_id,),
-                ).fetchall()
-            )
+            rows = database.execute(
+                "SELECT DISTINCT provider, model FROM reasoning_calls "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchall()
+            models = tuple(str(item["model"]) for item in rows)
+            providers = tuple(sorted({str(item["provider"]) for item in rows}))
         finally:
             database.close()
         values = {"task_id": task_id, **{key: row[key] for key in row.keys()}}
         values["models"] = models
+        values["providers"] = providers
         values["estimated_usd"] = self._cost(values, models)
         with self._lock:
             budget = self._budgets.get(task_id)
