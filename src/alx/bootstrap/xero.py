@@ -39,6 +39,7 @@ XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
 # reasoning calls. They stay dispatchable for an explicit recovery, but they
 # are withheld from the catalogue AL/X plans from.
 BILL_EXECUTION_CAPABILITIES = frozenset({EXECUTE_XERO_BILL})
+
 RECOVERY_ONLY_CAPABILITIES = frozenset(
     {
         CREATE_XERO_DRAFT_BILL,
@@ -47,6 +48,20 @@ RECOVERY_ONLY_CAPABILITIES = frozenset(
         AUTHORISE_XERO_BILL,
     }
 )
+
+# Arming the ceiling on the commit was too late: a task spent seven reasoning
+# calls reaching Xero and stayed unbudgeted because it never got that far. Any
+# of these says bill processing has begun, so the ceiling applies from the
+# first one AL/X reaches for.
+BILL_TASK_CAPABILITIES = BILL_EXECUTION_CAPABILITIES | {
+    SEARCH_XERO_CONTACTS,
+    LIST_XERO_ACCOUNTS,
+    LIST_XERO_TAX_RATES,
+    FIND_XERO_BILL,
+    READ_XERO_BILL,
+    DELETE_XERO_DRAFT_BILL,
+    *RECOVERY_ONLY_CAPABILITIES,
+}
 
 
 @dataclass(frozen=True, slots=True)

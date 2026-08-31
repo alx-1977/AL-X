@@ -16,7 +16,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.reasoning import build_model_reasoner
-from alx.bootstrap.xero import BILL_EXECUTION_CAPABILITIES, build_xero_runtime
+from alx.bootstrap.xero import BILL_TASK_CAPABILITIES, build_xero_runtime
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
@@ -198,9 +198,9 @@ async def run(repository_root: Path) -> None:
 
     def dispatch(call, state):
         current_call_id[0] = call.call_id
-        # Committing a bill declares the task routine, so the reasoning ceiling
-        # applies from here on. Ordinary conversation stays unbudgeted.
-        if call.capability_id in BILL_EXECUTION_CAPABILITIES:
+        # Reaching for any bill capability declares the task routine, so the
+        # ceiling applies from the first one rather than from the commit.
+        if call.capability_id in BILL_TASK_CAPABILITIES:
             usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
         return broker.dispatch(
             call,

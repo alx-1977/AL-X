@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.bootstrap.xero import (  # noqa: E402
     BILL_EXECUTION_CAPABILITIES,
+    BILL_TASK_CAPABILITIES,
     RECOVERY_ONLY_CAPABILITIES,
     build_xero_runtime,
 )
@@ -25,6 +26,9 @@ from alx.config import XeroSettings  # noqa: E402
 from alx.observability import XERO_BILL_BUDGET  # noqa: E402
 from alx.tools import (  # noqa: E402
     ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+    LIST_XERO_ACCOUNTS,
+    LIST_XERO_TAX_RATES,
+    SEARCH_XERO_CONTACTS,
     AUTHORISE_XERO_BILL,
     CREATE_XERO_DRAFT_BILL,
     EXECUTE_XERO_BILL,
@@ -118,7 +122,7 @@ class ArmedBudgetTests(unittest.TestCase):
 
     def test_dispatching_a_bill_execution_arms_the_ceiling(self) -> None:
         """Without this the ceiling never applies to a real bill task."""
-        self.assertIn("BILL_EXECUTION_CAPABILITIES", self.source)
+        self.assertIn("BILL_TASK_CAPABILITIES", self.source)
         self.assertIn("usage.set_budget(", self.source)
         self.assertIn("XERO_BILL_BUDGET", self.source)
 
@@ -129,9 +133,18 @@ class ArmedBudgetTests(unittest.TestCase):
         self.assertEqual(XERO_BILL_BUDGET.recovery_allowance, 2)
         self.assertEqual(XERO_BILL_BUDGET.recovery_limit, 6)
 
-    def test_only_bill_execution_arms_the_ceiling(self) -> None:
-        """Ordinary conversation must not inherit a four-call limit."""
-        self.assertEqual(BILL_EXECUTION_CAPABILITIES, frozenset({EXECUTE_XERO_BILL}))
+    def test_any_bill_capability_arms_the_ceiling_not_only_the_commit(self) -> None:
+        """Arming on the commit was too late; a task reached seven calls first."""
+        self.assertIn(EXECUTE_XERO_BILL, BILL_TASK_CAPABILITIES)
+        for capability_id in (
+            SEARCH_XERO_CONTACTS,
+            LIST_XERO_ACCOUNTS,
+            LIST_XERO_TAX_RATES,
+            FIND_XERO_BILL,
+            READ_XERO_BILL,
+        ):
+            with self.subTest(capability_id=capability_id):
+                self.assertIn(capability_id, BILL_TASK_CAPABILITIES)
 
 
 class ArmedBudgetBehaviourTests(unittest.TestCase):
@@ -181,6 +194,56 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
             with self.assertRaises(BudgetExceeded):
                 budget_check("conversation-1")
             self.assertEqual(usage.task("conversation-1")["calls"], 4)
+
+    def test_a_bill_task_cannot_reach_five_calls_unbudgeted(self) -> None:
+        """The failure this fixes: seven calls spent before the ceiling armed.
+
+        Whichever bill capability AL/X reaches for first arms the ceiling, and
+        the calls already spent on the task still count against it, so a bill
+        task can never run away before the budget notices.
+        """
+        from alx.observability import BudgetExceeded, SQLiteUsageRecorder
+
+        for first_capability in sorted(BILL_TASK_CAPABILITIES):
+            with self.subTest(first_capability=first_capability):
+                with tempfile.TemporaryDirectory() as directory:
+                    usage = SQLiteUsageRecorder(Path(directory) / "usage.sqlite3")
+                    current = [""]
+
+                    def budget_check(conversation_id: str) -> None:
+                        current[0] = conversation_id
+                        usage.check(conversation_id)
+
+                    def dispatch(capability_id: str) -> None:
+                        if capability_id in BILL_TASK_CAPABILITIES:
+                            usage.set_budget(current[0], XERO_BILL_BUDGET)
+
+                    call = {"code": "reasoning.completed", "model": "grok-4.5"}
+
+                    # AL/X reasons, then reaches for a bill capability.
+                    budget_check("conversation-1")
+                    usage.record("conversation-1", call)
+                    dispatch(first_capability)
+
+                    spent = 1
+                    stopped_at = None
+                    for _ in range(10):
+                        try:
+                            budget_check("conversation-1")
+                        except BudgetExceeded as error:
+                            stopped_at = error.calls
+                            break
+                        usage.record("conversation-1", call)
+                        spent += 1
+
+                    self.assertIsNotNone(
+                        stopped_at, "a bill task ran without ever being stopped"
+                    )
+                    self.assertLessEqual(
+                        spent,
+                        XERO_BILL_BUDGET.stop_above,
+                        "a bill task spent more than the ceiling allows",
+                    )
 
     def test_a_conversation_without_a_bill_is_never_capped(self) -> None:
         from alx.observability import SQLiteUsageRecorder
