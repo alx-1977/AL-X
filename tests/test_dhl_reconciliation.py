@@ -373,9 +373,13 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
         and that extraction was unbounded. Every earlier test used FakeMail, so
         none of them touched the path a real attachment actually takes.
         """
+        import zlib
+
+        from pypdf.generic import NumberObject, StreamObject
+
         from alx.providers.icloud_mail import (
             _DOCUMENT_BYTES,
-            _DOCUMENT_CONTENT_BYTES,
+            _PAGE_STORED_BYTES,
             _attachment_text,
         )
 
@@ -383,6 +387,15 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
             _attachment_text("application/pdf", b"%PDF-" + b"x" * _DOCUMENT_BYTES, None),
             "",
             "an oversized PDF must not be extracted",
+        )
+        # Codex finding: the size limit guarded only PDFs, so a 24MB CSV was
+        # decoded and returned whole.
+        oversized_csv = b"a,b,c\n" * ((_DOCUMENT_BYTES // 6) + 1)
+        self.assertGreater(len(oversized_csv), _DOCUMENT_BYTES)
+        self.assertEqual(
+            _attachment_text("text/csv", oversized_csv, None),
+            "",
+            "an oversized text attachment must not be returned",
         )
 
         writer = PdfWriter()
@@ -397,27 +410,46 @@ class UntrustedDocumentBoundTests(unittest.TestCase):
         page[NameObject("/Resources")] = DictionaryObject(
             {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
         )
-        commands = ["BT"] + [
-            f"/F1 8 Tf 1 0 0 1 {index % 600} {index % 700} Tm (r{index}) Tj"
-            for index in range(600_000)
-        ] + ["ET"]
-        stream = DecodedStreamObject()
-        stream.set_data("\n".join(commands).encode())
-        page[NameObject("/Contents")] = stream
+        # A decompression bomb: small on the wire, large once decoded. A check
+        # that calls get_contents() cannot catch this, because that call
+        # decodes the stream to answer.
+        expanded = (
+            "BT "
+            + " ".join(
+                f"/F1 8 Tf 1 0 0 1 {index % 600} {index % 700} Tm (r{index}) Tj"
+                for index in range(200_000)
+            )
+            + " ET"
+        ).encode()
+        compressed = zlib.compress(expanded)
+        stream = StreamObject()
+        stream._data = compressed
+        stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+        stream[NameObject("/Length")] = NumberObject(len(compressed))
+        page[NameObject("/Contents")] = writer._add_object(stream)
         output = io.BytesIO()
         writer.write(output)
         hostile = output.getvalue()
-        self.assertGreater(len(hostile), _DOCUMENT_CONTENT_BYTES)
+        self.assertLess(
+            len(hostile), _DOCUMENT_BYTES, "the bomb must be small on the wire"
+        )
+        self.assertGreater(len(expanded), _PAGE_STORED_BYTES)
 
         import time
+        import tracemalloc
 
+        tracemalloc.start()
         started = time.monotonic()
-        self.assertEqual(
-            _attachment_text("application/pdf", hostile, None),
-            "",
-            "a page too large on the wire must not be extracted",
+        extracted = _attachment_text("application/pdf", hostile, None)
+        elapsed = time.monotonic() - started
+        _current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        self.assertEqual(extracted, "", "a decompression bomb must not be decoded")
+        self.assertLess(elapsed, 2.0, "the bomb was decoded before being refused")
+        self.assertLess(
+            peak, 20_000_000, "the bomb was expanded in memory before refusal"
         )
-        self.assertLess(time.monotonic() - started, 5.0)
 
     def test_a_real_attachment_still_yields_its_text(self) -> None:
         """The bounds must not stop a genuine worksheet being read."""

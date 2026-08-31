@@ -105,18 +105,49 @@ def _attachment_parts(item):
     return tuple(found)
 
 
+def _page_within_bounds(page) -> bool:
+    """Measure a page's stored stream without letting pypdf decode it.
+
+    page.get_contents() decodes to answer, so it cannot bound its own decode.
+    The indirect object's retained bytes are what arrived on the wire.
+    """
+    contents = page.get("/Contents")
+    items = contents if isinstance(contents, list) else [contents]
+    stored = 0
+    for item in items:
+        if item is None:
+            continue
+        try:
+            obj = item.get_object() if hasattr(item, "get_object") else item
+        except Exception:
+            return False
+        stored += len(getattr(obj, "_data", b"") or b"")
+        if stored > _PAGE_STORED_BYTES:
+            return False
+    return True
+
+
 def _attachment_text(media_type: str, payload: bytes, charset: str | None) -> str:
-    """Extract domain text without granting the adapter accounting authority."""
+    """Extract domain text without granting the adapter accounting authority.
+
+    Every attachment is untrusted input, so the size limit applies to all of
+    them rather than only to PDFs: a 24MB CSV was previously decoded and
+    returned whole.
+    """
+    if len(payload) > _DOCUMENT_BYTES:
+        return ""
     if media_type.startswith("text/") or media_type in (
         "application/csv",
         "application/json",
         "application/xml",
     ):
-        return payload.decode(charset or "utf-8", errors="replace")
+        return payload.decode(charset or "utf-8", errors="replace")[
+            :_DOCUMENT_TEXT_CHARACTERS
+        ]
     if media_type == "application/pdf":
         if not payload.startswith(b"%PDF-"):
             return ""
-        if len(payload) > _DOCUMENT_BYTES:
+        if len(payload) > _PDF_BYTES:
             return ""
         try:
             from pypdf import PdfReader
@@ -130,9 +161,7 @@ def _attachment_text(media_type: str, payload: bytes, charset: str | None) -> st
             extracted: list[str] = []
             characters = 0
             for page in reader.pages:
-                contents = page.get_contents()
-                stored = None if contents is None else contents.get_object()
-                if len(getattr(stored, "_data", b"") or b"") > _DOCUMENT_CONTENT_BYTES:
+                if not _page_within_bounds(page):
                     return ""
                 text = page.extract_text()
                 if not text:
@@ -166,10 +195,48 @@ def _mail_attachment(attachment_id: str, part) -> tuple[MailAttachment, bytes]:
 
 # A mail attachment is untrusted input, and its text is extracted before any
 # capability sees it, so the limits belong here rather than in one consumer.
+# A PDF's own size is the only figure knowable before pypdf decodes anything:
+# a page's /Length is often absent, and get_contents() decodes to answer, so a
+# 1MB file expanded to 8MB and 255MB of memory while a per-page check looked
+# on. Bounding the file caps what any compression ratio can reach. The retained
+# V1 worksheets are about 1.5KB; a scanned multi-page invoice is a few MB.
 _DOCUMENT_BYTES = 25 * 1024 * 1024
+_PDF_BYTES = 8 * 1024 * 1024
+# What a page may hold once expanded. A page is refused on the bytes stored on
+# the wire multiplied by the worst ratio worth honouring, so nothing is
+# decompressed to find out: a 1MB bomb reached 255MB while a check that called
+# get_contents() looked on, because that call decodes to answer.
+_PAGE_STORED_BYTES = 512 * 1024
 _DOCUMENT_PAGES = 200
-_DOCUMENT_CONTENT_BYTES = 4 * 1024 * 1024
 _DOCUMENT_TEXT_CHARACTERS = 2_000_000
+
+# A page compressing far beyond this is not a document, it is a decompression
+# bomb: the retained V1 worksheets sit near 3:1.
+_DOCUMENT_EXPANSION_RATIO = 50
+
+
+def _stream_within_bounds(page) -> bool:
+    """Refuse a page whose stored stream is too large or too compressible.
+
+    Reading the raw indirect object avoids pypdf decoding the stream to answer,
+    which is what made the earlier check useless: a 3MB file expanded to 24MB
+    and 58MB of memory before the comparison ran.
+    """
+    raw = page.get("/Contents")
+    streams = raw if isinstance(raw, list) else [raw]
+    stored = 0
+    for item in streams:
+        if item is None:
+            continue
+        try:
+            obj = item.get_object() if hasattr(item, "get_object") else item
+            stored += int(obj.get("/Length", 0) or 0)
+        except Exception:
+            return False
+    # A page whose stored bytes could expand past the ceiling is refused
+    # without expanding it, so no decompression bomb reaches the decoder.
+    return stored * _DOCUMENT_EXPANSION_RATIO <= _DOCUMENT_CONTENT_BYTES
+
 
 _ARCHIVE_MEMBER_LIMIT = 100
 _ARCHIVE_MEMBER_BYTES = 25 * 1024 * 1024
