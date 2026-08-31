@@ -369,7 +369,7 @@ class XeroPrimitiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
                 XeroSettings(
-                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False
+                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
                 ),
                 Path(directory),
                 self.mail,
@@ -410,7 +410,7 @@ class XeroPrimitiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
                 XeroSettings(
-                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False
+                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
                 ),
                 Path(directory),
                 self.mail,
@@ -459,7 +459,7 @@ class XeroPrimitiveTests(unittest.TestCase):
     def test_runtime_requires_approval_for_every_xero_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300, False, False),
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300, False, False, "", ""),
                 Path(directory),
                 self.mail,
                 lambda: "call",
@@ -541,7 +541,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 registry.register(definition)
             current_call_id = [""]
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600, False, False),
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600, False, False, "", ""),
                 Path(directory),
                 self.mail,
                 lambda: current_call_id[0],

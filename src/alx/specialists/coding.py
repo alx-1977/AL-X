@@ -14,12 +14,25 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 
-def prior_coding(bills: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Derive the settled coding for a supplier, or say why there is none.
+def prior_coding(
+    bills: Sequence[Mapping[str, Any]],
+    default_account_code: str = "",
+    invoice_shows_tax: bool | None = None,
+    default_tax_type: str = "",
+) -> dict[str, Any]:
+    """Derive the settled coding for a supplier, or fall back to a default.
 
     `bills` are that supplier's existing accounts-payable bills, newest first.
     Discarded bills are excluded by the caller: a deleted bill is not evidence
     of how this supplier is treated.
+
+    Where a supplier codes consistently, that settled treatment is a fact and
+    is used. Where its bills disagree, choosing between them is a policy
+    decision no document contains: a supplier whose work spans consulting,
+    travel and equipment has no single correct answer to derive. Rather than
+    interrogate Friedl on every such invoice, or let a model guess an account
+    and present the guess as knowledge, the configured default account is used
+    and the tax type follows what the document itself shows.
     """
     treatments: list[tuple[str, str, str]] = []
     for bill in bills:
@@ -32,19 +45,40 @@ def prior_coding(bills: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             if code:
                 treatments.append((code, tax_type, line_amount_types))
 
+    def fallback(reason: str) -> dict[str, Any]:
+        if not default_account_code or invoice_shows_tax is None:
+            return _unresolved(reason)
+        tax_type = default_tax_type if invoice_shows_tax else "NONE"
+        if not tax_type:
+            return _unresolved(reason)
+        return {
+            "resolved": True,
+            "account_code": default_account_code,
+            "tax_type": tax_type,
+            "line_amount_types": "Exclusive" if invoice_shows_tax else "NoTax",
+            "based_on_bills": len(bills),
+            "from_default": True,
+            "reason": (
+                f"{reason}; posted to the configured default account "
+                f"{default_account_code} with tax {tax_type} taken from the "
+                "document"
+            ),
+        }
+
     if not treatments:
-        return _unresolved("no earlier bill for this supplier")
+        return fallback("no earlier bill for this supplier")
 
     distinct = set(treatments)
     if len(distinct) > 1:
         seen = sorted(f"{code}/{tax}" for code, tax, _ in distinct)
-        return _unresolved(
+        return fallback(
             f"earlier bills disagree on treatment: {', '.join(seen)}"
         )
 
     code, tax_type, line_amount_types = treatments[0]
     return {
         "resolved": True,
+        "from_default": False,
         "account_code": code,
         "tax_type": tax_type,
         "line_amount_types": line_amount_types,
@@ -63,6 +97,7 @@ def _unresolved(reason: str) -> dict[str, Any]:
         "tax_type": "",
         "line_amount_types": "",
         "based_on_bills": 0,
+        "from_default": False,
         "reason": reason,
     }
 

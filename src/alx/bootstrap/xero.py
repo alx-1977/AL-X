@@ -140,7 +140,14 @@ def build_xero_runtime(
             if item.capability_id in RECOVERY_ONLY_CAPABILITIES
         ),
         policies,
-        build_xero_executors(adapter, mail_account, call_id_source, extractor),
+        build_xero_executors(
+            adapter,
+            mail_account,
+            call_id_source,
+            extractor,
+            settings.default_account_code,
+            settings.default_tax_type,
+        ),
         frozenset(
             {
                 XERO_READ_PERMISSION,

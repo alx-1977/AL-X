@@ -48,7 +48,7 @@ def runtime():
     with tempfile.TemporaryDirectory() as directory:
         return build_xero_runtime(
             XeroSettings(
-                "id", "secret", "http://localhost/callback", "", 10, 300, True, False
+                "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
             ),
             Path(directory),
             FakeMail(),

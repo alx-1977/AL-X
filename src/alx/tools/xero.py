@@ -496,6 +496,13 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
     return output, total.quantize(Decimal("0.01"))
 
 
+def _decimal_or_zero(value: str) -> Decimal:
+    try:
+        return Decimal(value or "0")
+    except InvalidOperation:
+        return Decimal("0")
+
+
 def _validate_line_mappings(
     account: XeroAccountingAccount,
     lines: Sequence[Mapping[str, Any]],
@@ -624,6 +631,8 @@ def build_xero_executors(
     mail: MailAccount,
     call_id_source: Callable[[], str],
     extractor: Callable[[str, str], Mapping[str, Any]] | None = None,
+    default_account_code: str = "",
+    default_tax_type: str = "",
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     def failed(capability_id: str, code: str) -> CapabilityResult:
         return CapabilityResult(
@@ -1042,7 +1051,12 @@ def build_xero_executors(
                 return returned("supplier_unresolved", contact["reason"], invoice)
 
             history = account.bills_for_contact(contact["contact_id"])
-            coding = prior_coding(history)
+            # The document itself settles the tax question: a supplier that
+            # charges VAT shows it, one that does not cannot be claimed for.
+            shows_tax = _decimal_or_zero(invoice["tax_amount"]) > 0
+            coding = prior_coding(
+                history, default_account_code, shows_tax, default_tax_type
+            )
             steps.append("looked_up_prior_coding")
             if not coding["resolved"]:
                 return returned("coding_unresolved", coding["reason"], invoice)

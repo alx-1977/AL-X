@@ -60,6 +60,8 @@ class FakeXero:
                 "LineItems": [{"AccountCode": "310", "TaxType": "NONE"}],
             },
         )
+        self.accounts = ({"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},)
+        self.tax_rates = ()
 
     def search_contacts(self, _term):
         return self.contacts
@@ -68,10 +70,10 @@ class FakeXero:
         return self.history
 
     def list_accounts(self):
-        return ({"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},)
+        return self.accounts
 
     def list_tax_rates(self):
-        return ()
+        return self.tax_rates
 
     def find_bill(self, invoice_number, contact_id=""):
         for bill in self.bills.values():
@@ -235,6 +237,73 @@ class RealDocumentTypeTests(unittest.TestCase):
                 self.assertEqual(self.xero.created, 0)
 
 
+class DefaultAccountTests(unittest.TestCase):
+    """The live case: a supplier whose 18 bills used ten different treatments."""
+
+    MIXED = (
+        {"LineAmountTypes": "Exclusive",
+         "LineItems": [{"AccountCode": "412", "TaxType": "NONE"}]},
+        {"LineAmountTypes": "Inclusive",
+         "LineItems": [{"AccountCode": "700", "TaxType": "CAPEXINPUT2"}]},
+        {"LineAmountTypes": "Exclusive",
+         "LineItems": [{"AccountCode": "720", "TaxType": "NONE"}]},
+    )
+
+    def build(self, *, history, tax_amount="0.00", default="310"):
+        xero = FakeXero()
+        xero.history = history
+        xero.accounts = (
+            {"Code": "310", "Status": "ACTIVE", "TaxType": "INPUT3"},
+            {"Code": "412", "Status": "ACTIVE", "TaxType": "NONE"},
+        )
+        xero.tax_rates = ({"TaxType": "INPUT3", "Status": "ACTIVE"},)
+        self.xero = xero
+        return build_xero_executors(
+            xero,
+            FakeMail(),
+            lambda: "call-1",
+            lambda *_: extracted(tax_amount=tax_amount),
+            default,
+            "INPUT3",
+        )[CAPTURE_SUPPLIER_INVOICE]
+
+    def test_a_mixed_history_supplier_posts_without_asking(self) -> None:
+        """Previously this returned coding_unresolved on every invoice."""
+        capture = self.build(history=self.MIXED)
+        result = capture(arguments())
+        self.assertTrue(
+            result.values["completed"],
+            "a varied supplier must not interrogate Friedl on every invoice",
+        )
+        posted = self.xero.bills[result.values["bill"]["invoice_id"]]
+        self.assertEqual(posted["LineItems"][0]["AccountCode"], "310")
+
+    def test_a_zero_vat_invoice_is_posted_with_no_tax(self) -> None:
+        capture = self.build(history=self.MIXED, tax_amount="0.00")
+        result = capture(arguments())
+        self.assertTrue(result.values["completed"])
+        posted = self.xero.bills[result.values["bill"]["invoice_id"]]
+        self.assertEqual(posted["LineItems"][0]["TaxType"], "NONE")
+        self.assertEqual(posted["LineAmountTypes"], "NoTax")
+
+    def test_settled_history_is_still_preferred_to_the_default(self) -> None:
+        settled = (
+            {"LineAmountTypes": "NoTax",
+             "LineItems": [{"AccountCode": "412", "TaxType": "NONE"}]},
+        ) * 2
+        capture = self.build(history=settled)
+        result = capture(arguments())
+        self.assertTrue(result.values["completed"])
+        posted = self.xero.bills[result.values["bill"]["invoice_id"]]
+        self.assertEqual(posted["LineItems"][0]["AccountCode"], "412")
+
+    def test_without_a_default_a_mixed_supplier_still_returns_to_alx(self) -> None:
+        capture = self.build(history=self.MIXED, default="")
+        result = capture(arguments())
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "coding_unresolved")
+
+
 class ReturnsToCoreTests(unittest.TestCase):
     """Only genuine ambiguity reaches AL/X, and it reaches her with the facts."""
 
@@ -329,7 +398,7 @@ class NoFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
                 XeroSettings(
-                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False
+                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
                 ),
                 Path(directory),
                 FakeMail(),

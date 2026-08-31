@@ -343,6 +343,67 @@ class PriorCodingTests(unittest.TestCase):
         self.assertFalse(result["resolved"])
 
 
+class DefaultCodingTests(unittest.TestCase):
+    """A supplier whose work varies has no single answer to derive.
+
+    One real supplier had 18 bills across ten account/tax combinations:
+    consulting, capital equipment and office equipment, all legitimate. Asking
+    Friedl to choose on every invoice is unacceptable, and letting a model pick
+    an account presents a guess as knowledge. The document settles the tax; the
+    account falls back to a configured default.
+    """
+
+    @staticmethod
+    def bill(code: str, tax: str = "NONE", kind: str = "NoTax") -> dict:
+        return {
+            "LineAmountTypes": kind,
+            "LineItems": [{"AccountCode": code, "TaxType": tax}],
+        }
+
+    def test_settled_history_still_wins_over_the_default(self) -> None:
+        result = prior_coding(
+            [self.bill("412"), self.bill("412")], "310", False, "INPUT3"
+        )
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["account_code"], "412")
+        self.assertFalse(result["from_default"])
+
+    def test_conflicting_history_uses_the_default_account(self) -> None:
+        result = prior_coding(
+            [self.bill("412"), self.bill("700", "CAPEXINPUT2", "Inclusive")],
+            "310",
+            False,
+            "INPUT3",
+        )
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["account_code"], "310")
+        self.assertTrue(result["from_default"])
+        self.assertIn("disagree", result["reason"])
+
+    def test_a_new_supplier_uses_the_default_account(self) -> None:
+        result = prior_coding([], "310", False, "INPUT3")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["account_code"], "310")
+
+    def test_tax_follows_the_document_not_the_account_default(self) -> None:
+        """A supplier who is not VAT registered cannot be claimed for."""
+        without = prior_coding([], "310", False, "INPUT3")
+        self.assertEqual(without["tax_type"], "NONE")
+        self.assertEqual(without["line_amount_types"], "NoTax")
+
+        with_vat = prior_coding([], "310", True, "INPUT3")
+        self.assertEqual(with_vat["tax_type"], "INPUT3")
+        self.assertEqual(with_vat["line_amount_types"], "Exclusive")
+
+    def test_without_a_configured_default_it_still_asks(self) -> None:
+        """The default is a deployment choice, never assumed."""
+        result = prior_coding(
+            [self.bill("412"), self.bill("700", "CAPEXINPUT2")], "", False, ""
+        )
+        self.assertFalse(result["resolved"])
+        self.assertFalse(result["from_default"])
+
+
 class SupplierResolutionTests(unittest.TestCase):
     @staticmethod
     def contact(name: str, identifier: str) -> dict:

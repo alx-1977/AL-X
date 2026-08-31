@@ -242,6 +242,10 @@ class XeroSettings:
     approval_ttl_seconds: int
     unattended_bill_writes: bool
     unattended_bill_deletes: bool
+    # Where a supplier's own history gives no single answer, the account is a
+    # policy choice no document contains. Blank leaves it unresolved and asks.
+    default_account_code: str
+    default_tax_type: str
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
@@ -266,6 +270,12 @@ class XeroSettings:
             unattended_bill_deletes=_boolean(
                 environment, "ALX_XERO_UNATTENDED_BILL_DELETES", False
             ),
+            default_account_code=environment.get(
+                "ALX_XERO_DEFAULT_ACCOUNT_CODE", ""
+            ).strip(),
+            default_tax_type=environment.get(
+                "ALX_XERO_DEFAULT_TAX_TYPE", ""
+            ).strip(),
         )
 
     def __repr__(self) -> str:
