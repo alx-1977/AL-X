@@ -14,6 +14,7 @@ from alx.contracts import (
     CapabilityResultState,
     MailAccessError,
     MailAccount,
+    MailAttachment,
     MailContent,
     MailObservationControl,
     MailReference,
@@ -28,6 +29,8 @@ from alx.contracts.provenance import RetentionPolicy
 
 
 READ_MAIL_MESSAGE = "read_mail_message"
+LIST_MAIL_ATTACHMENTS = "list_mail_attachments"
+READ_MAIL_ATTACHMENT = "read_mail_attachment"
 ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
 MARK_MAIL_MESSAGE_SEEN = "mark_mail_message_seen"
 MOVE_MAIL_MESSAGE_TO_TRASH = "move_mail_message_to_trash"
@@ -40,6 +43,7 @@ _FAILURES = (
     "mailbox_unavailable",
     "identifier_stale",
     "message_unavailable",
+    "attachment_unavailable",
     "observation_unavailable",
     "trash_unavailable",
     "move_failed",
@@ -51,6 +55,7 @@ _FAILURES = (
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
+_INTEGER = StructuredSchema(ValueKind.INTEGER)
 _REFERENCE_PROPERTIES = {
     "mailbox_id": _STRING,
     "uid_validity": _STRING,
@@ -97,6 +102,53 @@ READ_DEFINITION = CapabilityDefinition(
             "recipients", "carbon_copy", "reply_references",
             "has_attachments",
         ),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+_ATTACHMENT = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "attachment_id": _STRING,
+        "filename": _STRING,
+        "media_type": _STRING,
+        "size": _INTEGER,
+        "sha256": _STRING,
+        "text_available": _BOOLEAN,
+    },
+    ("attachment_id", "filename", "media_type", "size", "sha256", "text_available"),
+    extra_properties=False,
+)
+
+LIST_ATTACHMENTS_DEFINITION = CapabilityDefinition(
+    LIST_MAIL_ATTACHMENTS,
+    "List the explicit MIME attachments on one identified mail item without changing it or returning file content.",
+    _input(),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, "attachments": StructuredSchema(ValueKind.ARRAY, items=_ATTACHMENT)},
+        ("reference", "attachments"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+READ_ATTACHMENT_DEFINITION = CapabilityDefinition(
+    READ_MAIL_ATTACHMENT,
+    "Read provider-extracted text from one exact attachment on an identified mail item without changing the message.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {**_REFERENCE_PROPERTIES, "attachment_id": _STRING},
+        (*_REFERENCE_PROPERTIES, "attachment_id"),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, **dict(_ATTACHMENT.properties), "text": _STRING},
+        ("reference", *_ATTACHMENT.required, "text"),
         extra_properties=False,
     ),
     SideEffect.NONE,
@@ -190,6 +242,8 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
 
 DEFINITIONS = (
     READ_DEFINITION,
+    LIST_ATTACHMENTS_DEFINITION,
+    READ_ATTACHMENT_DEFINITION,
     ACKNOWLEDGE_DEFINITION,
     MARK_SEEN_DEFINITION,
     TRASH_DEFINITION,
@@ -274,6 +328,17 @@ def _reference_values(reference: MailReference) -> dict[str, str]:
     }
 
 
+def _attachment_values(attachment: MailAttachment) -> dict[str, Any]:
+    return {
+        "attachment_id": attachment.attachment_id,
+        "filename": attachment.filename,
+        "media_type": attachment.media_type,
+        "size": attachment.size,
+        "sha256": attachment.sha256,
+        "text_available": bool(attachment.text),
+    }
+
+
 def build_mail_executors(
     account: MailAccount,
     observations: MailObservationControl,
@@ -335,6 +400,44 @@ def build_mail_executors(
             {"reference": _reference_values(reference), "acknowledged": True},
         )
 
+    def list_attachments(arguments: StructuredData) -> CapabilityResult:
+        try:
+            reference = _reference(arguments)
+            attachments = account.list_attachments(reference)
+        except ValueError:
+            return failed(LIST_MAIL_ATTACHMENTS, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(LIST_MAIL_ATTACHMENTS, error.code)
+        values = {
+            "reference": _reference_values(reference),
+            "attachments": tuple(_attachment_values(item) for item in attachments),
+        }
+        return CapabilityResult(
+            call_id_source(), LIST_MAIL_ATTACHMENTS,
+            CapabilityResultState.SUCCEEDED, values,
+            provenance=RetentionPolicy().direct_mail(now(), (reference,)),
+        )
+
+    def read_attachment(arguments: StructuredData) -> CapabilityResult:
+        try:
+            reference = _reference(arguments)
+            attachment_id = arguments.get("attachment_id")
+            if not isinstance(attachment_id, str) or not attachment_id.strip():
+                raise ValueError("attachment_id")
+            attachment, _payload_bytes = account.read_attachment(reference, attachment_id)
+        except ValueError:
+            return failed(READ_MAIL_ATTACHMENT, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(READ_MAIL_ATTACHMENT, error.code)
+        durable = {"reference": _reference_values(reference), **_attachment_values(attachment)}
+        return CapabilityResult(
+            call_id_source(), READ_MAIL_ATTACHMENT,
+            CapabilityResultState.SUCCEEDED,
+            {**durable, "text": attachment.text},
+            durable_values=durable,
+            provenance=RetentionPolicy().direct_mail(now(), (reference,)),
+        )
+
     def move_to_trash(arguments: StructuredData) -> CapabilityResult:
         try:
             reference = _reference(arguments)
@@ -371,6 +474,8 @@ def build_mail_executors(
 
     return {
         READ_MAIL_MESSAGE: read,
+        LIST_MAIL_ATTACHMENTS: list_attachments,
+        READ_MAIL_ATTACHMENT: read_attachment,
         ACKNOWLEDGE_MAIL_MESSAGE: acknowledge,
         MARK_MAIL_MESSAGE_SEEN: mark_seen,
         MOVE_MAIL_MESSAGE_TO_TRASH: move_to_trash,

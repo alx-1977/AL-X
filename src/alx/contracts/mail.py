@@ -84,6 +84,26 @@ class MailContent:
 
 
 @dataclass(frozen=True, slots=True)
+class MailAttachment:
+    """One exact MIME attachment and its provider-extracted readable text."""
+
+    attachment_id: str
+    filename: str
+    media_type: str
+    size: int
+    sha256: str
+    text: str = ""
+
+    def __post_init__(self) -> None:
+        _required(self.attachment_id, "attachment_id")
+        _required(self.filename, "filename")
+        _required(self.media_type, "media_type")
+        _required(self.sha256, "sha256")
+        if not isinstance(self.size, int) or isinstance(self.size, bool) or self.size < 0:
+            raise ValueError("size must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
 class OutboundReply:
     """One fully specified reply, assembled but not sent.
 
@@ -171,6 +191,12 @@ class MailAccessError(Exception):
 
 class MailAccount(Protocol):
     def read(self, reference: MailReference) -> MailContent: ...
+
+    def list_attachments(self, reference: MailReference) -> tuple[MailAttachment, ...]: ...
+
+    def read_attachment(
+        self, reference: MailReference, attachment_id: str
+    ) -> tuple[MailAttachment, bytes]: ...
 
     def mark_seen(self, reference: MailReference) -> None: ...
 

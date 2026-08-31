@@ -27,8 +27,10 @@ from alx.tools import (
     ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
     MARK_MAIL_MESSAGE_SEEN,
+    LIST_MAIL_ATTACHMENTS,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     READ_MAIL_MESSAGE,
+    READ_MAIL_ATTACHMENT,
     SEND_DEFINITIONS,
     SEND_MAIL_REPLY,
     build_mail_executors,
@@ -151,6 +153,8 @@ def build_mail_runtime(
     )
     policies = {
         READ_MAIL_MESSAGE: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
+        LIST_MAIL_ATTACHMENTS: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
+        READ_MAIL_ATTACHMENT: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
         ACKNOWLEDGE_MAIL_MESSAGE: AuthorityPolicy(
             frozenset({MAIL_OBSERVATION_PERMISSION})
         ),

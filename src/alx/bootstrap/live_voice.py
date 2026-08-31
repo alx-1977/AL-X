@@ -16,6 +16,8 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.reasoning import build_model_reasoner
+from alx.bootstrap.xero import build_xero_runtime
+from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     ConfigurationError,
@@ -23,6 +25,7 @@ from alx.config import (
     MailSendSettings,
     MailSettings,
     RuntimeSettings,
+    XeroSettings,
 )
 from alx.contracts import GoalStatus
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
@@ -126,6 +129,36 @@ async def run(repository_root: Path) -> None:
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
 
+    dhl_runtime = build_dhl_runtime(
+        mail_runtime.source, lambda: current_call_id[0]
+    )
+    for definition in dhl_runtime.definitions:
+        registry.register(definition)
+    policies.update(dhl_runtime.policies)
+    executors.update(dhl_runtime.executors)
+    permissions.update(dhl_runtime.permissions)
+
+    # D-016 authorises the narrowly scoped supplier-bill capability. Missing
+    # configuration leaves Xero absent without weakening mail or voice.
+    xero_approval_ttl_seconds: int | None = None
+    try:
+        xero_settings = XeroSettings.from_environment(environment)
+    except ConfigurationError as error:
+        LOGGER.info("Xero unavailable: %s", error)
+    else:
+        xero_runtime = build_xero_runtime(
+            xero_settings,
+            storage_root,
+            mail_runtime.source,
+            lambda: current_call_id[0],
+        )
+        for definition in xero_runtime.definitions:
+            registry.register(definition)
+        policies.update(xero_runtime.policies)
+        executors.update(xero_runtime.executors)
+        permissions.update(xero_runtime.permissions)
+        xero_approval_ttl_seconds = xero_settings.approval_ttl_seconds
+
     # Replying is authorised by DECISIONS.md D-011 and configured separately, so
     # a runtime without send settings reads mail without being able to send it.
     approval_ttl_seconds: int | None = None
@@ -161,13 +194,17 @@ async def run(repository_root: Path) -> None:
             ),
         )
 
+    approval_windows = tuple(
+        value for value in (approval_ttl_seconds, xero_approval_ttl_seconds)
+        if value is not None
+    )
     core = CoreAgent(
         goal_store,
         build_model_reasoner(providers.reasoning, repository_root),
         dispatch,
         registry.list_definitions(),
         memory_store,
-        approval_ttl_seconds=approval_ttl_seconds,
+        approval_ttl_seconds=min(approval_windows) if approval_windows else None,
     )
     gateway = ConversationGateway(
         core,

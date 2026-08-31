@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import imaplib
+import io
 import json
 import logging
+import mimetypes
 import re
 import sqlite3
+import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email import policy
@@ -21,6 +25,7 @@ from typing import Any
 from alx.contracts import (
     BackgroundEvent,
     MailAccessError,
+    MailAttachment,
     MailContent,
     MailParticipants,
     MailReference,
@@ -83,6 +88,104 @@ def _has_attachments(item) -> bool:
         )
         for part in candidates
     )
+
+
+def _attachment_parts(item):
+    """Enumerate explicit attachments with stable MIME-walk identifiers."""
+    candidates = item.walk() if item.is_multipart() else (item,)
+    found = []
+    for index, part in enumerate(candidates, start=1):
+        if part.is_multipart():
+            continue
+        if part.get_content_disposition() != "attachment" and part.get_filename() is None:
+            continue
+        found.append((str(index), part))
+    return tuple(found)
+
+
+def _attachment_text(media_type: str, payload: bytes, charset: str | None) -> str:
+    """Extract domain text without granting the adapter accounting authority."""
+    if media_type.startswith("text/") or media_type in (
+        "application/csv",
+        "application/json",
+        "application/xml",
+    ):
+        return payload.decode(charset or "utf-8", errors="replace")
+    if media_type == "application/pdf":
+        try:
+            from pypdf import PdfReader
+
+            return "\n".join(
+                text for page in PdfReader(io.BytesIO(payload)).pages
+                if (text := page.extract_text())
+            )
+        except Exception:
+            return ""
+    return ""
+
+
+def _mail_attachment(attachment_id: str, part) -> tuple[MailAttachment, bytes]:
+    payload = part.get_payload(decode=True) or b""
+    media_type = part.get_content_type() or "application/octet-stream"
+    filename = _decoded(part.get_filename()) or f"attachment-{attachment_id}"
+    return (
+        MailAttachment(
+            attachment_id,
+            filename,
+            media_type,
+            len(payload),
+            hashlib.sha256(payload).hexdigest(),
+            "",
+        ),
+        payload,
+    )
+
+
+_ARCHIVE_MEMBER_LIMIT = 100
+_ARCHIVE_MEMBER_BYTES = 25 * 1024 * 1024
+_ARCHIVE_TOTAL_BYTES = 50 * 1024 * 1024
+
+
+def _message_attachments(item) -> tuple[tuple[MailAttachment, bytes], ...]:
+    """Expose bounded ZIP members as stable, non-persisted virtual attachments."""
+    found: list[tuple[MailAttachment, bytes]] = []
+    for attachment_id, part in _attachment_parts(item):
+        outer, payload = _mail_attachment(attachment_id, part)
+        found.append((outer, payload))
+        if outer.media_type not in ("application/zip", "application/x-zip-compressed") \
+                and not outer.filename.lower().endswith(".zip"):
+            continue
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(payload))
+            members = [item for item in archive.infolist() if not item.is_dir()]
+            if (
+                len(members) > _ARCHIVE_MEMBER_LIMIT
+                or any(item.file_size > _ARCHIVE_MEMBER_BYTES for item in members)
+                or sum(item.file_size for item in members) > _ARCHIVE_TOTAL_BYTES
+            ):
+                continue
+            for index, member in enumerate(members, start=1):
+                content = archive.read(member)
+                filename = Path(member.filename).name
+                if not filename:
+                    continue
+                media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                found.append(
+                    (
+                        MailAttachment(
+                            f"{attachment_id}:{index}",
+                            filename,
+                            media_type,
+                            len(content),
+                            hashlib.sha256(content).hexdigest(),
+                            "",
+                        ),
+                        content,
+                    )
+                )
+        except (OSError, ValueError, zipfile.BadZipFile, RuntimeError):
+            continue
+    return tuple(found)
 
 
 # RFC 5322 message identifiers are angle-addr tokens.
@@ -457,7 +560,7 @@ class ICloudMailAdapter:
                 )
             await asyncio.sleep(self._poll_seconds)
 
-    def read(self, reference: MailReference) -> MailContent:
+    def _read_parsed(self, reference: MailReference):
         connection = self._open()
         try:
             status, _ = connection.select(self._quoted(reference.mailbox_id), readonly=True)
@@ -470,8 +573,13 @@ class ICloudMailAdapter:
             )
             if status != "OK":
                 raise MailAccessError("message_unavailable")
-            parsed = BytesParser(policy=policy.default).parsebytes(_payload(values))
-            return MailContent(
+            return BytesParser(policy=policy.default).parsebytes(_payload(values))
+        finally:
+            self._close(connection)
+
+    def read(self, reference: MailReference) -> MailContent:
+        parsed = self._read_parsed(reference)
+        return MailContent(
                 reference,
                 _decoded(parsed.get("Subject")),
                 _decoded(parsed.get("From")),
@@ -490,8 +598,34 @@ class ICloudMailAdapter:
                 ),
                 _has_attachments(parsed),
             )
-        finally:
-            self._close(connection)
+
+    def list_attachments(self, reference: MailReference) -> tuple[MailAttachment, ...]:
+        parsed = self._read_parsed(reference)
+        return tuple(
+            attachment
+            for attachment, _payload in _message_attachments(parsed)
+        )
+
+    def read_attachment(
+        self, reference: MailReference, attachment_id: str
+    ) -> tuple[MailAttachment, bytes]:
+        if not isinstance(attachment_id, str) or not attachment_id.strip():
+            raise MailAccessError("attachment_unavailable")
+        parsed = self._read_parsed(reference)
+        for attachment, payload in _message_attachments(parsed):
+            if attachment.attachment_id == attachment_id:
+                return (
+                    MailAttachment(
+                        attachment.attachment_id,
+                        attachment.filename,
+                        attachment.media_type,
+                        attachment.size,
+                        attachment.sha256,
+                        _attachment_text(attachment.media_type, payload, None),
+                    ),
+                    payload,
+                )
+        raise MailAccessError("attachment_unavailable")
 
     @staticmethod
     def _quoted(mailbox_id: str) -> str:

@@ -233,6 +233,40 @@ class MailSendSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class XeroSettings:
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+    tenant_id: str
+    timeout_seconds: int
+    approval_ttl_seconds: int
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
+        return cls(
+            client_id=_required(environment, "XERO_CLIENT_ID"),
+            client_secret=_required(environment, "XERO_CLIENT_SECRET"),
+            redirect_uri=_required(environment, "XERO_REDIRECT_URI"),
+            tenant_id=environment.get("XERO_TENANT_ID", "").strip(),
+            timeout_seconds=_positive_integer(
+                environment, "ALX_XERO_TIMEOUT_SECONDS", 60
+            ),
+            approval_ttl_seconds=_positive_integer(
+                environment, "ALX_XERO_APPROVAL_TTL_SECONDS", 600
+            ),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"XeroSettings(client_id={self.client_id!r}, "
+            f"client_secret=<redacted>, redirect_uri={self.redirect_uri!r}, "
+            f"tenant_id={self.tenant_id!r}, "
+            f"timeout_seconds={self.timeout_seconds!r}, "
+            f"approval_ttl_seconds={self.approval_ttl_seconds!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     reasoning: ReasoningSettings
     speech_to_text: SpeechToTextSettings

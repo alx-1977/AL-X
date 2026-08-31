@@ -62,6 +62,7 @@ from alx.contracts.mail import (
     BackgroundEventSource,
     MailAccessError,
     MailAccount,
+    MailAttachment,
     MailContent,
     MailObservationControl,
     MailParticipants,
@@ -71,6 +72,8 @@ from alx.contracts.mail import (
     OutboundReply,
     ReplyOutcome,
 )
+from alx.contracts.xero import XeroAccessError, XeroAccountingAccount
+from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
     "RetentionPolicy",
@@ -91,7 +94,9 @@ __all__ = [
     "ReasoningModel",
     "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
-    "BackgroundEventSource", "MailAccessError", "MailAccount", "MailContent",
+    "BackgroundEventSource", "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
     "MailObservationControl", "MailParticipants", "MailReference",
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
+    "XeroAccessError", "XeroAccountingAccount",
+    "DhlDocumentError", "DhlImportAnalyzer",
 ]

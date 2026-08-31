@@ -1,0 +1,526 @@
+from __future__ import annotations
+
+import stat
+import tempfile
+import threading
+import unittest
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlsplit
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from alx.bootstrap.xero import (  # noqa: E402
+    XERO_BILL_WRITE_PERMISSION,
+    XERO_READ_PERMISSION,
+    build_xero_runtime,
+)
+from alx.config import XeroSettings  # noqa: E402
+from alx.contracts import (  # noqa: E402
+    AgentDecision,
+    Approval,
+    ApprovalLifecycle,
+    ApprovalScope,
+    CapabilityCall,
+    CapabilityResultState,
+    ConversationOrigin,
+    ConversationSnapshot,
+    ConversationTurn,
+    GoalState,
+    MailAttachment,
+    Objective,
+    SuccessCriterion,
+    XeroAccessError,
+)
+from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
+from alx.core import CoreAgent, CoreState  # noqa: E402
+from alx.goals import SQLiteGoalStore  # noqa: E402
+from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
+from alx.providers.xero import (  # noqa: E402
+    ACCOUNTING_URL,
+    SQLiteXeroOAuth,
+    XeroAccountingAdapter,
+    XeroConnection,
+)
+from alx.tools import (  # noqa: E402
+    ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+    AUTHORISE_XERO_BILL,
+    CREATE_XERO_DRAFT_BILL,
+    READ_XERO_BILL,
+    XERO_DEFINITIONS,
+    build_xero_executors,
+)
+
+
+class FakeXero:
+    def __init__(self) -> None:
+        self.existing = None
+        self.created = []
+        self.attachments = []
+        self.current = {
+            "Type": "ACCPAY",
+            "InvoiceID": "bill-1",
+            "InvoiceNumber": "SUP-42",
+            "Contact": {"ContactID": "contact-1", "Name": "Supplier"},
+            "Status": "DRAFT",
+            "CurrencyCode": "ZAR",
+            "Total": "1250.00",
+            "AmountDue": "1250.00",
+            "Reference": "mail:777:1",
+            "HasAttachments": True,
+        }
+
+    def search_contacts(self, _term):
+        return ()
+
+    def list_accounts(self):
+        return ()
+
+    def list_tax_rates(self):
+        return ()
+
+    def find_bill(self, _invoice_number, _contact_id=""):
+        return self.existing
+
+    def read_bill(self, _invoice_id):
+        return self.current
+
+    def create_draft_bill(self, bill):
+        self.created.append(bill)
+        return dict(self.current)
+
+    def attach_bill_document(self, invoice_id, filename, media_type, content):
+        self.attachments.append((invoice_id, filename, media_type, content))
+        return {"FileName": filename}
+
+    def authorise_bill(self, _invoice_id):
+        self.current = {**self.current, "Status": "AUTHORISED"}
+        return self.current
+
+
+class FakeMail:
+    def __init__(self) -> None:
+        self.references = []
+        self.attachment = MailAttachment(
+            "4", "SUP-42.pdf", "application/pdf", 8, "abc123", "Invoice"
+        )
+
+    def read_attachment(self, reference, attachment_id):
+        self.references.append((reference, attachment_id))
+        return self.attachment, b"pdf-data"
+
+
+def draft_arguments() -> dict:
+    return {
+        "contact_id": "contact-1",
+        "invoice_number": "SUP-42",
+        "date": "2026-08-30",
+        "due_date": "2026-09-30",
+        "currency": "ZAR",
+        "reference": "mail:777:1",
+        "line_amount_types": "NoTax",
+        "expected_total": "1250.00",
+        "line_items": [
+            {
+                "description": "Components",
+                "quantity": "1",
+                "unit_amount": "1250.00",
+                "account_code": "310",
+                "tax_type": "NONE",
+                "tax_amount": "0.00",
+            }
+        ],
+    }
+
+
+class XeroPrimitiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.xero = FakeXero()
+        self.mail = FakeMail()
+        self.executors = build_xero_executors(
+            self.xero, self.mail, lambda: "call-1"
+        )
+
+    def test_balanced_bill_is_created_as_draft_and_never_authorised_inline(self) -> None:
+        result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(result.values["status"], "DRAFT")
+        self.assertEqual(self.xero.created[0]["Type"], "ACCPAY")
+        self.assertEqual(self.xero.created[0]["Status"], "DRAFT")
+
+    def test_unbalanced_bill_is_refused_before_xero_is_called(self) -> None:
+        arguments = {**draft_arguments(), "expected_total": "1250.01"}
+        result = self.executors[CREATE_XERO_DRAFT_BILL](arguments)
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertEqual(self.xero.created, [])
+
+    def test_duplicate_invoice_number_is_refused(self) -> None:
+        self.xero.existing = self.xero.current
+        result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
+        self.assertEqual(result.failure["code"], "duplicate_found")
+        self.assertEqual(self.xero.created, [])
+
+    def test_attachment_is_bound_to_exact_mail_hash(self) -> None:
+        arguments = {
+            "invoice_id": "bill-1",
+            "mailbox_id": "INBOX",
+            "uid_validity": "777",
+            "uid": "1",
+            "attachment_id": "4",
+            "expected_sha256": "abc123",
+        }
+        result = self.executors[ATTACH_MAIL_DOCUMENT_TO_XERO_BILL](arguments)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(
+            self.xero.attachments,
+            [("bill-1", "SUP-42.pdf", "application/pdf", b"pdf-data")],
+        )
+
+        self.xero.attachments.clear()
+        mismatch = self.executors[ATTACH_MAIL_DOCUMENT_TO_XERO_BILL](
+            {**arguments, "expected_sha256": "different"}
+        )
+        self.assertEqual(mismatch.failure["code"], "source_mismatch")
+        self.assertEqual(self.xero.attachments, [])
+
+    def test_authorisation_requires_a_matching_draft(self) -> None:
+        arguments = {
+            "invoice_id": "bill-1",
+            "invoice_number": "SUP-42",
+            "expected_total": "1250.00",
+        }
+        result = self.executors[AUTHORISE_XERO_BILL](arguments)
+        self.assertEqual(result.values["status"], "AUTHORISED")
+
+        self.xero.current = {**self.xero.current, "Status": "DRAFT"}
+        mismatch = self.executors[AUTHORISE_XERO_BILL](
+            {**arguments, "expected_total": "1250.01"}
+        )
+        self.assertEqual(mismatch.failure["code"], "source_mismatch")
+
+        self.xero.current = {
+            **self.xero.current,
+            "Status": "DRAFT",
+            "HasAttachments": False,
+        }
+        missing = self.executors[AUTHORISE_XERO_BILL](arguments)
+        self.assertEqual(missing.failure["code"], "supporting_document_missing")
+
+    def test_runtime_requires_approval_for_every_xero_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_xero_runtime(
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300),
+                Path(directory),
+                self.mail,
+                lambda: "call",
+            )
+        self.assertEqual(
+            runtime.permissions,
+            frozenset({XERO_READ_PERMISSION, XERO_BILL_WRITE_PERMISSION}),
+        )
+        for capability_id in (
+            CREATE_XERO_DRAFT_BILL,
+            ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+            AUTHORISE_XERO_BILL,
+        ):
+            self.assertTrue(runtime.policies[capability_id].approval_required)
+
+    def test_create_result_survives_restart_and_returns_to_core_for_readback(self) -> None:
+        now = datetime(2026, 8, 31, tzinfo=UTC)
+        retention = now + timedelta(days=30)
+        create_call = CapabilityCall(
+            "create-1",
+            CREATE_XERO_DRAFT_BILL,
+            draft_arguments(),
+            "approval-1",
+        )
+        approval = Approval(
+            "approval-1",
+            ApprovalScope(CREATE_XERO_DRAFT_BILL, draft_arguments()),
+            ApprovalLifecycle.GRANTED,
+            now + timedelta(minutes=10),
+        )
+        conversation = ConversationSnapshot(
+            "conversation-1",
+            (
+                ConversationTurn(
+                    "conversation-1",
+                    "turn-1",
+                    ConversationOrigin.TYPED,
+                    "Create the supplier bill from the invoice.",
+                    now,
+                    "friedl",
+                ),
+            ),
+            1,
+            retention,
+        )
+
+        class Queued:
+            def __init__(self, *decisions):
+                self.decisions = list(decisions)
+                self.contexts = []
+
+            def decide(self, context):
+                self.contexts.append(context)
+                return self.decisions.pop(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "goals.sqlite3"
+            store = SQLiteGoalStore(path)
+            store.create(
+                GoalState(
+                    "goal-1",
+                    Objective("turn:turn-1", "Create and verify the supplier bill"),
+                    (SuccessCriterion("criterion-1", "bill read back from Xero"),),
+                    approvals=(approval,),
+                ),
+                "conversation-1",
+                retention,
+            )
+            registry = CapabilityRegistry()
+            for definition in XERO_DEFINITIONS:
+                registry.register(definition)
+            current_call_id = [""]
+            runtime = build_xero_runtime(
+                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600),
+                Path(directory),
+                self.mail,
+                lambda: current_call_id[0],
+            )
+            broker = CapabilityBroker(
+                registry,
+                SafetyGate(runtime.policies),
+                build_xero_executors(
+                    self.xero, self.mail, lambda: current_call_id[0]
+                ),
+            )
+
+            def dispatch(call, state):
+                current_call_id[0] = call.call_id
+                return broker.dispatch(
+                    call,
+                    AuthorityContext(
+                        "friedl",
+                        runtime.permissions,
+                        now,
+                        state.approvals if state is not None else (),
+                    ),
+                )
+
+            first_reasoner = Queued(AgentDecision(call=create_call))
+            first = CoreAgent(
+                store,
+                first_reasoner,
+                dispatch,
+                XERO_DEFINITIONS,
+                clock=lambda: now,
+            ).process(conversation, "goal-1", retention, 1)
+            self.assertEqual(first.state, CoreState.CHECKPOINTED)
+            self.assertEqual(first.snapshot.state.attempts[-1].result.values["status"], "DRAFT")
+            store.close()
+
+            restarted_store = SQLiteGoalStore(path)
+            read_call = CapabilityCall(
+                "read-1", READ_XERO_BILL, {"invoice_id": "bill-1"}
+            )
+            second_reasoner = Queued(
+                AgentDecision(call=read_call),
+                AgentDecision(response="The draft bill exists and matches the invoice."),
+            )
+            second = CoreAgent(
+                restarted_store,
+                second_reasoner,
+                dispatch,
+                XERO_DEFINITIONS,
+                clock=lambda: now,
+            ).process(conversation, "goal-1", retention, 2)
+            self.assertEqual(second.state, CoreState.RESPONDED)
+            self.assertEqual(
+                second_reasoner.contexts[0].active_goal.attempts[-1].call.capability_id,
+                CREATE_XERO_DRAFT_BILL,
+            )
+            self.assertEqual(
+                second_reasoner.contexts[1].active_goal.attempts[-1].call.capability_id,
+                READ_XERO_BILL,
+            )
+            restarted_store.close()
+
+
+class XeroOAuthTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "xero.sqlite3"
+        self.oauth = SQLiteXeroOAuth(
+            self.path, "client", "secret", "http://localhost/callback", "", 10
+        )
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_oauth_state_survives_restart_and_tokens_are_encrypted(self) -> None:
+        url = self.oauth.begin_authorization(now=100)
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        restarted = SQLiteXeroOAuth(
+            self.path, "client", "secret", "http://localhost/callback", "", 10
+        )
+        with patch.object(
+            restarted,
+            "_token_request",
+            return_value={
+                "access_token": "access-secret",
+                "refresh_token": "refresh-secret",
+                "expires_in": 1800,
+                "scope": "accounting.invoices",
+            },
+        ), patch.object(
+            restarted,
+            "_connections",
+            return_value=[{"tenantId": "tenant-1", "tenantName": "FireFli"}],
+        ):
+            self.assertEqual(restarted.exchange_code("code", state, now=101), "FireFli")
+
+        raw = self.path.read_bytes()
+        self.assertNotIn(b"access-secret", raw)
+        self.assertNotIn(b"refresh-secret", raw)
+        key_mode = stat.S_IMODE(self.path.with_suffix(".key").stat().st_mode)
+        self.assertEqual(key_mode, 0o600)
+        connection = restarted.connection(now=102)
+        self.assertEqual(connection.access_token, "access-secret")
+        self.assertEqual(connection.tenant_id, "tenant-1")
+
+    def test_concurrent_refresh_rotates_the_token_once(self) -> None:
+        self.oauth._persist(
+            {
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "expires_in": 1,
+                "scope": "accounting.invoices",
+            },
+            {"tenantId": "tenant-1", "tenantName": "FireFli"},
+            now=0,
+        )
+        calls = []
+
+        def refresh(_data):
+            calls.append(1)
+            return {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_in": 1800,
+                "scope": "accounting.invoices",
+            }
+
+        results = []
+        with patch.object(self.oauth, "_token_request", side_effect=refresh):
+            threads = [
+                threading.Thread(
+                    target=lambda: results.append(self.oauth.connection(now=100))
+                )
+                for _ in range(5)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual({item.access_token for item in results}, {"new-access"})
+
+    def test_provider_failure_does_not_retain_the_http_exception(self) -> None:
+        self.oauth._persist(
+            {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_in": 1800,
+                "scope": "accounting.invoices",
+            },
+            {"tenantId": "tenant-1", "tenantName": "FireFli"},
+            now=0,
+        )
+        adapter = XeroAccountingAdapter(self.oauth)
+        request = type("Request", (), {"content": b"private invoice"})()
+
+        class RequestFailure(Exception):
+            pass
+
+        error = RequestFailure("failed")
+        error.request = request
+        with patch("httpx.request", side_effect=error):
+            with self.assertRaises(XeroAccessError) as captured:
+                adapter.list_accounts()
+        self.assertIsNone(captured.exception.__cause__)
+        self.assertIsNone(captured.exception.__context__)
+        self.assertNotIn("private invoice", str(captured.exception))
+
+
+class XeroAccountingAdapterTests(unittest.TestCase):
+    class ConnectedOAuth:
+        def connection(self):
+            return XeroConnection("access-token", "tenant-1")
+
+    @staticmethod
+    def response(body):
+        response = Mock(status_code=200)
+        response.json.return_value = body
+        return response
+
+    def setUp(self) -> None:
+        self.adapter = XeroAccountingAdapter(self.ConnectedOAuth(), timeout_seconds=17)
+
+    def test_create_draft_uses_accounting_endpoint_and_tenant_boundary(self) -> None:
+        bill = {"Type": "ACCPAY", "Status": "DRAFT", "InvoiceNumber": "SUP-42"}
+        response = self.response({"Invoices": [{**bill, "InvoiceID": "bill-1"}]})
+        with patch("httpx.request", return_value=response) as request:
+            created = self.adapter.create_draft_bill(bill)
+
+        self.assertEqual(created["InvoiceID"], "bill-1")
+        args, kwargs = request.call_args
+        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices"))
+        self.assertEqual(kwargs["headers"]["Xero-tenant-id"], "tenant-1")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer access-token")
+        self.assertEqual(kwargs["json"], {"Invoices": [bill]})
+        self.assertEqual(kwargs["timeout"], 17)
+
+    def test_attachment_uses_exact_bytes_and_escaped_filename(self) -> None:
+        response = self.response({"Attachments": [{"FileName": "invoice 42.pdf"}]})
+        with patch("httpx.request", return_value=response) as request:
+            attached = self.adapter.attach_bill_document(
+                "bill/1", "invoice 42.pdf", "application/pdf", b"exact-pdf"
+            )
+
+        self.assertEqual(attached["FileName"], "invoice 42.pdf")
+        args, kwargs = request.call_args
+        self.assertEqual(
+            args,
+            (
+                "PUT",
+                f"{ACCOUNTING_URL}/Invoices/bill%2F1/Attachments/invoice%2042.pdf",
+            ),
+        )
+        self.assertEqual(kwargs["content"], b"exact-pdf")
+        self.assertEqual(kwargs["headers"]["Content-Type"], "application/pdf")
+        self.assertIsNone(kwargs["json"])
+
+    def test_authorise_updates_only_the_identified_bill(self) -> None:
+        response = self.response(
+            {"Invoices": [{"InvoiceID": "bill-1", "Status": "AUTHORISED"}]}
+        )
+        with patch("httpx.request", return_value=response) as request:
+            authorised = self.adapter.authorise_bill("bill-1")
+
+        self.assertEqual(authorised["Status"], "AUTHORISED")
+        args, kwargs = request.call_args
+        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices/bill-1"))
+        self.assertEqual(
+            kwargs["json"],
+            {"Invoices": [{"InvoiceID": "bill-1", "Status": "AUTHORISED"}]},
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
