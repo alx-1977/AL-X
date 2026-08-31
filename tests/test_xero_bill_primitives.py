@@ -253,6 +253,68 @@ class XeroPrimitiveTests(unittest.TestCase):
         self.assertEqual(result.failure["code"], "supporting_document_mismatch")
         self.assertEqual(self.xero.current["Status"], "DRAFT")
 
+    def test_zero_vat_supplier_may_use_a_vat_defaulted_account(self) -> None:
+        """A supplier who charges no VAT is ordinary, not an error.
+
+        Account 429 defaults to INPUT3, but the Cape Town shuttle invoice
+        carries no VAT. An account's tax type is Xero's default for that
+        account, not a constraint, so NONE must remain postable.
+        """
+        self.xero.list_accounts = lambda: (
+            {"Code": "429", "Status": "ACTIVE", "TaxType": "INPUT3"},
+        )
+        self.xero.list_tax_rates = lambda: (
+            {"TaxType": "INPUT3", "Status": "ACTIVE"},
+        )
+        arguments = {
+            **draft_arguments(),
+            "line_amount_types": "Exclusive",
+            "expected_total": "1250.00",
+            "line_items": [
+                {
+                    "description": "Transfer service",
+                    "quantity": "1",
+                    "unit_amount": "1250.00",
+                    "account_code": "429",
+                    "tax_type": "NONE",
+                    "tax_amount": "0.00",
+                }
+            ],
+        }
+        result = self.executors[CREATE_XERO_DRAFT_BILL](arguments)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(self.xero.created), 1)
+        self.assertEqual(
+            self.xero.created[0]["LineItems"][0]["TaxType"], "NONE"
+        )
+
+    def test_a_tax_type_absent_from_the_organisation_is_still_refused(self) -> None:
+        """Allowing NONE must not allow an invented tax type."""
+        self.xero.list_accounts = lambda: (
+            {"Code": "429", "Status": "ACTIVE", "TaxType": "INPUT3"},
+        )
+        self.xero.list_tax_rates = lambda: (
+            {"TaxType": "INPUT3", "Status": "ACTIVE"},
+        )
+        arguments = {
+            **draft_arguments(),
+            "line_amount_types": "Exclusive",
+            "expected_total": "620.00",
+            "line_items": [
+                {
+                    "description": "Transfer service",
+                    "quantity": "1",
+                    "unit_amount": "620.00",
+                    "account_code": "429",
+                    "tax_type": "NOT_A_REAL_TAX",
+                    "tax_amount": "0.00",
+                }
+            ],
+        }
+        result = self.executors[CREATE_XERO_DRAFT_BILL](arguments)
+        self.assertEqual(result.failure["code"], "account_mapping_invalid")
+        self.assertEqual(self.xero.created, [])
+
     def test_unknown_live_account_is_refused_before_write(self) -> None:
         self.xero.list_accounts = lambda: ()
         result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())

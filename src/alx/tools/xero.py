@@ -423,7 +423,11 @@ def _validate_line_mappings(
         if line_amount_types == "NoTax":
             valid_pair = tax_type == "NONE"
         else:
-            valid_pair = bool(default_tax) and tax_type == default_tax
+            # An account's tax type is Xero's default for that account, not a
+            # constraint on it. A supplier who charges no VAT is ordinary, so
+            # NONE stays valid on a VAT-defaulted account; any other override
+            # must still be a tax type that is live in this organisation.
+            valid_pair = tax_type == "NONE" or tax_type in active_taxes
         if not valid_pair or (tax_type != "NONE" and tax_type not in active_taxes):
             raise XeroAccessError("account_mapping_invalid")
 
