@@ -5,6 +5,7 @@ import hashlib
 import io
 import tempfile
 import unittest
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject  # n
 
 from alx.contracts import DhlDocumentError, MailAttachment  # noqa: E402
 from alx.providers import DhlImportAnalyzerAdapter  # noqa: E402
+from alx.providers.dhl import _classify_customs_document  # noqa: E402
 from alx.tools import (  # noqa: E402
     ANALYZE_DHL_CUSTOMS_DOCUMENTS,
     RECONCILE_DHL_IMPORT_DOCUMENTS,
@@ -124,6 +126,90 @@ def sad500_pdf(*, declaration: str = "DFM202604215028901") -> bytes:
 
 
 class DhlAnalyzerTests(unittest.TestCase):
+    def test_committed_sanitized_v1_layouts_parse_to_recorded_values(self) -> None:
+        fixture_root = Path(__file__).parent / "fixtures" / "dhl"
+        cases = (
+            (
+                "dfm_20260421",
+                "DHL-WAYBILL-8339567983",
+                "DFM202604215028901",
+                "1116.15",
+                {"import_vat": "1100.55", "customs_duty": "15.60"},
+            ),
+            (
+                "dfm_20260719",
+                "DHL-WAYBILL-7096903730",
+                "DFM202607195025382",
+                "207.00",
+                {"import_vat": "168.75", "customs_duty": "38.25"},
+            ),
+        )
+        for name, invoice_number, declaration, total, lines in cases:
+            with self.subTest(name=name):
+                result = DhlImportAnalyzerAdapter().analyze_customs(
+                    [
+                        (fixture_root / f"worksheet_{name}_sanitized.pdf").read_bytes(),
+                        (fixture_root / f"sad500_{name}_sanitized.pdf").read_bytes(),
+                    ]
+                )
+                self.assertTrue(result["verified"])
+                self.assertEqual(result["provisional_invoice_number"], invoice_number)
+                self.assertEqual(result["declaration"], declaration)
+                self.assertEqual(result["total"], total)
+                self.assertEqual(
+                    {item["category"]: item["amount"] for item in result["lines"]},
+                    lines,
+                )
+
+    @unittest.skipUnless(
+        (Path(__file__).resolve().parents[2] / "JARVIS" / "static").exists(),
+        "private sibling JARVIS fixtures are not available",
+    )
+    def test_every_unique_private_v1_customs_document_still_parses_locally(self) -> None:
+        expected = {
+            "05645ee75f300b3b81e5be4ce9d1a3ab2eac9a65e996997cfa96535e52f56b8e": ("customs_worksheet", "DFM202604215028901", 4),
+            "47989158bd89c9805412a0c586af69af953dd0de722bbd3b9add2c43846218c7": ("sad_500", "DFM202604215028901", 4),
+            "7ae9f4cc3a7235db8104b076f8a7bf3c2bb02d14126dfde52abf9f1a2e05e1e6": ("customs_worksheet", "DFM202607195025382", 2),
+            "88b95e4ab5a38738831acb8a9646a2d96bec484b0728973104dd2e78ddfa678b": ("sad_500", "DFM202604215028901", 1),
+            "bee9260d3efcf8393c5352f0a9ff4565dda246b2093affa4ec654bda6bc4801c": ("sad_500", "DFM202604215028901", 1),
+            "cdcfc5254325c1f18020f85dd7a24501146fdb45a9c8b6972ef39c974a9cbe78": ("customs_worksheet", "DFM202604215028901", 1),
+            "e1abac65f75377c678132194a63ee683d3675561ca44c0f70c1483b0f542acea": ("sad_500", "DFM202607195025382", 2),
+            "f29c1fa1ce8e75db3e16e2e1470261e3a12fb535510cebf180f82461e6adb620": ("customs_worksheet", "DFM202604215028901", 1),
+        }
+        root = Path(__file__).resolve().parents[2] / "JARVIS" / "static"
+        found: dict[str, list[bytes]] = {digest: [] for digest in expected}
+
+        def members(payload: bytes):
+            try:
+                with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                    for member in archive.infolist():
+                        if member.is_dir():
+                            continue
+                        content = archive.read(member)
+                        if member.filename.lower().endswith(".zip"):
+                            yield from members(content)
+                        elif member.filename.lower().endswith(".pdf"):
+                            yield content
+            except zipfile.BadZipFile:
+                return
+
+        for archive_path in root.glob("*.zip"):
+            for payload in members(archive_path.read_bytes()):
+                digest = hashlib.sha256(payload).hexdigest()
+                if digest in found:
+                    found[digest].append(payload)
+
+        for digest, (kind, declaration, count) in expected.items():
+            with self.subTest(digest=digest):
+                self.assertEqual(len(found[digest]), count)
+                for payload in found[digest]:
+                    classified_kind, value = _classify_customs_document(payload)
+                    self.assertEqual(classified_kind, kind)
+                    self.assertEqual(
+                        value.declaration if hasattr(value, "declaration") else value,
+                        declaration,
+                    )
+
     def test_v1_customs_rules_produce_a_balanced_bill_proposal(self) -> None:
         result = DhlImportAnalyzerAdapter().reconcile(
             mybill_csv(), [worksheet_pdf(), sad500_pdf()]

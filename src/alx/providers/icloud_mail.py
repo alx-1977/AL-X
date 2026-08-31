@@ -619,6 +619,25 @@ class ICloudMailAdapter:
                 return True
         return False
 
+    @staticmethod
+    def _bodystructure_has_attachments(values) -> bool:
+        metadata: list[bytes] = []
+        for value in values or ():
+            candidate = value[0] if isinstance(value, tuple) and value else value
+            if isinstance(candidate, bytes):
+                metadata.append(candidate)
+        joined = b" ".join(metadata).upper()
+        marker = joined.find(b"BODYSTRUCTURE")
+        if marker < 0:
+            raise MailAccessError("search_failed")
+        structure = joined[marker:]
+        # MIME filename parameters and attachment dispositions are the same
+        # facts used by _has_attachments, without downloading part payloads.
+        return any(
+            token in structure
+            for token in (b'"ATTACHMENT"', b'"FILENAME"', b'"NAME"')
+        )
+
     def search(
         self, criteria: MailSearchCriteria
     ) -> tuple[tuple[MailSearchResult, ...], bool]:
@@ -665,13 +684,13 @@ class ICloudMailAdapter:
                     incomplete = True
                     break
                 status, fetched = connection.uid(
-                    "fetch", uid, "(BODY.PEEK[] FLAGS)"
+                    "fetch", uid, "(BODY.PEEK[HEADER] BODYSTRUCTURE FLAGS)"
                 )
                 if status != "OK":
                     incomplete = True
                     continue
                 parsed = BytesParser(policy=policy.default).parsebytes(_payload(fetched))
-                has_attachments = _has_attachments(parsed)
+                has_attachments = self._bodystructure_has_attachments(fetched)
                 if (
                     criteria.has_attachments is not None
                     and has_attachments is not criteria.has_attachments

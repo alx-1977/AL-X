@@ -23,7 +23,8 @@ payroll.
 - Mail, DHL and Xero receive structured identifiers and values only.
 - Mail search, attachment listing and attachment reading are reusable
   primitives. Search selects the mailbox read-only, uses `BODY.PEEK`, and does
-  not change observation state. Attachment text
+  not change observation state. It fetches headers plus IMAP `BODYSTRUCTURE`,
+  not message bodies or attachment payloads. Attachment text
   is transient; stable metadata is retained under D-013 provenance.
 - Nested ZIP members are exposed as bounded virtual attachments. The archive is never
   extracted to disk, path components are discarded, and member count and byte
@@ -73,8 +74,16 @@ Scheduled enforcement of those expiry dates remains the explicit item in
 
 ## V1 fixture and archive evidence
 
-The positional worksheet parser was exercised read-only against both retained
-V1 fixtures:
+The original documents are tracked in the private V1 `JARVIS` repository;
+`AL-X` is public, so they are deliberately not copied here. Four deterministic,
+sanitized PDFs are committed under `tests/fixtures/dhl/`: a Customs Worksheet
+and SAD 500 for each observed declaration. They retain only the identifiers and
+totals below and reproduce the relevant Crystal Reports text-run geometry,
+including the VAT value appearing on the neighbouring `TOTAL 12B/Ad Val.` run.
+The committed tests parse those PDFs and assert every value.
+
+The production parser was also exercised read-only against both retained V1
+worksheet fixtures:
 
 - SHA-256 `05645ee75f300b3b81e5be4ce9d1a3ab2eac9a65e996997cfa96535e52f56b8e`
   → declaration `DFM202604215028901`, waybill `8339567983`, duty `15.60`, VAT
@@ -84,11 +93,16 @@ V1 fixtures:
   `168.75`, total `207.00`.
 
 The retained V1 DHL archive set was inspected without extraction to disk. Its
-nested paths expose the expected eight Customs Worksheets and eight SAD 500
-documents, all of which are identified by content; unrelated and malformed PDF
-members are refused rather than treated as customs evidence. The evidence also
-confirmed that SAD 500 identity must be matched by declaration number rather
-than by the first 10-digit value in the document.
+nested paths expose 16 relevant occurrences comprising eight byte-unique
+documents: four worksheet files and four SAD 500 files, representing two
+declarations. A local-only automated inventory test asserts all eight private
+SHA-256 values, all 16 occurrence counts, and every parsed declaration whenever
+the sibling V1 checkout is present. CI runs the sanitized layout fixtures. This
+distinction is explicit: CI proves the parser against the relevant layouts and
+values, while the private-source hash check is reproducible only on a machine
+with authorised access to V1. Unrelated and malformed PDF members are refused.
+The evidence also confirmed that SAD 500 identity must be matched by declaration
+number rather than by the first 10-digit value in the document.
 
 ## Known limits
 
@@ -119,5 +133,7 @@ than by the first 10-digit value in the document.
 - **Raw-language flow:** person → Conversation Gateway → Core → structured
   capability call. No tool or provider accepts a transcript, prompt or intent.
 - **Exceptions:** none.
-- **Unresolved evidence:** real Xero OAuth consent and a non-destructive live
-  read remain to be performed before any approved real bill write.
+- **Unresolved evidence:** the private original PDFs cannot run in public CI;
+  their exact hash inventory runs locally and sanitized layout equivalents run
+  in CI. Real Xero OAuth consent and a non-destructive live read remain to be
+  performed before any approved real bill write.

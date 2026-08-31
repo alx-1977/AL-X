@@ -9,7 +9,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts import CapabilityResultState, MailSearchCriteria  # noqa: E402
+from alx.contracts import (  # noqa: E402
+    CapabilityResultState,
+    MailAccessError,
+    MailSearchCriteria,
+)
 from alx.providers import ICloudMailAdapter, SQLiteMailObservationState  # noqa: E402
 from alx.tools import SEARCH_MAIL_MESSAGES, build_mail_executors  # noqa: E402
 
@@ -51,7 +55,17 @@ class SearchImap:
             self.fetch_values.append(values)
             uid = values[0]
             flags = b"\\Seen" if uid == "7" else b""
-            return "OK", [(b"FLAGS (" + flags + b")", self.messages[uid]), b")"]
+            structure = (
+                b'BODYSTRUCTURE (("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 7 1) '
+                b'("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 3 NIL '
+                b'("ATTACHMENT" ("FILENAME" "invoice.pdf"))) "MIXED")'
+                if uid == "9"
+                else b'BODYSTRUCTURE ("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 7 1)'
+            )
+            return "OK", [
+                (b"FLAGS (" + flags + b") " + structure, self.messages[uid]),
+                b")",
+            ]
         raise AssertionError((operation, values))
 
 
@@ -74,7 +88,12 @@ class MailSearchTests(unittest.TestCase):
             state.close()
 
         self.assertTrue(connection.readonly)
-        self.assertTrue(all(values[1] == "(BODY.PEEK[] FLAGS)" for values in connection.fetch_values))
+        self.assertTrue(
+            all(
+                values[1] == "(BODY.PEEK[HEADER] BODYSTRUCTURE FLAGS)"
+                for values in connection.fetch_values
+            )
+        )
         self.assertEqual([item.reference.uid for item in found], ["9"])
         self.assertEqual(found[0].reference.uid_validity, "777")
         self.assertTrue(found[0].has_attachments)
@@ -88,6 +107,27 @@ class MailSearchTests(unittest.TestCase):
     def test_search_contract_rejects_imap_control_characters(self) -> None:
         with self.assertRaises(ValueError):
             MailSearchCriteria("INBOX", sender="supplier\r\nSEEN")
+
+    def test_bodystructure_attachment_detection_does_not_need_payloads(self) -> None:
+        detect = ICloudMailAdapter._bodystructure_has_attachments
+        plain_alternative = [
+            b'BODYSTRUCTURE (("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 7 1) '
+            b'("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 12 1) "ALTERNATIVE")'
+        ]
+        inline_without_filename = [
+            b'BODYSTRUCTURE ("IMAGE" "PNG" NIL "logo" NIL "BASE64" 10 NIL '
+            b'("INLINE" NIL))'
+        ]
+        inline_with_filename = [
+            b'BODYSTRUCTURE ("IMAGE" "PNG" ("NAME" "logo.png") "logo" NIL '
+            b'"BASE64" 10 NIL ("INLINE" ("FILENAME" "logo.png")))'
+        ]
+        self.assertFalse(detect(plain_alternative))
+        self.assertFalse(detect(inline_without_filename))
+        self.assertTrue(detect(inline_with_filename))
+        with self.assertRaises(MailAccessError) as captured:
+            detect([b"FLAGS ()"])
+        self.assertEqual(captured.exception.code, "search_failed")
 
     def test_search_tool_carries_mail_provenance_without_observation_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
