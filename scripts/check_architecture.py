@@ -366,6 +366,226 @@ class SourceVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+# Law 1: anything presented as coming from AL/X must be authored by the
+# authoritative reasoning path. A transport, frontend, provider, tool or
+# recovery handler may emit technical codes, diagnostics and structural UI
+# state; it may not compose conversational wording on her behalf. A recovery
+# handler once added a fixed sentence — "That turn failed before I could
+# answer..." — to the voice error event, which is a second assistant voice.
+#
+# Terminal logs and diagnostic panel codes stay allowed, and so do structural
+# phases such as listening, thinking, speaking and error.
+CONVERSATIONAL_EVENT_FIELDS = frozenset(
+    {"notice", "message", "text", "content", "speech", "utterance", "say",
+     "prose", "wording", "explanation", "apology", "prompt_text"}
+)
+
+# The one value that may reach speech synthesis. It carries the reasoner's own
+# words; anything else would be a composed fallback.
+AUTHORITATIVE_RESPONSE_SOURCES = frozenset({"response", "outcome.response"})
+
+
+def _voice_event_violations(path: Path, relative: str, tree: ast.AST) -> list[Violation]:
+    """Reject conversational fields added to a phase/error event payload."""
+    found: list[Violation] = []
+    for node in ast.walk(tree):
+        # message["notice"] = "..."  — a composed field on an event mapping.
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                    and target.slice.value in CONVERSATIONAL_EVENT_FIELDS
+                    and _contains_string_literal(node.value)
+                ):
+                    found.append(
+                        Violation(
+                            relative,
+                            node.lineno,
+                            "voice event may not carry composed wording: "
+                            f"{target.slice.value!r} is conversational output "
+                            "and must come from the authoritative reasoner",
+                        )
+                    )
+        # {"type": "phase", "notice": "..."} — the same field in a literal.
+        if isinstance(node, ast.Dict):
+            keys = {
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            if not keys & {"type", "value", "reason"}:
+                continue
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value in CONVERSATIONAL_EVENT_FIELDS
+                    and _contains_string_literal(value)
+                ):
+                    found.append(
+                        Violation(
+                            relative,
+                            node.lineno,
+                            "voice event may not carry composed wording: "
+                            f"{key.value!r} is conversational output and must "
+                            "come from the authoritative reasoner",
+                        )
+                    )
+    return found
+
+
+def _speech_synthesis_violations(relative: str, tree: ast.AST) -> list[Violation]:
+    """Only the authoritative Core response may be synthesised."""
+    found: list[Violation] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called = node.func.attr if isinstance(node.func, ast.Attribute) else None
+        if called != "synthesize" or not node.args:
+            continue
+        spoken = node.args[0]
+        if isinstance(spoken, ast.Name):
+            name = spoken.id
+        elif isinstance(spoken, ast.Attribute):
+            name = f"{getattr(spoken.value, 'id', '')}.{spoken.attr}".lstrip(".")
+        else:
+            name = None
+        if name is None or name not in AUTHORITATIVE_RESPONSE_SOURCES:
+            found.append(
+                Violation(
+                    relative,
+                    node.lineno,
+                    "only the authoritative Core response may reach speech "
+                    "synthesis; a literal, fallback or capability result may not",
+                )
+            )
+    return found
+
+
+# The complete set of neutral system states a phase label may name. A label is
+# structural UI state, not AL/X speaking, so first-person or user-directed
+# wording is prohibited here: "I hear you" and "Something interrupted me" both
+# read as her voice when she has not reasoned at all. "AL/X" is her name rather
+# than a sentence, so it is permitted as the unknown-phase fallback.
+NEUTRAL_PHASE_LABELS = frozenset(
+    {
+        "Ready",
+        "Listening",
+        "Hearing",
+        "Thinking",
+        "Speaking",
+        "Error",
+        "Disconnected",
+        "AL/X",
+    }
+)
+
+
+def _phase_label_violations(path: Path, relative: str, text: str) -> list[Violation]:
+    """Every phase label must be one of the approved neutral states."""
+    found: list[Violation] = []
+    block = re.search(r"phaseLabels\s*=\s*\{(.*?)\}", text, re.S)
+    if block is not None:
+        for number, line in enumerate(block.group(1).splitlines()):
+            match = re.search(r'["\']([^"\']*)["\']\s*,?\s*$', line.strip())
+            if match is None:
+                continue
+            label = match.group(1)
+            if label not in NEUTRAL_PHASE_LABELS:
+                found.append(
+                    Violation(
+                        relative,
+                        text[: block.start()].count("\n") + number + 2,
+                        f"phase label {label!r} is not a neutral system state; "
+                        "a label may not carry first-person or user-directed "
+                        "wording, which reads as AL/X speaking",
+                    )
+                )
+    # The fallback assigned when a phase is unknown is a label too.
+    for number, line in enumerate(text.splitlines(), 1):
+        match = re.search(
+            r"phaseLabels\[[^\]]*\]\s*\?\?\s*[\"\']([^\"\']*)[\"\']", line
+        )
+        if match and match.group(1) not in NEUTRAL_PHASE_LABELS:
+            found.append(
+                Violation(
+                    relative,
+                    number,
+                    f"phase fallback {match.group(1)!r} is not a neutral system "
+                    "state",
+                )
+            )
+    return found
+
+
+def _frontend_violations(root: Path) -> list[Violation]:
+    """The frontend renders authoritative state; it does not author AL/X.
+
+    JavaScript has no AST here, so this is structural rather than a search for
+    one sentence: any assignment that puts a transported field onto a visible
+    AL/X surface is rejected, whatever the field is called and whatever it
+    says. The diagnostics panel is explicitly allowed — it is a technical log,
+    not AL/X speaking — and so is a fixed structural phase label.
+    """
+    assets = root / "src/alx/interfaces/assets"
+    if not assets.exists():
+        return []
+
+    # Surfaces the person reads as AL/X, rather than as a technical panel.
+    surfaces = ("status", "transcript", "response", "reply", "bubble")
+    found: list[Violation] = []
+    # The status element's initial value is a label the person reads before any
+    # phase arrives, so it is held to the same rule.
+    for markup in sorted(assets.glob("*.html")):
+        relative = str(markup.relative_to(root))
+        for number, line in enumerate(
+            markup.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            match = re.search(r'id="status"[^>]*>([^<]*)<', line)
+            if match and match.group(1).strip() not in NEUTRAL_PHASE_LABELS:
+                found.append(
+                    Violation(
+                        relative,
+                        number,
+                        f"status text {match.group(1).strip()!r} is not a "
+                        "neutral system state",
+                    )
+                )
+
+    for path in sorted(assets.glob("*.js")):
+        relative = str(path.relative_to(root))
+        text = path.read_text(encoding="utf-8")
+        found.extend(_phase_label_violations(path, relative, text))
+        for number, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            match = re.search(
+                r"\b(" + "|".join(surfaces) + r")\s*\.\s*"
+                r"(?:textContent|innerText|innerHTML)\s*=\s*(.+)$",
+                stripped,
+            )
+            if match is None:
+                continue
+            assigned = match.group(2).strip().rstrip(";")
+            # A fixed structural label, or a lookup of one, is allowed.
+            if assigned.startswith("phaseLabels"):
+                continue
+            # Anything carried in from the transport is not.
+            if re.search(r"\bmessage\b|\bevent\b|\bdata\b|\bpayload\b", assigned):
+                found.append(
+                    Violation(
+                        relative,
+                        number,
+                        "frontend may not render transported prose as AL/X: "
+                        f"{match.group(1)} must show structural state, and "
+                        "conversational wording must come from the reasoner",
+                    )
+                )
+    return found
+
+
 def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
     root = root.resolve()
     rules = rules or load_rules(root)
@@ -415,7 +635,11 @@ def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
         visitor = SourceVisitor(relative_text, owner, rules)
         visitor.visit(tree)
         violations.extend(visitor.violations)
+        if owner == "interfaces":
+            violations.extend(_voice_event_violations(path, relative_text, tree))
+            violations.extend(_speech_synthesis_violations(relative_text, tree))
 
+    violations.extend(_frontend_violations(root))
     return sorted(set(violations))
 
 

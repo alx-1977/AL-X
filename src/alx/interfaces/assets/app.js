@@ -5,12 +5,16 @@ const diagnosticLog = document.querySelector("#diagnostic-log");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
+// Law 1: these name a system state and nothing more. First-person or
+// user-directed wording here reads as AL/X speaking when she has not reasoned,
+// so the gate whitelists exactly these labels.
 const phaseLabels = {
+  ready: "Ready",
   listening: "Listening",
-  hearing: "I hear you",
+  hearing: "Hearing",
   thinking: "Thinking",
   speaking: "Speaking",
-  error: "Something interrupted me",
+  error: "Error",
   disconnected: "Disconnected",
 };
 
@@ -215,8 +219,16 @@ function handleControl(message) {
         `Tokens · input ${message.input_tokens ?? 0} · cached ${message.cached_tokens ?? 0} · reasoning ${message.reasoning_tokens ?? 0} · output ${message.output_tokens ?? 0} · total ${message.total_tokens ?? 0}`,
       );
     } else if (message.code === "reasoning.failed") {
+      // 402/403 from a reasoning provider means credit exhausted or the key
+      // refused. Naming the condition is a technical diagnostic, not AL/X
+      // speaking: without it a spent account looks like an unexplained hang.
+      const status = Number(message.status_code ?? 0);
+      const cause =
+        status === 402 || status === 403
+          ? " · provider rejected the key: credit or spending limit"
+          : "";
       diagnostic(
-        `Reasoning provider failed after ${(Number(message.duration_ms ?? 0) / 1000).toFixed(2)} s · ${message.error_type ?? "unknown"}`,
+        `Reasoning provider failed after ${(Number(message.duration_ms ?? 0) / 1000).toFixed(2)} s · ${message.error_type ?? "unknown"}${cause}`,
         "error",
       );
     } else if (message.code === "tts.request_sent") {

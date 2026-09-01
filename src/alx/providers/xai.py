@@ -11,7 +11,11 @@ from typing import Any
 import httpx
 
 from alx.contracts import ModelCompletion, ModelRequest
-from alx.providers.errors import ProviderError, raise_provider_failure
+from alx.providers.errors import (
+    ProviderError,
+    raise_provider_failure,
+    status_code_of,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -114,6 +118,11 @@ class XAIReasoningModel:
             return completion
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             error_code = type(error).__name__
+            # The status is a number, not payload: 403 says the credit ran out,
+            # where the exception name alone says only that something failed.
+            status = status_code_of(error)
+            if status is not None:
+                error_code = f"{error_code}:{status}"
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -123,13 +132,25 @@ class XAIReasoningModel:
                     "model": self._model,
                     "duration_ms": round(duration * 1000),
                     "error_type": error_code,
+                    "status_code": status,
                 },
             )
-            LOGGER.info(
-                "Reasoning provider request failed after %.3f seconds: %s",
-                duration,
-                error_code,
-            )
+            if status in (402, 403):
+                # The one failure Friedl must be able to see without a browser:
+                # a spent account otherwise looks like an unexplained hang.
+                LOGGER.error(
+                    "Reasoning provider rejected the request with %s after "
+                    "%.3f seconds: the API key is out of credit, over its "
+                    "spending limit, or not permitted for this model",
+                    status,
+                    duration,
+                )
+            else:
+                LOGGER.info(
+                    "Reasoning provider request failed after %.3f seconds: %s",
+                    duration,
+                    error_code,
+                )
         raise_provider_failure("xai", error_code)
 
     def _stream(

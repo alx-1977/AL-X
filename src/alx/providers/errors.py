@@ -22,6 +22,22 @@ class ProviderError(RuntimeError):
         super().__init__(f"{provider} provider failure: {reason}")
 
 
+def status_code_of(error: BaseException) -> int | None:
+    """The HTTP status of a failed provider call, or None.
+
+    A status code is a number the provider assigned to the outcome. It carries
+    no part of the request, so it is safe to keep where the exception itself is
+    not: 403 tells Friedl the credit ran out, where `HTTPStatusError` alone
+    left him watching a silent runtime with no way to know why.
+
+    The response body is deliberately not read. It is untrusted external text
+    and may quote the request back.
+    """
+    response = getattr(error, "response", None)
+    code = getattr(response, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
 def raise_provider_failure(provider: str, reason: str) -> None:
     """Raise a provider failure carrying no reference to the request.
 

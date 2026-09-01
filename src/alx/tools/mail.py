@@ -14,9 +14,11 @@ from alx.contracts import (
     CapabilityResultState,
     MailAccessError,
     MailAccount,
+    MailAttachment,
     MailContent,
     MailObservationControl,
     MailReference,
+    MailSearchCriteria,
     MailSendError,
     OutboundReply,
     SideEffect,
@@ -28,9 +30,13 @@ from alx.contracts.provenance import RetentionPolicy
 
 
 READ_MAIL_MESSAGE = "read_mail_message"
+SEARCH_MAIL_MESSAGES = "search_mail_messages"
+LIST_MAIL_ATTACHMENTS = "list_mail_attachments"
+READ_MAIL_ATTACHMENT = "read_mail_attachment"
 ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
 MARK_MAIL_MESSAGE_SEEN = "mark_mail_message_seen"
 MOVE_MAIL_MESSAGE_TO_TRASH = "move_mail_message_to_trash"
+FILE_PROCESSED_MAIL_MESSAGE = "file_processed_mail_message"
 SEND_MAIL_REPLY = "send_mail_reply"
 
 _FAILURES = (
@@ -40,6 +46,9 @@ _FAILURES = (
     "mailbox_unavailable",
     "identifier_stale",
     "message_unavailable",
+    "search_failed",
+    "attachment_unavailable",
+    "archive_unsafe",
     "observation_unavailable",
     "trash_unavailable",
     "move_failed",
@@ -51,6 +60,7 @@ _FAILURES = (
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
+_INTEGER = StructuredSchema(ValueKind.INTEGER)
 _REFERENCE_PROPERTIES = {
     "mailbox_id": _STRING,
     "uid_validity": _STRING,
@@ -103,6 +113,105 @@ READ_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+_SEARCH_ITEM = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "reference": _REFERENCE,
+        "subject": _STRING,
+        "sender": _STRING,
+        "received_at": _STRING,
+        "has_attachments": _BOOLEAN,
+        "seen": _BOOLEAN,
+    },
+    (
+        "reference",
+        "subject",
+        "sender",
+        "received_at",
+        "has_attachments",
+        "seen",
+    ),
+    extra_properties=False,
+)
+
+SEARCH_DEFINITION = CapabilityDefinition(
+    SEARCH_MAIL_MESSAGES,
+    "Search one mailbox with structured sender, subject, date, Seen-state and attachment criteria; return stable message references without changing mail or notification state.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "mailbox_id": _STRING,
+            "sender": _STRING,
+            "subject": _STRING,
+            "date_from": _STRING,
+            "date_to": _STRING,
+            "seen_state": _STRING,
+            "has_attachments": _BOOLEAN,
+            "limit": _INTEGER,
+        },
+        ("mailbox_id",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "messages": StructuredSchema(ValueKind.ARRAY, items=_SEARCH_ITEM),
+            "truncated": _BOOLEAN,
+        },
+        ("messages", "truncated"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+_ATTACHMENT = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "attachment_id": _STRING,
+        "filename": _STRING,
+        "media_type": _STRING,
+        "size": _INTEGER,
+        "sha256": _STRING,
+        "text_available": _BOOLEAN,
+    },
+    ("attachment_id", "filename", "media_type", "size", "sha256", "text_available"),
+    extra_properties=False,
+)
+
+LIST_ATTACHMENTS_DEFINITION = CapabilityDefinition(
+    LIST_MAIL_ATTACHMENTS,
+    "List the explicit MIME attachments on one identified mail item without changing it or returning file content.",
+    _input(),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, "attachments": StructuredSchema(ValueKind.ARRAY, items=_ATTACHMENT)},
+        ("reference", "attachments"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+READ_ATTACHMENT_DEFINITION = CapabilityDefinition(
+    READ_MAIL_ATTACHMENT,
+    "Read provider-extracted text from one exact attachment on an identified mail item without changing the message.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {**_REFERENCE_PROPERTIES, "attachment_id": _STRING},
+        (*_REFERENCE_PROPERTIES, "attachment_id"),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, **dict(_ATTACHMENT.properties), "text": _STRING},
+        ("reference", *_ATTACHMENT.required, "text"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
 ACKNOWLEDGE_DEFINITION = CapabilityDefinition(
     ACKNOWLEDGE_MAIL_MESSAGE,
     "Release one current mail notification after it has been handled, dismissed, or explicitly skipped so a later notification can become current; this changes no mail item or Seen/Unseen state.",
@@ -125,6 +234,20 @@ MARK_SEEN_DEFINITION = CapabilityDefinition(
         ValueKind.OBJECT,
         {"reference": _REFERENCE, "seen": _BOOLEAN},
         ("reference", "seen"),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
+FILE_DEFINITION = CapabilityDefinition(
+    FILE_PROCESSED_MAIL_MESSAGE,
+    "Move one identified mail item to the configured processed mailbox once its invoice is in Xero; the destination is configured, not chosen.",
+    _input(),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, "mailbox_id": _STRING, "filed": StructuredSchema(ValueKind.BOOLEAN)},
+        ("reference", "mailbox_id", "filed"),
         extra_properties=False,
     ),
     SideEffect.EFFECTFUL,
@@ -189,9 +312,13 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
 )
 
 DEFINITIONS = (
+    SEARCH_DEFINITION,
     READ_DEFINITION,
+    LIST_ATTACHMENTS_DEFINITION,
+    READ_ATTACHMENT_DEFINITION,
     ACKNOWLEDGE_DEFINITION,
     MARK_SEEN_DEFINITION,
+    FILE_DEFINITION,
     TRASH_DEFINITION,
 )
 
@@ -274,11 +401,30 @@ def _reference_values(reference: MailReference) -> dict[str, str]:
     }
 
 
+def _optional_string(arguments: StructuredData, name: str, default: str = "") -> str:
+    value = arguments.get(name, default)
+    if not isinstance(value, str):
+        raise ValueError(name)
+    return value.strip()
+
+
+def _attachment_values(attachment: MailAttachment) -> dict[str, Any]:
+    return {
+        "attachment_id": attachment.attachment_id,
+        "filename": attachment.filename,
+        "media_type": attachment.media_type,
+        "size": attachment.size,
+        "sha256": attachment.sha256,
+        "text_available": bool(attachment.text),
+    }
+
+
 def build_mail_executors(
     account: MailAccount,
     observations: MailObservationControl,
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
+    processed_mailbox: str = "",
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
     def failed(capability_id: str, code: str) -> CapabilityResult:
@@ -320,6 +466,56 @@ def build_mail_executors(
             provenance=RetentionPolicy().direct_mail(now(), (content.reference,)),
         )
 
+    def search(arguments: StructuredData) -> CapabilityResult:
+        try:
+            has_attachments = arguments.get("has_attachments")
+            if has_attachments is not None and not isinstance(has_attachments, bool):
+                raise ValueError("has_attachments")
+            limit = arguments.get("limit", 50)
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise ValueError("limit")
+            criteria = MailSearchCriteria(
+                _optional_string(arguments, "mailbox_id"),
+                _optional_string(arguments, "sender"),
+                _optional_string(arguments, "subject"),
+                _optional_string(arguments, "date_from"),
+                _optional_string(arguments, "date_to"),
+                _optional_string(arguments, "seen_state", "any"),
+                has_attachments,
+                limit,
+            )
+            messages, truncated = account.search(criteria)
+        except (TypeError, ValueError):
+            return failed(SEARCH_MAIL_MESSAGES, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(SEARCH_MAIL_MESSAGES, error.code)
+        values = {
+            "messages": tuple(
+                {
+                    "reference": _reference_values(item.reference),
+                    "subject": item.subject,
+                    "sender": item.sender,
+                    "received_at": item.received_at,
+                    "has_attachments": item.has_attachments,
+                    "seen": item.seen,
+                }
+                for item in messages
+            ),
+            "truncated": truncated,
+        }
+        references = tuple(item.reference for item in messages)
+        return CapabilityResult(
+            call_id_source(),
+            SEARCH_MAIL_MESSAGES,
+            CapabilityResultState.SUCCEEDED,
+            values,
+            provenance=(
+                RetentionPolicy().direct_mail(now(), references)
+                if references
+                else None
+            ),
+        )
+
     def acknowledge(arguments: StructuredData) -> CapabilityResult:
         try:
             reference = _reference(arguments)
@@ -333,6 +529,65 @@ def build_mail_executors(
             ACKNOWLEDGE_MAIL_MESSAGE,
             CapabilityResultState.SUCCEEDED,
             {"reference": _reference_values(reference), "acknowledged": True},
+        )
+
+    def list_attachments(arguments: StructuredData) -> CapabilityResult:
+        try:
+            reference = _reference(arguments)
+            attachments = account.list_attachments(reference)
+        except ValueError:
+            return failed(LIST_MAIL_ATTACHMENTS, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(LIST_MAIL_ATTACHMENTS, error.code)
+        values = {
+            "reference": _reference_values(reference),
+            "attachments": tuple(_attachment_values(item) for item in attachments),
+        }
+        return CapabilityResult(
+            call_id_source(), LIST_MAIL_ATTACHMENTS,
+            CapabilityResultState.SUCCEEDED, values,
+            provenance=RetentionPolicy().direct_mail(now(), (reference,)),
+        )
+
+    def read_attachment(arguments: StructuredData) -> CapabilityResult:
+        try:
+            reference = _reference(arguments)
+            attachment_id = arguments.get("attachment_id")
+            if not isinstance(attachment_id, str) or not attachment_id.strip():
+                raise ValueError("attachment_id")
+            attachment, _payload_bytes = account.read_attachment(reference, attachment_id)
+        except ValueError:
+            return failed(READ_MAIL_ATTACHMENT, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(READ_MAIL_ATTACHMENT, error.code)
+        durable = {"reference": _reference_values(reference), **_attachment_values(attachment)}
+        return CapabilityResult(
+            call_id_source(), READ_MAIL_ATTACHMENT,
+            CapabilityResultState.SUCCEEDED,
+            {**durable, "text": attachment.text},
+            durable_values=durable,
+            provenance=RetentionPolicy().direct_mail(now(), (reference,)),
+        )
+
+    def file_processed(arguments: StructuredData) -> CapabilityResult:
+        if not processed_mailbox:
+            return failed(FILE_PROCESSED_MAIL_MESSAGE, "mailbox_unavailable")
+        try:
+            reference = _reference(arguments)
+            destination = account.file_message(reference, processed_mailbox)
+        except ValueError:
+            return failed(FILE_PROCESSED_MAIL_MESSAGE, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(FILE_PROCESSED_MAIL_MESSAGE, error.code)
+        return CapabilityResult(
+            call_id_source(),
+            FILE_PROCESSED_MAIL_MESSAGE,
+            CapabilityResultState.SUCCEEDED,
+            {
+                "reference": _reference_values(reference),
+                "mailbox_id": destination,
+                "filed": True,
+            },
         )
 
     def move_to_trash(arguments: StructuredData) -> CapabilityResult:
@@ -370,9 +625,13 @@ def build_mail_executors(
         )
 
     return {
+        SEARCH_MAIL_MESSAGES: search,
         READ_MAIL_MESSAGE: read,
+        LIST_MAIL_ATTACHMENTS: list_attachments,
+        READ_MAIL_ATTACHMENT: read_attachment,
         ACKNOWLEDGE_MAIL_MESSAGE: acknowledge,
         MARK_MAIL_MESSAGE_SEEN: mark_seen,
+        FILE_PROCESSED_MAIL_MESSAGE: file_processed,
         MOVE_MAIL_MESSAGE_TO_TRASH: move_to_trash,
     }
 

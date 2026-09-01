@@ -82,8 +82,9 @@ class OpenAIReasoningModel:
         }
         if self._service_tier != "default":
             payload["service_tier"] = self._service_tier
-        if request.affinity_key is not None:
-            payload["prompt_cache_key"] = request.affinity_key
+        cache_key = request.cache_key or request.affinity_key
+        if cache_key is not None:
+            payload["prompt_cache_key"] = cache_key
         if self._streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_obfuscation": False}
@@ -308,6 +309,9 @@ class OpenAIReasoningModel:
             "input_tokens": self._nested_integer(usage, "input_tokens"),
             "cached_tokens": self._nested_integer(
                 usage, "input_tokens_details", "cached_tokens"
+            ),
+            "cache_write_tokens": self._nested_integer(
+                usage, "input_tokens_details", "cache_write_tokens"
             ),
             "reasoning_tokens": self._nested_integer(
                 usage, "output_tokens_details", "reasoning_tokens"

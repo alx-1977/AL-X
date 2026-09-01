@@ -8,17 +8,22 @@
   "triggerOnUpdates": false,
   "triggerOnDrafts": false,
   "statusCheck": true,
-  "instructions": "Act as AL/X's independent constitutional reviewer. Review semantics and authority, not only syntax or whether tests pass. LAWS_OF_ALX.md is canonical; supporting summaries never replace it. Report every probable breach as `AL/X LAW VIOLATION — BLOCKING`, cite the applicable Law number and exact code, explain which authority moved out of AL/X, and require redesign or an existing Friedl-approved exception from governance/EXCEPTIONS.md. Never invent, infer, or approve an exception.",
+  "instructions": "Act as AL/X's independent constitutional reviewer. Review semantics and authority, not only syntax or whether tests pass. LAWS_OF_ALX.md is canonical and currently holds four laws; supporting summaries never replace it, and any older nineteen-law framing is superseded. Law 0: every production outcome has exactly one authoritative implementation path, and every superseded or competing path is deleted rather than hidden, deprecated, wrapped, redirected or retained. Law 1: AL/X alone decides meaning, interpretation and what to do next. Law 2: deterministic code executes known procedures, and a capability performs one reusable outcome and may contain whatever mechanical steps that outcome requires. Law 3: anything needing interpretation, policy choice or unresolved ambiguity returns to AL/X. Several mechanical steps inside one capability are therefore lawful and need no exception; what is prohibited is a capability that interprets Friedl, decides business meaning, or resolves genuine ambiguity itself. Report every probable breach of those four laws as `AL/X LAW VIOLATION \u2014 BLOCKING`, cite the law and exact code, explain the competing path or which authority moved out of AL/X, and require deletion or redesign, or an existing Friedl-approved exception from governance/EXCEPTIONS.md. Never invent, infer, or approve an exception.",
   "rules": [
+    {
+      "id": "alx-one-production-path",
+      "severity": "high",
+      "rule": "For every production outcome, require exactly one authoritative implementation path. When a path is replaced, flag every retained production entry point, registration, dispatcher, handler, route or callable sequence that can still achieve that outcome. Hidden, unregistered, deprecated, wrapped, redirected, recovery-only, optional, renamed and alternative implementations are competing paths and must be deleted, not merely avoided. Shared low-level primitives are permitted only when they cannot independently form a second end-to-end route. Tests must prove the competing path is absent, not only that the preferred path was selected."
+    },
     {
       "id": "alx-single-reasoning-authority",
       "severity": "high",
-      "rule": "Only the AL/X Core Agent may interpret Friedl's goal, choose or sequence capabilities, evaluate results, decide continuation or completion, and formulate AL/X's response. Flag any second authority in frontends, routes, handlers, coordinators, state machines, integrations, tools, or fallback logic."
+      "rule": "Only the AL/X Core Agent may interpret Friedl's goal, decide what to do next, evaluate results, decide continuation or completion, and formulate AL/X's response. Deterministic code may carry out steps she has chosen. Flag any second authority in frontends, routes, handlers, coordinators, state machines, integrations, capabilities, or fallback logic that decides meaning rather than executing a known procedure."
     },
     {
       "id": "alx-dynamic-reasoning",
       "severity": "high",
-      "rule": "Flag behaviour prescribed through phrases, keywords, regexes, intent enums, routes, fixed sequences, decision trees, domain workflows, coded fallbacks, or exact-wording tests. Code may structure capabilities, memory, evidence, and safety boundaries; it may not encode AL/X's reasoning path."
+      "rule": "Flag behaviour prescribed through phrases, keywords, regexes, intent enums, routes, decision trees over what Friedl meant, coded fallbacks that choose a different goal, or exact-wording tests. Code may structure capabilities, memory, evidence and safety boundaries, and under Law 2 a capability may execute a fixed sequence of mechanical steps to achieve one reusable outcome; that is permitted and needs no exception. What code may not do is encode AL/X's reasoning path: prescribing which capability she uses, deciding on her behalf what a request means, or choosing the next goal for her."
     },
     {
       "id": "alx-no-unapproved-hardcoding",
@@ -33,12 +38,12 @@
     {
       "id": "alx-primitive-tool-boundary",
       "severity": "high",
-      "rule": "Tools must be reusable language-blind primitives with structured inputs and results. Flag raw user language at tool boundaries, journey-shaped tools, tools that call the next tool, tools that decide goal completion, provider-specific workflow behaviour, or a new tool justified only by new wording or a journey step."
+      "rule": "Capabilities must be language-blind, with structured inputs and results, and perform one reusable outcome. Under Law 2 a capability may contain whatever deterministic mechanical steps that outcome requires, so several steps in one capability are lawful and need no exception; but Law 2 also says a capability may not contain a complete user journey, so flag one that spans what the person set out to do end to end rather than achieving a single outcome within it. Flag raw user language at capability boundaries, a capability that interprets what Friedl wants, decides business meaning, resolves genuine ambiguity instead of returning it, or declares a goal complete; and flag a new capability justified only by new wording."
     },
     {
       "id": "alx-durable-goal-loop",
       "severity": "high",
-      "rule": "Flag changes that make goals, decisions, approvals, blockers, evidence, or unfinished work process-only or frontend-only; impose one-turn or one-action limits; prevent restart-safe continuation; or fail to return every capability result to AL/X for evaluation and replanning."
+      "rule": "Flag changes that make goals, decisions, approvals, blockers, evidence, or unfinished work process-only or frontend-only; impose one-turn or one-action limits; prevent restart-safe continuation; or withhold a capability's result from AL/X so she cannot evaluate it and replan. A capability completing several mechanical steps before returning one result is lawful under Law 2; withholding that result, or acting on it without her, is not."
     },
     {
       "id": "alx-explicit-exceptions-only",

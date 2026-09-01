@@ -24,11 +24,16 @@ from alx.providers import (
 )
 from alx.safety import AuthorityPolicy
 from alx.tools import (
+    CAPTURE_SUPPLIER_INVOICE,
     ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
     MARK_MAIL_MESSAGE_SEEN,
+    LIST_MAIL_ATTACHMENTS,
+    FILE_PROCESSED_MAIL_MESSAGE,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     READ_MAIL_MESSAGE,
+    READ_MAIL_ATTACHMENT,
+    SEARCH_MAIL_MESSAGES,
     SEND_DEFINITIONS,
     SEND_MAIL_REPLY,
     build_mail_executors,
@@ -52,6 +57,42 @@ class MailRuntime:
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
+
+
+def captured_invoice_filing_scopes(
+    state: GoalState | None,
+) -> tuple[ApprovalScope, ...]:
+    """Derive filing authority from a capture that actually completed.
+
+    D-020 authorises filing a processed supplier invoice, not any message. The
+    scope names the exact mail item whose capture reported completion, so a
+    message AL/X merely looked at cannot be filed, and the evidence comes from
+    the capability result rather than from anything the model asserts.
+    """
+    if state is None:
+        return ()
+    scopes: list[ApprovalScope] = []
+    for attempt in state.attempts:
+        call = attempt.call
+        result = attempt.result
+        if (
+            call is None
+            or call.capability_id != CAPTURE_SUPPLIER_INVOICE
+            or result is None
+            or result.state is not CapabilityResultState.SUCCEEDED
+            or result.values.get("completed") is not True
+        ):
+            continue
+        reference = {
+            name: call.arguments.get(name)
+            for name in ("mailbox_id", "uid_validity", "uid")
+        }
+        if any(not isinstance(value, str) or not value for value in reference.values()):
+            continue
+        scope = ApprovalScope(FILE_PROCESSED_MAIL_MESSAGE, reference)
+        if scope not in scopes:
+            scopes.append(scope)
+    return tuple(scopes)
 
 
 def mail_post_reply_standing_scopes(
@@ -150,7 +191,10 @@ def build_mail_runtime(
         settings.poll_seconds,
     )
     policies = {
+        SEARCH_MAIL_MESSAGES: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
         READ_MAIL_MESSAGE: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
+        LIST_MAIL_ATTACHMENTS: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
+        READ_MAIL_ATTACHMENT: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
         ACKNOWLEDGE_MAIL_MESSAGE: AuthorityPolicy(
             frozenset({MAIL_OBSERVATION_PERMISSION})
         ),
@@ -164,13 +208,26 @@ def build_mail_runtime(
             approval_required=True,
             standing_scope_allowed=True,
         ),
+        # D-020 authorises filing a *processed* invoice. Granting it outright
+        # let any identified message be moved, so authority is instead derived
+        # from a capture that actually succeeded on that exact message.
+        FILE_PROCESSED_MAIL_MESSAGE: AuthorityPolicy(
+            frozenset({MAIL_TRASH_PERMISSION}),
+            approval_required=True,
+            standing_scope_allowed=True,
+        ),
     }
     return MailRuntime(
         source,
         observations,
         DEFINITIONS,
         policies,
-        build_mail_executors(source, source, call_id_source),
+        build_mail_executors(
+            source,
+            source,
+            call_id_source,
+            processed_mailbox=settings.processed_mailbox,
+        ),
         frozenset(
             {
                 MAIL_READ_PERMISSION,

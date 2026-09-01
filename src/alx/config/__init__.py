@@ -9,6 +9,7 @@ from alx.config.settings import (
     RuntimeSettings,
     SpeechToTextSettings,
     TextToSpeechSettings,
+    XeroSettings,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "RuntimeSettings",
     "SpeechToTextSettings",
     "TextToSpeechSettings",
+    "XeroSettings",
 ]

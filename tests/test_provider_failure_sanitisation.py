@@ -499,5 +499,145 @@ def _failing_async_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
+class CreditExhaustionVisibilityTests(unittest.TestCase):
+    """A spent account must be diagnosable, not a silent hang.
+
+    Live failure: xAI began returning 403 mid-session. The panel said only
+    `reasoner_error` and the log only `HTTPStatusError`, so the runtime looked
+    broken when the account had simply run out of credit. A status code is a
+    number the provider assigned to the outcome; it carries no part of the
+    request, so it is safe to keep where the exception itself is not.
+    """
+
+    def test_a_status_code_is_recovered_from_a_failure(self) -> None:
+        from alx.providers.errors import status_code_of
+
+        class Response:
+            status_code = 403
+
+        class Failure(Exception):
+            response = Response()
+
+        self.assertEqual(status_code_of(Failure()), 403)
+
+    def test_a_failure_without_a_response_yields_none(self) -> None:
+        from alx.providers.errors import status_code_of
+
+        self.assertIsNone(status_code_of(ValueError("boom")))
+        self.assertIsNone(status_code_of(TimeoutError()))
+
+    def test_a_non_integer_status_is_refused(self) -> None:
+        """A provider object is not trusted to hold a sane value."""
+        from alx.providers.errors import status_code_of
+
+        class Response:
+            status_code = "403 Forbidden"
+
+        class Failure(Exception):
+            response = Response()
+
+        self.assertIsNone(status_code_of(Failure()))
+
+    def test_the_response_body_is_never_read(self) -> None:
+        """The body is untrusted external text and may quote the request."""
+        from alx.providers.errors import status_code_of
+
+        touched: list[str] = []
+
+        class Response:
+            status_code = 403
+
+            @property
+            def text(self):
+                touched.append("text")
+                return "secret request echoed back"
+
+            @property
+            def content(self):
+                touched.append("content")
+                return b"secret"
+
+        class Failure(Exception):
+            response = Response()
+
+        status_code_of(Failure())
+        self.assertEqual(touched, [])
+
+    def test_the_credit_failure_is_logged_at_error_level(self) -> None:
+        """Visible on a server with no browser attached."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/providers/xai.py"
+        ).read_text()
+        self.assertIn("if status in (402, 403):", source)
+        self.assertIn("out of credit", source)
+        self.assertIn("LOGGER.error", source)
+
+    def test_the_panel_names_the_credit_condition(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/alx/interfaces/assets/app.js"
+        ).read_text()
+        self.assertIn("status === 402 || status === 403", source)
+        self.assertIn("credit or spending limit", source)
+
+
+class KimiProviderTests(unittest.TestCase):
+    """A second vendor on the same protocol is configuration, not code.
+
+    The blueprint keeps the model a configuration choice: changing provider
+    must not create a new conversation route, tool set or adapter. Kimi speaks
+    the same OpenAI-style /v1/chat/completions the xAI transport already uses,
+    so it is selected by base URL and key.
+    """
+
+    def settings(self, provider: str):
+        from alx.config import ReasoningSettings
+
+        return ReasoningSettings(
+            provider,
+            "kimi-k3",
+            "key",
+            "https://api.moonshot.ai",
+            30,
+            False,
+            "default",
+            "medium",
+        )
+
+    def test_kimi_builds_on_the_shared_transport(self) -> None:
+        from alx.bootstrap.providers import _build_reasoning_model
+        from alx.providers import XAIReasoningModel
+
+        model = _build_reasoning_model(self.settings("kimi"), None)
+        self.assertIsInstance(model, XAIReasoningModel)
+
+    def test_an_unknown_provider_is_still_refused(self) -> None:
+        """A silent fallback would hide a misconfiguration."""
+        from alx.bootstrap.providers import _build_reasoning_model
+
+        self.assertIsNone(_build_reasoning_model(self.settings("nonesuch"), None))
+
+    def test_the_core_accepts_kimi_as_its_reasoning_provider(self) -> None:
+        import ast
+
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/bootstrap/providers.py"
+        ).read_text()
+        self.assertIn('settings.reasoning.provider in ("xai", "kimi")', source)
+        ast.parse(source)
+
+    def test_switching_vendor_adds_no_second_path(self) -> None:
+        """One adapter, one transport: no parallel route was introduced."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/bootstrap/providers.py"
+        ).read_text()
+        self.assertNotIn("KimiReasoningModel", source)
+        self.assertFalse(
+            (
+                Path(__file__).resolve().parents[1] / "src/alx/providers/kimi.py"
+            ).exists()
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

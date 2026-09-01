@@ -37,6 +37,7 @@ REQUIRED_FILES = (
 )
 
 GREPTILE_RULE_IDS = {
+    "alx-one-production-path",
     "alx-single-reasoning-authority",
     "alx-dynamic-reasoning",
     "alx-no-unapproved-hardcoding",
@@ -240,6 +241,18 @@ def _check_greptile(root: Path, violations: list[str]) -> None:
             violations.append(
                 f".greptile/config.json: {rule_id} must remain enabled at high severity"
             )
+    one_path = rules_by_id.get("alx-one-production-path", {})
+    one_path_text = one_path.get("rule", "") if isinstance(one_path, dict) else ""
+    for marker in (
+        "exactly one authoritative implementation path",
+        "must be deleted",
+        "Tests must prove the competing path is absent",
+    ):
+        if marker not in one_path_text:
+            violations.append(
+                ".greptile/config.json: alx-one-production-path missing required "
+                f"marker: {marker}"
+            )
 
     context = _load_json(files_path, ".greptile/files.json", violations)
     context_entries = context.get("files", [])
@@ -261,6 +274,8 @@ def _check_greptile(root: Path, violations: list[str]) -> None:
         ".greptile/rules.md",
         (
             "`LAWS_OF_ALX.md` is the sole canonical law text.",
+            "exactly one authoritative implementation path",
+            "Require deletion, not concealment or redirection.",
             "Who is deciding meaning",
             "AL/X LAW VIOLATION — BLOCKING",
             "Do not create or infer exceptions.",
@@ -305,19 +320,107 @@ def check_repository(root: Path) -> list[str]:
             violations.append(f"missing required file: {relative_path}")
 
     laws = _read(root, "LAWS_OF_ALX.md", violations)
-    law_numbers = [int(value) for value in re.findall(r"^### Law (\d+)\b", laws, re.MULTILINE)]
-    if law_numbers != list(range(1, 20)):
-        violations.append("LAWS_OF_ALX.md: expected exactly Laws 1 through 19 in order")
+    law_numbers = [int(value) for value in re.findall(r"^## Law (\d+)\b", laws, re.MULTILINE)]
+    if law_numbers != [0, 1, 2, 3]:
+        violations.append("LAWS_OF_ALX.md: expected exactly Laws 0 through 3 in order")
     _require_markers(
         laws,
         "LAWS_OF_ALX.md",
         (
-            "Law 19 — AL/X may improve and invent capabilities",
+            "Law 0 — One outcome. One production path.",
+            "One outcome. One path. Everything else is removed.",
+            "Law 1 — AL/X decides meaning",
+            "Law 2 — Code executes known procedures",
+            "Law 3 — Ambiguity returns to AL/X",
             "Ideas are permissive. Experimentation is isolated. Deployment is governed.",
-            "Law 19 approved",
         ),
         violations,
     )
+
+    # The three-law rewrite left the enforcement specification describing gates
+    # for laws that no longer exist, and both gates passed anyway. A document
+    # that binds implementers must not contradict the canonical law text.
+    enforcement = _read(root, "docs/LAW_ENFORCEMENT.md", violations)
+    stale = sorted(
+        {
+            int(value)
+            for value in re.findall(r"^\| (\d+)", enforcement, re.MULTILINE)
+        }
+        - set(law_numbers)
+    )
+    if stale:
+        violations.append(
+            "docs/LAW_ENFORCEMENT.md: defines gates for laws that do not exist "
+            f"in LAWS_OF_ALX.md: {', '.join(str(item) for item in stale)}"
+        )
+    enforced = {
+        int(value) for value in re.findall(r"^\| (\d+)", enforcement, re.MULTILINE)
+    }
+    missing = sorted(set(law_numbers) - enforced)
+    if missing:
+        violations.append(
+            "docs/LAW_ENFORCEMENT.md: no gate is defined for law(s) "
+            f"{', '.join(str(item) for item in missing)}"
+        )
+    for number, title in re.findall(r"^## Law (\d+) — (.+)$", laws, re.MULTILINE):
+        if f"| {number} — {title.strip()} |" not in enforcement:
+            violations.append(
+                f"docs/LAW_ENFORCEMENT.md: its row for law {number} does not "
+                "carry that law's title"
+            )
+
+    # Greptile reviews against the laws this file names. Instructing it to
+    # review "all 19 Laws" after the rewrite would have produced an invalid
+    # constitutional review, and no gate noticed. Any live document that names
+    # a law must name one that exists; governance/DECISIONS.md is excluded
+    # because it records decisions as they were approved at the time.
+    for relative_path in (
+        ".greptile/rules.md",
+        ".greptile/config.json",
+        ".greptile/files.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+        "TODO.md",
+        "IDENTITY_AND_MEMORY.md",
+        "docs/ARCHITECTURE_BLUEPRINT.md",
+        "docs/FOUNDATION_PROOF.md",
+        "docs/TECHNICAL_PLAN.md",
+        "docs/MAIL_RETENTION_PROPOSAL.md",
+        "docs/PERSISTENT_RESEARCH_NOTEBOOK_BRIEF.md",
+        "docs/XERO_EMAIL_BILLS_IMPLEMENTATION.md",
+    ):
+        path = root / relative_path
+        if not path.is_file():
+            continue
+        document = path.read_text(encoding="utf-8")
+        named = {
+            int(value)
+            for value in re.findall(r"\bLaws? (\d+)\b", document)
+        }
+        unknown = sorted(named - set(law_numbers))
+        if unknown:
+            violations.append(
+                f"{relative_path}: names law(s) that do not exist in "
+                f"LAWS_OF_ALX.md: {', '.join(str(item) for item in unknown)}"
+            )
+        counted = re.search(
+            r"\b(?:all\s+)?(\d+)(?:\s+[A-Za-z-]+){0,2}\s+Laws\b",
+            document,
+            re.IGNORECASE,
+        )
+        if counted and int(counted.group(1)) != len(law_numbers):
+            violations.append(
+                f"{relative_path}: claims {counted.group(1)} laws exist, "
+                f"but LAWS_OF_ALX.md has {len(law_numbers)}"
+            )
+
+    blueprint = _read(root, "docs/ARCHITECTURE_BLUEPRINT.md", violations)
+    if "process_DHL_invoice_workflow` would encode a journey" in blueprint:
+        violations.append(
+            "docs/ARCHITECTURE_BLUEPRINT.md: its prohibited-capability example "
+            "predates Law 2 and contradicts it"
+        )
 
     agents = _read(root, "AGENTS.md", violations)
     _require_markers(
@@ -329,6 +432,20 @@ def check_repository(root: Path) -> list[str]:
             "docs/LAW_ENFORCEMENT.md",
             "docs/ARCHITECTURE_BLUEPRINT.md",
             "docs/FOUNDATION_PROOF.md",
+            "preserve exactly one production path",
+            "Git history is the archive for removed implementations.",
+        ),
+        violations,
+    )
+
+    pull_request = _read(root, ".github/pull_request_template.md", violations)
+    _require_markers(
+        pull_request,
+        ".github/pull_request_template.md",
+        (
+            "Production outcome and its one authoritative path:",
+            "Superseded production entry points searched and deleted",
+            "replacement tests prove no competing path remains",
         ),
         violations,
     )

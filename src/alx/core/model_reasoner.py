@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -33,6 +33,10 @@ from alx.contracts import (
     WorkItem,
 )
 
+
+# Every conversation sends the same stable prefix, so they share one cache
+# rather than each warming a separate one.
+CACHE_KEY = "alx-core-v1"
 
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
 Interpret the continuous conversation and the optional active goal. Choose either
@@ -97,6 +101,12 @@ briefly, naming the outcome rather than the mechanism or where something was
 stored, and never repeat wording he has just heard in this conversation. He knows
 what he agreed to; say that it is done, not what it said. Add detail only when it
 is genuinely useful or he asks.
+Never read a document out. When you have examined an invoice or any other
+document, give the few facts that matter for the decision in front of you,
+typically who it is from, its number, its total, and anything genuinely
+unusual. Do not recite line items, dates, addresses, banking details or a
+running breakdown of amounts; a document can run to many pages and he can open
+it himself. If he wants the detail he will ask for it.
 When a message has been dealt with and nothing further seems needed from it, you
 may offer to clear it from his inbox, so it does not accumulate. Offer; do not
 assume. Some exchanges continue and he may want the original kept, and a message
@@ -200,7 +210,45 @@ def _without_reused_ids(
     return proposed
 
 
+# A long-running goal accumulates every attempt and its full result values.
+# Resending all of them makes each reasoning call more expensive than the last,
+# so the prompt carries the recent ones verbatim and the rest as a compact
+# summary. This projects what is sent; the durable record keeps everything.
+VERBATIM_ATTEMPTS = 8
+VERBATIM_HISTORY = 12
+
+
+def _older_attempt_summary(items: Sequence[Any]) -> dict[str, Any] | None:
+    """Compact older attempts into counts and outcomes, preserving order."""
+    if not items:
+        return None
+    outcomes: dict[str, int] = {}
+    failures: list[str] = []
+    for item in items:
+        capability_id = None if item.call is None else item.call.capability_id
+        state = None if item.result is None else item.result.state.value
+        key = f"{capability_id or 'unknown'}:{state or item.disposition.value}"
+        outcomes[key] = outcomes.get(key, 0) + 1
+        if item.result is not None and item.result.failure is not None:
+            code = str(item.result.failure.get("code") or "")
+            if code and code not in failures:
+                failures.append(code)
+    return {
+        "count": len(items),
+        "note": "older attempts, summarised; ask for detail if it matters",
+        "outcomes": outcomes,
+        "failure_codes": failures,
+    }
+
+
+def _recent(items: Sequence[Any], limit: int) -> list[Any]:
+    return list(items[-limit:]) if len(items) > limit else list(items)
+
+
 def _state_payload(state: GoalState) -> dict[str, Any]:
+    attempts = tuple(state.attempts)
+    recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
+    older_attempts = attempts[: len(attempts) - len(recent_attempts)]
     return {
         "goal_id": state.goal_id,
         "objective": {
@@ -226,8 +274,9 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
         ],
         "progress": [
             {"id": item.record_id, "summary": item.summary, "evidence_refs": list(item.evidence_refs)}
-            for item in state.progress
+            for item in _recent(state.progress, VERBATIM_HISTORY)
         ],
+        "older_progress_count": max(0, len(state.progress) - VERBATIM_HISTORY),
         "attempts": [
             {
                 "call_id": None if item.call is None else item.call.call_id,
@@ -237,8 +286,9 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
                 "result_values": None if item.result is None else _plain(item.result.values),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
             }
-            for item in state.attempts
+            for item in recent_attempts
         ],
+        "older_attempts": _older_attempt_summary(older_attempts),
         "blockers": [{"id": item.item_id, "summary": item.summary} for item in state.blockers],
         "outstanding_work": [
             {"id": item.item_id, "summary": item.summary} for item in state.outstanding_work
@@ -267,16 +317,39 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
 
 
 def _capability_schema_payload(schema: StructuredSchema) -> dict[str, Any]:
-    return {
-        "kind": schema.kind.value,
-        "properties": {
+    """Describe an input schema without spelling out empty fields.
+
+    A scalar carried four empty values per occurrence, which is most of the
+    catalogue. Omitting them changes nothing a caller can observe: an absent
+    key means the empty default it always had.
+    """
+    payload: dict[str, Any] = {"kind": schema.kind.value}
+    if schema.properties:
+        payload["properties"] = {
             key: _capability_schema_payload(value)
             for key, value in schema.properties.items()
-        },
-        "required": list(schema.required),
-        "items": None if schema.items is None else _capability_schema_payload(schema.items),
-        "extra_properties": schema.extra_properties,
-    }
+        }
+    if schema.required:
+        payload["required"] = list(schema.required)
+    if schema.items is not None:
+        payload["items"] = _capability_schema_payload(schema.items)
+    if not schema.extra_properties:
+        payload["extra_properties"] = False
+    return payload
+
+
+def _result_fields(schema: StructuredSchema) -> Any:
+    """Name what a result contains rather than restating its whole schema.
+
+    Planning needs to know which capability to use and what it takes. The full
+    shape of a result is evident when the result actually arrives, so the
+    catalogue lists its field names instead of a nested schema.
+    """
+    if schema.properties:
+        return sorted(schema.properties)
+    if schema.items is not None:
+        return [f"array of {schema.items.kind.value}"]
+    return schema.kind.value
 
 
 def _attempt_payload(item: Any) -> dict[str, Any]:
@@ -292,8 +365,52 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
     }
 
 
+def _catalogue_payload(capabilities: Sequence[Any]) -> str:
+    """Serialise the capability catalogue on its own.
+
+    The catalogue is identical between calls, but it used to sit in the same
+    message as the goal and conversation, which change constantly. A cache only
+    reuses an unchanged prefix, so anything volatile in front of the catalogue
+    stopped it from ever being reused. It is now its own stable message.
+    """
+    shared = _shared_failure_codes(capabilities)
+    return json.dumps(
+        {
+            "capabilities": [
+                {
+                    "id": item.capability_id,
+                    "purpose": item.purpose,
+                    "side_effect": item.side_effect.value,
+                    "failure_codes": _failure_codes(item, shared),
+                    "input_schema": _capability_schema_payload(item.input_schema),
+                    "result_fields": _result_fields(item.output_schema),
+                }
+                for item in capabilities
+            ],
+            # Most capabilities repeat the same failure codes, so they are
+            # stated once and each capability lists only what it adds.
+            "shared_failure_codes": sorted(shared),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _shared_failure_codes(capabilities: Sequence[Any]) -> frozenset[str]:
+    """Codes every capability can return, stated once instead of per entry."""
+    sets = [frozenset(item.possible_failure_codes) for item in capabilities]
+    if len(sets) < 2:
+        return frozenset()
+    return frozenset.intersection(*sets)
+
+
+def _failure_codes(item: Any, shared: frozenset[str]) -> list[str]:
+    return sorted(frozenset(item.possible_failure_codes) - shared)
+
+
 def _context_payload(context: ReasoningContext) -> str:
     goal = context.active_goal
+    shared_failure_codes = _shared_failure_codes(context.capabilities)
     payload = {
         "current_trigger": {
             "kind": (
@@ -378,17 +495,6 @@ def _context_payload(context: ReasoningContext) -> str:
                 "meaning": item.current.meaning,
             }
             for item in context.memories
-        ],
-        "capabilities": [
-            {
-                "id": item.capability_id,
-                "purpose": item.purpose,
-                "side_effect": item.side_effect.value,
-                "possible_failure_codes": list(item.possible_failure_codes),
-                "input_schema": _capability_schema_payload(item.input_schema),
-                "output_schema": _capability_schema_payload(item.output_schema),
-            }
-            for item in context.capabilities
         ],
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -627,13 +733,19 @@ class ModelReasoner:
         completion = self._model.complete(
             ModelRequest(
                 (
+                    # Stable prefix first, volatile task material last, so a
+                    # cache can reuse everything up to the changing content.
                     ModelMessage(ModelRole.SYSTEM, self._constitutional_context),
                     ModelMessage(ModelRole.SYSTEM, PROTOCOL_INSTRUCTIONS),
+                    ModelMessage(
+                        ModelRole.SYSTEM, _catalogue_payload(context.capabilities)
+                    ),
                     ModelMessage(ModelRole.USER, _context_payload(context)),
                 ),
                 "alx_core_decision",
                 decision_schema(),
                 context.conversation_id,
+                CACHE_KEY,
             )
         )
         output = completion.output

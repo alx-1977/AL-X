@@ -575,7 +575,7 @@ class MailPrimitiveTests(unittest.TestCase):
         try:
             runtime = build_mail_runtime(
                 MailSettings(
-                    "friedl@example.test", "secret", "imap.example.test", 993, 15
+                    "friedl@example.test", "secret", "imap.example.test", 993, 15, ""
                 ),
                 Path(directory.name),
                 lambda: "call-1",

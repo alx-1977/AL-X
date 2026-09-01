@@ -44,25 +44,60 @@ Any proposal must name the concrete module that owns each boundary. Two owners f
 
 | Law | Automated evidence required | Human evidence required |
 | --- | --- | --- |
-| 1 | Static checks reject phrase/keyword/regex intent routing and embedded environment-specific behaviour outside approved constant/config boundaries. | Explain every newly encoded constant and why it is universal, protocol-mandated, configurable, or explicitly approved. |
-| 2 | Agent-loop tests prove multi-step planning, tool composition, result evaluation, replanning after failure, verification, and constructive challenge. | Demonstrate that AL/X can advance a goal without Friedl prescribing each step. |
-| 3 | Architecture tests prove all conversational inputs reach the same ingress and agent authority; no feature may emit an independent assistant response. | List every input and output surface and trace it through the single path. |
-| 4 | Boundary tests reject raw user language in tool, route, integration, and frontend domain interfaces. | Explain any component that processes domain documents and prove it does not interpret Friedl's intent. |
-| 5 | Capability-schema checks require structured inputs/results and reject trigger vocabulary and bundled journey definitions. | Justify each new capability as a reusable primitive. |
-| 6 | Dependency and integration tests prove application code cannot privately sequence domain workflows outside the agent loop. | Describe how AL/X dynamically chooses the demonstrated sequence. |
-| 7 | Behavioural tests inspect persisted goal objective, context, decisions, progress, blockers, and outstanding work across turns. | Show how a request creates or updates a goal. |
-| 8 | Continuation tests prove AL/X keeps working after intermediate results and stops only for an allowed terminal condition. | Identify the terminal condition and evidence for it. |
-| 9 | Tool-loop tests prove every result re-enters AL/X before another action or final conclusion. | Trace at least one multi-tool result chain. |
-| 10 | Frontend boundary tests reject domain capability selection, workflow orchestration, and authoritative goal/conversation state in client code. | Review frontend changes for presentation/input responsibility only. |
-| 11 | Paraphrase tests use meaning-equivalent wording, follow-ups, corrections, and different styles without code-path-specific expectations. | Confirm no production change was needed for new wording. |
-| 12 | Registry checks require a capability justification and reject duplicate or workflow-shaped tools. | Approve the primitive boundary of every new tool. |
-| 13 | Tests prove requests are not limited to a fixed intent enumeration; the catalogue describes capabilities only. | Review schemas and prompts for hidden intent menus. |
-| 14 | Agent tests prove zero, one, and multiple tool calls are possible in one active goal, including replanning. | Demonstrate a genuine multi-capability goal. |
-| 15 | Restart tests prove durable recovery; data-policy tests cover inspection, correction, deletion, and retention controls. | Approve the context data model and retention policy. |
-| 16 | CI verifies that every exception identifier exists in `governance/EXCEPTIONS.md` and matches its exact scope and expiry/review condition. | Friedl explicitly approves each exception before implementation. |
-| 17 | Test-policy checks reject suites whose behavioural coverage depends only on exact trigger phrases or intent labels. | Review scenarios for varied language, interruptions, corrections, and restarts. |
-| 18 | CI makes all implemented law gates required and prevents silent skipping. | Record evidence for any law that cannot yet be mechanically verified. |
-| 19 | Sandbox-boundary tests prove experiments cannot self-register, increase permissions, modify production systems, or use production-data operations other than explicitly scoped reads. Deployment tests require a separately governed capability record and authority decision. | Review the experiment's isolation, resource and privacy controls, production-data scope, evidence, and proposed deployment; Friedl alone authorises production deployment. |
+| 0 — One outcome. One production path. | Replacement-specific tests enumerate the production entry points, registrations, dispatchers, handlers, routes and callable sequences for the named outcome and prove exactly one remains. Mutation tests restore a superseded entry point and prove the suite fails. | Name the production outcome, identify the authoritative path, list every searched superseded path and show its production code was deleted. Confirm any retained shared primitive cannot independently achieve the outcome. |
+| 1 — AL/X decides meaning | Static checks reject raw-language parameters, phrase and regex routing, intent/action/command naming, frontend domain authority, and parallel conversation paths. Agent-loop tests prove planning, replanning after failure, and multi-capability goals. Paraphrase tests use meaning-equivalent wording without code-path-specific expectations. | Trace every input surface through the single ingress. Confirm no production change was needed for new wording. Explain any component that reads domain documents and show it does not interpret Friedl's intent. |
+| 2 — Code executes known procedures | Capability-schema checks require structured inputs and results and reject trigger vocabulary. Dependency and architecture tests prove module boundaries and provider isolation. | Justify each capability as one reusable outcome. A deterministic sequence longer than a single external call requires Friedl's recorded decision naming it. |
+| 3 — Ambiguity returns to AL/X | Tests prove every condition without one objectively correct outcome returns rather than resolving itself, that consequential actions are gated by the recorded authority, and that goals, decisions and progress survive restart. | Identify what the capability refuses to decide and why. Approve the retained data and its retention policy. |
+
+A change fails if any applicable gate fails. Where a law cannot be checked
+automatically, compliance requires recorded evidence in the pull request.
+
+## Who may author AL/X's words
+
+**Clarification of Law 1, recorded by Friedl on 2026-09-01. This is not an
+exception; `governance/EXCEPTIONS.md` remains empty.**
+
+> Anything presented as coming from AL/X must be authored by the authoritative
+> LLM reasoning path. Non-LLM components may emit technical codes, diagnostics
+> and structural UI state only. No conversational fallback wording is permitted
+> without Friedl's explicit written consent.
+
+No transport, frontend, provider, tool, capability, deterministic workflow or
+recovery handler may compose conversational wording on her behalf. Law 1
+already forbids a second assistant voice; this states plainly where the line
+falls, because a recovery handler crossed it.
+
+**Allowed.** Terminal logs, diagnostic panel codes and structural UI states.
+A phase label must be one of exactly these neutral system states: Ready,
+Listening, Hearing, Thinking, Speaking, Error, Disconnected — plus AL/X's own
+name as the unknown-phase fallback. They may not become conversational
+messages, first-person statements, reassurance, claims about what happened, or
+instructions to Friedl. "Hearing" is a state; "I hear you" is her voice.
+
+**Prohibited.** A fixed sentence attributed to AL/X, a spoken or synthesized
+fallback, a toast, banner or status sentence explaining a failure in her voice,
+and any capability result rendered directly as her speech. A structured result
+returns to the Core as evidence; AL/X formulates what is said about it.
+
+**What the gate checks.** `scripts/check_architecture.py` rejects a
+conversational field added to a voice phase or error event, a frontend
+assignment that renders transported prose onto a surface the person reads as
+AL/X, and any value other than the authoritative Core response reaching speech
+synthesis. `tests/test_architecture_gates.py` proves each rejection by
+reintroducing the violation, and proves diagnostics and structural labels stay
+allowed.
+
+**Recorded violations.** On 2026-09-01 a recovery handler added
+`message["notice"]` to the voice error event carrying a fixed sentence, and the
+frontend rendered it on the status line. It was removed rather than reworded,
+and the gate above was added so it cannot return.
+
+The same day, three first-person phase labels were found already shipping:
+`"I hear you"`, `"Something interrupted me"` and the status element's
+`"Ready when you are"`. They predated the handler above but breach the same
+rule, and were replaced with `Hearing`, `Error` and `Ready`. The gate now
+whitelists the exact neutral labels rather than accepting any phase string, so
+neither a new label nor a reworded one can reintroduce her voice.
 
 ## Required test scenarios for every conversational capability
 
@@ -85,6 +120,8 @@ Exact-string unit tests may be used for protocols, schemas, or fixed external fo
 Every runtime or domain-capability change must include a short compliance record in the pull request or commit review containing:
 
 - goal and scope;
+- production outcome and its single authoritative path;
+- superseded-path search and deletion evidence, or `none`;
 - architecture boundaries affected;
 - primitives reused, added, or changed;
 - reason a new primitive is necessary, if applicable;
@@ -110,6 +147,8 @@ The author and reviewing model must both assess technical compliance. Friedl's e
 - `scripts/check_governance.py` verifies the canonical documents, approval markers, law checksum, decision/exception records, model entry points, and `.env` protection.
 - `scripts/check_architecture.py` enforces machine-readable module dependencies, provider isolation, prohibited source structures, raw-language tool boundaries, and detectable phrase routing.
 - The enforcement tests inject deliberate violations and must prove that the gates reject them.
+- Replacement tests prove a superseded production route cannot remain callable,
+  registered, dispatched or otherwise independently usable.
 - GitHub Actions runs all available law gates on pushes and pull requests to `main`.
 
 ### Required before runtime code

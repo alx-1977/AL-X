@@ -35,6 +35,7 @@ from alx.contracts.provenance import (
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
 from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, PendingMemoryBatch, ReasoningContext, ReasoningProvider
 from alx.contracts.records import StructuredData
+from alx.contracts.specialists import SpecialistError, SpecialistModel, SpecialistQuestion
 from alx.contracts.speech import (
     AudioChunk,
     SpeechSynthesizer,
@@ -62,15 +63,20 @@ from alx.contracts.mail import (
     BackgroundEventSource,
     MailAccessError,
     MailAccount,
+    MailAttachment,
     MailContent,
     MailObservationControl,
     MailParticipants,
     MailReference,
+    MailSearchCriteria,
+    MailSearchResult,
     MailSendError,
     MailThreading,
     OutboundReply,
     ReplyOutcome,
 )
+from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
+from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
     "RetentionPolicy",
@@ -84,6 +90,7 @@ __all__ = [
     "Objective", "ProgressRecord", "Referent", "SuccessCriterion", "WorkItem",
     "CapabilityDefinition", "SideEffect", "StructuredSchema", "ValueKind",
     "StructuredData",
+    "SpecialistError", "SpecialistModel", "SpecialistQuestion",
     "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "PendingMemoryBatch", "ReasoningContext", "ReasoningProvider",
     "AudioChunk", "SpeechSynthesizer", "SpeechTranscriber", "TranscriptionEvent",
     "TranscriptionState",
@@ -91,7 +98,11 @@ __all__ = [
     "ReasoningModel",
     "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
-    "BackgroundEventSource", "MailAccessError", "MailAccount", "MailContent",
+    "BackgroundEventSource", "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
     "MailObservationControl", "MailParticipants", "MailReference",
+    "MailSearchCriteria", "MailSearchResult",
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
+    "xero_date",
+    "XeroAccessError", "XeroAccountingAccount",
+    "DhlDocumentError", "DhlImportAnalyzer",
 ]

@@ -65,6 +65,8 @@ No particular tool order, number of calls, internal plan, or response wording is
 
 The proof fails if:
 
+- one production outcome remains reachable through competing implementation
+  paths, including a hidden, deprecated, wrapped or recovery-only path;
 - any phrase, keyword, intent label, regex, or frontend handler selects the route;
 - a test passes only for exact wording;
 - application code contains the expected workflow sequence or a special fallback sequence;

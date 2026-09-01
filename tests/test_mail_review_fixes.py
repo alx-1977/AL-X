@@ -276,7 +276,9 @@ class TrashAuthorisationTests(unittest.TestCase):
 
         effectful = [item.capability_id for item in DEFINITIONS
                      if item.side_effect is SideEffect.EFFECTFUL]
-        self.assertEqual(effectful, [SEEN, TRASH])
+        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE
+
+        self.assertEqual(effectful, [SEEN, FILE_PROCESSED_MAIL_MESSAGE, TRASH])
 
     def test_no_permanent_deletion_is_reachable(self) -> None:
         source = (Path(__file__).resolve().parents[1]
@@ -333,6 +335,199 @@ class SessionResilienceTests(unittest.TestCase):
         for reason in ("repeated_rejected_call", "active_goal_required",
                        "goal_proposal_invalid", "voice_transport_error"):
             self.assertNotIn(reason, RECOVERABLE_TRANSPORT_REASONS)
+
+    def test_a_blank_reasoning_response_does_not_end_the_conversation(self) -> None:
+        """Live failure: the model answered blank after 154 seconds.
+
+        The Core rejected the decision and the session ended, so Friedl was
+        left waiting on a turn that was already dead and heard nothing at all.
+        A provider that returns nothing usable has failed one turn; it has not
+        ended the conversation, and it changed no durable state.
+        """
+        from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
+
+        self.assertIn("reasoner_error", RECOVERABLE_TRANSPORT_REASONS)
+
+    def test_an_invalid_core_decision_still_ends_the_session(self) -> None:
+        """Recovering a blank response must not excuse a decision AL/X acted on."""
+        from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
+
+        for reason in (
+            "repeated_rejected_call",
+            "active_goal_required",
+            "goal_proposal_invalid",
+            "voice_transport_error",
+        ):
+            with self.subTest(reason=reason):
+                self.assertNotIn(reason, RECOVERABLE_TRANSPORT_REASONS)
+
+    def test_one_audio_iterator_serves_speech_before_and_after_recovery(
+        self,
+    ) -> None:
+        """The behavioural proof: the microphone survives a mid-stream failure.
+
+        This drives the real `_exchange_once`. A fake exchange consumes one
+        audio frame, fails a turn, then consumes another. If the handler
+        returned on that failure the exchange would be abandoned and the
+        second frame never read — which is exactly how the live session went
+        deaf while still appearing healthy.
+        """
+        import asyncio
+
+        from alx.interfaces.live_voice import VoiceEvent, VoiceEventKind
+        from alx.interfaces.server import LiveVoiceServer
+
+        exchanges: list[int] = []
+        consumed: list[str] = []
+
+        class Session:
+            async def exchange(self, conversation_id, audio):
+                exchanges.append(1)
+                iterator = audio.__aiter__()
+                consumed.append(await iterator.__anext__())
+                yield VoiceEvent(VoiceEventKind.ERROR, reason="reasoner_error")
+                yield VoiceEvent(VoiceEventKind.LISTENING)
+                consumed.append(await iterator.__anext__())
+                yield VoiceEvent(VoiceEventKind.LISTENING)
+
+        sent: list[str] = []
+
+        class Connection:
+            async def send(self, payload):
+                sent.append(payload)
+
+        server = LiveVoiceServer.__new__(LiveVoiceServer)
+        server._session = Session()
+        server._await_audio_confirmation = False
+
+        async def audio():
+            yield "before the failure"
+            yield "after the failure"
+
+        server._audio = lambda _connection, _stream_id: audio()
+
+        resume = asyncio.run(
+            server._exchange_once(Connection(), "conversation-1")
+        )
+
+        self.assertEqual(len(exchanges), 1, "the exchange must not be re-entered")
+        self.assertEqual(
+            consumed,
+            ["before the failure", "after the failure"],
+            "the same iterator must carry speech after the failed turn",
+        )
+        self.assertFalse(resume, "a completed exchange needs no re-entry")
+        self.assertTrue(
+            any("voice.recovered_in_exchange" in item for item in sent),
+            "the recovery must be visible as a structural diagnostic",
+        )
+
+    def test_mid_exchange_errors_recover_without_re_entry(self) -> None:
+        """The live defect: recovering by re-entry left AL/X deaf.
+
+        These three are raised while `exchange()` is still running and still
+        owns the microphone iterator. Returning from the handler abandoned that
+        iterator and started a second consumer of the same browser socket, so
+        the next thing Friedl said reached nobody. The session survived and
+        could no longer hear, which is worse than ending.
+        """
+        from alx.interfaces.server import (
+            MID_EXCHANGE_RECOVERABLE_REASONS,
+            RECOVERABLE_TRANSPORT_REASONS,
+        )
+
+        self.assertEqual(
+            MID_EXCHANGE_RECOVERABLE_REASONS,
+            frozenset({"budget_exhausted", "budget_exceeded", "reasoner_error"}),
+        )
+        # Every mid-exchange reason must also be recoverable at all.
+        self.assertTrue(
+            MID_EXCHANGE_RECOVERABLE_REASONS <= RECOVERABLE_TRANSPORT_REASONS
+        )
+
+    def test_only_a_dead_exchange_is_re_entered(self) -> None:
+        """`speech_transcription_error` ends exchange(); nothing else does."""
+        from alx.interfaces.server import (
+            MID_EXCHANGE_RECOVERABLE_REASONS,
+            RECOVERABLE_TRANSPORT_REASONS,
+        )
+
+        self.assertEqual(
+            RECOVERABLE_TRANSPORT_REASONS - MID_EXCHANGE_RECOVERABLE_REASONS,
+            frozenset({"speech_transcription_error"}),
+        )
+        self.assertNotIn(
+            "speech_transcription_error", MID_EXCHANGE_RECOVERABLE_REASONS
+        )
+
+    def test_the_handler_continues_rather_than_returning(self) -> None:
+        """Structural proof, so the distinction cannot quietly regress."""
+        import ast
+
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/interfaces/server.py"
+        ).read_text()
+        tree = ast.parse(source)
+        handler = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_exchange_once"
+        )
+        # The mid-exchange branch must continue the loop, never return.
+        for node in ast.walk(handler):
+            if not isinstance(node, ast.If):
+                continue
+            test = ast.unparse(node.test)
+            if "MID_EXCHANGE_RECOVERABLE_REASONS" not in test:
+                continue
+            body = ast.unparse(node)
+            self.assertIn("continue", body)
+            self.assertNotIn("return True", body)
+            self.assertNotIn("return False", body)
+            break
+        else:
+            self.fail("no mid-exchange recovery branch found")
+
+    def test_the_exchange_yields_listening_after_a_failed_turn(self) -> None:
+        """The server must not send its own, or the browser gets two."""
+        import ast
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/alx/interfaces/live_voice.py"
+        ).read_text()
+        tree = ast.parse(source)
+        responder = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_response_events"
+        )
+        body = ast.unparse(responder)
+        self.assertIn("VoiceEventKind.ERROR", body)
+        self.assertIn("VoiceEventKind.LISTENING", body)
+
+    def test_microphone_health_is_a_code_not_wording(self) -> None:
+        """Law 1: surface it structurally, never as AL/X speaking."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/interfaces/server.py"
+        ).read_text()
+        self.assertIn("microphone.audio_resumed", source)
+        self.assertIn("voice.recovered_in_exchange", source)
+        # A diagnostic carries a code; it must not carry composed prose.
+        self.assertNotIn("Please say", source)
+        self.assertNotIn("Sorry", source)
+
+    def test_a_step_budget_checkpoint_keeps_the_conversation_open(self) -> None:
+        """Reaching the step budget is durable progress, not a failure.
+
+        The Core persists the goal and can continue it, so a long multi-step
+        task must not hang up the voice transport mid-goal.
+        """
+        from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
+
+        self.assertIn("budget_exhausted", RECOVERABLE_TRANSPORT_REASONS)
 
     def test_the_handler_resumes_rather_than_returning_once(self) -> None:
         import ast

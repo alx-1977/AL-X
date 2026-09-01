@@ -1,0 +1,1118 @@
+"""Language-blind Xero primitives for supplier accounts-payable bills."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from alx.contracts import (
+    CapabilityDefinition,
+    CapabilityResult,
+    CapabilityResultState,
+    MailAccessError,
+    MailAccount,
+    MailReference,
+    SideEffect,
+    StructuredData,
+    StructuredSchema,
+    ValueKind,
+    SpecialistError,
+    XeroAccessError,
+    XeroAccountingAccount,
+    xero_date,
+)
+from alx.specialists import is_supplier_bill, prior_coding, resolve_supplier
+
+
+SEARCH_XERO_CONTACTS = "search_xero_contacts"
+LIST_XERO_ACCOUNTS = "list_xero_accounts"
+LIST_XERO_TAX_RATES = "list_xero_tax_rates"
+FIND_XERO_BILL = "find_xero_bill"
+READ_XERO_BILL = "read_xero_bill"
+CAPTURE_SUPPLIER_INVOICE = "capture_supplier_invoice"
+DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
+
+_FAILURES = (
+    "arguments_unusable",
+    "connection_failed",
+    "not_connected",
+    "token_unreadable",
+    "token_key_invalid",
+    "oauth_rejected",
+    "permission_denied",
+    "rate_limited",
+    "request_rejected",
+    "response_invalid",
+    "contact_not_found",
+    "bill_not_found",
+    "duplicate_found",
+    "bill_not_draft",
+    "account_mapping_invalid",
+    "supporting_document_missing",
+    "supporting_document_mismatch",
+    "dhl_import_requires_dedicated_processing",
+    "source_mismatch",
+    "attachment_unavailable",
+)
+
+_STRING = StructuredSchema(ValueKind.STRING)
+_BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
+_INTEGER = StructuredSchema(ValueKind.INTEGER)
+_ANY_OBJECT = StructuredSchema(ValueKind.OBJECT)
+_ARRAY_OBJECT = StructuredSchema(ValueKind.ARRAY, items=_ANY_OBJECT)
+
+
+def _object(
+    properties: Mapping[str, StructuredSchema],
+    required: Sequence[str],
+) -> StructuredSchema:
+    return StructuredSchema(
+        ValueKind.OBJECT,
+        properties,
+        tuple(required),
+        extra_properties=False,
+    )
+
+
+_BILL_RESULT = _object(
+    {
+        "found": _BOOLEAN,
+        "invoice_id": _STRING,
+        "invoice_number": _STRING,
+        "contact_id": _STRING,
+        "contact_name": _STRING,
+        "status": _STRING,
+        "currency": _STRING,
+        "total": _STRING,
+        "amount_due": _STRING,
+        "reference": _STRING,
+        "has_attachments": _BOOLEAN,
+    },
+    (
+        "found",
+        "invoice_id",
+        "invoice_number",
+        "contact_id",
+        "contact_name",
+        "status",
+        "currency",
+        "total",
+        "amount_due",
+        "reference",
+        "has_attachments",
+    ),
+)
+
+_LINE_ITEM = _object(
+    {
+        "description": _STRING,
+        "quantity": _STRING,
+        "unit_amount": _STRING,
+        "account_code": _STRING,
+        "tax_type": _STRING,
+        "tax_amount": _STRING,
+    },
+    ("description", "quantity", "unit_amount", "account_code", "tax_type", "tax_amount"),
+)
+
+_DRAFT_PROPERTIES = {
+    "contact_id": _STRING,
+    "invoice_number": _STRING,
+    "date": _STRING,
+    "due_date": _STRING,
+    "currency": _STRING,
+    "reference": _STRING,
+    "line_amount_types": _STRING,
+    "expected_total": _STRING,
+    "line_items": StructuredSchema(ValueKind.ARRAY, items=_LINE_ITEM),
+}
+_DRAFT_REQUIRED = tuple(_DRAFT_PROPERTIES)
+
+_REQUIRED_ATTACHMENT = _object(
+    {"filename": _STRING, "sha256": _STRING},
+    ("filename", "sha256"),
+)
+
+SEARCH_CONTACTS_DEFINITION = CapabilityDefinition(
+    SEARCH_XERO_CONTACTS,
+    "Search existing contacts in the configured Xero organisation without creating or changing one.",
+    _object({"search_term": _STRING}, ("search_term",)),
+    _object({"contacts": _ARRAY_OBJECT}, ("contacts",)),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+LIST_ACCOUNTS_DEFINITION = CapabilityDefinition(
+    LIST_XERO_ACCOUNTS,
+    "List the configured Xero chart-of-accounts entries without changing them.",
+    _object({}, ()),
+    _object({"accounts": _ARRAY_OBJECT}, ("accounts",)),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+LIST_TAX_RATES_DEFINITION = CapabilityDefinition(
+    LIST_XERO_TAX_RATES,
+    "List the configured Xero tax rates without changing them.",
+    _object({}, ()),
+    _object({"tax_rates": _ARRAY_OBJECT}, ("tax_rates",)),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+FIND_BILL_DEFINITION = CapabilityDefinition(
+    FIND_XERO_BILL,
+    "Find an accounts-payable bill by its exact supplier invoice number without changing it.",
+    _object(
+        {"invoice_number": _STRING, "contact_id": _STRING},
+        ("invoice_number",),
+    ),
+    _BILL_RESULT,
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+READ_BILL_DEFINITION = CapabilityDefinition(
+    READ_XERO_BILL,
+    "Read one exact Xero accounts-payable bill by Xero identifier without changing it.",
+    _object({"invoice_id": _STRING}, ("invoice_id",)),
+    _BILL_RESULT,
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+_SOURCE_DOCUMENT = _object(
+    {
+        "mailbox_id": _STRING,
+        "uid_validity": _STRING,
+        "uid": _STRING,
+        "attachment_id": _STRING,
+        "expected_sha256": _STRING,
+    },
+    ("mailbox_id", "uid_validity", "uid", "attachment_id", "expected_sha256"),
+)
+
+CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
+    CAPTURE_SUPPLIER_INVOICE,
+    "Read one identified mail attachment as a supplier invoice, resolve its supplier and accounting treatment from this organisation's own records, and commit the bill when every one of those is unambiguous; otherwise return what is unresolved without acting.",
+    _object(
+        {
+            "mailbox_id": _STRING,
+            "uid_validity": _STRING,
+            "uid": _STRING,
+            "attachment_id": _STRING,
+            "expected_sha256": _STRING,
+            "context_line": _STRING,
+            "authorise": _BOOLEAN,
+        },
+        (
+            "mailbox_id",
+            "uid_validity",
+            "uid",
+            "attachment_id",
+            "expected_sha256",
+            "authorise",
+        ),
+    ),
+    _object(
+        {
+            "completed": _BOOLEAN,
+            "returned_for": _STRING,
+            "detail": _STRING,
+            "invoice": _ANY_OBJECT,
+            "bill": _BILL_RESULT,
+            "attached": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "steps": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+        },
+        ("completed", "returned_for", "detail", "invoice", "bill", "attached", "steps"),
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES + ("document_has_no_text", "not_an_invoice", "extraction_unverified"),
+)
+
+DELETE_DRAFT_DEFINITION = CapabilityDefinition(
+    DELETE_XERO_DRAFT_BILL,
+    "Discard one exact DRAFT accounts-payable bill after verifying its invoice number and total; refuse a bill that is not a draft.",
+    _object(
+        {
+            "invoice_id": _STRING,
+            "invoice_number": _STRING,
+            "expected_total": _STRING,
+        },
+        ("invoice_id", "invoice_number", "expected_total"),
+    ),
+    _BILL_RESULT,
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
+DEFINITIONS = (
+    SEARCH_CONTACTS_DEFINITION,
+    LIST_ACCOUNTS_DEFINITION,
+    LIST_TAX_RATES_DEFINITION,
+    FIND_BILL_DEFINITION,
+    READ_BILL_DEFINITION,
+    CAPTURE_INVOICE_DEFINITION,
+    DELETE_DRAFT_DEFINITION,
+)
+
+
+def _required(arguments: StructuredData, name: str) -> str:
+    value = arguments.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(name)
+    return value.strip()
+
+
+def _decimal(value: Any, name: str) -> Decimal:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(name)
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise ValueError(name) from error
+    if not parsed.is_finite():
+        raise ValueError(name)
+    return parsed
+
+
+def _money(value: Any, absent: str | None = None) -> str:
+    """Convert a Xero money field, failing closed on anything unreadable.
+
+    Xero omits some money fields on a create response: a draft that has had no
+    payment carries no AmountDue. An absent optional field is normal and takes
+    the supplied default, while an absent required field, or a value that
+    cannot be read as money, is still a failure. Treating the two the same
+    reported a bill as unposted after Xero had already created it.
+    """
+    if value is None and absent is not None:
+        return absent
+    if value is None or isinstance(value, bool):
+        raise XeroAccessError("response_invalid")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise XeroAccessError("response_invalid") from None
+    if not parsed.is_finite():
+        raise XeroAccessError("response_invalid")
+    return format(parsed.quantize(Decimal("0.01")), "f")
+
+
+def _bill_values(bill: Mapping[str, Any] | None) -> dict[str, Any]:
+    if bill is None:
+        return {
+            "found": False,
+            "invoice_id": "",
+            "invoice_number": "",
+            "contact_id": "",
+            "contact_name": "",
+            "status": "",
+            "currency": "",
+            "total": "0.00",
+            "amount_due": "0.00",
+            "reference": "",
+            "has_attachments": False,
+        }
+    contact = bill.get("Contact") if isinstance(bill.get("Contact"), Mapping) else {}
+    invoice_id = str(bill.get("InvoiceID") or "")
+    invoice_number = str(bill.get("InvoiceNumber") or "")
+    contact_id = str(contact.get("ContactID") or "")
+    status = str(bill.get("Status") or "")
+    # A freshly created bill has no attachments, and Xero can omit the flag
+    # rather than send false. Treating that as an invalid response reported a
+    # bill as unposted after Xero had already created it, which is the worst
+    # direction to be wrong in.
+    has_attachments = bill.get("HasAttachments", False)
+    if (
+        not invoice_id
+        or not invoice_number
+        or not contact_id
+        or not status
+        or not isinstance(has_attachments, bool)
+    ):
+        raise XeroAccessError("response_invalid")
+    return {
+        "found": True,
+        "invoice_id": invoice_id,
+        "invoice_number": invoice_number,
+        "contact_id": contact_id,
+        "contact_name": str(contact.get("Name") or ""),
+        "status": status,
+        "currency": str(bill.get("CurrencyCode") or ""),
+        "total": _money(bill.get("Total")),
+        # A draft with no payment against it carries no AmountDue.
+        "amount_due": _money(bill.get("AmountDue"), absent=_money(bill.get("Total"))),
+        "reference": str(bill.get("Reference") or ""),
+        "has_attachments": has_attachments,
+    }
+
+
+def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decimal]:
+    values = arguments.get("line_items")
+    if not isinstance(values, (tuple, list)) or not values:
+        raise ValueError("line_items")
+    line_amount_types = _required(arguments, "line_amount_types")
+    if line_amount_types not in ("Exclusive", "Inclusive", "NoTax"):
+        raise ValueError("line_amount_types")
+    output: list[dict[str, Any]] = []
+    total = Decimal("0")
+    for item in values:
+        if not isinstance(item, Mapping):
+            raise ValueError("line_items")
+        description = _required(item, "description")
+        account_code = _required(item, "account_code")
+        tax_type = _required(item, "tax_type")
+        quantity = _decimal(item.get("quantity"), "quantity")
+        unit_amount = _decimal(item.get("unit_amount"), "unit_amount")
+        tax_amount = _decimal(item.get("tax_amount"), "tax_amount")
+        if quantity <= 0 or tax_amount < 0:
+            raise ValueError("line_items")
+        base = quantity * unit_amount
+        total += base + tax_amount if line_amount_types == "Exclusive" else base
+        output.append(
+            {
+                "Description": description,
+                "Quantity": float(quantity),
+                "UnitAmount": float(unit_amount),
+                "AccountCode": account_code,
+                "TaxType": tax_type,
+                "TaxAmount": float(tax_amount),
+            }
+        )
+    return output, total.quantize(Decimal("0.01"))
+
+
+def _draft_mismatch(
+    existing: Mapping[str, Any] | None, requested: Mapping[str, Any]
+) -> str:
+    """Report the first way an existing draft differs from the requested bill.
+
+    Comparing selected fields let a draft with the wrong dates, currency,
+    reference, description and tax amount be authorised because its total still
+    matched. Every field the request states is compared, so resuming a draft
+    means finishing the requested bill rather than adopting whatever the draft
+    happens to contain.
+    """
+    if existing is None:
+        return "the draft could not be read back"
+
+    def money(value: Any) -> Decimal:
+        return Decimal(str(value if value not in (None, "") else "0"))
+
+    # D-018 requires a DRAFT bill for authorisation. D-019 separately names
+    # DRAFT or SUBMITTED for discarding, so the distinction is deliberate: a
+    # submitted bill is awaiting someone's approval and is not this capability's
+    # to authorise. Reading the status here rather than trusting the earlier
+    # search means a bill changed in between is refused.
+    status = str(existing.get("Status") or "")
+    if status != "DRAFT":
+        return f"it is {status or 'in an unknown state'}, not a draft"
+
+    requested_total = sum(
+        (
+            money(item.get("Quantity")) * money(item.get("UnitAmount"))
+            + (
+                money(item.get("TaxAmount"))
+                if str(requested.get("LineAmountTypes") or "") == "Exclusive"
+                else Decimal("0")
+            )
+            for item in requested.get("LineItems") or []
+        ),
+        Decimal("0"),
+    )
+    try:
+        if money(existing.get("Total")) != requested_total:
+            return (
+                f"its total is {existing.get('Total')!r}, not {requested_total}"
+            )
+    except InvalidOperation:
+        return f"its total {existing.get('Total')!r} is unreadable"
+
+    for field, label in (
+        ("InvoiceNumber", "invoice number"),
+        ("Date", "date"),
+        ("DueDate", "due date"),
+        ("CurrencyCode", "currency"),
+        ("Reference", "reference"),
+        ("LineAmountTypes", "line amount type"),
+    ):
+        was = str(existing.get(field) or "").strip()
+        wanted = str(requested.get(field) or "").strip()
+        if field in ("Date", "DueDate"):
+            normalised = xero_date(was)
+            # Skipping an unrecognised date let a bill dated /Date(0+0000)/
+            # pass as matching, so an unreadable date fails closed instead.
+            if normalised is None:
+                return f"its {label} {was!r} cannot be read as a date"
+            if normalised != wanted[:10]:
+                return f"its {label} is {normalised!r}, not {wanted[:10]!r}"
+            continue
+        if was != wanted:
+            return f"its {label} is {was!r}, not {wanted!r}"
+
+    stored_contact = existing.get("Contact")
+    stored_contact_id = (
+        str(stored_contact.get("ContactID") or "")
+        if isinstance(stored_contact, Mapping) else ""
+    )
+    wanted_contact = requested.get("Contact")
+    wanted_contact_id = (
+        str(wanted_contact.get("ContactID") or "")
+        if isinstance(wanted_contact, Mapping) else ""
+    )
+    if stored_contact_id != wanted_contact_id:
+        return "it is against a different supplier"
+
+    stored = [
+        item for item in existing.get("LineItems") or []
+        if isinstance(item, Mapping)
+    ]
+    wanted_lines = list(requested.get("LineItems") or [])
+    if len(stored) != len(wanted_lines):
+        return f"it has {len(stored)} line(s), not {len(wanted_lines)}"
+
+    for index, (was, wanted) in enumerate(zip(stored, wanted_lines), start=1):
+        for field, label in (
+            ("AccountCode", "account"),
+            ("TaxType", "tax type"),
+            ("Description", "description"),
+        ):
+            if str(was.get(field) or "") != str(wanted.get(field) or ""):
+                return (
+                    f"line {index} {label} is {was.get(field)!r}, "
+                    f"not {wanted.get(field)!r}"
+                )
+        try:
+            # Xero returns LineAmount; a stored line may carry only its
+            # quantity and unit amount, so accept whichever is present.
+            stored_amount = (
+                money(was["LineAmount"])
+                if was.get("LineAmount") is not None
+                else money(was.get("Quantity")) * money(was.get("UnitAmount"))
+            )
+            if stored_amount != money(wanted.get("Quantity")) * money(
+                wanted.get("UnitAmount")
+            ):
+                return f"line {index} amount differs"
+            # Two lines can multiply to the same amount from different
+            # quantities, so the parts are compared as well as the product.
+            for part, part_label in (("Quantity", "quantity"), ("UnitAmount", "unit amount")):
+                # Absent evidence is not agreement: a line that does not state
+                # its quantity cannot be verified as the requested one.
+                if was.get(part) is None:
+                    return f"line {index} states no {part_label} to verify"
+                if money(was.get(part)) != money(wanted.get(part)):
+                    return (
+                        f"line {index} {part_label} is {was.get(part)!r}, "
+                        f"not {wanted.get(part)!r}"
+                    )
+            if money(was.get("TaxAmount")) != money(wanted.get("TaxAmount")):
+                return (
+                    f"line {index} tax amount is {was.get('TaxAmount')!r}, "
+                    f"not {wanted.get('TaxAmount')!r}"
+                )
+        except InvalidOperation:
+            return f"line {index} amount is unreadable"
+    return ""
+
+
+def _decimal_or_zero(value: str) -> Decimal:
+    try:
+        return Decimal(value or "0")
+    except InvalidOperation:
+        return Decimal("0")
+
+
+def _validate_line_mappings(
+    account: XeroAccountingAccount,
+    lines: Sequence[Mapping[str, Any]],
+    line_amount_types: str,
+) -> None:
+    """Fail before a write when a code/tax pair is not live in this tenant."""
+    active_accounts: dict[str, Mapping[str, Any]] = {}
+    for item in account.list_accounts():
+        code = str(item.get("Code") or "")
+        if code and str(item.get("Status") or "") == "ACTIVE":
+            if code in active_accounts:
+                raise XeroAccessError("account_mapping_invalid")
+            active_accounts[code] = item
+    active_taxes = {
+        str(item.get("TaxType") or "")
+        for item in account.list_tax_rates()
+        if str(item.get("Status") or "") == "ACTIVE"
+    }
+    for line in lines:
+        code = str(line.get("AccountCode") or "")
+        tax_type = str(line.get("TaxType") or "")
+        configured = active_accounts.get(code)
+        if configured is None:
+            raise XeroAccessError("account_mapping_invalid")
+        default_tax = str(configured.get("TaxType") or "")
+        if line_amount_types == "NoTax":
+            valid_pair = tax_type == "NONE"
+        else:
+            # An account's tax type is Xero's default for that account, not a
+            # constraint on it. A supplier who charges no VAT is ordinary, so
+            # NONE stays valid on a VAT-defaulted account; any other override
+            # must still be a tax type that is live in this organisation.
+            valid_pair = tax_type == "NONE" or tax_type in active_taxes
+        if not valid_pair or (tax_type != "NONE" and tax_type not in active_taxes):
+            raise XeroAccessError("account_mapping_invalid")
+
+
+def _draft_payload(
+    arguments: StructuredData,
+    account: XeroAccountingAccount,
+) -> tuple[dict[str, Any], Decimal]:
+    contact_id = _required(arguments, "contact_id")
+    invoice_number = _required(arguments, "invoice_number")
+    issue_date = _required(arguments, "date")
+    due_date = _required(arguments, "due_date")
+    date.fromisoformat(issue_date)
+    date.fromisoformat(due_date)
+    expected_total = _decimal(arguments.get("expected_total"), "expected_total")
+    if expected_total <= 0:
+        raise ValueError("expected_total")
+    lines, calculated_total = _line_items(arguments)
+    if calculated_total != expected_total.quantize(Decimal("0.01")):
+        raise ValueError("expected_total")
+    line_amount_types = _required(arguments, "line_amount_types")
+    _validate_line_mappings(account, lines, line_amount_types)
+    return (
+        {
+            "Type": "ACCPAY",
+            "Contact": {"ContactID": contact_id},
+            "InvoiceNumber": invoice_number,
+            "Date": issue_date,
+            "DueDate": due_date,
+            "CurrencyCode": _required(arguments, "currency"),
+            "Reference": _required(arguments, "reference"),
+            "LineAmountTypes": line_amount_types,
+            "LineItems": lines,
+            "Status": "DRAFT",
+        },
+        expected_total.quantize(Decimal("0.01")),
+    )
+
+
+def _sha256(value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(name)
+    digest = value.strip().lower()
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError(name)
+    return digest
+
+
+def _required_attachment_values(
+    arguments: StructuredData,
+) -> tuple[tuple[str, str], ...]:
+    values = arguments.get("required_attachments")
+    if not isinstance(values, (tuple, list)) or not values:
+        raise ValueError("required_attachments")
+    found: list[tuple[str, str]] = []
+    for item in values:
+        if not isinstance(item, Mapping):
+            raise ValueError("required_attachments")
+        filename = _required(item, "filename")
+        digest = _sha256(item.get("sha256"), "sha256")
+        if (filename, digest) in found:
+            raise ValueError("required_attachments")
+        found.append((filename, digest))
+    return tuple(found)
+
+
+def _verified_attachment(
+    account: XeroAccountingAccount,
+    invoice_id: str,
+    filename: str,
+    digest: str,
+) -> Mapping[str, Any]:
+    candidates = tuple(
+        item
+        for item in account.list_bill_attachments(invoice_id)
+        if str(item.get("FileName") or "") == filename
+    )
+    for item in candidates:
+        attachment_id = str(item.get("AttachmentID") or "")
+        media_type = str(item.get("MimeType") or "")
+        if not attachment_id or not media_type:
+            continue
+        payload = account.read_bill_attachment(invoice_id, attachment_id, media_type)
+        if hashlib.sha256(payload).hexdigest() == digest:
+            return item
+    raise XeroAccessError(
+        "supporting_document_missing" if not candidates else "supporting_document_mismatch"
+    )
+
+
+def build_xero_executors(
+    account: XeroAccountingAccount,
+    mail: MailAccount,
+    call_id_source: Callable[[], str],
+    extractor: Callable[[str, str], Mapping[str, Any]] | None = None,
+    default_account_code: str = "",
+    default_tax_type: str = "",
+    dhl_classifier: Callable[[bytes], str] | None = None,
+) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
+    def failed(capability_id: str, code: str) -> CapabilityResult:
+        return CapabilityResult(
+            call_id_source(),
+            capability_id,
+            CapabilityResultState.FAILED,
+            failure={"code": code},
+        )
+
+    def invoke(
+        capability_id: str, function: Callable[[], Mapping[str, Any]]
+    ) -> CapabilityResult:
+        try:
+            values = function()
+        except ValueError:
+            return failed(capability_id, "arguments_unusable")
+        except XeroAccessError as error:
+            return failed(capability_id, error.code)
+        return CapabilityResult(
+            call_id_source(), capability_id, CapabilityResultState.SUCCEEDED, values
+        )
+
+    def search_contacts(arguments: StructuredData) -> CapabilityResult:
+        def operation() -> Mapping[str, Any]:
+            contacts = account.search_contacts(_required(arguments, "search_term"))
+            return {
+                "contacts": tuple(
+                    {
+                        "contact_id": str(item.get("ContactID") or ""),
+                        "name": str(item.get("Name") or ""),
+                        "email": str(item.get("EmailAddress") or ""),
+                        "status": str(item.get("ContactStatus") or ""),
+                        "is_supplier": bool(item.get("IsSupplier")),
+                    }
+                    for item in contacts
+                )
+            }
+
+        return invoke(SEARCH_XERO_CONTACTS, operation)
+
+    def list_accounts(_arguments: StructuredData) -> CapabilityResult:
+        return invoke(
+            LIST_XERO_ACCOUNTS,
+            lambda: {
+                "accounts": tuple(
+                    {
+                        "account_id": str(item.get("AccountID") or ""),
+                        "code": str(item.get("Code") or ""),
+                        "name": str(item.get("Name") or ""),
+                        "type": str(item.get("Type") or ""),
+                        "status": str(item.get("Status") or ""),
+                        "tax_type": str(item.get("TaxType") or ""),
+                    }
+                    for item in account.list_accounts()
+                )
+            },
+        )
+
+    def list_tax_rates(_arguments: StructuredData) -> CapabilityResult:
+        return invoke(
+            LIST_XERO_TAX_RATES,
+            lambda: {
+                "tax_rates": tuple(
+                    {
+                        "name": str(item.get("Name") or ""),
+                        "tax_type": str(item.get("TaxType") or ""),
+                        "status": str(item.get("Status") or ""),
+                        "effective_rate": str(item.get("EffectiveRate") or ""),
+                    }
+                    for item in account.list_tax_rates()
+                )
+            },
+        )
+
+    def find_bill(arguments: StructuredData) -> CapabilityResult:
+        contact_id = arguments.get("contact_id", "")
+        if not isinstance(contact_id, str):
+            return failed(FIND_XERO_BILL, "arguments_unusable")
+        return invoke(
+            FIND_XERO_BILL,
+            lambda: _bill_values(
+                account.find_bill(
+                    _required(arguments, "invoice_number"), contact_id.strip()
+                )
+            ),
+        )
+
+    def read_bill(arguments: StructuredData) -> CapabilityResult:
+        return invoke(
+            READ_XERO_BILL,
+            lambda: _bill_values(account.read_bill(_required(arguments, "invoice_id"))),
+        )
+
+    def _commit_decided_bill(arguments: StructuredData) -> CapabilityResult:
+        """Private step of capture_supplier_invoice, not a capability.
+
+        Law 0: this is a shared implementation component, reachable only
+        through the one capture path. It is deliberately absent from the
+        capability registry, the executor map and the authority policies, so
+        it cannot form a second end-to-end route to a posted bill.
+        """
+        """Commit values AL/X already decided; return whenever judgment is needed.
+
+        Every step here is mechanical: the supplier, lines, amounts, account
+        codes and tax types arrive already chosen. Nothing in this function
+        selects accounting meaning, and any condition without one objectively
+        correct outcome stops and returns to AL/X.
+        """
+        steps: list[str] = []
+        attached: list[str] = []
+
+        def returned(reason: str, detail: str, bill: Mapping[str, Any] | None = None):
+            return CapabilityResult(
+                call_id_source(),
+                CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.SUCCEEDED,
+                {
+                    "completed": False,
+                    "returned_for": reason,
+                    "detail": detail,
+                    "bill": _bill_values(bill),
+                    "attached": tuple(attached),
+                    "steps": tuple(steps),
+                },
+            )
+
+        try:
+            documents = arguments.get("source_documents")
+            if not isinstance(documents, (tuple, list)) or not documents:
+                raise ValueError("source_documents")
+            authorise_requested = arguments.get("authorise")
+            if not isinstance(authorise_requested, bool):
+                raise ValueError("authorise")
+            bill_payload, expected_total = _draft_payload(arguments, account)
+            contact_id = str(bill_payload["Contact"]["ContactID"])
+            invoice_number = str(bill_payload["InvoiceNumber"])
+            steps.append("validated_supplied_values")
+
+            # Idempotency. A prior attempt may have created this bill before
+            # failing, so an existing draft for the same supplier and invoice
+            # number is resumed rather than duplicated. Anything already beyond
+            # draft is an outcome only AL/X may judge.
+            existing = account.find_bill(invoice_number, contact_id)
+            current = _bill_values(existing)
+            if current["found"]:
+                if current["status"] != "DRAFT":
+                    return returned(
+                        "duplicate_bill",
+                        f"a {current['status']} bill already exists for {invoice_number}",
+                        existing,
+                    )
+                if Decimal(current["total"]) != expected_total:
+                    return returned(
+                        "duplicate_bill",
+                        f"an existing draft for {invoice_number} totals "
+                        f"{current['total']}, not {expected_total}",
+                        existing,
+                    )
+                # Matching the total is not enough to authorise a draft. The
+                # whole draft is compared against the requested bill, read
+                # fresh rather than from the search projection, because a
+                # search result carries less than the bill actually holds.
+                mismatch = _draft_mismatch(
+                    account.read_bill(current["invoice_id"]), bill_payload
+                )
+                if mismatch:
+                    return returned(
+                        "existing_draft_differs",
+                        f"the existing draft for {invoice_number} does not match "
+                        f"the requested bill: {mismatch}",
+                        existing,
+                    )
+                invoice_id = current["invoice_id"]
+                steps.append("resumed_existing_draft")
+            else:
+                created = _bill_values(account.create_draft_bill(bill_payload))
+                if (
+                    created["invoice_number"] != invoice_number
+                    or Decimal(created["total"]) != expected_total
+                ):
+                    raise XeroAccessError("source_mismatch")
+                invoice_id = created["invoice_id"]
+                steps.append("created_draft")
+
+            stored = {
+                str(item.get("FileName") or "")
+                for item in account.list_bill_attachments(invoice_id)
+            }
+            for document in documents:
+                if not isinstance(document, Mapping):
+                    raise ValueError("source_documents")
+                reference = MailReference(
+                    _required(document, "mailbox_id"),
+                    _required(document, "uid_validity"),
+                    _required(document, "uid"),
+                )
+                digest = _sha256(document.get("expected_sha256"), "expected_sha256")
+                attachment, content = mail.read_attachment(
+                    reference, _required(document, "attachment_id")
+                )
+                if attachment.sha256 != digest:
+                    return returned(
+                        "attachment_mismatch",
+                        f"{attachment.filename} does not match the approved digest",
+                        account.read_bill(invoice_id),
+                    )
+                # Re-attaching the same filename would duplicate it on retry.
+                if attachment.filename not in stored:
+                    account.attach_bill_document(
+                        invoice_id, attachment.filename, attachment.media_type, content
+                    )
+                    stored.add(attachment.filename)
+                _verified_attachment(
+                    account, invoice_id, attachment.filename, digest
+                )
+                attached.append(attachment.filename)
+            steps.append("attached_and_verified_documents")
+
+            if authorise_requested:
+                account.authorise_bill(invoice_id)
+                steps.append("authorised")
+
+            final = _bill_values(account.read_bill(invoice_id))
+            steps.append("read_back")
+            expected_status = "AUTHORISED" if authorise_requested else "DRAFT"
+            if (
+                not final["found"]
+                or final["invoice_id"] != invoice_id
+                or final["invoice_number"] != invoice_number
+                or final["contact_id"] != contact_id
+                or Decimal(final["total"]) != expected_total
+                or final["status"] != expected_status
+                or not final["has_attachments"]
+            ):
+                return returned(
+                    "read_back_mismatch",
+                    "the committed bill does not match the requested values",
+                    account.read_bill(invoice_id),
+                )
+            steps.append("verified")
+            return CapabilityResult(
+                call_id_source(),
+                CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.SUCCEEDED,
+                {
+                    "completed": True,
+                    "returned_for": "",
+                    "detail": "",
+                    "bill": final,
+                    "attached": tuple(attached),
+                    "steps": tuple(steps),
+                },
+            )
+        except ValueError:
+            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+        except XeroAccessError as error:
+            # account_mapping_invalid means AL/X supplied an account or tax type
+            # this organisation does not have. Choosing a replacement would be
+            # deciding accounting meaning, so it returns to her instead.
+            if error.code == "account_mapping_invalid":
+                return returned(
+                    "account_or_tax_unresolved",
+                    "a supplied account code or tax type is not active in this organisation",
+                )
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+
+    def capture_invoice(arguments: StructuredData) -> CapabilityResult:
+        """Read a document, resolve it against records, and commit if certain.
+
+        Extraction is a bounded specialist question, supplier and accounting
+        treatment come from this organisation's own history, and the commit is
+        the same execute path. Nothing here interprets what Friedl wants, and
+        anything without one objectively correct answer returns to AL/X rather
+        than being guessed.
+        """
+        steps: list[str] = []
+
+        def returned(reason: str, detail: str, invoice: Mapping[str, Any] | None = None):
+            return CapabilityResult(
+                call_id_source(),
+                CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.SUCCEEDED,
+                {
+                    "completed": False,
+                    "returned_for": reason,
+                    "detail": detail,
+                    "invoice": dict(invoice or {}),
+                    "bill": _bill_values(None),
+                    "attached": (),
+                    "steps": tuple(steps),
+                },
+            )
+
+        if extractor is None:
+            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+        try:
+            reference = MailReference(
+                _required(arguments, "mailbox_id"),
+                _required(arguments, "uid_validity"),
+                _required(arguments, "uid"),
+            )
+            digest = _sha256(arguments.get("expected_sha256"), "expected_sha256")
+            authorise_requested = arguments.get("authorise")
+            if not isinstance(authorise_requested, bool):
+                raise ValueError("authorise")
+            context_line = arguments.get("context_line", "")
+            if not isinstance(context_line, str):
+                raise ValueError("context_line")
+            attachment, content = mail.read_attachment(
+                reference, _required(arguments, "attachment_id")
+            )
+            if attachment.sha256 != digest:
+                return failed(CAPTURE_SUPPLIER_INVOICE, "source_mismatch")
+            steps.append("read_source_document")
+
+            # Law 0: a DHL import has its own single path, because its duty,
+            # import VAT and clearance must not be flattened into one line on
+            # the default account. Recognition is by document evidence, not by
+            # wording, and it happens before any Xero call.
+            if dhl_classifier is not None:
+                if dhl_classifier(content) in (
+                    "customs_worksheet",
+                    "sad_500",
+                    "dhl_invoice",
+                ):
+                    return failed(
+                        CAPTURE_SUPPLIER_INVOICE,
+                        "dhl_import_requires_dedicated_processing",
+                    )
+                # Only claimed when the check actually ran: an unwired
+                # classifier must not leave evidence of a check in the trail.
+                steps.append("checked_not_a_dhl_document")
+
+            invoice = extractor(attachment.text, context_line)
+            steps.append("extracted_invoice")
+            if not is_supplier_bill(invoice["document_type"]):
+                return failed(CAPTURE_SUPPLIER_INVOICE, "not_an_invoice")
+            if not invoice["verified"]:
+                return returned(
+                    "extraction_unverified",
+                    "; ".join(invoice["problems"]),
+                    invoice,
+                )
+
+            contact = resolve_supplier(
+                account.search_contacts(invoice["supplier_name"]),
+                invoice["supplier_name"],
+            )
+            steps.append("resolved_supplier")
+            if not contact["resolved"]:
+                return returned("supplier_unresolved", contact["reason"], invoice)
+
+            history = account.bills_for_contact(contact["contact_id"])
+            # The document itself settles the tax question: a supplier that
+            # charges VAT shows it, one that does not cannot be claimed for.
+            shows_tax = _decimal_or_zero(invoice["tax_amount"]) > 0
+            coding = prior_coding(
+                history, default_account_code, shows_tax, default_tax_type
+            )
+            steps.append("looked_up_prior_coding")
+            if not coding["resolved"]:
+                return returned("coding_unresolved", coding["reason"], invoice)
+        except ValueError:
+            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+        except SpecialistError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+        except XeroAccessError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+
+        # Everything is unambiguous, so the same commit path runs directly
+        # rather than returning to AL/X to be told to do what is already known.
+        outcome = _commit_decided_bill(
+            {
+                "contact_id": contact["contact_id"],
+                "invoice_number": invoice["invoice_number"],
+                "date": invoice["invoice_date"],
+                # Xero requires a due date. Where the invoice states none,
+                # due on receipt is the conservative reading: it can make a
+                # bill look due sooner, never hide one that is overdue. V1 made
+                # the same choice, and it is recorded in D-020.
+                "due_date": invoice["due_date"] or invoice["invoice_date"],
+                "currency": invoice["currency"],
+                "reference": context_line or attachment.filename,
+                "line_amount_types": coding["line_amount_types"] or "NoTax",
+                "expected_total": invoice["total"],
+                "line_items": [
+                    {
+                        "description": invoice["description"] or "Supplier invoice",
+                        "quantity": "1",
+                        "unit_amount": invoice["subtotal"] or invoice["total"],
+                        "account_code": coding["account_code"],
+                        "tax_type": coding["tax_type"],
+                        "tax_amount": invoice["tax_amount"] or "0",
+                    }
+                ],
+                "source_documents": [dict(arguments)],
+                "authorise": authorise_requested,
+            }
+        )
+        steps.append("executed_bill")
+        if outcome.state is not CapabilityResultState.SUCCEEDED:
+            return CapabilityResult(
+                call_id_source(),
+                CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.FAILED,
+                failure=dict(outcome.failure or {"code": "request_rejected"}),
+            )
+        return CapabilityResult(
+            call_id_source(),
+            CAPTURE_SUPPLIER_INVOICE,
+            CapabilityResultState.SUCCEEDED,
+            {
+                **outcome.values,
+                "invoice": invoice,
+                "steps": (*steps, *outcome.values["steps"]),
+            },
+        )
+
+    def delete_draft(arguments: StructuredData) -> CapabilityResult:
+        def operation() -> Mapping[str, Any]:
+            invoice_id = _required(arguments, "invoice_id")
+            invoice_number = _required(arguments, "invoice_number")
+            expected_total = _decimal(arguments.get("expected_total"), "expected_total")
+            current = _bill_values(account.read_bill(invoice_id))
+            if not current["found"]:
+                raise XeroAccessError("bill_not_found")
+            # Only a draft may be discarded. An authorised bill is an accounting
+            # entry whose reversal is not covered by this capability.
+            if current["status"] not in ("DRAFT", "SUBMITTED"):
+                raise XeroAccessError("bill_not_draft")
+            if (
+                current["invoice_number"] != invoice_number
+                or Decimal(current["total"]) != expected_total
+            ):
+                raise XeroAccessError("source_mismatch")
+            deleted = _bill_values(account.delete_draft_bill(invoice_id))
+            if (
+                deleted["invoice_id"] != invoice_id
+                or deleted["status"] != "DELETED"
+            ):
+                raise XeroAccessError("source_mismatch")
+            return deleted
+
+        return invoke(DELETE_XERO_DRAFT_BILL, operation)
+
+    return {
+        SEARCH_XERO_CONTACTS: search_contacts,
+        LIST_XERO_ACCOUNTS: list_accounts,
+        LIST_XERO_TAX_RATES: list_tax_rates,
+        FIND_XERO_BILL: find_bill,
+        READ_XERO_BILL: read_bill,
+        CAPTURE_SUPPLIER_INVOICE: capture_invoice,
+        DELETE_XERO_DRAFT_BILL: delete_draft,
+    }

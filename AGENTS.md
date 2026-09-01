@@ -22,33 +22,53 @@ Do not edit approved law wording, identity principles or origin memories, approv
 
 ## Required behaviour on every task
 
-Before implementation, state:
+Before implementation, state briefly what the change is for and whether it needs a
+capability AL/X does not already have. Raise a conflict with the laws before
+building, not after.
 
-- the user goal being served;
-- the primitive capabilities involved;
-- whether any new primitive capability is genuinely required;
-- which law-enforcement gates apply;
-- any potential conflict or requested exception.
+Also name the production outcome, its existing authoritative implementation
+path, and every superseded or competing path that must be removed.
 
 During implementation:
 
+- preserve exactly one production path for the outcome and delete every
+  superseded entry point, registration, dispatcher, handler, route and callable
+  sequence;
 - keep raw user language inside the single authoritative AL/X reasoning path;
-- expose structured, language-blind primitive tools;
-- keep orchestration and workflow choice in AL/X;
+- keep interpretation and the choice of what to do next in AL/X;
+- put mechanical steps with one correct outcome in deterministic code;
+- return ambiguity, judgment, and policy choices to AL/X;
 - keep authoritative goals and conversation state out of the frontend;
 - preserve multi-turn and restart-safe goal continuation;
-- return every capability result to AL/X for evaluation;
-- add or update the required architectural and behavioural tests.
+- add or update the tests that enforce the above.
 
-Before declaring completion:
+Before declaring completion, run the law gates and the test suite, and say plainly
+what could not be verified. Never silently treat an unverified requirement as
+passed.
 
-1. Run all available law-enforcement checks.
-2. Complete the change evidence required by `docs/LAW_ENFORCEMENT.md`.
-3. Identify any requirement that could not be verified; never silently treat it as passed.
+## Requesting a Greptile review
+
+Greptile re-reviews are requested through the GitHub Issues API; neither `gh`
+nor browser access is required. The repository `.env` contains `GITHUB_TOKEN`
+(never print or record its value). For the relevant pull-request number, POST
+the JSON body `{"body":"@greptileai"}` to:
+
+`https://api.github.com/repos/alx-1977/AL-X/issues/<PR_NUMBER>/comments`
+
+Use the `Authorization: Bearer $GITHUB_TOKEN`,
+`Accept: application/vnd.github+json`, and
+`X-GitHub-Api-Version: 2022-11-28` headers. Confirm the returned comment URL.
+The established trigger is exactly `@greptileai`, not `@greptile`. Posting a
+review request is an external action, so do it only when Friedl has asked for
+the review or explicitly approved the post.
 
 ## Prohibited shortcuts
 
 Do not introduce phrase or keyword routing, intent menus, regex-based meaning, workflow-specific conversational handlers, feature-owned dialogue, frontend business orchestration, one-action agent loops, process-only goal state, or copied orchestration code from the previous system.
+
+Do not retain a replaced or competing production path as hidden, deprecated,
+wrapped, redirected, recovery-only, optional, renamed, or unregistered code.
+Git history is the archive for removed implementations.
 
 Do not reinterpret a workflow as a "tool" to bypass the laws. A tool must represent a genuinely reusable primitive capability with structured input and output.
 

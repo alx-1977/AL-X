@@ -72,7 +72,7 @@ The durable memory service validates and persists the proposal without interpret
 - Earned memories must be grounded in real retained events or conversations. AL/X must not fabricate a human childhood, physical sensations, off-camera experiences, or events that did not occur.
 - Memories may be reconsidered or superseded, but they must not be silently rewritten to create a different past. Their provenance and revision history remain inspectable.
 - First-person reflections are not secret from Friedl. He can inspect, correct, or delete retained memories and see why they were stored.
-- Retention, inspection, correction, deletion, and relevant-context retrieval remain subject to Law 15 and approved privacy policy.
+- Retention, inspection, correction, deletion, and relevant-context retrieval remain subject to Law 3 and approved privacy policy.
 - Only contextually relevant memories should be supplied to the Core. Autobiographical continuity does not justify replaying the entire history on every turn.
 - Memories and evolving preferences never create permissions, expand authority, weaken safety gates, or amend the Laws.
 

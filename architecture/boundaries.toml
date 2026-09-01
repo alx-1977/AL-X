@@ -12,11 +12,13 @@ boundaries = [
   "tools",
   "providers",
   "interfaces",
+  "observability",
+  "specialists",
   "bootstrap",
   "config",
 ]
 
-restricted_external_imports = { anthropic = ["providers"], certifi = ["providers"], httpx = ["providers"], openai = ["providers"], websockets = ["providers", "interfaces"], xai_sdk = ["providers"] }
+restricted_external_imports = { anthropic = ["providers"], certifi = ["providers"], cryptography = ["providers"], httpx = ["providers"], openai = ["providers"], pypdf = ["providers"], websockets = ["providers", "interfaces"], xai_sdk = ["providers"] }
 
 forbidden_source_names = [
   "command_router",
@@ -40,9 +42,11 @@ goals = ["contracts"]
 memories = ["contracts"]
 capabilities = ["contracts", "safety"]
 safety = ["contracts"]
-tools = ["contracts"]
+tools = ["contracts", "specialists"]
 providers = ["contracts"]
 interfaces = ["contracts", "conversation"]
+observability = []
+specialists = ["contracts"]
 bootstrap = [
   "contracts",
   "core",
@@ -54,6 +58,8 @@ bootstrap = [
   "tools",
   "providers",
   "interfaces",
+  "observability",
+  "specialists",
   "config",
 ]
 config = []

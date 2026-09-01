@@ -125,7 +125,7 @@ class ModelReasonerTests(unittest.TestCase):
         )
         self.assertEqual(decision.response, "A normal response.")
         self.assertIsNone(decision.goal_proposal)
-        supplied = json.loads(model.requests[0].messages[2].content)
+        supplied = json.loads(model.requests[0].messages[-1].content)
         self.assertIsNone(supplied["active_goal"])
         self.assertEqual(supplied["conversation"][0]["content"], "Please investigate")
         self.assertNotIn("rejected_decision_feedback", supplied)

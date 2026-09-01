@@ -7,15 +7,22 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 from alx.bootstrap.providers import build_runtime_providers
 from alx.bootstrap.mail import (
     build_mail_runtime,
     build_mail_send_runtime,
+    captured_invoice_filing_scopes,
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.reasoning import build_model_reasoner
+from alx.bootstrap.xero import (
+    BILL_EXECUTION_CAPABILITIES,
+    BILL_TASK_CAPABILITIES,
+    build_xero_runtime,
+)
+from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     ConfigurationError,
@@ -23,12 +30,15 @@ from alx.config import (
     MailSendSettings,
     MailSettings,
     RuntimeSettings,
+    XeroSettings,
 )
 from alx.contracts import GoalStatus
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
+from alx.observability import BudgetExceeded, XERO_BILL_BUDGET, SQLiteUsageRecorder
+from alx.specialists import ModelSpecialist, extract_invoice
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
 
@@ -54,6 +64,13 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
             values[key] = value
     values.update(inherited if inherited is not None else os.environ)
     return values
+
+
+def _completed(attempt) -> bool:
+    """True only when a capture actually finished its work."""
+    result = getattr(attempt, "result", None)
+    values = getattr(result, "values", None)
+    return bool(values and values.get("completed") is True)
 
 
 def locate_active_goal(store: SQLiteGoalStore, conversation_id: str) -> str | None:
@@ -108,7 +125,34 @@ async def run(repository_root: Path) -> None:
     storage_root.mkdir(parents=True, exist_ok=True)
 
     diagnostics = VoiceDiagnosticBuffer()
-    providers = build_runtime_providers(provider_settings, diagnostics.publish)
+    usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
+    # The Core names the conversation on every budget check, so a dispatch can
+    # arm the ceiling for the task that is actually running.
+    current_conversation_id = [""]
+
+    def budget_check(conversation_id: str) -> None:
+        """Stop a runaway task, and convert that stop into bounded recovery.
+
+        A ceiling that only ever raises leaves the conversation deadlocked:
+        the Core checkpoints, the transport keeps listening, and every later
+        turn re-raises against the same exhausted window, so the next thing
+        Friedl says fails before it is heard. Declaring recovery here gives
+        the next turns the configured allowance and nothing more. It is
+        idempotent, so being stopped repeatedly never buys a further one.
+        """
+        current_conversation_id[0] = conversation_id
+        try:
+            usage.check(conversation_id)
+        except BudgetExceeded:
+            usage.enter_recovery(conversation_id)
+            raise
+
+    def telemetry(task_id: str, values: Mapping[str, Any]) -> None:
+        """Development panel and durable record see the same measurement."""
+        diagnostics.publish(task_id, values)
+        usage.record(task_id, values)
+
+    providers = build_runtime_providers(provider_settings, telemetry)
     goal_store = SQLiteGoalStore(storage_root / "goals.sqlite3")
     conversation_store = SQLiteConversationStore(storage_root / "conversations.sqlite3")
     migrate_legacy_conversations(goal_store, conversation_store)
@@ -125,6 +169,59 @@ async def run(repository_root: Path) -> None:
     policies = dict(mail_runtime.policies)
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
+
+    # D-016 authorises the narrowly scoped supplier-bill capability. Missing
+    # configuration leaves Xero absent without weakening mail or voice.
+    xero_approval_ttl_seconds: int | None = None
+    try:
+        xero_settings = XeroSettings.from_environment(environment)
+    except ConfigurationError as error:
+        LOGGER.info("Xero unavailable: %s", error)
+    else:
+        # Extraction is a bounded question, so it goes to a specialist with
+        # its own model and reasoning effort. When no specialist is configured
+        # the extractor stays absent and capture refuses: answering it through
+        # the Core is the expensive path this exists to avoid.
+        specialist = (
+            None if providers.specialist is None
+            else ModelSpecialist(providers.specialist)
+        )
+        xero_runtime = build_xero_runtime(
+            xero_settings,
+            storage_root,
+            mail_runtime.source,
+            lambda: current_call_id[0],
+            None if specialist is None
+            else (
+                lambda text, context_line: extract_invoice(
+                    specialist, text, context_line
+                )
+            ),
+        )
+        for definition in xero_runtime.definitions:
+            registry.register(definition)
+        policies.update(xero_runtime.policies)
+        executors.update(xero_runtime.executors)
+        permissions.update(xero_runtime.permissions)
+        xero_approval_ttl_seconds = xero_settings.approval_ttl_seconds
+
+        # A DHL import posts to Xero, so its one capability is built with the
+        # same adapter and the same authority as any other bill write.
+        dhl_runtime = build_dhl_runtime(
+            mail_runtime.source,
+            xero_runtime.adapter,
+            lambda: current_call_id[0],
+            xero_settings.import_vat_account,
+            xero_settings.customs_duty_account,
+            xero_settings.clearance_account,
+            xero_settings.dhl_supplier_name,
+            xero_settings.unattended_bill_writes,
+        )
+        for definition in dhl_runtime.definitions:
+            registry.register(definition)
+        policies.update(dhl_runtime.policies)
+        executors.update(dhl_runtime.executors)
+        permissions.update(dhl_runtime.permissions)
 
     # Replying is authorised by DECISIONS.md D-011 and configured separately, so
     # a runtime without send settings reads mail without being able to send it.
@@ -150,24 +247,43 @@ async def run(repository_root: Path) -> None:
 
     def dispatch(call, state):
         current_call_id[0] = call.call_id
-        return broker.dispatch(
+        # Reaching for any bill capability declares the task routine, so the
+        # ceiling applies from the first one rather than from the commit.
+        if call.capability_id in BILL_TASK_CAPABILITIES:
+            usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
+        attempt = broker.dispatch(
             call,
             AuthorityContext(
                 principal_reference=voice_settings.primary_person_id,
                 granted_permission_references=frozenset(permissions),
                 evaluated_at=datetime.now(UTC),
                 approvals=() if state is None else state.approvals,
-                standing_scopes=mail_post_reply_standing_scopes(state),
+                standing_scopes=(
+                    *mail_post_reply_standing_scopes(state),
+                    *captured_invoice_filing_scopes(state),
+                ),
             ),
         )
+        # A finished bill closes its ceiling window, so the next invoice gets
+        # its own. Only a completed capture counts: settling after a refusal
+        # or a returned ambiguity would hand the same bill a fresh ceiling and
+        # let it keep reasoning.
+        if call.capability_id in BILL_EXECUTION_CAPABILITIES and _completed(attempt):
+            usage.settle(current_conversation_id[0])
+        return attempt
 
+    approval_windows = tuple(
+        value for value in (approval_ttl_seconds, xero_approval_ttl_seconds)
+        if value is not None
+    )
     core = CoreAgent(
         goal_store,
         build_model_reasoner(providers.reasoning, repository_root),
         dispatch,
         registry.list_definitions(),
         memory_store,
-        approval_ttl_seconds=approval_ttl_seconds,
+        approval_ttl_seconds=min(approval_windows) if approval_windows else None,
+        budget_check=budget_check,
     )
     gateway = ConversationGateway(
         core,

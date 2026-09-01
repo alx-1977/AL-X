@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import AsyncIterator, Protocol
 
 from alx.contracts.records import BackgroundEvent
@@ -81,6 +82,78 @@ class MailContent:
     def __post_init__(self) -> None:
         if not isinstance(self.has_attachments, bool):
             raise TypeError("has_attachments must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class MailAttachment:
+    """One exact MIME attachment and its provider-extracted readable text."""
+
+    attachment_id: str
+    filename: str
+    media_type: str
+    size: int
+    sha256: str
+    text: str = ""
+
+    def __post_init__(self) -> None:
+        _required(self.attachment_id, "attachment_id")
+        _required(self.filename, "filename")
+        _required(self.media_type, "media_type")
+        _required(self.sha256, "sha256")
+        if not isinstance(self.size, int) or isinstance(self.size, bool) or self.size < 0:
+            raise ValueError("size must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class MailSearchCriteria:
+    """Structured IMAP search facts; no user wording or workflow intent."""
+
+    mailbox_id: str
+    sender: str = ""
+    subject: str = ""
+    date_from: str = ""
+    date_to: str = ""
+    seen_state: str = "any"
+    has_attachments: bool | None = None
+    limit: int = 50
+
+    def __post_init__(self) -> None:
+        _required(self.mailbox_id, "mailbox_id")
+        for value in (self.mailbox_id, self.sender, self.subject):
+            if any(character in value for character in ("\r", "\n", "\x00")):
+                raise ValueError("mail search text contains a control character")
+        for name in ("date_from", "date_to"):
+            value = getattr(self, name)
+            if value:
+                date.fromisoformat(value)
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValueError("date_from must not be after date_to")
+        if self.seen_state not in ("any", "seen", "unseen"):
+            raise ValueError("seen_state must be any, seen, or unseen")
+        if self.has_attachments is not None and not isinstance(
+            self.has_attachments, bool
+        ):
+            raise TypeError("has_attachments must be a bool or None")
+        if (
+            not isinstance(self.limit, int)
+            or isinstance(self.limit, bool)
+            or not 1 <= self.limit <= 100
+        ):
+            raise ValueError("limit must be between 1 and 100")
+
+
+@dataclass(frozen=True, slots=True)
+class MailSearchResult:
+    reference: MailReference
+    subject: str
+    sender: str
+    received_at: str
+    has_attachments: bool
+    seen: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.has_attachments, bool) or not isinstance(self.seen, bool):
+            raise TypeError("mail search flags must be bools")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,9 +243,21 @@ class MailAccessError(Exception):
 
 
 class MailAccount(Protocol):
+    def search(
+        self, criteria: MailSearchCriteria
+    ) -> tuple[tuple[MailSearchResult, ...], bool]: ...
+
     def read(self, reference: MailReference) -> MailContent: ...
 
+    def list_attachments(self, reference: MailReference) -> tuple[MailAttachment, ...]: ...
+
+    def read_attachment(
+        self, reference: MailReference, attachment_id: str
+    ) -> tuple[MailAttachment, bytes]: ...
+
     def mark_seen(self, reference: MailReference) -> None: ...
+
+    def file_message(self, reference: MailReference, mailbox: str) -> str: ...
 
     def move_to_trash(self, reference: MailReference) -> str: ...
 

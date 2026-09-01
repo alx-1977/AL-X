@@ -174,6 +174,8 @@ class MailSettings:
     imap_host: str
     imap_port: int
     poll_seconds: int
+    # Where a processed supplier invoice is filed. Blank leaves mail in place.
+    processed_mailbox: str
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "MailSettings":
@@ -183,13 +185,17 @@ class MailSettings:
             imap_host=_required(environment, "MAIL_IMAP_HOST"),
             imap_port=_integer_in_range(environment, "MAIL_IMAP_PORT", 1, 65535),
             poll_seconds=_positive_integer(environment, "ALX_MAIL_POLL_SECONDS", 15),
+            processed_mailbox=environment.get(
+                "ALX_MAIL_PROCESSED_MAILBOX", ""
+            ).strip(),
         )
 
     def __repr__(self) -> str:
         return (
             f"MailSettings(address={self.address!r}, secret=<redacted>, "
             f"imap_host={self.imap_host!r}, imap_port={self.imap_port!r}, "
-            f"poll_seconds={self.poll_seconds!r})"
+            f"poll_seconds={self.poll_seconds!r}, "
+            f"processed_mailbox={self.processed_mailbox!r})"
         )
 
 
@@ -233,8 +239,153 @@ class MailSendSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class XeroSettings:
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+    tenant_id: str
+    timeout_seconds: int
+    approval_ttl_seconds: int
+    unattended_bill_writes: bool
+    unattended_bill_deletes: bool
+    # Where a supplier's own history gives no single answer, the account is a
+    # policy choice no document contains. Blank leaves it unresolved and asks.
+    default_account_code: str
+    default_tax_type: str
+    # V1's proven DHL treatment: import VAT is claimable, duty is not, and
+    # clearance is a service charge. Configurable for another organisation.
+    import_vat_account: str
+    customs_duty_account: str
+    clearance_account: str
+    # D-021: the DHL supplier is configuration, so a wrong contact cannot be
+    # supplied to the import capability. It is a name, not a Xero identifier:
+    # the contact is resolved by exact name at run time, as V1 did.
+    dhl_supplier_name: str
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
+        return cls(
+            client_id=_required(environment, "XERO_CLIENT_ID"),
+            client_secret=_required(environment, "XERO_CLIENT_SECRET"),
+            redirect_uri=_required(environment, "XERO_REDIRECT_URI"),
+            tenant_id=environment.get("XERO_TENANT_ID", "").strip(),
+            timeout_seconds=_positive_integer(
+                environment, "ALX_XERO_TIMEOUT_SECONDS", 60
+            ),
+            approval_ttl_seconds=_positive_integer(
+                environment, "ALX_XERO_APPROVAL_TTL_SECONDS", 600
+            ),
+            # D-018. Friedl authorised unattended supplier-bill writes. The
+            # default stays attended so the authority is an explicit choice.
+            unattended_bill_writes=_boolean(
+                environment, "ALX_XERO_UNATTENDED_BILL_WRITES", False
+            ),
+            # D-019. Discarding a draft is requested, not routine, so it
+            # defaults to asking even where bill writes run unattended.
+            unattended_bill_deletes=_boolean(
+                environment, "ALX_XERO_UNATTENDED_BILL_DELETES", False
+            ),
+            default_account_code=environment.get(
+                "ALX_XERO_DEFAULT_ACCOUNT_CODE", ""
+            ).strip(),
+            default_tax_type=environment.get(
+                "ALX_XERO_DEFAULT_TAX_TYPE", ""
+            ).strip(),
+            import_vat_account=environment.get(
+                "ALX_XERO_IMPORT_VAT_ACCOUNT", "820"
+            ).strip(),
+            customs_duty_account=environment.get(
+                "ALX_XERO_CUSTOMS_DUTY_ACCOUNT", "426"
+            ).strip(),
+            clearance_account=environment.get(
+                "ALX_XERO_CLEARANCE_ACCOUNT", "425"
+            ).strip(),
+            dhl_supplier_name=environment.get(
+                "ALX_XERO_DHL_SUPPLIER_NAME", "DHL International (Pty) Ltd"
+            ).strip(),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"XeroSettings(client_id={self.client_id!r}, "
+            f"client_secret=<redacted>, redirect_uri={self.redirect_uri!r}, "
+            f"tenant_id={self.tenant_id!r}, "
+            f"timeout_seconds={self.timeout_seconds!r}, "
+            f"approval_ttl_seconds={self.approval_ttl_seconds!r}, "
+            f"unattended_bill_writes={self.unattended_bill_writes!r}, "
+            f"unattended_bill_deletes={self.unattended_bill_deletes!r})"
+        )
+
+
+
+def _specialist_settings(
+    environment: Mapping[str, str], core_provider: str
+) -> "ReasoningSettings":
+    """Configure the specialist independently, defaulting to the Core provider.
+
+    Extraction is a bounded structured question, so it defaults to the lowest
+    reasoning setting that still returns reliable structured output. Nothing
+    here changes the Core.
+    """
+    provider = environment.get(
+        "ALX_SPECIALIST_PROVIDER", core_provider
+    ).strip().lower() or core_provider
+    key_name = {
+        "openai": "OPENAI_API_KEY",
+        "xai": "XAI_API_KEY",
+        "kimi": "KIMI_API_KEY",
+    }.get(provider, "ALX_SPECIALIST_API_KEY")
+    base_name = {
+        "openai": "OPENAI_BASE_URL",
+        "xai": "XAI_BASE_URL",
+        "kimi": "KIMI_BASE_URL",
+    }.get(provider, "ALX_SPECIALIST_BASE_URL")
+    base_fallback = {
+        "openai": "https://api.openai.com",
+        "xai": "https://api.x.ai",
+        "kimi": "https://api.moonshot.ai",
+    }.get(provider)
+    return ReasoningSettings(
+        provider=provider,
+        model=_configured(
+            environment,
+            "ALX_SPECIALIST_MODEL",
+            "ALX_REASONING_MODEL",
+        ),
+        # Defaults to the Core provider's credential; only a specialist on a
+        # different provider needs a key of its own.
+        api_key=_configured(
+            environment,
+            "ALX_SPECIALIST_API_KEY",
+            key_name,
+            environment.get("ALX_REASONING_API_KEY", "").strip() or None,
+        ),
+        base_url=_configured(
+            environment,
+            "ALX_SPECIALIST_BASE_URL",
+            base_name,
+            base_fallback
+            or environment.get("ALX_REASONING_BASE_URL", "").strip()
+            or "",
+        ).rstrip("/"),
+        timeout_seconds=_positive_integer(
+            environment, "ALX_SPECIALIST_TIMEOUT_SECONDS", 60
+        ),
+        streaming=_boolean(environment, "ALX_SPECIALIST_STREAMING", False),
+        service_tier=environment.get(
+            "ALX_SPECIALIST_SERVICE_TIER", "default"
+        ).strip().lower(),
+        effort=environment.get("ALX_SPECIALIST_EFFORT", "none").strip().lower(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     reasoning: ReasoningSettings
+    # Bounded extraction does not need Core-level reasoning, and reasoning
+    # tokens were the dominant cost. The specialist is configured separately so
+    # tuning it never disturbs the Core.
+    specialist: ReasoningSettings
     speech_to_text: SpeechToTextSettings
     text_to_speech: TextToSpeechSettings
 
@@ -244,14 +395,17 @@ class RuntimeSettings:
         provider_key_name = {
             "openai": "OPENAI_API_KEY",
             "xai": "XAI_API_KEY",
+            "kimi": "KIMI_API_KEY",
         }.get(reasoning_provider, "ALX_REASONING_API_KEY")
         provider_base_name = {
             "openai": "OPENAI_BASE_URL",
             "xai": "XAI_BASE_URL",
+            "kimi": "KIMI_BASE_URL",
         }.get(reasoning_provider, "ALX_REASONING_BASE_URL")
         provider_base_fallback = {
             "openai": "https://api.openai.com",
             "xai": "https://api.x.ai",
+            "kimi": "https://api.moonshot.ai",
         }.get(reasoning_provider)
         return cls(
             reasoning=ReasoningSettings(
@@ -275,6 +429,7 @@ class RuntimeSettings:
                     "ALX_REASONING_EFFORT", "medium"
                 ).strip().lower(),
             ),
+            specialist=_specialist_settings(environment, reasoning_provider),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
                 model=_required(environment, "ALX_STT_MODEL"),

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import imaplib
+import io
 import json
 import logging
+import mimetypes
 import re
 import sqlite3
+import zipfile
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesParser
@@ -21,15 +25,22 @@ from typing import Any
 from alx.contracts import (
     BackgroundEvent,
     MailAccessError,
+    MailAttachment,
     MailContent,
     MailParticipants,
     MailReference,
+    MailSearchCriteria,
+    MailSearchResult,
     MailThreading,
 )
 from alx.contracts.provenance import (
     RetentionPolicy,
     provenance_from_storage,
     provenance_to_storage,
+)
+from alx.providers.pdf_limits import (
+    PDF_DECODED_STREAM_BYTES,
+    enforce_pdf_decode_limits,
 )
 
 
@@ -83,6 +94,202 @@ def _has_attachments(item) -> bool:
         )
         for part in candidates
     )
+
+
+def _attachment_parts(item):
+    """Enumerate explicit attachments with stable MIME-walk identifiers."""
+    candidates = item.walk() if item.is_multipart() else (item,)
+    found = []
+    for index, part in enumerate(candidates, start=1):
+        if part.is_multipart():
+            continue
+        if part.get_content_disposition() != "attachment" and part.get_filename() is None:
+            continue
+        found.append((str(index), part))
+    return tuple(found)
+
+
+def _page_within_bounds(page) -> bool:
+    """Measure a page's stored stream without letting pypdf decode it.
+
+    page.get_contents() decodes to answer, so it cannot bound its own decode.
+    The indirect object's retained bytes are what arrived on the wire.
+    """
+    contents = page.get("/Contents")
+    items = contents if isinstance(contents, list) else [contents]
+    stored = 0
+    for item in items:
+        if item is None:
+            continue
+        try:
+            obj = item.get_object() if hasattr(item, "get_object") else item
+        except Exception:
+            return False
+        stored += len(getattr(obj, "_data", b"") or b"")
+        if stored > _PAGE_STORED_BYTES:
+            return False
+    return True
+
+
+def _attachment_text(media_type: str, payload: bytes, charset: str | None) -> str:
+    """Extract domain text without granting the adapter accounting authority.
+
+    Every attachment is untrusted input, so the size limit applies to all of
+    them rather than only to PDFs: a 24MB CSV was previously decoded and
+    returned whole.
+    """
+    if len(payload) > _DOCUMENT_BYTES:
+        return ""
+    if media_type.startswith("text/") or media_type in (
+        "application/csv",
+        "application/json",
+        "application/xml",
+    ):
+        return payload.decode(charset or "utf-8", errors="replace")[
+            :_DOCUMENT_TEXT_CHARACTERS
+        ]
+    if media_type == "application/pdf":
+        if not payload.startswith(b"%PDF-"):
+            return ""
+        if len(payload) > _PDF_BYTES:
+            return ""
+        try:
+            from pypdf import PdfReader
+
+            enforce_pdf_decode_limits()
+            reader = PdfReader(io.BytesIO(payload), strict=True)
+            if len(reader.pages) > _DOCUMENT_PAGES:
+                return ""
+            # Every PDF attachment reaches this path, not only a DHL one, and
+            # a page's content stream is decoded before any text appears. A
+            # page that is large on the wire is refused before that work.
+            extracted: list[str] = []
+            characters = 0
+            decoded_bytes = 0
+            for page in reader.pages:
+                if not _page_within_bounds(page):
+                    return ""
+                contents = page.get_contents()
+                if contents is not None:
+                    decoded_bytes += len(contents.get_data())
+                    if decoded_bytes > _DOCUMENT_DECODED_CONTENT_BYTES:
+                        return ""
+                text = page.extract_text()
+                if not text:
+                    continue
+                characters += len(text)
+                if characters > _DOCUMENT_TEXT_CHARACTERS:
+                    return ""
+                extracted.append(text)
+            return "\n".join(extracted)
+        except Exception:
+            return ""
+    return ""
+
+
+def _mail_attachment(attachment_id: str, part) -> tuple[MailAttachment, bytes]:
+    payload = part.get_payload(decode=True) or b""
+    media_type = part.get_content_type() or "application/octet-stream"
+    filename = _decoded(part.get_filename()) or f"attachment-{attachment_id}"
+    return (
+        MailAttachment(
+            attachment_id,
+            filename,
+            media_type,
+            len(payload),
+            hashlib.sha256(payload).hexdigest(),
+            "",
+        ),
+        payload,
+    )
+
+
+# A mail attachment is untrusted input, and its text is extracted before any
+# capability sees it, so the limits belong here rather than in one consumer.
+# Bound the transport size before parsing.  This does not bound decompression:
+# a tiny stored stream can have an extreme expansion ratio, so pdf_limits also
+# caps pypdf's decoded output.  The retained V1 worksheets are about 1.5KB; a
+# scanned multi-page invoice is a few MB.
+_DOCUMENT_BYTES = 25 * 1024 * 1024
+_PDF_BYTES = 8 * 1024 * 1024
+# Refuse an unusually large stored page before decoding it.  This is only a
+# fast preflight; the independent decoded-output ceiling is the bomb defence.
+_PAGE_STORED_BYTES = 512 * 1024
+_DOCUMENT_PAGES = 200
+_DOCUMENT_TEXT_CHARACTERS = 2_000_000
+_DOCUMENT_DECODED_CONTENT_BYTES = PDF_DECODED_STREAM_BYTES
+
+
+_ARCHIVE_MEMBER_LIMIT = 100
+_ARCHIVE_MEMBER_BYTES = 25 * 1024 * 1024
+_ARCHIVE_TOTAL_BYTES = 50 * 1024 * 1024
+_ARCHIVE_DEPTH_LIMIT = 4
+
+
+def _message_attachments(item) -> tuple[tuple[MailAttachment, bytes], ...]:
+    """Expose bounded nested ZIP members as stable transient attachments."""
+    found: list[tuple[MailAttachment, bytes]] = []
+    expanded_members = 0
+    expanded_bytes = 0
+
+    def expand(attachment_id: str, payload: bytes, depth: int) -> None:
+        nonlocal expanded_members, expanded_bytes
+        if depth > _ARCHIVE_DEPTH_LIMIT:
+            raise MailAccessError("archive_unsafe")
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                members = [member for member in archive.infolist() if not member.is_dir()]
+                if (
+                    expanded_members + len(members) > _ARCHIVE_MEMBER_LIMIT
+                    or any(
+                        member.file_size > _ARCHIVE_MEMBER_BYTES
+                        or member.flag_bits & 1
+                        for member in members
+                    )
+                    or expanded_bytes + sum(member.file_size for member in members)
+                    > _ARCHIVE_TOTAL_BYTES
+                ):
+                    raise MailAccessError("archive_unsafe")
+                for index, member in enumerate(members, start=1):
+                    content = archive.read(member)
+                    expanded_members += 1
+                    expanded_bytes += len(content)
+                    filename = Path(member.filename).name
+                    if not filename:
+                        continue
+                    member_id = f"{attachment_id}:{index}"
+                    media_type = (
+                        mimetypes.guess_type(filename)[0]
+                        or "application/octet-stream"
+                    )
+                    found.append(
+                        (
+                            MailAttachment(
+                                member_id,
+                                filename,
+                                media_type,
+                                len(content),
+                                hashlib.sha256(content).hexdigest(),
+                                "",
+                            ),
+                            content,
+                        )
+                    )
+                    if zipfile.is_zipfile(io.BytesIO(content)):
+                        expand(member_id, content, depth + 1)
+        except MailAccessError:
+            raise
+        except (OSError, ValueError, zipfile.BadZipFile, RuntimeError):
+            raise MailAccessError("archive_unsafe") from None
+
+    for attachment_id, part in _attachment_parts(item):
+        outer, payload = _mail_attachment(attachment_id, part)
+        found.append((outer, payload))
+        if outer.media_type not in ("application/zip", "application/x-zip-compressed") \
+                and not zipfile.is_zipfile(io.BytesIO(payload)):
+            continue
+        expand(attachment_id, payload, 1)
+    return tuple(found)
 
 
 # RFC 5322 message identifiers are angle-addr tokens.
@@ -457,7 +664,7 @@ class ICloudMailAdapter:
                 )
             await asyncio.sleep(self._poll_seconds)
 
-    def read(self, reference: MailReference) -> MailContent:
+    def _read_parsed(self, reference: MailReference):
         connection = self._open()
         try:
             status, _ = connection.select(self._quoted(reference.mailbox_id), readonly=True)
@@ -470,8 +677,121 @@ class ICloudMailAdapter:
             )
             if status != "OK":
                 raise MailAccessError("message_unavailable")
-            parsed = BytesParser(policy=policy.default).parsebytes(_payload(values))
-            return MailContent(
+            return BytesParser(policy=policy.default).parsebytes(_payload(values))
+        finally:
+            self._close(connection)
+
+    @staticmethod
+    def _search_text(value: str) -> str:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _seen(values) -> bool:
+        for value in values or ():
+            metadata = value[0] if isinstance(value, tuple) and value else value
+            if isinstance(metadata, bytes) and b"\\Seen" in metadata:
+                return True
+        return False
+
+    @staticmethod
+    def _bodystructure_has_attachments(values) -> bool:
+        metadata: list[bytes] = []
+        for value in values or ():
+            candidate = value[0] if isinstance(value, tuple) and value else value
+            if isinstance(candidate, bytes):
+                metadata.append(candidate)
+        joined = b" ".join(metadata).upper()
+        marker = joined.find(b"BODYSTRUCTURE")
+        if marker < 0:
+            raise MailAccessError("search_failed")
+        structure = joined[marker:]
+        # MIME filename parameters and attachment dispositions are the same
+        # facts used by _has_attachments, without downloading part payloads.
+        return any(
+            token in structure
+            for token in (b'"ATTACHMENT"', b'"FILENAME"', b'"NAME"')
+        )
+
+    def search(
+        self, criteria: MailSearchCriteria
+    ) -> tuple[tuple[MailSearchResult, ...], bool]:
+        """Search stable message identifiers without changing mail state."""
+        connection = self._open()
+        try:
+            status, _ = connection.select(
+                self._quoted(criteria.mailbox_id), readonly=True
+            )
+            if status != "OK":
+                raise MailAccessError("mailbox_unavailable")
+            validity = _uid_validity(connection)
+            terms: list[str] = []
+            if criteria.sender:
+                terms.extend(("FROM", self._search_text(criteria.sender)))
+            if criteria.subject:
+                terms.extend(("SUBJECT", self._search_text(criteria.subject)))
+            if criteria.date_from:
+                terms.extend(
+                    ("SINCE", date.fromisoformat(criteria.date_from).strftime("%d-%b-%Y"))
+                )
+            if criteria.date_to:
+                exclusive = date.fromisoformat(criteria.date_to) + timedelta(days=1)
+                terms.extend(("BEFORE", exclusive.strftime("%d-%b-%Y")))
+            if criteria.seen_state != "any":
+                terms.append(criteria.seen_state.upper())
+            status, values = connection.uid("search", None, *(terms or ("ALL",)))
+            if status != "OK":
+                raise MailAccessError("search_failed")
+            identifiers = tuple(
+                reversed(
+                    tuple(
+                        value.decode("ascii")
+                        for value in (values[0] or b"").split()
+                        if value.isdigit()
+                    )
+                )
+            )
+            found: list[MailSearchResult] = []
+            incomplete = False
+            scan_limit = min(1000, max(criteria.limit * 10, 100))
+            for index, uid in enumerate(identifiers):
+                if index >= scan_limit:
+                    incomplete = True
+                    break
+                status, fetched = connection.uid(
+                    "fetch", uid, "(BODY.PEEK[HEADER] BODYSTRUCTURE FLAGS)"
+                )
+                if status != "OK":
+                    incomplete = True
+                    continue
+                parsed = BytesParser(policy=policy.default).parsebytes(_payload(fetched))
+                has_attachments = self._bodystructure_has_attachments(fetched)
+                if (
+                    criteria.has_attachments is not None
+                    and has_attachments is not criteria.has_attachments
+                ):
+                    continue
+                found.append(
+                    MailSearchResult(
+                        MailReference(criteria.mailbox_id, validity, uid),
+                        _decoded(parsed.get("Subject")),
+                        _decoded(parsed.get("From")),
+                        str(parsed.get("Date", "")),
+                        has_attachments,
+                        self._seen(fetched),
+                    )
+                )
+                if len(found) >= criteria.limit:
+                    if index + 1 < len(identifiers):
+                        incomplete = True
+                    break
+            return tuple(found), incomplete
+        finally:
+            self._close(connection)
+
+    def read(self, reference: MailReference) -> MailContent:
+        parsed = self._read_parsed(reference)
+        return MailContent(
                 reference,
                 _decoded(parsed.get("Subject")),
                 _decoded(parsed.get("From")),
@@ -490,8 +810,34 @@ class ICloudMailAdapter:
                 ),
                 _has_attachments(parsed),
             )
-        finally:
-            self._close(connection)
+
+    def list_attachments(self, reference: MailReference) -> tuple[MailAttachment, ...]:
+        parsed = self._read_parsed(reference)
+        return tuple(
+            attachment
+            for attachment, _payload in _message_attachments(parsed)
+        )
+
+    def read_attachment(
+        self, reference: MailReference, attachment_id: str
+    ) -> tuple[MailAttachment, bytes]:
+        if not isinstance(attachment_id, str) or not attachment_id.strip():
+            raise MailAccessError("attachment_unavailable")
+        parsed = self._read_parsed(reference)
+        for attachment, payload in _message_attachments(parsed):
+            if attachment.attachment_id == attachment_id:
+                return (
+                    MailAttachment(
+                        attachment.attachment_id,
+                        attachment.filename,
+                        attachment.media_type,
+                        attachment.size,
+                        attachment.sha256,
+                        _attachment_text(attachment.media_type, payload, None),
+                    ),
+                    payload,
+                )
+        raise MailAccessError("attachment_unavailable")
 
     @staticmethod
     def _quoted(mailbox_id: str) -> str:
@@ -522,6 +868,31 @@ class ICloudMailAdapter:
             if status != "OK":
                 raise MailAccessError("trash_unavailable")
             return self._trash_mailbox(values)
+        finally:
+            self._close(connection)
+
+    def file_message(self, reference: MailReference, mailbox: str) -> str:
+        """Move one message to a named mailbox, releasing mail attention.
+
+        Filing a processed invoice is not deletion: the message stays in the
+        account, and the mailbox is configured rather than chosen by AL/X.
+        """
+        if not isinstance(mailbox, str) or not mailbox.strip():
+            raise MailAccessError("mailbox_unavailable")
+        connection = self._open()
+        try:
+            status, _ = connection.select(
+                self._quoted(reference.mailbox_id), readonly=False
+            )
+            if status != "OK":
+                raise MailAccessError("mailbox_unavailable")
+            if _uid_validity(connection) != reference.uid_validity:
+                raise MailAccessError("identifier_stale")
+            status, _ = connection.uid("MOVE", reference.uid, self._quoted(mailbox))
+            if status != "OK":
+                raise MailAccessError("move_failed")
+            self._observations.acknowledge(reference)
+            return mailbox
         finally:
             self._close(connection)
 
