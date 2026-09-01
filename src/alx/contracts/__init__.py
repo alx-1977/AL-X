@@ -1,6 +1,18 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
 from alx.contracts.cognition import Cognition
+from alx.contracts.notebook import (
+    DeletionRecord,
+    EntryKind,
+    EntryProposal,
+    EntryRevision,
+    EntryRevisionProposal,
+    EntrySnapshot,
+    ResearchQuery,
+    ThreadProposal,
+    ThreadSnapshot,
+    ThreadStatus,
+)
 from alx.contracts.research import (
     ResearchLedger,
     ResearchModelUnpriced,
@@ -87,6 +99,16 @@ from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
     "Cognition",
+    "DeletionRecord",
+    "EntryKind",
+    "EntryProposal",
+    "EntryRevision",
+    "EntryRevisionProposal",
+    "EntrySnapshot",
+    "ResearchQuery",
+    "ThreadProposal",
+    "ThreadSnapshot",
+    "ThreadStatus",
     "ResearchLedger",
     "ResearchModelUnpriced",
     "ResearchPricing",
