@@ -53,14 +53,20 @@ def _build_reasoning_model(
             reasoning_effort=settings.effort,
             telemetry_sink=telemetry_sink,
         )
-    if settings.provider == "xai":
-        # The xAI transport takes no reasoning-effort parameter, so the
+    if settings.provider in ("xai", "kimi"):
+        # One OpenAI-style /v1/chat/completions client serves both. The
+        # blueprint keeps the model a configuration choice, so a second vendor
+        # speaking the same protocol needs a base URL and a key, not a second
+        # adapter or a second conversation path.
+        #
+        # Neither transport takes a reasoning-effort parameter, so the
         # configured effort cannot be honoured there. Saying so is better than
         # leaving a setting that looks active and is not.
         if settings.effort not in ("", "medium"):
             LOGGER.info(
-                "Specialist reasoning effort %r is not supported by xai and is ignored",
+                "Specialist reasoning effort %r is not supported by %s and is ignored",
                 settings.effort,
+                settings.provider,
             )
         return XAIReasoningModel(
             settings.model,
@@ -90,7 +96,8 @@ def build_runtime_providers(
             reasoning_effort=settings.reasoning.effort,
             telemetry_sink=telemetry_sink,
         )
-    elif settings.reasoning.provider == "xai":
+    elif settings.reasoning.provider in ("xai", "kimi"):
+        # Same OpenAI-style transport; the vendor is a base URL and a key.
         reasoning = XAIReasoningModel(
             settings.reasoning.model,
             settings.reasoning.api_key,

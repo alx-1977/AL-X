@@ -333,14 +333,17 @@ def _specialist_settings(
     key_name = {
         "openai": "OPENAI_API_KEY",
         "xai": "XAI_API_KEY",
+        "kimi": "KIMI_API_KEY",
     }.get(provider, "ALX_SPECIALIST_API_KEY")
     base_name = {
         "openai": "OPENAI_BASE_URL",
         "xai": "XAI_BASE_URL",
+        "kimi": "KIMI_BASE_URL",
     }.get(provider, "ALX_SPECIALIST_BASE_URL")
     base_fallback = {
         "openai": "https://api.openai.com",
         "xai": "https://api.x.ai",
+        "kimi": "https://api.moonshot.ai",
     }.get(provider)
     return ReasoningSettings(
         provider=provider,
@@ -392,14 +395,17 @@ class RuntimeSettings:
         provider_key_name = {
             "openai": "OPENAI_API_KEY",
             "xai": "XAI_API_KEY",
+            "kimi": "KIMI_API_KEY",
         }.get(reasoning_provider, "ALX_REASONING_API_KEY")
         provider_base_name = {
             "openai": "OPENAI_BASE_URL",
             "xai": "XAI_BASE_URL",
+            "kimi": "KIMI_BASE_URL",
         }.get(reasoning_provider, "ALX_REASONING_BASE_URL")
         provider_base_fallback = {
             "openai": "https://api.openai.com",
             "xai": "https://api.x.ai",
+            "kimi": "https://api.moonshot.ai",
         }.get(reasoning_provider)
         return cls(
             reasoning=ReasoningSettings(

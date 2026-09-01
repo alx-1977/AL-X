@@ -32,9 +32,30 @@
   restart mid-bill loses the ceiling until the next bill capability is
   reached. Recorded rather than fixed: it cannot post a wrong bill, but it
   weakens the guardrail across a restart.
+- [ ] Recovery state is in memory with the window, so a restart mid-recovery
+  drops the task back to an unbudgeted conversation rather than resuming the
+  remaining allowance. Same root cause as the item above; it fails open on the
+  ceiling, never on the deadlock.
 - [ ] Mail search and read calls made before the first Xero capability fall
   outside the ceiling, which is how two bills reached twelve Core calls. The
   ceiling covers the bill, not the work of finding it.
+
+## Conversation context growth
+
+Fixed by a deterministic reasoning projection: the Core sends the last
+`REASONING_TURN_WINDOW` turns plus every older turn the active goal still
+cites. The complete conversation stays stored and unrewritten, and grounding,
+provenance and retention still validate against all of it.
+
+- [ ] Older casual conversation is no longer silently present in the model's
+  context. A turn outside the window that nothing cites has to be retrieved,
+  and there is no retrieval capability for the conversation thread yet — only
+  durable memories are retrieved. AL/X will not know she is missing it, so she
+  may answer from the window alone rather than saying she needs to look. Worth
+  a conversation-search primitive once real behaviour shows it matters.
+- [ ] The window is a fixed count, not a token measure. Twelve short turns and
+  twelve long ones cost very differently, so this bounds growth without
+  bounding size.
 
 ## Provider limitations
 
