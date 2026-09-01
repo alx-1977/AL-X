@@ -44,6 +44,7 @@ Any proposal must name the concrete module that owns each boundary. Two owners f
 
 | Law | Automated evidence required | Human evidence required |
 | --- | --- | --- |
+| 0 — One outcome. One production path. | Replacement-specific tests enumerate the production entry points, registrations, dispatchers, handlers, routes and callable sequences for the named outcome and prove exactly one remains. Mutation tests restore a superseded entry point and prove the suite fails. | Name the production outcome, identify the authoritative path, list every searched superseded path and show its production code was deleted. Confirm any retained shared primitive cannot independently achieve the outcome. |
 | 1 — AL/X decides meaning | Static checks reject raw-language parameters, phrase and regex routing, intent/action/command naming, frontend domain authority, and parallel conversation paths. Agent-loop tests prove planning, replanning after failure, and multi-capability goals. Paraphrase tests use meaning-equivalent wording without code-path-specific expectations. | Trace every input surface through the single ingress. Confirm no production change was needed for new wording. Explain any component that reads domain documents and show it does not interpret Friedl's intent. |
 | 2 — Code executes known procedures | Capability-schema checks require structured inputs and results and reject trigger vocabulary. Dependency and architecture tests prove module boundaries and provider isolation. | Justify each capability as one reusable outcome. A deterministic sequence longer than a single external call requires Friedl's recorded decision naming it. |
 | 3 — Ambiguity returns to AL/X | Tests prove every condition without one objectively correct outcome returns rather than resolving itself, that consequential actions are gated by the recorded authority, and that goals, decisions and progress survive restart. | Identify what the capability refuses to decide and why. Approve the retained data and its retention policy. |
@@ -72,6 +73,8 @@ Exact-string unit tests may be used for protocols, schemas, or fixed external fo
 Every runtime or domain-capability change must include a short compliance record in the pull request or commit review containing:
 
 - goal and scope;
+- production outcome and its single authoritative path;
+- superseded-path search and deletion evidence, or `none`;
 - architecture boundaries affected;
 - primitives reused, added, or changed;
 - reason a new primitive is necessary, if applicable;
@@ -97,6 +100,8 @@ The author and reviewing model must both assess technical compliance. Friedl's e
 - `scripts/check_governance.py` verifies the canonical documents, approval markers, law checksum, decision/exception records, model entry points, and `.env` protection.
 - `scripts/check_architecture.py` enforces machine-readable module dependencies, provider isolation, prohibited source structures, raw-language tool boundaries, and detectable phrase routing.
 - The enforcement tests inject deliberate violations and must prove that the gates reject them.
+- Replacement tests prove a superseded production route cannot remain callable,
+  registered, dispatched or otherwise independently usable.
 - GitHub Actions runs all available law gates on pushes and pull requests to `main`.
 
 ### Required before runtime code

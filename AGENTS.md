@@ -26,8 +26,14 @@ Before implementation, state briefly what the change is for and whether it needs
 capability AL/X does not already have. Raise a conflict with the laws before
 building, not after.
 
+Also name the production outcome, its existing authoritative implementation
+path, and every superseded or competing path that must be removed.
+
 During implementation:
 
+- preserve exactly one production path for the outcome and delete every
+  superseded entry point, registration, dispatcher, handler, route and callable
+  sequence;
 - keep raw user language inside the single authoritative AL/X reasoning path;
 - keep interpretation and the choice of what to do next in AL/X;
 - put mechanical steps with one correct outcome in deterministic code;
@@ -43,6 +49,10 @@ passed.
 ## Prohibited shortcuts
 
 Do not introduce phrase or keyword routing, intent menus, regex-based meaning, workflow-specific conversational handlers, feature-owned dialogue, frontend business orchestration, one-action agent loops, process-only goal state, or copied orchestration code from the previous system.
+
+Do not retain a replaced or competing production path as hidden, deprecated,
+wrapped, redirected, recovery-only, optional, renamed, or unregistered code.
+Git history is the archive for removed implementations.
 
 Do not reinterpret a workflow as a "tool" to bypass the laws. A tool must represent a genuinely reusable primitive capability with structured input and output.
 

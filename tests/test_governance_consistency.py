@@ -1,6 +1,6 @@
 """The enforcement specification must not contradict the canonical laws.
 
-The three-law rewrite left docs/LAW_ENFORCEMENT.md defining gates for nineteen
+The earlier law rewrite left docs/LAW_ENFORCEMENT.md defining gates for nineteen
 laws that no longer existed, and both gates passed anyway. AGENTS.md says both
 documents bind and that work stops when they conflict, so a contradiction that
 no gate detects is exactly the failure the gates exist to prevent.
@@ -87,6 +87,15 @@ class ConsistencyGateTests(unittest.TestCase):
             "a law with no enforcement gate must fail the check",
         )
 
+    def test_law_zero_cannot_lose_its_enforcement_row(self) -> None:
+        text = (self.root / "docs/LAW_ENFORCEMENT.md").read_text(encoding="utf-8")
+        row = next(line for line in text.splitlines() if line.startswith("| 0 — "))
+        self.rewrite("docs/LAW_ENFORCEMENT.md", row + "\n", "")
+        self.assertTrue(
+            any("no gate is defined for law(s) 0" in item for item in self.violations()),
+            "one-path governance must not be reduced to canonical prose alone",
+        )
+
     def test_a_gate_row_carrying_the_wrong_title_is_rejected(self) -> None:
         self.rewrite(
             "docs/LAW_ENFORCEMENT.md",
@@ -130,6 +139,46 @@ class ConsistencyGateTests(unittest.TestCase):
         self.assertTrue(
             any("claims 19 laws exist" in item for item in self.violations()),
             "a mandate naming a law count that does not exist must fail",
+        )
+
+    def test_greptile_cannot_soften_deletion_into_preference(self) -> None:
+        self.rewrite(
+            ".greptile/config.json",
+            "Tests must prove the competing path is absent",
+            "Tests may prefer the new path while retaining the old one",
+        )
+        self.checksum_greptile()
+        self.assertTrue(
+            any(
+                "alx-one-production-path missing required marker" in item
+                for item in self.violations()
+            ),
+            "Greptile must require deletion rather than preferred-path usage",
+        )
+
+    def test_entry_instructions_cannot_retain_replaced_code(self) -> None:
+        self.rewrite(
+            "AGENTS.md",
+            "Git history is the archive for removed implementations.",
+            "Deprecated code may remain as an implementation archive.",
+        )
+        self.assertTrue(
+            any("AGENTS.md: missing required marker" in item for item in self.violations()),
+            "implementers must be told to delete competing production code",
+        )
+
+    def test_pull_request_must_record_superseded_path_deletion(self) -> None:
+        self.rewrite(
+            ".github/pull_request_template.md",
+            "Superseded production entry points searched and deleted",
+            "Preferred implementation entry points",
+        )
+        self.assertTrue(
+            any(
+                ".github/pull_request_template.md: missing required marker" in item
+                for item in self.violations()
+            ),
+            "review evidence must name the paths that were removed",
         )
 
     def test_a_live_document_naming_a_deleted_law_is_rejected(self) -> None:

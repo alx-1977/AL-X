@@ -9,6 +9,12 @@ AL/X is given a goal, not a prescribed route. She chooses an approach, uses avai
 
 We structure AL/X's capabilities, safety boundaries, and memory—not her reasoning path.
 
+For each production outcome there is one authoritative implementation path.
+Replacing a path means deleting its production entry points and callable
+sequence; hiding, deprecating, wrapping or redirecting the old path is not an
+architectural replacement. Shared low-level primitives may support the one path
+but may not remain independently usable as a second end-to-end route.
+
 ## The single path
 
 ```text

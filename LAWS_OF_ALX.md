@@ -1,15 +1,55 @@
 # Laws of AL/X
 
-**Status:** Approved by Friedl on 2026-08-31
+**Status:** Approved by Friedl on 2026-09-01
 **Owner:** Friedl
 
-Three laws govern how AL/X is built. They take precedence over local convenience,
+Four laws govern how AL/X is built. They take precedence over local convenience,
 existing patterns, model preferences, and delivery speed.
 
 No implementer or model may weaken, reinterpret, or bypass these laws. Amendments
 require Friedl's explicit approval.
 
 ---
+
+## Law 0 — One outcome. One production path.
+
+For every production outcome in AL/X, there is exactly **one authoritative implementation path**.
+
+When a new path replaces an old one, the old path is **deleted**.
+
+It may not be:
+
+- hidden from the planner
+- deprecated but retained
+- wrapped by the new path
+- redirected through another layer
+- left callable “for recovery”
+- preserved “for flexibility”
+- kept as an alternative implementation
+- renamed and left behind
+- duplicated in another module
+
+Shared low-level primitives may exist only where they are genuinely reusable implementation components. They may not form a second end-to-end route to the same production outcome.
+
+A production outcome must never have two independently usable ways to reach it.
+
+If `A → B → C` is replaced by `X → Y`, then `A → B → C` does not remain beside it. It is removed.
+
+Tests must prove not merely that the preferred path is used, but that **no competing production path exists**.
+
+Before claiming a replacement is complete, the implementer must search for the superseded path and delete every production entry point, registration, dispatcher, handler, route, and callable sequence that can still achieve the same outcome.
+
+**“Not currently used” is not deleted.**
+
+**“Not exposed” is not deleted.**
+
+**“Deprecated” is not deleted.**
+
+**“Recovery-only” is not deleted.**
+
+There is one production truth.
+
+**One outcome. One path. Everything else is removed.**
 
 ## Law 1 — AL/X decides meaning
 
@@ -99,3 +139,6 @@ Ideas are permissive. Experimentation is isolated. Deployment is governed.
   them. Deterministic execution of AL/X-composed values — such as committing a Xero
   bill she has decided — is permitted under Laws 2 and 3 without a separate
   approval ceremony.
+- 2026-09-01 — Friedl added Law 0 to govern development structure: every
+  production outcome has one authoritative implementation path, and every
+  superseded or competing path is deleted rather than hidden or retained.

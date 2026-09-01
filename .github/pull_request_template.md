@@ -7,6 +7,8 @@
 - Boundaries affected:
 - Existing primitives reused:
 - New primitives proposed and why they are genuinely necessary:
+- Production outcome and its one authoritative path:
+- Superseded production entry points searched and deleted, or `None`:
 - Raw user-language path:
 - Goal persistence/restart impact:
 - Safety/approval impact:
@@ -14,6 +16,7 @@
 ## Law compliance evidence
 
 - [ ] I read `LAWS_OF_ALX.md`, `AGENTS.md`, and `docs/LAW_ENFORCEMENT.md` in full.
+- [ ] Every production outcome has exactly one authoritative implementation path; replacement tests prove no competing path remains.
 - [ ] The change preserves one authoritative AL/X conversation and reasoning path.
 - [ ] Tools remain structured, language-blind primitives.
 - [ ] AL/X—not the frontend, route, or tool—owns workflow selection and result evaluation.
