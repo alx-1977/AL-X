@@ -377,6 +377,7 @@ def check_repository(root: Path) -> list[str]:
     for relative_path in (
         ".greptile/rules.md",
         ".greptile/config.json",
+        ".greptile/files.json",
         "AGENTS.md",
         "CLAUDE.md",
         "README.md",
@@ -403,7 +404,11 @@ def check_repository(root: Path) -> list[str]:
                 f"{relative_path}: names law(s) that do not exist in "
                 f"LAWS_OF_ALX.md: {', '.join(str(item) for item in unknown)}"
             )
-        counted = re.search(r"\ball (\d+) Laws\b", document)
+        counted = re.search(
+            r"\b(?:all\s+)?(\d+)(?:\s+[A-Za-z-]+){0,2}\s+Laws\b",
+            document,
+            re.IGNORECASE,
+        )
         if counted and int(counted.group(1)) != len(law_numbers):
             violations.append(
                 f"{relative_path}: claims {counted.group(1)} laws exist, "

@@ -141,6 +141,30 @@ class ConsistencyGateTests(unittest.TestCase):
             "a mandate naming a law count that does not exist must fail",
         )
 
+    def test_greptile_config_cannot_name_a_law_count_that_is_wrong(self) -> None:
+        self.rewrite(
+            ".greptile/config.json",
+            "currently holds four laws",
+            "currently holds all 19 Laws",
+        )
+        self.checksum_greptile()
+        self.assertTrue(
+            any("claims 19 laws exist" in item for item in self.violations()),
+            "Greptile's structured configuration must reject an obsolete count",
+        )
+
+    def test_greptile_context_cannot_name_a_law_count_that_is_wrong(self) -> None:
+        self.rewrite(
+            ".greptile/files.json",
+            "Sole canonical statement of the approved Laws of AL/X.",
+            "Sole canonical statement of all 19 approved Laws of AL/X.",
+        )
+        self.checksum_greptile()
+        self.assertTrue(
+            any("claims 19 laws exist" in item for item in self.violations()),
+            "Greptile's context descriptions must reject an obsolete count",
+        )
+
     def test_greptile_cannot_soften_deletion_into_preference(self) -> None:
         self.rewrite(
             ".greptile/config.json",
