@@ -13,6 +13,7 @@ notebook exists to avoid.
 from __future__ import annotations
 
 from datetime import UTC as _UTC, datetime, timedelta as _timedelta
+from collections.abc import Callable
 from typing import Any, Mapping
 
 from alx.contracts import (
@@ -484,3 +485,43 @@ def _time(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     return datetime.fromisoformat(str(value))
+
+
+def build_notebook_executors(
+    store: Any,
+    retention_days: int,
+    call_id_source: Callable[[], str],
+    clock: Callable[[], datetime] | None = None,
+) -> Mapping[str, Callable[[Any], CapabilityResult]]:
+    """Bind the eight notebook primitives to the one durable store.
+
+    Every capability reaches the notebook through this map and no other way, so
+    there is exactly one production path to research storage.
+    """
+    capabilities = NotebookCapabilities(store, retention_days, clock)
+    return {
+        OPEN_RESEARCH_THREAD: lambda values: capabilities.open_thread(
+            call_id_source(), values
+        ),
+        RECORD_RESEARCH_ENTRY: lambda values: capabilities.record_entry(
+            call_id_source(), values
+        ),
+        REVISE_RESEARCH_ENTRY: lambda values: capabilities.revise_entry(
+            call_id_source(), values
+        ),
+        SEARCH_RESEARCH: lambda values: capabilities.search(
+            call_id_source(), values
+        ),
+        READ_RESEARCH_THREAD: lambda values: capabilities.read_thread(
+            call_id_source(), values
+        ),
+        SET_RESEARCH_STATUS: lambda values: capabilities.set_status(
+            call_id_source(), values
+        ),
+        CORRECT_RESEARCH_ENTRY: lambda values: capabilities.correct_entry(
+            call_id_source(), values
+        ),
+        DELETE_RESEARCH: lambda values: capabilities.delete(
+            call_id_source(), values
+        ),
+    }

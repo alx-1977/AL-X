@@ -16,6 +16,7 @@ from alx.bootstrap.mail import (
     captured_invoice_filing_scopes,
     mail_post_reply_standing_scopes,
 )
+from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import build_model_reasoner
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
@@ -170,6 +171,20 @@ async def run(repository_root: Path) -> None:
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
 
+    # The research notebook is durable storage AL/X reaches through the same
+    # broker as any other capability. It starts nothing and spends nothing:
+    # opening a thread records a question, it does not begin researching it.
+    notebook_runtime = build_notebook_runtime(
+        storage_root,
+        voice_settings.goal_retention_days,
+        lambda: current_call_id[0],
+    )
+    for definition in notebook_runtime.definitions:
+        registry.register(definition)
+    policies.update(notebook_runtime.policies)
+    executors.update(notebook_runtime.executors)
+    permissions.update(notebook_runtime.permissions)
+
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
     xero_approval_ttl_seconds: int | None = None
@@ -312,6 +327,7 @@ async def run(repository_root: Path) -> None:
         await server.serve_forever()
     finally:
         mail_runtime.observations.close()
+        notebook_runtime.store.close()
         conversation_store.close()
         memory_store.close()
         goal_store.close()
