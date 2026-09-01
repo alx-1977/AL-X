@@ -71,6 +71,9 @@ class XAIReasoningModel:
                 },
             },
         }
+        if request.max_output_tokens is not None:
+            # The OpenAI-style chat completions field both vendors accept.
+            payload["max_tokens"] = request.max_output_tokens
         if self._streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}

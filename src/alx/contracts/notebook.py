@@ -17,7 +17,7 @@ memory path that already exists.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -55,6 +55,18 @@ class ThreadStatus(str, Enum):
     OPEN = "open"
     PAUSED = "paused"
     ARCHIVED = "archived"
+
+
+class RevisionAuthor(str, Enum):
+    """Who wrote a version of an entry.
+
+    AL/X changing her own mind and Friedl correcting the record are different
+    events with different authority, and a history that blurred them would let a
+    model's revision be read later as the owner's correction.
+    """
+
+    ALX = "alx"
+    FRIEDL = "friedl"
 
 
 class EntryKind(str, Enum):
@@ -134,6 +146,7 @@ class EntryRevision:
     content: str
     recorded_at: datetime
     source_references: tuple[str, ...] = ()
+    author: RevisionAuthor = RevisionAuthor.ALX
     # Why the view changed. Absent on the first revision, required after it:
     # a changed conclusion without a reason loses what the revision was for.
     reason: str | None = None
@@ -182,6 +195,23 @@ class ThreadSnapshot:
     opened_at: datetime
     retention_until: datetime
     entries: tuple[EntrySnapshot, ...] = ()
+    # How many entries the thread actually holds, and where a further read
+    # should continue from. A thread larger than the bound is paged, never
+    # returned whole.
+    total_entries: int = 0
+    next_offset: int | None = None
+
+
+# Hard retrieval bounds. Core context is the scarce resource the notebook exists
+# to protect, so no query, however scoped, may return more than this.
+MAX_RETRIEVAL_LIMIT = 25
+# A window wide enough is not a scope. Ninety days is long enough to find a
+# thread worked on last quarter and far short of "everything".
+MAX_WINDOW_DAYS = 90
+# One read of a thread returns at most this many entries, and at most this many
+# revisions of each, with continuation information when more exist.
+MAX_THREAD_ENTRIES = 25
+MAX_ENTRY_REVISIONS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +234,7 @@ class ResearchQuery:
     # Archived research stays out of retrieval unless asked for by name, so a
     # put-aside enquiry does not keep surfacing in ordinary work.
     include_archived: bool = False
-    limit: int = 50
+    limit: int = MAX_RETRIEVAL_LIMIT
 
     def __post_init__(self) -> None:
         _required(self.query_id, "query_id")
@@ -222,6 +252,11 @@ class ResearchQuery:
             raise ValueError("kinds must not contain duplicates")
         if self.limit <= 0:
             raise ValueError("limit must be positive")
+        if self.limit > MAX_RETRIEVAL_LIMIT:
+            raise ValueError(
+                f"limit must not exceed {MAX_RETRIEVAL_LIMIT}; a larger page "
+                "would put an unbounded amount of research into Core context"
+            )
         if self.recorded_after is not None:
             _aware(self.recorded_after, "recorded_after")
         if self.recorded_before is not None:
@@ -232,6 +267,20 @@ class ResearchQuery:
             and self.recorded_after > self.recorded_before
         ):
             raise ValueError("recorded_after must not be later than recorded_before")
+        # A time window only counts as a scope if it is actually narrow. An
+        # open-ended or century-wide window selects the whole notebook, which is
+        # the dump this guard exists to prevent.
+        if self.recorded_after is not None or self.recorded_before is not None:
+            if self.recorded_after is None or self.recorded_before is None:
+                raise ValueError(
+                    "a time scope requires both recorded_after and recorded_before; "
+                    "an open-ended window is not a scope"
+                )
+            span = self.recorded_before - self.recorded_after
+            if span > timedelta(days=MAX_WINDOW_DAYS):
+                raise ValueError(
+                    f"a time scope must span at most {MAX_WINDOW_DAYS} days"
+                )
         # Kind and status alone are not scopes: "every claim" and "everything
         # open" both return the whole notebook.
         if not (

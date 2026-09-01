@@ -3,9 +3,11 @@
 from alx.observability.pricing import (
     USD_PER_MILLION,
     ConfiguredPricing,
+    ConfiguredPricingWorstCase,
     cost_usd,
     is_priced,
     price_of,
+    worst_case_usd,
 )
 from alx.observability.research_budget import ResearchBudget, SQLiteResearchLedger
 from alx.observability.usage import (
@@ -21,10 +23,12 @@ __all__ = [
     "BudgetExceeded",
     "ExecutionBudget",
     "ConfiguredPricing",
+    "ConfiguredPricingWorstCase",
     "ResearchBudget",
     "SQLiteResearchLedger",
     "SQLiteUsageRecorder",
     "cost_usd",
     "is_priced",
     "price_of",
+    "worst_case_usd",
 ]

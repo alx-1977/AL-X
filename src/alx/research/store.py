@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 
 from alx.contracts.notebook import (
+    MAX_ENTRY_REVISIONS,
+    MAX_THREAD_ENTRIES,
     DeletionRecord,
     EntryKind,
     EntryProposal,
@@ -24,6 +26,7 @@ from alx.contracts.notebook import (
     EntryRevisionProposal,
     EntrySnapshot,
     ResearchQuery,
+    RevisionAuthor,
     ThreadProposal,
     ThreadSnapshot,
     ThreadStatus,
@@ -130,7 +133,7 @@ class SQLiteResearchStore:
                 "entry_id TEXT NOT NULL REFERENCES research_entries(entry_id) "
                 "ON DELETE CASCADE, revision INTEGER NOT NULL, "
                 "content TEXT NOT NULL, reason TEXT, recorded_at TEXT NOT NULL, "
-                "source_references TEXT NOT NULL, "
+                "source_references TEXT NOT NULL, author TEXT NOT NULL DEFAULT 'alx', "
                 "content_origins TEXT, content_recorded_at TEXT, "
                 "content_expires_at TEXT, mail_references TEXT, "
                 "PRIMARY KEY(entry_id, revision))"
@@ -195,21 +198,38 @@ class SQLiteResearchStore:
             raise ThreadNotFound(thread_id)
         return self.read_thread(thread_id)
 
-    def read_thread(self, thread_id: str) -> ThreadSnapshot:
+    def read_thread(self, thread_id: str, offset: int = 0) -> ThreadSnapshot:
+        """One page of a thread. A thread is never returned whole.
+
+        A research thread grows without limit, so an unpaged read would be a
+        route for putting an arbitrarily large amount of material into a
+        reasoning turn. The caller is told the true size and where to continue.
+        """
+        if offset < 0:
+            raise ValueError("offset must not be negative")
         row = self._connection.execute(
             "SELECT * FROM research_threads WHERE thread_id = ?", (thread_id,)
         ).fetchone()
         if row is None:
             raise ThreadNotFound(thread_id)
+        total = int(
+            self._connection.execute(
+                "SELECT COUNT(*) FROM research_entries WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()[0]
+        )
         entries = tuple(
             self._entry(item["entry_id"])
             for item in self._connection.execute(
                 "SELECT entry_id FROM research_entries WHERE thread_id = ? "
-                "ORDER BY rowid",
-                (thread_id,),
+                "ORDER BY rowid LIMIT ? OFFSET ?",
+                (thread_id, MAX_THREAD_ENTRIES, offset),
             )
         )
-        return self._thread(row, entries)
+        consumed = offset + len(entries)
+        return self._thread(
+            row, entries, total, consumed if consumed < total else None
+        )
 
     # ---- entries --------------------------------------------------------
 
@@ -230,13 +250,15 @@ class SQLiteResearchStore:
                 self._connection.execute(
                     "INSERT INTO research_entry_revisions(entry_id, revision, "
                     "content, reason, recorded_at, source_references, "
-                    "content_origins, content_recorded_at, content_expires_at, "
-                    "mail_references) VALUES (?, 1, ?, NULL, ?, ?, ?, ?, ?, ?)",
+                    "author, content_origins, content_recorded_at, "
+                    "content_expires_at, mail_references) "
+                    "VALUES (?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         proposal.entry_id,
                         proposal.content,
                         proposal.recorded_at.isoformat(),
                         json.dumps(list(proposal.source_references)),
+                        RevisionAuthor.ALX.value,
                         origins,
                         recorded,
                         expires,
@@ -252,8 +274,14 @@ class SQLiteResearchStore:
         entry_id: str,
         revision: EntryRevisionProposal,
         expected_revision: int,
+        author: RevisionAuthor = None,
     ) -> EntrySnapshot:
-        """Add a version. What AL/X thought before is preserved, not replaced."""
+        """Add a version. What was thought before is preserved, not replaced.
+
+        The author is stored, so a later reader can tell AL/X changing her own
+        mind from Friedl correcting the record. Both append; neither overwrites.
+        """
+        author = author or RevisionAuthor.ALX
         current = self._entry(entry_id)
         if self._status(current.thread_id) is ThreadStatus.ARCHIVED:
             raise ArchivedThreadWrite(current.thread_id)
@@ -268,9 +296,9 @@ class SQLiteResearchStore:
         with self._connection:
             self._connection.execute(
                 "INSERT INTO research_entry_revisions(entry_id, revision, content, "
-                "reason, recorded_at, source_references, content_origins, "
+                "reason, recorded_at, source_references, author, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry_id,
                     current.revision + 1,
@@ -278,6 +306,7 @@ class SQLiteResearchStore:
                     revision.reason,
                     revision.recorded_at.isoformat(),
                     json.dumps(list(revision.source_references)),
+                    author.value,
                     origins,
                     recorded,
                     expires,
@@ -449,7 +478,11 @@ class SQLiteResearchStore:
         return ThreadStatus(row["status"])
 
     def _thread(
-        self, row: sqlite3.Row, entries: tuple[EntrySnapshot, ...]
+        self,
+        row: sqlite3.Row,
+        entries: tuple[EntrySnapshot, ...],
+        total_entries: int = 0,
+        next_offset: int | None = None,
     ) -> ThreadSnapshot:
         return ThreadSnapshot(
             thread_id=row["thread_id"],
@@ -459,6 +492,8 @@ class SQLiteResearchStore:
             opened_at=datetime.fromisoformat(row["opened_at"]),
             retention_until=datetime.fromisoformat(row["retention_until"]),
             entries=entries,
+            total_entries=total_entries,
+            next_offset=next_offset,
         )
 
     def _entry(self, entry_id: str) -> EntrySnapshot:
@@ -475,6 +510,7 @@ class SQLiteResearchStore:
                 content=item["content"],
                 recorded_at=datetime.fromisoformat(item["recorded_at"]),
                 source_references=tuple(json.loads(item["source_references"])),
+                author=RevisionAuthor(item["author"]),
                 reason=item["reason"],
                 provenance=provenance_from_storage(
                     item["content_origins"],
@@ -484,13 +520,17 @@ class SQLiteResearchStore:
                 ),
             )
             for item in self._connection.execute(
+                # Newest revisions, bounded, then re-ordered oldest-first below.
+                # An entry revised hundreds of times must not return hundreds of
+                # versions into Core context.
                 "SELECT * FROM research_entry_revisions WHERE entry_id = ? "
-                "ORDER BY revision",
-                (entry_id,),
+                "ORDER BY revision DESC LIMIT ?",
+                (entry_id, MAX_ENTRY_REVISIONS),
             )
         )
         if not revisions:
             raise EntryNotFound(entry_id)
+        revisions = tuple(reversed(revisions))
         return EntrySnapshot(
             entry_id=row["entry_id"],
             thread_id=row["thread_id"],

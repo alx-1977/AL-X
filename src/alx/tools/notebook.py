@@ -16,6 +16,8 @@ from datetime import UTC as _UTC, datetime, timedelta as _timedelta
 from collections.abc import Callable
 from typing import Any, Mapping
 
+from alx.contracts.notebook import MAX_RETRIEVAL_LIMIT
+from alx.contracts.provenance import ContentOrigin, RetentionPolicy
 from alx.contracts import (
     CapabilityDefinition,
     CapabilityResult,
@@ -24,6 +26,7 @@ from alx.contracts import (
     EntryProposal,
     EntryRevisionProposal,
     ResearchQuery,
+    RevisionAuthor,
     SideEffect,
     StructuredSchema,
     ThreadProposal,
@@ -41,6 +44,14 @@ SET_RESEARCH_STATUS = "set_research_status"
 CORRECT_RESEARCH_ENTRY = "correct_research_entry"
 DELETE_RESEARCH = "delete_research"
 
+class _EvidenceUnresolved(Exception):
+    """A cited evidence identifier could not be resolved to its provenance."""
+
+
+def _policy() -> RetentionPolicy:
+    return RetentionPolicy()
+
+
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
 _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
@@ -55,6 +66,9 @@ _FAILURES = (
     "revision_conflict",
     "thread_archived",
     "storage_failed",
+    # A citation whose provenance cannot be established is refused rather
+    # than written without its retention deadline.
+    "evidence_unresolved",
 )
 
 _ENTRY = StructuredSchema(
@@ -67,10 +81,11 @@ _ENTRY = StructuredSchema(
         "content": _STRING,
         "recorded_at": _STRING,
         "reason": _STRING,
+        "author": _STRING,
         "source_references": _STRINGS,
     },
     ("entry_id", "thread_id", "kind", "revision", "content", "recorded_at",
-     "source_references"),
+     "author", "source_references"),
     extra_properties=False,
 )
 
@@ -84,9 +99,11 @@ _THREAD = StructuredSchema(
         "opened_at": _STRING,
         "retention_until": _STRING,
         "entries": StructuredSchema(ValueKind.ARRAY, items=_ENTRY),
+        "total_entries": _INTEGER,
+        "next_offset": _INTEGER,
     },
     ("thread_id", "question", "interest", "status", "opened_at",
-     "retention_until", "entries"),
+     "retention_until", "entries", "total_entries"),
     extra_properties=False,
 )
 
@@ -129,8 +146,8 @@ RECORD_ENTRY_DEFINITION = CapabilityDefinition(
 
 REVISE_ENTRY_DEFINITION = CapabilityDefinition(
     REVISE_RESEARCH_ENTRY,
-    "Record a changed view as a new revision, preserving every earlier "
-    "version and the stated reason for the change.",
+    "Record AL/X's own changed view as a new revision attributed to her, "
+    "preserving every earlier version and the stated reason.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -179,11 +196,11 @@ SEARCH_DEFINITION = CapabilityDefinition(
 
 READ_THREAD_DEFINITION = CapabilityDefinition(
     READ_RESEARCH_THREAD,
-    "Read one research thread with its entries and their current versions, "
-    "for inspection or export.",
+    "Read one page of a research thread. Entries and revisions are bounded; "
+    "next_offset continues a larger thread.",
     StructuredSchema(
         ValueKind.OBJECT,
-        {"thread_id": _STRING},
+        {"thread_id": _STRING, "offset": _INTEGER},
         ("thread_id",),
         extra_properties=False,
     ),
@@ -209,8 +226,8 @@ SET_STATUS_DEFINITION = CapabilityDefinition(
 
 CORRECT_ENTRY_DEFINITION = CapabilityDefinition(
     CORRECT_RESEARCH_ENTRY,
-    "Record a correction to an entry as a new revision, preserving what was "
-    "written before and why it was corrected.",
+    "Record Friedl's correction to an entry as a new revision attributed to "
+    "him, preserving what was written before and why it was corrected.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -270,6 +287,7 @@ def _entry_values(snapshot: Any) -> dict[str, Any]:
         "revision": current.revision,
         "content": current.content,
         "recorded_at": current.recorded_at.isoformat(),
+        "author": current.author.value,
         "source_references": list(current.source_references),
     }
     if current.reason is not None:
@@ -286,6 +304,11 @@ def _thread_values(snapshot: Any) -> dict[str, Any]:
         "opened_at": snapshot.opened_at.isoformat(),
         "retention_until": snapshot.retention_until.isoformat(),
         "entries": [_entry_values(item) for item in snapshot.entries],
+        "total_entries": snapshot.total_entries,
+        **(
+            {} if snapshot.next_offset is None
+            else {"next_offset": snapshot.next_offset}
+        ),
     }
 
 
@@ -312,10 +335,22 @@ class NotebookCapabilities:
     storage verbatim and never parsed for meaning.
     """
 
-    def __init__(self, store: Any, retention_days: int, clock: Any = None) -> None:
+    def __init__(
+        self,
+        store: Any,
+        retention_days: int,
+        clock: Any = None,
+        provenance_of: Callable[[tuple[str, ...], datetime], Any] | None = None,
+    ) -> None:
         self._store = store
         self._retention_days = retention_days
         self._clock = clock or (lambda: datetime.now(_UTC))
+        # Resolves cited evidence identifiers to the provenance of that
+        # evidence. Without it a mail-derived quotation would be written with no
+        # origin and no deadline, and D-013 would silently not apply to research
+        # written through capabilities. Absent, research records only that AL/X
+        # authored it, and citing evidence is refused rather than unstamped.
+        self._provenance_of = provenance_of
 
     def _now(self) -> datetime:
         return self._clock()
@@ -330,6 +365,7 @@ class NotebookCapabilities:
                 question=str(values["question"]),
                 interest=str(values["interest"]),
                 opened_at=now,
+                provenance=_policy().non_mail(ContentOrigin.ALX, now),
             )
             snapshot = self._store.open_thread(
                 proposal, now + _timedelta(days=self._retention_days)
@@ -346,15 +382,21 @@ class NotebookCapabilities:
         self, call_id: str, values: Mapping[str, Any]
     ) -> CapabilityResult:
         try:
+            now = self._now()
+            sources = tuple(values.get("source_references", ()) or ())
+            provenance = self._provenance(sources, now)
             proposal = EntryProposal(
                 entry_id=str(values["entry_id"]),
                 thread_id=str(values["thread_id"]),
                 kind=EntryKind(str(values["kind"])),
                 content=str(values["content"]),
-                recorded_at=self._now(),
-                source_references=tuple(values.get("source_references", ()) or ()),
+                recorded_at=now,
+                source_references=sources,
+                provenance=provenance,
             )
             snapshot = self._store.record_entry(proposal)
+        except _EvidenceUnresolved:
+            return _failed(call_id, RECORD_RESEARCH_ENTRY, "evidence_unresolved")
         except (KeyError, TypeError, ValueError):
             return _failed(call_id, RECORD_RESEARCH_ENTRY, "arguments_unusable")
         except Exception as error:
@@ -362,36 +404,80 @@ class NotebookCapabilities:
         return _ok(call_id, RECORD_RESEARCH_ENTRY, _entry_values(snapshot))
 
     def revise_entry(
+        self, call_id: str, values: Mapping[str, Any]
+    ) -> CapabilityResult:
+        """AL/X changes her own thinking. No approval; history is preserved."""
+        return self._append_revision(
+            call_id, values, REVISE_RESEARCH_ENTRY, RevisionAuthor.ALX
+        )
+
+    def correct_entry(
+        self, call_id: str, values: Mapping[str, Any]
+    ) -> CapabilityResult:
+        """Friedl corrects the record, recorded as his correction.
+
+        This is not a wrapper around the revise capability. Both append through
+        the same storage primitive, but the author is fixed here and cannot be
+        chosen by the caller, so AL/X cannot reach this outcome through the
+        ungated revise route or present her own revision as Friedl's.
+        """
+        return self._append_revision(
+            call_id, values, CORRECT_RESEARCH_ENTRY, RevisionAuthor.FRIEDL
+        )
+
+    def _append_revision(
         self,
         call_id: str,
         values: Mapping[str, Any],
-        capability_id: str = REVISE_RESEARCH_ENTRY,
+        capability_id: str,
+        author: RevisionAuthor,
     ) -> CapabilityResult:
+        """The shared storage step. The author comes from the caller, never
+        from the arguments: a value AL/X could supply would let her sign a
+        revision as Friedl."""
         try:
+            now = self._now()
+            sources = tuple(values.get("source_references", ()) or ())
             proposal = EntryRevisionProposal(
                 content=str(values["content"]),
                 reason=str(values["reason"]),
-                recorded_at=self._now(),
-                source_references=tuple(values.get("source_references", ()) or ()),
+                recorded_at=now,
+                source_references=sources,
+                provenance=self._provenance(sources, now),
             )
             snapshot = self._store.revise_entry(
-                str(values["entry_id"]), proposal, int(values["expected_revision"])
+                str(values["entry_id"]),
+                proposal,
+                int(values["expected_revision"]),
+                author,
             )
+        except _EvidenceUnresolved:
+            return _failed(call_id, capability_id, "evidence_unresolved")
         except (KeyError, TypeError, ValueError):
             return _failed(call_id, capability_id, "arguments_unusable")
         except Exception as error:
             return _failed(call_id, capability_id, _code(error))
         return _ok(call_id, capability_id, _entry_values(snapshot))
 
-    def correct_entry(
-        self, call_id: str, values: Mapping[str, Any]
-    ) -> CapabilityResult:
-        """Friedl's correction takes the same revision-preserving path.
+    def _provenance(self, sources: tuple[str, ...], now: datetime) -> Any:
+        """Provenance for a record, derived from the evidence it cites.
 
-        A correction and a changed view are the same storage outcome, so they
-        share one implementation rather than two that could drift apart.
+        Mail-derived evidence carries D-013's deadline, and deriving here is
+        what makes that deadline reach research written through capabilities
+        rather than only research written directly to the store.
         """
-        return self.revise_entry(call_id, values, CORRECT_RESEARCH_ENTRY)
+        policy = _policy()
+        if not sources:
+            return policy.non_mail(ContentOrigin.ALX, now)
+        if self._provenance_of is None:
+            # Refusing is the safe failure. Writing the citation with no origin
+            # would create exactly the unstamped mail-derived record D-013
+            # forbids.
+            raise _EvidenceUnresolved()
+        inputs = self._provenance_of(sources, now)
+        if inputs is None:
+            raise _EvidenceUnresolved()
+        return policy.derive(ContentOrigin.ALX, now, tuple(inputs))
 
     def search(
         self, call_id: str, values: Mapping[str, Any]
@@ -407,7 +493,7 @@ class NotebookCapabilities:
                 recorded_after=_time(values.get("recorded_after")),
                 recorded_before=_time(values.get("recorded_before")),
                 include_archived=bool(values.get("include_archived", False)),
-                limit=int(values.get("limit", 50)),
+                limit=int(values.get("limit", MAX_RETRIEVAL_LIMIT)),
             )
             found = self._store.retrieve(query)
         except (KeyError, TypeError, ValueError):
@@ -420,7 +506,9 @@ class NotebookCapabilities:
         self, call_id: str, values: Mapping[str, Any]
     ) -> CapabilityResult:
         try:
-            snapshot = self._store.read_thread(str(values["thread_id"]))
+            snapshot = self._store.read_thread(
+                str(values["thread_id"]), int(values.get("offset", 0))
+            )
         except (KeyError, TypeError, ValueError):
             return _failed(call_id, READ_RESEARCH_THREAD, "arguments_unusable")
         except Exception as error:
@@ -492,13 +580,16 @@ def build_notebook_executors(
     retention_days: int,
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
+    provenance_of: Callable[[tuple[str, ...], datetime], Any] | None = None,
 ) -> Mapping[str, Callable[[Any], CapabilityResult]]:
     """Bind the eight notebook primitives to the one durable store.
 
     Every capability reaches the notebook through this map and no other way, so
     there is exactly one production path to research storage.
     """
-    capabilities = NotebookCapabilities(store, retention_days, clock)
+    capabilities = NotebookCapabilities(
+        store, retention_days, clock, provenance_of
+    )
     return {
         OPEN_RESEARCH_THREAD: lambda values: capabilities.open_thread(
             call_id_source(), values

@@ -26,7 +26,7 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.observability import pricing  # noqa: E402
 from alx.contracts import ResearchModelUnpriced  # noqa: E402
-from alx.observability import ConfiguredPricing  # noqa: E402
+from alx.observability import ConfiguredPricingWorstCase  # noqa: E402
 from alx.observability.research_budget import (  # noqa: E402
     ResearchBudget,
     ResearchBudgetExceeded,
@@ -34,6 +34,10 @@ from alx.observability.research_budget import (  # noqa: E402
 )
 from alx.specialists import ModelSpecialist, ResearchSpecialist  # noqa: E402
 
+
+# A small bound so the worst-case price fits every ceiling used below.
+MAX_INPUT = 4_000
+MAX_OUTPUT = 1_000
 
 SCHEMA = {
     "type": "object",
@@ -103,8 +107,11 @@ class ResearchBudgetTest(unittest.TestCase):
             ResearchSpecialist(
                 specialist,
                 ledger,
-                ConfiguredPricing(),
+                ConfiguredPricingWorstCase(),
                 lambda _tier: (model.provider, model.model),
+                MAX_INPUT,
+                MAX_OUTPUT,
+                ledger._budget.per_request_max_usd,
             ),
             specialist,
         )
@@ -173,7 +180,9 @@ class ResearchBudgetTest(unittest.TestCase):
             survey, tiers={Cognition.SURVEY: survey, Cognition.JUDGE: judge}
         )
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricing(), lambda _tier: ("testvendor", "test-model")
+            specialist, ledger, ConfiguredPricingWorstCase(),
+            lambda _tier: ("testvendor", "test-model"),
+            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
         )
         researcher.answer(question(Cognition.JUDGE))
         self.assertEqual(judge.calls, 1)
@@ -190,7 +199,9 @@ class ResearchBudgetTest(unittest.TestCase):
         pricing.USD_PER_MILLION[("othervendor", "other-model")] = (1.0, 1.0, 1.0)
         specialist = ModelSpecialist(primary, tiers={Cognition.SURVEY: primary})
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricing(), lambda _tier: ("testvendor", "test-model")
+            specialist, ledger, ConfiguredPricingWorstCase(),
+            lambda _tier: ("testvendor", "test-model"),
+            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
         )
         researcher.answer(question())
         with self.assertRaises(ResearchBudgetExceeded):
@@ -220,7 +231,9 @@ class ResearchBudgetTest(unittest.TestCase):
         model.provider, model.model = "testvendor", "test-model"
         specialist = ModelSpecialist(model, tiers={Cognition.SURVEY: model})
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricing(), lambda _tier: ("testvendor", "test-model")
+            specialist, ledger, ConfiguredPricingWorstCase(),
+            lambda _tier: ("testvendor", "test-model"),
+            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
         )
         with self.assertRaises(SpecialistError):
             researcher.answer(question())
@@ -234,7 +247,9 @@ class ResearchBudgetTest(unittest.TestCase):
         model.provider, model.model = "testvendor", "test-model"
         specialist = ModelSpecialist(model, tiers={Cognition.SURVEY: model})
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricing(), lambda _tier: ("testvendor", "test-model")
+            specialist, ledger, ConfiguredPricingWorstCase(),
+            lambda _tier: ("testvendor", "test-model"),
+            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
         )
         for _ in range(2):
             with self.assertRaises(SpecialistError):

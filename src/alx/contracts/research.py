@@ -55,3 +55,11 @@ class ResearchPricing(Protocol):
     def cost_usd(
         self, provider: str, model: str, usage: Mapping[str, object]
     ) -> float | None: ...
+
+    def worst_case_usd(
+        self,
+        provider: str,
+        model: str,
+        max_input_tokens: int,
+        max_output_tokens: int,
+    ) -> float | None: ...

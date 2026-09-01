@@ -24,7 +24,7 @@ from alx.contracts import (  # noqa: E402
     SpecialistError,
     SpecialistQuestion,
 )
-from alx.observability import ConfiguredPricing, pricing  # noqa: E402
+from alx.observability import ConfiguredPricingWorstCase, pricing  # noqa: E402
 from alx.observability.research_budget import (  # noqa: E402
     ResearchBudget,
     ResearchBudgetExceeded,
@@ -83,8 +83,9 @@ class UnbudgetedPathMutationTest(unittest.TestCase):
         model = ExpensiveModel()
         specialist = ModelSpecialist(model, tiers={Cognition.JUDGE: model})
         researcher = ResearchSpecialist(
-            specialist, self.ledger, ConfiguredPricing(),
+            specialist, self.ledger, ConfiguredPricingWorstCase(),
             lambda _t: ("testvendor", "test-model"),
+            2_000, 500, 1.0,
         )
         researcher.answer(question())
         with self.assertRaises(ResearchBudgetExceeded):
@@ -143,22 +144,24 @@ class NotebookNotWiredMutationTest(unittest.TestCase):
 
 
 class UnboundedRetrievalMutationTest(unittest.TestCase):
-    def test_a_time_only_scope_can_select_the_whole_notebook(self) -> None:
-        """Recorded as a known gap: a wide window is not a narrow scope.
+    def test_a_wide_time_window_is_refused_as_a_scope(self) -> None:
+        """Restoring the unbounded window must fail, not merely be discouraged."""
+        with self.assertRaises(ValueError):
+            ResearchQuery(
+                query_id="q",
+                recorded_after=datetime(1970, 1, 1, tzinfo=UTC),
+                recorded_before=datetime(2999, 1, 1, tzinfo=UTC),
+            )
 
-        `ResearchQuery` accepts a time window as a scope, and a window wide
-        enough selects everything. Bounding retrieval properly is part of the
-        outstanding notebook work, and this test names the gap rather than
-        letting a passing suite imply it is closed.
-        """
-        wide = ResearchQuery(
-            query_id="q",
-            recorded_after=datetime(1970, 1, 1, tzinfo=UTC),
-            recorded_before=datetime(2999, 1, 1, tzinfo=UTC),
-        )
-        self.assertIsNotNone(wide.recorded_after)
-        # There is currently no maximum on limit either.
-        self.assertEqual(ResearchQuery(query_id="q", thread_ids=("t",)).limit, 50)
+    def test_an_open_ended_window_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            ResearchQuery(
+                query_id="q", recorded_after=datetime(2026, 1, 1, tzinfo=UTC)
+            )
+
+    def test_an_oversized_page_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            ResearchQuery(query_id="q", thread_ids=("t",), limit=10_000)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,29 @@ from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 NOW = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
 
 
+def evidence_provenance(sources, now):
+    """Stand-in for the runtime's evidence lookup.
+
+    Anything named ev-mail-* is treated as derived from a mail message, so the
+    D-013 deadline reaches research that cites it. Everything else is external
+    evidence with no retention deadline of its own.
+    """
+    from alx.contracts.mail import MailReference
+    from alx.contracts.provenance import ContentOrigin, RetentionPolicy
+
+    policy = RetentionPolicy()
+    found = []
+    for reference in sources:
+        if reference.startswith("ev-mail-"):
+            found.append(
+                policy.direct_mail(now, (MailReference("INBOX", "1", reference),))
+            )
+        else:
+            found.append(policy.non_mail(ContentOrigin.EXTERNAL, now))
+    return tuple(found)
+
+
+
 class NotebookRuntimeTestCase(unittest.TestCase):
     """A runtime assembled exactly as live_voice assembles it."""
 
@@ -56,7 +79,10 @@ class NotebookRuntimeTestCase(unittest.TestCase):
 
     def _build(self):
         runtime = build_notebook_runtime(
-            self.root, retention_days=3650, call_id_source=lambda: self._call_id[0]
+            self.root,
+            retention_days=3650,
+            call_id_source=lambda: self._call_id[0],
+            provenance_of=evidence_provenance,
         )
         self.registry = CapabilityRegistry()
         for definition in runtime.definitions:

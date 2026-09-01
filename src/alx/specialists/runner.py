@@ -63,7 +63,11 @@ class ModelSpecialist:
             raise SpecialistError(f"cognition_tier_unconfigured:{cognition.value}")
         return model
 
-    def answer(self, question: SpecialistQuestion) -> Mapping[str, Any]:
+    def answer(
+        self,
+        question: SpecialistQuestion,
+        max_output_tokens: int | None = None,
+    ) -> Mapping[str, Any]:
         request = ModelRequest(
             (
                 # The instruction is the whole system context. AL/X's laws,
@@ -76,6 +80,7 @@ class ModelSpecialist:
             question.answer_schema,
             question.question_id,
             self._cache_key,
+            max_output_tokens,
         )
         self.last_usage = None
         try:

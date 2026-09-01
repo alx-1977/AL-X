@@ -24,8 +24,34 @@ from alx.contracts import (
 )
 
 
+class ResearchModelUnbounded(Exception):
+    """The model's worst-case cost exceeds the configured per-request ceiling.
+
+    A reservation is only honest if the request cannot cost more than it. When
+    the provider bound still permits a price above the ceiling, the model is
+    refused for autonomous research rather than used with a ceiling that would
+    not hold.
+    """
+
+    def __init__(self, provider: str, model: str, worst_case: float, ceiling: float) -> None:
+        self.provider = provider
+        self.model = model
+        self.worst_case = worst_case
+        self.ceiling = ceiling
+        super().__init__(
+            f"{provider} model {model} can cost up to {worst_case:.4f} USD per "
+            f"bounded request, above the {ceiling:.4f} USD per-request ceiling"
+        )
+
+
 class ResearchSpecialist:
-    """Put one bounded research question, within the day's budget."""
+    """Put one bounded research question, within the day's budget.
+
+    The bound comes first. Before anything is reserved the request is capped at
+    a token ceiling the provider enforces, and the worst-case price of that
+    capped request is compared with the configured per-request maximum. Only a
+    model that cannot exceed the maximum may run.
+    """
 
     def __init__(
         self,
@@ -33,6 +59,9 @@ class ResearchSpecialist:
         ledger: ResearchLedger,
         pricing: ResearchPricing,
         model_identity: Callable[[Cognition], tuple[str, str]],
+        max_input_tokens: int,
+        max_output_tokens: int,
+        per_request_max_usd: float,
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
         self._specialist = specialist
@@ -41,6 +70,9 @@ class ResearchSpecialist:
         # Which provider and model a tier resolves to, so the ledger can record
         # what was actually charged rather than what was configured somewhere.
         self._model_identity = model_identity
+        self._max_input_tokens = max_input_tokens
+        self._max_output_tokens = max_output_tokens
+        self._per_request_max_usd = per_request_max_usd
         self._telemetry_sink = telemetry_sink
 
     def answer(
@@ -51,6 +83,17 @@ class ResearchSpecialist:
             # Refused before any spend. An unpriced model cannot be reconciled
             # against the ceiling, and a guessed price would quietly break it.
             raise ResearchModelUnpriced(provider, model)
+        worst_case = self._pricing.worst_case_usd(
+            provider, model, self._max_input_tokens, self._max_output_tokens
+        )
+        if worst_case is None:
+            raise ResearchModelUnpriced(provider, model)
+        if worst_case > self._per_request_max_usd:
+            # The ceiling would not hold for this model at this bound, so the
+            # model is refused rather than the ceiling quietly weakened.
+            raise ResearchModelUnbounded(
+                provider, model, worst_case, self._per_request_max_usd
+            )
 
         # Raises ResearchBudgetExceeded when the day cannot cover one more
         # request. It does not select a cheaper tier or another provider.
@@ -58,7 +101,9 @@ class ResearchSpecialist:
             question.cognition.value, provider, model, kind="research"
         )
         try:
-            answer = self._specialist.answer(question)
+            answer = self._specialist.answer(
+                question, max_output_tokens=self._max_output_tokens
+            )
         except Exception:
             # A failed call may still have been billed: a timeout after the
             # model answered, a stream cut mid-response. The reservation is
@@ -112,4 +157,4 @@ class ResearchSpecialist:
             pass
 
 
-__all__ = ["ResearchSpecialist", "SpecialistError"]
+__all__ = ["ResearchModelUnbounded", "ResearchSpecialist", "SpecialistError"]

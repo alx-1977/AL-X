@@ -80,6 +80,10 @@ class OpenAIReasoningModel:
                 }
             },
         }
+        if request.max_output_tokens is not None:
+            # Enforced by the provider, not by us reading usage afterwards.
+            # A bound applied after the fact cannot stop the spend it measures.
+            payload["max_output_tokens"] = request.max_output_tokens
         if self._service_tier != "default":
             payload["service_tier"] = self._service_tier
         cache_key = request.cache_key or request.affinity_key

@@ -84,3 +84,42 @@ class ConfiguredPricing:
         self, provider: str, model: str, usage: Mapping[str, object]
     ) -> float | None:
         return cost_usd(provider, model, usage)
+
+
+def worst_case_usd(
+    provider: str,
+    model: str,
+    max_input_tokens: int,
+    max_output_tokens: int,
+) -> float | None:
+    """The most one bounded request can cost, or None when unpriced.
+
+    Every token is priced at the uncached input rate or the output rate, with no
+    cache discount assumed: a cache miss is the expensive case, and a ceiling
+    must hold in the expensive case. Reasoning tokens bill as output, so the
+    output bound covers them.
+    """
+    rate = price_of(provider, model)
+    if rate is None:
+        return None
+    uncached_rate, _cached_rate, output_rate = rate
+    if max_input_tokens < 0 or max_output_tokens <= 0:
+        raise ValueError("token bounds must be non-negative and output positive")
+    return round(
+        max_input_tokens / 1e6 * uncached_rate
+        + max_output_tokens / 1e6 * output_rate,
+        6,
+    )
+
+
+class ConfiguredPricingWorstCase(ConfiguredPricing):
+    """Pricing that can also answer what a bounded request may cost at most."""
+
+    def worst_case_usd(
+        self,
+        provider: str,
+        model: str,
+        max_input_tokens: int,
+        max_output_tokens: int,
+    ) -> float | None:
+        return worst_case_usd(provider, model, max_input_tokens, max_output_tokens)

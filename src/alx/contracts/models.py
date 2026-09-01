@@ -41,6 +41,12 @@ class ModelRequest:
     # conversation sends an identical prefix, so keying this per conversation
     # would split one reusable cache into many that never get reused.
     cache_key: str | None = None
+    # A hard provider-side ceiling on generated tokens. None leaves the
+    # provider's own default in place, which is right for Core conversation and
+    # wrong for anything spending against a dollar ceiling: without a bound
+    # there is no worst-case price, so no reservation can be honest. Declared
+    # last so existing positional callers keep their argument order.
+    max_output_tokens: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
@@ -48,6 +54,8 @@ class ModelRequest:
             raise ValueError("a model request requires at least one message")
         _required(self.output_schema_name, "output_schema_name")
         object.__setattr__(self, "output_schema", freeze_data(self.output_schema))
+        if self.max_output_tokens is not None and self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive when set")
         if self.affinity_key is not None:
             _required(self.affinity_key, "affinity_key")
 

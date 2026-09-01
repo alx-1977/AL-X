@@ -39,10 +39,18 @@ RESEARCH_WRITE_PERMISSION = "research.write"
 # out alone: the gate stops every deletion for Friedl's explicit approval.
 RESEARCH_DELETE_PERMISSION = "research.delete"
 
+# Notebook approvals expire on their own clock. Inheriting a window from mail or
+# Xero meant a runtime configured for neither had no expiry at all, so an
+# approval could stay valid indefinitely. 600 seconds is the value both existing
+# gated capabilities use, so an approval-gated notebook action expires exactly as
+# a bill write or a mail send does.
+NOTEBOOK_APPROVAL_TTL_SECONDS = 600
+
 
 @dataclass(frozen=True, slots=True)
 class NotebookRuntime:
     store: SQLiteResearchStore
+    approval_ttl_seconds: int
     definitions: tuple[CapabilityDefinition, ...]
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
@@ -54,7 +62,14 @@ def build_notebook_runtime(
     retention_days: int,
     call_id_source: Callable[[], str],
     clock: Any = None,
+    provenance_of: Any = None,
+    approval_ttl_seconds: int = NOTEBOOK_APPROVAL_TTL_SECONDS,
 ) -> NotebookRuntime:
+    if approval_ttl_seconds <= 0:
+        raise ValueError(
+            "notebook approvals require a finite positive TTL; a permanent "
+            "approval would let one consent authorise a later deletion"
+        )
     store = SQLiteResearchStore(storage_root / "research.sqlite3")
     policies = {
         OPEN_RESEARCH_THREAD: AuthorityPolicy(
@@ -89,10 +104,11 @@ def build_notebook_runtime(
     }
     return NotebookRuntime(
         store=store,
+        approval_ttl_seconds=approval_ttl_seconds,
         definitions=NOTEBOOK_DEFINITIONS,
         policies=policies,
         executors=build_notebook_executors(
-            store, retention_days, call_id_source, clock
+            store, retention_days, call_id_source, clock, provenance_of
         ),
         # Deletion is granted so AL/X can decide research is no longer worth
         # keeping. The approval requirement above, not a withheld permission,
