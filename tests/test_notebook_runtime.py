@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -28,6 +28,9 @@ from alx.bootstrap.notebook import (  # noqa: E402
 )
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.contracts import (  # noqa: E402
+    Approval,
+    ApprovalLifecycle,
+    ApprovalScope,
     CapabilityAttemptDisposition,
     CapabilityCall,
     CapabilityResultState,
@@ -212,22 +215,145 @@ class ConversationScenarioTest(NotebookRuntimeTestCase):
         self.assertEqual(resumed.result.values["status"], "open")
 
 
-class AuthorityTest(NotebookRuntimeTestCase):
-    def test_alx_cannot_delete_her_own_research(self) -> None:
-        """Deletion is irreversible, so the runtime never grants it."""
-        self.assertNotIn(RESEARCH_DELETE_PERMISSION, self.permissions)
+class DeletionApprovalTest(NotebookRuntimeTestCase):
+    """AL/X may decide research is no longer worth keeping; Friedl approves it.
+
+    Deciding an enquiry has run its course is part of thinking, so she holds the
+    permission. Carrying it out is irreversible, so the gate stops every attempt
+    until Friedl has approved that exact deletion.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
         self.call(
             "call-1",
             "open_research_thread",
-            {"thread_id": "t-1", "question": "Q?", "interest": "Because."},
+            {
+                "thread_id": "t-1",
+                "question": "Why do some jellyfish appear not to age?",
+                "interest": "I assumed ageing was universal.",
+            },
         )
-        attempt = self.call(
-            "call-2", "delete_research", {"record_id": "t-1", "kind": "thread"}
+        self.call(
+            "call-2",
+            "record_research_entry",
+            {
+                "entry_id": "e-1",
+                "thread_id": "t-1",
+                "kind": "claim",
+                "content": "SECRET-RESEARCH-CONTENT",
+            },
+        )
+
+    def delete_call(self, call_id: str, approval_id: str | None = None):
+        return CapabilityCall(
+            call_id,
+            "delete_research",
+            {"record_id": "t-1", "kind": "thread"},
+            approval_id=approval_id,
+        )
+
+    def dispatch(self, call, approvals=()):
+        self._call_id[0] = call.call_id
+        return self.broker.dispatch(
+            call,
+            AuthorityContext(
+                principal_reference="friedl",
+                granted_permission_references=frozenset(self.permissions),
+                evaluated_at=NOW,
+                approvals=tuple(approvals),
+            ),
+        )
+
+    def test_alx_holds_the_permission_to_propose_deletion(self) -> None:
+        """She can reach for it; holding it is what makes the request hers."""
+        self.assertIn(RESEARCH_DELETE_PERMISSION, self.permissions)
+
+    def test_deletion_without_approval_is_stopped_and_nothing_is_deleted(self) -> None:
+        attempt = self.dispatch(self.delete_call("call-3"))
+        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
+        self.assertEqual(attempt.reason_code, "approval_required")
+        # Not merely refused: the executor never ran.
+        self.assertFalse(attempt.implementation_invoked)
+        self.assertEqual(self.runtime.store.read_thread("t-1").thread_id, "t-1")
+        self.assertIn("SECRET-RESEARCH-CONTENT", self._raw_database())
+
+    def test_an_invented_approval_id_does_not_authorise_deletion(self) -> None:
+        """A model asserting it was approved is not an approval."""
+        attempt = self.dispatch(self.delete_call("call-3", approval_id="made-up"))
+        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
+        self.assertEqual(attempt.reason_code, "approval_invalid")
+        self.assertEqual(self.runtime.store.read_thread("t-1").thread_id, "t-1")
+
+    def test_an_approval_for_another_thread_does_not_authorise_this_one(self) -> None:
+        """Approval is scoped to the exact record Friedl agreed to delete."""
+        other = Approval(
+            approval_id="approval-1",
+            scope=ApprovalScope(
+                "delete_research", {"record_id": "t-OTHER", "kind": "thread"}
+            ),
+            lifecycle=ApprovalLifecycle.GRANTED,
+        )
+        attempt = self.dispatch(
+            self.delete_call("call-3", approval_id="approval-1"), approvals=(other,)
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
-        self.assertFalse(attempt.implementation_invoked)
-        # The research is still there.
+        self.assertEqual(attempt.reason_code, "approval_invalid")
         self.assertEqual(self.runtime.store.read_thread("t-1").thread_id, "t-1")
+
+    def test_deletion_succeeds_once_friedl_approves_that_exact_record(self) -> None:
+        granted = Approval(
+            approval_id="approval-1",
+            scope=ApprovalScope(
+                "delete_research", {"record_id": "t-1", "kind": "thread"}
+            ),
+            lifecycle=ApprovalLifecycle.GRANTED,
+        )
+        attempt = self.dispatch(
+            self.delete_call("call-3", approval_id="approval-1"), approvals=(granted,)
+        )
+        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
+        self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(attempt.result.values["kind"], "thread")
+        with self.assertRaises(Exception):
+            self.runtime.store.read_thread("t-1")
+        # Secure delete and the content-free tombstone are unchanged.
+        self.assertNotIn("SECRET-RESEARCH-CONTENT", self._raw_database())
+        self.assertNotIn("jellyfish", self._raw_database())
+        self.assertEqual(
+            {(r.record_id, r.kind) for r in self.runtime.store.deletions()},
+            {("t-1", "thread"), ("e-1", "entry")},
+        )
+
+    def test_an_expired_approval_does_not_authorise_deletion(self) -> None:
+        expired = Approval(
+            approval_id="approval-1",
+            scope=ApprovalScope(
+                "delete_research", {"record_id": "t-1", "kind": "thread"}
+            ),
+            lifecycle=ApprovalLifecycle.GRANTED,
+            expires_at=NOW - timedelta(minutes=1),
+        )
+        attempt = self.dispatch(
+            self.delete_call("call-3", approval_id="approval-1"), approvals=(expired,)
+        )
+        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
+        self.assertEqual(self.runtime.store.read_thread("t-1").thread_id, "t-1")
+
+    def test_no_standing_scope_can_pre_authorise_deletions(self) -> None:
+        """One approval must never license the next deletion she proposes."""
+        policy = dict(self.runtime.policies)["delete_research"]
+        self.assertTrue(policy.approval_required)
+        self.assertFalse(policy.standing_scope_allowed)
+
+    def _raw_database(self) -> str:
+        self.runtime.store._connection.commit()
+        return (self.root / "research.sqlite3").read_bytes().decode(
+            "utf-8", errors="ignore"
+        )
+
+
+class AuthorityTest(NotebookRuntimeTestCase):
 
     def test_correction_requires_approval(self) -> None:
         self.call(

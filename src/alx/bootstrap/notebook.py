@@ -33,8 +33,10 @@ from alx.tools import (
 RESEARCH_READ_PERMISSION = "research.read"
 # Writing research is durable but private and reversible by revision.
 RESEARCH_WRITE_PERMISSION = "research.write"
-# Deleting is irreversible, so it is a separate authority that AL/X does not
-# hold. Only Friedl deletes research, and the gate refuses it otherwise.
+# Deleting is irreversible, so it stays a separate authority from writing.
+# AL/X holds it because deciding a line of enquiry is no longer worth keeping is
+# part of thinking, not an administrative act. What she cannot do is carry it
+# out alone: the gate stops every deletion for Friedl's explicit approval.
 RESEARCH_DELETE_PERMISSION = "research.delete"
 
 
@@ -76,9 +78,11 @@ def build_notebook_runtime(
         CORRECT_RESEARCH_ENTRY: AuthorityPolicy(
             frozenset({RESEARCH_WRITE_PERMISSION}), approval_required=True
         ),
-        # Deletion destroys content permanently. It requires an authority the
-        # runtime does not grant, so AL/X cannot delete her own research and
-        # cannot delete Friedl's corrections to it.
+        # Deletion destroys content permanently. AL/X may propose it, but
+        # every deletion needs Friedl's approval for that exact record.
+        # standing_scope_allowed stays false deliberately: a standing grant
+        # would let one approval authorise later deletions she proposes
+        # herself, which is the whole thing this gate exists to prevent.
         DELETE_RESEARCH: AuthorityPolicy(
             frozenset({RESEARCH_DELETE_PERMISSION}), approval_required=True
         ),
@@ -90,9 +94,14 @@ def build_notebook_runtime(
         executors=build_notebook_executors(
             store, retention_days, call_id_source, clock
         ),
-        # Deletion is deliberately absent: granting it here would hand AL/X the
-        # one notebook action that cannot be undone.
+        # Deletion is granted so AL/X can decide research is no longer worth
+        # keeping. The approval requirement above, not a withheld permission,
+        # is what stops her acting on that decision unilaterally.
         permissions=frozenset(
-            {RESEARCH_READ_PERMISSION, RESEARCH_WRITE_PERMISSION}
+            {
+                RESEARCH_READ_PERMISSION,
+                RESEARCH_WRITE_PERMISSION,
+                RESEARCH_DELETE_PERMISSION,
+            }
         ),
     )
