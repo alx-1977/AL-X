@@ -60,9 +60,11 @@ class ResearchSpecialist:
         try:
             answer = self._specialist.answer(question)
         except Exception:
-            # A failed call bought nothing; close the reservation at zero so
-            # the day's remaining budget is not held hostage by a failure.
-            self._ledger.release(reservation)
+            # A failed call may still have been billed: a timeout after the
+            # model answered, a stream cut mid-response. The reservation is
+            # kept in full rather than refunded, because treating failures as
+            # free would let unbounded failing calls run inside one day.
+            self._ledger.abandon(reservation)
             raise
 
         usage = getattr(self._specialist, "last_usage", None)

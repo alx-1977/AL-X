@@ -98,14 +98,19 @@ class RuntimeVisibilityTest(NotebookRuntimeTestCase):
             },
         )
 
-    def test_research_is_reached_only_through_the_broker(self) -> None:
-        """One registration, one dispatcher: no second notebook access path."""
+    def test_the_notebook_is_not_wired_into_the_production_runtime(self) -> None:
+        """Awaiting Friedl's recorded decisions before it may be reachable.
+
+        These tests exercise the notebook through a broker they assemble
+        themselves, which is how the capability path behaves. The production
+        runtime deliberately registers none of it: the governing brief withholds
+        runtime authorisation until retention, authority, deletion and resource
+        policy are settled in governance/DECISIONS.md.
+        """
         source = (
             REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "live_voice.py"
         ).read_text()
-        self.assertEqual(source.count("build_notebook_runtime("), 1)
-        # The store is constructed once, in the notebook bootstrap, and nowhere
-        # else in the runtime.
+        self.assertNotIn("build_notebook_runtime(", source)
         self.assertNotIn("SQLiteResearchStore(", source)
 
 

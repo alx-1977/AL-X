@@ -147,19 +147,22 @@ class ResearchBudgetTest(unittest.TestCase):
                 reservations.append(ledger.reserve("judge", "testvendor", "test-model"))
             except ResearchBudgetExceeded:
                 break
+        # Reservations are what the ceiling is enforced against; settling at
+        # the reserved amount leaves the day exactly spent, not overspent.
         for reservation in reservations:
-            ledger.settle(reservation, 999.0)  # each tries to overspend
+            ledger.settle(reservation, reservation.reserved_usd)
         self.assertLessEqual(ledger.committed_usd(), 5.0)
         self.assertEqual(ledger.remaining_usd(), 0.0)
 
-    def test_a_call_costing_more_than_its_reservation_settles_at_the_maximum(
-        self,
-    ) -> None:
+    def test_an_overrun_is_recorded_at_its_true_cost_not_clamped(self) -> None:
+        """Hiding an overrun would let the day spend money already gone."""
         ledger = self.ledger(daily=10.0, per_request=2.0)
         reservation = ledger.reserve("judge", "testvendor", "test-model")
         settled = ledger.settle(reservation, 7.5)
-        self.assertEqual(settled, 2.0)
-        self.assertEqual(ledger.committed_usd(), 2.0)
+        self.assertEqual(settled, 7.5)
+        self.assertEqual(ledger.committed_usd(), 7.5)
+        # The overrun consumes the day it really consumed.
+        self.assertEqual(ledger.remaining_usd(), 2.5)
 
     def test_exhaustion_stops_research_and_does_not_downgrade_the_tier(self) -> None:
         """No JUDGE to COMPARE to SURVEY slide when money runs short."""
@@ -210,7 +213,8 @@ class ResearchBudgetTest(unittest.TestCase):
             pricing.cost_usd("testvendor", "not-configured", {"output_tokens": 1000})
         )
 
-    def test_failed_call_releases_its_reservation(self) -> None:
+    def test_a_failed_call_keeps_its_full_reservation(self) -> None:
+        """A failure is not proof the provider did not bill for the work."""
         ledger = self.ledger(daily=10.0, per_request=2.0)
         model = FailingModel()
         model.provider, model.model = "testvendor", "test-model"
@@ -220,8 +224,23 @@ class ResearchBudgetTest(unittest.TestCase):
         )
         with self.assertRaises(SpecialistError):
             researcher.answer(question())
-        self.assertEqual(ledger.committed_usd(), 0.0)
-        self.assertEqual(ledger.remaining_usd(), 10.0)
+        self.assertEqual(ledger.committed_usd(), 2.0)
+        self.assertEqual(ledger.remaining_usd(), 8.0)
+
+    def test_repeated_failures_cannot_outrun_the_daily_ceiling(self) -> None:
+        """The hole this closes: unbounded failing paid calls in one day."""
+        ledger = self.ledger(daily=4.0, per_request=2.0)
+        model = FailingModel()
+        model.provider, model.model = "testvendor", "test-model"
+        specialist = ModelSpecialist(model, tiers={Cognition.SURVEY: model})
+        researcher = ResearchSpecialist(
+            specialist, ledger, ConfiguredPricing(), lambda _tier: ("testvendor", "test-model")
+        )
+        for _ in range(2):
+            with self.assertRaises(SpecialistError):
+                researcher.answer(question())
+        with self.assertRaises(ResearchBudgetExceeded):
+            researcher.answer(question())
 
     def test_unmeasured_usage_settles_at_the_full_reservation(self) -> None:
         """An unmeasured call is not free; treating it so would uncap the day."""

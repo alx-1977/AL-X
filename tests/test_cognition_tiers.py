@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import (  # noqa: E402
     Cognition,
+    SpecialistError,
     ModelCompletion,
     ModelRole,
     SpecialistQuestion,
@@ -113,11 +114,18 @@ class CognitionTierTest(unittest.TestCase):
         )
         self.assertIs(default.cognition, Cognition.SURVEY)
 
-    def test_an_unconfigured_tier_never_escalates(self) -> None:
-        """A missing tier falls back to the default, never to a dearer model."""
+    def test_an_unconfigured_tier_refuses_rather_than_substituting(self) -> None:
+        """Silent substitution would run a tier AL/X did not choose.
+
+        Falling back would answer a hard question with a cheap model, or a cheap
+        question with an expensive one, and the tier would stop meaning anything.
+        A misconfiguration is made visible instead.
+        """
         specialist = ModelSpecialist(self.survey, tiers={Cognition.SURVEY: self.survey})
-        specialist.answer(question(Cognition.JUDGE))
-        self.assertEqual(self.survey.calls, 1)
+        with self.assertRaises(SpecialistError) as caught:
+            specialist.answer(question(Cognition.JUDGE))
+        self.assertIn("cognition_tier_unconfigured", str(caught.exception))
+        self.assertEqual(self.survey.calls, 0)
         self.assertEqual(self.judge.calls, 0)
 
     def test_a_tier_carries_no_laws_identity_catalogue_or_goal(self) -> None:

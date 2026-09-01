@@ -196,17 +196,17 @@ class SQLiteResearchLedger:
         return Reservation(reservation_id, required)
 
     def settle(self, reservation: Reservation, actual_usd: float) -> float:
-        """Replace the reservation with the measured cost and return the rest.
+        """Replace the reservation with the measured cost.
 
-        The settled amount is never allowed below zero or above what was
-        reserved. A call that somehow cost more than the per-request maximum
-        still settles at the maximum, because that is what was withdrawn and
-        what the ceiling was enforced against; the overrun is a pricing or
-        configuration fault to fix, not a licence to exceed the day.
+        The true cost is recorded even when it exceeds what was reserved.
+        Clamping it to the reservation would hide the overrun and let the day
+        keep spending against money already gone; the ledger must show what was
+        actually spent so the ceiling is enforced against reality. An overrun is
+        a bound or pricing fault, and it is surfaced rather than absorbed.
         """
         if actual_usd < 0:
             raise ValueError("actual_usd must not be negative")
-        settled = min(actual_usd, reservation.reserved_usd)
+        settled = actual_usd
         with self._lock:
             database = self._db()
             try:
@@ -224,13 +224,20 @@ class SQLiteResearchLedger:
                 database.close()
         return settled
 
-    def release(self, reservation: Reservation) -> None:
-        """Settle a failed call at zero cost.
+    def abandon(self, reservation: Reservation) -> float:
+        """Close a failed or unmeasurable call at its full reservation.
 
-        A provider failure that returned nothing consumed no allowance, but the
-        reservation must still be closed or it stays withdrawn for the day.
+        A failed provider call is not a free one. A request can be billed and
+        still fail: a timeout after the model generated its answer, a stream cut
+        mid-response, a malformed body. Settling those at zero would let an
+        unbounded number of failing paid calls run inside one day's budget,
+        which is exactly the hole a ceiling exists to close.
+
+        Charging the full reservation is deliberately conservative. It may
+        overstate the cost of a call that genuinely never reached the provider,
+        and that is the safe direction to be wrong in.
         """
-        self.settle(reservation, 0.0)
+        return self.settle(reservation, reservation.reserved_usd)
 
     def day(self, day: str | None = None) -> dict[str, object]:
         """Inspectable rollup so Friedl can see where research spend went."""

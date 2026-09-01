@@ -46,13 +46,22 @@ class ModelSpecialist:
         self.last_usage: Mapping[str, Any] | None = None
 
     def model_for(self, cognition: Cognition) -> ReasoningModel:
-        """The model configured for one tier.
+        """The model configured for one tier, or a refusal.
 
-        An unconfigured tier falls back to the default specialist model rather
-        than to a more expensive one: a missing configuration must never buy
-        more capability than Friedl configured.
+        A tier with no configured model refuses the question. Falling back to
+        another model would silently answer a hard question with a cheap one, or
+        a cheap question with an expensive one, and in either case the tier AL/X
+        chose would not be the tier that ran. A misconfiguration must be visible,
+        not absorbed.
         """
-        return self._tiers.get(cognition, self._model)
+        if not self._tiers:
+            # No tiers configured at all: this is the ordinary single-model
+            # specialist, and the question is not tiered work.
+            return self._model
+        model = self._tiers.get(cognition)
+        if model is None:
+            raise SpecialistError(f"cognition_tier_unconfigured:{cognition.value}")
+        return model
 
     def answer(self, question: SpecialistQuestion) -> Mapping[str, Any]:
         request = ModelRequest(
