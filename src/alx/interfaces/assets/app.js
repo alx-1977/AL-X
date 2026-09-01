@@ -5,12 +5,16 @@ const diagnosticLog = document.querySelector("#diagnostic-log");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
+// Law 1: these name a system state and nothing more. First-person or
+// user-directed wording here reads as AL/X speaking when she has not reasoned,
+// so the gate whitelists exactly these labels.
 const phaseLabels = {
+  ready: "Ready",
   listening: "Listening",
-  hearing: "I hear you",
+  hearing: "Hearing",
   thinking: "Thinking",
   speaking: "Speaking",
-  error: "Something interrupted me",
+  error: "Error",
   disconnected: "Disconnected",
 };
 

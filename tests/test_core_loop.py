@@ -19,6 +19,10 @@ from alx.contracts import (  # noqa: E402
     WorkItem,
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
+from alx.core.loop import (  # noqa: E402
+    REASONING_TURN_WINDOW,
+    project_turns_for_reasoning,
+)
 from alx.goals import SQLiteGoalStore  # noqa: E402
 
 NOW = datetime(2026, 8, 28, tzinfo=UTC)
@@ -387,6 +391,144 @@ class CoreTests(unittest.TestCase):
         closed = stored.attempts[-1]
         self.assertEqual(closed.reason_code, "dispatch_interrupted")
         self.assertEqual(closed.result.failure["code"], "dispatch_interrupted")
+
+
+class ReasoningProjectionTests(unittest.TestCase):
+    """Send goal-relevant context, never the entire history.
+
+    Replaying all 71 stored turns made each call slower than the last: 35s,
+    78s, then 154s before the provider returned a blank response. The
+    projection is deterministic — a fixed window plus whatever the active goal
+    still cites — so latency is predictable and no model summarisation stands
+    between AL/X and what was actually said.
+    """
+
+    def turns(self, count: int) -> tuple:
+        moment = datetime(2026, 9, 1, tzinfo=UTC)
+        return tuple(
+            ConversationTurn(
+                "conversation-1",
+                f"turn-{index}",
+                ConversationOrigin.TYPED,
+                f"message {index}",
+                moment,
+                "friedl",
+            )
+            for index in range(count)
+        )
+
+    def test_a_short_conversation_is_sent_whole(self) -> None:
+        turns = self.turns(5)
+        self.assertEqual(project_turns_for_reasoning(turns, None), turns)
+
+    def test_a_long_conversation_is_windowed(self) -> None:
+        kept = project_turns_for_reasoning(self.turns(71), None)
+        self.assertEqual(len(kept), REASONING_TURN_WINDOW)
+        self.assertEqual(kept[-1].turn_id, "turn-70")
+
+    def test_the_window_keeps_the_most_recent_turns(self) -> None:
+        kept = project_turns_for_reasoning(self.turns(40), None)
+        self.assertEqual(
+            [item.turn_id for item in kept],
+            [f"turn-{index}" for index in range(28, 40)],
+        )
+
+    def test_original_order_is_preserved(self) -> None:
+        kept = project_turns_for_reasoning(self.turns(60), _state("turn:turn-2"))
+        ordinals = [int(item.turn_id.split("-")[1]) for item in kept]
+        self.assertEqual(ordinals, sorted(ordinals))
+
+    def test_the_turn_a_goal_came_from_is_never_dropped(self) -> None:
+        """Cost control may not silently truncate an active goal."""
+        kept = project_turns_for_reasoning(self.turns(71), _state("turn:turn-1"))
+        self.assertIn("turn-1", {item.turn_id for item in kept})
+
+    def test_evidence_sources_are_kept_however_old(self) -> None:
+        state = _state("turn:turn-60", evidence_sources=("turn:turn-3",))
+        kept = {item.turn_id for item in project_turns_for_reasoning(self.turns(71), state)}
+        self.assertIn("turn-3", kept)
+
+    def test_decisions_corrections_and_approvals_are_kept(self) -> None:
+        state = _state(
+            "turn:turn-70",
+            decisions=("turn:turn-4",),
+            corrections=("turn:turn-5",),
+            approvals=("turn:turn-6",),
+        )
+        kept = {item.turn_id for item in project_turns_for_reasoning(self.turns(71), state)}
+        for turn_id in ("turn-4", "turn-5", "turn-6"):
+            with self.subTest(turn_id=turn_id):
+                self.assertIn(turn_id, kept)
+
+    def test_a_non_turn_reference_is_ignored(self) -> None:
+        state = _state("evidence:e-1", evidence_sources=("event:x", "evidence:y"))
+        self.assertEqual(
+            len(project_turns_for_reasoning(self.turns(71), state)),
+            REASONING_TURN_WINDOW,
+        )
+
+    def test_projection_never_mutates_the_stored_conversation(self) -> None:
+        """The complete thread stays stored and unrewritten."""
+        turns = self.turns(71)
+        before = [item.turn_id for item in turns]
+        project_turns_for_reasoning(turns, _state("turn:turn-0"))
+        self.assertEqual([item.turn_id for item in turns], before)
+        self.assertEqual(len(turns), 71)
+
+    def test_the_core_projects_rather_than_sending_everything(self) -> None:
+        """Proof the live path uses it, not merely that it exists."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/core/loop.py"
+        ).read_text()
+        self.assertIn("turns=project_turns_for_reasoning(", source)
+        self.assertNotIn("turns=conversation.turns,", source)
+
+    def test_grounding_still_validates_against_the_whole_conversation(self) -> None:
+        """Windowing the model's view must not narrow what may be cited."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/core/loop.py"
+        ).read_text()
+        self.assertIn(
+            'known = {f"turn:{item.turn_id}" for item in conversation.turns}', source
+        )
+        self.assertIn(
+            'turns = {f"turn:{item.turn_id}": item.person_id '
+            "for item in conversation.turns}",
+            source,
+        )
+
+
+def _state(
+    objective_reference: str,
+    *,
+    evidence_sources: tuple = (),
+    decisions: tuple = (),
+    corrections: tuple = (),
+    approvals: tuple = (),
+):
+    """A stand-in carrying only the references the projection reads."""
+
+    class Objective:
+        source_reference = objective_reference
+
+    class Evidence:
+        source_references = evidence_sources
+
+    def referencing(values):
+        return tuple(
+            type("Item", (), {"source_reference": value})() for value in values
+        )
+
+    class State:
+        objective = Objective()
+        evidence = (Evidence(),) if evidence_sources else ()
+        decisions_ = None
+
+    state = State()
+    state.decisions = referencing(decisions)
+    state.corrections = referencing(corrections)
+    state.approvals = referencing(approvals)
+    return state
 
 
 if __name__ == "__main__":

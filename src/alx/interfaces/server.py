@@ -25,8 +25,34 @@ LOGGER = logging.getLogger(__name__)
 # A step-budget stop is a durable checkpoint, not a failed session. The Core
 # has persisted the goal and can continue it on the next turn, so the transport
 # must keep listening instead of hanging up on work that is still in progress.
+# A reasoning provider that returns nothing usable has failed one turn, not the
+# conversation: the model answered blank after 154 seconds and the session
+# ended silently, so Friedl was left waiting on a turn that was already dead.
+# The Core rejected that decision and changed nothing, so there is no partial
+# work to protect by hanging up. This is a provider fault like a dropped
+# socket, not an invalid decision AL/X acted on.
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
-    {"speech_transcription_error", "budget_exhausted", "budget_exceeded"}
+    {
+        "speech_transcription_error",
+        "budget_exhausted",
+        "budget_exceeded",
+        "reasoner_error",
+    }
+)
+
+# Where recovery happens decides whether AL/X can still hear.
+#
+# These three are raised mid-exchange while the transcriber and the microphone
+# iterator are both alive, and `exchange()` already yields LISTENING and keeps
+# running afterwards. Returning here would abandon that live audio iterator and
+# start a second consumer of the same browser socket, so the next thing Friedl
+# said reached nobody: the session survived but was deaf, which is worse than
+# ending. They are recovered inside the existing exchange.
+#
+# `speech_transcription_error` is different: it ends `exchange()` itself, so
+# there is no exchange left to continue and re-entry is the only way back.
+MID_EXCHANGE_RECOVERABLE_REASONS = frozenset(
+    {"budget_exhausted", "budget_exceeded", "reasoner_error"}
 )
 
 
@@ -44,6 +70,9 @@ class LiveVoiceServer:
         self._port = port
         self._sample_rate_hz = sample_rate_hz
         self._asset_root = asset_root.resolve()
+        # Set when a mid-exchange recovery happens, cleared by the next audio
+        # frame. It proves the microphone iterator survived the recovery.
+        self._await_audio_confirmation = False
 
     async def serve_forever(self) -> None:
         origins = (f"http://{self._host}:{self._port}", None)
@@ -119,7 +148,31 @@ class LiveVoiceServer:
                 if event.kind is VoiceEventKind.ERROR:
                     message["reason"] = event.reason
                     LOGGER.error("Voice session failed: %s", event.reason)
+                    # Law 1: the transport reports a structural phase and a
+                    # reason code. It does not compose wording on AL/X's
+                    # behalf. A failed turn is visible as an error phase and in
+                    # the diagnostics panel; anything said to Friedl about it
+                    # must come from the authoritative reasoning path.
                     await connection.send(json.dumps(message))
+                    if event.reason in MID_EXCHANGE_RECOVERABLE_REASONS:
+                        # The exchange is still running and still owns the
+                        # microphone iterator. It yields its own LISTENING
+                        # next, so this neither sends one nor re-enters.
+                        LOGGER.info(
+                            "Recovering inside the running exchange: %s",
+                            event.reason,
+                        )
+                        self._await_audio_confirmation = True
+                        await connection.send(
+                            json.dumps(
+                                {
+                                    "type": "diagnostic",
+                                    "code": "voice.recovered_in_exchange",
+                                    "reason": event.reason,
+                                }
+                            )
+                        )
+                        continue
                     if event.reason in RECOVERABLE_TRANSPORT_REASONS:
                         await connection.send(
                             json.dumps({
@@ -159,6 +212,21 @@ class LiveVoiceServer:
                         {
                             "type": "diagnostic",
                             "code": "microphone.audio_received",
+                        }
+                    )
+                )
+            elif self._await_audio_confirmation:
+                # Proof the same iterator is still carrying audio after a
+                # mid-exchange recovery. Silence here is how a deaf session
+                # looked last time: the turn recovered, the browser kept
+                # sending, and nothing arrived. A technical code, not wording.
+                self._await_audio_confirmation = False
+                LOGGER.info("Microphone audio resumed after recovery")
+                await connection.send(
+                    json.dumps(
+                        {
+                            "type": "diagnostic",
+                            "code": "microphone.audio_resumed",
                         }
                     )
                 )

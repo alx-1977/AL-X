@@ -116,8 +116,11 @@ class SQLiteUsageRecorder:
             if task_id in self._budgets and not self._settled.get(task_id, False):
                 # An unfinished task keeps its window, so reaching for a second
                 # capability within one bill does not hand it a fresh ceiling.
+                # Its recovery state is kept for the same reason: a task that
+                # was stopped and is now recovering must not have that state
+                # cleared, in either direction, by selecting another
+                # capability. Only completing the work opens a new window.
                 self._budgets[task_id] = budget
-                self._recovery.discard(task_id)
                 return
             self._settled.pop(task_id, None)
             self._budgets[task_id] = budget
@@ -159,9 +162,14 @@ class SQLiteUsageRecorder:
         Recovery is genuine extra work, so it buys a bounded allowance of
         further calls rather than an open budget. Only the Core may declare it;
         a provider or tool cannot lift its own limit.
+
+        Declaring it twice grants nothing further: the allowance is a property
+        of the one window, not a credit issued per call. That is what stops a
+        stopped task from reasoning indefinitely by re-entering recovery.
         """
         with self._lock:
-            self._recovery.add(task_id)
+            if task_id in self._budgets:
+                self._recovery.add(task_id)
 
     def record(self, task_id: str, values: Mapping[str, Any]) -> None:
         if values.get("code") != "reasoning.completed" or not task_id.strip():
@@ -281,6 +289,11 @@ class SQLiteUsageRecorder:
         with self._lock:
             budget = self._budgets.get(task_id)
             if budget is None:
+                return
+            if self._settled.get(task_id, False):
+                # The work finished. Its ceiling stopped that task running
+                # away; it must not also stop AL/X saying what she did. The
+                # next capability call opens a new window.
                 return
             recovering = task_id in self._recovery
             since = self._windows.get(task_id, 0)

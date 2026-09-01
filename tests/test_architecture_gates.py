@@ -221,6 +221,251 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class AlxAuthorshipBoundaryTests(ArchitectureGateTests):
+    """Only the authoritative reasoning path may author AL/X's words.
+
+    Law 1 forbids a second assistant voice. A recovery handler nevertheless
+    added a fixed sentence to the voice error event — "That turn failed before
+    I could answer. Nothing was changed. Please say that again." — which reads
+    to Friedl as AL/X speaking when she never reasoned at all.
+
+    Each test is a mutation: it reintroduces one way for a non-reasoning
+    component to speak and asserts the gate rejects it. Technical codes,
+    diagnostics and structural phase labels stay allowed and are asserted too.
+    """
+
+    def test_a_composed_field_on_a_voice_event_is_rejected(self) -> None:
+        self.assert_rejected(
+            "interfaces/server.py",
+            "def send(message: dict) -> None:\n"
+            "    message['notice'] = 'That turn failed. Please say it again.'\n",
+            "voice event may not carry composed wording",
+        )
+
+    def test_composed_wording_in_an_event_literal_is_rejected(self) -> None:
+        self.assert_rejected(
+            "interfaces/server.py",
+            "def build() -> dict:\n"
+            "    return {'type': 'phase', 'value': 'error',\n"
+            "            'message': 'Something went wrong, sorry.'}\n",
+            "voice event may not carry composed wording",
+        )
+
+    def test_every_conversational_field_name_is_covered(self) -> None:
+        """Renaming the field must not evade the rule."""
+        for field in ("notice", "message", "text", "content", "speech", "say"):
+            with self.subTest(field=field):
+                self.assert_rejected(
+                    "interfaces/server.py",
+                    "def send(event: dict) -> None:\n"
+                    f"    event[{field!r}] = 'Please try that again.'\n",
+                    "voice event may not carry composed wording",
+                )
+
+    def test_a_literal_sentence_reaching_speech_is_rejected(self) -> None:
+        self.assert_rejected(
+            "interfaces/live_voice.py",
+            "async def speak(synthesizer, conversation_id) -> None:\n"
+            "    async for chunk in synthesizer.synthesize(\n"
+            "        'Sorry, something went wrong.', conversation_id\n"
+            "    ):\n"
+            "        pass\n",
+            "only the authoritative Core response may reach speech synthesis",
+        )
+
+    def test_a_capability_result_reaching_speech_is_rejected(self) -> None:
+        """A tool result is evidence for AL/X, never her words."""
+        self.assert_rejected(
+            "interfaces/live_voice.py",
+            "async def speak(synthesizer, attempt, conversation_id) -> None:\n"
+            "    async for chunk in synthesizer.synthesize(\n"
+            "        attempt.result.values, conversation_id\n"
+            "    ):\n"
+            "        pass\n",
+            "only the authoritative Core response may reach speech synthesis",
+        )
+
+    def test_the_authoritative_response_reaching_speech_is_accepted(self) -> None:
+        """The gate must not refuse the one legitimate path."""
+        messages = self.inspect(
+            "interfaces/live_voice.py",
+            "async def speak(synthesizer, outcome, conversation_id) -> None:\n"
+            "    async for chunk in synthesizer.synthesize(\n"
+            "        outcome.response, conversation_id\n"
+            "    ):\n"
+            "        pass\n",
+        )
+        self.assertEqual([], messages)
+
+    def test_a_technical_diagnostic_is_still_allowed(self) -> None:
+        """Codes and logs are not AL/X speaking."""
+        messages = self.inspect(
+            "interfaces/server.py",
+            "import logging\n\n\n"
+            "def report(message: dict, reason: str) -> None:\n"
+            "    logging.getLogger('alx').error('Voice session failed: %s', reason)\n"
+            "    message['reason'] = reason\n",
+        )
+        self.assertEqual([], messages)
+
+    def test_a_structural_phase_is_still_allowed(self) -> None:
+        messages = self.inspect(
+            "interfaces/server.py",
+            "def phase(kind: str) -> dict:\n"
+            "    return {'type': 'phase', 'value': kind}\n",
+        )
+        self.assertEqual([], messages)
+
+
+class FrontendAuthorshipTests(unittest.TestCase):
+    """The frontend renders authoritative state; it does not author AL/X."""
+
+    def setUp(self) -> None:
+        self.root = REPOSITORY_ROOT
+
+    def test_the_live_frontend_passes(self) -> None:
+        from scripts.check_architecture import _frontend_violations
+
+        self.assertEqual([], _frontend_violations(self.root))
+
+    def test_rendering_transported_prose_as_alx_is_rejected(self) -> None:
+        import tempfile
+        from pathlib import Path as _Path
+
+        from scripts.check_architecture import _frontend_violations
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = _Path(directory)
+            assets = root / "src/alx/interfaces/assets"
+            assets.mkdir(parents=True)
+            (assets / "app.js").write_text(
+                "function show(message) {\n"
+                "  status.textContent = message.notice;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            found = _frontend_violations(root)
+        self.assertTrue(found)
+        self.assertIn("may not render transported prose", found[0].message)
+
+    def _assets(self, directory, *, js: str = "", html: str = ""):
+        from pathlib import Path as _Path
+
+        root = _Path(directory)
+        assets = root / "src/alx/interfaces/assets"
+        assets.mkdir(parents=True)
+        if js:
+            (assets / "app.js").write_text(js, encoding="utf-8")
+        if html:
+            (assets / "index.html").write_text(html, encoding="utf-8")
+        return root
+
+    def test_first_person_phase_wording_is_rejected(self) -> None:
+        """A label names a system state; it is not AL/X speaking.
+
+        These are the exact strings that shipped: they read as her voice on a
+        turn where she never reasoned at all.
+        """
+        import tempfile
+
+        from scripts.check_architecture import _frontend_violations
+
+        for label in ("I hear you", "Something interrupted me", "I'm listening"):
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = self._assets(
+                        directory,
+                        js=(
+                            "const phaseLabels = {\n"
+                            '  listening: "Listening",\n'
+                            f'  hearing: "{label}",\n'
+                            "};\n"
+                        ),
+                    )
+                    found = _frontend_violations(root)
+                self.assertTrue(found, f"{label!r} must be rejected")
+                self.assertIn("not a neutral system state", found[0].message)
+
+    def test_user_directed_status_text_is_rejected(self) -> None:
+        import tempfile
+
+        from scripts.check_architecture import _frontend_violations
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._assets(
+                directory, html='<p id="status">Ready when you are</p>\n'
+            )
+            found = _frontend_violations(root)
+        self.assertTrue(found)
+        self.assertIn("not a neutral system state", found[0].message)
+
+    def test_a_user_directed_fallback_label_is_rejected(self) -> None:
+        import tempfile
+
+        from scripts.check_architecture import _frontend_violations
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._assets(
+                directory,
+                js='status.textContent = phaseLabels[phase] ?? "Sorry, try again.";\n',
+            )
+            found = _frontend_violations(root)
+        self.assertTrue(found)
+        self.assertIn("not a neutral system state", found[0].message)
+
+    def test_only_the_approved_neutral_states_are_permitted(self) -> None:
+        """The whitelist is exact, not a judgement about tone."""
+        from scripts.check_architecture import NEUTRAL_PHASE_LABELS
+
+        self.assertEqual(
+            NEUTRAL_PHASE_LABELS,
+            frozenset(
+                {
+                    "Ready",
+                    "Listening",
+                    "Hearing",
+                    "Thinking",
+                    "Speaking",
+                    "Error",
+                    "Disconnected",
+                    "AL/X",
+                }
+            ),
+        )
+
+    def test_the_live_labels_are_all_neutral(self) -> None:
+        from scripts.check_architecture import (
+            NEUTRAL_PHASE_LABELS,
+            _phase_label_violations,
+        )
+
+        path = REPOSITORY_ROOT / "src/alx/interfaces/assets/app.js"
+        self.assertEqual(
+            [], _phase_label_violations(path, str(path), path.read_text())
+        )
+        text = path.read_text()
+        for prohibited in ("I hear you", "Something interrupted me"):
+            self.assertNotIn(prohibited, text)
+
+    def test_a_structural_phase_label_is_still_allowed(self) -> None:
+        import tempfile
+        from pathlib import Path as _Path
+
+        from scripts.check_architecture import _frontend_violations
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = _Path(directory)
+            assets = root / "src/alx/interfaces/assets"
+            assets.mkdir(parents=True)
+            (assets / "app.js").write_text(
+                "function show(phase) {\n"
+                '  status.textContent = phaseLabels[phase] ?? "AL/X";\n'
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], _frontend_violations(root))
+
+
 class DiagnosticsPrivacyBoundaryTests(ArchitectureGateTests):
     """The gate must reject every route that exports payload-bearing state.
 

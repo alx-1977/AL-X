@@ -37,7 +37,7 @@ from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteCo
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
-from alx.observability import XERO_BILL_BUDGET, SQLiteUsageRecorder
+from alx.observability import BudgetExceeded, XERO_BILL_BUDGET, SQLiteUsageRecorder
 from alx.specialists import ModelSpecialist, extract_invoice
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
@@ -131,8 +131,21 @@ async def run(repository_root: Path) -> None:
     current_conversation_id = [""]
 
     def budget_check(conversation_id: str) -> None:
+        """Stop a runaway task, and convert that stop into bounded recovery.
+
+        A ceiling that only ever raises leaves the conversation deadlocked:
+        the Core checkpoints, the transport keeps listening, and every later
+        turn re-raises against the same exhausted window, so the next thing
+        Friedl says fails before it is heard. Declaring recovery here gives
+        the next turns the configured allowance and nothing more. It is
+        idempotent, so being stopped repeatedly never buys a further one.
+        """
         current_conversation_id[0] = conversation_id
-        usage.check(conversation_id)
+        try:
+            usage.check(conversation_id)
+        except BudgetExceeded:
+            usage.enter_recovery(conversation_id)
+            raise
 
     def telemetry(task_id: str, values: Mapping[str, Any]) -> None:
         """Development panel and durable record see the same measurement."""

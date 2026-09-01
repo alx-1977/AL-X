@@ -13,7 +13,7 @@ from alx.contracts import (
     AgentDecision, Approval, ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityDefinition, CapabilityDispatch, CapabilityResult,
     ConversationOrigin,
-    CapabilityResultState, ConversationSnapshot,
+    CapabilityResultState, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
@@ -37,6 +37,63 @@ class CoreOutcome:
     response: str | None = None
     reason: str | None = None
     response_provenance: ContentProvenance | None = None
+
+
+# The whole conversation is stored and never rewritten, but sending all of it
+# on every call made each reasoning turn slower than the last: at 71 turns the
+# provider took 35s, then 78s, then 154s before returning a blank response.
+# The blueprint asks for goal-relevant context rather than the entire history,
+# and forbids silently truncating an active goal. So the projection is
+# deterministic and goal-preserving: the recent thread, plus every older turn
+# the active work still cites. Nothing is deleted; older casual conversation
+# simply has to be retrieved rather than being silently present.
+REASONING_TURN_WINDOW = 12
+
+
+def project_turns_for_reasoning(
+    turns: Sequence[ConversationTurn],
+    state: GoalState | None,
+    window: int = REASONING_TURN_WINDOW,
+) -> tuple[ConversationTurn, ...]:
+    """The turns one reasoning call sees, in their original order.
+
+    Keeps the last `window` turns, and any older turn the active goal still
+    depends on: its objective's source, evidence sources, decisions,
+    corrections and approvals. A goal therefore never loses the turn it came
+    from, however long the conversation grows.
+    """
+    ordered = tuple(turns)
+    if window <= 0 or len(ordered) <= window:
+        return ordered
+    referenced = _referenced_turn_ids(state)
+    recent = {item.turn_id for item in ordered[-window:]}
+    return tuple(
+        item
+        for item in ordered
+        if item.turn_id in recent or item.turn_id in referenced
+    )
+
+
+def _referenced_turn_ids(state: GoalState | None) -> frozenset[str]:
+    """Every turn id the active goal still points at."""
+    if state is None:
+        return frozenset()
+    references: set[str] = set()
+
+    def note(value: object) -> None:
+        if isinstance(value, str) and value.startswith("turn:"):
+            references.add(value[len("turn:") :])
+
+    note(getattr(state.objective, "source_reference", None))
+    for item in state.evidence:
+        for reference in item.source_references:
+            note(reference)
+    for group in (state.decisions, state.corrections):
+        for item in group:
+            note(getattr(item, "source_reference", None))
+    for item in state.approvals:
+        note(getattr(item, "source_reference", None))
+    return frozenset(references)
 
 
 class CoreAgent:
@@ -108,7 +165,10 @@ class CoreAgent:
             try:
                 decision = self._reasoner.decide(ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,
-                    turns=conversation.turns,
+                    turns=project_turns_for_reasoning(
+                        conversation.turns,
+                        None if snapshot is None else snapshot.state,
+                    ),
                     capabilities=self._capabilities,
                     memories=retrieved_memories,
                     events=conversation.events,

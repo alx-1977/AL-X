@@ -52,6 +52,53 @@ Any proposal must name the concrete module that owns each boundary. Two owners f
 A change fails if any applicable gate fails. Where a law cannot be checked
 automatically, compliance requires recorded evidence in the pull request.
 
+## Who may author AL/X's words
+
+**Clarification of Law 1, recorded by Friedl on 2026-09-01. This is not an
+exception; `governance/EXCEPTIONS.md` remains empty.**
+
+> Anything presented as coming from AL/X must be authored by the authoritative
+> LLM reasoning path. Non-LLM components may emit technical codes, diagnostics
+> and structural UI state only. No conversational fallback wording is permitted
+> without Friedl's explicit written consent.
+
+No transport, frontend, provider, tool, capability, deterministic workflow or
+recovery handler may compose conversational wording on her behalf. Law 1
+already forbids a second assistant voice; this states plainly where the line
+falls, because a recovery handler crossed it.
+
+**Allowed.** Terminal logs, diagnostic panel codes and structural UI states.
+A phase label must be one of exactly these neutral system states: Ready,
+Listening, Hearing, Thinking, Speaking, Error, Disconnected — plus AL/X's own
+name as the unknown-phase fallback. They may not become conversational
+messages, first-person statements, reassurance, claims about what happened, or
+instructions to Friedl. "Hearing" is a state; "I hear you" is her voice.
+
+**Prohibited.** A fixed sentence attributed to AL/X, a spoken or synthesized
+fallback, a toast, banner or status sentence explaining a failure in her voice,
+and any capability result rendered directly as her speech. A structured result
+returns to the Core as evidence; AL/X formulates what is said about it.
+
+**What the gate checks.** `scripts/check_architecture.py` rejects a
+conversational field added to a voice phase or error event, a frontend
+assignment that renders transported prose onto a surface the person reads as
+AL/X, and any value other than the authoritative Core response reaching speech
+synthesis. `tests/test_architecture_gates.py` proves each rejection by
+reintroducing the violation, and proves diagnostics and structural labels stay
+allowed.
+
+**Recorded violations.** On 2026-09-01 a recovery handler added
+`message["notice"]` to the voice error event carrying a fixed sentence, and the
+frontend rendered it on the status line. It was removed rather than reworded,
+and the gate above was added so it cannot return.
+
+The same day, three first-person phase labels were found already shipping:
+`"I hear you"`, `"Something interrupted me"` and the status element's
+`"Ready when you are"`. They predated the handler above but breach the same
+rule, and were replaced with `Hearing`, `Error` and `Ready`. The gate now
+whitelists the exact neutral labels rather than accepting any phase string, so
+neither a new label nor a reworded one can reintroduce her voice.
+
 ## Required test scenarios for every conversational capability
 
 Each capability must be exercised through AL/X, not by directly testing a hidden conversational handler:

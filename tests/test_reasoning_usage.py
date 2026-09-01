@@ -241,20 +241,235 @@ class ExecutionBudgetTests(unittest.TestCase):
                 self.assertGreater(budget.recovery_allowance, 0)
                 self.assertGreater(budget.recovery_limit, budget.stop_above)
 
-    def test_a_new_budget_clears_a_previous_recovery(self) -> None:
+    def test_selecting_another_capability_neither_refreshes_nor_revokes_recovery(
+        self,
+    ) -> None:
+        """Recovery belongs to the window, not to a capability call.
+
+        Clearing it here dropped a recovering task back to the base ceiling,
+        which is what left a stopped conversation unable to continue: every
+        later turn re-raised against the spent window. Granting a fresh one
+        would be the opposite fault. The allowance is bounded and counted once.
+        """
         self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        for _ in range(XERO_BILL_BUDGET.stop_above):
+            self.recorder.record("task-1", call())
+        self.recorder.enter_recovery("task-1")
+
+        # Reaching for another bill capability mid-recovery changes nothing.
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        self.recorder.check("task-1")
+        self.assertEqual(
+            self.recorder.task("task-1")["budget_state"], "recovering"
+        )
+
+        # The allowance is still bounded, and re-declaring buys nothing more.
+        for _ in range(XERO_BILL_BUDGET.recovery_allowance):
+            self.recorder.record("task-1", call())
         self.recorder.enter_recovery("task-1")
         self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
-        for _ in range(5):
-            self.recorder.record("task-1", call())
         with self.assertRaises(BudgetExceeded):
             self.recorder.check("task-1")
+
+    def test_a_completed_task_opens_a_new_window(self) -> None:
+        """Settling is the one thing that does clear recovery."""
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        for _ in range(XERO_BILL_BUDGET.recovery_limit):
+            self.recorder.record("task-1", call())
+        self.recorder.enter_recovery("task-1")
+        self.recorder.settle("task-1")
+        self.recorder.set_budget("task-1", XERO_BILL_BUDGET)
+        self.recorder.check("task-1")
+        self.assertEqual(self.recorder.task("task-1")["budget_state"], "expected")
 
     def test_budget_rejects_an_incoherent_configuration(self) -> None:
         for expected, warn, stop in ((0, 1, 2), (3, 2, 4), (2, 5, 4)):
             with self.subTest(expected=expected, warn=warn, stop=stop):
                 with self.assertRaises(ValueError):
                     ExecutionBudget(expected, warn, stop)
+
+
+class BudgetDeadlockTests(unittest.TestCase):
+    """A ceiling that stops a task must not strand the conversation.
+
+    Live behaviour: a background mail event drove a DHL task to the ceiling,
+    and the first thing Friedl said afterwards failed with `budget_exceeded`
+    before AL/X had announced the waiting mail. The transport recovered and
+    kept listening, but every later turn re-raised against the same exhausted
+    window, so the conversation could never continue. The stop was correct;
+    never converting it into the configured bounded allowance was not.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.recorder = SQLiteUsageRecorder(
+            Path(self._directory.name) / "reasoning-usage.sqlite3"
+        )
+
+    def budget_check(self, task_id: str) -> None:
+        """The live seam: a stop declares recovery, exactly as live_voice does."""
+        try:
+            self.recorder.check(task_id)
+        except BudgetExceeded:
+            self.recorder.enter_recovery(task_id)
+            raise
+
+    def spend(self, task_id: str, calls: int) -> None:
+        for _ in range(calls):
+            self.recorder.record(task_id, call())
+
+    def turn(self, task_id: str) -> bool:
+        """One reasoning turn. True if it was allowed to proceed."""
+        try:
+            self.budget_check(task_id)
+        except BudgetExceeded:
+            return False
+        self.recorder.record(task_id, call())
+        return True
+
+    def test_the_first_turn_after_a_stop_is_not_permanently_blocked(self) -> None:
+        """Requirement 7: a mail event at the ceiling must not strand speech."""
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        self.spend("conversation-1", XERO_BILL_BUDGET.stop_above)
+
+        # The stop itself still refuses this turn and checkpoints.
+        self.assertFalse(self.turn("conversation-1"))
+        # But the conversation is now recovering, not deadlocked.
+        self.assertEqual(
+            self.recorder.task("conversation-1")["budget_state"], "recovering"
+        )
+        self.assertTrue(
+            self.turn("conversation-1"),
+            "the next spoken turn must not fail against the same spent window",
+        )
+
+    def test_recovery_grants_exactly_the_configured_allowance(self) -> None:
+        """Requirement 4: bounded, and not one call more."""
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        self.spend("conversation-1", XERO_BILL_BUDGET.stop_above)
+        self.assertFalse(self.turn("conversation-1"))
+
+        allowed = 0
+        for _ in range(10):
+            if not self.turn("conversation-1"):
+                break
+            allowed += 1
+        self.assertEqual(allowed, XERO_BILL_BUDGET.recovery_allowance)
+
+    def test_recovery_cannot_be_refreshed_by_another_bill_capability(self) -> None:
+        """Requirement 5: no unlimited loop, however capabilities are chosen."""
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        self.spend("conversation-1", XERO_BILL_BUDGET.stop_above)
+        self.assertFalse(self.turn("conversation-1"))
+
+        allowed = 0
+        for _ in range(12):
+            # Re-arming and re-declaring recovery must both buy nothing.
+            self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+            self.recorder.enter_recovery("conversation-1")
+            if not self.turn("conversation-1"):
+                break
+            allowed += 1
+        self.assertEqual(allowed, XERO_BILL_BUDGET.recovery_allowance)
+
+    def test_a_stop_is_still_a_stop_for_a_runaway_task(self) -> None:
+        """Requirement 3: the ceiling is not removed or raised."""
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        spent = 0
+        refusals = 0
+        for _ in range(30):
+            if self.turn("conversation-1"):
+                spent += 1
+                continue
+            refusals += 1
+            if refusals > 1:
+                break
+        # The base ceiling stops it, then the bounded allowance, and no more.
+        self.assertLessEqual(spent, XERO_BILL_BUDGET.recovery_limit)
+        self.assertEqual(
+            self.recorder.task("conversation-1")["budget_state"], "stopped"
+        )
+        # Once the allowance is gone the task stays stopped for good.
+        self.assertFalse(self.turn("conversation-1"))
+
+    def test_a_completed_capability_lets_alx_report_during_recovery(self) -> None:
+        """Requirement 6: finishing the work must not silence the report."""
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        self.spend("conversation-1", XERO_BILL_BUDGET.recovery_limit)
+        self.recorder.enter_recovery("conversation-1")
+        self.assertFalse(self.turn("conversation-1"))
+
+        # The capability then succeeds, so its window closes.
+        self.recorder.settle("conversation-1")
+        self.assertTrue(
+            self.turn("conversation-1"),
+            "a completed bill must still be able to say what it did",
+        )
+
+    def test_a_settled_task_reports_before_any_new_window_opens(self) -> None:
+        """Requirement: settle() alone must unblock the reporting call."""
+        self.recorder.set_budget("conversation-1", XERO_BILL_BUDGET)
+        self.spend("conversation-1", XERO_BILL_BUDGET.stop_above)
+        self.recorder.settle("conversation-1")
+        self.recorder.check("conversation-1")
+
+
+class BillSettlementWiringTests(unittest.TestCase):
+    """Whatever arms the ceiling must be able to close it again."""
+
+    def test_every_committing_capability_can_settle_its_window(self) -> None:
+        """Requirement 1: a DHL import armed a ceiling it could never settle."""
+        from alx.bootstrap.xero import (
+            BILL_EXECUTION_CAPABILITIES,
+            BILL_TASK_CAPABILITIES,
+        )
+        from alx.tools import CAPTURE_SUPPLIER_INVOICE, PROCESS_DHL_IMPORT
+
+        self.assertIn(CAPTURE_SUPPLIER_INVOICE, BILL_EXECUTION_CAPABILITIES)
+        self.assertIn(PROCESS_DHL_IMPORT, BILL_EXECUTION_CAPABILITIES)
+        self.assertTrue(BILL_EXECUTION_CAPABILITIES <= BILL_TASK_CAPABILITIES)
+
+    def test_only_a_completed_result_settles(self) -> None:
+        """Requirement 2: a refusal must not falsely close the window."""
+        import ast
+
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/bootstrap/live_voice.py"
+        ).read_text()
+        self.assertIn("and _completed(attempt)", source)
+
+        namespace: dict = {}
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.FunctionDef) and node.name == "_completed":
+                exec(compile(ast.Module([node], []), "<ast>", "exec"), namespace)
+        completed = namespace["_completed"]
+
+        class Attempt:
+            def __init__(self, values):
+                self.result = type("R", (), {"values": values})()
+
+        # A finished DHL import settles.
+        self.assertTrue(completed(Attempt({"completed": True, "stage": "dhl_invoice"})))
+        # A returned stage, a refusal and a failure do not.
+        self.assertFalse(
+            completed(Attempt({"completed": False, "returned_for": "no_matching_draft"}))
+        )
+        self.assertFalse(
+            completed(
+                Attempt({"completed": False, "returned_for": "customs_evidence_missing"})
+            )
+        )
+        self.assertFalse(completed(Attempt({})))
+        self.assertFalse(completed(type("A", (), {"result": None})()))
+
+    def test_the_live_budget_check_declares_recovery_on_a_stop(self) -> None:
+        """Requirement: the checkpoint must open the recovery allowance."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src/alx/bootstrap/live_voice.py"
+        ).read_text()
+        self.assertIn("except BudgetExceeded:", source)
+        self.assertIn("usage.enter_recovery(conversation_id)", source)
 
 
 class CoreBudgetIntegrationTests(unittest.TestCase):
