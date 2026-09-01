@@ -1,0 +1,2 @@
+Line Type,Invoice Number,Shipment Number,Invoice Date,Due Date,Currency,Total amount (incl. VAT),Total Tax,Weight Charge,Declaration/Entry number,XC1 Code,XC1 Name,XC1 Charge,XC1 Tax,XC1 Discount,XC1 Total,XC2 Code,XC2 Name,XC2 Charge,XC2 Tax,XC2 Discount,XC2 Total,XC3 Code,XC3 Name,XC3 Charge,XC3 Tax,XC3 Discount,XC3 Total
+S,CPTIR00273840,1921099471,20260831,20260907,ZAR,508.76,0.00,0,,XX,IMPORT EXPORT DUTIES,136.55,0.00,0.00,136.55,RG,REGULATORY CHARGES,22.21,0.00,0.00,22.21,DT,DUTY TAX PAID,350.00,0.00,0.00,350.00

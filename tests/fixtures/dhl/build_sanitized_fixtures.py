@@ -104,6 +104,44 @@ def worksheet(case: dict[str, str | float]) -> None:
     )
 
 
+# The MyBill invoice that completes an import. Its values are the sanitized
+# equivalents of the live CPTIR00273840 invoice recorded in the implementation
+# evidence: one waybill repeated per charge line, a labelled HAWB, and the
+# "NET AMOUNT PAYABLE" total the parser reads.
+INVOICE = {
+    "name": "cptir_sanitized",
+    "invoice_number": "CPTIR00273840",
+    "waybill": "1921099471",
+    "invoice_date": "31/08/2026",
+    "due_date": "07/09/2026",
+    "total": "508.76",
+    "clearance": "300.00",
+    "processing": "208.76",
+}
+
+
+def invoice(case: dict[str, str]) -> None:
+    _write(
+        ROOT / f"invoice_{case['name']}.pdf",
+        f"Sanitized DHL invoice {case['invoice_number']}",
+        [
+            (24.0, 560.0, "DHL EXPRESS SOUTH AFRICA (PTY) LTD"),
+            (24.0, 546.0, "TAX INVOICE"),
+            (400.0, 546.0, str(case["invoice_number"])),
+            (400.0, 532.0, f"INVOICE DATE {case['invoice_date']}"),
+            (400.0, 518.0, f"DUE DATE {case['due_date']}"),
+            (24.0, 480.0, f"HAWB {case['waybill']}"),
+            # A waybill repeats per charge line on a real invoice; a VAT or
+            # registration number appears once. The parser relies on that.
+            (24.0, 466.0, f"{case['waybill']} CLEARANCE {case['clearance']}"),
+            (24.0, 452.0, f"{case['waybill']} PROCESSING {case['processing']}"),
+            # Padded so a test may substitute a longer total in place without
+            # changing the length of the PDF content stream.
+            (24.0, 424.0, f"NET AMOUNT PAYABLE {case['total']}".ljust(29)),
+        ],
+    )
+
+
 def sad500(case: dict[str, str | float]) -> None:
     _write(
         ROOT / f"sad500_{case['name']}_sanitized.pdf",
@@ -119,3 +157,4 @@ if __name__ == "__main__":
     for item in CASES:
         worksheet(item)
         sad500(item)
+    invoice(INVOICE)

@@ -10,15 +10,12 @@ from typing import Any, Mapping
 from alx.config import XeroSettings
 from alx.contracts import CapabilityDefinition, CapabilityResult, MailAccount, StructuredData
 from alx.providers import SQLiteXeroOAuth, XeroAccountingAdapter
+from alx.providers.dhl import classify_dhl_document
 from alx.safety import AuthorityPolicy
 from alx.tools import (
-    ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
-    AUTHORISE_XERO_BILL,
+    PROCESS_DHL_IMPORT,
     CAPTURE_SUPPLIER_INVOICE,
-    EXECUTE_XERO_BILL,
     DELETE_XERO_DRAFT_BILL,
-    CREATE_XERO_DRAFT_BILL,
-    UPDATE_XERO_DRAFT_BILL,
     FIND_XERO_BILL,
     LIST_XERO_ACCOUNTS,
     LIST_XERO_TAX_RATES,
@@ -33,22 +30,15 @@ XERO_READ_PERMISSION = "xero.read"
 XERO_BILL_WRITE_PERMISSION = "xero.bill.write"
 XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
 
-# Committing a bill is one outcome, so AL/X is offered one way to do it.
-# Creating, attaching and authorising separately are the deterministic steps
-# inside that outcome, not competing plans: offering both lets a routine bill
-# be reasoned through step by step, which is what made one invoice cost eight
-# reasoning calls. They stay dispatchable for an explicit recovery, but they
-# are withheld from the catalogue AL/X plans from.
-BILL_EXECUTION_CAPABILITIES = frozenset({CAPTURE_SUPPLIER_INVOICE})
-
-RECOVERY_ONLY_CAPABILITIES = frozenset(
-    {
-        EXECUTE_XERO_BILL,
-        CREATE_XERO_DRAFT_BILL,
-        UPDATE_XERO_DRAFT_BILL,
-        ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
-        AUTHORISE_XERO_BILL,
-    }
+# Law 0: one production path per outcome. An ordinary supplier bill is posted
+# by capture_supplier_invoice and a DHL import by process_dhl_import. The steps
+# inside each are private implementation, not competing entry points, and the
+# capabilities they replaced are deleted rather than withheld.
+# Both commit a bill, so both close their own ceiling window when they
+# actually finish. A DHL import armed the ceiling but could never settle it,
+# so a completed import left the conversation inside a spent window.
+BILL_EXECUTION_CAPABILITIES = frozenset(
+    {CAPTURE_SUPPLIER_INVOICE, PROCESS_DHL_IMPORT}
 )
 
 # Arming the ceiling on the commit was too late: a task spent seven reasoning
@@ -56,13 +46,13 @@ RECOVERY_ONLY_CAPABILITIES = frozenset(
 # of these says bill processing has begun, so the ceiling applies from the
 # first one AL/X reaches for.
 BILL_TASK_CAPABILITIES = BILL_EXECUTION_CAPABILITIES | {
+    PROCESS_DHL_IMPORT,
     SEARCH_XERO_CONTACTS,
     LIST_XERO_ACCOUNTS,
     LIST_XERO_TAX_RATES,
     FIND_XERO_BILL,
     READ_XERO_BILL,
     DELETE_XERO_DRAFT_BILL,
-    *RECOVERY_ONLY_CAPABILITIES,
 }
 
 
@@ -71,7 +61,6 @@ class XeroRuntime:
     oauth: SQLiteXeroOAuth
     adapter: XeroAccountingAdapter
     definitions: tuple[CapabilityDefinition, ...]
-    recovery_definitions: tuple[CapabilityDefinition, ...]
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
@@ -118,27 +107,13 @@ def build_xero_runtime(
         LIST_XERO_TAX_RATES: read_policy,
         FIND_XERO_BILL: read_policy,
         READ_XERO_BILL: read_policy,
-        CREATE_XERO_DRAFT_BILL: write_policy,
-        UPDATE_XERO_DRAFT_BILL: write_policy,
-        ATTACH_MAIL_DOCUMENT_TO_XERO_BILL: write_policy,
         CAPTURE_SUPPLIER_INVOICE: write_policy,
-        EXECUTE_XERO_BILL: write_policy,
         DELETE_XERO_DRAFT_BILL: delete_policy,
-        AUTHORISE_XERO_BILL: write_policy,
     }
     return XeroRuntime(
         oauth,
         adapter,
-        tuple(
-            item
-            for item in XERO_DEFINITIONS
-            if item.capability_id not in RECOVERY_ONLY_CAPABILITIES
-        ),
-        tuple(
-            item
-            for item in XERO_DEFINITIONS
-            if item.capability_id in RECOVERY_ONLY_CAPABILITIES
-        ),
+        XERO_DEFINITIONS,
         policies,
         build_xero_executors(
             adapter,
@@ -147,6 +122,7 @@ def build_xero_runtime(
             extractor,
             settings.default_account_code,
             settings.default_tax_type,
+            classify_dhl_document,
         ),
         frozenset(
             {

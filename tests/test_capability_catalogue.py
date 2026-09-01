@@ -26,12 +26,14 @@ from alx.core.model_reasoner import (  # noqa: E402
     _result_fields,
     _shared_failure_codes,
 )
-from alx.tools import XERO_DEFINITIONS  # noqa: E402
+from alx.tools import DHL_DEFINITIONS, XERO_DEFINITIONS  # noqa: E402
 
 
 def find(capability_id: str) -> CapabilityDefinition:
     return next(
-        item for item in XERO_DEFINITIONS if item.capability_id == capability_id
+        item
+        for item in (*XERO_DEFINITIONS, *DHL_DEFINITIONS)
+        if item.capability_id == capability_id
     )
 
 
@@ -53,8 +55,8 @@ class InputCompletenessTests(unittest.TestCase):
 
     def test_nested_input_structure_is_preserved(self) -> None:
         """A composite call takes arrays of objects; that shape must survive."""
-        payload = _capability_schema_payload(find("execute_xero_bill").input_schema)
-        documents = payload["properties"]["source_documents"]
+        payload = _capability_schema_payload(find("process_dhl_import").input_schema)
+        documents = payload["properties"]["documents"]
         self.assertEqual(documents["kind"], "array")
         self.assertEqual(
             set(documents["items"]["properties"]),
@@ -62,20 +64,11 @@ class InputCompletenessTests(unittest.TestCase):
         )
         self.assertIn("expected_sha256", documents["items"]["required"])
 
-    def test_line_item_structure_survives_two_levels_down(self) -> None:
-        payload = _capability_schema_payload(find("execute_xero_bill").input_schema)
-        line = payload["properties"]["line_items"]["items"]
-        self.assertEqual(
-            set(line["properties"]),
-            {
-                "description",
-                "quantity",
-                "unit_amount",
-                "account_code",
-                "tax_type",
-                "tax_amount",
-            },
-        )
+    def test_a_nested_object_keeps_its_closed_schema(self) -> None:
+        """Two levels down, extra_properties must still be carried."""
+        payload = _capability_schema_payload(find("process_dhl_import").input_schema)
+        item = payload["properties"]["documents"]["items"]
+        self.assertIs(item["extra_properties"], False)
 
     def test_a_closed_schema_still_says_so(self) -> None:
         """extra_properties False is a real constraint, not a default."""
@@ -113,7 +106,7 @@ class ResultCompressionTests(unittest.TestCase):
         self.assertEqual(fields, ["array of object"])
 
     def test_result_fields_are_materially_smaller_than_the_schema(self) -> None:
-        definition = find("execute_xero_bill")
+        definition = find("process_dhl_import")
         full = json.dumps(
             _capability_schema_payload(definition.output_schema), separators=(",", ":")
         )

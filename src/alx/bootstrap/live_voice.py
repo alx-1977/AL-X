@@ -157,15 +157,6 @@ async def run(repository_root: Path) -> None:
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
 
-    dhl_runtime = build_dhl_runtime(
-        mail_runtime.source, lambda: current_call_id[0]
-    )
-    for definition in dhl_runtime.definitions:
-        registry.register(definition)
-    policies.update(dhl_runtime.policies)
-    executors.update(dhl_runtime.executors)
-    permissions.update(dhl_runtime.permissions)
-
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
     xero_approval_ttl_seconds: int | None = None
@@ -200,6 +191,24 @@ async def run(repository_root: Path) -> None:
         executors.update(xero_runtime.executors)
         permissions.update(xero_runtime.permissions)
         xero_approval_ttl_seconds = xero_settings.approval_ttl_seconds
+
+        # A DHL import posts to Xero, so its one capability is built with the
+        # same adapter and the same authority as any other bill write.
+        dhl_runtime = build_dhl_runtime(
+            mail_runtime.source,
+            xero_runtime.adapter,
+            lambda: current_call_id[0],
+            xero_settings.import_vat_account,
+            xero_settings.customs_duty_account,
+            xero_settings.clearance_account,
+            xero_settings.dhl_supplier_name,
+            xero_settings.unattended_bill_writes,
+        )
+        for definition in dhl_runtime.definitions:
+            registry.register(definition)
+        policies.update(dhl_runtime.policies)
+        executors.update(dhl_runtime.executors)
+        permissions.update(dhl_runtime.permissions)
 
     # Replying is authorised by DECISIONS.md D-011 and configured separately, so
     # a runtime without send settings reads mail without being able to send it.

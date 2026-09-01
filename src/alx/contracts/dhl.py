@@ -14,13 +14,14 @@ class DhlDocumentError(Exception):
 
 
 class DhlImportAnalyzer(Protocol):
-    def analyze_customs(
+    """Deterministic reading of DHL documents. It commits nothing."""
+
+    def classify(self, document: bytes) -> str: ...
+
+    def customs_evidence(
         self, customs_documents: Sequence[bytes]
     ) -> Mapping[str, Any]: ...
 
-    def reconcile(
-        self,
-        invoice_document: bytes,
-        customs_documents: Sequence[bytes],
-        invoice_number: str = "",
-    ) -> Mapping[str, Any]: ...
+    def invoice_fields(self, invoice_document: bytes) -> Mapping[str, Any]: ...
+
+    def invoice_evidence(self, structured_document: bytes) -> Mapping[str, Any]: ...

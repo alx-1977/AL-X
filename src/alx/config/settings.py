@@ -252,6 +252,15 @@ class XeroSettings:
     # policy choice no document contains. Blank leaves it unresolved and asks.
     default_account_code: str
     default_tax_type: str
+    # V1's proven DHL treatment: import VAT is claimable, duty is not, and
+    # clearance is a service charge. Configurable for another organisation.
+    import_vat_account: str
+    customs_duty_account: str
+    clearance_account: str
+    # D-021: the DHL supplier is configuration, so a wrong contact cannot be
+    # supplied to the import capability. It is a name, not a Xero identifier:
+    # the contact is resolved by exact name at run time, as V1 did.
+    dhl_supplier_name: str
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
@@ -282,6 +291,18 @@ class XeroSettings:
             default_tax_type=environment.get(
                 "ALX_XERO_DEFAULT_TAX_TYPE", ""
             ).strip(),
+            import_vat_account=environment.get(
+                "ALX_XERO_IMPORT_VAT_ACCOUNT", "820"
+            ).strip(),
+            customs_duty_account=environment.get(
+                "ALX_XERO_CUSTOMS_DUTY_ACCOUNT", "426"
+            ).strip(),
+            clearance_account=environment.get(
+                "ALX_XERO_CLEARANCE_ACCOUNT", "425"
+            ).strip(),
+            dhl_supplier_name=environment.get(
+                "ALX_XERO_DHL_SUPPLIER_NAME", "DHL International (Pty) Ltd"
+            ).strip(),
         )
 
     def __repr__(self) -> str:
@@ -309,12 +330,14 @@ def _specialist_settings(
     provider = environment.get(
         "ALX_SPECIALIST_PROVIDER", core_provider
     ).strip().lower() or core_provider
-    key_name = {"openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY"}.get(
-        provider, "ALX_SPECIALIST_API_KEY"
-    )
-    base_name = {"openai": "OPENAI_BASE_URL", "xai": "XAI_BASE_URL"}.get(
-        provider, "ALX_SPECIALIST_BASE_URL"
-    )
+    key_name = {
+        "openai": "OPENAI_API_KEY",
+        "xai": "XAI_API_KEY",
+    }.get(provider, "ALX_SPECIALIST_API_KEY")
+    base_name = {
+        "openai": "OPENAI_BASE_URL",
+        "xai": "XAI_BASE_URL",
+    }.get(provider, "ALX_SPECIALIST_BASE_URL")
     base_fallback = {
         "openai": "https://api.openai.com",
         "xai": "https://api.x.ai",

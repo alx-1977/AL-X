@@ -16,13 +16,8 @@ from alx.tools.mail import (
     build_send_executors,
 )
 from alx.tools.xero import (
-    ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
-    AUTHORISE_XERO_BILL,
     DELETE_XERO_DRAFT_BILL,
-    CREATE_XERO_DRAFT_BILL,
     CAPTURE_SUPPLIER_INVOICE,
-    EXECUTE_XERO_BILL,
-    UPDATE_XERO_DRAFT_BILL,
     DEFINITIONS as XERO_DEFINITIONS,
     FIND_XERO_BILL,
     LIST_XERO_ACCOUNTS,
@@ -32,9 +27,8 @@ from alx.tools.xero import (
     build_xero_executors,
 )
 from alx.tools.dhl import (
-    ANALYZE_DHL_CUSTOMS_DOCUMENTS,
+    PROCESS_DHL_IMPORT,
     DEFINITIONS as DHL_DEFINITIONS,
-    RECONCILE_DHL_IMPORT_DOCUMENTS,
     build_dhl_executors,
 )
 
@@ -52,13 +46,9 @@ __all__ = [
     "SEARCH_MAIL_MESSAGES",
     "build_mail_executors",
     "build_send_executors",
-    "ATTACH_MAIL_DOCUMENT_TO_XERO_BILL",
-    "AUTHORISE_XERO_BILL",
     "DELETE_XERO_DRAFT_BILL",
-    "CREATE_XERO_DRAFT_BILL",
     "CAPTURE_SUPPLIER_INVOICE",
-    "EXECUTE_XERO_BILL",
-    "UPDATE_XERO_DRAFT_BILL",
+    "PROCESS_DHL_IMPORT",
     "XERO_DEFINITIONS",
     "FIND_XERO_BILL",
     "LIST_XERO_ACCOUNTS",
@@ -67,7 +57,5 @@ __all__ = [
     "SEARCH_XERO_CONTACTS",
     "build_xero_executors",
     "DHL_DEFINITIONS",
-    "ANALYZE_DHL_CUSTOMS_DOCUMENTS",
-    "RECONCILE_DHL_IMPORT_DOCUMENTS",
     "build_dhl_executors",
 ]

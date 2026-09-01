@@ -19,23 +19,28 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from alx.bootstrap.xero import (  # noqa: E402
     BILL_EXECUTION_CAPABILITIES,
     BILL_TASK_CAPABILITIES,
-    RECOVERY_ONLY_CAPABILITIES,
     build_xero_runtime,
 )
-from alx.config import XeroSettings  # noqa: E402
 from alx.observability import XERO_BILL_BUDGET  # noqa: E402
 from alx.tools import (  # noqa: E402
-    ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
     CAPTURE_SUPPLIER_INVOICE,
     LIST_XERO_ACCOUNTS,
     LIST_XERO_TAX_RATES,
+    PROCESS_DHL_IMPORT,
     SEARCH_XERO_CONTACTS,
-    AUTHORISE_XERO_BILL,
-    CREATE_XERO_DRAFT_BILL,
-    EXECUTE_XERO_BILL,
     FIND_XERO_BILL,
     READ_XERO_BILL,
-    UPDATE_XERO_DRAFT_BILL,
+)
+from support import xero_settings  # noqa: E402
+
+# The step-by-step write path Law 0 required to be deleted, named as plain
+# strings because there is no longer an identifier to import.
+SUPERSEDED_WRITE_CAPABILITIES = (
+    "execute_xero_bill",
+    "create_xero_draft_bill",
+    "update_xero_draft_bill",
+    "attach_mail_document_to_xero_bill",
+    "authorise_xero_bill",
 )
 
 
@@ -47,9 +52,7 @@ class FakeMail:
 def runtime():
     with tempfile.TemporaryDirectory() as directory:
         return build_xero_runtime(
-            XeroSettings(
-                "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
-            ),
+            xero_settings(unattended_bill_writes=True),
             Path(directory),
             FakeMail(),
             lambda: "call",
@@ -64,41 +67,33 @@ class RoutineCatalogueTests(unittest.TestCase):
         self.offered = {item.capability_id for item in self.runtime.definitions}
 
     def test_committing_a_bill_offers_exactly_one_capability(self) -> None:
-        writes = self.offered & (
-            RECOVERY_ONLY_CAPABILITIES | BILL_EXECUTION_CAPABILITIES
-        )
+        writes = self.offered & BILL_EXECUTION_CAPABILITIES
         self.assertEqual(writes, {CAPTURE_SUPPLIER_INVOICE})
 
-    def test_the_old_step_by_step_write_path_is_not_offered(self) -> None:
-        for capability_id in (
-            EXECUTE_XERO_BILL,
-            CREATE_XERO_DRAFT_BILL,
-            UPDATE_XERO_DRAFT_BILL,
-            ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
-            AUTHORISE_XERO_BILL,
-        ):
+    def test_the_old_step_by_step_write_path_no_longer_exists(self) -> None:
+        """Law 0: deleted, not merely withheld from the catalogue."""
+        for capability_id in SUPERSEDED_WRITE_CAPABILITIES:
             with self.subTest(capability_id=capability_id):
                 self.assertNotIn(capability_id, self.offered)
+                self.assertNotIn(capability_id, self.runtime.executors)
+                self.assertNotIn(capability_id, self.runtime.policies)
 
     def test_reads_remain_available_for_ordinary_questions(self) -> None:
         for capability_id in (FIND_XERO_BILL, READ_XERO_BILL):
             with self.subTest(capability_id=capability_id):
                 self.assertIn(capability_id, self.offered)
 
-    def test_granular_steps_stay_dispatchable_for_an_explicit_recovery(self) -> None:
-        """Withheld from planning, not deleted: recovery may still need them."""
-        recovery = {item.capability_id for item in self.runtime.recovery_definitions}
-        self.assertEqual(recovery, set(RECOVERY_ONLY_CAPABILITIES))
-        for capability_id in RECOVERY_ONLY_CAPABILITIES:
-            with self.subTest(capability_id=capability_id):
-                self.assertIn(capability_id, self.runtime.executors)
-                self.assertIn(capability_id, self.runtime.policies)
+    def test_no_recovery_surface_survives_on_the_runtime(self) -> None:
+        """A recovery-only route is exactly what Law 0 forbids."""
+        self.assertFalse(hasattr(self.runtime, "recovery_definitions"))
 
-    def test_the_composite_reuses_the_granular_implementation(self) -> None:
-        """The building blocks are shared code, not a second implementation."""
+    def test_the_commit_steps_are_private_implementation(self) -> None:
+        """Shared building blocks are allowed; a second entry point is not."""
         source = (REPOSITORY_ROOT / "src/alx/tools/xero.py").read_text()
         self.assertIn("_draft_payload(arguments, account)", source)
         self.assertIn("_verified_attachment(", source)
+        # Private by name, so nothing outside can dispatch the sequence.
+        self.assertIn("def _commit_decided_bill(", source)
 
 
 class ArmedBudgetTests(unittest.TestCase):
@@ -138,7 +133,7 @@ class ArmedBudgetTests(unittest.TestCase):
     def test_any_bill_capability_arms_the_ceiling_not_only_the_commit(self) -> None:
         """Arming on the commit was too late; a task reached seven calls first."""
         self.assertIn(CAPTURE_SUPPLIER_INVOICE, BILL_TASK_CAPABILITIES)
-        self.assertIn(EXECUTE_XERO_BILL, BILL_TASK_CAPABILITIES)
+        self.assertIn(PROCESS_DHL_IMPORT, BILL_TASK_CAPABILITIES)
         for capability_id in (
             SEARCH_XERO_CONTACTS,
             LIST_XERO_ACCOUNTS,

@@ -18,9 +18,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import CapabilityResultState, MailAttachment  # noqa: E402
+from alx.contracts import SideEffect  # noqa: E402
+from support import xero_settings  # noqa: E402
 from alx.tools import (  # noqa: E402
     CAPTURE_SUPPLIER_INVOICE,
-    EXECUTE_XERO_BILL,
     build_xero_executors,
 )
 
@@ -774,26 +775,53 @@ class ReturnsToCoreTests(unittest.TestCase):
 class NoFallbackTests(unittest.TestCase):
     """A routine bill cannot re-enter the old step-by-step planning loop."""
 
-    def test_the_granular_write_steps_are_withheld_from_planning(self) -> None:
+    def test_the_granular_write_steps_no_longer_exist_at_all(self) -> None:
+        """Law 0: withheld is not deleted. The old steps must be gone.
+
+        These five capabilities were once retained but hidden from planning.
+        Law 0 forbids a superseded path surviving as recovery-only code, so
+        this asserts absence from the definitions, the executors and the
+        policies -- not merely absence from the catalogue.
+        """
         import tempfile
 
-        from alx.bootstrap.xero import RECOVERY_ONLY_CAPABILITIES, build_xero_runtime
-        from alx.config import XeroSettings
+        from alx.bootstrap.xero import build_xero_runtime
 
+        superseded = (
+            "execute_xero_bill",
+            "create_xero_draft_bill",
+            "update_xero_draft_bill",
+            "attach_mail_document_to_xero_bill",
+            "authorise_xero_bill",
+        )
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
-                XeroSettings(
-                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
-                ),
+                xero_settings(unattended_bill_writes=True),
                 Path(directory),
                 FakeMail(),
                 lambda: "call",
             )
         offered = {item.capability_id for item in runtime.definitions}
         self.assertIn(CAPTURE_SUPPLIER_INVOICE, offered)
-        # execute_xero_bill is now reached through capture, not planned directly.
-        self.assertIn(EXECUTE_XERO_BILL, RECOVERY_ONLY_CAPABILITIES)
-        self.assertNotIn(EXECUTE_XERO_BILL, offered)
+        for capability_id in superseded:
+            with self.subTest(capability_id=capability_id):
+                self.assertNotIn(capability_id, offered)
+                self.assertNotIn(capability_id, runtime.executors)
+                self.assertNotIn(capability_id, runtime.policies)
+
+    def test_no_second_route_to_a_bill_survives_in_the_registry(self) -> None:
+        """The named outcome has exactly one production entry point."""
+        from alx.tools import XERO_DEFINITIONS
+
+        effectful = {
+            item.capability_id
+            for item in XERO_DEFINITIONS
+            if item.side_effect is SideEffect.EFFECTFUL
+        }
+        # Capture commits a bill; delete discards one. Nothing else writes.
+        self.assertEqual(
+            effectful, {CAPTURE_SUPPLIER_INVOICE, "delete_xero_draft_bill"}
+        )
 
     def test_capture_arms_the_reasoning_ceiling_immediately(self) -> None:
         from alx.bootstrap.xero import BILL_TASK_CAPABILITIES

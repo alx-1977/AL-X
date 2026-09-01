@@ -1,0 +1,2 @@
+Line Type,Invoice Number,Shipment Number,Invoice Date,Due Date,Currency,Total amount (incl. VAT),Total Tax,Weight Charge,Declaration/Entry number,XC1 Code,XC1 Name,XC1 Charge,XC1 Tax,XC1 Discount,XC1 Total
+S,CPTR001005873,6560843833,20260417,20260501,ZAR,4198.66,0.00,3425.00,,FF,FUEL SURCHARGE,1374.75,0.00,-601.09,773.66

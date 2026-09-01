@@ -1,0 +1,80 @@
+%PDF-1.3
+%‚„œ”
+1 0 obj
+<<
+/Producer (pypdf)
+/Title (Sanitized DHL invoice CPTIR00273840)
+/Author (AL\057X test fixture generator)
+/Creator (AL\057X test fixture generator)
+/Subject (Sanitized DHL parser regression fixture)
+>>
+endobj
+2 0 obj
+<<
+/Type /Pages
+/Count 1
+/Kids [ 4 0 R ]
+>>
+endobj
+3 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+>>
+endobj
+4 0 obj
+<<
+/Type /Page
+/Resources <<
+/Font <<
+/F1 5 0 R
+>>
+>>
+/MediaBox [ 0.0 0.0 792 612 ]
+/Parent 2 0 R
+/Contents 6 0 R
+>>
+endobj
+5 0 obj
+<<
+/Type /Font
+/Subtype /Type1
+/BaseFont /Helvetica
+>>
+endobj
+6 0 obj
+<<
+/Length 558
+>>
+stream
+BT
+/F1 8 Tf 1 0 0 1 24.0 560.0 Tm (DHL EXPRESS SOUTH AFRICA \(PTY\) LTD) Tj
+/F1 8.001 Tf 1 0 0 1 24.0 546.0 Tm (TAX INVOICE) Tj
+/F1 8 Tf 1 0 0 1 400.0 546.0 Tm (CPTIR00273840) Tj
+/F1 8.001 Tf 1 0 0 1 400.0 532.0 Tm (INVOICE DATE 31/08/2026) Tj
+/F1 8 Tf 1 0 0 1 400.0 518.0 Tm (DUE DATE 07/09/2026) Tj
+/F1 8.001 Tf 1 0 0 1 24.0 480.0 Tm (HAWB 1921099471) Tj
+/F1 8 Tf 1 0 0 1 24.0 466.0 Tm (1921099471 CLEARANCE 300.00) Tj
+/F1 8.001 Tf 1 0 0 1 24.0 452.0 Tm (1921099471 PROCESSING 208.76) Tj
+/F1 8 Tf 1 0 0 1 24.0 424.0 Tm (NET AMOUNT PAYABLE 508.76    ) Tj
+ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000233 00000 n 
+0000000292 00000 n 
+0000000341 00000 n 
+0000000473 00000 n 
+0000000543 00000 n 
+trailer
+<<
+/Size 7
+/Root 3 0 R
+/Info 1 0 R
+>>
+startxref
+1152
+%%EOF

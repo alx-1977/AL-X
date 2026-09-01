@@ -20,7 +20,7 @@ from alx.bootstrap.xero import (  # noqa: E402
     XERO_READ_PERMISSION,
     build_xero_runtime,
 )
-from alx.config import XeroSettings  # noqa: E402
+from support import xero_settings  # noqa: E402
 from alx.contracts import (  # noqa: E402
     AgentDecision,
     Approval,
@@ -48,12 +48,9 @@ from alx.providers.xero import (  # noqa: E402
     XeroConnection,
 )
 from alx.tools import (  # noqa: E402
-    ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
-    AUTHORISE_XERO_BILL,
-    CREATE_XERO_DRAFT_BILL,
+    CAPTURE_SUPPLIER_INVOICE,
     DELETE_XERO_DRAFT_BILL,
     READ_XERO_BILL,
-    UPDATE_XERO_DRAFT_BILL,
     XERO_DEFINITIONS,
     build_xero_executors,
 )
@@ -80,7 +77,19 @@ class FakeXero:
         }
 
     def search_contacts(self, _term):
-        return ()
+        return (
+            {"Name": "Supplier", "ContactID": "contact-1", "ContactStatus": "ACTIVE"},
+        )
+
+    def bills_for_contact(self, _contact_id):
+        # Consistent prior coding, so capture resolves the treatment from this
+        # organisation's own records rather than returning to AL/X.
+        return (
+            {
+                "LineAmountTypes": "NoTax",
+                "LineItems": [{"AccountCode": "310", "TaxType": "NONE"}],
+            },
+        )
 
     def list_accounts(self):
         return ({"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},)
@@ -145,26 +154,32 @@ class FakeMail:
         return self.attachment, b"pdf-data"
 
 
-def draft_arguments() -> dict:
+def capture_arguments() -> dict:
     return {
-        "contact_id": "contact-1",
+        "mailbox_id": "INBOX",
+        "uid_validity": "777",
+        "uid": "1",
+        "attachment_id": "4",
+        "expected_sha256": hashlib.sha256(b"pdf-data").hexdigest(),
+        "authorise": False,
+    }
+
+
+def captured_invoice() -> dict:
+    """What the bounded specialist returns for the fixture document."""
+    return {
+        "document_type": "supplier_invoice",
+        "supplier_name": "Supplier",
         "invoice_number": "SUP-42",
-        "date": "2026-08-30",
+        "invoice_date": "2026-08-30",
         "due_date": "2026-09-30",
         "currency": "ZAR",
-        "reference": "mail:777:1",
-        "line_amount_types": "NoTax",
-        "expected_total": "1250.00",
-        "line_items": [
-            {
-                "description": "Components",
-                "quantity": "1",
-                "unit_amount": "1250.00",
-                "account_code": "310",
-                "tax_type": "NONE",
-                "tax_amount": "0.00",
-            }
-        ],
+        "subtotal": "1250.00",
+        "tax_amount": "0.00",
+        "total": "1250.00",
+        "description": "Components",
+        "verified": True,
+        "problems": (),
     }
 
 
@@ -175,153 +190,6 @@ class XeroPrimitiveTests(unittest.TestCase):
         self.executors = build_xero_executors(
             self.xero, self.mail, lambda: "call-1"
         )
-
-    def test_balanced_bill_is_created_as_draft_and_never_authorised_inline(self) -> None:
-        result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
-        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual(result.values["status"], "DRAFT")
-        self.assertEqual(self.xero.created[0]["Type"], "ACCPAY")
-        self.assertEqual(self.xero.created[0]["Status"], "DRAFT")
-
-    def test_unbalanced_bill_is_refused_before_xero_is_called(self) -> None:
-        arguments = {**draft_arguments(), "expected_total": "1250.01"}
-        result = self.executors[CREATE_XERO_DRAFT_BILL](arguments)
-        self.assertEqual(result.state, CapabilityResultState.FAILED)
-        self.assertEqual(result.failure["code"], "arguments_unusable")
-        self.assertEqual(self.xero.created, [])
-
-    def test_duplicate_invoice_number_is_refused(self) -> None:
-        self.xero.existing = self.xero.current
-        result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
-        self.assertEqual(result.failure["code"], "duplicate_found")
-        self.assertEqual(self.xero.created, [])
-
-    def test_attachment_is_bound_to_exact_mail_hash(self) -> None:
-        digest = hashlib.sha256(b"pdf-data").hexdigest()
-        arguments = {
-            "invoice_id": "bill-1",
-            "mailbox_id": "INBOX",
-            "uid_validity": "777",
-            "uid": "1",
-            "attachment_id": "4",
-            "expected_sha256": digest,
-        }
-        result = self.executors[ATTACH_MAIL_DOCUMENT_TO_XERO_BILL](arguments)
-        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual(
-            self.xero.attachments,
-            [("bill-1", "SUP-42.pdf", "application/pdf", b"pdf-data")],
-        )
-
-        self.xero.attachments.clear()
-        mismatch = self.executors[ATTACH_MAIL_DOCUMENT_TO_XERO_BILL](
-            {**arguments, "expected_sha256": "0" * 64}
-        )
-        self.assertEqual(mismatch.failure["code"], "source_mismatch")
-        self.assertEqual(self.xero.attachments, [])
-
-    def test_authorisation_requires_a_matching_draft(self) -> None:
-        digest = hashlib.sha256(b"pdf-data").hexdigest()
-        self.xero.attach_bill_document("bill-1", "SUP-42.pdf", "application/pdf", b"pdf-data")
-        arguments = {
-            "invoice_id": "bill-1",
-            "invoice_number": "SUP-42",
-            "expected_total": "1250.00",
-            "required_attachments": [{"filename": "SUP-42.pdf", "sha256": digest}],
-        }
-        result = self.executors[AUTHORISE_XERO_BILL](arguments)
-        self.assertEqual(result.values["status"], "AUTHORISED")
-
-        self.xero.current = {**self.xero.current, "Status": "DRAFT"}
-        mismatch = self.executors[AUTHORISE_XERO_BILL](
-            {**arguments, "expected_total": "1250.01"}
-        )
-        self.assertEqual(mismatch.failure["code"], "source_mismatch")
-
-        self.xero.current = {
-            **self.xero.current,
-            "Status": "DRAFT",
-            "HasAttachments": False,
-        }
-        missing = self.executors[AUTHORISE_XERO_BILL](arguments)
-        self.assertEqual(missing.failure["code"], "supporting_document_missing")
-
-    def test_authorisation_refuses_wrong_attachment_bytes(self) -> None:
-        self.xero.attach_bill_document("bill-1", "SUP-42.pdf", "application/pdf", b"wrong")
-        result = self.executors[AUTHORISE_XERO_BILL](
-            {
-                "invoice_id": "bill-1",
-                "invoice_number": "SUP-42",
-                "expected_total": "1250.00",
-                "required_attachments": [
-                    {"filename": "SUP-42.pdf", "sha256": hashlib.sha256(b"pdf-data").hexdigest()}
-                ],
-            }
-        )
-        self.assertEqual(result.failure["code"], "supporting_document_mismatch")
-        self.assertEqual(self.xero.current["Status"], "DRAFT")
-
-    def test_zero_vat_supplier_may_use_a_vat_defaulted_account(self) -> None:
-        """A supplier who charges no VAT is ordinary, not an error.
-
-        Account 429 defaults to INPUT3, but the Cape Town shuttle invoice
-        carries no VAT. An account's tax type is Xero's default for that
-        account, not a constraint, so NONE must remain postable.
-        """
-        self.xero.list_accounts = lambda: (
-            {"Code": "429", "Status": "ACTIVE", "TaxType": "INPUT3"},
-        )
-        self.xero.list_tax_rates = lambda: (
-            {"TaxType": "INPUT3", "Status": "ACTIVE"},
-        )
-        arguments = {
-            **draft_arguments(),
-            "line_amount_types": "Exclusive",
-            "expected_total": "1250.00",
-            "line_items": [
-                {
-                    "description": "Transfer service",
-                    "quantity": "1",
-                    "unit_amount": "1250.00",
-                    "account_code": "429",
-                    "tax_type": "NONE",
-                    "tax_amount": "0.00",
-                }
-            ],
-        }
-        result = self.executors[CREATE_XERO_DRAFT_BILL](arguments)
-        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual(len(self.xero.created), 1)
-        self.assertEqual(
-            self.xero.created[0]["LineItems"][0]["TaxType"], "NONE"
-        )
-
-    def test_a_tax_type_absent_from_the_organisation_is_still_refused(self) -> None:
-        """Allowing NONE must not allow an invented tax type."""
-        self.xero.list_accounts = lambda: (
-            {"Code": "429", "Status": "ACTIVE", "TaxType": "INPUT3"},
-        )
-        self.xero.list_tax_rates = lambda: (
-            {"TaxType": "INPUT3", "Status": "ACTIVE"},
-        )
-        arguments = {
-            **draft_arguments(),
-            "line_amount_types": "Exclusive",
-            "expected_total": "620.00",
-            "line_items": [
-                {
-                    "description": "Transfer service",
-                    "quantity": "1",
-                    "unit_amount": "620.00",
-                    "account_code": "429",
-                    "tax_type": "NOT_A_REAL_TAX",
-                    "tax_amount": "0.00",
-                }
-            ],
-        }
-        result = self.executors[CREATE_XERO_DRAFT_BILL](arguments)
-        self.assertEqual(result.failure["code"], "account_mapping_invalid")
-        self.assertEqual(self.xero.created, [])
 
     def test_a_draft_bill_can_be_discarded_when_it_matches(self) -> None:
         result = self.executors[DELETE_XERO_DRAFT_BILL](
@@ -368,15 +236,13 @@ class XeroPrimitiveTests(unittest.TestCase):
     def test_discarding_a_draft_asks_before_acting_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
-                XeroSettings(
-                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
-                ),
+                xero_settings(unattended_bill_writes=True),
                 Path(directory),
                 self.mail,
                 lambda: "call",
             )
         # Unattended bill writes must not silently carry deletion with them.
-        self.assertFalse(runtime.policies[CREATE_XERO_DRAFT_BILL].approval_required)
+        self.assertFalse(runtime.policies[CAPTURE_SUPPLIER_INVOICE].approval_required)
         self.assertTrue(runtime.policies[DELETE_XERO_DRAFT_BILL].approval_required)
         self.assertIn(
             XERO_BILL_DELETE_PERMISSION,
@@ -431,23 +297,6 @@ class XeroPrimitiveTests(unittest.TestCase):
                 with self.assertRaises(XeroAccessError):
                     _bill_values(bill)
 
-    def test_unknown_live_account_is_refused_before_write(self) -> None:
-        self.xero.list_accounts = lambda: ()
-        result = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
-        self.assertEqual(result.failure["code"], "account_mapping_invalid")
-        self.assertEqual(self.xero.created, [])
-
-    def test_provisional_draft_is_updated_in_place(self) -> None:
-        arguments = {
-            **draft_arguments(),
-            "invoice_id": "bill-1",
-            "expected_current_invoice_number": "SUP-42",
-            "expected_current_total": "1250.00",
-        }
-        result = self.executors[UPDATE_XERO_DRAFT_BILL](arguments)
-        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual(result.values["invoice_id"], "bill-1")
-
     def test_d018_unattended_writes_proceed_without_an_approval(self) -> None:
         """D-018: Friedl authorised unattended supplier-bill writes.
 
@@ -457,19 +306,13 @@ class XeroPrimitiveTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
-                XeroSettings(
-                    "id", "secret", "http://localhost/callback", "", 10, 300, True, False, "", ""
-                ),
+                xero_settings(unattended_bill_writes=True),
                 Path(directory),
                 self.mail,
                 lambda: "call",
             )
         gate = SafetyGate(runtime.policies)
         for capability_id in (
-            CREATE_XERO_DRAFT_BILL,
-            UPDATE_XERO_DRAFT_BILL,
-            ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
-            AUTHORISE_XERO_BILL,
         ):
             with self.subTest(capability_id=capability_id):
                 self.assertFalse(runtime.policies[capability_id].approval_required)
@@ -491,23 +334,10 @@ class XeroPrimitiveTests(unittest.TestCase):
                     gate.evaluate(call, unpermitted).state, SafetyState.DENIED
                 )
 
-    def test_d018_does_not_weaken_any_accounting_safeguard(self) -> None:
-        """Unattended authority must not let bad accounting data through."""
-        unbalanced = self.executors[CREATE_XERO_DRAFT_BILL](
-            {**draft_arguments(), "expected_total": "999.99"}
-        )
-        self.assertEqual(unbalanced.failure["code"], "arguments_unusable")
-        self.assertEqual(self.xero.created, [])
-
-        self.xero.existing = self.xero.current
-        duplicate = self.executors[CREATE_XERO_DRAFT_BILL](draft_arguments())
-        self.assertEqual(duplicate.failure["code"], "duplicate_found")
-        self.assertEqual(self.xero.created, [])
-
     def test_runtime_requires_approval_for_every_xero_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 300, False, False, "", ""),
+                xero_settings(),
                 Path(directory),
                 self.mail,
                 lambda: "call",
@@ -523,26 +353,23 @@ class XeroPrimitiveTests(unittest.TestCase):
             ),
         )
         for capability_id in (
-            CREATE_XERO_DRAFT_BILL,
-            UPDATE_XERO_DRAFT_BILL,
-            ATTACH_MAIL_DOCUMENT_TO_XERO_BILL,
+            CAPTURE_SUPPLIER_INVOICE,
             DELETE_XERO_DRAFT_BILL,
-            AUTHORISE_XERO_BILL,
         ):
             self.assertTrue(runtime.policies[capability_id].approval_required)
 
     def test_create_result_survives_restart_and_returns_to_core_for_readback(self) -> None:
         now = datetime(2026, 8, 31, tzinfo=UTC)
         retention = now + timedelta(days=30)
-        create_call = CapabilityCall(
-            "create-1",
-            CREATE_XERO_DRAFT_BILL,
-            draft_arguments(),
+        capture_call = CapabilityCall(
+            "capture-1",
+            CAPTURE_SUPPLIER_INVOICE,
+            capture_arguments(),
             "approval-1",
         )
         approval = Approval(
             "approval-1",
-            ApprovalScope(CREATE_XERO_DRAFT_BILL, draft_arguments()),
+            ApprovalScope(CAPTURE_SUPPLIER_INVOICE, capture_arguments()),
             ApprovalLifecycle.GRANTED,
             now + timedelta(minutes=10),
         )
@@ -589,7 +416,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 registry.register(definition)
             current_call_id = [""]
             runtime = build_xero_runtime(
-                XeroSettings("id", "secret", "http://localhost/callback", "", 10, 600, False, False, "", ""),
+                xero_settings(approval_ttl_seconds=600),
                 Path(directory),
                 self.mail,
                 lambda: current_call_id[0],
@@ -598,7 +425,12 @@ class XeroPrimitiveTests(unittest.TestCase):
                 registry,
                 SafetyGate(runtime.policies),
                 build_xero_executors(
-                    self.xero, self.mail, lambda: current_call_id[0]
+                    self.xero,
+                    self.mail,
+                    lambda: current_call_id[0],
+                    lambda *_: captured_invoice(),
+                    "310",
+                    "NONE",
                 ),
             )
 
@@ -614,7 +446,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                     ),
                 )
 
-            first_reasoner = Queued(AgentDecision(call=create_call))
+            first_reasoner = Queued(AgentDecision(call=capture_call))
             first = CoreAgent(
                 store,
                 first_reasoner,
@@ -623,7 +455,10 @@ class XeroPrimitiveTests(unittest.TestCase):
                 clock=lambda: now,
             ).process(conversation, "goal-1", retention, 1)
             self.assertEqual(first.state, CoreState.CHECKPOINTED)
-            self.assertEqual(first.snapshot.state.attempts[-1].result.values["status"], "DRAFT")
+            captured = first.snapshot.state.attempts[-1].result.values
+            self.assertTrue(captured["completed"])
+            self.assertEqual(captured["bill"]["status"], "DRAFT")
+            self.assertEqual(captured["bill"]["invoice_number"], "SUP-42")
             store.close()
 
             restarted_store = SQLiteGoalStore(path)
@@ -642,9 +477,10 @@ class XeroPrimitiveTests(unittest.TestCase):
                 clock=lambda: now,
             ).process(conversation, "goal-1", retention, 2)
             self.assertEqual(second.state, CoreState.RESPONDED)
+            # The capture result survived the restart in durable state.
             self.assertEqual(
                 second_reasoner.contexts[0].active_goal.attempts[-1].call.capability_id,
-                CREATE_XERO_DRAFT_BILL,
+                CAPTURE_SUPPLIER_INVOICE,
             )
             self.assertEqual(
                 second_reasoner.contexts[1].active_goal.attempts[-1].call.capability_id,

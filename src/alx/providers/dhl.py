@@ -6,7 +6,7 @@ import csv
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
@@ -51,36 +51,6 @@ def _bounded(payload: bytes, name: str) -> bytes:
         raise DhlDocumentError(f"{name}_too_large")
     return bytes(payload)
 _MONEY_PATTERN = r"[\d,]+\.\d{2}"
-_SERVICE_CODES = frozenset({"WC", "WE"})
-_KNOWN_CODES = frozenset({"XX", "XB", *_SERVICE_CODES})
-
-
-@dataclass(frozen=True, slots=True)
-class Charge:
-    code: str
-    name: str
-    amount: Decimal
-
-
-@dataclass(frozen=True, slots=True)
-class Shipment:
-    waybill: str
-    declaration: str
-    charges: tuple[Charge, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class Invoice:
-    invoice_number: str
-    invoice_date: date
-    due_date: date
-    currency: str
-    total: Decimal
-    shipments: tuple[Shipment, ...]
-
-    @property
-    def charges(self) -> tuple[Charge, ...]:
-        return tuple(charge for shipment in self.shipments for charge in shipment.charges)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,108 +69,22 @@ class _Run:
     text: str
 
 
-def _money(raw: Any, name: str) -> Decimal:
-    text = str(raw or "").strip().replace(",", "")
-    if not text:
-        return Decimal("0")
-    invalid = False
-    value = Decimal("0")
-    try:
-        value = Decimal(text)
-    except InvalidOperation:
-        invalid = True
-    if invalid:
-        raise DhlDocumentError(f"{name}_invalid")
-    if not value.is_finite():
-        raise DhlDocumentError(f"{name}_invalid")
-    return value
+def _assessed_on(declaration: str) -> str:
+    """The assessment date SARS encodes in the declaration number.
 
-
-def _date(raw: Any, name: str) -> date:
-    value = str(raw or "").strip()
-    invalid = False
-    parsed = date.min
+    A customs declaration is `AAAYYYYMMDD` plus a sequence, so the date the
+    entry was assessed is stated by the identifier itself rather than inferred.
+    Both retained V1 declarations follow it. An identifier that does not carry
+    a real date yields nothing: an empty date is refused upstream, which is
+    better than posting a bill under a date no document asserts.
+    """
+    digits = declaration[3:11]
+    if len(digits) != 8 or not digits.isdigit():
+        return ""
     try:
-        parsed = datetime.strptime(value, "%Y%m%d").date()
+        return datetime.strptime(digits, "%Y%m%d").date().isoformat()
     except ValueError:
-        invalid = True
-    if invalid:
-        raise DhlDocumentError(f"{name}_invalid")
-    return parsed
-
-
-def _charges(row: Mapping[str, Any]) -> tuple[Charge, ...]:
-    found: list[Charge] = []
-    for index in range(1, 12):
-        code = str(row.get(f"XC{index} Code") or "").strip()
-        if not code or code == "0":
-            continue
-        amount = _money(row.get(f"XC{index} Charge"), "charge")
-        if amount == 0:
-            continue
-        found.append(
-            Charge(
-                code,
-                str(row.get(f"XC{index} Name") or "").strip(),
-                amount,
-            )
-        )
-    return tuple(found)
-
-
-def _parse_invoices(payload: bytes) -> tuple[Invoice, ...]:
-    payload = _bounded(payload, "invoice")
-    invalid_encoding = False
-    text = ""
-    try:
-        text = payload.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        invalid_encoding = True
-    if invalid_encoding:
-        raise DhlDocumentError("invoice_encoding_invalid")
-    reader = csv.DictReader(io.StringIO(text))
-    rows = []
-    for row in reader:
-        if len(rows) >= _INVOICE_ROWS:
-            raise DhlDocumentError("invoice_too_many_rows")
-        rows.append(row)
-    if not rows or "Invoice Number" not in (rows[0] or {}):
-        raise DhlDocumentError("invoice_format_invalid")
-    headers: dict[str, Mapping[str, Any]] = {}
-    shipments: dict[str, list[Shipment]] = {}
-    for row in rows:
-        number = str(row.get("Invoice Number") or "").strip()
-        line_type = str(row.get("Line Type") or "").strip().upper()
-        if not number:
-            continue
-        if line_type == "I":
-            headers[number] = row
-        elif line_type == "S":
-            shipments.setdefault(number, []).append(
-                Shipment(
-                    str(row.get("Shipment Number") or "").strip(),
-                    str(row.get("Declaration/Entry number") or "").strip(),
-                    _charges(row),
-                )
-            )
-    invoices: list[Invoice] = []
-    for number, legs in shipments.items():
-        header = headers.get(number)
-        if header is None:
-            raise DhlDocumentError("invoice_header_missing")
-        invoices.append(
-            Invoice(
-                number,
-                _date(header.get("Invoice Date"), "invoice_date"),
-                _date(header.get("Due Date"), "due_date"),
-                str(header.get("Currency") or "").strip(),
-                _money(header.get("Total amount (incl. VAT)"), "invoice_total"),
-                tuple(legs),
-            )
-        )
-    if not invoices:
-        raise DhlDocumentError("invoice_unavailable")
-    return tuple(invoices)
+        return ""
 
 
 def _runs_by_page(payload: bytes) -> list[list[_Run]]:
@@ -356,6 +240,224 @@ def _parse_sad500(payload: bytes) -> str:
     )
 
 
+_MYBILL_MARKERS = ("Invoice Number", "Line Type", "Shipment Number")
+
+
+def _mybill_rows(payload: bytes) -> list[dict[str, str]]:
+    """The shipment rows of a DHL MyBill CSV, or [] if this is not one.
+
+    MyBill sends this machine-readable export in the same email as the PDF. It
+    states the charge codes, per-line amounts, discounts, weight charge,
+    declaration number and tax, so classification and reconciliation read it
+    rather than recovering figures from a rendered document.
+    """
+    payload = _bounded(payload, "invoice")
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return []
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = next(reader)
+    except StopIteration:
+        return []
+    if len(set(header)) != len(header) or not all(
+        marker in header for marker in _MYBILL_MARKERS
+    ):
+        return []
+    rows: list[dict[str, str]] = []
+    for index, values in enumerate(reader):
+        if index >= _INVOICE_ROWS:
+            raise DhlDocumentError("invoice_too_many_rows")
+        if len(values) != len(header):
+            raise DhlDocumentError("invoice_format_invalid")
+        row = dict(zip(header, values))
+        if (row.get("Line Type") or "").strip().upper() == "S":
+            rows.append(row)
+    return rows
+
+
+def _charge_lines(row: Mapping[str, str]) -> tuple[tuple[str, str, Decimal], ...]:
+    """Each stated extra charge as (code, name, net amount).
+
+    `XCn Total` is net of that line's discount; `XCn Charge` is gross. V1
+    recorded a fuel surcharge billed at 1,374.75 gross against a -601.09
+    discount: reading the gross figure overstates the bill by the discount.
+    """
+    found: list[tuple[str, str, Decimal]] = []
+    for index in range(1, 12):
+        code = str(row.get(f"XC{index} Code") or "").strip()
+        if not code or code == "0":
+            continue
+        raw_net = row.get(f"XC{index} Total")
+        net = _csv_money(raw_net)
+        gross = _csv_money(row.get(f"XC{index} Charge"))
+        # An explicit zero is DHL's net result after discount; falling back to
+        # the gross value would recreate a charge the invoice removed.
+        amount = net if str(raw_net or "").strip() else gross
+        if not amount:
+            continue
+        name = str(row.get(f"XC{index} Name") or code).strip()
+        found.append((code, name, amount))
+    return tuple(found)
+
+
+def _csv_money(raw: Any) -> Decimal:
+    text = str(raw or "").strip().replace(",", "")
+    if not text:
+        return Decimal("0")
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        raise DhlDocumentError("invoice_amount_invalid")
+    if not value.is_finite():
+        raise DhlDocumentError("invoice_amount_invalid")
+    return value
+
+
+def classify_dhl_document(payload: bytes) -> str:
+    """Name what a DHL-related document is, from its own content.
+
+    The stage a DHL import is at is decided by the documents themselves, never
+    by wording: customs evidence begins the first stage, an invoice completes
+    it. A document that is neither is refused rather than guessed at.
+    """
+    rows = _mybill_rows(payload)
+    if rows:
+        return _classify_mybill(rows)
+    try:
+        pages = _runs_by_page(payload)
+    except DhlDocumentError:
+        return "unreadable"
+    upper = " ".join(run.text for page in pages for run in page).upper()
+    if "CUSTOMS WORKSHEET" in upper:
+        return "customs_worksheet"
+    if "SAD 500" in upper or "CUSTOMS DECLARATION" in upper:
+        return "sad_500"
+    if "DHL" in upper and any(label in upper for label in _TOTAL_LABELS):
+        return "dhl_invoice"
+    return "unrecognised"
+
+
+def _classify_mybill(rows: Sequence[Mapping[str, str]]) -> str:
+    """Which of the three DHL invoice shapes a MyBill export states.
+
+    D-022. The discriminators are ordered and come from the document alone: a
+    weight charge means DHL billed its own carriage; otherwise a declaration
+    number means SARS assessed an entry, whose worksheet and SAD 500 carry the
+    duty and VAT; otherwise the charges are duties and fees paid on an export,
+    with no second document behind them.
+    """
+    if any(_csv_money(row.get("Weight Charge")) for row in rows):
+        return "dhl_freight_invoice"
+    if any(str(row.get("Declaration/Entry number") or "").strip() for row in rows):
+        return "dhl_customs_invoice"
+    charges = tuple(line for row in rows for line in _charge_lines(row))
+    duty_tax_names = {
+        "IMPORT EXPORT DUTIES",
+        "REGULATORY CHARGES",
+        "DUTY TAX PAID",
+    }
+    if charges and all(name.upper() in duty_tax_names for _code, name, _amount in charges):
+        return "dhl_duty_tax_invoice"
+    return "unrecognised"
+
+
+def _csv_date(raw: Any) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    for pattern in ("%Y%m%d", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(value, pattern).date().isoformat()
+        except ValueError:
+            continue
+    raise DhlDocumentError("invoice_date_invalid")
+
+
+def _one_csv_value(
+    rows: Sequence[Mapping[str, str]], field: str, code: str
+) -> str:
+    values = {
+        str(row.get(field) or "").strip()
+        for row in rows
+        if str(row.get(field) or "").strip()
+    }
+    if len(values) != 1:
+        raise DhlDocumentError(code)
+    return next(iter(values))
+
+
+def parse_mybill_invoice(payload: bytes) -> dict[str, Any]:
+    """Read and reconcile one structured DHL MyBill invoice.
+
+    This is evidence only: it performs no accounting write. The production
+    capability decides what to do with the classified shape.
+    """
+    rows = _mybill_rows(payload)
+    if not rows:
+        raise DhlDocumentError("not_a_dhl_invoice")
+    kind = _classify_mybill(rows)
+    invoice_number = _one_csv_value(rows, "Invoice Number", "invoice_number_missing")
+    waybill = _one_csv_value(rows, "Shipment Number", "waybill_missing")
+    currency = _one_csv_value(rows, "Currency", "invoice_currency_missing")
+    invoice_date = _csv_date(
+        _one_csv_value(rows, "Invoice Date", "invoice_date_missing")
+    )
+    due_values = {
+        str(row.get("Due Date") or "").strip()
+        for row in rows
+        if str(row.get("Due Date") or "").strip()
+    }
+    if len(due_values) > 1:
+        raise DhlDocumentError("invoice_date_ambiguous")
+    due_date = _csv_date(next(iter(due_values))) if due_values else ""
+    total = _csv_money(
+        _one_csv_value(
+            rows, "Total amount (incl. VAT)", "invoice_total_missing"
+        )
+    )
+    tax = sum((_csv_money(row.get("Total Tax")) for row in rows), Decimal("0"))
+    stated_tax_values = [
+        _csv_money(row.get(field))
+        for row in rows
+        for field in (
+            "Total Tax",
+            "Weight Tax (VAT)",
+            "Total Extra Charges Tax",
+            *(f"XC{index} Tax" for index in range(1, 12)),
+        )
+    ]
+    charges = tuple(line for row in rows for line in _charge_lines(row))
+    components = sum((amount for _code, _name, amount in charges), Decimal("0"))
+    problems: list[str] = []
+    if total <= 0:
+        problems.append("invoice total is not positive")
+    if not _agree(components, total):
+        problems.append(f"components {components} do not equal invoice total {total}")
+    return {
+        "kind": kind,
+        "invoice_number": invoice_number,
+        "waybill": waybill,
+        "currency": currency,
+        "invoice_date": invoice_date,
+        "due_date": due_date,
+        "total": format(total, "f"),
+        "tax": format(tax, "f"),
+        "tax_present": any(value != 0 for value in stated_tax_values),
+        "verified": not problems,
+        "problems": tuple(problems),
+        "lines": tuple(
+            {
+                "code": code,
+                "description": name,
+                "amount": format(amount, "f"),
+            }
+            for code, name, amount in charges
+        ),
+    }
+
+
 def _classify_customs_document(payload: bytes) -> tuple[str, Worksheet | str]:
     pages = _runs_by_page(payload)
     joined = " ".join(run.text for page in pages for run in page)
@@ -374,8 +476,112 @@ def _agree(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= TOLERANCE
 
 
+_INVOICE_NUMBER = re.compile(r"\b([A-Z]{2,}\d{6,})\b")
+_TEN_DIGITS = re.compile(r"\b(\d{10})\b")
+_WAYBILL_CONTEXT = re.compile(
+    r"(?:HAWB|waybill|SHIPMENT)[^0-9]{0,25}(\d{10})", re.IGNORECASE
+)
+_TOTAL_LABELS = ("NET AMOUNT PAYABLE", "GRAND TOTAL")
+
+
+def _labelled_amount(joined: str, label: str) -> Decimal | None:
+    match = re.search(
+        re.escape(label) + r"[^0-9]{0,15}([\d,]+\.\d{2})", joined, re.IGNORECASE
+    )
+    return _decimal_token(match.group(1)) if match else None
+
+
+def _labelled_date(joined: str, label: str) -> str:
+    """A date stated beside its label, normalised to ISO.
+
+    DHL South Africa states dates as DD/MM/YYYY; ISO is accepted too. Only
+    these two unambiguous forms are read. A value that is not a real calendar
+    date yields nothing rather than a guess.
+    """
+    match = re.search(
+        re.escape(label) + r"[^0-9]{0,15}(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})",
+        joined,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    value = match.group(1)
+    for pattern in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(value, pattern).date().isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def parse_invoice_pdf(payload: bytes) -> dict[str, Any]:
+    """Read the fields the invoice stage needs from a DHL MyBill invoice PDF.
+
+    The invoice that arrives by email is a PDF, not the structured MyBill CSV.
+    Only the waybill, number, total and dates are read: the clearance charge is
+    never parsed here, because it is the invoice total less the duty and VAT
+    already verified from the customs documents. That subtraction reconciles
+    exactly and avoids guessing charge-code layouts that vary by invoice.
+    """
+    pages = _runs_by_page(payload)
+    joined = " ".join(run.text for page in pages for run in page)
+    upper = joined.upper()
+    if "DHL" not in upper:
+        raise DhlDocumentError("not_a_dhl_invoice")
+
+    number_match = _INVOICE_NUMBER.search(joined)
+    invoice_number = number_match.group(1) if number_match else ""
+    if not invoice_number:
+        raise DhlDocumentError("invoice_number_missing")
+
+    # Several ten-digit values appear on an invoice, so the labelled one wins
+    # and the most repeated is the fallback: a waybill repeats per charge line
+    # while a VAT or registration number appears once.
+    context = _WAYBILL_CONTEXT.search(joined)
+    if context:
+        waybill = context.group(1)
+    else:
+        found = _TEN_DIGITS.findall(joined)
+        waybill = max(set(found), key=found.count) if found else ""
+    if not waybill:
+        raise DhlDocumentError("waybill_missing")
+
+    total = None
+    for label in _TOTAL_LABELS:
+        total = _labelled_amount(joined, label)
+        if total is not None:
+            break
+    if total is None or total <= 0:
+        raise DhlDocumentError("invoice_total_missing")
+
+    due_date = _labelled_date(joined, "DUE DATE")
+    # Only a distinctly labelled invoice date is accepted. A bare "DATE" on a
+    # DHL invoice matches the due-date label, which would post the due date as
+    # the invoice date. Empty is better than guessed.
+    invoice_date = _labelled_date(joined, "INVOICE DATE")
+    if invoice_date == due_date:
+        invoice_date = ""
+
+    return {
+        "invoice_number": invoice_number,
+        "waybill": waybill,
+        "total": format(total, "f"),
+        "invoice_date": invoice_date,
+        "due_date": due_date,
+    }
+
+
 class DhlImportAnalyzerAdapter:
-    def analyze_customs(
+    def classify(self, document: bytes) -> str:
+        return classify_dhl_document(document)
+
+    def invoice_fields(self, invoice_document: bytes) -> Mapping[str, Any]:
+        return parse_invoice_pdf(invoice_document)
+
+    def invoice_evidence(self, structured_document: bytes) -> Mapping[str, Any]:
+        return parse_mybill_invoice(structured_document)
+
+    def customs_evidence(
         self, customs_documents: Sequence[bytes]
     ) -> Mapping[str, Any]:
         if len(customs_documents) > _CUSTOMS_DOCUMENTS:
@@ -428,6 +634,12 @@ class DhlImportAnalyzerAdapter:
             )
         return {
             "verified": not errors,
+            # The two figures the provisional bill is drafted from, kept apart
+            # because import VAT is claimable and duty is not.
+            "duty": format(worksheet.duty, "f"),
+            "vat": format(worksheet.vat, "f"),
+            "assessed_on": _assessed_on(worksheet.declaration),
+            "problems": tuple(errors),
             "provisional_invoice_number": f"DHL-WAYBILL-{worksheet.waybill}",
             "currency": "ZAR",
             "total": format(worksheet.total, "f"),
@@ -443,163 +655,4 @@ class DhlImportAnalyzerAdapter:
             "warnings": (
                 "Provisional evidence only; MyBill invoice and final total pending.",
             ),
-        }
-
-    def reconcile(
-        self,
-        invoice_document: bytes,
-        customs_documents: Sequence[bytes],
-        invoice_number: str = "",
-    ) -> Mapping[str, Any]:
-        if len(customs_documents) > _CUSTOMS_DOCUMENTS:
-            raise DhlDocumentError("too_many_customs_documents")
-        invoices = _parse_invoices(invoice_document)
-        if invoice_number:
-            selected = [item for item in invoices if item.invoice_number == invoice_number]
-            if len(selected) != 1:
-                raise DhlDocumentError("invoice_number_unavailable")
-            invoice = selected[0]
-        elif len(invoices) == 1:
-            invoice = invoices[0]
-        else:
-            raise DhlDocumentError("invoice_selection_required")
-        classified = tuple(
-            _classify_customs_document(payload) for payload in customs_documents
-        )
-        worksheets = tuple(
-            value for kind, value in classified
-            if kind == "customs_worksheet" and isinstance(value, Worksheet)
-        )
-        sad_declarations = tuple(
-            value for kind, value in classified
-            if kind == "sad_500" and isinstance(value, str)
-        )
-        errors: list[str] = []
-        warnings: list[str] = []
-
-        by_waybill = {worksheet.waybill: worksheet for worksheet in worksheets}
-        if len(by_waybill) != len(worksheets):
-            errors.append("duplicate customs worksheet for a waybill")
-        missing = sorted(
-            shipment.waybill
-            for shipment in invoice.shipments
-            if shipment.waybill and shipment.waybill not in by_waybill
-        )
-        if missing:
-            errors.append(f"customs worksheet missing for waybill(s): {', '.join(missing)}")
-        invoice_waybills = {shipment.waybill for shipment in invoice.shipments}
-        unexpected = sorted(set(by_waybill) - invoice_waybills)
-        if unexpected:
-            errors.append(f"worksheet waybill not on invoice: {', '.join(unexpected)}")
-        required_declarations = {
-            worksheet.declaration for worksheet in worksheets
-        }
-        available_sad = set(sad_declarations)
-        missing_sad = sorted(required_declarations - available_sad)
-        unexpected_sad = sorted(available_sad - required_declarations)
-        if missing_sad:
-            errors.append(f"SAD 500 missing for declaration(s): {', '.join(missing_sad)}")
-        if unexpected_sad:
-            errors.append(
-                f"SAD 500 declaration not on worksheet: {', '.join(unexpected_sad)}"
-            )
-        if len(available_sad) != len(sad_declarations):
-            errors.append("duplicate SAD 500 for a declaration")
-
-        for shipment in invoice.shipments:
-            worksheet = by_waybill.get(shipment.waybill)
-            if worksheet is None:
-                continue
-            if shipment.declaration and worksheet.declaration != shipment.declaration:
-                errors.append(
-                    f"declaration mismatch for {shipment.waybill}: "
-                    f"invoice {shipment.declaration}, worksheet {worksheet.declaration}"
-                )
-            if not _agree(worksheet.duty + worksheet.vat, worksheet.total):
-                errors.append(
-                    f"worksheet does not balance for {shipment.waybill}: "
-                    f"duty {worksheet.duty} + VAT {worksheet.vat} != {worksheet.total}"
-                )
-
-        unknown = [charge for charge in invoice.charges if charge.code not in _KNOWN_CODES]
-        for charge in unknown:
-            errors.append(
-                f"unrecognised charge code {charge.code!r} ({charge.name}) "
-                f"{invoice.currency} {charge.amount}"
-            )
-        charge_total = sum((charge.amount for charge in invoice.charges), Decimal("0"))
-        if not _agree(charge_total, invoice.total):
-            errors.append(f"invoice lines {charge_total} != invoice total {invoice.total}")
-
-        invoice_duty = sum(
-            (charge.amount for charge in invoice.charges if charge.code == "XX"),
-            Decimal("0"),
-        )
-        invoice_vat = sum(
-            (charge.amount for charge in invoice.charges if charge.code == "XB"),
-            Decimal("0"),
-        )
-        worksheet_duty = sum((item.duty for item in worksheets), Decimal("0"))
-        worksheet_vat = sum((item.vat for item in worksheets), Decimal("0"))
-        if not _agree(invoice_duty, worksheet_duty):
-            errors.append(f"duty mismatch: invoice {invoice_duty}, worksheets {worksheet_duty}")
-        if not _agree(invoice_vat, worksheet_vat):
-            errors.append(f"VAT mismatch: invoice {invoice_vat}, worksheets {worksheet_vat}")
-
-        lines: list[dict[str, Any]] = []
-        if invoice_vat:
-            lines.append(
-                {
-                    "category": "import_vat",
-                    "description": "Import VAT (claimable — per SAD 500)",
-                    "amount": format(invoice_vat, "f"),
-                    "claimable": True,
-                }
-            )
-        if invoice_duty:
-            lines.append(
-                {
-                    "category": "customs_duty",
-                    "description": "Customs duty (not claimable)",
-                    "amount": format(invoice_duty, "f"),
-                    "claimable": False,
-                }
-            )
-        service_totals: dict[str, Decimal] = {}
-        for charge in invoice.charges:
-            if charge.code in _SERVICE_CODES:
-                name = charge.name.title()
-                service_totals[name] = service_totals.get(name, Decimal("0")) + charge.amount
-        for name, amount in service_totals.items():
-            lines.append(
-                {
-                    "category": "clearance_fee",
-                    "description": name,
-                    "amount": format(amount, "f"),
-                    "claimable": False,
-                }
-            )
-        proposed_total = sum((Decimal(line["amount"]) for line in lines), Decimal("0"))
-        if not _agree(proposed_total, invoice.total):
-            errors.append(f"proposed bill lines {proposed_total} != invoice total {invoice.total}")
-
-        waybills = tuple(shipment.waybill for shipment in invoice.shipments)
-        declarations = tuple(shipment.declaration for shipment in invoice.shipments)
-        return {
-            "reconciled": not errors,
-            "invoice_number": invoice.invoice_number,
-            "invoice_date": invoice.invoice_date.isoformat(),
-            "due_date": invoice.due_date.isoformat(),
-            "currency": invoice.currency,
-            "total": format(invoice.total, "f"),
-            "waybills": waybills,
-            "declarations": declarations,
-            "reference": (
-                f"DHL import; waybill(s) {', '.join(waybills)}; "
-                f"declaration(s) {', '.join(declarations)}"
-            ),
-            "lines": tuple(lines),
-            "document_kinds": tuple(kind for kind, _value in classified),
-            "errors": tuple(errors),
-            "warnings": tuple(warnings),
         }

@@ -101,7 +101,7 @@ class PrefixStabilityTests(unittest.TestCase):
         self.reasoner.decide(context("conversation-1", "hello"))
         messages = self.model.requests[0].messages
         self.assertEqual(messages[2].role, ModelRole.SYSTEM)
-        self.assertIn("execute_xero_bill", messages[2].content)
+        self.assertIn("capture_supplier_invoice", messages[2].content)
         # The volatile task material is last and holds no catalogue.
         self.assertEqual(messages[-1].role, ModelRole.USER)
         self.assertNotIn('"capabilities"', messages[-1].content)
