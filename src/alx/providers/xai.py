@@ -29,7 +29,18 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
+    return {
+        "kind": request.kind,
+        "tier": request.tier,
+        "reservation_id": request.reservation_id,
+        "reserved_usd": request.reserved_usd,
+    }
+
+
 class XAIReasoningModel:
+    supports_bounded_research = True
+
     def __init__(
         self,
         model: str,
@@ -110,9 +121,12 @@ class XAIReasoningModel:
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
-                self._completion_telemetry(
-                    model, service_tier, usage, duration, timings
-                ),
+                {
+                    **self._completion_telemetry(
+                        model, service_tier, usage, duration, timings
+                    ),
+                    **_request_telemetry(request),
+                },
             )
             LOGGER.info(
                 "Reasoning provider request completed in %.3f seconds",
@@ -136,6 +150,7 @@ class XAIReasoningModel:
                     "duration_ms": round(duration * 1000),
                     "error_type": error_code,
                     "status_code": status,
+                    **_request_telemetry(request),
                 },
             )
             if status in (402, 403):

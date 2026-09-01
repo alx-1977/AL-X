@@ -14,6 +14,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
@@ -23,9 +24,10 @@ from alx.contracts import (  # noqa: E402
     SpecialistError,
     ModelCompletion,
     ModelRole,
+    ResearchQuestion,
     SpecialistQuestion,
 )
-from alx.specialists import ModelSpecialist  # noqa: E402
+from alx.specialists import ResearchSpecialist, ResearchTierModel  # noqa: E402
 
 
 SCHEMA = {
@@ -37,6 +39,8 @@ SCHEMA = {
 
 
 class TierModel:
+    supports_bounded_research = True
+
     def __init__(self, name: str) -> None:
         self.name = name
         self.calls = 0
@@ -48,13 +52,39 @@ class TierModel:
         return ModelCompletion("testvendor", self.name, {"finding": self.name}, {})
 
 
-def question(cognition: Cognition, material: str = "material") -> SpecialistQuestion:
-    return SpecialistQuestion(
-        question_id="q",
-        instruction="Answer from the material.",
-        material=material,
-        answer_schema=SCHEMA,
-        cognition=cognition,
+class FreePricing:
+    def is_priced(self, provider, model): return True
+    def worst_case_usd(self, provider, model, max_input, max_output): return 0.01
+    def cost_usd(self, provider, model, usage): return 0.0
+
+
+class RecordingLedger:
+    def __init__(self): self.reservations = 0
+    def overrun_usd(self, day=None): return 0.0
+    def reserve(self, tier, provider, model, kind="research", worst_case_usd=None):
+        self.reservations += 1
+        return SimpleNamespace(reservation_id=f"r-{self.reservations}", reserved_usd=worst_case_usd)
+    def settle(
+        self, reservation, actual_usd, usage=None, provider=None, model=None
+    ):
+        return actual_usd
+    def abandon(
+        self, reservation, failure_code="provider_failed", usage=None,
+        provider=None, model=None,
+    ):
+        return reservation.reserved_usd
+    def remaining_usd(self, day=None): return 1.0
+
+
+def question(cognition: Cognition, material: str = "material") -> ResearchQuestion:
+    return ResearchQuestion(
+        SpecialistQuestion(
+            question_id="q",
+            instruction="Answer from the material.",
+            material=material,
+            answer_schema=SCHEMA,
+        ),
+        cognition,
     )
 
 
@@ -63,13 +93,18 @@ class CognitionTierTest(unittest.TestCase):
         self.survey = TierModel("survey-model")
         self.compare = TierModel("compare-model")
         self.judge = TierModel("judge-model")
-        self.specialist = ModelSpecialist(
-            self.survey,
-            tiers={
-                Cognition.SURVEY: self.survey,
-                Cognition.COMPARE: self.compare,
-                Cognition.JUDGE: self.judge,
+        self.ledger = RecordingLedger()
+        self.specialist = ResearchSpecialist(
+            {
+                Cognition.SURVEY: ResearchTierModel("testvendor", "survey-model", self.survey),
+                Cognition.COMPARE: ResearchTierModel("testvendor", "compare-model", self.compare),
+                Cognition.JUDGE: ResearchTierModel("testvendor", "judge-model", self.judge),
             },
+            self.ledger,
+            FreePricing(),
+            4_000,
+            1_000,
+            0.10,
         )
 
     def test_each_tier_reaches_its_configured_model(self) -> None:
@@ -106,11 +141,13 @@ class CognitionTierTest(unittest.TestCase):
 
     def test_default_tier_is_the_cheapest(self) -> None:
         """Nothing silently buys expensive thinking it was not asked for."""
-        default = SpecialistQuestion(
-            question_id="q",
-            instruction="Answer from the material.",
-            material="material",
-            answer_schema=SCHEMA,
+        default = ResearchQuestion(
+            SpecialistQuestion(
+                question_id="q",
+                instruction="Answer from the material.",
+                material="material",
+                answer_schema=SCHEMA,
+            )
         )
         self.assertIs(default.cognition, Cognition.SURVEY)
 
@@ -121,7 +158,10 @@ class CognitionTierTest(unittest.TestCase):
         question with an expensive one, and the tier would stop meaning anything.
         A misconfiguration is made visible instead.
         """
-        specialist = ModelSpecialist(self.survey, tiers={Cognition.SURVEY: self.survey})
+        specialist = ResearchSpecialist(
+            {Cognition.SURVEY: ResearchTierModel("testvendor", "survey-model", self.survey)},
+            RecordingLedger(), FreePricing(), 4_000, 1_000, 0.10,
+        )
         with self.assertRaises(SpecialistError) as caught:
             specialist.answer(question(Cognition.JUDGE))
         self.assertIn("cognition_tier_unconfigured", str(caught.exception))
@@ -151,13 +191,15 @@ class CognitionTierTest(unittest.TestCase):
         self.assertFalse(hasattr(request, "capabilities"))
 
     def test_an_invalid_tier_is_refused(self) -> None:
-        with self.assertRaises(ValueError):
-            SpecialistQuestion(
-                question_id="q",
-                instruction="i",
-                material="m",
-                answer_schema=SCHEMA,
-                cognition="judge",  # a string is not a tier
+        with self.assertRaises(TypeError):
+            ResearchQuestion(
+                SpecialistQuestion(
+                    question_id="q",
+                    instruction="i",
+                    material="m",
+                    answer_schema=SCHEMA,
+                ),
+                "judge",  # a string is not a tier
             )
 
     def test_tiers_are_difficulty_names_not_vendor_names(self) -> None:
@@ -172,11 +214,11 @@ class CognitionTierTest(unittest.TestCase):
 class SingleResearchPathTest(unittest.TestCase):
     """Law 0: three tiers are three configurations, not three paths."""
 
-    def test_one_specialist_class_serves_every_tier(self) -> None:
+    def test_one_research_class_serves_every_tier(self) -> None:
         source = (
-            REPOSITORY_ROOT / "src" / "alx" / "specialists" / "runner.py"
+            REPOSITORY_ROOT / "src" / "alx" / "specialists" / "research.py"
         ).read_text()
-        self.assertEqual(source.count("class ModelSpecialist"), 1)
+        self.assertEqual(source.count("class ResearchSpecialist"), 1)
         self.assertEqual(source.count("def answer"), 1)
 
     def test_no_tier_specific_specialist_class_exists(self) -> None:
@@ -189,14 +231,18 @@ class SingleResearchPathTest(unittest.TestCase):
             ]
             self.assertEqual(hits, [], f"{name} would be a second research path")
 
-    def test_research_goes_through_the_one_bounded_question_contract(self) -> None:
+    def test_generic_specialist_has_no_tier_dispatch(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "specialists" / "runner.py"
+        ).read_text()
+        self.assertNotIn("tiers", source)
+        self.assertNotIn("Cognition", source)
+
+    def test_research_owns_the_only_tier_dispatch(self) -> None:
         source = (
             REPOSITORY_ROOT / "src" / "alx" / "specialists" / "research.py"
         ).read_text()
-        self.assertIn("SpecialistQuestion", source)
-        # The researcher delegates to the one specialist rather than calling a
-        # model itself; a direct provider call here would be a second path.
-        self.assertNotIn(".complete(", source)
+        self.assertEqual(source.count(".transport.complete(request)"), 1)
 
 
 if __name__ == "__main__":

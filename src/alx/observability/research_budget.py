@@ -21,6 +21,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 from threading import Lock
 from uuid import uuid4
@@ -66,6 +67,8 @@ class ResearchBudget:
     per_request_max_usd: float
 
     def __post_init__(self) -> None:
+        if not isfinite(self.daily_usd) or not isfinite(self.per_request_max_usd):
+            raise ValueError("research budgets must be finite")
         if self.daily_usd < 0:
             raise ValueError("daily_usd must not be negative")
         if self.per_request_max_usd <= 0:
@@ -105,7 +108,13 @@ class SQLiteResearchLedger:
                     kind TEXT NOT NULL,
                     tier TEXT NOT NULL,
                     provider TEXT NOT NULL,
-                    model TEXT NOT NULL
+                    model TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                    outcome TEXT NOT NULL DEFAULT 'reserved',
+                    failure_code TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS research_spend_day
                     ON research_spend(day);
@@ -120,6 +129,18 @@ class SQLiteResearchLedger:
                     "ALTER TABLE research_spend ADD COLUMN overrun_usd REAL "
                     "NOT NULL DEFAULT 0.0"
                 )
+            for column, definition in (
+                ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                ("cached_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                ("outcome", "TEXT NOT NULL DEFAULT 'reserved'"),
+                ("failure_code", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in existing:
+                    database.execute(
+                        f"ALTER TABLE research_spend ADD COLUMN {column} {definition}"
+                    )
             database.commit()
         finally:
             database.close()
@@ -194,10 +215,19 @@ class SQLiteResearchLedger:
                     if worst_case_usd is None
                     else worst_case_usd
                 )
-                if required > self._budget.per_request_max_usd:
+                if not isfinite(required) or required < 0:
+                    database.rollback()
+                    raise ValueError("research reservation must be finite and non-negative")
+                required_micros = round(required * 1_000_000)
+                committed_micros = round(committed * 1_000_000)
+                request_ceiling_micros = round(
+                    self._budget.per_request_max_usd * 1_000_000
+                )
+                daily_ceiling_micros = round(self._budget.daily_usd * 1_000_000)
+                if required_micros > request_ceiling_micros:
                     database.rollback()
                     raise ResearchBudgetExceeded(max(0.0, remaining), required)
-                if remaining < required:
+                if committed_micros + required_micros > daily_ceiling_micros:
                     database.rollback()
                     raise ResearchBudgetExceeded(max(0.0, remaining), required)
                 reservation_id = uuid4().hex
@@ -221,7 +251,14 @@ class SQLiteResearchLedger:
                 database.close()
         return Reservation(reservation_id, required)
 
-    def settle(self, reservation: Reservation, actual_usd: float) -> float:
+    def settle(
+        self,
+        reservation: Reservation,
+        actual_usd: float,
+        usage: dict[str, object] | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> float:
         """Replace the reservation with the measured cost.
 
         A measured cost above the reservation means the enforced bound did not
@@ -231,24 +268,37 @@ class SQLiteResearchLedger:
         `overrun_usd` reports the excess so research can stop entirely rather
         than continue against a ceiling already known to have failed.
         """
-        if actual_usd < 0:
+        if not isfinite(actual_usd) or actual_usd < 0:
             raise ValueError("actual_usd must not be negative")
-        # The day is charged at most what was withdrawn, so committed spend can
-        # never exceed the ceiling the reservation was checked against. Any
-        # excess is recorded separately rather than added to the day: a bound
-        # that failed is a fault to surface, not a licence to overspend.
-        settled = min(actual_usd, reservation.reserved_usd)
+        # Record the provider's measured charge, never an accounting clamp. If
+        # it exceeds the mechanically enforced bound, overrun_usd makes the
+        # failed guarantee explicit and the caller stops research immediately.
+        settled = actual_usd
         overrun = max(0.0, actual_usd - reservation.reserved_usd)
+        outcome = "failed" if overrun > 0 else "succeeded"
+        failure_code = "cost_overrun" if overrun > 0 else ""
+        usage = usage or {}
         with self._lock:
             database = self._db()
             try:
                 database.execute(
                     "UPDATE research_spend SET actual_usd = ?, overrun_usd = ?, "
-                    "settled_at = ? WHERE reservation_id = ? AND actual_usd IS NULL",
+                    "settled_at = ?, input_tokens = ?, cached_tokens = ?, "
+                    "output_tokens = ?, reasoning_tokens = ?, provider = COALESCE(?, provider), "
+                    "model = COALESCE(?, model), outcome = ?, failure_code = ? "
+                    "WHERE reservation_id = ? AND actual_usd IS NULL",
                     (
                         settled,
                         overrun,
                         datetime.now(UTC).isoformat(),
+                        int(usage.get("input_tokens") or 0),
+                        int(usage.get("cached_tokens") or 0),
+                        int(usage.get("output_tokens") or 0),
+                        int(usage.get("reasoning_tokens") or 0),
+                        provider,
+                        model,
+                        outcome,
+                        failure_code,
                         reservation.reservation_id,
                     ),
                 )
@@ -257,7 +307,14 @@ class SQLiteResearchLedger:
                 database.close()
         return settled
 
-    def abandon(self, reservation: Reservation) -> float:
+    def abandon(
+        self,
+        reservation: Reservation,
+        failure_code: str = "provider_failed",
+        usage: dict[str, object] | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> float:
         """Close a failed or unmeasurable call at its full reservation.
 
         A failed provider call is not a free one. A request can be billed and
@@ -270,7 +327,33 @@ class SQLiteResearchLedger:
         overstate the cost of a call that genuinely never reached the provider,
         and that is the safe direction to be wrong in.
         """
-        return self.settle(reservation, reservation.reserved_usd)
+        usage = usage or {}
+        with self._lock:
+            database = self._db()
+            try:
+                database.execute(
+                    "UPDATE research_spend SET actual_usd = reserved_usd, "
+                    "settled_at = ?, input_tokens = ?, cached_tokens = ?, "
+                    "output_tokens = ?, reasoning_tokens = ?, "
+                    "provider = COALESCE(?, provider), model = COALESCE(?, model), "
+                    "outcome = 'failed', failure_code = ? "
+                    "WHERE reservation_id = ? AND actual_usd IS NULL",
+                    (
+                        datetime.now(UTC).isoformat(),
+                        int(usage.get("input_tokens") or 0),
+                        int(usage.get("cached_tokens") or 0),
+                        int(usage.get("output_tokens") or 0),
+                        int(usage.get("reasoning_tokens") or 0),
+                        provider,
+                        model,
+                        failure_code,
+                        reservation.reservation_id,
+                    ),
+                )
+                database.commit()
+            finally:
+                database.close()
+        return reservation.reserved_usd
 
     def overrun_usd(self, day: str | None = None) -> float:
         """How far settled spend has exceeded its reservations today.
@@ -296,7 +379,9 @@ class SQLiteResearchLedger:
         database = self._db()
         try:
             rows = database.execute(
-                "SELECT kind, tier, provider, model, reserved_usd, actual_usd "
+                "SELECT reservation_id, kind, tier, provider, model, reserved_usd, "
+                "actual_usd, overrun_usd, input_tokens, cached_tokens, "
+                "output_tokens, reasoning_tokens, outcome, failure_code "
                 "FROM research_spend WHERE day = ? ORDER BY opened_at",
                 (day,),
             ).fetchall()

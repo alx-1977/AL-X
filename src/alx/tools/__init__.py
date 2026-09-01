@@ -26,18 +26,6 @@ from alx.tools.xero import (
     SEARCH_XERO_CONTACTS,
     build_xero_executors,
 )
-from alx.tools.notebook import (
-    CORRECT_RESEARCH_ENTRY,
-    DEFINITIONS as NOTEBOOK_DEFINITIONS,
-    DELETE_RESEARCH,
-    OPEN_RESEARCH_THREAD,
-    READ_RESEARCH_THREAD,
-    RECORD_RESEARCH_ENTRY,
-    REVISE_RESEARCH_ENTRY,
-    SEARCH_RESEARCH,
-    SET_RESEARCH_STATUS,
-    build_notebook_executors,
-)
 from alx.tools.dhl import (
     PROCESS_DHL_IMPORT,
     DEFINITIONS as DHL_DEFINITIONS,
@@ -46,16 +34,6 @@ from alx.tools.dhl import (
 
 __all__ = [
     "ACKNOWLEDGE_MAIL_MESSAGE",
-    "CORRECT_RESEARCH_ENTRY",
-    "DELETE_RESEARCH",
-    "NOTEBOOK_DEFINITIONS",
-    "OPEN_RESEARCH_THREAD",
-    "READ_RESEARCH_THREAD",
-    "RECORD_RESEARCH_ENTRY",
-    "REVISE_RESEARCH_ENTRY",
-    "SEARCH_RESEARCH",
-    "SET_RESEARCH_STATUS",
-    "build_notebook_executors",
     "DEFINITIONS",
     "LIST_MAIL_ATTACHMENTS",
     "MARK_MAIL_MESSAGE_SEEN",

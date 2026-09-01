@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from alx.contracts import (  # noqa: E402
     Cognition,
     ModelCompletion,
+    ResearchQuestion,
     SpecialistError,
     SpecialistQuestion,
 )
@@ -32,7 +34,7 @@ from alx.observability.research_budget import (  # noqa: E402
     ResearchBudgetExceeded,
     SQLiteResearchLedger,
 )
-from alx.specialists import ModelSpecialist, ResearchSpecialist  # noqa: E402
+from alx.specialists import ResearchSpecialist, ResearchTierModel  # noqa: E402
 
 
 # A small bound so the worst-case price fits every ceiling used below.
@@ -49,18 +51,22 @@ SCHEMA = {
 }
 
 
-def question(cognition: Cognition = Cognition.SURVEY) -> SpecialistQuestion:
-    return SpecialistQuestion(
-        question_id="research-question",
-        instruction="Answer the question from the material.",
-        material="Some bounded research material.",
-        answer_schema=SCHEMA,
-        cognition=cognition,
+def question(cognition: Cognition = Cognition.SURVEY) -> ResearchQuestion:
+    return ResearchQuestion(
+        SpecialistQuestion(
+            question_id="research-question",
+            instruction="Answer the question from the material.",
+            material="Some bounded research material.",
+            answer_schema=SCHEMA,
+        ),
+        cognition,
     )
 
 
 class RecordingModel:
     """A model that returns a fixed answer and a controllable usage report."""
+
+    supports_bounded_research = True
 
     def __init__(self, provider: str, model: str, usage: dict | None = None) -> None:
         self.provider = provider
@@ -76,6 +82,8 @@ class RecordingModel:
 
 
 class FailingModel:
+    supports_bounded_research = True
+
     def __init__(self) -> None:
         self.calls = 0
 
@@ -104,18 +112,16 @@ class ResearchBudgetTest(unittest.TestCase):
         )
 
     def researcher(self, ledger, model, tier=Cognition.SURVEY):
-        specialist = ModelSpecialist(model, tiers={tier: model})
         return (
             ResearchSpecialist(
-                specialist,
+                {tier: ResearchTierModel(model.provider, model.model, model)},
                 ledger,
                 ConfiguredPricingWorstCase(),
-                lambda _tier: (model.provider, model.model),
                 MAX_INPUT,
                 MAX_OUTPUT,
                 PER_REQUEST_MAX,
             ),
-            specialist,
+            model,
         )
 
     def test_reservation_holds_the_worst_case_while_the_call_runs(self) -> None:
@@ -174,19 +180,13 @@ class ResearchBudgetTest(unittest.TestCase):
         self.assertLessEqual(ledger.committed_usd(), 5.0)
         self.assertEqual(ledger.remaining_usd(), 0.0)
 
-    def test_an_overrun_is_recorded_without_breaching_the_day(self) -> None:
-        """The day is charged what was withdrawn; the excess is a recorded fault.
-
-        Charging the day the true figure would let one bad call blow through the
-        ceiling, and clamping it silently would hide that a bound failed. The
-        reservation caps the day, and the overrun is reported separately so
-        research can stop.
-        """
+    def test_an_overrun_records_true_spend_instead_of_clamping_accounting(self) -> None:
+        """A provider-bound failure must never make the ledger look compliant."""
         ledger = self.ledger(daily=10.0, per_request=2.0)
         reservation = ledger.reserve("judge", "testvendor", "test-model")
         settled = ledger.settle(reservation, 7.5)
-        self.assertEqual(settled, 2.0)
-        self.assertEqual(ledger.committed_usd(), 2.0)
+        self.assertEqual(settled, 7.5)
+        self.assertEqual(ledger.committed_usd(), 7.5)
         self.assertAlmostEqual(ledger.overrun_usd(), 5.5, places=6)
 
     def test_exhaustion_stops_research_and_does_not_downgrade_the_tier(self) -> None:
@@ -194,12 +194,12 @@ class ResearchBudgetTest(unittest.TestCase):
         ledger = self.ledger(daily=0.09, per_request=0.09)
         judge = RecordingModel("testvendor", "test-model", {"output_tokens": 10})
         survey = RecordingModel("testvendor", "test-model", {"output_tokens": 10})
-        specialist = ModelSpecialist(
-            survey, tiers={Cognition.SURVEY: survey, Cognition.JUDGE: judge}
-        )
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricingWorstCase(),
-            lambda _tier: ("testvendor", "test-model"),
+            {
+                Cognition.SURVEY: ResearchTierModel("testvendor", "test-model", survey),
+                Cognition.JUDGE: ResearchTierModel("testvendor", "test-model", judge),
+            },
+            ledger, ConfiguredPricingWorstCase(),
             MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         researcher.answer(question(Cognition.JUDGE))
@@ -215,10 +215,9 @@ class ResearchBudgetTest(unittest.TestCase):
         primary = RecordingModel("testvendor", "test-model", {"output_tokens": 5})
         other = RecordingModel("othervendor", "other-model", {"output_tokens": 5})
         pricing.USD_PER_MILLION[("othervendor", "other-model")] = (1.0, 1.0, 1.0)
-        specialist = ModelSpecialist(primary, tiers={Cognition.SURVEY: primary})
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricingWorstCase(),
-            lambda _tier: ("testvendor", "test-model"),
+            {Cognition.SURVEY: ResearchTierModel("testvendor", "test-model", primary)},
+            ledger, ConfiguredPricingWorstCase(),
             MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         researcher.answer(question())
@@ -247,26 +246,28 @@ class ResearchBudgetTest(unittest.TestCase):
         ledger = self.ledger(daily=1.0, per_request=0.09)
         model = FailingModel()
         model.provider, model.model = "testvendor", "test-model"
-        specialist = ModelSpecialist(model, tiers={Cognition.SURVEY: model})
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricingWorstCase(),
-            lambda _tier: ("testvendor", "test-model"),
+            {Cognition.SURVEY: ResearchTierModel("testvendor", "test-model", model)},
+            ledger, ConfiguredPricingWorstCase(),
             MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         with self.assertRaises(SpecialistError):
             researcher.answer(question())
         self.assertAlmostEqual(ledger.committed_usd(), 0.09, places=6)
         self.assertAlmostEqual(ledger.remaining_usd(), 0.91, places=6)
+        call = ledger.day()["calls"][0]
+        self.assertEqual(call["outcome"], "failed")
+        self.assertEqual(call["failure_code"], "RuntimeError")
+        self.assertTrue(call["reservation_id"])
 
     def test_repeated_failures_cannot_outrun_the_daily_ceiling(self) -> None:
         """The hole this closes: unbounded failing paid calls in one day."""
         ledger = self.ledger(daily=0.18, per_request=0.09)
         model = FailingModel()
         model.provider, model.model = "testvendor", "test-model"
-        specialist = ModelSpecialist(model, tiers={Cognition.SURVEY: model})
         researcher = ResearchSpecialist(
-            specialist, ledger, ConfiguredPricingWorstCase(),
-            lambda _tier: ("testvendor", "test-model"),
+            {Cognition.SURVEY: ResearchTierModel("testvendor", "test-model", model)},
+            ledger, ConfiguredPricingWorstCase(),
             MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         for _ in range(2):
@@ -294,6 +295,10 @@ class ResearchBudgetTest(unittest.TestCase):
         expected = round(1000 / 1e6 * 10.0 + 1000 / 1e6 * 50.0, 6)
         self.assertAlmostEqual(ledger.committed_usd(), expected, places=6)
         self.assertLess(ledger.committed_usd(), 2.0)
+        call = ledger.day()["calls"][0]
+        self.assertEqual(call["outcome"], "succeeded")
+        self.assertEqual(call["input_tokens"], 1000)
+        self.assertEqual(call["output_tokens"], 1000)
 
     def test_budget_survives_restart(self) -> None:
         """A restart must not hand AL/X a fresh day's money."""
@@ -315,6 +320,34 @@ class ResearchBudgetTest(unittest.TestCase):
     def test_a_budget_that_cannot_afford_one_request_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             ResearchBudget(daily_usd=1.0, per_request_max_usd=2.0)
+
+    def test_concurrent_ledger_instances_share_one_atomic_ceiling(self) -> None:
+        ledgers = [self.ledger(daily=0.05, per_request=0.01) for _ in range(10)]
+
+        def attempt(ledger):
+            try:
+                ledger.reserve(
+                    "judge", "testvendor", "test-model", worst_case_usd=0.01
+                )
+                return True
+            except ResearchBudgetExceeded:
+                return False
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            admitted = list(pool.map(attempt, ledgers))
+        self.assertEqual(sum(admitted), 5)
+        self.assertLessEqual(ledgers[0].committed_usd(), 0.05)
+
+    def test_non_finite_or_negative_money_cannot_bypass_comparisons(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError):
+                ResearchBudget(daily_usd=value, per_request_max_usd=0.01)
+        ledger = self.ledger(daily=1.0, per_request=0.1)
+        for value in (-0.01, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                ledger.reserve(
+                    "judge", "testvendor", "test-model", worst_case_usd=value
+                )
 
 
 if __name__ == "__main__":

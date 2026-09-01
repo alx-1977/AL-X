@@ -12,7 +12,6 @@ import json
 from typing import Any, Mapping
 
 from alx.contracts import (
-    Cognition,
     ModelMessage,
     ModelRequest,
     ModelRole,
@@ -23,51 +22,27 @@ from alx.contracts import (
 
 
 class ModelSpecialist:
-    """Answer bounded questions through the shared replaceable model port.
-
-    One specialist serves every cognition tier. A tier chooses which configured
-    model answers; it does not change what the call is, what it may do, or what
-    happens to the answer. Three tiers are three configurations of this one
-    path, not three paths.
-    """
+    """Answer one ordinary bounded extraction question through one model."""
 
     def __init__(
         self,
         model: ReasoningModel,
         cache_key: str = "alx-specialist-v1",
-        tiers: Mapping[Cognition, ReasoningModel] | None = None,
     ) -> None:
         self._model = model
         self._cache_key = cache_key
-        self._tiers = dict(tiers or {})
         # Usage from the most recent answer, so a caller enforcing a spending
         # ceiling can price what the call actually consumed. It is measurement,
         # not state: nothing reads it to decide anything.
         self.last_usage: Mapping[str, Any] | None = None
-
-    def model_for(self, cognition: Cognition) -> ReasoningModel:
-        """The model configured for one tier, or a refusal.
-
-        A tier with no configured model refuses the question. Falling back to
-        another model would silently answer a hard question with a cheap one, or
-        a cheap question with an expensive one, and in either case the tier AL/X
-        chose would not be the tier that ran. A misconfiguration must be visible,
-        not absorbed.
-        """
-        if not self._tiers:
-            # No tiers configured at all: this is the ordinary single-model
-            # specialist, and the question is not tiered work.
-            return self._model
-        model = self._tiers.get(cognition)
-        if model is None:
-            raise SpecialistError(f"cognition_tier_unconfigured:{cognition.value}")
-        return model
 
     def answer(
         self,
         question: SpecialistQuestion,
         max_output_tokens: int | None = None,
     ) -> Mapping[str, Any]:
+        if not isinstance(question, SpecialistQuestion):
+            raise TypeError("question must be an ordinary SpecialistQuestion")
         request = ModelRequest(
             (
                 # The instruction is the whole system context. AL/X's laws,
@@ -81,10 +56,11 @@ class ModelSpecialist:
             question.question_id,
             self._cache_key,
             max_output_tokens,
+            kind="specialist",
         )
         self.last_usage = None
         try:
-            completion = self.model_for(question.cognition).complete(request)
+            completion = self._model.complete(request)
         except Exception as error:
             raise SpecialistError(_failure_code(error)) from None
         usage = completion.usage

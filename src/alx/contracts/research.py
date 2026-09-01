@@ -9,7 +9,41 @@ than on storage, which is what the module boundaries require.
 
 from __future__ import annotations
 
-from typing import Mapping, Protocol
+from dataclasses import dataclass
+from typing import Any, Mapping, Protocol
+
+from alx.contracts.cognition import Cognition
+from alx.contracts.specialists import SpecialistQuestion
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchQuestion:
+    """A bounded question explicitly designated for prepaid research."""
+
+    question: SpecialistQuestion
+    cognition: Cognition = Cognition.SURVEY
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.question, SpecialistQuestion):
+            raise TypeError("question must be a SpecialistQuestion")
+        if not isinstance(self.cognition, Cognition):
+            raise TypeError("cognition must be a Cognition tier")
+
+    @property
+    def question_id(self) -> str:
+        return self.question.question_id
+
+    @property
+    def instruction(self) -> str:
+        return self.question.instruction
+
+    @property
+    def answer_schema(self) -> Mapping[str, Any]:
+        return self.question.answer_schema
+
+    @property
+    def bounded_material(self) -> str:
+        return self.question.bounded_material
 
 
 class ResearchModelUnpriced(Exception):
@@ -37,14 +71,35 @@ class ResearchLedger(Protocol):
     """Reserves spend before a research call and reconciles it after."""
 
     def reserve(
-        self, tier: str, provider: str, model: str, kind: str = "research"
+        self,
+        tier: str,
+        provider: str,
+        model: str,
+        kind: str = "research",
+        worst_case_usd: float | None = None,
     ) -> Reservation: ...
 
-    def settle(self, reservation: Reservation, actual_usd: float) -> float: ...
+    def settle(
+        self,
+        reservation: Reservation,
+        actual_usd: float,
+        usage: Mapping[str, object] | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> float: ...
 
-    def abandon(self, reservation: Reservation) -> float: ...
+    def abandon(
+        self,
+        reservation: Reservation,
+        failure_code: str = "provider_failed",
+        usage: Mapping[str, object] | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> float: ...
 
     def remaining_usd(self, day: str | None = None) -> float: ...
+
+    def overrun_usd(self, day: str | None = None) -> float: ...
 
 
 class ResearchPricing(Protocol):

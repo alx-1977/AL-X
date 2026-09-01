@@ -17,7 +17,19 @@ from typing import Mapping
 
 # Keyed by (provider, model) so two vendors serving a same-named model cannot
 # be confused for one another.
-USD_PER_MILLION: dict[tuple[str, str], tuple[float, float, float]] = {}
+USD_PER_MILLION: dict[tuple[str, str], tuple[float, float, float]] = {
+    # Verified standard short-context rates, recorded by Friedl on 2026-09-01
+    # for the first live research test. Each entry is (uncached input, cached
+    # input, output) in USD per million tokens.
+    #
+    # Only SURVEY is exercised by that first test. COMPARE and JUDGE are priced
+    # here so that a mistaken selection is refused for exceeding the ceiling
+    # rather than for being unpriced: an unpriced model and a too-expensive one
+    # are different faults and should not look alike.
+    ("openai", "gpt-5.4-nano"): (0.20, 0.02, 1.25),
+    ("openai", "gpt-5.4-mini"): (0.75, 0.075, 4.50),
+    ("openai", "gpt-5.4"): (2.50, 0.25, 15.00),
+}
 
 
 def price_of(provider: str, model: str) -> tuple[float, float, float] | None:

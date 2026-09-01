@@ -32,8 +32,19 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
+    return {
+        "kind": request.kind,
+        "tier": request.tier,
+        "reservation_id": request.reservation_id,
+        "reserved_usd": request.reserved_usd,
+    }
+
+
 class OpenAIReasoningModel:
     """Translate neutral AL/X model requests to the OpenAI Responses API."""
+
+    supports_bounded_research = True
 
     def __init__(
         self,
@@ -124,9 +135,12 @@ class OpenAIReasoningModel:
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
-                self._completion_telemetry(
-                    model, service_tier, usage, duration, timings
-                ),
+                {
+                    **self._completion_telemetry(
+                        model, service_tier, usage, duration, timings
+                    ),
+                    **_request_telemetry(request),
+                },
             )
             LOGGER.info("Reasoning provider request completed in %.3f seconds", duration)
             return completion
@@ -142,6 +156,7 @@ class OpenAIReasoningModel:
                     "duration_ms": round(duration * 1000),
                     "error_type": type(error).__name__,
                     "error_code": error_code,
+                    **_request_telemetry(request),
                 },
             )
             LOGGER.info(

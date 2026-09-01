@@ -461,6 +461,33 @@ class ResearchSettings:
     compare: ReasoningSettings
     judge: ReasoningSettings
     limits: ResearchLimits
+    # Which tiers may actually run. Empty disables paid research entirely, so a
+    # runtime that has never been told which tiers are authorised cannot spend.
+    # The first live test enables SURVEY alone; COMPARE and JUDGE stay
+    # unconstructed rather than merely unaffordable, because price is not a
+    # permission and all three fit the configured ceiling.
+    enabled_tiers: frozenset[str] = frozenset()
+
+
+def _enabled_tiers(environment: Mapping[str, str]) -> frozenset[str]:
+    """The cognition tiers this runtime may build, defaulting to none.
+
+    Paid research is off until a tier is named. Defaulting to every tier would
+    mean a runtime that had never been configured for research could still
+    spend, which is the opposite of the ceiling's intent.
+    """
+    raw = environment.get("ALX_RESEARCH_ENABLED_TIERS", "").strip()
+    if not raw:
+        return frozenset()
+    names = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    allowed = {"survey", "compare", "judge"}
+    unknown = names - allowed
+    if unknown:
+        raise ConfigurationError(
+            "ALX_RESEARCH_ENABLED_TIERS may name only survey, compare or judge; "
+            f"unknown: {', '.join(sorted(unknown))}"
+        )
+    return frozenset(names)
 
 
 def _research_settings(
@@ -472,6 +499,7 @@ def _research_settings(
         compare=_tier_settings(environment, "compare", specialist),
         judge=_tier_settings(environment, "judge", specialist),
         limits=_research_budget(environment),
+        enabled_tiers=_enabled_tiers(environment),
     )
 
 

@@ -47,6 +47,13 @@ class ModelRequest:
     # there is no worst-case price, so no reservation can be honest. Declared
     # last so existing positional callers keep their argument order.
     max_output_tokens: int | None = None
+    # Call classification is transport metadata, not model authority. Research
+    # carries its reservation identity through the provider event so usage and
+    # settlement update one durable lifecycle rather than creating two rows.
+    kind: str = "core"
+    tier: str = ""
+    reservation_id: str = ""
+    reserved_usd: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
@@ -56,6 +63,14 @@ class ModelRequest:
         object.__setattr__(self, "output_schema", freeze_data(self.output_schema))
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive when set")
+        if self.kind not in ("core", "specialist", "research"):
+            raise ValueError("kind must be core, specialist, or research")
+        if self.reserved_usd < 0:
+            raise ValueError("reserved_usd must not be negative")
+        if self.kind == "research" and not self.tier:
+            raise ValueError("research requests require a cognition tier")
+        if self.reservation_id and self.kind != "research":
+            raise ValueError("only research requests carry reservations")
         if self.affinity_key is not None:
             _required(self.affinity_key, "affinity_key")
 
