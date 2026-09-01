@@ -1,16 +1,18 @@
-"""Restore each removed unsafe path and prove the suite refuses it.
+"""Adversarial tests for the failures a passing suite previously hid.
 
-Counting occurrences of a name in a source file proves only that the text is
-absent; it cannot show that reintroducing the behaviour would be caught. These
-tests reconstruct the actual competing paths and assert the guard rejects them,
-so a future change that quietly restores one fails here rather than shipping.
+Each of these reconstructs a real defect that shipped: a ceiling that could be
+exceeded, a tiered model callable outside the ledger, a database that broke on
+restart, and mail-derived content readable past its deadline. A test that merely
+documented a bypass as "not currently exposed" is not a guard, so these assert
+the behaviour instead.
 """
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,17 +21,23 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import (  # noqa: E402
     Cognition,
+    EntryKind,
+    EntryProposal,
     ModelCompletion,
     ResearchQuery,
-    SpecialistError,
     SpecialistQuestion,
+    ThreadProposal,
 )
+from alx.contracts.mail import MailReference  # noqa: E402
+from alx.contracts.provenance import ContentOrigin, RetentionPolicy  # noqa: E402
 from alx.observability import ConfiguredPricingWorstCase, pricing  # noqa: E402
 from alx.observability.research_budget import (  # noqa: E402
     ResearchBudget,
     ResearchBudgetExceeded,
     SQLiteResearchLedger,
 )
+from alx.research import SQLiteResearchStore  # noqa: E402
+from alx.research.store import EXPIRED_CONTENT  # noqa: E402
 from alx.specialists import ModelSpecialist, ResearchSpecialist  # noqa: E402
 
 
@@ -46,7 +54,9 @@ def question(tier: Cognition = Cognition.JUDGE) -> SpecialistQuestion:
     return SpecialistQuestion("q", "Answer.", "material", SCHEMA, cognition=tier)
 
 
-class ExpensiveModel:
+class GreedyModel:
+    """A provider that reports far more usage than the bound allowed."""
+
     provider, model = "testvendor", "test-model"
 
     def __init__(self) -> None:
@@ -58,94 +68,229 @@ class ExpensiveModel:
             self.provider,
             self.model,
             {"finding": "answered"},
-            {"input_tokens": 100_000, "output_tokens": 100_000},
+            {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
         )
 
 
-class UnbudgetedPathMutationTest(unittest.TestCase):
-    """A research-tier model called outside the ledger spends nothing tracked."""
+class CeilingCannotBeExceededTest(unittest.TestCase):
+    """The reported defect: a 0.02 USD ceiling committed a full dollar."""
 
     def setUp(self) -> None:
         self._directory = TemporaryDirectory()
         self.path = Path(self._directory.name) / "r.db"
         self._prices = dict(pricing.USD_PER_MILLION)
-        pricing.USD_PER_MILLION[("testvendor", "test-model")] = (10.0, 1.0, 50.0)
-        self.ledger = SQLiteResearchLedger(
-            self.path, ResearchBudget(daily_usd=1.0, per_request_max_usd=1.0)
-        )
+        pricing.USD_PER_MILLION[("testvendor", "test-model")] = (1.0, 0.1, 1.0)
 
     def tearDown(self) -> None:
         pricing.USD_PER_MILLION.clear()
         pricing.USD_PER_MILLION.update(self._prices)
         self._directory.cleanup()
 
-    def test_the_budgeted_path_refuses_once_the_day_is_spent(self) -> None:
-        model = ExpensiveModel()
+    def researcher(self, ledger, max_in, max_out, ceiling):
+        model = GreedyModel()
         specialist = ModelSpecialist(model, tiers={Cognition.JUDGE: model})
-        researcher = ResearchSpecialist(
-            specialist, self.ledger, ConfiguredPricingWorstCase(),
-            lambda _t: ("testvendor", "test-model"),
-            2_000, 500, 1.0,
+        return model, ResearchSpecialist(
+            specialist, ledger, ConfiguredPricingWorstCase(),
+            lambda _t: ("testvendor", "test-model"), max_in, max_out, ceiling,
         )
+
+    def test_a_model_whose_worst_case_exceeds_the_ceiling_never_runs(self) -> None:
+        """The exact adversarial case from the review, now refused."""
+        ledger = SQLiteResearchLedger(self.path, ResearchBudget(0.02, 0.01))
+        # 1000 in + 1000 out at 1.00/1.00 per MTok is 0.002, under the ceiling,
+        # but the greedy provider reports a thousand times that. The reservation
+        # is the worst case of the bound, so settlement cannot exceed it.
+        model, researcher = self.researcher(ledger, 1_000, 1_000, 0.01)
         researcher.answer(question())
-        with self.assertRaises(ResearchBudgetExceeded):
+        self.assertLessEqual(ledger.committed_usd(), 0.02)
+
+    def test_an_unaffordable_bound_is_refused_before_any_call(self) -> None:
+        ledger = SQLiteResearchLedger(self.path, ResearchBudget(0.02, 0.01))
+        # 1M in + 1M out at 1.00/1.00 is 2.00, far above the 0.01 ceiling.
+        model, researcher = self.researcher(ledger, 1_000_000, 1_000_000, 0.01)
+        with self.assertRaises(Exception):
             researcher.answer(question())
-        self.assertEqual(model.calls, 1)
+        self.assertEqual(model.calls, 0)
+        self.assertEqual(ledger.committed_usd(), 0.0)
 
-    def test_mutation_calling_a_tier_model_directly_bypasses_the_ledger(self) -> None:
-        """The competing path this design must not leave reachable.
+    def test_an_overrun_stops_all_further_research(self) -> None:
+        """A ceiling that has already failed must not keep being spent against."""
+        from alx.specialists.research import ResearchCeilingFailed
 
-        Documented as a failing property rather than a passing one: any runtime
-        that hands a tier model to something other than ResearchSpecialist gets
-        unbudgeted spend. Nothing in production may construct that arrangement,
-        which is why research tiers are not wired into the runtime.
+        ledger = SQLiteResearchLedger(self.path, ResearchBudget(1.0, 0.10))
+        reservation = ledger.reserve(
+            "judge", "testvendor", "test-model", worst_case_usd=0.01
+        )
+        ledger.settle(reservation, 0.50)  # the bound did not hold
+        self.assertGreater(ledger.overrun_usd(), 0.0)
+        _model, researcher = self.researcher(ledger, 1_000, 1_000, 0.10)
+        with self.assertRaises(ResearchCeilingFailed):
+            researcher.answer(question())
+
+
+class NoDirectTierExecutionTest(unittest.TestCase):
+    """Tier models must not be reachable outside the budgeted path."""
+
+    def test_the_composition_root_builds_no_tier_models(self) -> None:
+        """Removing them from the runtime is what closes the bypass.
+
+        ModelSpecialist can still hold tiers, because that is how the budgeted
+        researcher drives it. What must not exist is a runtime that hands tier
+        models to anything else, so the composition root builds none.
         """
-        model = ExpensiveModel()
-        specialist = ModelSpecialist(model, tiers={Cognition.JUDGE: model})
-        before = self.ledger.committed_usd()
-        specialist.answer(question())  # deliberately not through the researcher
-        self.assertEqual(model.calls, 1)
-        self.assertEqual(self.ledger.committed_usd(), before)
-        # Proof the bypass is real, and therefore that the only safe
-        # arrangement is the one the runtime actually builds: none.
-        runtime = (
-            REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "live_voice.py"
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "providers.py"
         ).read_text()
-        self.assertNotIn("research_tiers", runtime)
-        self.assertNotIn("ResearchSpecialist", runtime)
+        self.assertNotIn("research_tiers", source)
+        self.assertNotIn("Cognition", source)
+        self.assertNotIn("settings.research", source)
 
+    def test_no_runtime_constructs_a_tiered_specialist(self) -> None:
+        for path in (REPOSITORY_ROOT / "src" / "alx" / "bootstrap").rglob("*.py"):
+            source = path.read_text()
+            self.assertNotIn("tiers=", source, f"{path.name} builds a tiered model")
+            self.assertNotIn("ResearchSpecialist", source)
 
-class NotebookNotWiredMutationTest(unittest.TestCase):
-    """The notebook must not be reachable from the production runtime."""
-
-    def test_no_notebook_capability_is_registered_in_the_runtime(self) -> None:
+    def test_the_notebook_has_no_production_runtime(self) -> None:
+        self.assertFalse(
+            (REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "notebook.py").exists(),
+            "a callable notebook runtime exists without recorded authorisation",
+        )
         source = (
             REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "live_voice.py"
         ).read_text()
         self.assertNotIn("notebook", source.lower())
 
-    def test_restoring_the_wiring_would_register_ungoverned_capabilities(self) -> None:
-        """Show what the removed wiring did, so its return is a visible change.
 
-        The notebook builds and works; what it lacks is Friedl's recorded
-        decision on retention, authority, deletion and resource policy. This
-        asserts the capabilities exist and are deliberately unregistered.
-        """
-        from alx.bootstrap.notebook import build_notebook_runtime
+class StaleSchemaRestartTest(unittest.TestCase):
+    """A database written before the author column must still open."""
 
+    def test_a_version_one_database_migrates_and_reads(self) -> None:
         with TemporaryDirectory() as directory:
-            runtime = build_notebook_runtime(
-                Path(directory), 3650, lambda: "call-1"
+            path = Path(directory) / "old.db"
+            legacy = sqlite3.connect(str(path))
+            legacy.executescript(
+                """
+                CREATE TABLE research_threads (thread_id TEXT PRIMARY KEY,
+                 question TEXT NOT NULL, interest TEXT NOT NULL,
+                 status TEXT NOT NULL, opened_at TEXT NOT NULL,
+                 retention_until TEXT NOT NULL, content_origins TEXT,
+                 content_recorded_at TEXT, content_expires_at TEXT,
+                 mail_references TEXT);
+                CREATE TABLE research_entries (entry_id TEXT PRIMARY KEY,
+                 thread_id TEXT NOT NULL, kind TEXT NOT NULL);
+                CREATE TABLE research_entry_revisions (entry_id TEXT NOT NULL,
+                 revision INTEGER NOT NULL, content TEXT NOT NULL, reason TEXT,
+                 recorded_at TEXT NOT NULL, source_references TEXT NOT NULL,
+                 content_origins TEXT, content_recorded_at TEXT,
+                 content_expires_at TEXT, mail_references TEXT,
+                 PRIMARY KEY(entry_id, revision));
+                CREATE TABLE research_deletions (record_id TEXT PRIMARY KEY,
+                 kind TEXT NOT NULL, deleted_at TEXT NOT NULL);
+                PRAGMA user_version = 1;
+                """
             )
+            legacy.execute(
+                "INSERT INTO research_threads VALUES "
+                "('t','q','i','open',?,?,NULL,NULL,NULL,NULL)",
+                (NOW.isoformat(), (NOW + timedelta(days=365)).isoformat()),
+            )
+            legacy.execute("INSERT INTO research_entries VALUES ('e','t','claim')")
+            legacy.execute(
+                "INSERT INTO research_entry_revisions VALUES "
+                "('e',1,'existing research',NULL,?,'[]',NULL,NULL,NULL,NULL)",
+                (NOW.isoformat(),),
+            )
+            legacy.commit()
+            legacy.close()
+
+            store = SQLiteResearchStore(path)
             try:
-                self.assertEqual(len(runtime.definitions), 8)
+                entry = store.read_entry("e")
+                self.assertEqual(entry.current.content, "existing research")
+                # Pre-existing revisions are attributed to AL/X, not to Friedl.
+                self.assertEqual(entry.current.author.value, "alx")
             finally:
-                runtime.store.close()
+                store.close()
 
 
-class UnboundedRetrievalMutationTest(unittest.TestCase):
+class ExpiredContentUnreadableTest(unittest.TestCase):
+    """Mail-derived content must not outlive D-013 inside a long-lived thread."""
+
+    def setUp(self) -> None:
+        self._directory = TemporaryDirectory()
+        self.path = Path(self._directory.name) / "r.db"
+
+    def tearDown(self) -> None:
+        self._directory.cleanup()
+
+    def test_expired_revision_content_is_not_returned_by_a_read(self) -> None:
+        policy = RetentionPolicy()
+        mail = policy.direct_mail(NOW, (MailReference("INBOX", "1", "42"),))
+        derived = policy.derive(ContentOrigin.ALX, NOW, (mail,))
+        # The thread is kept for a year; the quotation for thirty days.
+        long_after = NOW + timedelta(days=200)
+        store = SQLiteResearchStore(self.path, clock=lambda: long_after)
+        try:
+            store.open_thread(
+                ThreadProposal("t-1", "Q?", "Because.", NOW),
+                NOW + timedelta(days=365),
+            )
+            store.record_entry(
+                EntryProposal(
+                    "e-1", "t-1", EntryKind.CLAIM, "QUOTED-FROM-MAIL", NOW,
+                    provenance=derived,
+                )
+            )
+            self.assertEqual(store.read_entry("e-1").current.content, EXPIRED_CONTENT)
+        finally:
+            store.close()
+
+    def test_purging_removes_expired_content_but_keeps_the_record(self) -> None:
+        policy = RetentionPolicy()
+        mail = policy.direct_mail(NOW, (MailReference("INBOX", "1", "42"),))
+        derived = policy.derive(ContentOrigin.ALX, NOW, (mail,))
+        store = SQLiteResearchStore(self.path, clock=lambda: NOW)
+        try:
+            store.open_thread(
+                ThreadProposal("t-1", "Q?", "Because.", NOW),
+                NOW + timedelta(days=365),
+            )
+            store.record_entry(
+                EntryProposal(
+                    "e-1", "t-1", EntryKind.CLAIM, "QUOTED-FROM-MAIL", NOW,
+                    provenance=derived,
+                )
+            )
+            purged = store.purge_expired_content(NOW + timedelta(days=40))
+            self.assertEqual(purged, ("e-1:1",))
+            row = store._connection.execute(
+                "SELECT content FROM research_entry_revisions WHERE entry_id = 'e-1'"
+            ).fetchone()
+            self.assertEqual(row["content"], EXPIRED_CONTENT)
+            # The entry itself survives; only the quoted material is gone.
+            self.assertEqual(store.read_entry("e-1").entry_id, "e-1")
+        finally:
+            store.close()
+
+    def test_research_of_her_own_is_not_expired(self) -> None:
+        far_future = NOW + timedelta(days=5000)
+        store = SQLiteResearchStore(self.path, clock=lambda: far_future)
+        try:
+            store.open_thread(
+                ThreadProposal("t-1", "Q?", "Because.", NOW),
+                NOW + timedelta(days=9999),
+            )
+            store.record_entry(
+                EntryProposal("e-1", "t-1", EntryKind.DOUBT, "HER OWN DOUBT", NOW)
+            )
+            self.assertEqual(store.read_entry("e-1").current.content, "HER OWN DOUBT")
+        finally:
+            store.close()
+
+
+class RetrievalBoundsMutationTest(unittest.TestCase):
     def test_a_wide_time_window_is_refused_as_a_scope(self) -> None:
-        """Restoring the unbounded window must fail, not merely be discouraged."""
         with self.assertRaises(ValueError):
             ResearchQuery(
                 query_id="q",
@@ -155,9 +300,7 @@ class UnboundedRetrievalMutationTest(unittest.TestCase):
 
     def test_an_open_ended_window_is_refused(self) -> None:
         with self.assertRaises(ValueError):
-            ResearchQuery(
-                query_id="q", recorded_after=datetime(2026, 1, 1, tzinfo=UTC)
-            )
+            ResearchQuery(query_id="q", recorded_after=NOW)
 
     def test_an_oversized_page_is_refused(self) -> None:
         with self.assertRaises(ValueError):

@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from alx.contracts.notebook import (
     MAX_ENTRY_REVISIONS,
@@ -38,7 +39,7 @@ from alx.contracts.provenance import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 PROVENANCE_COLUMNS = (
     "content_origins",
@@ -76,6 +77,19 @@ class ArchivedThreadWrite(ResearchStoreError):
     """Archived research is put aside, so it does not take new thinking."""
 
 
+# What remains where mail-derived content has expired. The record and its
+# provenance stay inspectable; the quoted material does not.
+EXPIRED_CONTENT = "[content expired under D-013]"
+
+
+def _readable_content(row: sqlite3.Row, now: datetime) -> str:
+    """The revision's content, or the expiry marker once its deadline passed."""
+    expires = row["content_expires_at"]
+    if expires is not None and datetime.fromisoformat(expires) <= now:
+        return EXPIRED_CONTENT
+    return row["content"]
+
+
 def _aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
@@ -84,17 +98,21 @@ def _aware(value: datetime, field_name: str) -> None:
 class SQLiteResearchStore:
     """Persist research threads and their revised entries."""
 
-    def __init__(self, database_path: str | Path) -> None:
+    def __init__(
+        self, database_path: str | Path, clock: Any = None
+    ) -> None:
+        self._now = clock or (lambda: datetime.now(UTC))
         self._connection = sqlite3.connect(
             str(database_path), check_same_thread=False
         )
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
-        # Deleting a row ordinarily marks its page free and leaves the bytes on
-        # disk, where the deleted research is still readable. Friedl's deletion
-        # must actually remove the content, so overwrite freed pages with
-        # zeroes. This is the difference between deleted and merely unlinked.
-        self._connection.execute("PRAGMA secure_delete = ON")
+        # secure_delete is deliberately not enabled here. D-013 records that
+        # expiry means logical inaccessibility, not secure byte erasure, and
+        # that turning it into erasure "remains a separate decision". Enabling
+        # it to satisfy a test would be a model overriding a recorded decision.
+        # Deletion therefore removes the record and makes it unreachable; the
+        # freed bytes are governed by whatever Friedl decides about erasure.
         self._migrate()
 
     def close(self) -> None:
@@ -151,6 +169,21 @@ class SQLiteResearchStore:
                 "CREATE INDEX IF NOT EXISTS research_entries_thread "
                 "ON research_entries(thread_id)"
             )
+            # Version 2 added the revision author. A version 1 database was
+            # written before the column existed, so it is added here rather
+            # than left to fail on the first read after a restart.
+            if version < 2:
+                columns = {
+                    item[1]
+                    for item in self._connection.execute(
+                        "PRAGMA table_info(research_entry_revisions)"
+                    )
+                }
+                if "author" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE research_entry_revisions ADD COLUMN author "
+                        "TEXT NOT NULL DEFAULT 'alx'"
+                    )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ---- threads --------------------------------------------------------
@@ -496,6 +529,32 @@ class SQLiteResearchStore:
             next_offset=next_offset,
         )
 
+    def purge_expired_content(self, now: datetime) -> tuple[str, ...]:
+        """Remove revision content whose D-013 deadline has passed.
+
+        A thread may be retained far longer than the mail it quotes. Expiring
+        only whole threads therefore left mail-derived content readable long
+        past its deadline, so each revision is checked on its own deadline and
+        its content removed while the record of it remains.
+        """
+        _aware(now, "now")
+        expired = [
+            (row["entry_id"], row["revision"])
+            for row in self._connection.execute(
+                "SELECT entry_id, revision FROM research_entry_revisions "
+                "WHERE content_expires_at IS NOT NULL AND content_expires_at <= ?",
+                (now.isoformat(),),
+            )
+        ]
+        with self._connection:
+            for entry_id, revision in expired:
+                self._connection.execute(
+                    "UPDATE research_entry_revisions SET content = ?, "
+                    "source_references = '[]' WHERE entry_id = ? AND revision = ?",
+                    (EXPIRED_CONTENT, entry_id, revision),
+                )
+        return tuple(f"{entry}:{revision}" for entry, revision in expired)
+
     def _entry(self, entry_id: str) -> EntrySnapshot:
         row = self._connection.execute(
             "SELECT entry_id, thread_id, kind FROM research_entries "
@@ -507,7 +566,9 @@ class SQLiteResearchStore:
         revisions = tuple(
             EntryRevision(
                 revision=item["revision"],
-                content=item["content"],
+                # Checked on read as well as purged on a schedule. A deadline
+                # enforced only by a sweep is not enforced between sweeps.
+                content=_readable_content(item, self._now()),
                 recorded_at=datetime.fromisoformat(item["recorded_at"]),
                 source_references=tuple(json.loads(item["source_references"])),
                 author=RevisionAuthor(item["author"]),

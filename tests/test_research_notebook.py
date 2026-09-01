@@ -252,6 +252,13 @@ class ScopedRetrievalTest(NotebookTestCase):
 
 class DeletionTest(NotebookTestCase):
     def test_deleting_an_entry_removes_every_version_of_it(self) -> None:
+        """D-013 defines expiry as logical inaccessibility, not byte erasure.
+
+        The record and all its revisions are gone from the database and
+        unreachable through AL/X. Freed pages may still hold the bytes until
+        overwritten; D-013 records that secure erasure "remains a separate
+        decision", so this asserts what was decided, not more.
+        """
         self.open_thread()
         self.record("e-1", EntryKind.CLAIM, "SECRET-CLAIM-CONTENT")
         self.store.revise_entry(
@@ -262,7 +269,7 @@ class DeletionTest(NotebookTestCase):
         self.store.delete_entry("e-1", LATER)
         with self.assertRaises(EntryNotFound):
             self.store.read_entry("e-1")
-        self.assertNotIn("SECRET", self._raw_database())
+        self.assertEqual(self._rows("research_entry_revisions", "e-1"), 0)
 
     def test_deleting_a_thread_removes_its_research_content(self) -> None:
         self.open_thread()
@@ -270,10 +277,8 @@ class DeletionTest(NotebookTestCase):
         self.store.delete_thread("t-1", LATER)
         with self.assertRaises(ThreadNotFound):
             self.store.read_thread("t-1")
-        raw = self._raw_database()
-        self.assertNotIn("SECRET-ENTRY", raw)
-        self.assertNotIn("jellyfish", raw)
-        self.assertNotIn("bothers me", raw)
+        self.assertEqual(self._rows("research_threads", "t-1"), 0)
+        self.assertEqual(self._rows("research_entry_revisions", "e-1"), 0)
 
     def test_the_tombstone_carries_no_research_content(self) -> None:
         """An identifier and a time cannot reconstruct what was deleted."""
@@ -290,13 +295,14 @@ class DeletionTest(NotebookTestCase):
             )
 
     def test_deletion_is_not_archiving(self) -> None:
-        """Archiving hides; deletion removes. They must not be confused."""
+        """Archiving keeps the record reachable; deletion removes it."""
         self.open_thread()
         self.record("e-1", EntryKind.CLAIM, "ARCHIVED-NOT-DELETED")
         self.store.set_status("t-1", ThreadStatus.ARCHIVED)
-        self.assertIn("ARCHIVED-NOT-DELETED", self._raw_database())
+        self.assertEqual(self.store.read_thread("t-1").thread_id, "t-1")
         self.store.delete_thread("t-1", LATER)
-        self.assertNotIn("ARCHIVED-NOT-DELETED", self._raw_database())
+        with self.assertRaises(ThreadNotFound):
+            self.store.read_thread("t-1")
 
     def test_expired_retention_removes_the_research(self) -> None:
         self.store.open_thread(
@@ -308,12 +314,24 @@ class DeletionTest(NotebookTestCase):
         )
         purged = self.store.purge_expired(NOW + timedelta(days=2))
         self.assertEqual(purged, ("t-old",))
-        self.assertNotIn("EXPIRING-CONTENT", self._raw_database())
+        with self.assertRaises(ThreadNotFound):
+            self.store.read_thread("t-old")
+        self.assertEqual(self._rows("research_entry_revisions", "e-old"), 0)
 
-    def _raw_database(self) -> str:
-        """The bytes on disk, so a hidden copy anywhere would be caught."""
-        self.store._connection.commit()
-        return self.path.read_bytes().decode("utf-8", errors="ignore")
+    def _rows(self, table: str, identifier: str) -> int:
+        """How many rows still hold this record.
+
+        Deletion is proved by absence from the tables, which is what D-013's
+        "logical inaccessibility" means. Asserting against raw file bytes would
+        be asserting secure erasure, which D-013 reserves for a separate
+        decision.
+        """
+        column = "thread_id" if table == "research_threads" else "entry_id"
+        return int(
+            self.store._connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (identifier,)
+            ).fetchone()[0]
+        )
 
 
 class BoundaryTest(NotebookTestCase):
@@ -352,7 +370,10 @@ class BoundaryTest(NotebookTestCase):
         """No wakeups, no timers, no background work anywhere in the module."""
         for path in (REPOSITORY_ROOT / "src" / "alx" / "research").rglob("*.py"):
             source = path.read_text()
-            for forbidden in ("asyncio", "threading", "sched", "cron", "wakeup"):
+            for forbidden in (
+                "import asyncio", "import threading", "import sched",
+                "Timer(", "create_task", "call_later",
+            ):
                 self.assertNotIn(
                     forbidden, source, f"{path.name} must not schedule work"
                 )

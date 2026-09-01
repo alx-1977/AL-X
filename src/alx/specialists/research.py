@@ -12,6 +12,7 @@ time and records what it cost.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable, Mapping
 
 from alx.contracts import (
@@ -41,6 +42,21 @@ class ResearchModelUnbounded(Exception):
         super().__init__(
             f"{provider} model {model} can cost up to {worst_case:.4f} USD per "
             f"bounded request, above the {ceiling:.4f} USD per-request ceiling"
+        )
+
+
+class ResearchCeilingFailed(Exception):
+    """A settled cost exceeded its reservation, so the ceiling did not hold.
+
+    Research stops until Friedl has seen it. Continuing would spend against a
+    limit already known to be broken, which is worse than not researching.
+    """
+
+    def __init__(self, overrun_usd: float) -> None:
+        self.overrun_usd = overrun_usd
+        super().__init__(
+            f"research spend exceeded its reservations by {overrun_usd:.6f} USD; "
+            "the enforced request bound did not hold"
         )
 
 
@@ -97,19 +113,55 @@ class ResearchSpecialist:
 
         # Raises ResearchBudgetExceeded when the day cannot cover one more
         # request. It does not select a cheaper tier or another provider.
+        # A prior overrun means an enforced bound already failed today, so the
+        # ceiling is not trustworthy until Friedl looks at it. Continuing would
+        # spend against a limit known to be broken.
+        overrun = self._ledger.overrun_usd()
+        if overrun > 0:
+            raise ResearchCeilingFailed(overrun)
+        # The reservation is the worst case of this exact bounded request, so
+        # settlement cannot exceed what was withdrawn.
         reservation = self._ledger.reserve(
-            question.cognition.value, provider, model, kind="research"
+            question.cognition.value,
+            provider,
+            model,
+            kind="research",
+            worst_case_usd=worst_case,
         )
+        # The input bound must be enforced on the material, not merely declared
+        # to the pricing calculation. A question whose material exceeds it is
+        # truncated to the bound the worst case was computed from.
+        bounded = self._bounded(question)
         try:
             answer = self._specialist.answer(
-                question, max_output_tokens=self._max_output_tokens
+                bounded, max_output_tokens=self._max_output_tokens
             )
-        except Exception:
+        except Exception as error:
             # A failed call may still have been billed: a timeout after the
             # model answered, a stream cut mid-response. The reservation is
             # kept in full rather than refunded, because treating failures as
             # free would let unbounded failing calls run inside one day.
-            self._ledger.abandon(reservation)
+            settled = self._ledger.abandon(reservation)
+            # A failure that leaves no durable row makes spend unauditable, so
+            # the same lifecycle record is written for both outcomes.
+            self._emit(
+                task_id,
+                {
+                    "code": "research.completed",
+                    "kind": "research",
+                    "tier": question.cognition.value,
+                    "provider": provider,
+                    "model": model,
+                    "question_id": question.question_id,
+                    "reservation_id": reservation.reservation_id,
+                    "reserved_usd": reservation.reserved_usd,
+                    "cost_usd": settled,
+                    "cost_measured": False,
+                    "outcome": "failed",
+                    "failure_code": type(error).__name__,
+                    "remaining_usd": round(self._ledger.remaining_usd(), 6),
+                },
+            )
             raise
 
         usage = getattr(self._specialist, "last_usage", None)
@@ -134,8 +186,11 @@ class ResearchSpecialist:
                 "provider": provider,
                 "model": model,
                 "question_id": question.question_id,
+                "reservation_id": reservation.reservation_id,
+                "reserved_usd": reservation.reserved_usd,
                 "cost_usd": settled,
                 "cost_measured": actual is not None,
+                "outcome": "succeeded",
                 "remaining_usd": round(self._ledger.remaining_usd(), 6),
                 # The same token fields every other reasoning call records, so
                 # Core, specialist and research spend read from one table.
@@ -147,6 +202,18 @@ class ResearchSpecialist:
         )
         return answer
 
+    def _bounded(self, question: SpecialistQuestion) -> SpecialistQuestion:
+        """Truncate the material to the input bound the worst case assumed.
+
+        Characters are not tokens, so this uses a deliberately conservative
+        ratio: at least one token per character means the character budget can
+        never exceed the token bound the price was computed from.
+        """
+        limit = min(question.material_limit, self._max_input_tokens)
+        if question.material_limit <= limit:
+            return question
+        return replace(question, material_limit=limit)
+
     def _emit(self, task_id: str, values: Mapping[str, Any]) -> None:
         if not task_id or self._telemetry_sink is None:
             return
@@ -157,4 +224,9 @@ class ResearchSpecialist:
             pass
 
 
-__all__ = ["ResearchModelUnbounded", "ResearchSpecialist", "SpecialistError"]
+__all__ = [
+    "ResearchCeilingFailed",
+    "ResearchModelUnbounded",
+    "ResearchSpecialist",
+    "SpecialistError",
+]

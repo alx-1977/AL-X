@@ -91,7 +91,12 @@ class SQLiteUsageRecorder:
                     reasoning_tokens INTEGER NOT NULL,
                     duration_ms INTEGER NOT NULL,
                     kind TEXT NOT NULL DEFAULT 'core',
-                    tier TEXT NOT NULL DEFAULT ''
+                    tier TEXT NOT NULL DEFAULT '',
+                    reservation_id TEXT NOT NULL DEFAULT '',
+                    reserved_usd REAL NOT NULL DEFAULT 0.0,
+                    cost_usd REAL NOT NULL DEFAULT 0.0,
+                    outcome TEXT NOT NULL DEFAULT 'succeeded',
+                    failure_code TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS reasoning_calls_task
                     ON reasoning_calls(task_id);
@@ -113,6 +118,20 @@ class SQLiteUsageRecorder:
                     "ALTER TABLE reasoning_calls ADD COLUMN tier TEXT NOT NULL "
                     "DEFAULT ''"
                 )
+            # One reservation-keyed lifecycle row: without these, a research
+            # call's reservation, true cost and terminal state live nowhere
+            # durable and spend cannot be audited after the fact.
+            for column, definition in (
+                ("reservation_id", "TEXT NOT NULL DEFAULT ''"),
+                ("reserved_usd", "REAL NOT NULL DEFAULT 0.0"),
+                ("cost_usd", "REAL NOT NULL DEFAULT 0.0"),
+                ("outcome", "TEXT NOT NULL DEFAULT 'succeeded'"),
+                ("failure_code", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in existing:
+                    database.execute(
+                        f"ALTER TABLE reasoning_calls ADD COLUMN {column} {definition}"
+                    )
             database.commit()
         finally:
             database.close()
@@ -203,8 +222,9 @@ class SQLiteUsageRecorder:
                 "INSERT INTO reasoning_calls(task_id, occurred_at, provider, model, "
                 "reasoning_effort, service_tier, input_tokens, cached_tokens, "
                 "cache_write_tokens, output_tokens, reasoning_tokens, duration_ms, "
-                "kind, tier) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "kind, tier, reservation_id, reserved_usd, cost_usd, outcome, "
+                "failure_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     datetime.now(UTC).isoformat(),
@@ -222,6 +242,11 @@ class SQLiteUsageRecorder:
                     # only the caller can say which kind of work this was.
                     str(values.get("kind") or "core"),
                     str(values.get("tier") or ""),
+                    str(values.get("reservation_id") or ""),
+                    float(values.get("reserved_usd") or 0.0),
+                    float(values.get("cost_usd") or 0.0),
+                    str(values.get("outcome") or "succeeded"),
+                    str(values.get("failure_code") or ""),
                 ),
             )
             database.commit()

@@ -38,6 +38,8 @@ from alx.specialists import ModelSpecialist, ResearchSpecialist  # noqa: E402
 # A small bound so the worst-case price fits every ceiling used below.
 MAX_INPUT = 4_000
 MAX_OUTPUT = 1_000
+# Worst case at the test rate (10/1/50 per MTok) is 0.09 USD.
+PER_REQUEST_MAX = 0.09
 
 SCHEMA = {
     "type": "object",
@@ -111,18 +113,29 @@ class ResearchBudgetTest(unittest.TestCase):
                 lambda _tier: (model.provider, model.model),
                 MAX_INPUT,
                 MAX_OUTPUT,
-                ledger._budget.per_request_max_usd,
+                PER_REQUEST_MAX,
             ),
             specialist,
         )
 
-    def test_reservation_holds_the_full_maximum_while_the_call_runs(self) -> None:
-        """Mid-flight, the whole per-request maximum is already withdrawn."""
+    def test_reservation_holds_the_worst_case_while_the_call_runs(self) -> None:
+        """Mid-flight the whole worst case is withdrawn, not a nominal figure."""
         ledger = self.ledger(daily=10.0, per_request=2.0)
-        reservation = ledger.reserve("survey", "testvendor", "test-model")
-        self.assertEqual(ledger.committed_usd(), 2.0)
-        self.assertEqual(ledger.remaining_usd(), 8.0)
-        self.assertEqual(reservation.reserved_usd, 2.0)
+        reservation = ledger.reserve(
+            "survey", "testvendor", "test-model", worst_case_usd=0.09
+        )
+        self.assertAlmostEqual(ledger.committed_usd(), 0.09, places=6)
+        self.assertAlmostEqual(ledger.remaining_usd(), 9.91, places=6)
+        self.assertEqual(reservation.reserved_usd, 0.09)
+
+    def test_a_reservation_above_the_per_request_ceiling_is_refused(self) -> None:
+        """The worst case is checked against the ceiling before withdrawal."""
+        ledger = self.ledger(daily=10.0, per_request=0.05)
+        with self.assertRaises(ResearchBudgetExceeded):
+            ledger.reserve(
+                "judge", "testvendor", "test-model", worst_case_usd=0.09
+            )
+        self.assertEqual(ledger.committed_usd(), 0.0)
 
     def test_unused_reservation_returns_to_the_day(self) -> None:
         ledger = self.ledger(daily=10.0, per_request=2.0)
@@ -161,19 +174,24 @@ class ResearchBudgetTest(unittest.TestCase):
         self.assertLessEqual(ledger.committed_usd(), 5.0)
         self.assertEqual(ledger.remaining_usd(), 0.0)
 
-    def test_an_overrun_is_recorded_at_its_true_cost_not_clamped(self) -> None:
-        """Hiding an overrun would let the day spend money already gone."""
+    def test_an_overrun_is_recorded_without_breaching_the_day(self) -> None:
+        """The day is charged what was withdrawn; the excess is a recorded fault.
+
+        Charging the day the true figure would let one bad call blow through the
+        ceiling, and clamping it silently would hide that a bound failed. The
+        reservation caps the day, and the overrun is reported separately so
+        research can stop.
+        """
         ledger = self.ledger(daily=10.0, per_request=2.0)
         reservation = ledger.reserve("judge", "testvendor", "test-model")
         settled = ledger.settle(reservation, 7.5)
-        self.assertEqual(settled, 7.5)
-        self.assertEqual(ledger.committed_usd(), 7.5)
-        # The overrun consumes the day it really consumed.
-        self.assertEqual(ledger.remaining_usd(), 2.5)
+        self.assertEqual(settled, 2.0)
+        self.assertEqual(ledger.committed_usd(), 2.0)
+        self.assertAlmostEqual(ledger.overrun_usd(), 5.5, places=6)
 
     def test_exhaustion_stops_research_and_does_not_downgrade_the_tier(self) -> None:
         """No JUDGE to COMPARE to SURVEY slide when money runs short."""
-        ledger = self.ledger(daily=2.0, per_request=2.0)
+        ledger = self.ledger(daily=0.09, per_request=0.09)
         judge = RecordingModel("testvendor", "test-model", {"output_tokens": 10})
         survey = RecordingModel("testvendor", "test-model", {"output_tokens": 10})
         specialist = ModelSpecialist(
@@ -182,7 +200,7 @@ class ResearchBudgetTest(unittest.TestCase):
         researcher = ResearchSpecialist(
             specialist, ledger, ConfiguredPricingWorstCase(),
             lambda _tier: ("testvendor", "test-model"),
-            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
+            MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         researcher.answer(question(Cognition.JUDGE))
         self.assertEqual(judge.calls, 1)
@@ -193,7 +211,7 @@ class ResearchBudgetTest(unittest.TestCase):
         self.assertEqual(survey.calls, 0)
 
     def test_exhaustion_does_not_fall_back_to_another_provider(self) -> None:
-        ledger = self.ledger(daily=1.0, per_request=1.0)
+        ledger = self.ledger(daily=0.09, per_request=0.09)
         primary = RecordingModel("testvendor", "test-model", {"output_tokens": 5})
         other = RecordingModel("othervendor", "other-model", {"output_tokens": 5})
         pricing.USD_PER_MILLION[("othervendor", "other-model")] = (1.0, 1.0, 1.0)
@@ -201,7 +219,7 @@ class ResearchBudgetTest(unittest.TestCase):
         researcher = ResearchSpecialist(
             specialist, ledger, ConfiguredPricingWorstCase(),
             lambda _tier: ("testvendor", "test-model"),
-            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
+            MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         researcher.answer(question())
         with self.assertRaises(ResearchBudgetExceeded):
@@ -226,30 +244,30 @@ class ResearchBudgetTest(unittest.TestCase):
 
     def test_a_failed_call_keeps_its_full_reservation(self) -> None:
         """A failure is not proof the provider did not bill for the work."""
-        ledger = self.ledger(daily=10.0, per_request=2.0)
+        ledger = self.ledger(daily=1.0, per_request=0.09)
         model = FailingModel()
         model.provider, model.model = "testvendor", "test-model"
         specialist = ModelSpecialist(model, tiers={Cognition.SURVEY: model})
         researcher = ResearchSpecialist(
             specialist, ledger, ConfiguredPricingWorstCase(),
             lambda _tier: ("testvendor", "test-model"),
-            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
+            MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         with self.assertRaises(SpecialistError):
             researcher.answer(question())
-        self.assertEqual(ledger.committed_usd(), 2.0)
-        self.assertEqual(ledger.remaining_usd(), 8.0)
+        self.assertAlmostEqual(ledger.committed_usd(), 0.09, places=6)
+        self.assertAlmostEqual(ledger.remaining_usd(), 0.91, places=6)
 
     def test_repeated_failures_cannot_outrun_the_daily_ceiling(self) -> None:
         """The hole this closes: unbounded failing paid calls in one day."""
-        ledger = self.ledger(daily=4.0, per_request=2.0)
+        ledger = self.ledger(daily=0.18, per_request=0.09)
         model = FailingModel()
         model.provider, model.model = "testvendor", "test-model"
         specialist = ModelSpecialist(model, tiers={Cognition.SURVEY: model})
         researcher = ResearchSpecialist(
             specialist, ledger, ConfiguredPricingWorstCase(),
             lambda _tier: ("testvendor", "test-model"),
-            MAX_INPUT, MAX_OUTPUT, ledger._budget.per_request_max_usd,
+            MAX_INPUT, MAX_OUTPUT, PER_REQUEST_MAX,
         )
         for _ in range(2):
             with self.assertRaises(SpecialistError):
@@ -263,7 +281,7 @@ class ResearchBudgetTest(unittest.TestCase):
         model = RecordingModel("testvendor", "test-model", {})
         researcher, _ = self.researcher(ledger, model)
         researcher.answer(question())
-        self.assertEqual(ledger.committed_usd(), 2.0)
+        self.assertAlmostEqual(ledger.committed_usd(), 0.09, places=6)
 
     def test_measured_cost_is_recorded_and_the_remainder_returned(self) -> None:
         ledger = self.ledger(daily=10.0, per_request=2.0)

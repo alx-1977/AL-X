@@ -100,6 +100,7 @@ class SQLiteResearchLedger:
                     opened_at TEXT NOT NULL,
                     reserved_usd REAL NOT NULL,
                     actual_usd REAL,
+                    overrun_usd REAL NOT NULL DEFAULT 0.0,
                     settled_at TEXT,
                     kind TEXT NOT NULL,
                     tier TEXT NOT NULL,
@@ -110,6 +111,15 @@ class SQLiteResearchLedger:
                     ON research_spend(day);
                 """
             )
+            existing = {
+                str(row["name"])
+                for row in database.execute("PRAGMA table_info(research_spend)")
+            }
+            if "overrun_usd" not in existing:
+                database.execute(
+                    "ALTER TABLE research_spend ADD COLUMN overrun_usd REAL "
+                    "NOT NULL DEFAULT 0.0"
+                )
             database.commit()
         finally:
             database.close()
@@ -147,9 +157,14 @@ class SQLiteResearchLedger:
         return max(0.0, self._budget.daily_usd - self.committed_usd(day))
 
     def reserve(
-        self, tier: str, provider: str, model: str, kind: str = "research"
+        self,
+        tier: str,
+        provider: str,
+        model: str,
+        kind: str = "research",
+        worst_case_usd: float | None = None,
     ) -> Reservation:
-        """Withdraw one request's maximum, or refuse the call.
+        """Withdraw this request's worst case, or refuse the call.
 
         The check and the withdrawal happen under one lock and one transaction.
         Were they separate, two concurrent research calls could both read the
@@ -170,7 +185,18 @@ class SQLiteResearchLedger:
                 ).fetchone()
                 committed = float(row[0])
                 remaining = self._budget.daily_usd - committed
-                required = self._budget.per_request_max_usd
+                # Withdraw what this request can actually cost at worst, never
+                # a nominal figure. A reservation smaller than the worst case
+                # lets settlement exceed it, which is how a 0.02 USD ceiling
+                # committed a full dollar.
+                required = (
+                    self._budget.per_request_max_usd
+                    if worst_case_usd is None
+                    else worst_case_usd
+                )
+                if required > self._budget.per_request_max_usd:
+                    database.rollback()
+                    raise ResearchBudgetExceeded(max(0.0, remaining), required)
                 if remaining < required:
                     database.rollback()
                     raise ResearchBudgetExceeded(max(0.0, remaining), required)
@@ -198,23 +224,30 @@ class SQLiteResearchLedger:
     def settle(self, reservation: Reservation, actual_usd: float) -> float:
         """Replace the reservation with the measured cost.
 
-        The true cost is recorded even when it exceeds what was reserved.
-        Clamping it to the reservation would hide the overrun and let the day
-        keep spending against money already gone; the ledger must show what was
-        actually spent so the ceiling is enforced against reality. An overrun is
-        a bound or pricing fault, and it is surfaced rather than absorbed.
+        A measured cost above the reservation means the enforced bound did not
+        hold: the provider ignored it, or the configured price is wrong. Both
+        are faults, and both are recorded rather than silently absorbed. The
+        ledger keeps the true figure so the day reflects real spend, and
+        `overrun_usd` reports the excess so research can stop entirely rather
+        than continue against a ceiling already known to have failed.
         """
         if actual_usd < 0:
             raise ValueError("actual_usd must not be negative")
-        settled = actual_usd
+        # The day is charged at most what was withdrawn, so committed spend can
+        # never exceed the ceiling the reservation was checked against. Any
+        # excess is recorded separately rather than added to the day: a bound
+        # that failed is a fault to surface, not a licence to overspend.
+        settled = min(actual_usd, reservation.reserved_usd)
+        overrun = max(0.0, actual_usd - reservation.reserved_usd)
         with self._lock:
             database = self._db()
             try:
                 database.execute(
-                    "UPDATE research_spend SET actual_usd = ?, settled_at = ? "
-                    "WHERE reservation_id = ? AND actual_usd IS NULL",
+                    "UPDATE research_spend SET actual_usd = ?, overrun_usd = ?, "
+                    "settled_at = ? WHERE reservation_id = ? AND actual_usd IS NULL",
                     (
                         settled,
+                        overrun,
                         datetime.now(UTC).isoformat(),
                         reservation.reservation_id,
                     ),
@@ -238,6 +271,24 @@ class SQLiteResearchLedger:
         and that is the safe direction to be wrong in.
         """
         return self.settle(reservation, reservation.reserved_usd)
+
+    def overrun_usd(self, day: str | None = None) -> float:
+        """How far settled spend has exceeded its reservations today.
+
+        Non-zero means a bound failed. Research must stop rather than continue
+        against a ceiling that is already known not to hold.
+        """
+        day = day or self._today()
+        database = self._db()
+        try:
+            row = database.execute(
+                "SELECT COALESCE(SUM(overrun_usd), 0.0) "
+                "FROM research_spend WHERE day = ?",
+                (day,),
+            ).fetchone()
+        finally:
+            database.close()
+        return round(float(row[0]), 6)
 
     def day(self, day: str | None = None) -> dict[str, object]:
         """Inspectable rollup so Friedl can see where research spend went."""
