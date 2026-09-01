@@ -379,6 +379,102 @@ def _specialist_settings(
     )
 
 
+def _tier_settings(
+    environment: Mapping[str, str], tier: str, specialist: "ReasoningSettings"
+) -> "ReasoningSettings":
+    """Configure one cognition tier, defaulting to the specialist settings.
+
+    A tier is named for how hard the thinking is, never for a vendor. Which
+    model serves SURVEY, COMPARE or JUDGE is entirely configuration, so moving
+    a tier to another provider needs no code change and creates no second path.
+    """
+    prefix = f"ALX_RESEARCH_{tier.upper()}"
+    provider = (
+        environment.get(f"{prefix}_PROVIDER", "").strip().lower()
+        or specialist.provider
+    )
+    key_name = {
+        "openai": "OPENAI_API_KEY",
+        "xai": "XAI_API_KEY",
+        "kimi": "KIMI_API_KEY",
+    }.get(provider, f"{prefix}_API_KEY")
+    base_name = {
+        "openai": "OPENAI_BASE_URL",
+        "xai": "XAI_BASE_URL",
+        "kimi": "KIMI_BASE_URL",
+    }.get(provider, f"{prefix}_BASE_URL")
+    base_fallback = {
+        "openai": "https://api.openai.com",
+        "xai": "https://api.x.ai",
+        "kimi": "https://api.moonshot.ai",
+    }.get(provider, specialist.base_url)
+    return ReasoningSettings(
+        provider=provider,
+        model=environment.get(f"{prefix}_MODEL", "").strip() or specialist.model,
+        api_key=_configured(
+            environment,
+            f"{prefix}_API_KEY",
+            key_name,
+            specialist.api_key,
+        ),
+        base_url=_configured(
+            environment,
+            f"{prefix}_BASE_URL",
+            base_name,
+            base_fallback,
+        ).rstrip("/"),
+        timeout_seconds=_positive_integer(
+            environment, f"{prefix}_TIMEOUT_SECONDS", specialist.timeout_seconds
+        ),
+        streaming=_boolean(environment, f"{prefix}_STREAMING", specialist.streaming),
+        service_tier=environment.get(
+            f"{prefix}_SERVICE_TIER", specialist.service_tier
+        ).strip().lower(),
+        effort=environment.get(f"{prefix}_EFFORT", specialist.effort).strip().lower(),
+    )
+
+
+def _research_budget(environment: Mapping[str, str]) -> "ResearchLimits":
+    """Friedl's hard research spending boundary."""
+    daily = _number_in_range(
+        environment, "RESEARCH_DAILY_BUDGET_USD", 0.0, 1000.0, 0.0
+    )
+    per_request = _number_in_range(
+        environment, "RESEARCH_PER_REQUEST_MAX_USD", 0.0, 1000.0, 0.0
+    )
+    return ResearchLimits(daily_usd=daily, per_request_max_usd=per_request)
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchLimits:
+    """Configured research ceiling, validated where the ledger is built."""
+
+    daily_usd: float
+    per_request_max_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchSettings:
+    """Cognition tiers and the spending ceiling that governs them."""
+
+    survey: ReasoningSettings
+    compare: ReasoningSettings
+    judge: ReasoningSettings
+    limits: ResearchLimits
+
+
+def _research_settings(
+    environment: Mapping[str, str], core_provider: str
+) -> "ResearchSettings":
+    specialist = _specialist_settings(environment, core_provider)
+    return ResearchSettings(
+        survey=_tier_settings(environment, "survey", specialist),
+        compare=_tier_settings(environment, "compare", specialist),
+        judge=_tier_settings(environment, "judge", specialist),
+        limits=_research_budget(environment),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     reasoning: ReasoningSettings
@@ -386,6 +482,9 @@ class RuntimeSettings:
     # tokens were the dominant cost. The specialist is configured separately so
     # tuning it never disturbs the Core.
     specialist: ReasoningSettings
+    # Cognition tiers for research. Configuration only: a tier chooses which
+    # model answers a bounded question, never what AL/X investigates.
+    research: ResearchSettings
     speech_to_text: SpeechToTextSettings
     text_to_speech: TextToSpeechSettings
 
@@ -430,6 +529,7 @@ class RuntimeSettings:
                 ).strip().lower(),
             ),
             specialist=_specialist_settings(environment, reasoning_provider),
+            research=_research_settings(environment, reasoning_provider),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
                 model=_required(environment, "ALX_STT_MODEL"),

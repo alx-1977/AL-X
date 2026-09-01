@@ -1,5 +1,12 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
+from alx.contracts.cognition import Cognition
+from alx.contracts.research import (
+    ResearchLedger,
+    ResearchModelUnpriced,
+    ResearchPricing,
+    Reservation,
+)
 from alx.contracts.records import (
     Approval,
     ApprovalProposal,
@@ -79,6 +86,11 @@ from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
+    "Cognition",
+    "ResearchLedger",
+    "ResearchModelUnpriced",
+    "ResearchPricing",
+    "Reservation",
     "RetentionPolicy",
     "ExpiryReason",
     "ContentTombstone",

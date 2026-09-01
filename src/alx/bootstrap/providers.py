@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from alx.config import ConfigurationError, RuntimeSettings
-from alx.contracts import ReasoningModel, SpeechSynthesizer, SpeechTranscriber
+from alx.contracts import (
+    Cognition,
+    ReasoningModel,
+    SpeechSynthesizer,
+    SpeechTranscriber,
+)
 from alx.providers import (
     CartesiaTranscriber,
     ElevenLabsSynthesizer,
@@ -28,6 +33,14 @@ class RuntimeProviders:
     # specialist provider has no adapter, which disables specialist work
     # rather than sending it to the Core.
     specialist: ReasoningModel | None
+    # One model per cognition tier. A tier absent here has no adapter for its
+    # configured provider, so questions at that tier are refused rather than
+    # answered by a different tier: silently buying more or less thinking than
+    # AL/X asked for would make the tier meaningless.
+    research_tiers: Mapping[Cognition, ReasoningModel]
+    # What each tier resolves to, so a spending ledger records the model that
+    # was actually charged.
+    research_identity: Mapping[Cognition, tuple[str, str]]
     speech_to_text: SpeechTranscriber
     text_to_speech: SpeechSynthesizer
 
@@ -112,6 +125,24 @@ def build_runtime_providers(
             f"reasoning provider adapter is not installed: {settings.reasoning.provider}"
         )
     specialist = _build_reasoning_model(settings.specialist, telemetry_sink)
+    tier_settings = {
+        Cognition.SURVEY: settings.research.survey,
+        Cognition.COMPARE: settings.research.compare,
+        Cognition.JUDGE: settings.research.judge,
+    }
+    research_tiers: dict[Cognition, ReasoningModel] = {}
+    research_identity: dict[Cognition, tuple[str, str]] = {}
+    for tier, tier_setting in tier_settings.items():
+        model = _build_reasoning_model(tier_setting, telemetry_sink)
+        if model is None:
+            LOGGER.info(
+                "Research tier %s has no adapter for provider %s and is disabled",
+                tier.value,
+                tier_setting.provider,
+            )
+            continue
+        research_tiers[tier] = model
+        research_identity[tier] = (tier_setting.provider, tier_setting.model)
 
     if settings.speech_to_text.provider != "cartesia":
         raise ConfigurationError(
@@ -124,6 +155,8 @@ def build_runtime_providers(
     return RuntimeProviders(
         reasoning=reasoning,
         specialist=specialist,
+        research_tiers=research_tiers,
+        research_identity=research_identity,
         speech_to_text=CartesiaTranscriber(
             settings.speech_to_text.model,
             settings.speech_to_text.api_key,

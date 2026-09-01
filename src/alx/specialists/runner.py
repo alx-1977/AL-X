@@ -12,6 +12,7 @@ import json
 from typing import Any, Mapping
 
 from alx.contracts import (
+    Cognition,
     ModelMessage,
     ModelRequest,
     ModelRole,
@@ -22,11 +23,36 @@ from alx.contracts import (
 
 
 class ModelSpecialist:
-    """Answer bounded questions through the shared replaceable model port."""
+    """Answer bounded questions through the shared replaceable model port.
 
-    def __init__(self, model: ReasoningModel, cache_key: str = "alx-specialist-v1") -> None:
+    One specialist serves every cognition tier. A tier chooses which configured
+    model answers; it does not change what the call is, what it may do, or what
+    happens to the answer. Three tiers are three configurations of this one
+    path, not three paths.
+    """
+
+    def __init__(
+        self,
+        model: ReasoningModel,
+        cache_key: str = "alx-specialist-v1",
+        tiers: Mapping[Cognition, ReasoningModel] | None = None,
+    ) -> None:
         self._model = model
         self._cache_key = cache_key
+        self._tiers = dict(tiers or {})
+        # Usage from the most recent answer, so a caller enforcing a spending
+        # ceiling can price what the call actually consumed. It is measurement,
+        # not state: nothing reads it to decide anything.
+        self.last_usage: Mapping[str, Any] | None = None
+
+    def model_for(self, cognition: Cognition) -> ReasoningModel:
+        """The model configured for one tier.
+
+        An unconfigured tier falls back to the default specialist model rather
+        than to a more expensive one: a missing configuration must never buy
+        more capability than Friedl configured.
+        """
+        return self._tiers.get(cognition, self._model)
 
     def answer(self, question: SpecialistQuestion) -> Mapping[str, Any]:
         request = ModelRequest(
@@ -42,10 +68,13 @@ class ModelSpecialist:
             question.question_id,
             self._cache_key,
         )
+        self.last_usage = None
         try:
-            completion = self._model.complete(request)
+            completion = self.model_for(question.cognition).complete(request)
         except Exception as error:
             raise SpecialistError(_failure_code(error)) from None
+        usage = completion.usage
+        self.last_usage = usage if isinstance(usage, Mapping) else None
         values = completion.output
         if not isinstance(values, Mapping):
             raise SpecialistError("answer_not_structured")

@@ -89,12 +89,30 @@ class SQLiteUsageRecorder:
                     cache_write_tokens INTEGER NOT NULL,
                     output_tokens INTEGER NOT NULL,
                     reasoning_tokens INTEGER NOT NULL,
-                    duration_ms INTEGER NOT NULL
+                    duration_ms INTEGER NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'core',
+                    tier TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS reasoning_calls_task
                     ON reasoning_calls(task_id);
                 """
             )
+            # Existing databases predate these columns. Adding them here keeps
+            # one schema rather than a second recorder for research calls.
+            existing = {
+                str(row["name"])
+                for row in database.execute("PRAGMA table_info(reasoning_calls)")
+            }
+            if "kind" not in existing:
+                database.execute(
+                    "ALTER TABLE reasoning_calls ADD COLUMN kind TEXT NOT NULL "
+                    "DEFAULT 'core'"
+                )
+            if "tier" not in existing:
+                database.execute(
+                    "ALTER TABLE reasoning_calls ADD COLUMN tier TEXT NOT NULL "
+                    "DEFAULT ''"
+                )
             database.commit()
         finally:
             database.close()
@@ -171,16 +189,22 @@ class SQLiteUsageRecorder:
             if task_id in self._budgets:
                 self._recovery.add(task_id)
 
+    # Core, specialist and research all spend reasoning tokens and all belong
+    # in one table. A separate recorder per kind would make total spend
+    # unanswerable without joining two stores.
+    RECORDED_CODES = ("reasoning.completed", "research.completed")
+
     def record(self, task_id: str, values: Mapping[str, Any]) -> None:
-        if values.get("code") != "reasoning.completed" or not task_id.strip():
+        if values.get("code") not in self.RECORDED_CODES or not task_id.strip():
             return
         database = self._db()
         try:
             database.execute(
                 "INSERT INTO reasoning_calls(task_id, occurred_at, provider, model, "
                 "reasoning_effort, service_tier, input_tokens, cached_tokens, "
-                "cache_write_tokens, output_tokens, reasoning_tokens, duration_ms) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "cache_write_tokens, output_tokens, reasoning_tokens, duration_ms, "
+                "kind, tier) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     datetime.now(UTC).isoformat(),
@@ -194,6 +218,10 @@ class SQLiteUsageRecorder:
                     int(values.get("output_tokens") or 0),
                     int(values.get("reasoning_tokens") or 0),
                     int(values.get("duration_ms") or 0),
+                    # Core, specialist and research spend the same tokens, so
+                    # only the caller can say which kind of work this was.
+                    str(values.get("kind") or "core"),
+                    str(values.get("tier") or ""),
                 ),
             )
             database.commit()

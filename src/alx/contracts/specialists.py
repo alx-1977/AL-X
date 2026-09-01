@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
+from alx.contracts.cognition import Cognition
 from alx.contracts.records import StructuredData
 
 
@@ -40,6 +41,11 @@ class SpecialistQuestion:
     # A specialist reads a bounded amount of one document. An unbounded prompt
     # would reintroduce the cost this exists to avoid.
     material_limit: int = 6000
+    # How hard the thinking is, not what the subject is. AL/X sets this when
+    # she composes the question; nothing infers it from her words or the
+    # material's topic. Extraction defaults to the cheapest tier because that
+    # is what reading fields off a document actually costs.
+    cognition: Cognition = Cognition.SURVEY
 
     def __post_init__(self) -> None:
         for name in ("question_id", "instruction", "material"):
@@ -50,6 +56,8 @@ class SpecialistQuestion:
             raise ValueError("answer_schema must be a non-empty schema")
         if self.material_limit <= 0:
             raise ValueError("material_limit must be positive")
+        if not isinstance(self.cognition, Cognition):
+            raise ValueError("cognition must be a Cognition tier")
 
     @property
     def bounded_material(self) -> str:
