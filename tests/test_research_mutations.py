@@ -209,21 +209,62 @@ class ResearchSafetyMutationTest(unittest.TestCase):
         self.assertEqual(call["model"], "resolved-model")
 
 
-class UnauthorizedNotebookDeletionTest(unittest.TestCase):
-    def test_no_notebook_production_module_or_export_exists(self) -> None:
-        forbidden = (
-            REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "notebook.py",
-            REPOSITORY_ROOT / "src" / "alx" / "tools" / "notebook.py",
+class NotebookRestoredTest(unittest.TestCase):
+    """The notebook is authorised, and there is exactly one path to it.
+
+    This replaces a guard that asserted the notebook must not exist. That was a
+    reasonable reading while runtime authorisation was withheld, but D-023
+    authorises AL/X to create and maintain her own research threads, so absence
+    is no longer the property to hold. What matters now is that the notebook is
+    present, reachable one way, and still carries the fixes it was approved
+    with.
+    """
+
+    def test_the_approved_notebook_modules_are_present(self) -> None:
+        required = (
             REPOSITORY_ROOT / "src" / "alx" / "contracts" / "notebook.py",
+            REPOSITORY_ROOT / "src" / "alx" / "tools" / "notebook.py",
             REPOSITORY_ROOT / "src" / "alx" / "research" / "store.py",
         )
-        self.assertTrue(all(not path.exists() for path in forbidden))
-        self.assertIsNone(importlib.util.find_spec("alx.tools.notebook"))
-        import alx.tools
-        import alx.contracts
+        for path in required:
+            self.assertTrue(path.exists(), f"{path.name} was removed")
 
-        self.assertFalse(hasattr(alx.tools, "build_notebook_executors"))
-        self.assertFalse(hasattr(alx.contracts, "ResearchQuery"))
+    def test_there_is_exactly_one_notebook_storage_implementation(self) -> None:
+        """A second store would be the competing path Law 0 forbids."""
+        stores = [
+            path
+            for path in (REPOSITORY_ROOT / "src" / "alx").rglob("*.py")
+            if "class SQLiteResearchStore" in path.read_text()
+        ]
+        self.assertEqual([path.name for path in stores], ["store.py"])
+
+    def test_the_notebook_keeps_the_fixes_it_was_approved_with(self) -> None:
+        """Restoration must not quietly drop a reviewed guarantee."""
+        from alx.contracts.notebook import (
+            MAX_RETRIEVAL_LIMIT,
+            MAX_THREAD_ENTRIES,
+            MAX_WINDOW_DAYS,
+            ResearchQuery,
+            RevisionAuthor,
+        )
+        from alx.research.store import SCHEMA_VERSION
+
+        # Scoped retrieval, with hard bounds.
+        self.assertEqual((MAX_RETRIEVAL_LIMIT, MAX_WINDOW_DAYS), (25, 90))
+        self.assertEqual(MAX_THREAD_ENTRIES, 25)
+        with self.assertRaises(ValueError):
+            ResearchQuery(query_id="q")
+        # Revision authorship, so a model revision is not read as a correction.
+        self.assertEqual({item.value for item in RevisionAuthor}, {"alx", "friedl"})
+        # The migration that keeps an existing database readable after restart.
+        self.assertEqual(SCHEMA_VERSION, 2)
+
+    def test_d013_erasure_is_still_not_enabled(self) -> None:
+        """D-013 reserves secure byte erasure for a separate decision."""
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "research" / "store.py"
+        ).read_text()
+        self.assertNotIn('PRAGMA secure_delete', source)
 
 
 class ActivationBoundaryTest(unittest.TestCase):

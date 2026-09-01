@@ -24,11 +24,13 @@ from alx.bootstrap.research import (  # noqa: E402
 from alx.config.settings import RuntimeSettings  # noqa: E402
 from alx.contracts import (  # noqa: E402
     Cognition,
+    ModelCompletion,
     ResearchQuestion,
     SpecialistError,
     SpecialistQuestion,
 )
 from alx.observability.pricing import price_of, worst_case_usd  # noqa: E402
+from alx.specialists import ResearchTierModel  # noqa: E402
 from alx.specialists.research import ResearchCeilingFailed  # noqa: E402
 
 
@@ -67,6 +69,50 @@ def environment(**overrides: str) -> dict[str, str]:
     values = dict(BASE_ENVIRONMENT)
     values.update(overrides)
     return values
+
+
+# What an over-charging provider reports: far more than the enforced bound.
+OVERCHARGE_INPUT_TOKENS = 2_000_000
+OVERCHARGE_USD = round(
+    OVERCHARGE_INPUT_TOKENS / 1e6 * 0.20 + 1_000 / 1e6 * 1.25, 6
+)
+
+
+class OverchargingTransport:
+    """A provider that ignores the request bound and bills for far more."""
+
+    supports_bounded_research = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, request):
+        self.calls += 1
+        return ModelCompletion(
+            "openai",
+            "gpt-5.4-nano",
+            {"finding": "answered"},
+            {"input_tokens": OVERCHARGE_INPUT_TOKENS, "output_tokens": 1_000},
+        )
+
+
+def pricing_table() -> dict:
+    from alx.observability import pricing
+
+    return dict(pricing.USD_PER_MILLION)
+
+
+def set_price(key, value) -> None:
+    from alx.observability import pricing
+
+    pricing.USD_PER_MILLION[key] = value
+
+
+def restore_prices(previous: dict) -> None:
+    from alx.observability import pricing
+
+    pricing.USD_PER_MILLION.clear()
+    pricing.USD_PER_MILLION.update(previous)
 
 
 def question(tier: Cognition) -> ResearchQuestion:
@@ -257,3 +303,94 @@ class ReservationCoversWorstCaseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProviderBoundViolationTest(unittest.TestCase):
+    """A charge above the reservation is a safety fault, not a budget event.
+
+    The reservation is the worst case of a bound the provider is supposed to
+    enforce. If the measured charge exceeds it, the guarantee has failed rather
+    than merely been expensive: the true figure is recorded so telemetry never
+    understates spend, and no further paid research may dispatch.
+    """
+
+    def setUp(self) -> None:
+        self._directory = TemporaryDirectory()
+        self.root = Path(self._directory.name)
+        self._prices = dict(pricing_table())
+        # A rate that makes a runaway usage report obviously over the bound.
+        set_price(("openai", "gpt-5.4-nano"), (0.20, 0.02, 1.25))
+
+    def tearDown(self) -> None:
+        restore_prices(self._prices)
+        self._directory.cleanup()
+
+    def researcher(self, transport, root: Path | None = None):
+        settings = RuntimeSettings.from_environment(environment())
+        built = build_research_specialist(settings.research, root or self.root)
+        # Replace only the transport, so the ledger, pricing, bounds and
+        # ceiling are exactly the ones the runtime composed.
+        built._tiers[Cognition.SURVEY] = ResearchTierModel(
+            "openai", "gpt-5.4-nano", transport
+        )
+        return built
+
+    def test_an_overcharge_is_recorded_truthfully_and_stops_research(self) -> None:
+        researcher = self.researcher(OverchargingTransport(), self.root)
+        worst = worst_case_usd(
+            "openai", "gpt-5.4-nano",
+            RESEARCH_MAX_INPUT_TOKENS, RESEARCH_MAX_OUTPUT_TOKENS,
+        )
+
+        # The overcharging call itself fails. Codex raises on the same call
+        # rather than returning its answer and failing the next one, so a
+        # result obtained outside the guarantee is never handed back.
+        with self.assertRaises(ResearchCeilingFailed):
+            researcher.answer(question(Cognition.SURVEY))
+        ledger = researcher._ledger
+
+        # 1. The true cost is recorded, not clamped to the reservation.
+        call = ledger.day()["calls"][0]
+        self.assertGreater(call["actual_usd"], worst)
+        self.assertAlmostEqual(call["actual_usd"], OVERCHARGE_USD, places=6)
+        self.assertGreater(ledger.committed_usd(), worst)
+
+        # 2. The excess is visible as an overrun and marked as a failure.
+        self.assertGreater(ledger.overrun_usd(), 0.0)
+        self.assertEqual(call["outcome"], "failed")
+        self.assertEqual(call["failure_code"], "cost_overrun")
+
+        # 3. No further paid research can dispatch.
+        with self.assertRaises(ResearchCeilingFailed):
+            researcher.answer(question(Cognition.SURVEY))
+
+    def test_no_subsequent_call_reaches_the_provider(self) -> None:
+        """The halt happens before dispatch, not after another charge."""
+        with TemporaryDirectory() as directory:
+            transport = OverchargingTransport()
+            researcher = self.researcher(transport, Path(directory))
+            self._no_further_dispatch(researcher, transport)
+
+    def _no_further_dispatch(self, researcher, transport) -> None:
+        with self.assertRaises(ResearchCeilingFailed):
+            researcher.answer(question(Cognition.SURVEY))
+        self.assertEqual(transport.calls, 1)
+        # Every later attempt is refused before the transport is reached.
+        for _ in range(3):
+            with self.assertRaises(ResearchCeilingFailed):
+                researcher.answer(question(Cognition.SURVEY))
+        self.assertEqual(transport.calls, 1)
+
+
+    def test_the_halt_survives_a_restart(self) -> None:
+        """A fresh process must not resume spending against a failed ceiling.
+
+        Both researchers share one storage root, which is what a restart is.
+        """
+        researcher = self.researcher(OverchargingTransport(), self.root)
+        with self.assertRaises(ResearchCeilingFailed):
+            researcher.answer(question(Cognition.SURVEY))
+        reopened = self.researcher(OverchargingTransport(), self.root)
+        self.assertGreater(reopened._ledger.overrun_usd(), 0.0)
+        with self.assertRaises(ResearchCeilingFailed):
+            reopened.answer(question(Cognition.SURVEY))
