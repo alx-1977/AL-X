@@ -42,6 +42,7 @@ class FakeModel:
                     "response": "A normal response.",
                     "response_requires_goal_commit": False,
                 },
+                "goal_id": None,
                 "goal_update": None,
                 "memory_proposals": [],
             },

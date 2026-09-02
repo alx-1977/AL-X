@@ -10,15 +10,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap import build_model_reasoner  # noqa: E402
 from alx.contracts import (  # noqa: E402
-    BackgroundEvent, CapabilityAttempt, CapabilityAttemptDisposition,
+    AgentDecision, BackgroundEvent, CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
     ConversationOrigin, ConversationTurn, DecisionValidationError,
-    GoalMutationKind, GoalState, MemoryKind, ModelCompletion, Objective,
+    GoalMutationKind, GoalState, GoalSummary, MemoryKind, ModelCompletion, Objective,
     ReasoningContext, SideEffect,
     StructuredSchema, SuccessCriterion, ValueKind,
 )
 from alx.core import ModelReasoner  # noqa: E402
 from alx.core.model_reasoner import decision_schema  # noqa: E402
+from alx.tools.notebook import RECORD_ENTRY_DEFINITION  # noqa: E402
 
 NOW = datetime(2026, 8, 28, tzinfo=UTC)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
@@ -37,6 +38,7 @@ def goal() -> GoalState:
 
 def base_output(**changes):
     values = {
+        "goal_id": None,
         "goal_update": None,
         "memory_proposals": [],
     }
@@ -49,6 +51,9 @@ def base_output(**changes):
                 "response_requires_goal_commit", False
             ),
         }
+    elif action_type == "finish_silently":
+        changes.pop("response", None)
+        action = {"type": "finish_silently"}
     elif action_type == "call_capability":
         changes.pop("response", None)
         action = {
@@ -116,6 +121,9 @@ class ModelReasonerTests(unittest.TestCase):
                               ConversationOrigin.SPEECH_TRANSCRIPT,
                               "Please investigate", NOW, "friedl"),),
             (CAPABILITY,),
+            unfinished_goals=(
+                () if active_goal is None else (GoalSummary.of(active_goal),)
+            ),
         )
 
     def test_ordinary_response_has_no_required_goal_metadata(self) -> None:
@@ -130,6 +138,41 @@ class ModelReasonerTests(unittest.TestCase):
         self.assertEqual(supplied["conversation"][0]["content"], "Please investigate")
         self.assertNotIn("rejected_decision_feedback", supplied)
         self.assertEqual(model.requests[0].affinity_key, "conversation-1")
+
+    def test_silent_completion_is_a_general_core_decision(self) -> None:
+        model = FakeModel(base_output(disposition="finish_silently"))
+        decision = ModelReasoner(model, "Approved Laws", "Approved identity").decide(
+            self.context(None)
+        )
+        self.assertTrue(decision.finish_silently)
+        self.assertIsNone(decision.response)
+        variants = decision_schema()["properties"]["action"]["anyOf"]
+        silent = next(
+            item for item in variants
+            if item["properties"]["type"].get("const") == "finish_silently"
+        )
+        self.assertNotIn("capability_id", silent["properties"])
+
+    def test_silent_completion_cannot_also_call_or_respond(self) -> None:
+        with self.assertRaises(ValueError):
+            AgentDecision(response="must be heard", finish_silently=True)
+        with self.assertRaises(ValueError):
+            AgentDecision(
+                call=CapabilityCall("call-1", "search_records", {}),
+                finish_silently=True,
+            )
+
+    def test_durable_call_projection_cannot_fabricate_or_change_arguments(self) -> None:
+        with self.assertRaises(ValueError):
+            CapabilityCall(
+                "call-1", "search_records", {"scope": "one"},
+                durable_arguments={"scope": "different"},
+            )
+        with self.assertRaises(ValueError):
+            CapabilityCall(
+                "call-1", "search_records", {"scope": "one"},
+                durable_arguments={"invented": "value"},
+            )
 
     def test_goal_output_is_a_proposal_not_replacement_state(self) -> None:
         update = goal_update(
@@ -164,6 +207,34 @@ class ModelReasonerTests(unittest.TestCase):
         self.assertEqual(decision.call.capability_id, "search_records")
         self.assertEqual(decision.call.arguments["record_type"], "note")
 
+    def test_notebook_content_is_transient_but_identity_is_durable(self) -> None:
+        finding = "The complete finding must live only in the notebook."
+        output = base_output(
+            disposition="call_capability",
+            call_id="call-1",
+            capability_id="record_research_entry",
+            arguments_json=json.dumps({
+                "entry_id": "entry-1",
+                "thread_id": "thread-1",
+                "kind": "conclusion",
+                "content": finding,
+                "source_references": ["attempt:research-1"],
+            }),
+        )
+        context = ReasoningContext(
+            goal(),
+            (ConversationTurn(
+                "conversation-1", "turn-1", ConversationOrigin.TYPED,
+                "Continue", NOW, "friedl",
+            ),),
+            (RECORD_ENTRY_DEFINITION,),
+            unfinished_goals=(GoalSummary.of(goal()),),
+        )
+        decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(context)
+        self.assertEqual(decision.call.arguments["content"], finding)
+        self.assertNotIn("content", decision.call.durable_arguments)
+        self.assertEqual(decision.call.durable_arguments["entry_id"], "entry-1")
+
     def test_exact_action_approval_proposal_stays_bound_to_same_call(self) -> None:
         arguments = '{"mailbox_id":"INBOX","uid_validity":"777","uid":"2"}'
         output = base_output(
@@ -185,6 +256,38 @@ class ModelReasonerTests(unittest.TestCase):
         ).decide(self.context())
         self.assertEqual(decision.approval_proposal.approval_id, "approval-1")
         self.assertTrue(decision.approval_proposal.scope.matches(decision.call))
+
+    def test_the_protocol_states_how_a_memory_identifier_may_be_used(self) -> None:
+        """A reused identifier ended a live conversation mid-sentence.
+
+        The store refuses to let one identifier come to mean a different
+        memory, and offers supersession for refining what is already
+        remembered. The protocol never said so, while retrieved_memories
+        showed the model identifiers it could reuse. This states the rule; it
+        does not script wording or route anything.
+        """
+        from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
+
+        for stated in (
+            "A memory identifier names one memory permanently",
+            "Every memory you form takes a\nnew identifier",
+            "set supersedes_memory_id to the identifier being replaced",
+            "same\nkind and concern the same person",
+        ):
+            self.assertIn(stated, PROTOCOL_INSTRUCTIONS)
+
+    def test_the_identifier_rule_reaches_the_model_with_every_decision(self) -> None:
+        """It belongs in the stable cached prefix, not a per-turn instruction."""
+        model = FakeModel(base_output())
+        ModelReasoner(model, "laws", "identity").decide(self.context())
+        protocol = model.requests[0].messages[1].content
+        self.assertIn("A memory identifier names one memory permanently", protocol)
+
+    def test_supersession_is_expressible_in_the_decision_schema(self) -> None:
+        """The guidance names a field the model can actually set."""
+        variants = decision_schema()["properties"]["memory_proposals"]["items"]["anyOf"]
+        for variant in variants:
+            self.assertIn("supersedes_memory_id", variant["properties"])
 
     def test_structured_background_event_can_be_the_only_current_input(self) -> None:
         event = BackgroundEvent(

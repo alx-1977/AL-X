@@ -1,5 +1,31 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
+from alx.contracts.cognition import Cognition
+from alx.contracts.usage import (
+    CANONICAL_FIELDS,
+    is_measured,
+    normalise_usage,
+)
+from alx.contracts.notebook import (
+    DeletionRecord,
+    EntryKind,
+    EntryProposal,
+    EntryRevision,
+    EntryRevisionProposal,
+    EntrySnapshot,
+    ResearchQuery,
+    RevisionAuthor,
+    ThreadProposal,
+    ThreadSnapshot,
+    ThreadStatus,
+)
+from alx.contracts.research import (
+    ResearchLedger,
+    ResearchModelUnpriced,
+    ResearchPricing,
+    ResearchQuestion,
+    Reservation,
+)
 from alx.contracts.records import (
     Approval,
     ApprovalProposal,
@@ -33,7 +59,7 @@ from alx.contracts.provenance import (
     RetentionPolicy,
 )
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
-from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, PendingMemoryBatch, ReasoningContext, ReasoningProvider
+from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, GoalSummary, PendingMemoryBatch, ReasoningContext, ReasoningProvider
 from alx.contracts.records import StructuredData
 from alx.contracts.specialists import SpecialistError, SpecialistModel, SpecialistQuestion
 from alx.contracts.speech import (
@@ -79,6 +105,26 @@ from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
+    "CANONICAL_FIELDS",
+    "Cognition",
+    "is_measured",
+    "normalise_usage",
+    "DeletionRecord",
+    "EntryKind",
+    "EntryProposal",
+    "EntryRevision",
+    "EntryRevisionProposal",
+    "EntrySnapshot",
+    "ResearchQuery",
+    "RevisionAuthor",
+    "ThreadProposal",
+    "ThreadSnapshot",
+    "ThreadStatus",
+    "ResearchLedger",
+    "ResearchModelUnpriced",
+    "ResearchPricing",
+    "ResearchQuestion",
+    "Reservation",
     "RetentionPolicy",
     "ExpiryReason",
     "ContentTombstone",
@@ -91,7 +137,7 @@ __all__ = [
     "CapabilityDefinition", "SideEffect", "StructuredSchema", "ValueKind",
     "StructuredData",
     "SpecialistError", "SpecialistModel", "SpecialistQuestion",
-    "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "PendingMemoryBatch", "ReasoningContext", "ReasoningProvider",
+    "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "GoalSummary", "PendingMemoryBatch", "ReasoningContext", "ReasoningProvider",
     "AudioChunk", "SpeechSynthesizer", "SpeechTranscriber", "TranscriptionEvent",
     "TranscriptionState",
     "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",

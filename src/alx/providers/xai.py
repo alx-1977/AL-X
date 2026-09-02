@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from alx.contracts import ModelCompletion, ModelRequest
+from alx.contracts import ModelCompletion, ModelRequest, normalise_usage
 from alx.providers.errors import (
     ProviderError,
     raise_provider_failure,
@@ -29,7 +29,18 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
+    return {
+        "kind": request.kind,
+        "tier": request.tier,
+        "reservation_id": request.reservation_id,
+        "reserved_usd": request.reserved_usd,
+    }
+
+
 class XAIReasoningModel:
+    supports_bounded_research = True
+
     def __init__(
         self,
         model: str,
@@ -71,6 +82,9 @@ class XAIReasoningModel:
                 },
             },
         }
+        if request.max_output_tokens is not None:
+            # The OpenAI-style chat completions field both vendors accept.
+            payload["max_tokens"] = request.max_output_tokens
         if self._streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
@@ -101,15 +115,17 @@ class XAIReasoningModel:
             output = json.loads(content)
             if not isinstance(output, dict):
                 raise ValueError("structured output is not an object")
-            if not isinstance(usage, dict):
-                usage = {}
+            usage = normalise_usage(usage)
             completion = ModelCompletion("xai", model, output, usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
-                self._completion_telemetry(
-                    model, service_tier, usage, duration, timings
-                ),
+                {
+                    **self._completion_telemetry(
+                        model, service_tier, usage, duration, timings
+                    ),
+                    **_request_telemetry(request),
+                },
             )
             LOGGER.info(
                 "Reasoning provider request completed in %.3f seconds",
@@ -133,6 +149,7 @@ class XAIReasoningModel:
                     "duration_ms": round(duration * 1000),
                     "error_type": error_code,
                     "status_code": status,
+                    **_request_telemetry(request),
                 },
             )
             if status in (402, 403):
@@ -233,12 +250,6 @@ class XAIReasoningModel:
         duration: float,
         timings: Mapping[str, float],
     ) -> dict[str, Any]:
-        output_tokens = self._nested_integer(usage, "completion_tokens")
-        if not output_tokens:
-            output_tokens = self._nested_integer(usage, "output_tokens")
-        reasoning_tokens = self._nested_integer(
-            usage, "completion_tokens_details", "reasoning_tokens"
-        ) or self._nested_integer(usage, "output_tokens_details", "reasoning_tokens")
         return {
             "code": "reasoning.completed",
             "provider": "xai",
@@ -250,13 +261,12 @@ class XAIReasoningModel:
             "answer_generation_ms": round(
                 timings.get("answer_generation_seconds", 0.0) * 1000
             ),
-            "input_tokens": self._nested_integer(usage, "prompt_tokens")
-            or self._nested_integer(usage, "input_tokens"),
-            "cached_tokens": self._nested_integer(
-                usage, "prompt_tokens_details", "cached_tokens"
-            ) or self._nested_integer(usage, "input_tokens_details", "cached_tokens"),
-            "reasoning_tokens": reasoning_tokens,
-            "output_tokens": output_tokens,
+            # Canonical names: the adapter normalised the response already.
+            "input_tokens": self._nested_integer(usage, "input_tokens"),
+            "cached_tokens": self._nested_integer(usage, "cached_tokens"),
+            "cache_write_tokens": self._nested_integer(usage, "cache_write_tokens"),
+            "reasoning_tokens": self._nested_integer(usage, "reasoning_tokens"),
+            "output_tokens": self._nested_integer(usage, "output_tokens"),
             "total_tokens": self._nested_integer(usage, "total_tokens"),
         }
 

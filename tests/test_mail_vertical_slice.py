@@ -633,7 +633,6 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
         gateway = ConversationGateway(
             CoreAgent(goals, reasoner, lambda call, state: None, ()),
             conversations,
-            lambda conversation_id: None,
             identifier_factory=lambda: "response-1",
             clock=lambda: NOW,
         )
@@ -741,7 +740,7 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             RETENTION,
         )
         try:
-            outcome = core.process(conversation, None, RETENTION, 3)
+            outcome = core.process(conversation, RETENTION, 3)
             self.assertEqual(outcome.state, CoreState.RESPONDED)
             self.assertEqual(outcome.snapshot.state.approvals[0].lifecycle.value, "consumed")
             self.assertEqual(

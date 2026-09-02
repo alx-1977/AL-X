@@ -328,3 +328,13 @@ This file records approved product and architecture decisions that guide impleme
 - **Freight is not authorised by this decision.** Friedl confirmed freight invoices arrive separately and are visibly distinct. Their accounting treatment is not decided here; a freight invoice is recognised and returned to AL/X rather than posted, until a real one is inspected and its treatment recorded.
 - **Unproven at approval.** No duty-tax-paid invoice had been posted to the live organisation when this was recorded. Account 426, its No VAT default and the DHL contact were each confirmed read-only against the live FireFli organisation.
 - **Review condition.** Revisit if a duty-tax-paid invoice posts against the wrong account, if a freight or customs invoice is misclassified as duty tax paid, if an invoice carrying tax reaches a NoTax posting, or before freight handling is added.
+
+## D-023 — Self-directed research authority
+
+- **Date:** 2026-09-01
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-01.**
+- AL/X may create and maintain her own research threads, choose her interests, revise her views, pause or archive research, and use existing authorised read capabilities for evidence.
+- Notebook writes grant no new external authority. Deletion requires Friedl’s explicit approval scoped to the exact record.
+- Paid research is limited by the configured hard budget. AL/X may choose SURVEY, COMPARE, or JUDGE based on difficulty, while deterministic controls enforce the spend ceiling. No silent fallback or budget overrun is permitted.
+- Background scheduling, recurring research, and autonomous wakeups are not authorised.

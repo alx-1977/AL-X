@@ -229,6 +229,12 @@ class VoiceSession:
             outcome.reason,
             outcome.response is not None,
         )
+        if outcome.state.value == "finished_silently":
+            # Silence is an explicit authoritative Core result, not a missing
+            # response and not a transport inference. No conversation turn or
+            # speech synthesis is created for it.
+            yield VoiceEvent(VoiceEventKind.LISTENING)
+            return
         if outcome.response is None:
             yield VoiceEvent(
                 VoiceEventKind.ERROR,

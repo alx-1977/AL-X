@@ -31,12 +31,26 @@ LOGGER = logging.getLogger(__name__)
 # The Core rejected that decision and changed nothing, so there is no partial
 # work to protect by hanging up. This is a provider fault like a dropped
 # socket, not an invalid decision AL/X acted on.
+# A dispatch blocked by goal eligibility is the Core stopping on purpose after
+# one decision rather than buying more reasoning from the same state. Nothing
+# acted and nothing was recorded, so the transport keeps listening for the
+# turn that resolves it.
+# A memory that could not be persisted is a storage fault, not a decision AL/X
+# acted on. Prevention belongs upstream and is where the real fix lives: an
+# identifier the Core reused is now harmless and the protocol states the rule.
+# This is only what remains when storage itself fails, a full disk or a locked
+# database. Losing the conversation is then the worse of the two failures:
+# nothing external happened, the goal is unchanged, and a dispatch that was
+# checkpointed but never sent is closed as an unknown outcome on the next turn
+# rather than repeated. The diagnostics panel still names the fault.
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
     {
         "speech_transcription_error",
         "budget_exhausted",
         "budget_exceeded",
         "reasoner_error",
+        "active_goal_required",
+        "memory_persistence_error",
     }
 )
 
@@ -52,7 +66,10 @@ RECOVERABLE_TRANSPORT_REASONS = frozenset(
 # `speech_transcription_error` is different: it ends `exchange()` itself, so
 # there is no exchange left to continue and re-entry is the only way back.
 MID_EXCHANGE_RECOVERABLE_REASONS = frozenset(
-    {"budget_exhausted", "budget_exceeded", "reasoner_error"}
+    {
+        "budget_exhausted", "budget_exceeded", "reasoner_error",
+        "active_goal_required", "memory_persistence_error",
+    }
 )
 
 

@@ -89,12 +89,49 @@ class SQLiteUsageRecorder:
                     cache_write_tokens INTEGER NOT NULL,
                     output_tokens INTEGER NOT NULL,
                     reasoning_tokens INTEGER NOT NULL,
-                    duration_ms INTEGER NOT NULL
+                    duration_ms INTEGER NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'core',
+                    tier TEXT NOT NULL DEFAULT '',
+                    reservation_id TEXT NOT NULL DEFAULT '',
+                    reserved_usd REAL NOT NULL DEFAULT 0.0,
+                    cost_usd REAL NOT NULL DEFAULT 0.0,
+                    outcome TEXT NOT NULL DEFAULT 'succeeded',
+                    failure_code TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS reasoning_calls_task
                     ON reasoning_calls(task_id);
                 """
             )
+            # Existing databases predate these columns. Adding them here keeps
+            # one schema rather than a second recorder for research calls.
+            existing = {
+                str(row["name"])
+                for row in database.execute("PRAGMA table_info(reasoning_calls)")
+            }
+            if "kind" not in existing:
+                database.execute(
+                    "ALTER TABLE reasoning_calls ADD COLUMN kind TEXT NOT NULL "
+                    "DEFAULT 'core'"
+                )
+            if "tier" not in existing:
+                database.execute(
+                    "ALTER TABLE reasoning_calls ADD COLUMN tier TEXT NOT NULL "
+                    "DEFAULT ''"
+                )
+            # One reservation-keyed lifecycle row: without these, a research
+            # call's reservation, true cost and terminal state live nowhere
+            # durable and spend cannot be audited after the fact.
+            for column, definition in (
+                ("reservation_id", "TEXT NOT NULL DEFAULT ''"),
+                ("reserved_usd", "REAL NOT NULL DEFAULT 0.0"),
+                ("cost_usd", "REAL NOT NULL DEFAULT 0.0"),
+                ("outcome", "TEXT NOT NULL DEFAULT 'succeeded'"),
+                ("failure_code", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in existing:
+                    database.execute(
+                        f"ALTER TABLE reasoning_calls ADD COLUMN {column} {definition}"
+                    )
             database.commit()
         finally:
             database.close()
@@ -171,16 +208,79 @@ class SQLiteUsageRecorder:
             if task_id in self._budgets:
                 self._recovery.add(task_id)
 
+    # Core, specialist and research all spend reasoning tokens and all belong
+    # in one table. A separate recorder per kind would make total spend
+    # unanswerable without joining two stores.
+    RECORDED_CODES = (
+        "reasoning.completed",
+        "reasoning.failed",
+        "research.reserved",
+        "research.completed",
+    )
+
     def record(self, task_id: str, values: Mapping[str, Any]) -> None:
-        if values.get("code") != "reasoning.completed" or not task_id.strip():
+        if values.get("code") not in self.RECORDED_CODES or not task_id.strip():
             return
         database = self._db()
         try:
+            reservation_id = str(values.get("reservation_id") or "")
+            outcome = str(
+                values.get("outcome")
+                or ("failed" if values.get("code") == "reasoning.failed" else "succeeded")
+            )
+            failure_code = str(
+                values.get("failure_code")
+                or values.get("error_code")
+                or values.get("error_type")
+                or ""
+            )
+            if reservation_id:
+                existing = database.execute(
+                    "SELECT * FROM reasoning_calls WHERE reservation_id = ? "
+                    "ORDER BY id LIMIT 1",
+                    (reservation_id,),
+                ).fetchone()
+                if existing is not None:
+                    def supplied(name: str, default: Any) -> Any:
+                        return values[name] if name in values else default
+
+                    database.execute(
+                        "UPDATE reasoning_calls SET task_id = ?, provider = ?, model = ?, "
+                        "reasoning_effort = ?, service_tier = ?, input_tokens = ?, "
+                        "cached_tokens = ?, cache_write_tokens = ?, output_tokens = ?, "
+                        "reasoning_tokens = ?, duration_ms = ?, kind = ?, tier = ?, "
+                        "reserved_usd = ?, cost_usd = ?, outcome = ?, failure_code = ? "
+                        "WHERE id = ?",
+                        (
+                            task_id,
+                            str(supplied("provider", existing["provider"]) or ""),
+                            str(supplied("model", existing["model"]) or ""),
+                            str(supplied("reasoning_effort", existing["reasoning_effort"]) or ""),
+                            str(supplied("service_tier", existing["service_tier"]) or ""),
+                            int(supplied("input_tokens", existing["input_tokens"]) or 0),
+                            int(supplied("cached_tokens", existing["cached_tokens"]) or 0),
+                            int(supplied("cache_write_tokens", existing["cache_write_tokens"]) or 0),
+                            int(supplied("output_tokens", existing["output_tokens"]) or 0),
+                            int(supplied("reasoning_tokens", existing["reasoning_tokens"]) or 0),
+                            int(supplied("duration_ms", existing["duration_ms"]) or 0),
+                            str(supplied("kind", existing["kind"]) or "core"),
+                            str(supplied("tier", existing["tier"]) or ""),
+                            float(supplied("reserved_usd", existing["reserved_usd"]) or 0.0),
+                            float(supplied("cost_usd", existing["cost_usd"]) or 0.0),
+                            outcome,
+                            failure_code,
+                            existing["id"],
+                        ),
+                    )
+                    database.commit()
+                    return
             database.execute(
                 "INSERT INTO reasoning_calls(task_id, occurred_at, provider, model, "
                 "reasoning_effort, service_tier, input_tokens, cached_tokens, "
-                "cache_write_tokens, output_tokens, reasoning_tokens, duration_ms) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "cache_write_tokens, output_tokens, reasoning_tokens, duration_ms, "
+                "kind, tier, reservation_id, reserved_usd, cost_usd, outcome, "
+                "failure_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     datetime.now(UTC).isoformat(),
@@ -194,6 +294,15 @@ class SQLiteUsageRecorder:
                     int(values.get("output_tokens") or 0),
                     int(values.get("reasoning_tokens") or 0),
                     int(values.get("duration_ms") or 0),
+                    # Core, specialist and research spend the same tokens, so
+                    # only the caller can say which kind of work this was.
+                    str(values.get("kind") or "core"),
+                    str(values.get("tier") or ""),
+                    reservation_id,
+                    float(values.get("reserved_usd") or 0.0),
+                    float(values.get("cost_usd") or 0.0),
+                    outcome,
+                    failure_code,
                 ),
             )
             database.commit()

@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.live_voice import (  # noqa: E402
-    load_environment, locate_active_goal, migrate_legacy_conversations,
+    load_environment, migrate_legacy_conversations,
 )
 from alx.contracts import (  # noqa: E402
     AudioChunk,
@@ -334,6 +334,62 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1].reason, "decision_invalid")
         self.assertEqual(synthesizer.responses, ["recovered response"])
 
+    async def test_core_selected_silence_skips_tts_without_becoming_an_error(self) -> None:
+        synthesizer = FakeSynthesizer()
+        gateway = FakeGateway((outcome(
+            GoalStatus.ACTIVE,
+            response=None,
+            reason="core_selected_silence",
+            core_state=CoreState.FINISHED_SILENTLY,
+        ),))
+        session = VoiceSession(
+            gateway,
+            FakeTranscriber((transcription(
+                "one", TranscriptionState.FINAL, "No answer is needed"
+            ),)),
+            synthesizer,
+            "friedl", 8, 3650,
+            clock=lambda: NOW,
+            identifier_factory=lambda: "turn-1",
+        )
+        events = [
+            event async for event in session.exchange(
+                "conversation-1", incoming_audio()
+            )
+        ]
+        self.assertEqual(
+            [event.kind for event in events],
+            [VoiceEventKind.THINKING, VoiceEventKind.LISTENING],
+        )
+        self.assertEqual(synthesizer.responses, [])
+
+    async def test_missing_response_is_still_an_error_not_silence(self) -> None:
+        session = VoiceSession(
+            FakeGateway((outcome(
+                GoalStatus.ACTIVE,
+                response=None,
+                reason="active_goal_required",
+                core_state=CoreState.CHECKPOINTED,
+            ),)),
+            FakeTranscriber((transcription(
+                "one", TranscriptionState.FINAL, "Do the required action"
+            ),)),
+            FakeSynthesizer(),
+            "friedl", 8, 3650,
+            clock=lambda: NOW,
+            identifier_factory=lambda: "turn-1",
+        )
+        events = [
+            event async for event in session.exchange(
+                "conversation-1", incoming_audio()
+            )
+        ]
+        self.assertEqual(
+            [event.kind for event in events],
+            [VoiceEventKind.THINKING, VoiceEventKind.ERROR, VoiceEventKind.LISTENING],
+        )
+        self.assertEqual(events[1].reason, "active_goal_required")
+
 
 class BootstrapVoiceTests(unittest.TestCase):
     def test_legacy_goal_owned_turns_migrate_to_independent_conversation_store(self) -> None:
@@ -384,23 +440,27 @@ class BootstrapVoiceTests(unittest.TestCase):
                 conversations.close()
                 goals.close()
 
-    def test_active_goal_is_recovered_from_latest_durable_conversation_state(self) -> None:
-        older = SimpleNamespace(
-            state=SimpleNamespace(goal_id="older", status=GoalStatus.AWAITING_INPUT),
-            conversation_id="conversation-1",
-        )
-        newer = SimpleNamespace(
-            state=SimpleNamespace(goal_id="newer", status=GoalStatus.ACTIVE),
-            conversation_id="conversation-1",
-        )
-        completed = SimpleNamespace(
-            state=SimpleNamespace(goal_id="done", status=GoalStatus.COMPLETED),
-            conversation_id="conversation-1",
-        )
-        store = SimpleNamespace(list_goals=lambda: (older, newer, completed))
+    def test_no_deterministic_goal_selection_remains_in_the_composition_root(self) -> None:
+        """Law 1: choosing which goal an input belongs to is AL/X's judgement.
 
-        self.assertEqual(locate_active_goal(store, "conversation-1"), "newer")
-        self.assertIsNone(locate_active_goal(store, "another-conversation"))
+        The runtime used to attach the newest unfinished goal before the Core
+        reasoned, which bound a mail deletion to an unrelated research goal.
+        Nothing in the composition root or the gateway may select a goal by
+        recency, domain, capability or wording.
+        """
+        import alx.bootstrap.live_voice as bootstrap
+        from alx.conversation import gateway
+
+        self.assertFalse(hasattr(bootstrap, "locate_active_goal"))
+        for module in (bootstrap, gateway):
+            source = Path(module.__file__).read_text("utf-8")
+            for superseded in (
+                "locate_active_goal", "ActiveGoalLocator", "candidates[-1]",
+            ):
+                self.assertNotIn(
+                    superseded, source,
+                    f"{Path(module.__file__).name} still selects a goal deterministically",
+                )
 
     def test_process_environment_overrides_file_without_executing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

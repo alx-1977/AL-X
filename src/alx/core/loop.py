@@ -11,11 +11,11 @@ from uuid import uuid4
 
 from alx.contracts import (
     AgentDecision, Approval, ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
-    CapabilityDefinition, CapabilityDispatch, CapabilityResult,
+    CapabilityCall, CapabilityDefinition, CapabilityDispatch, CapabilityResult,
     ConversationOrigin,
     CapabilityResultState, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
-    GoalSnapshot, GoalState, GoalStatus, GoalStopReason, MemoryKind,
+    GoalSnapshot, GoalState, GoalStatus, GoalStopReason, GoalSummary, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
     ContentOrigin, ContentProvenance, RetentionPolicy,
@@ -26,6 +26,7 @@ LOGGER = logging.getLogger(__name__)
 
 class CoreState(str, Enum):
     RESPONDED = "responded"
+    FINISHED_SILENTLY = "finished_silently"
     CHECKPOINTED = "checkpointed"
     ERROR = "error"
 
@@ -119,28 +120,39 @@ class CoreAgent:
         # away, so the ceiling prevents spend rather than reporting it.
         self._budget_check = budget_check or (lambda _task_id: None)
 
-    def process(self, conversation: ConversationSnapshot, goal_id: str | None,
-                retention_until: datetime, step_budget: int,
-                trigger_event_id: str | None = None) -> CoreOutcome:
-        """Reason over one durable conversation and its optional attached goal."""
-        self._validate_step_budget(step_budget)
-        snapshot = None if goal_id is None else self._store.load(goal_id)
-        if snapshot is not None and snapshot.conversation_id != conversation.conversation_id:
-            return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_conversation_mismatch")
-        if snapshot is not None and self._has_pending_dispatch(snapshot.state):
-            # A dispatch that never returned means the process stopped between
-            # the durable checkpoint and the result. Refusing here would wedge
-            # the goal permanently, so the attempt is closed with an explicitly
-            # unknown outcome. It is never retried automatically: the external
-            # action may already have taken effect, and only the Core may
-            # decide, from this evidence, whether to verify or ask.
-            snapshot = self._close_interrupted_dispatch(snapshot)
-        if snapshot is not None and not self._flush_pending_memory_batches(snapshot.state.goal_id):
-            return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+    def process(self, conversation: ConversationSnapshot, retention_until: datetime,
+                step_budget: int, trigger_event_id: str | None = None) -> CoreOutcome:
+        """Reason over one durable conversation and whichever of its goals AL/X selects.
 
+        No goal is attached in advance. Every unfinished goal of the
+        conversation reaches the Core as a compact summary; the Core says
+        which one the input belongs to, starts a new one, or works without
+        one. Deterministic code only checks that a selected goal exists and
+        loads its full state.
+        """
+        self._validate_step_budget(step_budget)
+        conversation_id = conversation.conversation_id
+        for summary in self._store.list_unfinished(conversation_id):
+            if summary.has_pending_dispatch:
+                # A dispatch that never returned means the process stopped
+                # between the durable checkpoint and the result. Refusing
+                # would wedge the goal permanently, so the attempt is closed
+                # with an explicitly unknown outcome. It is never retried
+                # automatically: the external action may already have taken
+                # effect, and only the Core may decide, from this evidence,
+                # whether to verify or ask.
+                self._close_interrupted_dispatch(self._store.load(summary.goal_id))
+            if not self._flush_pending_memory_batches(summary.goal_id):
+                return CoreOutcome(CoreState.ERROR, None, reason="memory_persistence_error")
+
+        snapshot: GoalSnapshot | None = None
         retrieved_memories: tuple[MemorySnapshot, ...] = ()
         transient_attempts: tuple[CapabilityAttempt, ...] = ()
         memory_query_ids: set[str] = set()
+        # How many times this turn has moved to a different goal. Reading one
+        # goal before acting is legitimate; walking the conversation's goals
+        # one at a time buys a reasoning call per goal, so it is not.
+        selections = 0
         for _ in range(step_budget):
             try:
                 now = self._clock()
@@ -148,6 +160,7 @@ class CoreAgent:
                     raise ValueError("Core clock must be timezone-aware")
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="clock_error")
+            summaries = self._selectable_goals(conversation_id, snapshot)
             decision_provenance = self._derived_provenance(
                 now,
                 conversation,
@@ -156,7 +169,7 @@ class CoreAgent:
                 transient_attempts,
             )
             try:
-                self._budget_check(conversation.conversation_id)
+                self._budget_check(conversation_id)
             except Exception as error:
                 LOGGER.warning("Reasoning stopped by execution budget: %s", error)
                 return CoreOutcome(
@@ -173,12 +186,44 @@ class CoreAgent:
                     memories=retrieved_memories,
                     events=conversation.events,
                     transient_attempts=transient_attempts,
-                    conversation_id=conversation.conversation_id,
+                    conversation_id=conversation_id,
                     trigger_event_id=trigger_event_id,
+                    unfinished_goals=summaries,
                 ))
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
+            if decision.goal_id is not None:
+                selection_error = self._goal_selection_error(
+                    decision, snapshot, summaries, selections
+                )
+                if selection_error is not None:
+                    LOGGER.info("Goal selection rejected: %s", selection_error)
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason=selection_error)
+                if snapshot is None or snapshot.state.goal_id != decision.goal_id:
+                    snapshot = self._store.load(decision.goal_id)
+                    if snapshot.conversation_id != conversation_id:
+                        return CoreOutcome(CoreState.ERROR, None, reason="goal_conversation_mismatch")
+                    selections += 1
+                    # The selected goal is now a reasoning input, so the
+                    # provenance of everything this step persists must include
+                    # it. It was computed before the goal was known.
+                    decision_provenance = self._derived_provenance(
+                        now, conversation, snapshot, retrieved_memories,
+                        transient_attempts,
+                    )
+                if decision.selects_only:
+                    # Reading a goal before acting is a step, not a mutation.
+                    # Anything the Core proposes alongside it is reduced,
+                    # grounded and persisted by the one canonical block below,
+                    # exactly as it is for every other decision. A second path
+                    # here persisted an objective change before memory
+                    # grounding could reject the turn.
+                    if (
+                        decision.goal_proposal is None
+                        and not decision.memory_proposals
+                    ):
+                        continue
             decision = self._without_redundant_approval(decision)
             decision = replace(
                 decision,
@@ -192,6 +237,35 @@ class CoreAgent:
             candidate, proposal_error = self._reduce_goal_proposal(
                 snapshot, decision.goal_proposal, conversation, trigger_event_id,
             )
+            if proposal_error is not None:
+                LOGGER.info("Goal proposal rejected: %s", proposal_error)
+                if decision.response_requires_goal_commit or decision.finish_silently:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_proposal_invalid")
+            # The goal a call would run under: the reduced proposal when it was
+            # accepted, otherwise the attached goal exactly as it stands.
+            effective = (
+                candidate if proposal_error is None
+                else (None if snapshot is None else snapshot.state)
+            )
+            if decision.call is not None:
+                blocked = self._dispatch_blocked_reason(decision.call, effective)
+                if blocked is not None:
+                    # Eligibility is checked before any approval is recorded
+                    # and before another reasoning step is bought. A dispatch
+                    # that is structurally impossible in this state stays
+                    # impossible on the next step, because nothing about the
+                    # state changes: reasoning again from the same goal spent
+                    # twenty-five paid calls on one refused deletion. The Core
+                    # stops here with the reason, the approval it proposed is
+                    # left unrecorded and reusable, and the next turn reasons
+                    # afresh. Only the Core can say which goal the action
+                    # belongs to, so nothing is repaired deterministically.
+                    LOGGER.info(
+                        "Dispatch blocked before approval: %s for %s",
+                        blocked,
+                        decision.call.capability_id,
+                    )
+                    return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=blocked)
             if proposal_error is None and decision.approval_proposal is not None:
                 approval_error = self._approval_proposal_error(
                     conversation, candidate, decision
@@ -235,16 +309,9 @@ class CoreAgent:
                         ),
                     ),
                 )
-            if proposal_error is not None:
-                LOGGER.info("Goal proposal rejected: %s", proposal_error)
-                if decision.response_requires_goal_commit:
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_proposal_invalid")
 
             memory_error = self._memory_proposal_grounding_error(
-                conversation,
-                (None if previous is None else previous.state)
-                if proposal_error is not None else candidate,
-                decision.memory_proposals, now,
+                conversation, effective, decision.memory_proposals, now,
             )
             if memory_error is not None:
                 LOGGER.info("Memory proposal rejected: %s", memory_error)
@@ -254,20 +321,10 @@ class CoreAgent:
                 or decision.approval_proposal is not None
             ):
                 assert candidate is not None
-                if previous is None:
-                    snapshot = self._store.create(
-                        candidate,
-                        conversation.conversation_id,
-                        retention_until,
-                        decision_provenance,
-                    )
-                else:
-                    snapshot = self._store.replace(
-                        candidate,
-                        previous.retention_until,
-                        previous.revision,
-                        decision_provenance,
-                    )
+                snapshot = self._persist_goal(
+                    candidate, previous, conversation, retention_until,
+                    decision_provenance,
+                )
 
             if decision.memory_query is not None:
                 if decision.memory_query.query_id in memory_query_ids:
@@ -292,6 +349,12 @@ class CoreAgent:
                     snapshot, decision.memory_proposals, retention_until)
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                if decision.finish_silently:
+                    return CoreOutcome(
+                        CoreState.FINISHED_SILENTLY,
+                        snapshot,
+                        reason="core_selected_silence",
+                    )
                 return CoreOutcome(
                     CoreState.RESPONDED,
                     snapshot,
@@ -301,33 +364,8 @@ class CoreAgent:
                 )
 
             if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
-                definition = next(
-                    (item for item in self._capabilities
-                     if item.capability_id == decision.call.capability_id),
-                    None,
-                )
-                if definition is None or definition.side_effect not in (
-                    SideEffect.NONE,
-                    SideEffect.ATTENTION_STATE,
-                ):
-                    # An effectful call still needs an active goal, so it is
-                    # refused. Ending the conversation as well would make a
-                    # rejected goal proposal cost the whole session while
-                    # changing nothing about what may act.
-                    LOGGER.info(
-                        "Effectful call refused without an active goal: %s",
-                        decision.call.capability_id,
-                    )
-                    transient_attempts = (
-                        *transient_attempts,
-                        CapabilityAttempt(
-                            decision.call,
-                            CapabilityAttemptDisposition.REJECTED,
-                            False,
-                            reason_code="active_goal_required",
-                        ),
-                    )
-                    continue
+                # Only a side-effect-free call reaches here; an effectful one
+                # without an active goal was stopped above.
                 if any(item.call is not None and item.call.call_id == decision.call.call_id
                        for item in transient_attempts):
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
@@ -448,36 +486,13 @@ class CoreAgent:
         if snapshot is None:
             if proposal.kind is not GoalMutationKind.CREATE:
                 return None, "goal_missing"
-            if proposal.objective_summary is None or not proposal.success_criteria:
-                return None, "goal_creation_incomplete"
-            creation_error = self._new_history_error(proposal)
-            if creation_error:
-                return None, creation_error
-            state = GoalState(
-                self._identifier_factory(),
-                Objective(
-                    # A goal begun by an arriving event has no person turn to
-                    # attribute it to, and attributing it to an unrelated
-                    # earlier turn would misstate where it came from.
-                    self._objective_source(conversation, trigger_event_id),
-                    proposal.objective_summary,
-                ),
-                proposal.success_criteria,
-                context={} if proposal.context is None else proposal.context,
-                referents=() if proposal.referents is None else proposal.referents,
-                decisions=proposal.new_decisions, corrections=proposal.new_corrections,
-                progress=proposal.new_progress,
-                blockers=() if proposal.blockers is None else proposal.blockers,
-                outstanding_work=() if proposal.outstanding_work is None else proposal.outstanding_work,
-                evidence=proposal.new_evidence,
-            )
-            error = self._evidence_grounding_error(conversation, state, (), proposal.new_evidence)
-            if error:
-                return None, error
-            return state, None
+            return self._create_goal(proposal, conversation, trigger_event_id)
 
         if proposal.kind is GoalMutationKind.CREATE:
-            return snapshot.state, "goal_already_active"
+            # A conversation may hold several independent unfinished goals.
+            # Creating one never depends on the state of another: the goal
+            # the Core was working under, if any, is left exactly as it is.
+            return self._create_goal(proposal, conversation, trigger_event_id)
         state = snapshot.state
         if state.status in (GoalStatus.COMPLETED, GoalStatus.CANCELLED):
             return state, "goal_inactive"
@@ -507,6 +522,113 @@ class CoreAgent:
         except (TypeError, ValueError) as error_value:
             return state, str(error_value)
         return updated, None
+
+    def _create_goal(self, proposal: GoalProposal,
+                     conversation: ConversationSnapshot,
+                     trigger_event_id: str | None) -> tuple[GoalState | None, str | None]:
+        if proposal.objective_summary is None or not proposal.success_criteria:
+            return None, "goal_creation_incomplete"
+        creation_error = self._new_history_error(proposal)
+        if creation_error:
+            return None, creation_error
+        state = GoalState(
+            self._identifier_factory(),
+            Objective(
+                # A goal begun by an arriving event has no person turn to
+                # attribute it to, and attributing it to an unrelated
+                # earlier turn would misstate where it came from.
+                self._objective_source(conversation, trigger_event_id),
+                proposal.objective_summary,
+            ),
+            proposal.success_criteria,
+            context={} if proposal.context is None else proposal.context,
+            referents=() if proposal.referents is None else proposal.referents,
+            decisions=proposal.new_decisions, corrections=proposal.new_corrections,
+            progress=proposal.new_progress,
+            blockers=() if proposal.blockers is None else proposal.blockers,
+            outstanding_work=() if proposal.outstanding_work is None else proposal.outstanding_work,
+            evidence=proposal.new_evidence,
+        )
+        error = self._evidence_grounding_error(conversation, state, (), proposal.new_evidence)
+        if error:
+            return None, error
+        return state, None
+
+    def _persist_goal(self, candidate: GoalState, previous: GoalSnapshot | None,
+                      conversation: ConversationSnapshot, retention_until: datetime,
+                      provenance: ContentProvenance) -> GoalSnapshot:
+        """Write the reduced goal: a new record, or a revision of the attached one."""
+        if previous is None or candidate.goal_id != previous.state.goal_id:
+            return self._store.create(
+                candidate, conversation.conversation_id, retention_until, provenance,
+            )
+        return self._store.replace(
+            candidate, previous.retention_until, previous.revision, provenance,
+        )
+
+    def _selectable_goals(self, conversation_id: str,
+                          snapshot: GoalSnapshot | None) -> tuple[GoalSummary, ...]:
+        """The unfinished goals, plus the selected one whatever its status.
+
+        A goal the Core has just completed or cancelled leaves the unfinished
+        list, but it is still the goal this turn is working under and its
+        state is still what the Core is reasoning about. Dropping it here
+        would contradict the reasoning context on the very next step.
+        """
+        summaries = self._store.list_unfinished(conversation_id)
+        if snapshot is None or any(
+            item.goal_id == snapshot.state.goal_id for item in summaries
+        ):
+            return summaries
+        return (*summaries, GoalSummary.of(snapshot.state))
+
+    # One goal is read per turn. A second move to a different goal is refused
+    # rather than paid for: selecting A, then B, then C bought a reasoning
+    # call per goal and reached the step budget without acting.
+    _MAX_GOAL_SELECTIONS = 1
+
+    @classmethod
+    def _goal_selection_error(cls, decision: AgentDecision, snapshot: GoalSnapshot | None,
+                              summaries: tuple[GoalSummary, ...],
+                              selections: int) -> str | None:
+        """Check a selection the Core made; never make one for it."""
+        assert decision.goal_id is not None
+        if not any(item.goal_id == decision.goal_id for item in summaries):
+            return "goal_selection_unknown"
+        already_selected = (
+            snapshot is not None and snapshot.state.goal_id == decision.goal_id
+        )
+        if decision.selects_only and already_selected:
+            return "goal_selection_redundant"
+        if not already_selected and selections >= cls._MAX_GOAL_SELECTIONS:
+            return "goal_selection_exhausted"
+        return None
+
+    def _definition(self, capability_id: str) -> CapabilityDefinition | None:
+        return next(
+            (item for item in self._capabilities if item.capability_id == capability_id),
+            None,
+        )
+
+    def _dispatch_blocked_reason(self, call: CapabilityCall,
+                                 state: GoalState | None) -> str | None:
+        """Why a call cannot be dispatched in this goal state, if it cannot.
+
+        A side-effect-free call may serve plain conversation. Anything else
+        needs a goal that is active right now: a paused, finished or absent
+        goal cannot carry an approval or an attempt, so the dispatch is
+        impossible rather than merely refused, and reasoning again from the
+        same state cannot make it possible.
+        """
+        definition = self._definition(call.capability_id)
+        if definition is not None and definition.side_effect in (
+            SideEffect.NONE,
+            SideEffect.ATTENTION_STATE,
+        ):
+            return None
+        if state is None or state.status is not GoalStatus.ACTIVE:
+            return "active_goal_required"
+        return None
 
     # Text AL/X composed herself and is about to send outward must already have
     # reached Friedl in something she said. This is a property of the artifact,
@@ -666,7 +788,8 @@ class CoreAgent:
         known.update(f"attempt:{item.call.call_id}" for item in state.attempts
                      if item.call is not None
                      and item.disposition is not CapabilityAttemptDisposition.PENDING
-                     and item.result is not None)
+                     and item.result is not None
+                     and item.result.state is CapabilityResultState.SUCCEEDED)
         known.update(f"evidence:{item.evidence_id}" for item in existing)
         criteria = {item.criterion_id for item in state.success_criteria}
         seen = {item.evidence_id for item in existing}
@@ -891,11 +1014,7 @@ class CoreAgent:
         call = decision.call
         if call is None:
             return decision
-        definition = next(
-            (item for item in self._capabilities
-             if item.capability_id == call.capability_id),
-            None,
-        )
+        definition = self._definition(call.capability_id)
         if definition is None or definition.side_effect is SideEffect.EFFECTFUL:
             return decision
         if decision.approval_proposal is None and call.approval_id is None:

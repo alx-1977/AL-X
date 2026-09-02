@@ -210,6 +210,7 @@ class CapabilityCall:
     capability_id: str
     arguments: StructuredData = field(default_factory=dict)
     approval_id: str | None = None
+    durable_arguments: StructuredData | None = None
 
     def __post_init__(self) -> None:
         _required(self.call_id, "call_id")
@@ -217,6 +218,14 @@ class CapabilityCall:
         if self.approval_id is not None:
             _required(self.approval_id, "approval_id")
         object.__setattr__(self, "arguments", freeze_data(self.arguments))
+        durable = self.arguments if self.durable_arguments is None else self.durable_arguments
+        durable = freeze_data(durable)
+        if any(
+            key not in self.arguments or self.arguments[key] != value
+            for key, value in durable.items()
+        ):
+            raise ValueError("durable arguments must be an exact input projection")
+        object.__setattr__(self, "durable_arguments", durable)
 
 
 @dataclass(frozen=True, slots=True)

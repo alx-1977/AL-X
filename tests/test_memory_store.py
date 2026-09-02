@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from alx.contracts import (
+    ContentOrigin,
+    ContentProvenance,
+    MailReference,
     MemoryCorrection,
     MemoryKind,
     MemoryProposal,
@@ -24,6 +27,31 @@ from alx.memories import (
 
 
 NOW = datetime(2026, 8, 27, 10, 0, tzinfo=timezone.utc)
+
+
+def _provenance(
+    recorded_at: datetime, mail_uids: tuple[str, ...] = ()
+) -> ContentProvenance:
+    """Provenance as the Core stamps it: this step's time, this run's mail.
+
+    Both moving parts of the live record are reproduced here. recorded_at is
+    the moment of the reasoning step, and mail_references accumulate as
+    messages arrive during a conversation.
+    """
+    origins = {ContentOrigin.ALX, ContentOrigin.PERSON}
+    if mail_uids:
+        origins.add(ContentOrigin.MAIL_MESSAGE)
+    return ContentProvenance(
+        origins=frozenset(origins),
+        recorded_at=recorded_at,
+        mail_references=tuple(
+            MailReference(mailbox_id="INBOX", uid_validity="1376545928", uid=uid)
+            for uid in mail_uids
+        ),
+        content_expires_at=(
+            recorded_at + timedelta(days=30) if mail_uids else None
+        ),
+    )
 
 
 def proposal(
@@ -173,6 +201,69 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
         )
         with self.assertRaises(MemoryIdentityConflict):
             self.store.remember(conflict, retention)
+
+    def test_a_retry_is_idempotent_although_its_provenance_moved_on(self) -> None:
+        """The live case: the same memory, a later reasoning step.
+
+        The Core stamps fresh provenance onto every memory proposal on every
+        step, and two of its fields move by themselves: recorded_at is the
+        timestamp of that step, and mail_references grows as mail arrives.
+        Comparing provenance therefore made the retry guard unreachable, so a
+        memory identifier the Core reused ended the conversation with
+        memory_persistence_error while Friedl was mid-sentence.
+
+        Provenance describes the reasoning step that produced a memory. The
+        memory is the same memory.
+        """
+        retention = NOW + timedelta(days=90)
+        first = self.store.remember(
+            replace(proposal("memory-1"), provenance=_provenance(NOW)), retention,
+        )
+        later = replace(
+            proposal("memory-1"),
+            provenance=_provenance(NOW + timedelta(minutes=5), ("58705", "58706")),
+        )
+
+        self.assertEqual(self.store.remember(later, retention), first)
+
+    def test_a_matched_retry_never_disturbs_the_stored_provenance(self) -> None:
+        """D-013: the first write's origins and mail references are the record."""
+        retention = NOW + timedelta(days=90)
+        stored = self.store.remember(
+            replace(proposal("memory-1"), provenance=_provenance(NOW, ("58705",))),
+            retention,
+        )
+        before = stored.current.provenance
+
+        self.store.remember(
+            replace(
+                proposal("memory-1"),
+                provenance=_provenance(NOW + timedelta(hours=1), ("58705", "58706")),
+            ),
+            retention,
+        )
+
+        after = self.store.load("memory-1").current.provenance
+        self.assertEqual(after, before)
+        self.assertEqual(len(self.store.load("memory-1").revisions), 1)
+
+    def test_differing_content_under_a_reused_identifier_still_conflicts(self) -> None:
+        """Relaxing the provenance comparison must not admit a different memory."""
+        retention = NOW + timedelta(days=90)
+        self.store.remember(
+            replace(proposal("memory-1"), provenance=_provenance(NOW)), retention,
+        )
+        for changed in (
+            replace(proposal("memory-1"), content="a different reflection"),
+            replace(proposal("memory-1"), source_references=("conversation:turn-9",)),
+            replace(proposal("memory-1"), meaning="a different meaning"),
+            replace(proposal("memory-1"), formed_at=NOW + timedelta(minutes=1)),
+        ):
+            with self.subTest(changed=changed.content[:20]):
+                with self.assertRaises(MemoryIdentityConflict):
+                    self.store.remember(
+                        replace(changed, provenance=_provenance(NOW)), retention,
+                    )
 
     def test_memory_batch_rolls_back_every_new_record_on_conflict(self) -> None:
         retention = NOW + timedelta(days=90)

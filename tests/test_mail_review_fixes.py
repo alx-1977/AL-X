@@ -107,7 +107,7 @@ class ApprovalReleaseTests(unittest.TestCase):
         )
         agent = CoreAgent(self.store, reasoner, self.dispatcher(broker), (DEFINITION,),
                           clock=lambda: NOW, identifier_factory=lambda: "goal-1")
-        return agent.process(conversation(), None, RETENTION, 4)
+        return agent.process(conversation(), RETENTION, 4)
 
     def test_a_failed_move_returns_the_approval_for_a_retry(self) -> None:
         """The defect that produced five rejected Trash attempts in real state."""
@@ -132,13 +132,13 @@ class ApprovalReleaseTests(unittest.TestCase):
         self.first_turn(flaky)
         broker = self.broker_for(flaky)
         reasoner = Queued(
-            AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "approval-1")),
-            AgentDecision(response="Moved to Trash."),
+            AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "approval-1"),
+                          goal_id="goal-1"),
+            AgentDecision(response="Moved to Trash.", goal_id="goal-1"),
         )
         agent = CoreAgent(self.store, reasoner, self.dispatcher(broker), (DEFINITION,),
                           clock=lambda: NOW, identifier_factory=lambda: "goal-1")
-        outcome = agent.process(conversation("trash it", "try again"), "goal-1",
-                                RETENTION, 4)
+        outcome = agent.process(conversation("trash it", "try again"), RETENTION, 4)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(attempts["count"], 2, "the retry must reach the executor")
         approvals = self.store.load("goal-1").state.approvals
@@ -175,7 +175,7 @@ class ApprovalReleaseTests(unittest.TestCase):
         )
         agent = CoreAgent(self.store, reasoner, dispatch, (DEFINITION,),
                           clock=lambda: NOW, identifier_factory=lambda: "goal-1")
-        outcome = agent.process(conversation(), None, RETENTION, 4)
+        outcome = agent.process(conversation(), RETENTION, 4)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 1, "the refused action must not repeat")
 
@@ -332,9 +332,14 @@ class SessionResilienceTests(unittest.TestCase):
         self.assertIn("speech_transcription_error", RECOVERABLE_TRANSPORT_REASONS)
         # A refused action or an invalid Core decision is not a transport fault
         # and must not silently resume as though nothing happened.
-        for reason in ("repeated_rejected_call", "active_goal_required",
+        for reason in ("repeated_rejected_call",
                        "goal_proposal_invalid", "voice_transport_error"):
             self.assertNotIn(reason, RECOVERABLE_TRANSPORT_REASONS)
+        # A dispatch blocked by goal eligibility is different: the Core stopped
+        # after one decision, nothing acted and nothing was recorded, so the
+        # error phase is shown and listening continues for the turn that
+        # resolves it. Ending the session would cut Friedl off for asking.
+        self.assertIn("active_goal_required", RECOVERABLE_TRANSPORT_REASONS)
 
     def test_a_blank_reasoning_response_does_not_end_the_conversation(self) -> None:
         """Live failure: the model answered blank after 154 seconds.
@@ -354,7 +359,6 @@ class SessionResilienceTests(unittest.TestCase):
 
         for reason in (
             "repeated_rejected_call",
-            "active_goal_required",
             "goal_proposal_invalid",
             "voice_transport_error",
         ):
@@ -438,7 +442,10 @@ class SessionResilienceTests(unittest.TestCase):
 
         self.assertEqual(
             MID_EXCHANGE_RECOVERABLE_REASONS,
-            frozenset({"budget_exhausted", "budget_exceeded", "reasoner_error"}),
+            frozenset({
+                "budget_exhausted", "budget_exceeded", "reasoner_error",
+                "active_goal_required", "memory_persistence_error",
+            }),
         )
         # Every mid-exchange reason must also be recoverable at all.
         self.assertTrue(
@@ -575,7 +582,7 @@ class EventDrivenGoalTests(unittest.TestCase):
         outcome = CoreAgent(
             store, reasoner, lambda call, state: None, (),
             clock=lambda: NOW, identifier_factory=lambda: "goal-1",
-        ).process(snapshot, None, RETENTION, 2, trigger_event_id="event-1")
+        ).process(snapshot, RETENTION, 2, trigger_event_id="event-1")
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(
             store.load("goal-1").state.objective.source_reference, "event:event-1"
@@ -602,7 +609,7 @@ class EventDrivenGoalTests(unittest.TestCase):
         outcome = CoreAgent(
             store, reasoner, lambda call, state: None, (),
             clock=lambda: NOW, identifier_factory=lambda: "goal-1",
-        ).process(snapshot, None, RETENTION, 2)
+        ).process(snapshot, RETENTION, 2)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(
             store.load("goal-1").state.objective.source_reference, "event:event-1"

@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from alx.contracts import ModelCompletion, ModelRequest
+from alx.contracts import ModelCompletion, ModelRequest, normalise_usage
 from alx.providers.errors import ProviderError, raise_provider_failure
 
 
@@ -32,8 +32,19 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
+    return {
+        "kind": request.kind,
+        "tier": request.tier,
+        "reservation_id": request.reservation_id,
+        "reserved_usd": request.reserved_usd,
+    }
+
+
 class OpenAIReasoningModel:
     """Translate neutral AL/X model requests to the OpenAI Responses API."""
+
+    supports_bounded_research = True
 
     def __init__(
         self,
@@ -80,6 +91,10 @@ class OpenAIReasoningModel:
                 }
             },
         }
+        if request.max_output_tokens is not None:
+            # Enforced by the provider, not by us reading usage afterwards.
+            # A bound applied after the fact cannot stop the spend it measures.
+            payload["max_output_tokens"] = request.max_output_tokens
         if self._service_tier != "default":
             payload["service_tier"] = self._service_tier
         cache_key = request.cache_key or request.affinity_key
@@ -114,15 +129,20 @@ class OpenAIReasoningModel:
             output = json.loads(content)
             if not isinstance(output, dict):
                 raise _OpenAIProtocolError("structured_output_not_object")
-            if not isinstance(usage, dict):
-                usage = {}
+            # Normalised here, once, so telemetry and cost settlement read the
+            # same numbers. Parsing the provider's own layout downstream is what
+            # let cached tokens be priced as uncached.
+            usage = normalise_usage(usage)
             completion = ModelCompletion("openai", model, output, usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
-                self._completion_telemetry(
-                    model, service_tier, usage, duration, timings
-                ),
+                {
+                    **self._completion_telemetry(
+                        model, service_tier, usage, duration, timings
+                    ),
+                    **_request_telemetry(request),
+                },
             )
             LOGGER.info("Reasoning provider request completed in %.3f seconds", duration)
             return completion
@@ -138,6 +158,7 @@ class OpenAIReasoningModel:
                     "duration_ms": round(duration * 1000),
                     "error_type": type(error).__name__,
                     "error_code": error_code,
+                    **_request_telemetry(request),
                 },
             )
             LOGGER.info(
@@ -307,15 +328,11 @@ class OpenAIReasoningModel:
                 timings.get("answer_generation_seconds", 0.0) * 1000
             ),
             "input_tokens": self._nested_integer(usage, "input_tokens"),
-            "cached_tokens": self._nested_integer(
-                usage, "input_tokens_details", "cached_tokens"
-            ),
+            "cached_tokens": self._nested_integer(usage, "cached_tokens"),
             "cache_write_tokens": self._nested_integer(
-                usage, "input_tokens_details", "cache_write_tokens"
+                usage, "cache_write_tokens"
             ),
-            "reasoning_tokens": self._nested_integer(
-                usage, "output_tokens_details", "reasoning_tokens"
-            ),
+            "reasoning_tokens": self._nested_integer(usage, "reasoning_tokens"),
             "output_tokens": self._nested_integer(usage, "output_tokens"),
             "total_tokens": self._nested_integer(usage, "total_tokens"),
         }

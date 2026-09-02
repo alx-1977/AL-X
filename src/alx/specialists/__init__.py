@@ -9,12 +9,24 @@ from alx.specialists.invoice import (
     invoice_question,
     is_supplier_bill,
 )
+from alx.specialists.research import (
+    ResearchCeilingFailed,
+    ResearchInputUnbounded,
+    ResearchModelUnbounded,
+    ResearchSpecialist,
+    ResearchTierModel,
+)
 from alx.specialists.runner import ModelSpecialist, json_schema
 
 __all__ = [
     "EXTRACT_INVOICE",
     "INSTRUCTION",
     "ModelSpecialist",
+    "ResearchSpecialist",
+    "ResearchTierModel",
+    "ResearchCeilingFailed",
+    "ResearchInputUnbounded",
+    "ResearchModelUnbounded",
     "checked_invoice",
     "extract_invoice",
     "invoice_question",

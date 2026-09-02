@@ -379,7 +379,7 @@ class RuntimeLogsAreSanitisedTests(unittest.TestCase):
             )
 
             with self.assertLogs("alx", level="DEBUG") as captured:
-                outcome = core.process(conversation, None, retention, 3)
+                outcome = core.process(conversation, retention, 3)
 
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "reasoner_error")
@@ -437,7 +437,7 @@ class RuntimeLogsAreSanitisedTests(unittest.TestCase):
                 retention,
             )
             with self.assertLogs("alx", level="DEBUG"):
-                outcome = core.process(conversation, None, retention, 3)
+                outcome = core.process(conversation, retention, 3)
 
         self.assertNotIn(SECRET, repr(outcome))
 

@@ -356,6 +356,22 @@ class SQLiteMemoryStore:
         proposal: MemoryProposal,
         retention_until: datetime,
     ) -> bool:
+        """Whether a proposal is the memory already stored under that identifier.
+
+        Every field that constitutes the memory is compared: what is
+        remembered, who it concerns, what it came from, when it was formed and
+        what it means. Provenance is deliberately not among them. It describes
+        the reasoning step that produced the proposal, not the fact being
+        remembered, and the Core stamps a fresh one on every step: its
+        recorded_at is that step's clock and its mail references grow as
+        messages arrive. Comparing it made this guard unreachable, so a
+        repeated identifier raised MemoryIdentityConflict, the Core returned
+        memory_persistence_error and the conversation ended mid-sentence.
+
+        A memory that differs in any of these fields is a different memory and
+        still conflicts, which is what stops one identifier quietly coming to
+        mean something else.
+        """
         initial = existing.revisions[0]
         return (
             existing.kind is proposal.kind
@@ -365,7 +381,6 @@ class SQLiteMemoryStore:
             and initial.source_references == proposal.source_references
             and initial.recorded_at == proposal.formed_at
             and initial.meaning == proposal.meaning
-            and initial.provenance == proposal.provenance
             and existing.retention_until == retention_until
         )
 

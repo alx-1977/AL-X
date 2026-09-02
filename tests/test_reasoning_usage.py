@@ -488,6 +488,9 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
             def load(self, _goal_id):
                 return None
 
+            def list_unfinished(self, _conversation_id):
+                return ()
+
         def check(_task_id):
             raise BudgetExceeded("task-1", 5, 4)
 
@@ -501,9 +504,7 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
             turns = ()
             events = ()
 
-        outcome = agent.process(
-            Conversation(), None, _future(), step_budget=25
-        )
+        outcome = agent.process(Conversation(), _future(), step_budget=25)
         self.assertIs(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "budget_exceeded")
         self.assertEqual(calls, [])
@@ -512,6 +513,144 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
 
         self.assertIn("budget_exceeded", RECOVERABLE_TRANSPORT_REASONS)
+
+
+class CoreTelemetryPersistenceTests(unittest.TestCase):
+    """A Core call persists the provider's actual usage through the one path.
+
+    The live usage record held zero tokens for every reasoning-heavy Core call
+    on grok while short calls were measured. The adapter normalises the
+    provider's report once; the sink is the recorder; nothing else parses
+    usage. These drive that path with the shapes the providers actually send.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.path = Path(self._directory.name) / "reasoning-usage.sqlite3"
+        self.recorder = SQLiteUsageRecorder(self.path)
+
+    def _row(self) -> dict:
+        import sqlite3
+
+        database = sqlite3.connect(str(self.path))
+        database.row_factory = sqlite3.Row
+        try:
+            row = database.execute(
+                "SELECT * FROM reasoning_calls ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            database.close()
+        self.assertIsNotNone(row)
+        return dict(row)
+
+    @staticmethod
+    def _request():
+        from alx.contracts import ModelMessage, ModelRequest, ModelRole
+
+        return ModelRequest(
+            (ModelMessage(ModelRole.USER, "question"),),
+            "result", {"type": "object"}, "conversation-1",
+        )
+
+    def test_the_xai_streaming_shape_is_persisted_with_every_field(self) -> None:
+        """The exact live shape: 253 answered, 841 thought, 10,496 cached."""
+        import json
+
+        import httpx
+
+        from alx.providers import XAIReasoningModel
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            events = (
+                {"model": "grok-4.5", "choices": [{"delta": {"content": "{\"response\":"}}]},
+                {
+                    "model": "grok-4.5",
+                    "choices": [{"delta": {"content": "\"hello\"}"}}],
+                    "usage": {
+                        "prompt_tokens": 17805,
+                        "completion_tokens": 253,
+                        "total_tokens": 18899,
+                        "prompt_tokens_details": {"cached_tokens": 10496},
+                        "completion_tokens_details": {"reasoning_tokens": 841},
+                    },
+                },
+            )
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+            return httpx.Response(200, text=body + "data: [DONE]\n\n")
+
+        adapter = XAIReasoningModel(
+            "grok-4.5", "secret", "https://model.example", 10,
+            httpx.Client(transport=httpx.MockTransport(respond)),
+            streaming=True, telemetry_sink=self.recorder.sink,
+        )
+        adapter.complete(self._request())
+
+        row = self._row()
+        self.assertEqual(row["task_id"], "conversation-1")
+        self.assertEqual(row["provider"], "xai")
+        self.assertEqual(row["model"], "grok-4.5")
+        self.assertEqual(row["kind"], "core")
+        self.assertEqual(row["input_tokens"], 17805)
+        self.assertEqual(row["cached_tokens"], 10496)
+        self.assertEqual(row["cache_write_tokens"], 0)
+        self.assertEqual(row["output_tokens"], 1094)
+        self.assertEqual(row["reasoning_tokens"], 841)
+        self.assertGreaterEqual(row["duration_ms"], 0)
+        self.assertEqual(row["outcome"], "succeeded")
+        rollup = self.recorder.task("conversation-1")
+        self.assertEqual(rollup["calls"], 1)
+        self.assertEqual(rollup["providers"], ("xai",))
+
+    def test_the_openai_streaming_shape_is_persisted_with_every_field(self) -> None:
+        import json
+
+        import httpx
+
+        from alx.providers import OpenAIReasoningModel
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            events = (
+                {"type": "response.output_text.delta", "delta": "{\"response\":"},
+                {"type": "response.output_text.delta", "delta": "\"hello\"}"},
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "model": "gpt-5.4-2026-03-17",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 10000,
+                            "output_tokens": 2000,
+                            "total_tokens": 12000,
+                            "input_tokens_details": {
+                                "cached_tokens": 8000, "cache_write_tokens": 512,
+                            },
+                            "output_tokens_details": {"reasoning_tokens": 1500},
+                        },
+                    },
+                },
+            )
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+            return httpx.Response(200, text=body)
+
+        adapter = OpenAIReasoningModel(
+            "gpt-5.4", "secret", "https://model.example", 10,
+            httpx.Client(transport=httpx.MockTransport(respond)),
+            streaming=True, reasoning_effort="high",
+            telemetry_sink=self.recorder.sink,
+        )
+        adapter.complete(self._request())
+
+        row = self._row()
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["model"], "gpt-5.4-2026-03-17")
+        self.assertEqual(row["reasoning_effort"], "high")
+        self.assertEqual(row["input_tokens"], 10000)
+        self.assertEqual(row["cached_tokens"], 8000)
+        self.assertEqual(row["cache_write_tokens"], 512)
+        self.assertEqual(row["output_tokens"], 2000)
+        self.assertEqual(row["reasoning_tokens"], 1500)
+        self.assertGreaterEqual(row["duration_ms"], 0)
 
 
 def _future():

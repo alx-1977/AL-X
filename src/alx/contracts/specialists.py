@@ -55,6 +55,18 @@ class SpecialistQuestion:
     def bounded_material(self) -> str:
         return self.material[: self.material_limit]
 
+    @property
+    def material_omitted_characters(self) -> int:
+        """How much of the source `bounded_material` leaves out.
+
+        A specialist reads a bounded amount of one document, so the limit is
+        deliberate. What is not deliberate is a caller being unable to tell
+        that it applied: an answer read from the first part of a document is
+        weaker evidence than an answer read from all of it, and only the
+        reader can judge whether that matters.
+        """
+        return max(0, len(self.material) - self.material_limit)
+
 
 class SpecialistModel(Protocol):
     """Answers one bounded question and returns structured data."""
