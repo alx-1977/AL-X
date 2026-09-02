@@ -434,6 +434,58 @@ def _tier_settings(
     )
 
 
+AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
+
+
+def autonomous_reasoning_settings(
+    environment: Mapping[str, str],
+) -> "ReasoningSettings | None":
+    """The Core that answers an autonomous turn, or None when unconfigured.
+
+    Recorded under D-024a as a time-boxed experiment. Absent configuration
+    disables the second reasoner entirely rather than falling back to the
+    conversational Core, because a silent fallback would make the experiment
+    invisible: an autonomous turn would still run, on a model nobody chose.
+    """
+    provider = environment.get("ALX_AUTONOMOUS_PROVIDER", "").strip().lower()
+    model = environment.get("ALX_AUTONOMOUS_MODEL", "").strip()
+    if not provider or not model:
+        return None
+    key_name = {
+        "openai": "OPENAI_API_KEY",
+        "xai": "XAI_API_KEY",
+        "kimi": "KIMI_API_KEY",
+    }.get(provider, "ALX_AUTONOMOUS_API_KEY")
+    base_name = {
+        "openai": "OPENAI_BASE_URL",
+        "xai": "XAI_BASE_URL",
+        "kimi": "KIMI_BASE_URL",
+    }.get(provider, "ALX_AUTONOMOUS_BASE_URL")
+    base_fallback = {
+        "openai": "https://api.openai.com",
+        "xai": "https://api.x.ai",
+        "kimi": "https://api.moonshot.ai",
+    }.get(provider, "")
+    return ReasoningSettings(
+        provider=provider,
+        model=model,
+        api_key=_configured(
+            environment, "ALX_AUTONOMOUS_API_KEY", key_name, ""
+        ),
+        base_url=_configured(
+            environment, "ALX_AUTONOMOUS_BASE_URL", base_name, base_fallback
+        ).rstrip("/"),
+        timeout_seconds=_positive_integer(
+            environment, "ALX_AUTONOMOUS_TIMEOUT_SECONDS", 120
+        ),
+        streaming=_boolean(environment, "ALX_AUTONOMOUS_STREAMING", False),
+        service_tier=environment.get(
+            "ALX_AUTONOMOUS_SERVICE_TIER", "default"
+        ).strip().lower(),
+        effort=environment.get("ALX_AUTONOMOUS_EFFORT", "max").strip().lower(),
+    )
+
+
 def autonomous_cognition_daily_budget_usd(environment: Mapping[str, str]) -> float:
     """Friedl's hard daily ceiling on autonomous Core cognition.
 
@@ -530,6 +582,9 @@ class RuntimeSettings:
     # Cognition tiers for research. Configuration only: a tier chooses which
     # model answers a bounded question, never what AL/X investigates.
     research: ResearchSettings
+    # D-024a experiment: the Core that answers an autonomous turn. None when
+    # unconfigured, which disables the experiment entirely.
+    autonomous: "ReasoningSettings | None"
     speech_to_text: SpeechToTextSettings
     text_to_speech: TextToSpeechSettings
 
@@ -575,6 +630,7 @@ class RuntimeSettings:
             ),
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),
+            autonomous=autonomous_reasoning_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
                 model=_required(environment, "ALX_STT_MODEL"),

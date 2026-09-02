@@ -19,7 +19,7 @@ from alx.bootstrap.mail import (
 )
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.notebook import build_notebook_runtime
-from alx.bootstrap.reasoning import build_model_reasoner
+from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
     BILL_TASK_CAPABILITIES,
@@ -28,6 +28,7 @@ from alx.bootstrap.xero import (
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
+    AUTONOMOUS_MAX_OUTPUT_TOKENS,
     ConfigurationError,
     LiveVoiceSettings,
     MailSendSettings,
@@ -324,9 +325,27 @@ async def run(repository_root: Path) -> None:
         value for value in (approval_ttl_seconds, xero_approval_ttl_seconds)
         if value is not None
     )
+    # D-024a, time-boxed experiment: one Core answers Friedl, another answers a
+    # turn nobody asked for. Selection is one expression over CognitionOrigin,
+    # here and nowhere else. Absent configuration there is one Core, exactly as
+    # before, because a missing experimental model must disable the experiment
+    # rather than silently route autonomous turns to the conversational Core.
+    conversational_reasoner = build_model_reasoner(
+        providers.reasoning, repository_root
+    )
+    reasoner = conversational_reasoner
+    if providers.autonomous is not None:
+        reasoner = OriginSelectedReasoner(
+            conversational_reasoner,
+            build_model_reasoner(
+                providers.autonomous,
+                repository_root,
+                AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            ),
+        )
     core = CoreAgent(
         goal_store,
-        build_model_reasoner(providers.reasoning, repository_root),
+        reasoner,
         dispatch,
         registry.list_definitions(),
         memory_store,

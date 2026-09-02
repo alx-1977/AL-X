@@ -28,6 +28,10 @@ class RuntimeProviders:
     # specialist provider has no adapter, which disables specialist work
     # rather than sending it to the Core.
     specialist: ReasoningModel | None
+    # D-024a experiment: the Core that answers an autonomous turn. None when
+    # unconfigured, which disables the experiment rather than sending an
+    # autonomous turn to the conversational Core under another name.
+    autonomous: ReasoningModel | None
     speech_to_text: SpeechTranscriber
     text_to_speech: SpeechSynthesizer
 
@@ -112,6 +116,13 @@ def build_runtime_providers(
             f"reasoning provider adapter is not installed: {settings.reasoning.provider}"
         )
     specialist = _build_reasoning_model(settings.specialist, telemetry_sink)
+    # D-024a: the experimental autonomous Core, when one is configured. It is
+    # built by the same function, from the same settings shape, so it differs
+    # from the conversational Core only in provider, model and effort.
+    autonomous = (
+        None if settings.autonomous is None
+        else _build_reasoning_model(settings.autonomous, telemetry_sink)
+    )
 
     if settings.speech_to_text.provider != "cartesia":
         raise ConfigurationError(
@@ -124,6 +135,7 @@ def build_runtime_providers(
     return RuntimeProviders(
         reasoning=reasoning,
         specialist=specialist,
+        autonomous=autonomous,
         speech_to_text=CartesiaTranscriber(
             settings.speech_to_text.model,
             settings.speech_to_text.api_key,

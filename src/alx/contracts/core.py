@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Protocol
 
 from alx.contracts.capabilities import CapabilityDefinition
+from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.records import (
     ApprovalProposal,
     BackgroundEvent,
@@ -161,6 +162,9 @@ class ReasoningContext:
     # Every unfinished goal of the conversation, compactly. `active_goal` is
     # the full state of the one the Core has selected this turn, if any.
     unfinished_goals: tuple[GoalSummary, ...] = ()
+    # Where this turn came from. Provenance only: it says nobody asked, or that
+    # Friedl did. Nothing may be derived from it about what to think about.
+    origin: CognitionOrigin = CognitionOrigin.PERSON_TURN
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))

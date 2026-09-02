@@ -4,11 +4,57 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from alx.contracts import ReasoningModel
+from alx.contracts import CognitionOrigin, ReasoningModel
 from alx.core import ModelReasoner
 
 
-def build_model_reasoner(model: ReasoningModel, repository_root: Path) -> ModelReasoner:
+def build_model_reasoner(
+    model: ReasoningModel,
+    repository_root: Path,
+    max_output_tokens: int | None = None,
+) -> ModelReasoner:
+    """Build a reasoner over the approved Laws and identity.
+
+    Every reasoner reads the same two approved documents, so a second Core
+    built here is the same AL/X over a different model, never a different mind.
+    `max_output_tokens` is the provider-side generation ceiling: conversation
+    passes None, and a path spending against a dollar ceiling passes its bound.
+    """
     laws = (repository_root / "LAWS_OF_ALX.md").read_text(encoding="utf-8")
     identity = (repository_root / "IDENTITY_AND_MEMORY.md").read_text(encoding="utf-8")
-    return ModelReasoner(model, laws, identity)
+    return ModelReasoner(model, laws, identity, max_output_tokens)
+
+
+class OriginSelectedReasoner:
+    """Two Cores, chosen by where the turn came from. Nothing else.
+
+    Recorded under D-024a as a time-boxed experiment, not architecture. It
+    exists to compare one model answering Friedl with a stronger one thinking
+    unprompted, and it concludes with Friedl's deliberate decision.
+
+    The selection below is the whole mechanism: one expression over
+    `CognitionOrigin.is_autonomous`. There is deliberately no table, registry,
+    strategy object or per-turn choice, because each of those is the shape a
+    model router takes, and a router keyed on anything semantic would be a
+    second authority deciding which AL/X shows up before she has reasoned at
+    all.
+
+    Both reasoners are built from identical Laws, identity, catalogue,
+    contracts, stores, broker and gate. Only provider, model, effort and output
+    bound differ. `CoreAgent`, the broker and the gate are never told which one
+    answered, and nothing downstream can find out.
+    """
+
+    def __init__(self, conversational: ModelReasoner, autonomous: ModelReasoner) -> None:
+        self._conversational = conversational
+        self._autonomous = autonomous
+
+    def decide(self, context):
+        # The one expression. It reads `origin` and nothing else: not the
+        # goal, the notebook, the memories, the capabilities, the conversation,
+        # nor any content of the turn.
+        reasoner = (
+            self._autonomous if context.origin.is_autonomous
+            else self._conversational
+        )
+        return reasoner.decide(context)
