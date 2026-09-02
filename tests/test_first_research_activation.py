@@ -30,7 +30,7 @@ from alx.contracts import (  # noqa: E402
     SpecialistError,
     SpecialistQuestion,
 )
-from alx.observability.pricing import price_of, worst_case_usd  # noqa: E402
+from alx.observability.pricing import cost_usd, price_of, worst_case_usd  # noqa: E402
 from alx.specialists import ResearchTierModel  # noqa: E402
 from alx.specialists.research import ResearchCeilingFailed  # noqa: E402
 
@@ -152,13 +152,95 @@ def question(tier: Cognition) -> ResearchQuestion:
     )
 
 
+def _usage(cache_write: int = 0) -> dict[str, int]:
+    """One canonical, fully measured usage report."""
+    return {
+        "input_tokens": 10_000,
+        "cached_tokens": 0,
+        "output_tokens": 1_000,
+        "reasoning_tokens": 0,
+        "cache_write_tokens": cache_write,
+    }
+
+
 class VerifiedPricingTest(unittest.TestCase):
     """The rates Friedl verified on 2026-09-01, as recorded."""
 
     def test_the_three_models_carry_their_verified_rates(self) -> None:
-        self.assertEqual(price_of("openai", "gpt-5.4-nano"), (0.20, 0.02, 1.25))
-        self.assertEqual(price_of("openai", "gpt-5.4-mini"), (0.75, 0.075, 4.50))
-        self.assertEqual(price_of("openai", "gpt-5.4"), (2.50, 0.25, 15.00))
+        self.assertEqual(price_of("openai", "gpt-5.4-nano"), (0.20, 0.02, 1.25, None))
+        self.assertEqual(price_of("openai", "gpt-5.4-mini"), (0.75, 0.075, 4.50, None))
+        self.assertEqual(price_of("openai", "gpt-5.4"), (2.50, 0.25, 15.00, None))
+
+    def test_the_gpt_5_4_generation_carries_no_inferred_cache_write_rate(self) -> None:
+        """A GPT-5.6 fact must not become a GPT-5.4 rate.
+
+        Cache-write billing was verified for gpt-5.6-sol only. Deriving a rate
+        for an earlier generation from that multiplier would be exactly the
+        cross-family inference this table refuses, so these stay None until an
+        authoritative rate is recorded for them.
+        """
+        for model in ("gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"):
+            with self.subTest(model=model):
+                self.assertIsNone(price_of("openai", model).cache_write)
+
+    def test_the_core_model_carries_its_verified_rates(self) -> None:
+        """Recorded by Friedl on 2026-09-02 for the D-005 Core."""
+        self.assertEqual(
+            price_of("openai", "gpt-5.6-sol"), (4.00, 0.40, 20.00, 5.00)
+        )
+
+    def test_the_autonomous_experiment_model_carries_its_verified_rates(self) -> None:
+        """Recorded by Friedl on 2026-09-02 for the Luna autonomous evaluation.
+
+        Same generation as Sol, so cache writes bill separately. The rate is
+        verified for this model rather than derived from Sol's, even though the
+        1.25x relationship happens to hold for both.
+        """
+        self.assertEqual(
+            price_of("openai", "gpt-5.6-luna"), (0.20, 0.02, 1.20, 0.25)
+        )
+
+    def test_an_unapproved_experiment_snapshot_cannot_inherit_pricing(self) -> None:
+        self.assertIsNone(price_of("openai", "gpt-5.6-luna-preview"))
+        self.assertIsNone(price_of("openai", "gpt-5.6-luna-2026-09-02"))
+
+    def test_an_unapproved_core_snapshot_cannot_inherit_core_pricing(self) -> None:
+        """Exact identity only, for the Core model as for every other."""
+        self.assertIsNone(price_of("openai", "gpt-5.6-sol-2026-09-02"))
+        self.assertIsNone(price_of("openai", "gpt-5.6"))
+        self.assertIsNone(price_of("openai", "gpt-5.6-sol-preview"))
+
+    def test_cache_writes_are_charged_when_the_model_bills_them(self) -> None:
+        """The Core writes its stable prefix on every call; that is a real cost.
+
+        Leaving writes unpriced made a cache-heavy call look cheaper than it
+        was, against a hard daily ceiling.
+        """
+        without = cost_usd("openai", "gpt-5.6-sol", _usage(cache_write=0))
+        with_writes = cost_usd("openai", "gpt-5.6-sol", _usage(cache_write=10_000))
+        self.assertGreater(with_writes, without)
+        # 10,000 tokens at $5.00 per million.
+        self.assertAlmostEqual(with_writes - without, 0.05, places=6)
+
+    def test_cache_writes_cost_nothing_when_the_model_does_not_bill_them(self) -> None:
+        """A None rate means not applicable, so reported writes add nothing."""
+        without = cost_usd("openai", "gpt-5.4", _usage(cache_write=0))
+        with_writes = cost_usd("openai", "gpt-5.4", _usage(cache_write=10_000))
+        self.assertEqual(with_writes, without)
+
+    def test_the_worst_case_charges_input_once_as_uncached_and_once_as_write(
+        self,
+    ) -> None:
+        """A cache miss that also writes every input token is the expensive case."""
+        worst = worst_case_usd("openai", "gpt-5.6-sol", 32_000, 8_000)
+        # 32,000 x ($4.00 + $5.00) + 8,000 x $20.00, per million.
+        self.assertAlmostEqual(worst, 0.288 + 0.160, places=6)
+
+    def test_a_model_without_a_write_rate_has_no_write_term_in_its_worst_case(
+        self,
+    ) -> None:
+        worst = worst_case_usd("openai", "gpt-5.4", 32_000, 8_000)
+        self.assertAlmostEqual(worst, 32_000 / 1e6 * 2.50 + 8_000 / 1e6 * 15.00, 6)
 
     def test_an_unlisted_model_is_still_unpriced(self) -> None:
         """Recording three prices must not imply anything about a fourth."""
