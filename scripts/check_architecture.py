@@ -670,6 +670,87 @@ def _autonomous_selection_violations(
     return violations
 
 
+# D-024: `note` is AL/X's private message to her future self. Deterministic
+# code persists it and hands it back verbatim; it may never parse, classify,
+# score, keyword-match, summarise or branch on it. The moment code reads that
+# note, code has begun deciding what she meant, which is the whole thing this
+# mechanism exists to avoid.
+#
+# The gate is structural because the violation is easy and tempting: a helpful
+# "skip empty notes" or "index notes for search" reads exactly like a
+# convenience and is exactly the breach.
+NOTE_INTERPRETATION_METHODS = frozenset(
+    {
+        "lower", "upper", "casefold", "startswith", "endswith", "find",
+        "rfind", "index", "split", "rsplit", "partition", "search", "match",
+        "count", "replace", "strip", "encode", "translate", "title",
+    }
+)
+
+
+def _note_interpretation_violations(
+    relative_text: str, tree: ast.AST
+) -> list[Violation]:
+    """Prove nothing reads the private note.
+
+    Catches string inspection applied to anything named `note`, and any
+    conditional whose test is a bare note value. Storing, passing and returning
+    it are all untouched, because those are transport rather than reading.
+    """
+    violations: list[Violation] = []
+
+    def names_a_note(node: ast.AST) -> bool:
+        # See through a conversion such as str(values["note"]): wrapping the
+        # note in a cast does not make reading it something else.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("str", "repr", "format")
+            and node.args
+        ):
+            return names_a_note(node.args[0])
+        if isinstance(node, ast.Name):
+            return node.id == "note" or node.id.endswith("_note")
+        if isinstance(node, ast.Attribute):
+            return node.attr == "note" or node.attr.endswith("_note")
+        if isinstance(node, ast.Subscript):
+            key = node.slice
+            return isinstance(key, ast.Constant) and key.value == "note"
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if (
+                node.func.attr in NOTE_INTERPRETATION_METHODS
+                and names_a_note(node.func.value)
+            ):
+                violations.append(
+                    Violation(
+                        relative_text,
+                        node.lineno,
+                        f"the private note may not be inspected: .{node.func.attr}()"
+                        " reads what AL/X wrote to herself",
+                    )
+                )
+        if isinstance(node, (ast.If, ast.IfExp)) and names_a_note(node.test):
+            violations.append(
+                Violation(
+                    relative_text,
+                    node.lineno,
+                    "deterministic code may not branch on the private note",
+                )
+            )
+        if isinstance(node, ast.Compare) and names_a_note(node.left):
+            violations.append(
+                Violation(
+                    relative_text,
+                    node.lineno,
+                    "deterministic code may not compare the private note",
+                )
+            )
+    return violations
+
+
 def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
     root = root.resolve()
     rules = rules or load_rules(root)
@@ -720,6 +801,7 @@ def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
         visitor.visit(tree)
         violations.extend(visitor.violations)
         violations.extend(_autonomous_selection_violations(relative_text, tree))
+        violations.extend(_note_interpretation_violations(relative_text, tree))
         if owner == "interfaces":
             violations.extend(_voice_event_violations(path, relative_text, tree))
             violations.extend(_speech_synthesis_violations(relative_text, tree))

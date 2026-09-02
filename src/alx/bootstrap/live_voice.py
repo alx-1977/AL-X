@@ -18,6 +18,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.continuity import build_continuity_runtime
 from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
 from alx.bootstrap.xero import (
@@ -195,6 +196,20 @@ async def run(repository_root: Path) -> None:
     policies.update(notebook_runtime.policies)
     executors.update(notebook_runtime.executors)
     permissions.update(notebook_runtime.permissions)
+
+    # D-024: AL/X may ask for another cognition opportunity later. Phase 4
+    # creates and withdraws those requests durably; nothing honours them until
+    # the opportunity source exists, so this is inert on its own.
+    continuity_runtime = build_continuity_runtime(
+        storage_root,
+        voice_settings.goal_retention_days,
+        lambda: current_call_id[0],
+    )
+    for definition in continuity_runtime.definitions:
+        registry.register(definition)
+    policies.update(continuity_runtime.policies)
+    executors.update(continuity_runtime.executors)
+    permissions.update(continuity_runtime.permissions)
 
     # Paid research reaches AL/X as one capability through the same broker and
     # safety gate as everything else. It is absent unless a cognition tier is
