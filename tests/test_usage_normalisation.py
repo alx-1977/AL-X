@@ -110,9 +110,11 @@ class CachedPricingTest(unittest.TestCase):
     def test_cached_tokens_receive_the_cached_rate(self) -> None:
         values = normalise_usage(OPENAI_USAGE)
         cost = pricing.cost_usd("openai", "gpt-5.4-nano", values)
-        # 2,000 uncached x 0.20 + 8,000 cached x 0.02 + 3,500 out x 1.25
+        # 2,000 uncached x 0.20 + 8,000 cached x 0.02 + 2,000 output x 1.25.
+        # The 1,500 reasoning tokens are inside those 2,000 output tokens, not
+        # beside them, so they are not added again.
         expected = round(
-            2_000 / 1e6 * 0.20 + 8_000 / 1e6 * 0.02 + 3_500 / 1e6 * 1.25, 6
+            2_000 / 1e6 * 0.20 + 8_000 / 1e6 * 0.02 + 2_000 / 1e6 * 1.25, 6
         )
         self.assertAlmostEqual(cost, expected, places=6)
 
@@ -128,10 +130,15 @@ class CachedPricingTest(unittest.TestCase):
         raw = pricing.cost_usd("openai", "gpt-5.4-nano", OPENAI_USAGE)
         self.assertNotAlmostEqual(normalised, raw, places=6)
 
-    def test_reasoning_tokens_are_billed_as_output(self) -> None:
-        without = normalise_usage(
-            {"input_tokens": 0, "output_tokens": 2_000}
-        )
+    def test_reasoning_tokens_are_not_charged_a_second_time(self) -> None:
+        """They are a breakdown of output_tokens, not an addition to it.
+
+        The provider reports how many of the billed output tokens were internal
+        reasoning. Charging them again made a bounded response cost more than
+        its own reservation, which read as a provider-bound violation and
+        halted research on a call that had stayed within its limits.
+        """
+        plain = normalise_usage({"input_tokens": 0, "output_tokens": 2_000})
         with_reasoning = normalise_usage(
             {
                 "input_tokens": 0,
@@ -139,9 +146,45 @@ class CachedPricingTest(unittest.TestCase):
                 "output_tokens_details": {"reasoning_tokens": 1_500},
             }
         )
-        cheaper = pricing.cost_usd("openai", "gpt-5.4-nano", without)
-        dearer = pricing.cost_usd("openai", "gpt-5.4-nano", with_reasoning)
-        self.assertAlmostEqual(dearer - cheaper, 1_500 / 1e6 * 1.25, places=6)
+        self.assertEqual(
+            pricing.cost_usd("openai", "gpt-5.4-nano", plain),
+            pricing.cost_usd("openai", "gpt-5.4-nano", with_reasoning),
+        )
+        # Still recorded, because telemetry needs the breakdown even though
+        # pricing must not double it.
+        self.assertEqual(with_reasoning["reasoning_tokens"], 1_500)
+
+    def test_a_bounded_response_never_exceeds_its_own_reservation(self) -> None:
+        """The regression this fix exists to prevent.
+
+        A response that respects the enforced output bound must settle at or
+        under the worst case reserved for it, however much of that output was
+        reasoning. Otherwise a well-behaved call trips the ceiling and stops all
+        further research.
+        """
+        from alx.bootstrap.research import (
+            RESEARCH_MAX_INPUT_TOKENS,
+            RESEARCH_MAX_OUTPUT_TOKENS,
+        )
+
+        worst = pricing.worst_case_usd(
+            "openai", "gpt-5.4-nano",
+            RESEARCH_MAX_INPUT_TOKENS, RESEARCH_MAX_OUTPUT_TOKENS,
+        )
+        for reasoning in (0, 500, RESEARCH_MAX_OUTPUT_TOKENS):
+            usage = normalise_usage(
+                {
+                    "input_tokens": RESEARCH_MAX_INPUT_TOKENS,
+                    "output_tokens": RESEARCH_MAX_OUTPUT_TOKENS,
+                    "output_tokens_details": {"reasoning_tokens": reasoning},
+                }
+            )
+            cost = pricing.cost_usd("openai", "gpt-5.4-nano", usage)
+            self.assertLessEqual(
+                cost, worst,
+                f"a bounded response with {reasoning} reasoning tokens "
+                "billed above its reservation",
+            )
 
     def test_an_unmeasured_report_is_never_priced_as_free(self) -> None:
         self.assertIsNone(

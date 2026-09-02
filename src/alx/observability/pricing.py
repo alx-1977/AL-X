@@ -73,7 +73,13 @@ def cost_usd(provider: str, model: str, usage: Mapping[str, object]) -> float | 
     # layout at its boundary, so nothing here parses a vendor shape.
     input_tokens = _count(usage, "input_tokens")
     cached_tokens = min(_count(usage, "cached_tokens"), input_tokens)
-    output_tokens = _count(usage, "output_tokens") + _count(usage, "reasoning_tokens")
+    # Reasoning tokens are already inside output_tokens: the provider reports
+    # how many of the billed output tokens were internal reasoning, not an
+    # extra charge beside them. Adding them again billed a bounded response
+    # above its own reservation, which read as a provider-bound violation and
+    # halted research on a call that had done nothing wrong. They stay in the
+    # canonical shape as telemetry detail and are not priced separately.
+    output_tokens = _count(usage, "output_tokens")
     uncached_tokens = max(0, input_tokens - cached_tokens)
     return round(
         uncached_tokens / 1e6 * uncached_rate
