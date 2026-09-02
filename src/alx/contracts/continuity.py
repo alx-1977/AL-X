@@ -173,3 +173,60 @@ class CognitionOpportunitySource(Protocol):
     def events(self) -> AsyncIterator[BackgroundEvent]: ...
 
     def record_delivery(self, event_id: str) -> None: ...
+
+
+class CarriedThoughtStatus(str, Enum):
+    """Whether AL/X still holds a thought. Never how much it matters."""
+
+    OPEN = "open"
+    RAISED = "raised"
+    WITHDRAWN = "withdrawn"
+
+
+@dataclass(frozen=True, slots=True)
+class CarriedThought:
+    """Something AL/X keeps on her mind, in her own words.
+
+    It is content without an occasion: neither work with success criteria (a
+    goal), nor a claim about the world (a notebook entry), nor a judgement that
+    something mattered to her development (a memory), nor a moment she wants (a
+    future cognition request). Without this it would simply evaporate.
+
+    The fields are exhaustive on purpose. There is no priority, urgency,
+    category, sentiment, importance, expiry, delivery time, score or topic,
+    because each would be a place for a rule about when to raise a thought to
+    hide, and this is durable unfinished thinking rather than a message queue.
+
+    `content` is hers, stored and returned verbatim. Nothing in the runtime
+    reads it, and the three status transitions are things she does, never
+    things inferred from what she wrote.
+    """
+
+    thought_id: str
+    content: str
+    formed_at: datetime
+    references: tuple[str, ...] = ()
+    status: CarriedThoughtStatus = CarriedThoughtStatus.OPEN
+    provenance: "ContentProvenance | None" = None
+
+    def __post_init__(self) -> None:
+        _required(self.thought_id, "thought_id")
+        if not isinstance(self.content, str):
+            raise TypeError("content must be a string")
+        _aware(self.formed_at, "formed_at")
+        if not isinstance(self.status, CarriedThoughtStatus):
+            raise TypeError("status must be a CarriedThoughtStatus")
+        references = tuple(self.references)
+        if any(not item.strip() for item in references):
+            raise ValueError("references must not contain blanks")
+        if len(references) != len(set(references)):
+            raise ValueError("references must not contain duplicates")
+        object.__setattr__(self, "references", references)
+
+
+class CarriedThoughtNotFound(FutureCognitionError):
+    """No thought with that exact identity is in that state."""
+
+
+class DuplicateCarriedThought(FutureCognitionError):
+    """A thought identifier names one thought permanently."""

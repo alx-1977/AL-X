@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from alx.contracts.continuity import (
+    CarriedThought,
+    CarriedThoughtNotFound,
+    CarriedThoughtStatus,
+    DuplicateCarriedThought,
     DuplicateFutureCognition,
     FutureCognitionNotFound,
     FutureCognitionRequest,
@@ -65,6 +69,25 @@ class SQLiteContinuityStore:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS future_cognition_due "
                 "ON future_cognition(status, not_before)"
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS carried_thoughts (
+                    thought_id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    formed_at TEXT NOT NULL,
+                    refs TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    content_origins TEXT,
+                    content_recorded_at TEXT,
+                    content_expires_at TEXT,
+                    mail_references TEXT
+                )
+                """
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS carried_thoughts_open "
+                "ON carried_thoughts(status, formed_at)"
             )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -171,3 +194,96 @@ class SQLiteContinuityStore:
         if not changed:
             raise FutureCognitionNotFound(request_id)
         return self.load(request_id)
+
+    # --- carried thoughts -------------------------------------------------
+    #
+    # The same store, because one durable home for continuity state is one
+    # production path. The methods below move a thought between three states
+    # AL/X chooses; none of them reads what she wrote.
+
+    @staticmethod
+    def _row_to_thought(row: sqlite3.Row) -> CarriedThought:
+        return CarriedThought(
+            thought_id=row["thought_id"],
+            # Verbatim, like the note. A thought that came back altered would
+            # not be the one she formed.
+            content=row["content"],
+            formed_at=datetime.fromisoformat(row["formed_at"]),
+            references=tuple(item for item in row["refs"].split("\x1f") if item),
+            status=CarriedThoughtStatus(row["status"]),
+            provenance=provenance_from_storage(
+                row["content_origins"],
+                row["content_recorded_at"],
+                row["content_expires_at"],
+                row["mail_references"],
+            ),
+        )
+
+    def record_thought(self, thought: CarriedThought) -> CarriedThought:
+        stored = provenance_to_storage(thought.provenance)
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "INSERT INTO carried_thoughts(thought_id, content, formed_at, "
+                    "refs, status, content_origins, content_recorded_at, "
+                    "content_expires_at, mail_references) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        thought.thought_id,
+                        thought.content,
+                        thought.formed_at.isoformat(),
+                        "\x1f".join(thought.references),
+                        thought.status.value,
+                        *stored,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise DuplicateCarriedThought(thought.thought_id) from error
+        return self.load_thought(thought.thought_id)
+
+    def load_thought(self, thought_id: str) -> CarriedThought:
+        row = self._connection.execute(
+            "SELECT * FROM carried_thoughts WHERE thought_id = ?", (thought_id,)
+        ).fetchone()
+        if row is None:
+            raise CarriedThoughtNotFound(thought_id)
+        return self._row_to_thought(row)
+
+    def _set_thought_status(
+        self, thought_id: str, status: CarriedThoughtStatus
+    ) -> CarriedThought:
+        with self._connection:
+            changed = self._connection.execute(
+                "UPDATE carried_thoughts SET status = ? WHERE thought_id = ? "
+                "AND status = ?",
+                (status.value, thought_id, CarriedThoughtStatus.OPEN.value),
+            ).rowcount
+        if not changed:
+            raise CarriedThoughtNotFound(thought_id)
+        return self.load_thought(thought_id)
+
+    def withdraw_thought(self, thought_id: str) -> CarriedThought:
+        """AL/X no longer holds this. Only the one named."""
+        return self._set_thought_status(
+            thought_id, CarriedThoughtStatus.WITHDRAWN
+        )
+
+    def mark_thought_raised(self, thought_id: str) -> CarriedThought:
+        """She brought it into conversation. Never inferred from content."""
+        return self._set_thought_status(thought_id, CarriedThoughtStatus.RAISED)
+
+    def open_thoughts(self, limit: int = 20) -> tuple[CarriedThought, ...]:
+        """Thoughts she still holds, most recent first.
+
+        Recency is the only ordering. It encodes no judgement about subject
+        matter, which is exactly why it is the one used: any other ordering
+        would be the runtime deciding which of her thoughts matters most.
+        """
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        rows = self._connection.execute(
+            "SELECT * FROM carried_thoughts WHERE status = ? "
+            "ORDER BY formed_at DESC, rowid DESC LIMIT ?",
+            (CarriedThoughtStatus.OPEN.value, limit),
+        ).fetchall()
+        return tuple(self._row_to_thought(row) for row in rows)

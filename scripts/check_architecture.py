@@ -688,15 +688,30 @@ NOTE_INTERPRETATION_METHODS = frozenset(
 )
 
 
+# A carried thought is AL/X's own unfinished thinking, and it is opaque for the
+# same reason her private note is: the moment code reads it, code has begun
+# deciding what she meant and when it should be raised. Only files that
+# legitimately hold her words are checked, so ordinary uses of the English word
+# "content" elsewhere are not swept up.
+OPAQUE_CONTENT_MODULES = (
+    "continuity/store.py",
+    "tools/continuity.py",
+    "continuity/source.py",
+    "bootstrap/autonomous.py",
+)
+
+
 def _note_interpretation_violations(
     relative_text: str, tree: ast.AST
 ) -> list[Violation]:
-    """Prove nothing reads the private note.
+    """Prove nothing reads the private note or a carried thought.
 
     Catches string inspection applied to anything named `note`, and any
     conditional whose test is a bare note value. Storing, passing and returning
     it are all untouched, because those are transport rather than reading.
     """
+    posix = relative_text.replace("\\", "/")
+    opaque_here = posix.endswith(OPAQUE_CONTENT_MODULES)
     violations: list[Violation] = []
 
     def names_a_note(node: ast.AST) -> bool:
@@ -709,13 +724,14 @@ def _note_interpretation_violations(
             and node.args
         ):
             return names_a_note(node.args[0])
+        opaque_names = ("note", "content") if opaque_here else ("note",)
         if isinstance(node, ast.Name):
-            return node.id == "note" or node.id.endswith("_note")
+            return node.id in opaque_names or node.id.endswith("_note")
         if isinstance(node, ast.Attribute):
-            return node.attr == "note" or node.attr.endswith("_note")
+            return node.attr in opaque_names or node.attr.endswith("_note")
         if isinstance(node, ast.Subscript):
             key = node.slice
-            return isinstance(key, ast.Constant) and key.value == "note"
+            return isinstance(key, ast.Constant) and key.value in opaque_names
         return False
 
     for node in ast.walk(tree):
@@ -728,8 +744,8 @@ def _note_interpretation_violations(
                     Violation(
                         relative_text,
                         node.lineno,
-                        f"the private note may not be inspected: .{node.func.attr}()"
-                        " reads what AL/X wrote to herself",
+                        f"AL/X's own words may not be inspected: .{node.func.attr}()"
+                        " reads what she wrote",
                     )
                 )
         if isinstance(node, (ast.If, ast.IfExp)) and names_a_note(node.test):
@@ -737,7 +753,7 @@ def _note_interpretation_violations(
                 Violation(
                     relative_text,
                     node.lineno,
-                    "deterministic code may not branch on the private note",
+                    "deterministic code may not branch on AL/X's own words",
                 )
             )
         if isinstance(node, ast.Compare) and names_a_note(node.left):
@@ -756,7 +772,7 @@ def _note_interpretation_violations(
                 Violation(
                     relative_text,
                     node.lineno,
-                    "deterministic code may not compare the private note",
+                    "deterministic code may not compare AL/X's own words",
                 )
             )
     return violations

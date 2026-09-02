@@ -24,6 +24,9 @@ from alx.contracts import (
     ValueKind,
 )
 from alx.contracts.continuity import (
+    CarriedThought,
+    CarriedThoughtNotFound,
+    DuplicateCarriedThought,
     DuplicateFutureCognition,
     FutureCognitionNotFound,
     FutureCognitionRequest,
@@ -32,6 +35,14 @@ from alx.contracts.continuity import (
 
 REQUEST_FUTURE_COGNITION = "request_future_cognition"
 WITHDRAW_FUTURE_COGNITION = "withdraw_future_cognition"
+RECORD_CARRIED_THOUGHT = "record_carried_thought"
+WITHDRAW_CARRIED_THOUGHT = "withdraw_carried_thought"
+MARK_CARRIED_THOUGHT_RAISED = "mark_carried_thought_raised"
+
+# How many open thoughts one reasoning turn is shown. A fixed uniform bound, so
+# a long list is trimmed by count rather than by anyone deciding which of her
+# thoughts is worth seeing.
+OPEN_THOUGHT_LIMIT = 20
 
 # A self-requested occasion may not be immediate. This is the mechanical
 # anti-tight-loop bound from D-024: it stops a turn spawning a turn without
@@ -45,6 +56,8 @@ _STRINGS = StructuredSchema(ValueKind.ARRAY, items=_STRING)
 _FAILURES = (
     "arguments_unusable",
     "request_not_found",
+    "thought_not_found",
+    "thought_already_exists",
     "request_already_exists",
     "requested_time_too_soon",
     "storage_failed",
@@ -100,9 +113,6 @@ WITHDRAW_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
-DEFINITIONS = (REQUEST_DEFINITION, WITHDRAW_DEFINITION)
-
-
 def _failed(call_id: str, capability_id: str, code: str) -> CapabilityResult:
     return CapabilityResult(
         call_id, capability_id, CapabilityResultState.FAILED, failure={"code": code}
@@ -114,7 +124,87 @@ def _code(error: Exception) -> str:
         "DuplicateFutureCognition": "request_already_exists",
         "FutureCognitionNotFound": "request_not_found",
         "FutureCognitionTooSoon": "requested_time_too_soon",
+        "DuplicateCarriedThought": "thought_already_exists",
+        "CarriedThoughtNotFound": "thought_not_found",
     }.get(type(error).__name__, "storage_failed")
+
+
+_THOUGHT = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "thought_id": _STRING,
+        "content": _STRING,
+        "formed_at": _STRING,
+        "status": _STRING,
+    },
+    ("thought_id", "content", "formed_at", "status"),
+    extra_properties=False,
+)
+
+RECORD_THOUGHT_DEFINITION = CapabilityDefinition(
+    RECORD_CARRIED_THOUGHT,
+    "Keep a thought on your mind in your own words. It is not a goal, a "
+    "notebook entry, a memory or a request for another occasion; it is "
+    "something unfinished you want to hold. Nothing acts on it by itself.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"thought_id": _STRING, "content": _STRING, "references": _STRINGS},
+        ("thought_id", "content"),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"thought_id": _STRING, "status": _STRING},
+        ("thought_id", "status"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+WITHDRAW_THOUGHT_DEFINITION = CapabilityDefinition(
+    WITHDRAW_CARRIED_THOUGHT,
+    "Let go of a thought you no longer hold, by its exact identity.",
+    StructuredSchema(
+        ValueKind.OBJECT, {"thought_id": _STRING}, ("thought_id",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"thought_id": _STRING, "status": _STRING},
+        ("thought_id", "status"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+MARK_RAISED_DEFINITION = CapabilityDefinition(
+    MARK_CARRIED_THOUGHT_RAISED,
+    "Record that you have brought a thought into conversation. Only you can "
+    "say that you raised it.",
+    StructuredSchema(
+        ValueKind.OBJECT, {"thought_id": _STRING}, ("thought_id",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"thought_id": _STRING, "status": _STRING},
+        ("thought_id", "status"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+
+DEFINITIONS = (
+    REQUEST_DEFINITION,
+    WITHDRAW_DEFINITION,
+    RECORD_THOUGHT_DEFINITION,
+    WITHDRAW_THOUGHT_DEFINITION,
+    MARK_RAISED_DEFINITION,
+)
 
 
 def build_continuity_executors(
@@ -183,7 +273,62 @@ def build_continuity_executors(
             durable_values={"request_id": stored.request_id},
         )
 
+    def record_thought(values: Mapping[str, Any]) -> CapabilityResult:
+        call_id = call_id_source()
+        try:
+            now = now_of()
+            thought = CarriedThought(
+                thought_id=str(values["thought_id"]),
+                # Carried verbatim. Never inspected.
+                content=str(values["content"]),
+                formed_at=now,
+                references=tuple(
+                    str(item) for item in values.get("references", ()) or ()
+                ),
+                provenance=RetentionPolicy().non_mail(ContentOrigin.ALX, now),
+            )
+            stored = store.record_thought(thought)
+        except (KeyError, TypeError, ValueError):
+            return _failed(call_id, RECORD_CARRIED_THOUGHT, "arguments_unusable")
+        except Exception as error:
+            return _failed(call_id, RECORD_CARRIED_THOUGHT, _code(error))
+        return CapabilityResult(
+            call_id,
+            RECORD_CARRIED_THOUGHT,
+            CapabilityResultState.SUCCEEDED,
+            {"thought_id": stored.thought_id, "status": stored.status.value},
+            durable_values={"thought_id": stored.thought_id},
+        )
+
+    def _transition(
+        capability_id: str, operation: Callable[[str], Any]
+    ) -> Callable[[Mapping[str, Any]], CapabilityResult]:
+        def run(values: Mapping[str, Any]) -> CapabilityResult:
+            call_id = call_id_source()
+            try:
+                stored = operation(str(values["thought_id"]))
+            except (KeyError, TypeError, ValueError):
+                return _failed(call_id, capability_id, "arguments_unusable")
+            except Exception as error:
+                return _failed(call_id, capability_id, _code(error))
+            return CapabilityResult(
+                call_id,
+                capability_id,
+                CapabilityResultState.SUCCEEDED,
+                {"thought_id": stored.thought_id, "status": stored.status.value},
+                durable_values={"thought_id": stored.thought_id},
+            )
+
+        return run
+
     return {
         REQUEST_FUTURE_COGNITION: request,
         WITHDRAW_FUTURE_COGNITION: withdraw,
+        RECORD_CARRIED_THOUGHT: record_thought,
+        WITHDRAW_CARRIED_THOUGHT: _transition(
+            WITHDRAW_CARRIED_THOUGHT, store.withdraw_thought
+        ),
+        MARK_CARRIED_THOUGHT_RAISED: _transition(
+            MARK_CARRIED_THOUGHT_RAISED, store.mark_thought_raised
+        ),
     }
