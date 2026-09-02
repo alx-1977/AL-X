@@ -284,6 +284,23 @@ class ResearchBudgetTest(unittest.TestCase):
         researcher.answer(question())
         self.assertAlmostEqual(ledger.committed_usd(), 0.09, places=6)
 
+    def test_malformed_partial_usage_settles_at_the_full_reservation(self) -> None:
+        """A detail without its billed total cannot make paid work free."""
+        ledger = self.ledger(daily=10.0, per_request=2.0)
+        model = RecordingModel(
+            "testvendor",
+            "test-model",
+            {
+                "input_tokens": 0,
+                "cached_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 900,
+            },
+        )
+        researcher, _ = self.researcher(ledger, model)
+        researcher.answer(question())
+        self.assertAlmostEqual(ledger.committed_usd(), 0.09, places=6)
+
     def test_measured_cost_is_recorded_and_the_remainder_returned(self) -> None:
         ledger = self.ledger(daily=10.0, per_request=2.0)
         # 1M output tokens at 50 USD/1M would be 50; 1000 tokens is 0.05.

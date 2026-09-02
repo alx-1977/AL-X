@@ -6,8 +6,8 @@ cannot take part in paid autonomous research; it is not quietly charged at a
 neighbouring model's rate. Adding a model to this table is a deliberate act.
 
 Rates are USD per million tokens as (uncached input, cached input, output).
-Reasoning tokens are billed as output by every provider configured here, so
-they are added to the output count rather than priced separately.
+Reasoning tokens are a detail within the billed output total and are therefore
+recorded but not added to that total a second time.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Mapping
 # be confused for one another.
 # Mirrors alx.contracts.usage.MEASURED_FIELDS. Observability may not import
 # contracts, so the list is restated and a test proves it has not drifted.
-MEASURED_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens")
+MEASURED_FIELDS = ("input_tokens", "output_tokens")
 
 
 USD_PER_MILLION: dict[tuple[str, str], tuple[float, float, float]] = {
@@ -66,20 +66,19 @@ def cost_usd(provider: str, model: str, usage: Mapping[str, object]) -> float | 
     # Observability is a leaf module and may not import contracts, so this
     # restates alx.contracts.usage.MEASURED_FIELDS rather than importing it. A
     # test asserts the two stay identical.
-    if not any(_count(usage, name) for name in MEASURED_FIELDS):
+    measured = _measured_counts(usage)
+    if measured is None:
         return None
     uncached_rate, cached_rate, output_rate = rate
     # Canonical field names only. The adapter normalised the provider's own
     # layout at its boundary, so nothing here parses a vendor shape.
-    input_tokens = _count(usage, "input_tokens")
-    cached_tokens = min(_count(usage, "cached_tokens"), input_tokens)
+    input_tokens, cached_tokens, output_tokens = measured
     # Reasoning tokens are already inside output_tokens: the provider reports
     # how many of the billed output tokens were internal reasoning, not an
     # extra charge beside them. Adding them again billed a bounded response
     # above its own reservation, which read as a provider-bound violation and
     # halted research on a call that had done nothing wrong. They stay in the
     # canonical shape as telemetry detail and are not priced separately.
-    output_tokens = _count(usage, "output_tokens")
     uncached_tokens = max(0, input_tokens - cached_tokens)
     return round(
         uncached_tokens / 1e6 * uncached_rate
@@ -94,6 +93,30 @@ def _count(usage: Mapping[str, object], name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return max(0, value)
+
+
+def _measured_counts(
+    usage: Mapping[str, object],
+) -> tuple[int, int, int] | None:
+    """Validate canonical billing totals without parsing a provider shape."""
+    values: dict[str, int] = {}
+    for name in MEASURED_FIELDS:
+        value = usage.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        values[name] = value
+    for name in ("cached_tokens", "reasoning_tokens"):
+        value = usage.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        values[name] = value
+    if values["cached_tokens"] > values["input_tokens"]:
+        return None
+    if values["reasoning_tokens"] > values["output_tokens"]:
+        return None
+    if not values["input_tokens"] and not values["output_tokens"]:
+        return None
+    return values["input_tokens"], values["cached_tokens"], values["output_tokens"]
 
 
 class ConfiguredPricing:

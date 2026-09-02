@@ -27,22 +27,47 @@ CANONICAL_FIELDS = (
     "total_tokens",
 )
 
-# Whether the report carried any measurement at all. An empty or unparseable
-# report is not evidence a call was free, so callers that spend money treat a
-# report failing this as unmeasured and charge the full reservation.
-MEASURED_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens")
+# The two totals a complete usage measurement must contain. Detail fields can
+# refine those totals, but cannot establish a measurement by themselves.
+MEASURED_FIELDS = ("input_tokens", "output_tokens")
+
+_MISSING = object()
+_INVALID = object()
 
 
-def _integer(values: Mapping[str, Any], *path: str) -> int:
-    """A non-negative integer at a nested path, or zero."""
+def _value(values: Mapping[str, Any], *path: str) -> object:
+    """Return a nested value while distinguishing absence from bad structure."""
     current: Any = values
     for key in path:
         if not isinstance(current, Mapping):
-            return 0
-        current = current.get(key)
-    if isinstance(current, bool) or not isinstance(current, int):
-        return 0
-    return max(0, current)
+            return _INVALID
+        if key not in current:
+            return _MISSING
+        current = current[key]
+    return current
+
+
+def _aliased_count(
+    values: Mapping[str, Any],
+    paths: tuple[tuple[str, ...], ...],
+    *,
+    required: bool = False,
+) -> int | object:
+    """Read the first present alias without converting malformed values to zero."""
+    for path in paths:
+        value = _value(values, *path)
+        if value is _MISSING:
+            continue
+        if value is _INVALID or isinstance(value, bool) or not isinstance(value, int):
+            return _INVALID
+        if value < 0:
+            return _INVALID
+        return value
+    return _INVALID if required else 0
+
+
+def _unmeasured() -> dict[str, int]:
+    return {name: 0 for name in CANONICAL_FIELDS}
 
 
 def normalise_usage(usage: Any) -> dict[str, int]:
@@ -54,41 +79,74 @@ def normalise_usage(usage: Any) -> dict[str, int]:
     that spend money check `is_measured` instead.
     """
     if not isinstance(usage, Mapping):
-        return {name: 0 for name in CANONICAL_FIELDS}
+        return _unmeasured()
 
     # Responses-style first, then chat-completions names for the same quantity.
-    input_tokens = _integer(usage, "input_tokens") or _integer(usage, "prompt_tokens")
-    output_tokens = _integer(usage, "output_tokens") or _integer(
-        usage, "completion_tokens"
+    input_tokens = _aliased_count(
+        usage, (("input_tokens",), ("prompt_tokens",)), required=True
     )
-    cached = (
-        _integer(usage, "input_tokens_details", "cached_tokens")
-        or _integer(usage, "prompt_tokens_details", "cached_tokens")
-        or _integer(usage, "cached_tokens")
+    output_tokens = _aliased_count(
+        usage, (("output_tokens",), ("completion_tokens",)), required=True
     )
-    cache_write = (
-        _integer(usage, "input_tokens_details", "cache_write_tokens")
-        or _integer(usage, "prompt_tokens_details", "cache_write_tokens")
-        or _integer(usage, "cache_write_tokens")
+    cached = _aliased_count(
+        usage,
+        (
+            ("input_tokens_details", "cached_tokens"),
+            ("prompt_tokens_details", "cached_tokens"),
+            ("cached_tokens",),
+        ),
     )
-    reasoning = (
-        _integer(usage, "output_tokens_details", "reasoning_tokens")
-        or _integer(usage, "completion_tokens_details", "reasoning_tokens")
-        or _integer(usage, "reasoning_tokens")
+    cache_write = _aliased_count(
+        usage,
+        (
+            ("input_tokens_details", "cache_write_tokens"),
+            ("prompt_tokens_details", "cache_write_tokens"),
+            ("cache_write_tokens",),
+        ),
     )
-    # Cached input is a subset of input. A provider reporting more cached than
-    # input would otherwise produce a negative uncached count and undercharge.
-    cached = min(cached, input_tokens)
+    reasoning = _aliased_count(
+        usage,
+        (
+            ("output_tokens_details", "reasoning_tokens"),
+            ("completion_tokens_details", "reasoning_tokens"),
+            ("reasoning_tokens",),
+        ),
+    )
+    total = _aliased_count(usage, (("total_tokens",),))
+    counts = (input_tokens, output_tokens, cached, cache_write, reasoning, total)
+    if any(value is _INVALID for value in counts):
+        return _unmeasured()
+    assert all(isinstance(value, int) for value in counts)
+    if cached > input_tokens or reasoning > output_tokens:
+        return _unmeasured()
+    if total and total != input_tokens + output_tokens:
+        return _unmeasured()
     return {
         "input_tokens": input_tokens,
         "cached_tokens": cached,
         "cache_write_tokens": cache_write,
         "output_tokens": output_tokens,
         "reasoning_tokens": reasoning,
-        "total_tokens": _integer(usage, "total_tokens"),
+        "total_tokens": total,
     }
 
 
 def is_measured(usage: Mapping[str, Any]) -> bool:
-    """Whether a normalised report carries any token count at all."""
-    return any(_integer(usage, name) for name in MEASURED_FIELDS)
+    """Whether a canonical report has complete, internally consistent totals."""
+    input_tokens = _value(usage, "input_tokens")
+    output_tokens = _value(usage, "output_tokens")
+    cached = _value(usage, "cached_tokens")
+    reasoning = _value(usage, "reasoning_tokens")
+    counts = (input_tokens, output_tokens, cached, reasoning)
+    if any(
+        value in (_MISSING, _INVALID)
+        or isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        for value in counts
+    ):
+        return False
+    assert all(isinstance(value, int) for value in counts)
+    if cached > input_tokens or reasoning > output_tokens:
+        return False
+    return input_tokens > 0 or output_tokens > 0

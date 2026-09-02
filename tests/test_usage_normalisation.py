@@ -84,11 +84,42 @@ class NormalisationTest(unittest.TestCase):
         self.assertEqual(values["reasoning_tokens"], 1_500)
 
     def test_cached_tokens_cannot_exceed_input_tokens(self) -> None:
-        """A nonsense report must not produce a negative uncached count."""
+        """An inconsistent report is unmeasured, not silently discounted."""
         values = normalise_usage(
-            {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 900}}
+            {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 900},
+            }
         )
-        self.assertEqual(values["cached_tokens"], 100)
+        self.assertFalse(is_measured(values))
+        self.assertIsNone(pricing.cost_usd("openai", "gpt-5.4-nano", values))
+
+    def test_partial_or_inconsistent_reports_are_unmeasured(self) -> None:
+        malformed = (
+            {"input_tokens": 100},
+            {"output_tokens": 100},
+            {"output_tokens_details": {"reasoning_tokens": 90}},
+            {
+                "input_tokens": 100,
+                "output_tokens": "bad",
+                "output_tokens_details": {"reasoning_tokens": 90},
+            },
+            {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "output_tokens_details": {"reasoning_tokens": 51},
+            },
+            {"input_tokens": -1, "output_tokens": 50},
+            {"input_tokens": 100, "output_tokens": 50, "total_tokens": 149},
+        )
+        for report in malformed:
+            with self.subTest(report=report):
+                values = normalise_usage(report)
+                self.assertFalse(is_measured(values))
+                self.assertIsNone(
+                    pricing.cost_usd("openai", "gpt-5.4-nano", values)
+                )
 
     def test_a_missing_report_normalises_to_zeros_and_is_unmeasured(self) -> None:
         for absent in (None, {}, "usage", 42, []):
