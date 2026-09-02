@@ -312,6 +312,12 @@ class ResearchSpecialist:
                 tier=question.cognition.value,
             )
 
+        # Two separate cuts can remove material: the question's own
+        # material_limit, applied before this specialist ever sees the text,
+        # and the priced input bound applied below. Measuring only the second
+        # would report a complete read of an already-shortened document, so
+        # the shortfall is counted against the original source.
+        already_omitted = question.material_omitted_characters
         material = question.bounded_material
         minimum = build(material[:1])
         if input_token_upper_bound(minimum) > self._max_input_tokens:
@@ -324,7 +330,11 @@ class ResearchSpecialist:
             else:
                 high = middle - 1
         request = build(material[:low])
-        return request, input_token_upper_bound(request), len(material) - low
+        return (
+            request,
+            input_token_upper_bound(request),
+            already_omitted + (len(material) - low),
+        )
 
     def _event(
         self,

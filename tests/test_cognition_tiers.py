@@ -262,6 +262,55 @@ class OmittedMaterialTest(unittest.TestCase):
         self.assertGreater(events[0]["omitted_characters"], 0)
         self.assertEqual(events[0]["question_id"], "q")
 
+    def test_the_question_s_own_material_limit_is_counted_too(self) -> None:
+        """Two cuts can remove material; the report must cover both.
+
+        `bounded_material` applies the question's material_limit before this
+        specialist sees the text. Measuring the shortfall only against that
+        already-shortened string would report a complete read of a document
+        that had in fact been cut upstream.
+        """
+        material = "x" * 9_000
+        asked = ResearchQuestion(
+            SpecialistQuestion(
+                question_id="q",
+                instruction="Answer from the material.",
+                material=material,
+                answer_schema=SCHEMA,
+                material_limit=6_000,
+            ),
+            Cognition.SURVEY,
+        )
+        # A ceiling generous enough that the priced bound removes nothing, so
+        # only the question's own limit is in play.
+        specialist = ResearchSpecialist(
+            {Cognition.SURVEY: ResearchTierModel("testvendor", "survey-model", self.model)},
+            RecordingLedger(), FreePricing(), 100_000, 1_000, 0.10,
+        )
+        answer = specialist.answer(asked)
+        sent = self.model.requests[-1].messages[-1].content
+        self.assertEqual(len(sent), 6_000)
+        self.assertEqual(answer["material_omitted_characters"], 3_000)
+        self.assertEqual(len(sent) + answer["material_omitted_characters"], len(material))
+
+    def test_both_cuts_are_reported_together(self) -> None:
+        """The upstream limit and the priced bound add up to one shortfall."""
+        material = "x" * 9_000
+        asked = ResearchQuestion(
+            SpecialistQuestion(
+                question_id="q",
+                instruction="Answer from the material.",
+                material=material,
+                answer_schema=SCHEMA,
+                material_limit=6_000,
+            ),
+            Cognition.SURVEY,
+        )
+        answer = self.specialist.answer(asked)
+        sent = self.model.requests[-1].messages[-1].content
+        self.assertLess(len(sent), 6_000)
+        self.assertEqual(len(sent) + answer["material_omitted_characters"], len(material))
+
     def test_the_specialist_draws_no_conclusion_from_the_omission(self) -> None:
         """It reports the shortfall and still answers; it does not refuse."""
         answer = self.specialist.answer(question(Cognition.SURVEY, "x" * 5_000))

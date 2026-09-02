@@ -45,6 +45,10 @@ class ResearchQuestion:
     def bounded_material(self) -> str:
         return self.question.bounded_material
 
+    @property
+    def material_omitted_characters(self) -> int:
+        return self.question.material_omitted_characters
+
 
 class ResearchModelUnpriced(Exception):
     """Raised when a model has no trustworthy price for paid research.
