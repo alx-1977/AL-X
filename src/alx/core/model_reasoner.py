@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from alx.contracts.models import input_token_upper_bound
 from alx.contracts import (
     AgentDecision,
     ApprovalProposal,
@@ -807,6 +808,27 @@ def decision_schema() -> dict[str, Any]:
     }
 
 
+class AutonomousRequestUnbounded(Exception):
+    """The constructed request exceeds the autonomous input ceiling.
+
+    Raised before any provider call and before any reservation, because a
+    reservation computed from a bound the request does not respect is not a
+    ceiling, it is a guess. Nothing is truncated to make it fit: cutting the
+    Laws, her identity, the catalogue, the conversation, her goals or her own
+    thoughts would change who is reasoning in order to save money, which is
+    the one trade this design may never make. The turn simply does not happen,
+    and that becomes evidence.
+    """
+
+    def __init__(self, measured: int, ceiling: int) -> None:
+        self.measured = measured
+        self.ceiling = ceiling
+        super().__init__(
+            f"autonomous request needs {measured} input tokens, above the "
+            f"{ceiling} ceiling; refusing rather than truncating"
+        )
+
+
 class ModelReasoner:
     """The sole model-backed implementation of the Core reasoning port."""
 
@@ -816,6 +838,7 @@ class ModelReasoner:
         laws: str,
         identity: str,
         max_output_tokens: int | None = None,
+        max_input_tokens: int | None = None,
     ) -> None:
         """One reasoner over one model.
 
@@ -837,6 +860,9 @@ class ModelReasoner:
         self._model = model
         self._constitutional_context = f"{laws.strip()}\n\n{identity.strip()}"
         self._max_output_tokens = max_output_tokens
+        # The input ceiling the reservation was computed against. Conversation
+        # sets none; a spending path sets the same number it reserved for.
+        self._max_input_tokens = max_input_tokens
 
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
@@ -846,8 +872,7 @@ class ModelReasoner:
             raise DecisionValidationError(reason) from error
 
     def _decide(self, context: ReasoningContext) -> AgentDecision:
-        completion = self._model.complete(
-            ModelRequest(
+        request = ModelRequest(
                 (
                     # Stable prefix first, volatile task material last, so a
                     # cache can reuse everything up to the changing content.
@@ -863,8 +888,16 @@ class ModelReasoner:
                 context.conversation_id,
                 CACHE_KEY,
                 self._max_output_tokens,
-            )
         )
+        if self._max_input_tokens is not None:
+            # Measured on the complete constructed request, not estimated from
+            # its parts, and measured before anything is sent. A reservation
+            # taken against a ceiling the request does not respect would be a
+            # guess wearing a ceiling's name.
+            measured = input_token_upper_bound(request)
+            if measured > self._max_input_tokens:
+                raise AutonomousRequestUnbounded(measured, self._max_input_tokens)
+        completion = self._model.complete(request)
         output = completion.output
         action = output["action"]
         disposition = action["type"]

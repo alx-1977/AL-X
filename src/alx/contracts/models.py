@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from collections.abc import Mapping
 from typing import Protocol
 
 from alx.contracts.records import StructuredData, freeze_data
@@ -95,3 +96,36 @@ class ReasoningModel(Protocol):
     """Replaceable model transport with no ownership of memory or tools."""
 
     def complete(self, request: ModelRequest) -> ModelCompletion: ...
+
+
+# A token consumes at least one encoded byte on the supported transports, and
+# the fixed allowance covers provider chat framing absent from the neutral
+# request. Both make this an upper bound rather than an estimate, which is what
+# a spending ceiling needs: under-counting would let a request cost more than
+# its reservation.
+PROTOCOL_INPUT_TOKEN_ALLOWANCE = 512
+
+
+def input_token_upper_bound(request: "ModelRequest") -> int:
+    """Conservatively bound the complete request, including schema and framing."""
+    import json
+
+    def _plain(value):
+        if isinstance(value, Mapping):
+            return {key: _plain(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_plain(item) for item in value]
+        return value
+
+    wire = {
+        "messages": [
+            {"role": item.role.value, "content": item.content}
+            for item in request.messages
+        ],
+        "output_schema_name": request.output_schema_name,
+        "output_schema": _plain(request.output_schema),
+    }
+    encoded = json.dumps(
+        wire, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return len(encoded) + PROTOCOL_INPUT_TOKEN_ALLOWANCE

@@ -435,6 +435,10 @@ def _tier_settings(
 
 
 AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
+# The input ceiling the autonomous reservation is computed against. Enforced on
+# the constructed request before dispatch: a bound nothing checks makes the
+# worst case a guess rather than a ceiling.
+AUTONOMOUS_MAX_INPUT_TOKENS = 32_000
 
 
 def autonomous_reasoning_settings(

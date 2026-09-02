@@ -30,6 +30,8 @@ from alx.bootstrap.xero import (
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
+    AUTONOMOUS_MAX_INPUT_TOKENS,
+    autonomous_cognition_daily_budget_usd,
     AUTONOMOUS_MAX_OUTPUT_TOKENS,
     ConfigurationError,
     LiveVoiceSettings,
@@ -38,6 +40,12 @@ from alx.config import (
     RuntimeSettings,
     XeroSettings,
 )
+from alx.continuity import (
+    FutureCognitionSource,
+    SQLiteOpportunityLedger,
+)
+from alx.observability import ConfiguredPricingWorstCase
+from alx.observability.autonomous_budget import SQLiteAutonomousLedger
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
@@ -212,6 +220,34 @@ async def run(repository_root: Path) -> None:
     executors.update(continuity_runtime.executors)
     permissions.update(continuity_runtime.permissions)
 
+    # D-024 Phases 2 and 5, composed but inert. The ledgers and the source are
+    # constructed here, once, so the paid path is real rather than something
+    # that only exists in tests. Nothing polls the source and nothing calls
+    # run_due(): activation is Phase 8 and is Friedl's to switch on.
+    #
+    # The source is enabled only when an autonomous Core is actually
+    # configured. Without one an autonomous turn would be refused at the
+    # reasoner anyway, so producing occasions nobody can answer would spend a
+    # reservation to reach a guaranteed refusal.
+    opportunity_ledger = SQLiteOpportunityLedger(
+        storage_root / "cognition-opportunities.sqlite3"
+    )
+    autonomous_budget = SQLiteAutonomousLedger(
+        storage_root / "autonomous-cognition-spend.sqlite3",
+        autonomous_cognition_daily_budget_usd(environment),
+        ConfiguredPricingWorstCase(),
+    )
+    cognition_source = FutureCognitionSource(
+        continuity_runtime.store,
+        opportunity_ledger,
+        enabled=providers.autonomous is not None,
+    )
+    LOGGER.info(
+        "Autonomous cognition composed: enabled=%s daily_budget_usd=%.4f",
+        cognition_source.enabled,
+        autonomous_cognition_daily_budget_usd(environment),
+    )
+
     # Paid research reaches AL/X as one capability through the same broker and
     # safety gate as everything else. It is absent unless a cognition tier is
     # enabled and a budget configured, so a runtime that has not been told it
@@ -349,16 +385,21 @@ async def run(repository_root: Path) -> None:
     conversational_reasoner = build_model_reasoner(
         providers.reasoning, repository_root
     )
-    reasoner = conversational_reasoner
-    if providers.autonomous is not None:
-        reasoner = OriginSelectedReasoner(
-            conversational_reasoner,
-            build_model_reasoner(
-                providers.autonomous,
-                repository_root,
-                AUTONOMOUS_MAX_OUTPUT_TOKENS,
-            ),
-        )
+    # The origin boundary always exists, configured or not. When no autonomous
+    # Core is configured the autonomous side is None and an autonomous turn is
+    # refused; it is never answered by the conversational model, because that
+    # would spend Friedl's money on a Core nobody selected and record the
+    # result as if the experiment had run.
+    reasoner = OriginSelectedReasoner(
+        conversational_reasoner,
+        None if providers.autonomous is None
+        else build_model_reasoner(
+            providers.autonomous,
+            repository_root,
+            AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            AUTONOMOUS_MAX_INPUT_TOKENS,
+        ),
+    )
     core = CoreAgent(
         goal_store,
         reasoner,

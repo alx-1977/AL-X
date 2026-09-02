@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from alx.contracts import CognitionOpportunity
@@ -63,7 +63,11 @@ class AutonomousCognitionRunner:
         self._retention_days = retention_days
         # Returns the measured usage of the turn just run, for settlement.
         self._usage_of = usage_of or (lambda: None)
-        self._clock = clock or (lambda: datetime.now(tz=None))
+        # Timezone-aware, like every other clock in the runtime. A naive
+        # datetime here would reach retention_until and the durable records,
+        # where the contracts reject it, so the failure would surface as a
+        # broken turn rather than as the wrong time.
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def run_due(self) -> tuple[str, ...]:
         """Run every occasion that is due now. Returns what was attempted."""

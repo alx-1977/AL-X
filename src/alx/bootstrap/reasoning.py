@@ -25,6 +25,21 @@ def build_model_reasoner(
     return ModelReasoner(model, laws, identity, max_output_tokens)
 
 
+class AutonomousReasonerUnavailable(Exception):
+    """An autonomous turn arrived with no autonomous Core configured.
+
+    Refused before any provider call. Answering it with the conversational
+    model would spend money on the wrong Core and would make the recorded
+    experiment a measurement of something nobody chose.
+    """
+
+    def __init__(self, origin: str) -> None:
+        self.origin = origin
+        super().__init__(
+            f"no autonomous reasoner is configured for a {origin} turn"
+        )
+
+
 class OriginSelectedReasoner:
     """Two Cores, chosen by where the turn came from. Nothing else.
 
@@ -45,16 +60,24 @@ class OriginSelectedReasoner:
     answered, and nothing downstream can find out.
     """
 
-    def __init__(self, conversational: ModelReasoner, autonomous: ModelReasoner) -> None:
+    def __init__(
+        self,
+        conversational: ModelReasoner,
+        autonomous: ModelReasoner | None = None,
+    ) -> None:
         self._conversational = conversational
+        # None when the experiment is unconfigured. The boundary still exists:
+        # an autonomous turn is refused rather than quietly answered by the
+        # conversational model, because a silent fallback would run the
+        # experiment on the wrong Core and record results as if it had not.
         self._autonomous = autonomous
 
     def decide(self, context):
         # The one expression. It reads `origin` and nothing else: not the
         # goal, the notebook, the memories, the capabilities, the conversation,
         # nor any content of the turn.
-        reasoner = (
-            self._autonomous if context.origin.is_autonomous
-            else self._conversational
-        )
-        return reasoner.decide(context)
+        if context.origin.is_autonomous:
+            if self._autonomous is None:
+                raise AutonomousReasonerUnavailable(context.origin.value)
+            return self._autonomous.decide(context)
+        return self._conversational.decide(context)
