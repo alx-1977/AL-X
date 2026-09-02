@@ -302,7 +302,9 @@ class NothingActsOnAThoughtTests(unittest.TestCase):
         writers = sorted(
             path.relative_to(self.SOURCE).as_posix()
             for path in self.SOURCE.rglob("*.py")
-            if "carried_thoughts" in path.read_text(encoding="utf-8")
+            if "FROM carried_thoughts" in path.read_text(encoding="utf-8")
+            or "INTO carried_thoughts" in path.read_text(encoding="utf-8")
+            or "UPDATE carried_thoughts" in path.read_text(encoding="utf-8")
         )
         self.assertEqual(writers, ["continuity/store.py"])
 

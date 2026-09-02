@@ -8,6 +8,7 @@ from typing import Protocol
 
 from alx.contracts.capabilities import CapabilityDefinition
 from alx.contracts.cognition import CognitionOrigin
+from alx.contracts.continuity import CarriedThought
 from alx.contracts.records import (
     ApprovalProposal,
     BackgroundEvent,
@@ -165,10 +166,16 @@ class ReasoningContext:
     # Where this turn came from. Provenance only: it says nobody asked, or that
     # Friedl did. Nothing may be derived from it about what to think about.
     origin: CognitionOrigin = CognitionOrigin.PERSON_TURN
+    # Thoughts AL/X still holds, most recent first and bounded by count. Every
+    # turn gets the same list by the same rule, because a context assembled
+    # differently for an unprompted turn would be a second builder deciding
+    # what she is like when nobody is watching.
+    carried_thoughts: tuple[CarriedThought, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
+        object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
         if self.active_goal is not None and not any(
             item.goal_id == self.active_goal.goal_id for item in self.unfinished_goals
         ):

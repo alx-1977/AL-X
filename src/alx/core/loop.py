@@ -13,7 +13,7 @@ from alx.contracts import (
     AgentDecision, Approval, ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityDispatch, CapabilityResult,
     ConversationOrigin,
-    CapabilityResultState, ConversationSnapshot, ConversationTurn,
+    CapabilityResultState, CognitionOrigin, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, GoalSummary, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
@@ -105,7 +105,8 @@ class CoreAgent:
                  clock: Callable[[], datetime] | None = None,
                  identifier_factory: Callable[[], str] | None = None,
                  approval_ttl_seconds: int | None = None,
-                 budget_check: Callable[[str], None] | None = None) -> None:
+                 budget_check: Callable[[str], None] | None = None,
+                 open_thoughts: Callable[[], tuple] | None = None) -> None:
         self._store = store
         self._reasoner = reasoner
         self._dispatch = dispatch
@@ -119,9 +120,14 @@ class CoreAgent:
         # Raises before another reasoning call when a routine task has run
         # away, so the ceiling prevents spend rather than reporting it.
         self._budget_check = budget_check or (lambda _task_id: None)
+        # Thoughts AL/X still holds, supplied by the one continuity store. The
+        # Core asks for them; it never reaches the store itself, and the same
+        # call is made for every turn whatever its origin.
+        self._open_thoughts = open_thoughts or (lambda: ())
 
     def process(self, conversation: ConversationSnapshot, retention_until: datetime,
-                step_budget: int, trigger_event_id: str | None = None) -> CoreOutcome:
+                step_budget: int, trigger_event_id: str | None = None,
+                origin: CognitionOrigin = CognitionOrigin.PERSON_TURN) -> CoreOutcome:
         """Reason over one durable conversation and whichever of its goals AL/X selects.
 
         No goal is attached in advance. Every unfinished goal of the
@@ -189,6 +195,8 @@ class CoreAgent:
                     conversation_id=conversation_id,
                     trigger_event_id=trigger_event_id,
                     unfinished_goals=summaries,
+                    origin=origin,
+                    carried_thoughts=self._open_thoughts(),
                 ))
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)

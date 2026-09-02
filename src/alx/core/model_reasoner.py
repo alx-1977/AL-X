@@ -78,6 +78,11 @@ appear in your most recent response, so a draft stated earlier and left behind
 cannot be released later by an answer to some other question. It constrains
 sending only. You may draft, reconsider, abandon a message, or ask anything you
 like in any order, and nothing needs permission except the send itself.
+carried_thoughts holds things you decided were worth keeping on your mind, in your
+own words. They are not tasks and nothing acts on them by itself. You may revisit
+one, let one go, or bring one into conversation when it genuinely fits; when you
+have actually raised one with Friedl, say so through the capability, because
+nothing infers that for you.
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have
 selected this turn, or null. You decide which goal the input belongs to: set goal_id
@@ -452,6 +457,17 @@ def _context_payload(context: ReasoningContext) -> str:
                 else f"event:{context.trigger_event_id}"
             ),
         },
+        # Thoughts she still holds, in her own words, newest first. Passed
+        # verbatim: nothing summarises, ranks or filters them, and the same
+        # list is built the same way for every turn.
+        "carried_thoughts": [
+            {
+                "thought_id": item.thought_id,
+                "content": item.content,
+                "formed_at": item.formed_at.isoformat(),
+            }
+            for item in context.carried_thoughts
+        ],
         "unfinished_goals": [
             {
                 "goal_id": item.goal_id,

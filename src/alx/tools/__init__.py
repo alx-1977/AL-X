@@ -29,6 +29,7 @@ from alx.tools.xero import (
 from alx.tools.continuity import (
     DEFINITIONS as CONTINUITY_DEFINITIONS,
     MINIMUM_HORIZON_SECONDS,
+    OPEN_THOUGHT_LIMIT,
     REQUEST_FUTURE_COGNITION,
     WITHDRAW_FUTURE_COGNITION,
     build_continuity_executors,
@@ -59,6 +60,7 @@ from alx.tools.dhl import (
 __all__ = [
     "CONTINUITY_DEFINITIONS",
     "MINIMUM_HORIZON_SECONDS",
+    "OPEN_THOUGHT_LIMIT",
     "REQUEST_FUTURE_COGNITION",
     "WITHDRAW_FUTURE_COGNITION",
     "build_continuity_executors",

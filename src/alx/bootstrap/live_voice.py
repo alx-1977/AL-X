@@ -19,6 +19,7 @@ from alx.bootstrap.mail import (
 )
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.continuity import build_continuity_runtime
+from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
 from alx.bootstrap.xero import (
@@ -366,6 +367,13 @@ async def run(repository_root: Path) -> None:
         memory_store,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
+        # One bounded, recency-ordered list, from the one continuity store,
+        # for every turn. There is deliberately no separate assembly for an
+        # unprompted turn: a second builder would decide what she is like when
+        # nobody is watching.
+        open_thoughts=lambda: continuity_runtime.store.open_thoughts(
+            OPEN_THOUGHT_LIMIT
+        ),
     )
     gateway = ConversationGateway(
         core,
