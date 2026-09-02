@@ -17,6 +17,11 @@ from typing import Mapping
 
 # Keyed by (provider, model) so two vendors serving a same-named model cannot
 # be confused for one another.
+# Mirrors alx.contracts.usage.MEASURED_FIELDS. Observability may not import
+# contracts, so the list is restated and a test proves it has not drifted.
+MEASURED_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens")
+
+
 USD_PER_MILLION: dict[tuple[str, str], tuple[float, float, float]] = {
     # Verified standard short-context rates, recorded by Friedl on 2026-09-01
     # for the first live research test. Each entry is (uncached input, cached
@@ -41,11 +46,6 @@ def is_priced(provider: str, model: str) -> bool:
     return price_of(provider, model) is not None
 
 
-# A usage report must contain at least one of these to be a measurement. An
-# empty report is silence, not a free call.
-MEASURED_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens")
-
-
 def cost_usd(provider: str, model: str, usage: Mapping[str, object]) -> float | None:
     """Cost of one call from its measured usage, or None when it cannot be known.
 
@@ -60,9 +60,17 @@ def cost_usd(provider: str, model: str, usage: Mapping[str, object]) -> float | 
     rate = price_of(provider, model)
     if rate is None:
         return None
+    # A report with no token counts is silence, not a free call. Returning None
+    # makes the caller charge the full reservation instead of nothing.
+    #
+    # Observability is a leaf module and may not import contracts, so this
+    # restates alx.contracts.usage.MEASURED_FIELDS rather than importing it. A
+    # test asserts the two stay identical.
     if not any(_count(usage, name) for name in MEASURED_FIELDS):
         return None
     uncached_rate, cached_rate, output_rate = rate
+    # Canonical field names only. The adapter normalised the provider's own
+    # layout at its boundary, so nothing here parses a vendor shape.
     input_tokens = _count(usage, "input_tokens")
     cached_tokens = min(_count(usage, "cached_tokens"), input_tokens)
     output_tokens = _count(usage, "output_tokens") + _count(usage, "reasoning_tokens")

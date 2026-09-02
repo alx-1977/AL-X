@@ -1,6 +1,11 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
 from alx.contracts.cognition import Cognition
+from alx.contracts.usage import (
+    CANONICAL_FIELDS,
+    is_measured,
+    normalise_usage,
+)
 from alx.contracts.notebook import (
     DeletionRecord,
     EntryKind,
@@ -100,7 +105,10 @@ from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
+    "CANONICAL_FIELDS",
     "Cognition",
+    "is_measured",
+    "normalise_usage",
     "DeletionRecord",
     "EntryKind",
     "EntryProposal",

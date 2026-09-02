@@ -38,6 +38,11 @@ from alx.tools.notebook import (
     SET_RESEARCH_STATUS,
     build_notebook_executors,
 )
+from alx.tools.research import (
+    ASK_RESEARCH_QUESTION,
+    DEFINITION as RESEARCH_DEFINITION,
+    build_research_executors,
+)
 from alx.tools.dhl import (
     PROCESS_DHL_IMPORT,
     DEFINITIONS as DHL_DEFINITIONS,
@@ -46,6 +51,9 @@ from alx.tools.dhl import (
 
 __all__ = [
     "ACKNOWLEDGE_MAIL_MESSAGE",
+    "ASK_RESEARCH_QUESTION",
+    "RESEARCH_DEFINITION",
+    "build_research_executors",
     "CORRECT_RESEARCH_ENTRY",
     "DELETE_RESEARCH",
     "NOTEBOOK_DEFINITIONS",

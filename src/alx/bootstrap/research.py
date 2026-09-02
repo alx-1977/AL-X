@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +21,11 @@ from alx.observability import (
     ResearchBudget,
     SQLiteResearchLedger,
 )
+from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.providers import OpenAIReasoningModel, XAIReasoningModel
+from alx.safety import AuthorityPolicy
 from alx.specialists import ResearchSpecialist, ResearchTierModel
+from alx.tools import ASK_RESEARCH_QUESTION, RESEARCH_DEFINITION, build_research_executors
 
 
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +36,11 @@ LOGGER = logging.getLogger(__name__)
 # provider, and the reservation is the worst-case price of exactly this bound.
 RESEARCH_MAX_INPUT_TOKENS = 8_000
 RESEARCH_MAX_OUTPUT_TOKENS = 1_000
+
+# Paid research is its own authority. Holding it does not follow from any other
+# permission, so a runtime that never grants it cannot spend even if a tier is
+# configured and priced.
+RESEARCH_SPEND_PERMISSION = "research.spend"
 
 
 def _transport(settings: Any, telemetry_sink: Any) -> Any:
@@ -116,4 +125,48 @@ def build_research_specialist(
         RESEARCH_MAX_OUTPUT_TOKENS,
         settings.limits.per_request_max_usd,
         telemetry_sink=telemetry_sink,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchRuntime:
+    """The one research capability, or nothing at all."""
+
+    specialist: ResearchSpecialist
+    definitions: tuple[CapabilityDefinition, ...]
+    policies: Mapping[str, AuthorityPolicy]
+    executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
+    permissions: frozenset[str]
+
+
+def build_research_runtime(
+    settings: ResearchSettings,
+    storage_root: Path,
+    call_id_source: Callable[[], str],
+    telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
+) -> ResearchRuntime | None:
+    """Compose research as a capability, or None when it is not authorised.
+
+    Returning None leaves the capability unregistered, so AL/X cannot propose a
+    research call at all. That is the difference between research being off and
+    research being merely unaffordable.
+    """
+    specialist = build_research_specialist(settings, storage_root, telemetry_sink)
+    if specialist is None:
+        return None
+    return ResearchRuntime(
+        specialist=specialist,
+        definitions=(RESEARCH_DEFINITION,),
+        policies={
+            # Spending is consequential and irreversible once the provider has
+            # been called, so it carries its own permission. It is not approval
+            # gated: the budget, the bound and the ceiling are the control, and
+            # asking Friedl to approve each question would make research
+            # something he directs rather than something she pursues.
+            ASK_RESEARCH_QUESTION: AuthorityPolicy(
+                frozenset({RESEARCH_SPEND_PERMISSION})
+            ),
+        },
+        executors=build_research_executors(specialist, call_id_source),
+        permissions=frozenset({RESEARCH_SPEND_PERMISSION}),
     )

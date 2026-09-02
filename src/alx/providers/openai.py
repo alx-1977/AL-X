@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from alx.contracts import ModelCompletion, ModelRequest
+from alx.contracts import ModelCompletion, ModelRequest, normalise_usage
 from alx.providers.errors import ProviderError, raise_provider_failure
 
 
@@ -129,8 +129,10 @@ class OpenAIReasoningModel:
             output = json.loads(content)
             if not isinstance(output, dict):
                 raise _OpenAIProtocolError("structured_output_not_object")
-            if not isinstance(usage, dict):
-                usage = {}
+            # Normalised here, once, so telemetry and cost settlement read the
+            # same numbers. Parsing the provider's own layout downstream is what
+            # let cached tokens be priced as uncached.
+            usage = normalise_usage(usage)
             completion = ModelCompletion("openai", model, output, usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
@@ -326,15 +328,11 @@ class OpenAIReasoningModel:
                 timings.get("answer_generation_seconds", 0.0) * 1000
             ),
             "input_tokens": self._nested_integer(usage, "input_tokens"),
-            "cached_tokens": self._nested_integer(
-                usage, "input_tokens_details", "cached_tokens"
-            ),
+            "cached_tokens": self._nested_integer(usage, "cached_tokens"),
             "cache_write_tokens": self._nested_integer(
-                usage, "input_tokens_details", "cache_write_tokens"
+                usage, "cache_write_tokens"
             ),
-            "reasoning_tokens": self._nested_integer(
-                usage, "output_tokens_details", "reasoning_tokens"
-            ),
+            "reasoning_tokens": self._nested_integer(usage, "reasoning_tokens"),
             "output_tokens": self._nested_integer(usage, "output_tokens"),
             "total_tokens": self._nested_integer(usage, "total_tokens"),
         }

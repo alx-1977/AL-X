@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from alx.contracts import ModelCompletion, ModelRequest
+from alx.contracts import ModelCompletion, ModelRequest, normalise_usage
 from alx.providers.errors import (
     ProviderError,
     raise_provider_failure,
@@ -115,8 +115,7 @@ class XAIReasoningModel:
             output = json.loads(content)
             if not isinstance(output, dict):
                 raise ValueError("structured output is not an object")
-            if not isinstance(usage, dict):
-                usage = {}
+            usage = normalise_usage(usage)
             completion = ModelCompletion("xai", model, output, usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
@@ -251,12 +250,6 @@ class XAIReasoningModel:
         duration: float,
         timings: Mapping[str, float],
     ) -> dict[str, Any]:
-        output_tokens = self._nested_integer(usage, "completion_tokens")
-        if not output_tokens:
-            output_tokens = self._nested_integer(usage, "output_tokens")
-        reasoning_tokens = self._nested_integer(
-            usage, "completion_tokens_details", "reasoning_tokens"
-        ) or self._nested_integer(usage, "output_tokens_details", "reasoning_tokens")
         return {
             "code": "reasoning.completed",
             "provider": "xai",
@@ -268,13 +261,12 @@ class XAIReasoningModel:
             "answer_generation_ms": round(
                 timings.get("answer_generation_seconds", 0.0) * 1000
             ),
-            "input_tokens": self._nested_integer(usage, "prompt_tokens")
-            or self._nested_integer(usage, "input_tokens"),
-            "cached_tokens": self._nested_integer(
-                usage, "prompt_tokens_details", "cached_tokens"
-            ) or self._nested_integer(usage, "input_tokens_details", "cached_tokens"),
-            "reasoning_tokens": reasoning_tokens,
-            "output_tokens": output_tokens,
+            # Canonical names: the adapter normalised the response already.
+            "input_tokens": self._nested_integer(usage, "input_tokens"),
+            "cached_tokens": self._nested_integer(usage, "cached_tokens"),
+            "cache_write_tokens": self._nested_integer(usage, "cache_write_tokens"),
+            "reasoning_tokens": self._nested_integer(usage, "reasoning_tokens"),
+            "output_tokens": self._nested_integer(usage, "output_tokens"),
             "total_tokens": self._nested_integer(usage, "total_tokens"),
         }
 

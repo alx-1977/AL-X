@@ -394,3 +394,118 @@ class ProviderBoundViolationTest(unittest.TestCase):
         self.assertGreater(reopened._ledger.overrun_usd(), 0.0)
         with self.assertRaises(ResearchCeilingFailed):
             reopened.answer(question(Cognition.SURVEY))
+
+
+class AuthoritativeRuntimePathTest(unittest.TestCase):
+    """Research is reached through the broker, or not at all."""
+
+    def setUp(self) -> None:
+        self._directory = TemporaryDirectory()
+        self.root = Path(self._directory.name)
+        self._call_id = [""]
+
+    def tearDown(self) -> None:
+        self._directory.cleanup()
+
+    def runtime(self, **overrides: str):
+        from alx.bootstrap.research import build_research_runtime
+
+        settings = RuntimeSettings.from_environment(environment(**overrides))
+        return build_research_runtime(
+            settings.research, self.root, lambda: self._call_id[0]
+        )
+
+    def broker(self, runtime):
+        from alx.capabilities import CapabilityBroker, CapabilityRegistry
+        from alx.safety import SafetyGate
+
+        registry = CapabilityRegistry()
+        for definition in runtime.definitions:
+            registry.register(definition)
+        return registry, CapabilityBroker(
+            registry, SafetyGate(dict(runtime.policies)), dict(runtime.executors)
+        )
+
+    def authority(self, permissions):
+        from datetime import UTC, datetime
+
+        from alx.safety import AuthorityContext
+
+        return AuthorityContext(
+            "friedl", frozenset(permissions), datetime.now(UTC)
+        )
+
+    def test_research_is_one_capability_in_the_one_catalogue(self) -> None:
+        runtime = self.runtime()
+        registry, _broker = self.broker(runtime)
+        self.assertEqual(
+            [d.capability_id for d in registry.list_definitions()],
+            ["ask_research_question"],
+        )
+
+    def test_spending_requires_its_own_permission(self) -> None:
+        from alx.contracts import CapabilityAttemptDisposition, CapabilityCall
+
+        runtime = self.runtime()
+        _registry, broker = self.broker(runtime)
+        self._call_id[0] = "call-1"
+        attempt = broker.dispatch(
+            CapabilityCall(
+                "call-1",
+                "ask_research_question",
+                {"question_id": "q", "instruction": "i", "material": "m"},
+            ),
+            self.authority(set()),
+        )
+        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
+        self.assertEqual(attempt.reason_code, "permission_missing")
+        self.assertFalse(attempt.implementation_invoked)
+
+    def test_an_unenabled_tier_is_refused_through_the_broker(self) -> None:
+        from alx.contracts import CapabilityCall, CapabilityResultState
+
+        runtime = self.runtime()
+        _registry, broker = self.broker(runtime)
+        for tier in ("compare", "judge"):
+            self._call_id[0] = f"call-{tier}"
+            attempt = broker.dispatch(
+                CapabilityCall(
+                    f"call-{tier}",
+                    "ask_research_question",
+                    {
+                        "question_id": "q",
+                        "instruction": "i",
+                        "material": "m",
+                        "cognition": tier,
+                    },
+                ),
+                self.authority(runtime.permissions),
+            )
+            self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
+            self.assertEqual(
+                attempt.result.failure["code"], "cognition_tier_unconfigured"
+            )
+
+    def test_research_is_absent_when_no_tier_is_enabled(self) -> None:
+        """Unregistered, so AL/X cannot even propose the call."""
+        self.assertIsNone(self.runtime(ALX_RESEARCH_ENABLED_TIERS=""))
+
+    def test_there_is_one_research_execution_path(self) -> None:
+        """No second entry point, and no improvised direct invocation."""
+        callers = [
+            path.name
+            for path in (REPOSITORY_ROOT / "src" / "alx").rglob("*.py")
+            if ".answer(" in path.read_text()
+            and "ResearchQuestion" in path.read_text()
+        ]
+        self.assertEqual(callers, ["research.py"])
+
+    def test_the_runtime_registers_research_through_the_shared_broker(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "live_voice.py"
+        ).read_text()
+        self.assertIn("build_research_runtime(", source)
+        self.assertIn("registry.register(definition)", source)
+        # No scheduler, no recurring research, no background loop.
+        for forbidden in ("create_task", "call_later", "Timer(", "while True"):
+            self.assertNotIn(forbidden, source)

@@ -16,6 +16,7 @@ from alx.bootstrap.mail import (
     captured_invoice_filing_scopes,
     mail_post_reply_standing_scopes,
 )
+from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.reasoning import build_model_reasoner
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
@@ -169,6 +170,25 @@ async def run(repository_root: Path) -> None:
     policies = dict(mail_runtime.policies)
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
+
+    # Paid research reaches AL/X as one capability through the same broker and
+    # safety gate as everything else. It is absent unless a cognition tier is
+    # enabled and a budget configured, so a runtime that has not been told it
+    # may spend cannot propose a research call at all.
+    research_runtime = build_research_runtime(
+        provider_settings.research,
+        storage_root,
+        lambda: current_call_id[0],
+        telemetry,
+    )
+    if research_runtime is None:
+        LOGGER.info("Research is not enabled: no paid research capability")
+    else:
+        for definition in research_runtime.definitions:
+            registry.register(definition)
+        policies.update(research_runtime.policies)
+        executors.update(research_runtime.executors)
+        permissions.update(research_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
