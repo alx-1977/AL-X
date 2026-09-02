@@ -794,11 +794,33 @@ def decision_schema() -> dict[str, Any]:
 class ModelReasoner:
     """The sole model-backed implementation of the Core reasoning port."""
 
-    def __init__(self, model: ReasoningModel, laws: str, identity: str) -> None:
+    def __init__(
+        self,
+        model: ReasoningModel,
+        laws: str,
+        identity: str,
+        max_output_tokens: int | None = None,
+    ) -> None:
+        """One reasoner over one model.
+
+        `max_output_tokens` is a provider-side generation ceiling fixed when
+        this reasoner is built, not chosen per turn. Conversation leaves it
+        None, because an answer to Friedl must not be truncated by an arbitrary
+        bound. Anything spending against a dollar ceiling sets it, because
+        without a finite bound there is no worst-case price and no reservation
+        can be honest.
+
+        It limits what the provider will generate. It never limits what AL/X
+        may think about, and it is not a quality setting: nothing else about
+        the request changes with it.
+        """
         if not laws.strip() or not identity.strip():
             raise ValueError("approved Laws and identity context are required")
+        if max_output_tokens is not None and max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive when set")
         self._model = model
         self._constitutional_context = f"{laws.strip()}\n\n{identity.strip()}"
+        self._max_output_tokens = max_output_tokens
 
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
@@ -824,6 +846,7 @@ class ModelReasoner:
                 decision_schema(),
                 context.conversation_id,
                 CACHE_KEY,
+                self._max_output_tokens,
             )
         )
         output = completion.output
