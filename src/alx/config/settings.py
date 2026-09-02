@@ -434,6 +434,23 @@ def _tier_settings(
     )
 
 
+def autonomous_cognition_daily_budget_usd(environment: Mapping[str, str]) -> float:
+    """Friedl's hard daily ceiling on autonomous Core cognition.
+
+    Denominated in USD because every recorded rate is USD and the provider
+    bills in USD, so no currency conversion happens anywhere in the spending
+    path. The Rand figure it was chosen from is recorded in D-024a, not
+    computed here: a fuse whose size moved with the exchange rate would be a
+    different ceiling every day.
+
+    Defaults to zero, so a runtime that has never been told it may spend on
+    autonomous cognition cannot.
+    """
+    return _number_in_range(
+        environment, "AUTONOMOUS_COGNITION_DAILY_BUDGET_USD", 0.0, 1000.0, 0.0
+    )
+
+
 def _research_budget(environment: Mapping[str, str]) -> "ResearchLimits":
     """Friedl's hard research spending boundary."""
     daily = _number_in_range(

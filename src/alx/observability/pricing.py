@@ -176,6 +176,11 @@ def _measured_counts(
     usage: Mapping[str, object],
 ) -> tuple[int, int, int, int] | None:
     """Validate canonical billing totals without parsing a provider shape."""
+    # A non-mapping report is silence in an unexpected shape, not a free call.
+    # Raising here would push a provider's malformed answer into the caller as
+    # a crash, when the honest reading is simply that nothing was measured.
+    if not isinstance(usage, Mapping):
+        return None
     values: dict[str, int] = {}
     for name in MEASURED_FIELDS:
         value = usage.get(name)
