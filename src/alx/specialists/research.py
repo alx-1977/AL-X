@@ -148,7 +148,21 @@ class ResearchSpecialist:
         if not self._pricing.is_priced(provider, model):
             raise ResearchModelUnpriced(provider, model)
 
-        request, _input_bound = self._bounded_request(question, task_id)
+        request, _input_bound, omitted = self._bounded_request(question, task_id)
+        if omitted:
+            # Visible to an operator as well as to AL/X: material that never
+            # reached the model is a fact about the evidence, not a detail of
+            # transport.
+            self._emit(
+                task_id or question.question_id,
+                {
+                    "code": "research.material_omitted",
+                    "kind": "research",
+                    "tier": question.cognition.value,
+                    "question_id": question.question_id,
+                    "omitted_characters": omitted,
+                },
+            )
         worst_case = self._pricing.worst_case_usd(
             provider, model, self._max_input_tokens, self._max_output_tokens
         )
@@ -263,11 +277,26 @@ class ResearchSpecialist:
         )
         if overrun > 0:
             raise ResearchCeilingFailed(overrun)
+        # An answer read from part of the material is not the same evidence as
+        # an answer read from all of it. The Core is told how much was left
+        # out so it can weigh the finding, ask a narrower question, or split
+        # the material. Nothing here decides that the answer is good enough.
+        # A complete read adds no field, so the ordinary answer is unchanged
+        # and the presence of the field is itself the signal.
+        if omitted:
+            return {**values, "material_omitted_characters": omitted}
         return values
 
     def _bounded_request(
         self, question: ResearchQuestion, task_id: str
-    ) -> tuple[ModelRequest, int]:
+    ) -> tuple[ModelRequest, int, int]:
+        """Build the largest request that fits, and say what did not fit.
+
+        The material may be longer than the priced input bound allows. Cutting
+        it is a mechanical consequence of that bound, but deciding whether an
+        answer read from part of the material is still worth having is a
+        judgement, so the omission is reported rather than resolved here.
+        """
         def build(material: str) -> ModelRequest:
             return ModelRequest(
                 (
@@ -295,7 +324,7 @@ class ResearchSpecialist:
             else:
                 high = middle - 1
         request = build(material[:low])
-        return request, input_token_upper_bound(request)
+        return request, input_token_upper_bound(request), len(material) - low
 
     def _event(
         self,

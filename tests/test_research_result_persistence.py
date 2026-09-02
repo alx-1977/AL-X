@@ -213,6 +213,40 @@ class ResearchFailureTranslationTests(unittest.TestCase):
                 self.assertIs(result.state, CapabilityResultState.FAILED)
                 self.assertEqual(result.failure["code"], "arguments_unusable")
 
+    def test_omitted_material_reaches_the_core_with_the_finding(self) -> None:
+        """Evidence the model never saw must travel with the answer."""
+
+        class Partial:
+            def answer(self, question, task_id=""):
+                return {
+                    "finding": "A finding read from part of the material.",
+                    "material_omitted_characters": 4_200,
+                }
+
+        execute = build_research_executors(
+            Partial(), lambda: "research-call"
+        )[ASK_RESEARCH_QUESTION]
+        result = execute(dict(ARGUMENTS))
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(result.values["material_omitted_characters"], 4_200)
+
+    def test_a_complete_read_carries_no_omission_field(self) -> None:
+        """The field's presence is the signal, so a full read must not set it."""
+        execute = build_research_executors(
+            FakeResearcher(), lambda: "research-call"
+        )[ASK_RESEARCH_QUESTION]
+        result = execute(dict(ARGUMENTS))
+        self.assertNotIn("material_omitted_characters", result.values)
+
+    def test_the_declared_result_schema_admits_the_omission(self) -> None:
+        """A field the Core is sent must be one the capability declares."""
+        self.assertIn(
+            "material_omitted_characters", DEFINITION.output_schema.properties
+        )
+        self.assertNotIn(
+            "material_omitted_characters", DEFINITION.output_schema.required
+        )
+
     def test_a_blank_finding_is_a_provider_fault_rather_than_a_success(self) -> None:
         class Blank:
             def answer(self, question, task_id=""):

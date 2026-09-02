@@ -211,6 +211,64 @@ class CognitionTierTest(unittest.TestCase):
                 self.assertNotIn(vendor, value)
 
 
+class OmittedMaterialTest(unittest.TestCase):
+    """Material that does not fit the priced bound is reported, never hidden.
+
+    Truncating to a prefix is a mechanical consequence of the input ceiling,
+    but an answer read from part of the material is weaker evidence than an
+    answer read from all of it. Law 3 puts that judgement with AL/X, so the
+    shortfall travels with the finding instead of being silently resolved.
+    """
+
+    def setUp(self) -> None:
+        self.model = TierModel("survey-model")
+        self.emitted: list[tuple[str, dict]] = []
+        # A ceiling that comfortably carries the instruction and short
+        # material, so only genuinely long material overflows it.
+        self.specialist = ResearchSpecialist(
+            {Cognition.SURVEY: ResearchTierModel("testvendor", "survey-model", self.model)},
+            RecordingLedger(),
+            FreePricing(),
+            1_000,
+            1_000,
+            0.10,
+            telemetry_sink=lambda task_id, values: self.emitted.append((task_id, dict(values))),
+        )
+
+    def test_a_complete_read_reports_no_omission(self) -> None:
+        answer = self.specialist.answer(question(Cognition.SURVEY, "short"))
+        self.assertEqual(answer, {"finding": "survey-model"})
+        self.assertNotIn(
+            "research.material_omitted",
+            [values["code"] for _, values in self.emitted],
+        )
+
+    def test_an_oversized_read_reports_what_was_left_out(self) -> None:
+        material = "x" * 5_000
+        answer = self.specialist.answer(question(Cognition.SURVEY, material))
+        omitted = answer["material_omitted_characters"]
+        self.assertGreater(omitted, 0)
+        sent = self.model.requests[-1].messages[-1].content
+        self.assertEqual(len(sent) + omitted, len(material))
+        self.assertTrue(material.startswith(sent))
+
+    def test_the_omission_is_visible_to_an_operator(self) -> None:
+        self.specialist.answer(question(Cognition.SURVEY, "x" * 5_000))
+        events = [
+            values for _, values in self.emitted
+            if values["code"] == "research.material_omitted"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertGreater(events[0]["omitted_characters"], 0)
+        self.assertEqual(events[0]["question_id"], "q")
+
+    def test_the_specialist_draws_no_conclusion_from_the_omission(self) -> None:
+        """It reports the shortfall and still answers; it does not refuse."""
+        answer = self.specialist.answer(question(Cognition.SURVEY, "x" * 5_000))
+        self.assertEqual(answer["finding"], "survey-model")
+        self.assertEqual(self.model.calls, 1)
+
+
 class SingleResearchPathTest(unittest.TestCase):
     """Law 0: three tiers are three configurations, not three paths."""
 

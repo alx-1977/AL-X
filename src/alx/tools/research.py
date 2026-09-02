@@ -63,7 +63,13 @@ DEFINITION = CapabilityDefinition(
     ),
     StructuredSchema(
         ValueKind.OBJECT,
-        {"finding": _STRING},
+        {
+            "finding": _STRING,
+            # Present only when the material was longer than the priced input
+            # bound allowed. Its presence says the finding was read from part
+            # of the material; what that is worth is AL/X's judgement.
+            "material_omitted_characters": StructuredSchema(ValueKind.INTEGER),
+        },
         ("finding",),
         extra_properties=False,
     ),
@@ -71,9 +77,11 @@ DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
-# The answer shape a research question returns. Deliberately one field: this
-# capability asks a question and reports what came back, and a richer schema
-# would start encoding what research is for.
+# The answer shape asked of the model. Deliberately one field: this capability
+# asks a question and reports what came back, and a richer schema would start
+# encoding what research is for. The capability's own result may additionally
+# report material the priced input bound could not carry, which is a fact about
+# the evidence rather than something the model is asked for.
 ANSWER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"finding": {"type": "string"}},
@@ -147,11 +155,18 @@ def build_research_executors(
                 CapabilityResultState.FAILED,
                 failure={"code": "provider_failed"},
             )
+        values: dict[str, Any] = {"finding": finding}
+        omitted = answer.get("material_omitted_characters")
+        if isinstance(omitted, int) and not isinstance(omitted, bool) and omitted > 0:
+            # Material that never reached the model is evidence about the
+            # answer, so it travels with it. The capability reports the
+            # shortfall and draws no conclusion from it.
+            values["material_omitted_characters"] = omitted
         return CapabilityResult(
             call_id,
             ASK_RESEARCH_QUESTION,
             CapabilityResultState.SUCCEEDED,
-            {"finding": finding},
+            values,
             # The full answer is available to the Core for the next decision,
             # but the goal store is not the research notebook. Durable
             # continuity is created through record_research_entry.
