@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     AudioChunk,
-    BackgroundEventSource,
+    CognitionOpportunitySource,
     ConversationOrigin,
     ConversationTurn,
     SpeechSynthesizer,
@@ -93,7 +93,7 @@ class VoiceSession:
         clock: Callable[[], datetime] | None = None,
         identifier_factory: Callable[[], str] | None = None,
         diagnostics: VoiceDiagnosticBuffer | None = None,
-        event_source: BackgroundEventSource | None = None,
+        event_source: CognitionOpportunitySource | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")

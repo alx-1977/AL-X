@@ -741,11 +741,82 @@ def _note_interpretation_violations(
                 )
             )
         if isinstance(node, ast.Compare) and names_a_note(node.left):
+            # `note is None` and `isinstance(note, str)` ask whether a note
+            # exists and whether it is well-formed. Neither reads what it says,
+            # and a contract must be able to validate its own shape. Comparing
+            # a note to a value is different: that is reading it.
+            if all(
+                isinstance(operator, (ast.Is, ast.IsNot))
+                and isinstance(comparator, ast.Constant)
+                and comparator.value is None
+                for operator, comparator in zip(node.ops, node.comparators)
+            ):
+                continue
             violations.append(
                 Violation(
                     relative_text,
                     node.lineno,
                     "deterministic code may not compare the private note",
+                )
+            )
+    return violations
+
+
+# D-024: the opportunity source notices that something objective happened. It
+# may not read goals, notebook entries, memories, research or the private note,
+# and it may not rank, filter or defer an occasion by what the occasion might
+# be about. A filter there is the cheapest second mind to build and the most
+# damaging, because it decides what AL/X never gets to consider.
+#
+# Imports are the enforceable half: a module that cannot reach her state cannot
+# form an opinion about it.
+OPPORTUNITY_SOURCE_MODULE = "continuity/source.py"
+OPPORTUNITY_SOURCE_FORBIDDEN_IMPORTS = frozenset(
+    {"goals", "memories", "research", "specialists", "tools"}
+)
+OPPORTUNITY_SOURCE_FORBIDDEN_READS = frozenset(
+    {
+        "topic", "importance", "priority", "urgency", "category", "sentiment",
+        "score", "interest", "intent", "staleness", "sender", "subject",
+        "keywords", "content", "summary",
+    }
+)
+
+
+def _opportunity_source_violations(
+    relative_text: str, tree: ast.AST
+) -> list[Violation]:
+    """Prove the opportunity source stays a clock, not a critic."""
+    posix = relative_text.replace("\\", "/")
+    if not posix.endswith(OPPORTUNITY_SOURCE_MODULE):
+        return []
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = getattr(node, "module", "") or ""
+            names = [alias.name for alias in node.names]
+            for candidate in (module, *names):
+                parts = candidate.split(".")
+                if "alx" in parts:
+                    owner_index = parts.index("alx") + 1
+                    owner = parts[owner_index] if owner_index < len(parts) else ""
+                    if owner in OPPORTUNITY_SOURCE_FORBIDDEN_IMPORTS:
+                        violations.append(
+                            Violation(
+                                relative_text,
+                                node.lineno,
+                                "the opportunity source may not read AL/X's "
+                                f"state: importing {owner!r} lets it form an "
+                                "opinion about what deserves thought",
+                            )
+                        )
+        if isinstance(node, ast.Attribute) and node.attr in OPPORTUNITY_SOURCE_FORBIDDEN_READS:
+            violations.append(
+                Violation(
+                    relative_text,
+                    node.lineno,
+                    "the opportunity source notices objective events only; "
+                    f"reading {node.attr!r} would filter on meaning",
                 )
             )
     return violations
@@ -802,6 +873,7 @@ def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
         violations.extend(visitor.violations)
         violations.extend(_autonomous_selection_violations(relative_text, tree))
         violations.extend(_note_interpretation_violations(relative_text, tree))
+        violations.extend(_opportunity_source_violations(relative_text, tree))
         if owner == "interfaces":
             violations.extend(_voice_event_violations(path, relative_text, tree))
             violations.extend(_speech_synthesis_violations(relative_text, tree))

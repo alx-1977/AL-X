@@ -273,20 +273,26 @@ class ContractShapeTests(unittest.TestCase):
                 self.assertEqual(definition.side_effect.value, "none")
 
 
-class NothingHonoursARequestYetTests(unittest.TestCase):
-    """Phase 4 creates requests; only Phase 5 may act on one."""
+class OneMaturationPathTests(unittest.TestCase):
+    """Law 0: exactly one place turns a due request into an occasion."""
 
     SOURCE = Path(__file__).resolve().parents[1] / "src" / "alx"
 
-    def test_no_production_code_invokes_the_core_from_a_request(self) -> None:
+    def test_only_the_source_consumes_a_due_request(self) -> None:
+        """The store answers what is due; one source acts on it, and no more.
+
+        A second consumer would be a second production path to the same
+        outcome, and the second one is always where a filter on interest
+        eventually appears.
+        """
+        allowed = {"continuity/store.py", "continuity/source.py"}
         for path in sorted(self.SOURCE.rglob("*.py")):
             source = path.read_text(encoding="utf-8")
-            if "due(" not in source:
+            if ".due(" not in source and "def due(" not in source:
                 continue
             relative = path.relative_to(self.SOURCE).as_posix()
             with self.subTest(module=relative):
-                # Only the store may answer what is due. Nothing consumes it.
-                self.assertEqual(relative, "continuity/store.py")
+                self.assertIn(relative, allowed)
 
     def test_the_store_is_reached_only_through_capabilities(self) -> None:
         """No direct store access from Core, gateway, transport or reasoner."""

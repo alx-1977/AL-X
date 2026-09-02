@@ -24,12 +24,16 @@ time. It confers no priority, no importance and no ordering beyond time.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
+
+from alx.contracts.records import BackgroundEvent
 
 if TYPE_CHECKING:
+    from alx.contracts.cognition import CognitionOrigin
     from alx.contracts.provenance import ContentProvenance
 
 
@@ -112,3 +116,60 @@ class FutureCognitionTooSoon(FutureCognitionError):
         super().__init__(
             f"a future cognition must be at least {minimum_seconds} seconds ahead"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CognitionOpportunity:
+    """An occasion on which the authoritative Core is invoked.
+
+    It asserts that something in AL/X's world is new, and it invokes her. It
+    asserts nothing about importance, subject, urgency or what should be done,
+    because deciding whether an occasion is worth pursuing is itself a
+    judgement and only the Core makes it.
+
+    The fields are exhaustive on purpose. There is no topic, summary,
+    importance, priority, category, reason or suggested action: a field naming
+    what an opportunity is *about* would be the runtime forming an opinion, and
+    every rejected deterministic rule would eventually hide in it.
+
+    `note` is present only for a self-requested occasion, carried verbatim from
+    the matured request. It is AL/X's message to herself. Deterministic code
+    transports it and never reads it.
+    """
+
+    opportunity_id: str
+    origin: "CognitionOrigin"
+    arose_at: datetime
+    references: tuple[str, ...] = ()
+    note: str | None = None
+    provenance: "ContentProvenance | None" = None
+
+    def __post_init__(self) -> None:
+        from alx.contracts.cognition import CognitionOrigin as _Origin
+
+        _required(self.opportunity_id, "opportunity_id")
+        if not isinstance(self.origin, _Origin):
+            raise TypeError("origin must be a CognitionOrigin")
+        _aware(self.arose_at, "arose_at")
+        if self.note is not None and not isinstance(self.note, str):
+            raise TypeError("note must be a string or None")
+        references = tuple(self.references)
+        if any(not item.strip() for item in references):
+            raise ValueError("references must not contain blanks")
+        if len(references) != len(set(references)):
+            raise ValueError("references must not contain duplicates")
+        object.__setattr__(self, "references", references)
+
+
+class CognitionOpportunitySource(Protocol):
+    """The one way anything in the world reaches the Core.
+
+    Mail, completed work and AL/X's own matured requests all implement this.
+    There is deliberately one protocol rather than one per origin: a second
+    ingress would be a second production path under Law 0, and the second one
+    is always where a filter on interest eventually appears.
+    """
+
+    def events(self) -> AsyncIterator[BackgroundEvent]: ...
+
+    def record_delivery(self, event_id: str) -> None: ...
