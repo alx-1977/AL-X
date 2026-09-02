@@ -3,6 +3,9 @@
 Providers report usage differently: OpenAI nests cached input under
 `input_tokens_details` and reasoning under `output_tokens_details`, while
 OpenAI-style chat completions use `prompt_tokens` and `completion_tokens`.
+They also disagree on whether reasoning tokens sit inside the output count or
+beside it; canonical `output_tokens` is always the billed output, with
+`reasoning_tokens` the breakdown within it.
 Flattening that in each consumer meant telemetry read one shape and cost
 settlement read another, so a real response priced 8,000 cached tokens at the
 uncached rate and missed 1,500 reasoning tokens entirely.
@@ -117,9 +120,26 @@ def normalise_usage(usage: Any) -> dict[str, int]:
     if any(value is _INVALID for value in counts):
         return _unmeasured()
     assert all(isinstance(value, int) for value in counts)
-    if cached > input_tokens or reasoning > output_tokens:
+    if cached > input_tokens:
         return _unmeasured()
-    if total and total != input_tokens + output_tokens:
+    # Two layouts report reasoning. OpenAI counts reasoning inside
+    # output_tokens, so total is input plus output. xAI reports reasoning
+    # beside completion_tokens, so total is input plus completion plus
+    # reasoning, and reasoning can exceed completion: a Core call that thought
+    # for 841 tokens and answered in 253 is a real, measured call. Treating
+    # that as inconsistent zeroed every reasoning-heavy Core call in the usage
+    # record while the short ones were measured. Canonical output_tokens is
+    # the billed output, so the beside layout is folded into it and reasoning
+    # stays as the breakdown it is in both layouts.
+    if total and total == input_tokens + output_tokens + reasoning and reasoning:
+        output_tokens += reasoning
+    elif total and total != input_tokens + output_tokens:
+        return _unmeasured()
+    elif not total and reasoning > output_tokens:
+        # No total to arbitrate, but reasoning cannot be a breakdown of a
+        # smaller count, so it was reported beside.
+        output_tokens += reasoning
+    if reasoning > output_tokens:
         return _unmeasured()
     return {
         "input_tokens": input_tokens,

@@ -466,9 +466,9 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
             {MARK_MAIL_MESSAGE_SEEN: seen, MOVE_MAIL_MESSAGE_TO_TRASH: trash},
         )
         reasoner = Queued(
-            AgentDecision(call=seen_call),
-            AgentDecision(call=trash_call),
-            AgentDecision(response="Handled."),
+            AgentDecision(call=seen_call, goal_id="goal-1"),
+            AgentDecision(call=trash_call, goal_id="goal-1"),
+            AgentDecision(response="Handled.", goal_id="goal-1"),
         )
         directory = tempfile.TemporaryDirectory()
         store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
@@ -487,7 +487,6 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
                 ConversationSnapshot(
                     "conversation-1", (), 1, now + timedelta(days=1)
                 ),
-                "goal-1",
                 now + timedelta(days=1),
                 3,
             )
@@ -821,7 +820,7 @@ class UnheardTextTests(unittest.TestCase):
         outcome = CoreAgent(
             store, reasoner, dispatch, (definition,),
             clock=lambda: now, identifier_factory=lambda: "goal-1",
-        ).process(conversation, None, now + timedelta(days=1), 3)
+        ).process(conversation, now + timedelta(days=1), 3)
         # The send is refused and nothing leaves, but the conversation survives.
         self.assertEqual(dispatched, [], "nothing may be transmitted")
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -936,7 +935,7 @@ class ApprovalExpiryTests(unittest.TestCase):
             clock=lambda: now, identifier_factory=lambda: "goal-1",
             approval_ttl_seconds=600,
         )
-        agent.process(conversation, None, now + timedelta(days=1), 2)
+        agent.process(conversation, now + timedelta(days=1), 2)
         approval = store.load("goal-1").state.approvals[0]
         self.assertEqual(approval.expires_at, now + timedelta(minutes=10))
         store.close()
@@ -1037,7 +1036,7 @@ class ApprovalSlipDoesNotEndTheSessionTests(unittest.TestCase):
         outcome = CoreAgent(
             store, reasoner, dispatch, (definition,),
             clock=lambda: now, identifier_factory=lambda: "goal-1",
-        ).process(conversation, None, now + timedelta(days=1), 3)
+        ).process(conversation, now + timedelta(days=1), 3)
         self.assertEqual(dispatched, [], "nothing may be sent without an approval")
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(len(reasoner.contexts), 2, "the Core must get another turn")

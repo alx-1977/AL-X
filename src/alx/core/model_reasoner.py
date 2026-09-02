@@ -40,8 +40,10 @@ CACHE_KEY = "alx-core-v1"
 
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
 Interpret the continuous conversation and the optional active goal. Choose either
-one authoritative response, one reusable primitive capability call, or one memory
-retrieval. Ordinary conversation does not require a goal update. When useful, propose
+one authoritative response, one silent completion, one reusable primitive capability
+call, or one memory retrieval. A silent completion means you judge that no spoken or
+conversational response is useful; it is your semantic decision, never a transport or
+capability rule. Ordinary conversation does not require a goal update. When useful, propose
 a goal mutation separately; the runtime, not you, decides whether it becomes durable
 truth. Request completion rather than authoring completed state. Every proposed item
 of evidence must cite one or more available durable source references exactly as
@@ -60,6 +62,14 @@ side_effect is none or attention_state require null approval fields.
 You never need permission to ask a question. Ask whatever you want, whenever you
 want, as an ordinary response; the goal remains active and you can act on the
 answer on a later turn.
+Research is your notebook work. After a research result, normally persist the finding
+through the notebook capabilities and keep only the notebook thread and entry references
+plus the minimum goal progress needed to continue. Do not copy the finding into goal
+progress or evidence. Notebook work normally does not need to be narrated to Friedl, so
+you may finish silently after persistence. Speak instead whenever you judge the result
+relevant to the current conversation, advice or work for him, something he previously
+cared about, or something genuinely worth sharing. Never claim research progress when
+the notebook write failed.
 Text you compose and send outward can only carry wording the person has already
 heard from you. Say the finished message itself, complete and word for word as it
 will be sent rather than a description of what you intend to write, then send it
@@ -68,9 +78,19 @@ appear in your most recent response, so a draft stated earlier and left behind
 cannot be released later by an answer to some other question. It constrains
 sending only. You may draft, reconsider, abandon a message, or ask anything you
 like in any order, and nothing needs permission except the send itself.
-An effectful capability call requires an active goal. If active_goal is null and you
+A conversation may hold several independent unfinished goals. unfinished_goals lists
+every one of them in compact form; active_goal is the full state of the one you have
+selected this turn, or null. You decide which goal the input belongs to: set goal_id
+to continue an existing goal, include a create goal mutation to start a new one, or
+leave both empty for ordinary conversation. Do not fold unrelated work into an existing
+goal, and do not start a second goal for work an unfinished goal already covers. If you
+need a goal's full state before acting on it, choose the select_goal action with its
+goal_id; the next step shows that goal in full. A goal update applies to the selected
+goal only. An effectful capability call requires an active goal. If active_goal is null and you
 choose an effectful call, include a create goal mutation with a concise objective and
-explicit success criteria in the same decision. Do not create a goal merely for an
+explicit success criteria in the same decision, or set goal_id to the unfinished goal
+the call continues. A paused goal you select continues only with an update mutation;
+a call against a paused goal without one cannot run and ends the turn. Do not create a goal merely for an
 ordinary response or a none/attention_state call unless the conversation independently
 establishes meaningful unfinished work.
 You may optionally form memories through semantic judgement;
@@ -79,7 +99,16 @@ use an available durable reference exactly as supplied. The runtime owns memory
 timestamps; do not invent one. Factual memory has null
 person_id and null meaning. Relationship memory requires the matching person_id
 and null meaning. Autobiographical memory has null person_id and requires your
-first-person meaning reflection. In a goal update, null replacement fields preserve
+first-person meaning reflection.
+A memory identifier names one memory permanently. Every memory you form takes a
+new identifier, including one that refines or corrects something you already
+remember. To replace an earlier memory, give the new one its own identifier and
+set supersedes_memory_id to the identifier being replaced; the earlier memory is
+kept and its history stays inspectable. A superseding memory must be the same
+kind and concern the same person as the one it replaces. Reusing an identifier
+that already exists changes nothing and is refused, so an identifier you have
+seen among retrieved_memories is not available for a new memory.
+In a goal update, null replacement fields preserve
 their current values; arrays of new history/evidence contain additions only. Return
 only the required structured decision.
 
@@ -423,6 +452,18 @@ def _context_payload(context: ReasoningContext) -> str:
                 else f"event:{context.trigger_event_id}"
             ),
         },
+        "unfinished_goals": [
+            {
+                "goal_id": item.goal_id,
+                "objective": item.objective_summary,
+                "status": item.status.value,
+                "stop_reason": None if item.stop_reason is None else item.stop_reason.value,
+                "outstanding_work": list(item.outstanding_work),
+                "blockers": list(item.blockers),
+                "selected": goal is not None and item.goal_id == goal.goal_id,
+            }
+            for item in context.unfinished_goals
+        ],
         "active_goal": None if goal is None else _state_payload(goal),
         "transient_attempts": [
             _attempt_payload(item) for item in context.transient_attempts
@@ -660,11 +701,35 @@ def decision_schema() -> dict[str, Any]:
             ),
         ]
     }
+    select_goal_action = _strict_object(
+        {
+            "type": {
+                "type": "string",
+                "const": "select_goal",
+                "description": (
+                    "Load the full state of the unfinished goal named in goal_id "
+                    "before acting. Carries nothing else."
+                ),
+            },
+        }
+    )
     response_action = _strict_object(
         {
             "type": {"type": "string", "const": "respond"},
             "response": string,
             "response_requires_goal_commit": {"type": "boolean"},
+        }
+    )
+    silent_action = _strict_object(
+        {
+            "type": {
+                "type": "string",
+                "const": "finish_silently",
+                "description": (
+                    "End the turn with no spoken or conversational response because "
+                    "the Core judges that no response is useful."
+                ),
+            },
         }
     )
     capability_action = _strict_object(
@@ -698,7 +763,20 @@ def decision_schema() -> dict[str, Any]:
         }
     )
     properties: dict[str, Any] = {
-        "action": {"anyOf": [response_action, capability_action, memory_action]},
+        "goal_id": {
+            "anyOf": [{"type": "null"}, {"type": "string"}],
+            "description": (
+                "The unfinished goal this decision works under, from "
+                "unfinished_goals. Null with a create goal_update starts a new "
+                "goal; null without one is ordinary conversation."
+            ),
+        },
+        "action": {
+            "anyOf": [
+                response_action, silent_action, capability_action, memory_action,
+                select_goal_action,
+            ]
+        },
         "goal_update": {"anyOf": [{"type": "null"}, goal_update]},
         "memory_proposals": {
             "type": "array",
@@ -751,6 +829,9 @@ class ModelReasoner:
         output = completion.output
         action = output["action"]
         disposition = action["type"]
+        goal_id = output["goal_id"]
+        if goal_id is not None and not isinstance(goal_id, str):
+            raise ValueError("goal_id must be a string or null")
         update = output["goal_update"]
         proposal = None
         if update is not None:
@@ -791,6 +872,11 @@ class ModelReasoner:
             )
             for item in output["memory_proposals"]
         )
+        if disposition == "select_goal":
+            if goal_id is None:
+                raise ValueError("select_goal requires a goal_id")
+            return AgentDecision(goal_id=goal_id, goal_proposal=proposal,
+                                 memory_proposals=memory_proposals)
         if disposition == "retrieve_memories":
             query = MemoryQuery(
                 action["memory_query_id"],
@@ -803,21 +889,44 @@ class ModelReasoner:
                 MemorySourceMatch(action["memory_source_match"]),
                 action["memory_include_superseded"],
             )
-            return AgentDecision(memory_proposals=memory_proposals, memory_query=query, goal_proposal=proposal)
+            return AgentDecision(memory_proposals=memory_proposals, memory_query=query,
+                                 goal_proposal=proposal, goal_id=goal_id)
         if disposition == "respond":
             return AgentDecision(
                 response=action["response"],
                 goal_proposal=proposal,
                 response_requires_goal_commit=action["response_requires_goal_commit"],
                 memory_proposals=memory_proposals,
+                goal_id=goal_id,
+            )
+        if disposition == "finish_silently":
+            return AgentDecision(
+                finish_silently=True,
+                goal_proposal=proposal,
+                memory_proposals=memory_proposals,
+                goal_id=goal_id,
             )
         if disposition != "call_capability":
             raise ValueError("unknown decision action")
+        arguments = _object_json(action["arguments_json"], "arguments_json")
+        definition = next(
+            (item for item in context.capabilities
+             if item.capability_id == action["capability_id"]),
+            None,
+        )
+        durable_arguments = arguments
+        if definition is not None and definition.durable_input_fields is not None:
+            durable_arguments = {
+                field: arguments[field]
+                for field in definition.durable_input_fields
+                if field in arguments
+            }
         call = CapabilityCall(
             action["call_id"],
             action["capability_id"],
-            _object_json(action["arguments_json"], "arguments_json"),
+            arguments,
             action["approval_id"],
+            durable_arguments,
         )
         approval_proposal = None
         proposed_approval = action["approval_proposal"]
@@ -838,4 +947,5 @@ class ModelReasoner:
             goal_proposal=proposal,
             memory_proposals=memory_proposals,
             approval_proposal=approval_proposal,
+            goal_id=goal_id,
         )

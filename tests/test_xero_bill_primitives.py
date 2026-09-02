@@ -446,14 +446,18 @@ class XeroPrimitiveTests(unittest.TestCase):
                     ),
                 )
 
-            first_reasoner = Queued(AgentDecision(call=capture_call))
+            # Nothing attaches a goal for the Core; it selects the goal this
+            # work belongs to, before and after the restart.
+            first_reasoner = Queued(
+                AgentDecision(call=capture_call, goal_id="goal-1")
+            )
             first = CoreAgent(
                 store,
                 first_reasoner,
                 dispatch,
                 XERO_DEFINITIONS,
                 clock=lambda: now,
-            ).process(conversation, "goal-1", retention, 1)
+            ).process(conversation, retention, 1)
             self.assertEqual(first.state, CoreState.CHECKPOINTED)
             captured = first.snapshot.state.attempts[-1].result.values
             self.assertTrue(captured["completed"])
@@ -465,9 +469,14 @@ class XeroPrimitiveTests(unittest.TestCase):
             read_call = CapabilityCall(
                 "read-1", READ_XERO_BILL, {"invoice_id": "bill-1"}
             )
+            # After a restart the goal is one summary among the conversation's
+            # unfinished goals. The Core asks for its full state, then acts on
+            # what the capture actually recorded.
             second_reasoner = Queued(
-                AgentDecision(call=read_call),
-                AgentDecision(response="The draft bill exists and matches the invoice."),
+                AgentDecision(goal_id="goal-1"),
+                AgentDecision(call=read_call, goal_id="goal-1"),
+                AgentDecision(response="The draft bill exists and matches the invoice.",
+                              goal_id="goal-1"),
             )
             second = CoreAgent(
                 restarted_store,
@@ -475,15 +484,23 @@ class XeroPrimitiveTests(unittest.TestCase):
                 dispatch,
                 XERO_DEFINITIONS,
                 clock=lambda: now,
-            ).process(conversation, "goal-1", retention, 2)
+            ).process(conversation, retention, 3)
             self.assertEqual(second.state, CoreState.RESPONDED)
             # The capture result survived the restart in durable state.
+            # The first context offers the goal as a summary, without its
+            # history; the goal it names survived the restart.
+            self.assertIsNone(second_reasoner.contexts[0].active_goal)
             self.assertEqual(
-                second_reasoner.contexts[0].active_goal.attempts[-1].call.capability_id,
+                [item.goal_id for item in second_reasoner.contexts[0].unfinished_goals],
+                ["goal-1"],
+            )
+            # Once selected, the capture result is there in full.
+            self.assertEqual(
+                second_reasoner.contexts[1].active_goal.attempts[-1].call.capability_id,
                 CAPTURE_SUPPLIER_INVOICE,
             )
             self.assertEqual(
-                second_reasoner.contexts[1].active_goal.attempts[-1].call.capability_id,
+                second_reasoner.contexts[2].active_goal.attempts[-1].call.capability_id,
                 READ_XERO_BILL,
             )
             restarted_store.close()

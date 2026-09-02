@@ -152,6 +152,10 @@ def build_research_executors(
             ASK_RESEARCH_QUESTION,
             CapabilityResultState.SUCCEEDED,
             {"finding": finding},
+            # The full answer is available to the Core for the next decision,
+            # but the goal store is not the research notebook. Durable
+            # continuity is created through record_research_entry.
+            durable_values={},
         )
 
     return {ASK_RESEARCH_QUESTION: ask}

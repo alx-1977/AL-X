@@ -14,7 +14,7 @@ from alx.contracts import (
     CapabilityResultState, ConversationOrigin, ConversationTurn, Evidence, GoalState,
     GoalStatus, GoalStopReason, MemoryKind, MemoryProposal, Objective,
     PendingMemoryBatch, ProgressRecord, Referent, SuccessCriterion, WorkItem,
-    GoalSnapshot,
+    GoalSnapshot, GoalSummary,
 )
 from alx.contracts.provenance import (
     ContentProvenance,
@@ -91,7 +91,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "corrections": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.corrections],
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
         "attempts": [
-            [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
+            [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.durable_arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
              None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs)], item.reason_code]
             for item in goal.attempts
         ],
@@ -299,6 +299,23 @@ class SQLiteGoalStore:
         if row is None:
             raise GoalNotFound(goal_id)
         return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), row[3], row[0], _time_from_data(row[1]), provenance_from_storage(*row[4:]))  # type: ignore[arg-type]
+
+    def list_unfinished(self, conversation_id: str) -> tuple[GoalSummary, ...]:
+        """Every unfinished goal of one conversation, compactly, in creation order.
+
+        The order is presentation only. Which of them a new input belongs to
+        is never decided here.
+        """
+        rows = self._connection.execute(
+            "SELECT goal_id, state_json FROM goals WHERE conversation_id = ? ORDER BY rowid",
+            (conversation_id,),
+        ).fetchall()
+        summaries = []
+        for goal_id, state_json in rows:
+            summary = GoalSummary.of(_goal_from_data(goal_id, json.loads(state_json)))
+            if summary.unfinished:
+                summaries.append(summary)
+        return tuple(summaries)
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]:
         identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY rowid").fetchall()

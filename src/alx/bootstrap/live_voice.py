@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import logging
 import os
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import build_model_reasoner
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
@@ -33,7 +35,6 @@ from alx.config import (
     RuntimeSettings,
     XeroSettings,
 )
-from alx.contracts import GoalStatus
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
@@ -72,24 +73,6 @@ def _completed(attempt) -> bool:
     result = getattr(attempt, "result", None)
     values = getattr(result, "values", None)
     return bool(values and values.get("completed") is True)
-
-
-def locate_active_goal(store: SQLiteGoalStore, conversation_id: str) -> str | None:
-    """Select the latest Core-active goal using durable state, never wording."""
-    candidates = [
-        snapshot
-        for snapshot in store.list_goals()
-        if snapshot.conversation_id == conversation_id
-        and snapshot.state.status in (
-            GoalStatus.ACTIVE,
-            GoalStatus.AWAITING_INPUT,
-            GoalStatus.AWAITING_APPROVAL,
-            GoalStatus.BLOCKED,
-        )
-    ]
-    if not candidates:
-        return None
-    return candidates[-1].state.goal_id
 
 
 def migrate_legacy_conversations(
@@ -160,6 +143,9 @@ async def run(repository_root: Path) -> None:
     memory_store = SQLiteMemoryStore(storage_root / "memories.sqlite3")
     registry = CapabilityRegistry()
     current_call_id = [""]
+    current_goal_state: ContextVar[Any] = ContextVar(
+        "alx_current_notebook_goal_state", default=None
+    )
     mail_runtime = build_mail_runtime(
         MailSettings.from_environment(environment),
         storage_root,
@@ -170,6 +156,44 @@ async def run(repository_root: Path) -> None:
     policies = dict(mail_runtime.policies)
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
+
+    def notebook_provenance(source_references, _recorded_at):
+        """Resolve cited goal artifacts without copying their evidence.
+
+        A goal snapshot's provenance is a conservative union of the material
+        used to produce it. That makes a notebook entry citing any of its
+        artifacts inherit D-013 whenever mail contributed. Unknown references
+        return None and the notebook capability refuses the write.
+        """
+        state = current_goal_state.get()
+        if state is None:
+            return None
+        known = {
+            *(f"attempt:{item.call.call_id}" for item in state.attempts
+              if item.call is not None),
+            *(f"evidence:{item.evidence_id}" for item in state.evidence),
+            *(f"decision:{item.record_id}" for item in state.decisions),
+            *(f"correction:{item.record_id}" for item in state.corrections),
+            *(f"progress:{item.record_id}" for item in state.progress),
+        }
+        if any(reference not in known for reference in source_references):
+            return None
+        provenance = goal_store.load(state.goal_id).provenance
+        if provenance is None:
+            return None
+        return tuple(provenance for _reference in source_references)
+
+    notebook_runtime = build_notebook_runtime(
+        storage_root,
+        voice_settings.goal_retention_days,
+        lambda: current_call_id[0],
+        provenance_of=notebook_provenance,
+    )
+    for definition in notebook_runtime.definitions:
+        registry.register(definition)
+    policies.update(notebook_runtime.policies)
+    executors.update(notebook_runtime.executors)
+    permissions.update(notebook_runtime.permissions)
 
     # Paid research reaches AL/X as one capability through the same broker and
     # safety gate as everything else. It is absent unless a cognition tier is
@@ -267,23 +291,27 @@ async def run(repository_root: Path) -> None:
 
     def dispatch(call, state):
         current_call_id[0] = call.call_id
+        goal_state_token = current_goal_state.set(state)
         # Reaching for any bill capability declares the task routine, so the
         # ceiling applies from the first one rather than from the commit.
         if call.capability_id in BILL_TASK_CAPABILITIES:
             usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
-        attempt = broker.dispatch(
-            call,
-            AuthorityContext(
-                principal_reference=voice_settings.primary_person_id,
-                granted_permission_references=frozenset(permissions),
-                evaluated_at=datetime.now(UTC),
-                approvals=() if state is None else state.approvals,
-                standing_scopes=(
-                    *mail_post_reply_standing_scopes(state),
-                    *captured_invoice_filing_scopes(state),
+        try:
+            attempt = broker.dispatch(
+                call,
+                AuthorityContext(
+                    principal_reference=voice_settings.primary_person_id,
+                    granted_permission_references=frozenset(permissions),
+                    evaluated_at=datetime.now(UTC),
+                    approvals=() if state is None else state.approvals,
+                    standing_scopes=(
+                        *mail_post_reply_standing_scopes(state),
+                        *captured_invoice_filing_scopes(state),
+                    ),
                 ),
-            ),
-        )
+            )
+        finally:
+            current_goal_state.reset(goal_state_token)
         # A finished bill closes its ceiling window, so the next invoice gets
         # its own. Only a completed capture counts: settling after a refusal
         # or a returned ambiguity would hand the same bill a fresh ceiling and
@@ -308,7 +336,6 @@ async def run(repository_root: Path) -> None:
     gateway = ConversationGateway(
         core,
         conversation_store,
-        lambda conversation_id: locate_active_goal(goal_store, conversation_id),
         contextual_events=mail_runtime.source.contextual_events,
     )
     session = VoiceSession(
@@ -334,6 +361,7 @@ async def run(repository_root: Path) -> None:
         mail_runtime.observations.close()
         conversation_store.close()
         memory_store.close()
+        notebook_runtime.store.close()
         goal_store.close()
 
 

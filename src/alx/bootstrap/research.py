@@ -35,7 +35,7 @@ LOGGER = logging.getLogger(__name__)
 # smallest that still returns a structured answer. Both are enforced by the
 # provider, and the reservation is the worst-case price of exactly this bound.
 RESEARCH_MAX_INPUT_TOKENS = 8_000
-RESEARCH_MAX_OUTPUT_TOKENS = 1_000
+RESEARCH_MAX_OUTPUT_TOKENS = 4_000
 
 # Paid research is its own authority. Holding it does not follow from any other
 # permission, so a runtime that never grants it cannot spend even if a tier is

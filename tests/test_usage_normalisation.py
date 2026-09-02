@@ -105,9 +105,12 @@ class NormalisationTest(unittest.TestCase):
                 "output_tokens": "bad",
                 "output_tokens_details": {"reasoning_tokens": 90},
             },
+            # A total that matches neither layout: reasoning inside output
+            # would total 150, reasoning beside it 201.
             {
                 "input_tokens": 100,
                 "output_tokens": 50,
+                "total_tokens": 160,
                 "output_tokens_details": {"reasoning_tokens": 51},
             },
             {"input_tokens": -1, "output_tokens": 50},
@@ -126,6 +129,85 @@ class NormalisationTest(unittest.TestCase):
             values = normalise_usage(absent)
             self.assertEqual(values["input_tokens"], 0)
             self.assertFalse(is_measured(values))
+
+
+# The shape xAI actually returns for a reasoning model, as documented and as
+# observed on the Core: reasoning tokens are reported beside completion tokens
+# and inside the total, so they can and do exceed the completion count.
+XAI_REASONING_USAGE = {
+    "prompt_tokens": 18,
+    "completion_tokens": 26,
+    "total_tokens": 396,
+    "prompt_tokens_details": {"cached_tokens": 0},
+    "completion_tokens_details": {"reasoning_tokens": 352},
+}
+
+
+class ReasoningBesideCompletionTest(unittest.TestCase):
+    """The defect that zeroed the Core usage record.
+
+    Every reasoning-heavy Core call on grok was persisted with zero tokens
+    while the short ones were measured: the normaliser assumed OpenAI's layout,
+    where reasoning is a breakdown inside output_tokens, so xAI's report failed
+    the total check and the reasoning-exceeds-output check and was discarded.
+    """
+
+    def test_the_xai_reasoning_shape_is_measured(self) -> None:
+        values = normalise_usage(XAI_REASONING_USAGE)
+        self.assertTrue(is_measured(values))
+        self.assertEqual(values["input_tokens"], 18)
+        # Billed output is completion plus reasoning; reasoning stays as the
+        # breakdown within it.
+        self.assertEqual(values["output_tokens"], 378)
+        self.assertEqual(values["reasoning_tokens"], 352)
+        self.assertEqual(values["total_tokens"], 396)
+
+    def test_the_observed_core_call_is_measured_not_zero(self) -> None:
+        """Row 84 of the live usage record: 253 answered, 841 thought."""
+        values = normalise_usage(
+            {
+                "prompt_tokens": 17_805,
+                "completion_tokens": 253,
+                "total_tokens": 18_899,
+                "prompt_tokens_details": {"cached_tokens": 10_496},
+                "completion_tokens_details": {"reasoning_tokens": 841},
+            }
+        )
+        self.assertTrue(is_measured(values))
+        self.assertEqual(values["input_tokens"], 17_805)
+        self.assertEqual(values["cached_tokens"], 10_496)
+        self.assertEqual(values["output_tokens"], 1_094)
+        self.assertEqual(values["reasoning_tokens"], 841)
+
+    def test_reasoning_beside_a_smaller_completion_is_folded_without_a_total(self) -> None:
+        """Reasoning cannot be a breakdown of a count smaller than itself."""
+        values = normalise_usage(
+            {"prompt_tokens": 100, "completion_tokens": 50,
+             "completion_tokens_details": {"reasoning_tokens": 51}}
+        )
+        self.assertTrue(is_measured(values))
+        self.assertEqual(values["output_tokens"], 101)
+        self.assertEqual(values["reasoning_tokens"], 51)
+
+    def test_the_openai_layout_is_not_folded(self) -> None:
+        values = normalise_usage(OPENAI_USAGE)
+        self.assertEqual(values["output_tokens"], 2_000)
+        self.assertEqual(values["reasoning_tokens"], 1_500)
+
+    def test_both_layouts_price_reasoning_once_as_output(self) -> None:
+        inside = normalise_usage(
+            {"input_tokens": 1_000, "output_tokens": 400, "total_tokens": 1_400,
+             "output_tokens_details": {"reasoning_tokens": 300}}
+        )
+        beside = normalise_usage(
+            {"prompt_tokens": 1_000, "completion_tokens": 100, "total_tokens": 1_400,
+             "completion_tokens_details": {"reasoning_tokens": 300}}
+        )
+        self.assertEqual(inside["output_tokens"], beside["output_tokens"])
+        self.assertEqual(
+            pricing.cost_usd("openai", "gpt-5.4-nano", inside),
+            pricing.cost_usd("openai", "gpt-5.4-nano", beside),
+        )
 
 
 class CachedPricingTest(unittest.TestCase):

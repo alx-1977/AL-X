@@ -36,10 +36,19 @@ USD_PER_MILLION: dict[tuple[str, str], tuple[float, float, float]] = {
     ("openai", "gpt-5.4"): (2.50, 0.25, 15.00),
 }
 
+# Exact provider identities that Friedl approved to inherit an existing price.
+# This is deliberately an allowlist rather than model-family parsing: a new or
+# unexpected snapshot remains unpriced until it is explicitly recorded here.
+APPROVED_PRICE_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
+    ("openai", "gpt-5.4-nano-2026-03-17"): ("openai", "gpt-5.4-nano"),
+}
+
 
 def price_of(provider: str, model: str) -> tuple[float, float, float] | None:
-    """The rate for one model, or None when no price is configured."""
-    return USD_PER_MILLION.get((provider.strip().lower(), model.strip()))
+    """The explicitly approved rate for one exact provider identity, if any."""
+    identity = (provider.strip().lower(), model.strip())
+    priced_identity = APPROVED_PRICE_ALIASES.get(identity, identity)
+    return USD_PER_MILLION.get(priced_identity)
 
 
 def is_priced(provider: str, model: str) -> bool:

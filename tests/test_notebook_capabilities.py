@@ -92,6 +92,29 @@ class NotebookCapabilityTest(NotebookFixture):
         self.assertEqual(len(result.values["entries"]), 1)
         self.assertEqual(result.values["entries"][0]["kind"], "hypothesis")
 
+    def test_durable_capability_receipts_never_copy_notebook_prose(self) -> None:
+        opened = self.capabilities.open_thread("call-open", {
+            "thread_id": "t-1",
+            "question": "A private research question",
+            "interest": "Her own reason for caring",
+        })
+        recorded = self.capabilities.record_entry("call-record", {
+            "entry_id": "e-1",
+            "thread_id": "t-1",
+            "kind": "conclusion",
+            "content": "The complete research finding belongs in the notebook.",
+        })
+        self.assertEqual(
+            dict(opened.durable_values), {"thread_id": "t-1", "status": "open"}
+        )
+        self.assertEqual(
+            dict(recorded.durable_values),
+            {"entry_id": "e-1", "thread_id": "t-1", "revision": 1},
+        )
+        self.assertNotIn("content", recorded.durable_values)
+        self.assertNotIn("question", opened.durable_values)
+        self.assertNotIn("interest", opened.durable_values)
+
     def test_revision_preserves_and_reports_the_new_version(self) -> None:
         self.open()
         self.capabilities.record_entry("call-x", {"entry_id": "e-1", "thread_id": "t-1", "kind": "claim",

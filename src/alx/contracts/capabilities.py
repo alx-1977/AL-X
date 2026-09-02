@@ -104,6 +104,10 @@ class CapabilityDefinition:
     output_schema: StructuredSchema
     side_effect: SideEffect
     possible_failure_codes: tuple[str, ...] = ()
+    # None persists every structured argument in the goal's execution audit.
+    # A capability whose input contains content owned by another durable store
+    # names only the identity fields needed for restart continuity.
+    durable_input_fields: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -118,3 +122,10 @@ class CapabilityDefinition:
             raise ValueError("failure codes must not be blank")
         if len(set(codes)) != len(codes):
             raise ValueError("failure codes must be unique")
+        if self.durable_input_fields is not None:
+            fields = tuple(self.durable_input_fields)
+            if len(fields) != len(set(fields)):
+                raise ValueError("durable input fields must be unique")
+            if set(fields) - set(self.input_schema.properties):
+                raise ValueError("durable input fields must be declared inputs")
+            object.__setattr__(self, "durable_input_fields", fields)

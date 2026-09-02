@@ -11,10 +11,14 @@ from alx.contracts.records import (
     ApprovalProposal,
     BackgroundEvent,
     CapabilityAttempt,
+    CapabilityAttemptDisposition,
     CapabilityCall,
     ConversationTurn,
+    GoalMutationKind,
     GoalProposal,
     GoalState,
+    GoalStatus,
+    GoalStopReason,
 )
 from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
 from alx.contracts.provenance import ContentProvenance
@@ -48,6 +52,52 @@ class GoalSnapshot:
             raise ValueError("retention_until must be timezone-aware")
         if not self.conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class GoalSummary:
+    """Enough to recognise an unfinished goal, never enough to act on it.
+
+    A conversation may carry several unfinished goals at once. The Core sees
+    every one of them in this compact form and decides which, if any, the
+    current input belongs to. Full state is loaded only for the goal it
+    selects, so a long history is never paid for on every reasoning call.
+    """
+
+    goal_id: str
+    objective_summary: str
+    status: GoalStatus
+    stop_reason: GoalStopReason | None = None
+    outstanding_work: tuple[str, ...] = ()
+    blockers: tuple[str, ...] = ()
+    has_pending_dispatch: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.goal_id.strip():
+            raise ValueError("goal_id must not be blank")
+        if not isinstance(self.status, GoalStatus):
+            raise TypeError("status must be a GoalStatus")
+        object.__setattr__(self, "outstanding_work", tuple(self.outstanding_work))
+        object.__setattr__(self, "blockers", tuple(self.blockers))
+
+    @classmethod
+    def of(cls, state: GoalState) -> GoalSummary:
+        return cls(
+            state.goal_id,
+            state.objective.summary,
+            state.status,
+            state.stop_reason,
+            tuple(item.summary for item in state.outstanding_work),
+            tuple(item.summary for item in state.blockers),
+            any(
+                item.disposition is CapabilityAttemptDisposition.PENDING
+                for item in state.attempts
+            ),
+        )
+
+    @property
+    def unfinished(self) -> bool:
+        return self.status not in (GoalStatus.COMPLETED, GoalStatus.CANCELLED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +158,17 @@ class ReasoningContext:
     transient_attempts: tuple[CapabilityAttempt, ...] = ()
     conversation_id: str | None = None
     trigger_event_id: str | None = None
+    # Every unfinished goal of the conversation, compactly. `active_goal` is
+    # the full state of the one the Core has selected this turn, if any.
+    unfinished_goals: tuple[GoalSummary, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
+        object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
+        if self.active_goal is not None and not any(
+            item.goal_id == self.active_goal.goal_id for item in self.unfinished_goals
+        ):
+            raise ValueError("the active goal must be one of the unfinished goals")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "memories", tuple(self.memories))
         object.__setattr__(self, "events", tuple(self.events))
@@ -130,15 +188,40 @@ class ReasoningContext:
 class AgentDecision:
     call: CapabilityCall | None = None
     response: str | None = None
+    finish_silently: bool = False
     goal_proposal: GoalProposal | None = None
     response_requires_goal_commit: bool = False
     memory_proposals: tuple[MemoryProposal, ...] = ()
     memory_query: MemoryQuery | None = None
     approval_proposal: ApprovalProposal | None = None
+    # The unfinished goal this decision works under, chosen by the Core from
+    # the summaries it was shown. None with a create proposal starts a new
+    # goal; None without one is goal-less conversation. A decision that
+    # carries only a goal_id asks for that goal's full state before acting.
+    goal_id: str | None = None
 
     def __post_init__(self) -> None:
-        if sum(item is not None for item in (self.call, self.response, self.memory_query)) != 1:
+        if not isinstance(self.finish_silently, bool):
+            raise TypeError("finish_silently must be a bool")
+        chosen = sum(item is not None for item in (self.call, self.response, self.memory_query))
+        chosen += int(self.finish_silently)
+        if chosen == 0 and self.goal_id is not None:
+            # Selecting a goal may carry a mutation of that same goal: the
+            # Core says which work this is and what it now knows about it in
+            # one decision. An approval may not travel alone, because an
+            # approval authorises one exact call and there is none here.
+            if self.approval_proposal is not None or self.response_requires_goal_commit:
+                raise ValueError("a goal selection carries no approval or commit flag")
+        elif chosen != 1:
             raise ValueError("a decision contains exactly one call, response, or memory query")
+        if self.goal_id is not None and not self.goal_id.strip():
+            raise ValueError("goal_id must not be blank")
+        if (
+            self.goal_id is not None
+            and self.goal_proposal is not None
+            and self.goal_proposal.kind is GoalMutationKind.CREATE
+        ):
+            raise ValueError("a decision cannot both select a goal and create one")
         if self.response is not None and not self.response.strip():
             raise ValueError("response must not be blank")
         if self.response_requires_goal_commit and self.response is None:
@@ -149,6 +232,16 @@ class AgentDecision:
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
             raise ValueError("a decision cannot repeat a memory identifier")
+
+    @property
+    def selects_only(self) -> bool:
+        return (
+            self.goal_id is not None
+            and self.call is None
+            and self.response is None
+            and self.memory_query is None
+            and not self.finish_silently
+        )
 
 
 class ReasoningProvider(Protocol):
@@ -165,6 +258,8 @@ class DurableGoalStore(Protocol):
     ) -> GoalSnapshot: ...
 
     def load(self, goal_id: str) -> GoalSnapshot: ...
+
+    def list_unfinished(self, conversation_id: str) -> tuple[GoalSummary, ...]: ...
 
     def replace(
         self,

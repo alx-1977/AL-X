@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Protocol
 from uuid import uuid4
 
 from alx.contracts import (
@@ -17,21 +16,16 @@ from alx.conversation.store import ConversationNotFound
 from alx.core import CoreAgent, CoreOutcome, CoreState
 
 
-class ActiveGoalLocator(Protocol):
-    """Locate attached durable goal state without interpreting any words."""
-
-    def __call__(self, conversation_id: str) -> str | None: ...
-
-
 class ConversationGateway:
+    """Transport-neutral ingress. It attaches no goal: the Core is shown every
+    unfinished goal of the conversation and decides which, if any, applies."""
+
     def __init__(self, core: CoreAgent, conversation_store: DurableConversationStore,
-                 locate_active_goal: ActiveGoalLocator,
                  identifier_factory: Callable[[], str] | None = None,
                  clock: Callable[[], datetime] | None = None,
                  contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None) -> None:
         self._core = core
         self._conversation_store = conversation_store
-        self._locate_active_goal = locate_active_goal
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
@@ -74,12 +68,7 @@ class ConversationGateway:
         conversation = self._conversation_store.append(
             turn, retention_until, conversation.revision)
         conversation = self._with_contextual_events(conversation)
-        outcome = self._core.process(
-            conversation,
-            self._locate_active_goal(turn.conversation_id),
-            retention_until,
-            step_budget,
-        )
+        outcome = self._core.process(conversation, retention_until, step_budget)
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
             response_turn = ConversationTurn(
                 turn.conversation_id,
@@ -122,7 +111,6 @@ class ConversationGateway:
         transient_conversation = self._with_contextual_events(conversation, event)
         outcome = self._core.process(
             transient_conversation,
-            self._locate_active_goal(conversation_id),
             retention_until,
             step_budget,
             trigger_event_id=event.event_id,

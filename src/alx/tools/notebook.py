@@ -121,6 +121,7 @@ OPEN_THREAD_DEFINITION = CapabilityDefinition(
     _THREAD,
     SideEffect.EFFECTFUL,
     _FAILURES,
+    ("thread_id",),
 )
 
 RECORD_ENTRY_DEFINITION = CapabilityDefinition(
@@ -142,6 +143,7 @@ RECORD_ENTRY_DEFINITION = CapabilityDefinition(
     _ENTRY,
     SideEffect.EFFECTFUL,
     _FAILURES,
+    ("entry_id", "thread_id", "kind", "source_references"),
 )
 
 REVISE_ENTRY_DEFINITION = CapabilityDefinition(
@@ -163,6 +165,7 @@ REVISE_ENTRY_DEFINITION = CapabilityDefinition(
     _ENTRY,
     SideEffect.EFFECTFUL,
     _FAILURES,
+    ("entry_id", "expected_revision", "source_references"),
 )
 
 SEARCH_DEFINITION = CapabilityDefinition(
@@ -192,6 +195,10 @@ SEARCH_DEFINITION = CapabilityDefinition(
     ),
     SideEffect.NONE,
     _FAILURES,
+    (
+        "query_id", "thread_ids", "kinds", "source_references",
+        "recorded_after", "recorded_before", "include_archived", "limit",
+    ),
 )
 
 READ_THREAD_DEFINITION = CapabilityDefinition(
@@ -207,6 +214,7 @@ READ_THREAD_DEFINITION = CapabilityDefinition(
     _THREAD,
     SideEffect.NONE,
     _FAILURES,
+    ("thread_id", "offset"),
 )
 
 SET_STATUS_DEFINITION = CapabilityDefinition(
@@ -222,6 +230,7 @@ SET_STATUS_DEFINITION = CapabilityDefinition(
     _THREAD,
     SideEffect.EFFECTFUL,
     _FAILURES,
+    ("thread_id", "status"),
 )
 
 CORRECT_ENTRY_DEFINITION = CapabilityDefinition(
@@ -243,6 +252,7 @@ CORRECT_ENTRY_DEFINITION = CapabilityDefinition(
     _ENTRY,
     SideEffect.EFFECTFUL,
     _FAILURES,
+    ("entry_id", "expected_revision", "source_references"),
 )
 
 DELETE_DEFINITION = CapabilityDefinition(
@@ -263,6 +273,7 @@ DELETE_DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     _FAILURES,
+    ("record_id", "kind"),
 )
 
 
@@ -313,11 +324,32 @@ def _thread_values(snapshot: Any) -> dict[str, Any]:
 
 
 def _ok(
-    call_id: str, capability_id: str, values: Mapping[str, Any]
+    call_id: str,
+    capability_id: str,
+    values: Mapping[str, Any],
+    durable_values: Mapping[str, Any] | None = None,
 ) -> CapabilityResult:
     return CapabilityResult(
-        call_id, capability_id, CapabilityResultState.SUCCEEDED, values
+        call_id,
+        capability_id,
+        CapabilityResultState.SUCCEEDED,
+        values,
+        durable_values={} if durable_values is None else durable_values,
     )
+
+
+def _entry_receipt(snapshot: Any) -> dict[str, Any]:
+    """The goal keeps continuity identifiers, never notebook prose."""
+    return {
+        "entry_id": snapshot.entry_id,
+        "thread_id": snapshot.thread_id,
+        "revision": snapshot.current.revision,
+    }
+
+
+def _thread_receipt(snapshot: Any) -> dict[str, Any]:
+    """The goal keeps the thread identity and state, never its contents."""
+    return {"thread_id": snapshot.thread_id, "status": snapshot.status.value}
 
 
 def _failed(call_id: str, capability_id: str, code: str) -> CapabilityResult:
@@ -376,7 +408,12 @@ class NotebookCapabilities:
             return _failed(call_id, OPEN_RESEARCH_THREAD, "arguments_unusable")
         except Exception as error:
             return _failed(call_id, OPEN_RESEARCH_THREAD, _code(error))
-        return _ok(call_id, OPEN_RESEARCH_THREAD, _thread_values(snapshot))
+        return _ok(
+            call_id,
+            OPEN_RESEARCH_THREAD,
+            _thread_values(snapshot),
+            _thread_receipt(snapshot),
+        )
 
     def record_entry(
         self, call_id: str, values: Mapping[str, Any]
@@ -401,7 +438,12 @@ class NotebookCapabilities:
             return _failed(call_id, RECORD_RESEARCH_ENTRY, "arguments_unusable")
         except Exception as error:
             return _failed(call_id, RECORD_RESEARCH_ENTRY, _code(error))
-        return _ok(call_id, RECORD_RESEARCH_ENTRY, _entry_values(snapshot))
+        return _ok(
+            call_id,
+            RECORD_RESEARCH_ENTRY,
+            _entry_values(snapshot),
+            _entry_receipt(snapshot),
+        )
 
     def revise_entry(
         self, call_id: str, values: Mapping[str, Any]
@@ -457,7 +499,12 @@ class NotebookCapabilities:
             return _failed(call_id, capability_id, "arguments_unusable")
         except Exception as error:
             return _failed(call_id, capability_id, _code(error))
-        return _ok(call_id, capability_id, _entry_values(snapshot))
+        return _ok(
+            call_id,
+            capability_id,
+            _entry_values(snapshot),
+            _entry_receipt(snapshot),
+        )
 
     def _provenance(self, sources: tuple[str, ...], now: datetime) -> Any:
         """Provenance for a record, derived from the evidence it cites.
@@ -513,7 +560,12 @@ class NotebookCapabilities:
             return _failed(call_id, READ_RESEARCH_THREAD, "arguments_unusable")
         except Exception as error:
             return _failed(call_id, READ_RESEARCH_THREAD, _code(error))
-        return _ok(call_id, READ_RESEARCH_THREAD, _thread_values(snapshot))
+        return _ok(
+            call_id,
+            READ_RESEARCH_THREAD,
+            _thread_values(snapshot),
+            _thread_receipt(snapshot),
+        )
 
     def set_status(
         self, call_id: str, values: Mapping[str, Any]
@@ -526,7 +578,12 @@ class NotebookCapabilities:
             return _failed(call_id, SET_RESEARCH_STATUS, "arguments_unusable")
         except Exception as error:
             return _failed(call_id, SET_RESEARCH_STATUS, _code(error))
-        return _ok(call_id, SET_RESEARCH_STATUS, _thread_values(snapshot))
+        return _ok(
+            call_id,
+            SET_RESEARCH_STATUS,
+            _thread_values(snapshot),
+            _thread_receipt(snapshot),
+        )
 
     def delete(
         self, call_id: str, values: Mapping[str, Any]
@@ -545,14 +602,16 @@ class NotebookCapabilities:
             return _failed(call_id, DELETE_RESEARCH, "arguments_unusable")
         except Exception as error:
             return _failed(call_id, DELETE_RESEARCH, _code(error))
+        values = {
+            "record_id": record.record_id,
+            "kind": record.kind,
+            "deleted_at": record.deleted_at.isoformat(),
+        }
         return _ok(
             call_id,
             DELETE_RESEARCH,
-            {
-                "record_id": record.record_id,
-                "kind": record.kind,
-                "deleted_at": record.deleted_at.isoformat(),
-            },
+            values,
+            values,
         )
 
 

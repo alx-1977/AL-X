@@ -59,7 +59,7 @@ from alx.contracts.provenance import (
     RetentionPolicy,
 )
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
-from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, PendingMemoryBatch, ReasoningContext, ReasoningProvider
+from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, GoalSummary, PendingMemoryBatch, ReasoningContext, ReasoningProvider
 from alx.contracts.records import StructuredData
 from alx.contracts.specialists import SpecialistError, SpecialistModel, SpecialistQuestion
 from alx.contracts.speech import (
@@ -137,7 +137,7 @@ __all__ = [
     "CapabilityDefinition", "SideEffect", "StructuredSchema", "ValueKind",
     "StructuredData",
     "SpecialistError", "SpecialistModel", "SpecialistQuestion",
-    "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "PendingMemoryBatch", "ReasoningContext", "ReasoningProvider",
+    "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "GoalSummary", "PendingMemoryBatch", "ReasoningContext", "ReasoningProvider",
     "AudioChunk", "SpeechSynthesizer", "SpeechTranscriber", "TranscriptionEvent",
     "TranscriptionState",
     "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",

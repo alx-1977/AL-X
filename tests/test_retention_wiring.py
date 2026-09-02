@@ -97,7 +97,6 @@ class AuthoritativePathTests(unittest.TestCase):
             gateway = ConversationGateway(
                 core,
                 conversations,
-                lambda conversation_id: None,
                 identifier_factory=lambda: "response-1",
                 clock=lambda: CORE_TIME,
             )

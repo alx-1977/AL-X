@@ -1,6 +1,6 @@
 """The approved configuration for the first live research test.
 
-SURVEY only, on gpt-5.4-nano, under a one-dollar day and a ten-cent request.
+SURVEY only, on gpt-5.4-nano, under a one-dollar day and a $0.007 request.
 COMPARE and JUDGE are priced but not enabled, because every configured model
 fits the ceiling: price is not a permission, so the restriction has to come
 from what is built, not from what is affordable.
@@ -25,6 +25,7 @@ from alx.config.settings import RuntimeSettings  # noqa: E402
 from alx.contracts import (  # noqa: E402
     Cognition,
     ModelCompletion,
+    ResearchModelUnpriced,
     ResearchQuestion,
     SpecialistError,
     SpecialistQuestion,
@@ -61,7 +62,7 @@ BASE_ENVIRONMENT = {
     "ALX_RESEARCH_JUDGE_MODEL": "gpt-5.4",
     "ALX_RESEARCH_ENABLED_TIERS": "survey",
     "RESEARCH_DAILY_BUDGET_USD": "1.00",
-    "RESEARCH_PER_REQUEST_MAX_USD": "0.10",
+    "RESEARCH_PER_REQUEST_MAX_USD": "0.007",
 }
 
 
@@ -93,6 +94,25 @@ class OverchargingTransport:
             "gpt-5.4-nano",
             {"finding": "answered"},
             {"input_tokens": OVERCHARGE_INPUT_TOKENS, "output_tokens": 1_000},
+        )
+
+
+class SnapshotTransport:
+    """Return the exact canonical snapshot identity observed in the live test."""
+
+    supports_bounded_research = True
+
+    def __init__(self, model: str = "gpt-5.4-nano-2026-03-17") -> None:
+        self.model = model
+        self.calls = 0
+
+    def complete(self, request):
+        self.calls += 1
+        return ModelCompletion(
+            "openai",
+            self.model,
+            {"finding": "answered"},
+            {"input_tokens": 189, "output_tokens": 1_045},
         )
 
 
@@ -144,24 +164,83 @@ class VerifiedPricingTest(unittest.TestCase):
         """Recording three prices must not imply anything about a fourth."""
         self.assertIsNone(price_of("openai", "gpt-5.4-turbo"))
 
+    def test_the_approved_snapshot_inherits_the_verified_alias_price(self) -> None:
+        self.assertEqual(
+            price_of("openai", "gpt-5.4-nano-2026-03-17"),
+            price_of("openai", "gpt-5.4-nano"),
+        )
+
+    def test_a_plausible_but_unapproved_snapshot_cannot_inherit_pricing(self) -> None:
+        self.assertIsNone(price_of("openai", "gpt-5.4-nano-2026-03-18"))
+        self.assertIsNone(price_of("openai", "gpt-5.4-nano-preview"))
+
+
+class SnapshotIdentitySettlementTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._directory = TemporaryDirectory()
+        self.root = Path(self._directory.name)
+
+    def tearDown(self) -> None:
+        self._directory.cleanup()
+
+    def researcher(self, transport, telemetry=None):
+        settings = RuntimeSettings.from_environment(environment())
+        built = build_research_specialist(
+            settings.research, self.root, telemetry_sink=telemetry
+        )
+        built._tiers[Cognition.SURVEY] = ResearchTierModel(
+            "openai", "gpt-5.4-nano", transport
+        )
+        return built
+
+    def test_snapshot_is_priced_while_telemetry_preserves_actual_identity(self) -> None:
+        events: list[dict] = []
+        researcher = self.researcher(
+            SnapshotTransport(), lambda _task_id, values: events.append(dict(values))
+        )
+
+        self.assertEqual(
+            researcher.answer(question(Cognition.SURVEY)), {"finding": "answered"}
+        )
+        call = researcher._ledger.day()["calls"][0]
+        self.assertEqual(call["model"], "gpt-5.4-nano-2026-03-17")
+        self.assertEqual(call["outcome"], "succeeded")
+        self.assertEqual(call["failure_code"], "")
+        completed = [event for event in events if event["code"] == "research.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["model"], "gpt-5.4-nano-2026-03-17")
+
+    def test_unapproved_snapshot_still_fails_as_actual_model_unpriced(self) -> None:
+        researcher = self.researcher(
+            SnapshotTransport("gpt-5.4-nano-2026-03-18")
+        )
+        with self.assertRaises(ResearchModelUnpriced):
+            researcher.answer(question(Cognition.SURVEY))
+        call = researcher._ledger.day()["calls"][0]
+        self.assertEqual(call["model"], "gpt-5.4-nano-2026-03-18")
+        self.assertEqual(call["outcome"], "failed")
+        self.assertEqual(call["failure_code"], "actual_model_unpriced")
+
 
 class SurveyWorstCaseTest(unittest.TestCase):
-    def test_one_survey_request_costs_at_most_a_third_of_a_cent(self) -> None:
+    def test_one_survey_request_costs_at_most_sixty_six_hundredths_of_a_cent(self) -> None:
         worst = worst_case_usd(
             "openai",
             "gpt-5.4-nano",
             RESEARCH_MAX_INPUT_TOKENS,
             RESEARCH_MAX_OUTPUT_TOKENS,
         )
-        # 8,000/1M x 0.20 + 1,000/1M x 1.25 = 0.0016 + 0.00125
-        self.assertAlmostEqual(worst, 0.00285, places=6)
+        # 8,000/1M x 0.20 + 4,000/1M x 1.25 = 0.0016 + 0.005
+        self.assertAlmostEqual(worst, 0.0066, places=6)
 
     def test_the_worst_case_sits_far_below_the_per_request_ceiling(self) -> None:
         worst = worst_case_usd(
             "openai", "gpt-5.4-nano",
             RESEARCH_MAX_INPUT_TOKENS, RESEARCH_MAX_OUTPUT_TOKENS,
         )
-        self.assertLess(worst, 0.10)
+        settings = RuntimeSettings.from_environment(environment())
+        self.assertLess(worst, settings.research.limits.per_request_max_usd)
+        self.assertEqual(settings.research.limits.per_request_max_usd, 0.007)
 
     def test_a_full_day_cannot_exceed_the_configured_budget(self) -> None:
         """Even at the worst case every time, the day holds."""
@@ -170,7 +249,7 @@ class SurveyWorstCaseTest(unittest.TestCase):
             RESEARCH_MAX_INPUT_TOKENS, RESEARCH_MAX_OUTPUT_TOKENS,
         )
         affordable = int(1.00 / worst)
-        self.assertGreater(affordable, 300)
+        self.assertGreater(affordable, 150)
         self.assertLessEqual(affordable * worst, 1.00)
 
 
@@ -213,18 +292,10 @@ class EnabledTierTest(unittest.TestCase):
             researcher.answer(question(Cognition.JUDGE))
         self.assertEqual(researcher._ledger.committed_usd(), before)
 
-    def test_price_alone_would_not_have_stopped_the_other_tiers(self) -> None:
-        """Why the restriction is configuration rather than cost.
-
-        All three configured models fit the ten-cent ceiling at this bound, so
-        an affordability check would have let COMPARE and JUDGE run.
-        """
-        for model in ("gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"):
-            worst = worst_case_usd(
-                "openai", model,
-                RESEARCH_MAX_INPUT_TOKENS, RESEARCH_MAX_OUTPUT_TOKENS,
-            )
-            self.assertLess(worst, 0.10, f"{model} would have been affordable")
+    def test_other_tiers_remain_unbuilt_even_with_a_larger_ceiling(self) -> None:
+        """Enabled tiers, not incidental affordability, grant access."""
+        researcher = self.build(RESEARCH_PER_REQUEST_MAX_USD="0.10")
+        self.assertEqual(set(researcher._tiers), {Cognition.SURVEY})
 
     def test_research_is_off_when_no_tier_is_enabled(self) -> None:
         self.assertIsNone(self.build(ALX_RESEARCH_ENABLED_TIERS=""))
@@ -275,8 +346,12 @@ class ReservationCoversWorstCaseTest(unittest.TestCase):
         """
         settings = RuntimeSettings.from_environment(environment())
         researcher = build_research_specialist(settings.research, self.root)
+        worst = worst_case_usd(
+            "openai", "gpt-5.4-nano",
+            RESEARCH_MAX_INPUT_TOKENS, RESEARCH_MAX_OUTPUT_TOKENS,
+        )
         reservation = researcher._ledger.reserve(
-            "survey", "openai", "gpt-5.4-nano", worst_case_usd=0.00285
+            "survey", "openai", "gpt-5.4-nano", worst_case_usd=worst
         )
         researcher._ledger.settle(reservation, 5.00)
         self.assertGreater(researcher._ledger.overrun_usd(), 0.0)

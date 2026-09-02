@@ -44,11 +44,11 @@ class ConversationGatewayTests(unittest.TestCase):
         self.goals.close()
         self.directory.cleanup()
 
-    def gateway(self, reasoner, locator=lambda conversation_id: None):
+    def gateway(self, reasoner):
         core = CoreAgent(self.goals, reasoner, lambda call, state: None, ())
         identifiers = iter(("alx-1", "alx-2", "alx-3"))
         return ConversationGateway(
-            core, self.conversations, locator,
+            core, self.conversations,
             identifier_factory=lambda: next(identifiers), clock=lambda: NOW,
         )
 
@@ -68,6 +68,20 @@ class ConversationGatewayTests(unittest.TestCase):
             [ConversationOrigin.SPEECH_TRANSCRIPT, ConversationOrigin.ALX_RESPONSE],
         )
         self.assertEqual(recovered.turns[-1].content, "Hello Friedl.")
+
+    def test_core_selected_silence_creates_no_alx_conversation_turn(self) -> None:
+        gateway = self.gateway(QueuedReasoner(AgentDecision(finish_silently=True)))
+        turn = ConversationTurn(
+            "conversation-1", "turn-1", ConversationOrigin.TYPED,
+            "You need not answer", NOW, "friedl",
+        )
+        outcome = gateway.receive_conversation_turn(turn, 1, RETENTION)
+        self.assertEqual(outcome.state, CoreState.FINISHED_SILENTLY)
+        recovered = self.conversations.load("conversation-1")
+        self.assertEqual(len(recovered.turns), 1)
+        self.assertEqual(recovered.turns[0].turn_id, turn.turn_id)
+        self.assertEqual(recovered.turns[0].content, turn.content)
+        self.assertEqual(recovered.turns[0].origin, ConversationOrigin.TYPED)
 
     def test_follow_up_uses_same_thread_and_same_core_without_goal(self) -> None:
         reasoner = QueuedReasoner(
