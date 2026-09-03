@@ -216,6 +216,16 @@ class LiveVoiceServer:
             except Exception:
                 continue
 
+    def _typed_queue(self, conversation_id: str):
+        """The queue this exchange drains typed lines from.
+
+        Registered when the connection opens, and handed to the session here.
+        Without this the lines are queued and nobody reads them: the frame
+        arrives, the queue grows, and the turn never happens.
+        """
+        queues = getattr(self, "_typed_queues", {}).get(conversation_id) or []
+        return queues[-1] if queues else None
+
     def _delivery_queue(self, conversation_id: str):
         """The queue this exchange should drain, if a listener registered one."""
         queues = getattr(self, "_delivery_queues", {}).get(conversation_id) or []
@@ -288,6 +298,7 @@ class LiveVoiceServer:
                 conversation_id,
                 self._audio(connection, conversation_id),
                 self._delivery_queue(conversation_id),
+                self._typed_queue(conversation_id),
             ):
                 if event.kind is VoiceEventKind.AUDIO:
                     assert event.audio is not None

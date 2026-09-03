@@ -360,5 +360,72 @@ async def _never():
         yield None
 
 
+class ServerToSessionWiringTests(unittest.TestCase):
+    """The server must hand its queues to the session it is driving.
+
+    Every earlier console test called `exchange()` directly with a queue it had
+    built, so the seam between the transport and the session was never
+    exercised. A typed frame reached a queue nobody read: the frame arrived,
+    the queue grew, and no turn ever happened. These assert the wiring itself.
+    """
+
+    def _server(self) -> LiveVoiceServer:
+        server = LiveVoiceServer.__new__(LiveVoiceServer)
+        server._delivery_queues = {}
+        server._typed_queues = {}
+        server._delivery_loop = None
+        server._await_audio_confirmation = False
+        return server
+
+    def test_the_exchange_receives_the_registered_typed_queue(self) -> None:
+        seen: dict = {}
+
+        class Session:
+            async def exchange(self, conversation_id, audio, deliveries=None, typed=None):
+                seen["typed"] = typed
+                seen["deliveries"] = deliveries
+                if False:
+                    yield None
+
+        server = self._server()
+        server._session = Session()
+        server._audio = lambda _connection, _id: _never()
+        registered: asyncio.Queue[str] = asyncio.Queue()
+        server._typed_queues["c1"] = [registered]
+
+        asyncio.run(server._exchange_once(object(), "c1"))
+        self.assertIs(
+            seen["typed"], registered,
+            "the session must drain the queue the transport registered",
+        )
+
+    def test_a_typed_frame_reaches_the_queue_the_session_drains(self) -> None:
+        """End to end across the seam: frame in, same queue out."""
+        seen: dict = {}
+
+        class Session:
+            async def exchange(self, conversation_id, audio, deliveries=None, typed=None):
+                seen["typed"] = typed
+                if False:
+                    yield None
+
+        server = self._server()
+        server._session = Session()
+        server._audio = lambda _connection, _id: _never()
+        registered: asyncio.Queue[str] = asyncio.Queue()
+        server._typed_queues["c1"] = [registered]
+
+        server._queue_typed_turn(
+            "c1", json.dumps({"type": TYPED_FRAME, "content": "are you there?"})
+        )
+        asyncio.run(server._exchange_once(object(), "c1"))
+        self.assertIs(seen["typed"], registered)
+        self.assertEqual(seen["typed"].get_nowait(), "are you there?")
+
+    def test_no_registered_queue_yields_none_rather_than_failing(self) -> None:
+        server = self._server()
+        self.assertIsNone(server._typed_queue("unknown"))
+
+
 if __name__ == "__main__":
     unittest.main()

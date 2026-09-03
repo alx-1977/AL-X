@@ -385,7 +385,7 @@ class SessionResilienceTests(unittest.TestCase):
         consumed: list[str] = []
 
         class Session:
-            async def exchange(self, conversation_id, audio, deliveries=None):
+            async def exchange(self, conversation_id, audio, deliveries=None, typed=None):
                 exchanges.append(1)
                 iterator = audio.__aiter__()
                 consumed.append(await iterator.__anext__())
