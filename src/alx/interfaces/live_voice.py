@@ -94,6 +94,7 @@ class VoiceSession:
         identifier_factory: Callable[[], str] | None = None,
         diagnostics: VoiceDiagnosticBuffer | None = None,
         event_source: CognitionOpportunitySource | None = None,
+        core_turn_lock: asyncio.Lock | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")
@@ -111,7 +112,12 @@ class VoiceSession:
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._diagnostics = diagnostics
         self._event_source = event_source
-        self._core_turn_lock = asyncio.Lock()
+        # Given by the runtime, so person turns and autonomous turns serialize
+        # through one authority. Turn serialization is a property of AL/X
+        # having one Core, not of voice: a lock owned here would let an
+        # autonomous turn run while Friedl was speaking. One is created here
+        # only when no runtime supplied one, which is the test path.
+        self._core_turn_lock = core_turn_lock or asyncio.Lock()
 
     async def exchange(
         self,

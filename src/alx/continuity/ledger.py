@@ -54,7 +54,30 @@ class SQLiteOpportunityLedger:
                     output_tokens INTEGER NOT NULL DEFAULT 0,
                     reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                     cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-                    recorded_at TEXT NOT NULL
+                    recorded_at TEXT NOT NULL,
+                    -- RESPONDED with no live transport to deliver it. A fact
+                    -- about the occasion, not a stored message: the prose is
+                    -- deliberately not kept, so nothing can replay it.
+                    response_undelivered INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            columns = {
+                row[1]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(cognition_opportunities)"
+                ).fetchall()
+            }
+            if "response_undelivered" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE cognition_opportunities "
+                    "ADD COLUMN response_undelivered INTEGER NOT NULL DEFAULT 0"
+                )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS commissioning (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    dispatches_attempted INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -176,6 +199,71 @@ class SQLiteOpportunityLedger:
                 "WHERE opportunity_id = ?",
                 ("unreconciled", opportunity_id),
             )
+
+
+    def mark_response_undelivered(self, opportunity_id: str) -> None:
+        """Record that an autonomous response had nowhere to go.
+
+        The fact, never the prose. Keeping the words would be a delivery queue
+        by another name, and D-024 is explicit that an undeliverable response is
+        not replayed: AL/X is shown that it happened and decides on a later turn
+        whether she still wants to say anything, composing it fresh then.
+
+        Deterministic code records this and draws no conclusion from it. There
+        is no expiry, no priority and no notification semantics.
+        """
+        with self._connection:
+            self._connection.execute(
+                "UPDATE cognition_opportunities SET response_undelivered = 1 "
+                "WHERE opportunity_id = ?",
+                (opportunity_id,),
+            )
+
+    def undelivered(self) -> tuple[dict[str, Any], ...]:
+        """Occasions whose response could not be delivered, newest last."""
+        return tuple(
+            dict(row)
+            for row in self._connection.execute(
+                "SELECT * FROM cognition_opportunities "
+                "WHERE response_undelivered = 1 ORDER BY recorded_at"
+            ).fetchall()
+        )
+
+    # --- commissioning latch ------------------------------------------------
+    #
+    # Temporary safety for the first supervised activation, and nothing more.
+    # A financial fuse cannot limit turns: a reservation reconciles to actual
+    # spend, so a cheap turn returns most of its withdrawal and the next one
+    # fits. At $0.1632 that permits 79 dispatches, not two.
+    #
+    # This counts dispatch attempts, so it is independent of what anything
+    # cost. It is durable, so a crash cannot reset it. It is deliberately not a
+    # daily quota, a chain-depth limit or a cadence rule, and it is removed
+    # once the supervised turn is validated.
+
+    def commissioning_dispatches(self) -> int:
+        row = self._connection.execute(
+            "SELECT dispatches_attempted FROM commissioning WHERE id = 1"
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def record_commissioning_dispatch(self) -> int:
+        """Count one attempt, before it is made. Returns the new total.
+
+        Recorded before dispatch rather than after, so a process that dies
+        mid-call cannot come back and spend a second time on the strength of
+        having no record of the first.
+        """
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO commissioning(id, dispatches_attempted) VALUES (1, 0) "
+                "ON CONFLICT(id) DO NOTHING"
+            )
+            self._connection.execute(
+                "UPDATE commissioning SET dispatches_attempted = "
+                "dispatches_attempted + 1 WHERE id = 1"
+            )
+        return self.commissioning_dispatches()
 
     def rows(self) -> tuple[dict[str, Any], ...]:
         return tuple(

@@ -95,21 +95,30 @@ class CompositionRootTests(unittest.TestCase):
             with self.subTest(component=name):
                 self.assertEqual(constructed.count(name), 1)
 
-    def test_no_poller_is_started_and_run_due_is_never_called(self) -> None:
-        """Phase 8 activation stays out of scope."""
+    def test_exactly_one_due_cognition_producer_is_started(self) -> None:
+        """Phase 8: one tick, in the process-lifetime scope, and only one.
+
+        This previously asserted no producer existed at all, which was correct
+        while Phase 8 was out of scope. Now that it is implemented, the
+        property worth holding is that there is exactly one — a second would be
+        a competing production path to the same outcome.
+        """
         tree = ast.parse(self.SOURCE)
-        called = {
-            node.func.attr
+        constructed = [
+            node.func.id
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        }
-        self.assertNotIn("run_due", called)
-        names = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-        }
-        self.assertNotIn("AutonomousCognitionRunner", names)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        self.assertEqual(constructed.count("DueCognitionSource"), 1)
+        self.assertEqual(constructed.count("AutonomousCognitionRunner"), 1)
+
+    def test_the_producer_lives_for_the_process_not_a_voice_session(self) -> None:
+        """Her continuity must not depend on someone currently listening."""
+        session = (
+            ROOT / "src" / "alx" / "interfaces" / "live_voice.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("DueCognitionSource", session)
+        self.assertNotIn("AutonomousCognitionRunner", session)
 
     def test_the_origin_boundary_is_always_constructed(self) -> None:
         """EX-001: the boundary exists even unconfigured, so nothing falls back."""

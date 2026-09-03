@@ -18,7 +18,11 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
-from alx.bootstrap.autonomous import LedgerSpendAuthority, OccasionSpendRelay
+from alx.bootstrap.autonomous import (
+    AutonomousCognitionRunner,
+    LedgerSpendAuthority,
+    OccasionSpendRelay,
+)
 from alx.bootstrap.continuity import build_continuity_runtime
 from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
@@ -33,6 +37,8 @@ from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     AUTONOMOUS_MAX_INPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
+    autonomous_commissioning_limit,
+    autonomous_due_check_seconds,
     AUTONOMOUS_MAX_OUTPUT_TOKENS,
     ConfigurationError,
     LiveVoiceSettings,
@@ -42,6 +48,7 @@ from alx.config import (
     XeroSettings,
 )
 from alx.continuity import (
+    DueCognitionSource,
     FutureCognitionSource,
     SQLiteOpportunityLedger,
 )
@@ -445,6 +452,10 @@ async def run(repository_root: Path) -> None:
         conversation_store,
         contextual_events=mail_runtime.source.contextual_events,
     )
+    # One Core-turn lock for the whole runtime. Person turns and autonomous
+    # turns serialize through this same object: AL/X has one Core, so she has
+    # one turn at a time regardless of what caused the turn.
+    core_turn_lock = asyncio.Lock()
     session = VoiceSession(
         gateway,
         providers.speech_to_text,
@@ -454,6 +465,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.goal_retention_days,
         diagnostics=diagnostics,
         event_source=mail_runtime.source,
+        core_turn_lock=core_turn_lock,
     )
     server = LiveVoiceServer(
         session,
@@ -462,8 +474,29 @@ async def run(repository_root: Path) -> None:
         provider_settings.speech_to_text.sample_rate_hz,
         repository_root / "src/alx/interfaces/assets",
     )
+    # The due-cognition tick lives for the life of the process, beside the
+    # transport rather than inside it. Voice is how she is heard, not what
+    # decides whether she exists.
+    autonomous_runner = AutonomousCognitionRunner(
+        cognition_source,
+        opportunity_ledger,
+        gateway,
+        voice_settings.autonomous_conversation_id,
+        voice_settings.core_step_budget,
+        voice_settings.goal_retention_days,
+        transport_available=server.has_live_transport,
+        commissioning_limit=autonomous_commissioning_limit(environment),
+    )
+    due_cognition = DueCognitionSource(
+        cognition_source,
+        autonomous_runner,
+        core_turn_lock,
+        autonomous_due_check_seconds(environment),
+    )
     try:
-        await server.serve_forever()
+        async with asyncio.TaskGroup() as runtime_tasks:
+            runtime_tasks.create_task(server.serve_forever())
+            runtime_tasks.create_task(due_cognition.run())
     finally:
         mail_runtime.observations.close()
         conversation_store.close()

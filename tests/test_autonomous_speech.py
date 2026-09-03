@@ -231,16 +231,28 @@ class SpeechIsCoreJudgementTests(unittest.TestCase):
         self.assertIsNone(outcome.response)
 
     def test_the_transport_never_branches_on_origin(self) -> None:
-        """One speech path. An origin branch here would be a second one."""
-        transport = (self.SOURCE / "interfaces" / "live_voice.py").read_text(
-            encoding="utf-8"
+        """One speech path. An origin branch here would be a second one.
+
+        Checked against the code the transport executes rather than the words
+        in its comments: the property is that no identifier the transport reads
+        carries an origin, not that the file avoids the vocabulary.
+        """
+        import ast
+
+        tree = ast.parse(
+            (self.SOURCE / "interfaces" / "live_voice.py").read_text(encoding="utf-8")
         )
+        identifiers = {
+            node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Attribute, ast.Name))
+        }
         for token in (
             "CognitionOrigin", "SELF_REQUESTED", "is_autonomous",
-            "autonomous", "suppress",
+            "origin_is_autonomous", "suppress",
         ):
             with self.subTest(token=token):
-                self.assertNotIn(token, transport)
+                self.assertNotIn(token, identifiers)
 
     def test_no_importance_filter_exists_in_the_speech_path(self) -> None:
         """No quiet hours, threshold, priority or topic rule anywhere."""

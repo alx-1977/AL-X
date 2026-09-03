@@ -514,6 +514,40 @@ def autonomous_reasoning_settings(
     )
 
 
+def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:
+    """How promptly a matured request is noticed. Not a cognition cadence.
+
+    It bounds the delay between a `not_before` passing and the runtime seeing
+    it. It says nothing about how often AL/X thinks: with no pending request
+    the tick runs forever and invokes her never.
+    """
+    return _number_in_range(
+        environment, "ALX_AUTONOMOUS_DUE_CHECK_SECONDS", 1.0, 3600.0, 30.0
+    )
+
+
+def autonomous_commissioning_limit(environment: Mapping[str, str]) -> int | None:
+    """Temporary one-shot safety for the first supervised activation.
+
+    Counts dispatch attempts, because the financial fuse cannot limit turns: a
+    reservation reconciles to actual spend, so a cheap turn returns most of its
+    withdrawal and the next fits. Measured, a $0.1632 fuse permits 79
+    dispatches rather than two.
+
+    Absent in normal operation, which is the point: this is commissioning
+    safety and must never become a cognition quota or a cadence rule.
+    """
+    raw = environment.get("ALX_AUTONOMOUS_COMMISSIONING_DISPATCHES", "").strip()
+    if not raw:
+        return None
+    limit = int(raw)
+    if limit <= 0:
+        raise ConfigurationError(
+            "ALX_AUTONOMOUS_COMMISSIONING_DISPATCHES must be positive when set"
+        )
+    return limit
+
+
 def autonomous_cognition_daily_budget_usd(environment: Mapping[str, str]) -> float:
     """Friedl's hard daily ceiling on autonomous Core cognition.
 
@@ -732,6 +766,12 @@ class LiveVoiceSettings:
     primary_person_id: str
     goal_retention_days: int
     core_step_budget: int
+    # The durable thread an autonomous turn belongs to. A voice connection
+    # names its own conversation, but an occasion nobody opened has no
+    # connection to ask, and a fresh id per turn would give each unprompted
+    # thought its own private history. Defaults to the person's own thread,
+    # so a cognition she asked for continues the conversation she is in.
+    autonomous_conversation_id: str = ""
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> LiveVoiceSettings:
@@ -746,4 +786,7 @@ class LiveVoiceSettings:
                 environment, "ALX_GOAL_RETENTION_DAYS", 3650
             ),
             core_step_budget=_positive_integer(environment, "ALX_CORE_STEP_BUDGET", 8),
+            autonomous_conversation_id=environment.get(
+                "ALX_AUTONOMOUS_CONVERSATION_ID", ""
+            ).strip() or _required(environment, "ALX_PRIMARY_PERSON_ID"),
         )

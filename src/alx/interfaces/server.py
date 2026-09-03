@@ -90,6 +90,18 @@ class LiveVoiceServer:
         # Set when a mid-exchange recovery happens, cleared by the next audio
         # frame. It proves the microphone iterator survived the recovery.
         self._await_audio_confirmation = False
+        # How many voice connections are open. A count rather than a flag, so
+        # two browsers closing one tab does not read as silence.
+        self._live_connections = 0
+
+    def has_live_transport(self) -> bool:
+        """Whether a voice connection could carry speech right now.
+
+        Asked only after the Core has already decided to speak, so it never
+        influences whether cognition happens. Absence of a listener must not
+        stop her thinking; it only means what she said had nowhere to go.
+        """
+        return self._live_connections > 0
 
     async def serve_forever(self) -> None:
         origins = (f"http://{self._host}:{self._port}", None)
@@ -111,7 +123,9 @@ class LiveVoiceServer:
             await connection.close(code=1008, reason="unsupported_transport_path")
             return
         conversation_id = self._conversation_id(parse_qs(parsed.query))
+        self._live_connections += 1
         LOGGER.info("Voice session connected")
+
         await connection.send(
             json.dumps(
                 {
@@ -124,8 +138,12 @@ class LiveVoiceServer:
         # A transcription transport can drop while the person is simply silent.
         # That ends one exchange but not the conversation, so it is re-entered on
         # the same durable conversation while the browser socket stays open.
-        while await self._exchange_once(connection, conversation_id):
-            LOGGER.info("Resuming voice session on the same conversation")
+        try:
+            while await self._exchange_once(connection, conversation_id):
+                LOGGER.info("Resuming voice session on the same conversation")
+
+        finally:
+            self._live_connections -= 1
 
     async def _exchange_once(
         self, connection: ServerConnection, conversation_id: str

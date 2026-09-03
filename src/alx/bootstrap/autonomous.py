@@ -42,9 +42,11 @@ class AutonomousCognitionRunner:
         conversation_id: str,
         step_budget: int,
         retention_days: int,
+        transport_available: Callable[[], bool] | None = None,
         usage_of: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         spend_observer: Any = None,
+        commissioning_limit: int | None = None,
     ) -> None:
         # Deliberately no budget, provider, model or token bounds. Those belong
         # to the reasoning boundary, which is the only place the exact request
@@ -57,9 +59,16 @@ class AutonomousCognitionRunner:
         self._conversation_id = conversation_id
         self._step_budget = step_budget
         self._retention_days = retention_days
+        # Whether a live transport could deliver speech right now. Asked only
+        # after the Core has decided to speak, so it never influences whether
+        # cognition happens: absent transport must not make her stop thinking.
+        self._transport_available = transport_available or (lambda: True)
         # Returns the measured usage of the turn just run, for settlement.
         self._usage_of = usage_of or (lambda: None)
         self._spend_observer = spend_observer
+        # Temporary commissioning safety for the first supervised activation.
+        # None in normal operation, so there is no turn quota at all.
+        self._commissioning_limit = commissioning_limit
         # Timezone-aware, like every other clock in the runtime. A naive
         # datetime here would reach retention_until and the durable records,
         # where the contracts reject it, so the failure would surface as a
@@ -76,11 +85,41 @@ class AutonomousCognitionRunner:
                 attempted.append(opportunity.opportunity_id)
         return tuple(attempted)
 
+    def run_one(self, opportunity: CognitionOpportunity) -> bool:
+        """Run one occasion the tick has already found.
+
+        The public entry for the process-lifetime producer. `run_due` remains
+        for callers that want the scan and the run together; both reach the
+        same single implementation, so there is one production path.
+        """
+        return self._run_one(opportunity)
+
     def _run_one(self, opportunity: CognitionOpportunity) -> bool:
         # Step 2. Claim it before spending anything, so a crash loses the turn
         # rather than paying for it twice.
         if not self._source.claim(opportunity):
             return False
+
+        # Step 2a. The commissioning latch, when one is set. It counts dispatch
+        # attempts rather than dollars, because the financial fuse cannot limit
+        # turns: a reservation reconciles to actual spend, so a cheap turn
+        # returns most of its withdrawal and the next one fits. Counting the
+        # attempt before making it means a crash mid-call cannot come back and
+        # spend again for want of a record.
+        if self._commissioning_limit is not None:
+            attempted = self._ledger.record_commissioning_dispatch()
+            if attempted > self._commissioning_limit:
+                LOGGER.info(
+                    "Commissioning latch closed: %d dispatch(es) already "
+                    "attempted, limit %d",
+                    attempted,
+                    self._commissioning_limit,
+                )
+                self._ledger.record_outcome(
+                    opportunity.opportunity_id, "refused_commissioning_latch"
+                )
+                self._source.release(opportunity)
+                return False
 
         # Step 3. Invoke the one Core, through the one gateway. Phase 3's
         # origin selection routes this to the autonomous reasoner, which owns
@@ -92,6 +131,7 @@ class AutonomousCognitionRunner:
         # Bind cost reporting to this occasion for the duration of the turn, so
         # what the reasoning boundary spends lands on the right ledger row.
         spend = _OccasionSpend()
+        undelivered = False
         if self._spend_observer is not None:
             self._spend_observer.watch(spend, opportunity.opportunity_id)
         try:
@@ -102,6 +142,12 @@ class AutonomousCognitionRunner:
                 self._clock() + timedelta(days=self._retention_days),
             )
             outcome_state = outcome.state.value
+            # She decided to speak. Whether anyone could hear is a fact about
+            # the occasion, recorded and nothing more: the words are not kept,
+            # so nothing can replay them, and no rule here decides whether it
+            # still matters. She sees the fact on a later turn and chooses.
+            if outcome_state == "responded" and not self._transport_available():
+                undelivered = True
         except Exception as error:
             LOGGER.warning("Autonomous cognition turn failed: %s", error)
         finally:
@@ -130,6 +176,10 @@ class AutonomousCognitionRunner:
                     settled_usd=spend.settled_usd,
                     usage=self._usage_of(),
                 )
+                if undelivered:
+                    self._ledger.mark_response_undelivered(
+                        opportunity.opportunity_id
+                    )
             except Exception as error:
                 LOGGER.warning(
                     "Could not record the outcome of %s: %s",

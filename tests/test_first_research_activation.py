@@ -663,6 +663,37 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         ).read_text()
         self.assertIn("build_research_runtime(", source)
         self.assertIn("registry.register(definition)", source)
-        # No scheduler, no recurring research, no background loop.
-        for forbidden in ("create_task", "call_later", "Timer(", "while True"):
+        # D-023 forbids recurring research: nothing may schedule a research
+        # call, and research reaches AL/X only as a capability she chooses.
+        #
+        # This once asserted the composition root contained no background task
+        # at all, which was the right guard while D-024 did not exist. D-024
+        # now authorises one process-lifetime tick that notices matured future
+        # cognition requests, so the blanket ban would fail on a task Friedl
+        # approved. The property that still holds, and the one D-023 actually
+        # protects, is that nothing schedules *research*.
+        self.assertNotIn("research", source[source.index("TaskGroup"):].lower())
+        for forbidden in ("research_timer", "recurring_research", "research_loop"):
             self.assertNotIn(forbidden, source)
+
+    def test_no_task_schedules_research(self) -> None:
+        """Research is a capability AL/X chooses, never a scheduled activity."""
+        import ast
+
+        tree = ast.parse(
+            (REPOSITORY_ROOT / "src" / "alx" / "bootstrap" / "live_voice.py")
+            .read_text()
+        )
+        scheduled = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_task"
+        ]
+        # Exactly two: the voice server, and the due-cognition tick.
+        self.assertEqual(len(scheduled), 2)
+        for call in scheduled:
+            rendered = ast.dump(call)
+            with self.subTest(task=rendered[:60]):
+                self.assertNotIn("research", rendered.lower())
