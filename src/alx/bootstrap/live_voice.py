@@ -404,6 +404,13 @@ async def run(repository_root: Path) -> None:
             usage.settle(current_conversation_id[0])
         return attempt
 
+    # The shortest configured approval window governs, so a capability cannot
+    # inherit a longer one from another integration.
+    approval_windows = tuple(
+        value for value in (approval_ttl_seconds, xero_approval_ttl_seconds)
+        if value is not None
+    )
+
     # EX-001, time-boxed: one Core answers Friedl, another answers a turn
     # nobody asked for. Selection is one expression over CognitionOrigin, here
     # and nowhere else. The origin boundary exists whether or not the
