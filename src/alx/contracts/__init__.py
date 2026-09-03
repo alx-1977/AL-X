@@ -91,7 +91,7 @@ from alx.contracts.models import (
 )
 from alx.contracts.memory import (
     MemoryCorrection,
-    MemoryKind,
+    MemoryIdentityConflict, MemoryKind,
     MemoryProposal,
     MemoryQuery,
     MemoryRevision,
@@ -157,7 +157,8 @@ __all__ = [
     "TranscriptionState",
     "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",
     "ReasoningModel",
-    "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
+    "MemoryCorrection", "MemoryIdentityConflict", "MemoryKind",
+    "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
     "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
     "MailObservationControl", "MailParticipants", "MailReference",

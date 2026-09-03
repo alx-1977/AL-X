@@ -111,6 +111,12 @@ timestamps; do not invent one. Factual memory has null
 person_id and null meaning. Relationship memory requires the matching person_id
 and null meaning. Autobiographical memory has null person_id and requires your
 first-person meaning reflection.
+retrieved_memories holds only what you asked for this turn; it starts empty and
+is never the whole store. Memories you formed in earlier conversations are not
+shown to you unless you retrieve them, so before forming a memory about
+something you may already have recorded, consider one retrieval to see what is
+there. Whether an existing memory already covers it, and whether to leave it,
+add to it, or supersede it, is your judgement.
 A memory identifier names one memory permanently. Every memory you form takes a
 new identifier, including one that refines or corrects something you already
 remember. To replace an earlier memory, give the new one its own identifier and
@@ -119,6 +125,12 @@ kept and its history stays inspectable. A superseding memory must be the same
 kind and concern the same person as the one it replaces. Reusing an identifier
 that already exists changes nothing and is refused, so an identifier you have
 seen among retrieved_memories is not available for a new memory.
+When memory_identifier_conflicts is present, a memory you proposed reused an
+identifier that already holds different content, and nothing was stored for it.
+The entry shows what that identifier already means. Decide what to do: keep the
+existing memory and drop yours, form yours under a different identifier, or
+supersede the existing one. Repeating the same identifier with the same content
+stores nothing again.
 In a goal update, null replacement fields preserve
 their current values; arrays of new history/evidence contain additions only. Return
 only the required structured decision.
@@ -575,6 +587,9 @@ def _context_payload(context: ReasoningContext) -> str:
             }
             for item in context.memories
         ],
+        # Identifiers she proposed that already name something else. The facts
+        # only; what to do about each is her decision.
+        "memory_identifier_conflicts": [dict(item) for item in context.memory_conflicts],
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 

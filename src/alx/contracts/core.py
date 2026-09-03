@@ -175,11 +175,17 @@ class ReasoningContext:
     # timing only: the words are not kept, so she is told that it happened and
     # decides afresh whether anything still needs saying.
     undelivered_responses: tuple[Mapping[str, Any], ...] = ()
+    # Memory identifiers she proposed this turn that already name a different
+    # memory. Mechanical facts only -- the identifier, and the content already
+    # stored under it -- because whether to supersede it, choose another
+    # identifier, or let the write go is hers to judge under Law 3.
+    memory_conflicts: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
+        object.__setattr__(self, "memory_conflicts", tuple(self.memory_conflicts))
         object.__setattr__(
             self, "undelivered_responses", tuple(self.undelivered_responses)
         )
@@ -342,6 +348,8 @@ class DurableMemoryStore(Protocol):
         query: MemoryQuery,
         as_of: datetime,
     ) -> tuple[MemorySnapshot, ...]: ...
+
+    def load(self, memory_id: str) -> MemorySnapshot: ...
 
 
 class CapabilityDispatch(Protocol):

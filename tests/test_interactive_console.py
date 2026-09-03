@@ -18,6 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from alx.core import CoreState
+from alx.core.loop import CoreOutcome  # noqa: E402
 from alx.contracts import ConversationOrigin  # noqa: E402
 from alx.interfaces.live_voice import (  # noqa: E402
     VoiceEvent, VoiceEventKind, VoiceSession,
@@ -35,15 +37,13 @@ class RecordingGateway:
     def receive_conversation_turn(self, turn, step_budget, retention_until):
         self.turns.append(turn)
 
-        class Outcome:
-            class state:
-                value = "responded" if self._response else "finished_silently"
-            response = self._response
-            reason = None
-
-        Outcome.state.value = "responded" if self._response else "finished_silently"
-        Outcome.response = self._response
-        return Outcome()
+        # The real contract. A hand-rolled stand-in silently omits any field
+        # the loop later adds, hiding a transport break behind a green test.
+        return CoreOutcome(
+            state=CoreState.RESPONDED if self._response
+            else CoreState.FINISHED_SILENTLY,
+            response=self._response,
+        )
 
 
 class Synthesizer:
@@ -304,13 +304,7 @@ class PersonTurnShutdownTests(unittest.TestCase):
                 released.wait(5)
                 observed["gateway_finished"] = True
 
-                class Outcome:
-                    class state:
-                        value = "finished_silently"
-                    response = None
-                    reason = None
-
-                return Outcome()
+                return CoreOutcome(state=CoreState.FINISHED_SILENTLY)
 
         lock = asyncio.Lock()
         session = VoiceSession(

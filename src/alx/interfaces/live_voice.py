@@ -282,10 +282,11 @@ class VoiceSession:
             for diagnostic in self._diagnostics.drain(conversation_id):
                 yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=diagnostic)
         LOGGER.info(
-            "Authoritative Core turn finished: state=%s reason=%s response=%s",
+            "Authoritative Core turn finished: state=%s reason=%s response=%s memory=%s",
             outcome.state.value,
             outcome.reason,
             outcome.response is not None,
+            outcome.memory_state or "ok",
         )
         if outcome.state.value == "finished_silently":
             # Silence is an explicit authoritative Core result, not a missing

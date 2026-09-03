@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -15,6 +16,7 @@ from alx.contracts import (
     ConversationOrigin,
     CapabilityResultState, CognitionOrigin, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
+    MemoryIdentityConflict,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, GoalSummary, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
@@ -38,6 +40,11 @@ class CoreOutcome:
     response: str | None = None
     reason: str | None = None
     response_provenance: ContentProvenance | None = None
+    # Whether the memories this turn proposed actually persisted. A response
+    # is no longer discarded because a supporting memory clashed, so the
+    # durable record has to say plainly that the write did not happen.
+    # None means nothing was proposed or everything proposed was stored.
+    memory_state: str | None = None
 
 
 # The whole conversation is stored and never rewritten, but sending all of it
@@ -158,6 +165,17 @@ class CoreAgent:
 
         snapshot: GoalSnapshot | None = None
         retrieved_memories: tuple[MemorySnapshot, ...] = ()
+        # Identifier clashes seen this turn, handed to the next reasoning call
+        # so she can resolve them. Cleared once she stops proposing the
+        # conflicting write, so a resolved turn carries nothing forward.
+        memory_conflicts: tuple[Mapping[str, Any], ...] = ()
+        # An answer she had already finished when a memory identifier clashed.
+        # Held so that running out of steps mid-resolution delivers her words
+        # instead of discarding them; memory_state stays truthful that the
+        # supporting memory did not persist.
+        conflict_response: str | None = None
+        conflict_provenance: ContentProvenance | None = None
+        conflict_silent = False
         transient_attempts: tuple[CapabilityAttempt, ...] = ()
         memory_query_ids: set[str] = set()
         # How many times this turn has moved to a different goal. Reading one
@@ -203,6 +221,7 @@ class CoreAgent:
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
                     undelivered_responses=self._undelivered_responses(),
+                    memory_conflicts=memory_conflicts,
                 ))
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
@@ -345,8 +364,14 @@ class CoreAgent:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_id_reused")
                 if not self._memory_query_is_authorized(conversation, decision.memory_query):
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_unauthorized")
-                snapshot, committed = self._commit_memories(
-                    snapshot, decision.memory_proposals, retention_until)
+                try:
+                    snapshot, committed = self._commit_memories(
+                        snapshot, decision.memory_proposals, retention_until)
+                except MemoryIdentityConflict:
+                    memory_conflicts = self._conflicting_memories(
+                        decision.memory_proposals)
+                    continue
+                memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 if self._memory_store is None:
@@ -359,8 +384,22 @@ class CoreAgent:
                 continue
 
             if decision.call is None:
-                snapshot, committed = self._commit_memories(
-                    snapshot, decision.memory_proposals, retention_until)
+                try:
+                    snapshot, committed = self._commit_memories(
+                        snapshot, decision.memory_proposals, retention_until)
+                except MemoryIdentityConflict:
+                    # She reused an identifier that already means something
+                    # else. That is hers to resolve, so the conflict goes back
+                    # with the facts and the turn continues. If no step remains
+                    # the answer is still delivered below, and memory_state
+                    # records that nothing was stored.
+                    memory_conflicts = self._conflicting_memories(
+                        decision.memory_proposals)
+                    conflict_response = decision.response
+                    conflict_provenance = decision_provenance
+                    conflict_silent = decision.finish_silently
+                    continue
+                memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 if decision.finish_silently:
@@ -383,8 +422,14 @@ class CoreAgent:
                 if any(item.call is not None and item.call.call_id == decision.call.call_id
                        for item in transient_attempts):
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
-                snapshot, committed = self._commit_memories(
-                    snapshot, decision.memory_proposals, retention_until)
+                try:
+                    snapshot, committed = self._commit_memories(
+                        snapshot, decision.memory_proposals, retention_until)
+                except MemoryIdentityConflict:
+                    memory_conflicts = self._conflicting_memories(
+                        decision.memory_proposals)
+                    continue
+                memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 try:
@@ -414,13 +459,27 @@ class CoreAgent:
                     and item.scope.matches(decision.call)) else item
                 for item in snapshot.state.approvals
             )
+            # Checked before the durable checkpoint claims the approval: a
+            # conflict sends the turn back to her without dispatching, and a
+            # claimed approval with no dispatch would look like an interrupted
+            # external action on the next restart.
+            conflicts = self._conflicting_memories(decision.memory_proposals)
+            if conflicts:
+                memory_conflicts = conflicts
+                continue
             checkpoint = replace(snapshot.state,
                                  attempts=(*snapshot.state.attempts, pending),
                                  approvals=approvals)
             snapshot = self._store.replace(checkpoint, snapshot.retention_until,
                                            snapshot.revision, decision_provenance)
-            snapshot, committed = self._commit_memories(
-                snapshot, decision.memory_proposals, retention_until)
+            try:
+                snapshot, committed = self._commit_memories(
+                    snapshot, decision.memory_proposals, retention_until)
+            except MemoryIdentityConflict:
+                memory_conflicts = self._conflicting_memories(
+                    decision.memory_proposals)
+                continue
+            memory_conflicts = ()
             if not committed:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
             try:
@@ -434,6 +493,19 @@ class CoreAgent:
             if attempt.call != decision.call:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
             snapshot = self._finalize_dispatch(snapshot, attempt, now)
+        if conflict_response is not None or conflict_silent:
+            # She finished what she wanted to say, then ran out of steps while
+            # resolving a memory identifier. Discarding the answer to report a
+            # memory problem would lose the part that mattered to the person,
+            # so it is delivered and the memory failure is stated separately.
+            return CoreOutcome(
+                CoreState.FINISHED_SILENTLY if conflict_silent else CoreState.RESPONDED,
+                snapshot,
+                response=None if conflict_silent else conflict_response,
+                reason="core_selected_silence" if conflict_silent else None,
+                response_provenance=None if conflict_silent else conflict_provenance,
+                memory_state="unresolved_identity_conflict",
+            )
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
 
     def _close_interrupted_dispatch(self, snapshot: GoalSnapshot) -> GoalSnapshot:
@@ -886,6 +958,12 @@ class CoreAgent:
     def _commit_memories(self, snapshot: GoalSnapshot | None,
                          proposals: tuple[MemoryProposal, ...],
                          retention_until: datetime) -> tuple[GoalSnapshot | None, bool]:
+        """Persist a batch. False means a mechanical failure, not a conflict.
+
+        `MemoryIdentityConflict` is raised for the caller to hand back to the
+        Core; it means the identifier already names different content, which
+        is a question about meaning rather than a storage fault.
+        """
         if not proposals:
             return snapshot, True
         if self._memory_store is None:
@@ -902,8 +980,39 @@ class CoreAgent:
                 snapshot.provenance,
             )
             return updated, self._flush_pending_memory_batches(updated.state.goal_id)
+        except MemoryIdentityConflict:
+            raise
         except Exception:
             return snapshot, False
+
+    def _conflicting_memories(
+        self, proposals: tuple[MemoryProposal, ...],
+    ) -> tuple[Mapping[str, Any], ...]:
+        """The mechanical facts the Core needs to resolve an identifier clash.
+
+        Only what is already true in the store: the identifier, the kind, and
+        the content it currently holds. Nothing here suggests what she should
+        do about it, and nothing compares the two texts for similarity.
+        """
+        if self._memory_store is None:
+            return ()
+        conflicts: list[Mapping[str, Any]] = []
+        for proposal in proposals:
+            try:
+                existing = self._memory_store.load(proposal.memory_id)
+            except Exception:
+                continue
+            revision = existing.revisions[-1]
+            if (existing.kind is proposal.kind
+                    and revision.content == proposal.content):
+                continue
+            conflicts.append({
+                "memory_id": proposal.memory_id,
+                "existing_kind": existing.kind.value,
+                "existing_content": revision.content,
+                "existing_supersedes_memory_id": existing.supersedes_memory_id,
+            })
+        return tuple(conflicts)
 
     def _flush_pending_memory_batches(self, goal_id: str) -> bool:
         try:
