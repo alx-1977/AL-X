@@ -100,20 +100,18 @@ class PhaseFiveHarness(unittest.TestCase):
     def _runner(
         self,
         enabled: bool = True,
-        model: str = "gpt-5.6-luna",
-        out_bound: int | None = OUT_BOUND,
         gateway=None,
         usage=None,
     ) -> AutonomousCognitionRunner:
+        """The runner as production builds it: no budget, no bounds.
+
+        Reservation belongs to the reasoning boundary, which holds the exact
+        request, so the runner is given no way to spend.
+        """
         return AutonomousCognitionRunner(
             self._source(enabled),
             self.ledger,
-            self.budget,
             gateway or self.gateway,
-            "openai",
-            model,
-            IN_BOUND,
-            out_bound,
             "conversation-1",
             4,
             3650,

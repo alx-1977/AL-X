@@ -149,10 +149,7 @@ class ProductionClockTests(unittest.TestCase):
 
     def test_the_runner_default_clock_is_timezone_aware(self) -> None:
         runner = AutonomousCognitionRunner(
-            source=None, ledger=None, budget=None, gateway=None,
-            provider="openai", model="gpt-5.6-luna",
-            max_input_tokens=AUTONOMOUS_MAX_INPUT_TOKENS,
-            max_output_tokens=AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            source=None, ledger=None, gateway=None,
             conversation_id="c1", step_budget=4, retention_days=3650,
         )
         now = runner._clock()
@@ -162,10 +159,7 @@ class ProductionClockTests(unittest.TestCase):
     def test_a_retention_deadline_built_from_it_is_accepted(self) -> None:
         """A naive clock would be rejected downstream by the contracts."""
         runner = AutonomousCognitionRunner(
-            source=None, ledger=None, budget=None, gateway=None,
-            provider="openai", model="gpt-5.6-luna",
-            max_input_tokens=AUTONOMOUS_MAX_INPUT_TOKENS,
-            max_output_tokens=AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            source=None, ledger=None, gateway=None,
             conversation_id="c1", step_budget=4, retention_days=3650,
         )
         deadline = runner._clock() + timedelta(days=3650)
@@ -507,6 +501,110 @@ class MandatoryIntegrationTests(unittest.TestCase):
             ROOT / "src" / "alx" / "bootstrap" / "autonomous.py"
         ).read_text(encoding="utf-8")
         self.assertNotIn("within_input_bound", source)
+
+
+class RequestObjectIdentityTests(unittest.TestCase):
+    """The checked object and the dispatched object must be identical.
+
+    Equality is not enough. Two separately constructed requests with the same
+    content would compare equal while still meaning the ceiling was checked
+    against a request that was never sent, so this asserts `is`.
+    """
+
+    def _trace(self, laws="laws", identity="identity"):
+        """Run one autonomous turn, recording every object and its order."""
+        import alx.core.model_reasoner as module
+
+        events: list[tuple[str, int | None]] = []
+
+        class Authority:
+            def reserve(inner, max_input_tokens, max_output_tokens):
+                events.append(("reserve", None))
+                return "reservation"
+
+            def settle(inner, reservation, usage):
+                events.append(("settle", None))
+                return 0.0
+
+        class Model:
+            def complete(inner, request):
+                events.append(("complete", id(request)))
+                inner.dispatched = request
+                raise RuntimeError("captured after dispatch")
+
+        model = Model()
+        model.dispatched = None
+        original = module.input_token_upper_bound
+        checked: list = []
+
+        def spy(request):
+            events.append(("measure", id(request)))
+            checked.append(request)
+            return original(request)
+
+        module.input_token_upper_bound = spy
+        try:
+            reasoner = module.ModelReasoner(
+                model, laws, identity,
+                AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS,
+                Authority(),
+            )
+            try:
+                reasoner.decide(
+                    ReasoningContext(
+                        None, (), (), conversation_id="c1",
+                        origin=CognitionOrigin.SELF_REQUESTED,
+                    )
+                )
+            except Exception:
+                pass
+        finally:
+            module.input_token_upper_bound = original
+        return events, checked, model.dispatched
+
+    def test_the_checked_request_is_the_dispatched_request(self) -> None:
+        _, checked, dispatched = self._trace()
+        self.assertEqual(len(checked), 1, "exactly one measurement")
+        self.assertIsNotNone(dispatched)
+        self.assertIs(checked[0], dispatched)
+
+    def test_reserve_happens_after_construction_and_after_validation(self) -> None:
+        events, _, _ = self._trace()
+        order = [name for name, _ in events]
+        self.assertEqual(order, ["measure", "reserve", "complete", "settle"])
+
+    def test_only_one_request_is_ever_constructed(self) -> None:
+        """A rebuild after reservation would show a second distinct object."""
+        events, _, _ = self._trace()
+        object_ids = {ident for _, ident in events if ident is not None}
+        self.assertEqual(len(object_ids), 1)
+
+    def test_an_oversized_real_request_reserves_nothing(self) -> None:
+        """Measured from the real build_request output, not an estimate."""
+        events, checked, dispatched = self._trace("L" * 400_000, "I" * 400_000)
+        self.assertEqual([name for name, _ in events], ["measure"])
+        self.assertIsNone(dispatched)
+        self.assertEqual(len(checked), 1)
+
+
+class NoOptionalBoundPathTests(unittest.TestCase):
+    """No production path may skip the ceiling."""
+
+    def test_the_runner_takes_no_bound_measuring_argument(self) -> None:
+        import inspect
+
+        parameters = inspect.signature(AutonomousCognitionRunner).parameters
+        for name in parameters:
+            with self.subTest(parameter=name):
+                self.assertNotIn("bound", name)
+
+    def test_the_runner_never_reserves(self) -> None:
+        """Reservation lives at the boundary holding the request, not here."""
+        import inspect
+
+        source = inspect.getsource(AutonomousCognitionRunner)
+        self.assertNotIn(".reserve(", source)
+        self.assertNotIn(".settle(", source)
 
 
 if __name__ == "__main__":

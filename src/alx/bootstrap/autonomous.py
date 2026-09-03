@@ -38,26 +38,21 @@ class AutonomousCognitionRunner:
         self,
         source: Any,
         ledger: Any,
-        budget: Any,
         gateway: Any,
-        provider: str,
-        model: str,
-        max_input_tokens: int,
-        max_output_tokens: int,
         conversation_id: str,
         step_budget: int,
         retention_days: int,
         usage_of: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        # Deliberately no budget, provider, model or token bounds. Those belong
+        # to the reasoning boundary, which is the only place the exact request
+        # exists; holding them here as well would suggest this class still
+        # authorises spend, and the next person to read it would reasonably
+        # assume the reservation happens before the request is built.
         self._source = source
         self._ledger = ledger
-        self._budget = budget
         self._gateway = gateway
-        self._provider = provider
-        self._model = model
-        self._max_input_tokens = max_input_tokens
-        self._max_output_tokens = max_output_tokens
         self._conversation_id = conversation_id
         self._step_budget = step_budget
         self._retention_days = retention_days
