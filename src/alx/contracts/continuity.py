@@ -24,6 +24,7 @@ time. It confers no priority, no importance and no ordering beyond time.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -281,3 +282,31 @@ class AutonomousResponseTransport(Protocol):
     """
 
     def deliver(self, conversation_id: str, response: str) -> ResponseDelivery: ...
+
+
+async def run_core_worker(operation: Any, *arguments: Any) -> Any:
+    """Run one Core turn on a worker thread, and outlive cancellation.
+
+    A Core turn writes to durable stores from a worker thread, and shutdown
+    closes those stores once it can take the Core-turn lock. So the lock must
+    stay held until the worker has actually finished, not until the coroutine
+    awaiting it has been cancelled.
+
+    `asyncio.shield` alone does not do that. Cancelling the outer task raises
+    inside the `async with`, the block unwinds, the lock releases, and the
+    worker keeps writing into stores that teardown is already closing. The
+    cancellation must therefore be caught and the *worker* awaited — not the
+    shield wrapper, which is already cancelled — because that await is the last
+    one still running inside the lock.
+
+    Every kind of turn uses this: spoken, typed, background and autonomous. One
+    rule, because a store does not care which sort of turn was writing to it.
+    """
+    worker = asyncio.ensure_future(asyncio.to_thread(operation, *arguments))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Not a timeout and not a guess: this returns exactly when the worker
+        # reaches its own durable boundary.
+        await asyncio.wait({worker})
+        raise

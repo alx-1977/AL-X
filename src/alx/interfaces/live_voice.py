@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     AudioChunk,
+    run_core_worker,
     CognitionOpportunitySource,
     ConversationOrigin,
     ConversationTurn,
@@ -217,7 +218,7 @@ class VoiceSession:
                 try:
                     async with self._core_turn_lock:
                         if kind == "background":
-                            outcome = await asyncio.to_thread(
+                            outcome = await run_core_worker(
                                 self._gateway.receive_background_event,
                                 conversation_id,
                                 item,
@@ -247,7 +248,7 @@ class VoiceSession:
                                 occurred_at=now,
                                 person_id=self._person_id,
                             )
-                            outcome = await asyncio.to_thread(
+                            outcome = await run_core_worker(
                                 self._gateway.receive_conversation_turn,
                                 turn,
                                 self._step_budget,
@@ -268,7 +269,7 @@ class VoiceSession:
                     yield response_event
                 if kind == "background" and delivered:
                     assert self._event_source is not None
-                    await asyncio.to_thread(
+                    await run_core_worker(
                         self._event_source.record_delivery, item.event_id
                     )
         finally:

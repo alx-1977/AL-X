@@ -23,6 +23,8 @@ import asyncio
 import logging
 from typing import Any
 
+from alx.contracts import run_core_worker
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -79,19 +81,9 @@ class DueCognitionSource:
                 # writing to stores that shutdown is about to close. The turn
                 # is short and reaches its own durable boundary; letting it
                 # finish is the only way the lock can mean what it says.
-                turn = asyncio.shield(
-                    asyncio.to_thread(self._runner.run_one, opportunity)
-                )
-                try:
-                    completed = await turn
-                except asyncio.CancelledError:
-                    # Shutdown arrived mid-turn. The shielded work is still
-                    # running against stores that are about to close, so wait
-                    # for its durable boundary before letting the cancellation
-                    # propagate. Awaiting a shielded task after cancellation is
-                    # the only point where the lock can still be held.
-                    await asyncio.gather(turn, return_exceptions=True)
-                    raise
-                if completed:
+                # The lock is held until the worker itself finishes, so
+                # shutdown cannot close stores under a turn that is still
+                # writing. Shared with every other kind of turn.
+                if await run_core_worker(self._runner.run_one, opportunity):
                     run += 1
         return run

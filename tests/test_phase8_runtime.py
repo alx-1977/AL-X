@@ -360,60 +360,133 @@ class CommissioningLatchTests(Harness):
         self.assertEqual(self.ledger.commissioning_dispatches(), 0)
 
 
-class ShutdownOrderingTests(Harness):
-    """Stores must not close under a Core turn still writing to them."""
+class ShutdownOrderingTests(unittest.TestCase):
+    """No durable store may close while a Core worker can still reach it.
 
-    def test_cancellation_waits_for_an_in_flight_turn(self) -> None:
-        """Deliberately block inside to_thread, then shut down."""
+    The earlier version of this test asserted the store stayed usable and that
+    `shield` appeared in the source. Both passed while the barrier leaked:
+    cancelling the outer task unwinds `async with`, releases the lock, and lets
+    teardown close SQLite under a worker thread that is still writing.
+
+    So these assert the property directly — that the lock cannot be taken until
+    the worker has actually finished — for every kind of turn, because a store
+    does not care which sort of turn was writing to it.
+    """
+
+    def _barrier_holds(self, operation) -> dict:
+        """Block inside a Core worker, cancel, and see who holds the lock."""
         import threading
 
-        self._request()
         released = threading.Event()
-        entered = threading.Event()
-        store_open = []
+        started = threading.Event()
+        observed: dict = {}
 
-        class BlockingGateway:
-            def receive_cognition_opportunity(self, *args, **kwargs):
-                entered.set()
-                released.wait(5)
-                # Still writing when shutdown began: the store must be usable.
-                store_open.append(self_store_usable())
-                return _Outcome("finished_silently")
+        def blocked_worker(*_args):
+            started.set()
+            released.wait(5)
+            observed["worker_finished"] = True
+            return True
 
-        def self_store_usable() -> bool:
+        async def scenario() -> None:
+            lock = asyncio.Lock()
+
+            async def turn() -> None:
+                async with lock:
+                    await operation(blocked_worker)
+
+            task = asyncio.create_task(turn())
+            await asyncio.to_thread(started.wait, 5)
+            observed["worker_started"] = True
+
+            task.cancel()                       # shutdown begins
+            await asyncio.sleep(0.1)
+
+            # Teardown's barrier: it must not get the lock yet.
             try:
-                self.store.pending()
-                return True
-            except Exception:
-                return False
+                await asyncio.wait_for(lock.acquire(), timeout=0.3)
+                observed["teardown_acquired_early"] = True
+                lock.release()
+            except asyncio.TimeoutError:
+                observed["teardown_acquired_early"] = False
+            observed["worker_finished_before_release"] = observed.get(
+                "worker_finished", False
+            )
 
-        source = self._source()
-        producer = DueCognitionSource(
-            source, self._runner(BlockingGateway(), source),
-            asyncio.Lock(), 30.0,
-        )
-
-        async def scenario():
-            task = asyncio.create_task(producer.tick())
-            await asyncio.to_thread(entered.wait, 5)
-            task.cancel()                      # shutdown arrives mid-turn
-            await asyncio.sleep(0.05)
-            # The blocked Core turn has not been abandoned: it has neither
-            # completed nor been discarded while its worker still runs.
-            finished_early = entered.is_set() and bool(store_open)
-            released.set()                     # let the Core turn finish
+            released.set()                      # let the worker reach its end
             try:
                 await task
             except asyncio.CancelledError:
                 pass
-            return finished_early
 
-        finished_early = asyncio.run(scenario())
-        # The turn ran to its own boundary rather than being cut short.
-        self.assertFalse(finished_early, "the turn must not finish before release")
-        # And it saw a usable store throughout, which is the property that
-        # matters: shutdown cannot close SQLite under a writing Core turn.
-        self.assertEqual(store_open, [True])
+            # Now teardown may proceed.
+            await asyncio.wait_for(lock.acquire(), timeout=2)
+            lock.release()
+            observed["teardown_acquired_after"] = True
+
+        asyncio.run(scenario())
+        return observed
+
+    def test_the_shared_barrier_holds_until_the_worker_finishes(self) -> None:
+        from alx.contracts import run_core_worker
+
+        observed = self._barrier_holds(run_core_worker)
+        self.assertTrue(observed["worker_started"])
+        self.assertFalse(
+            observed["teardown_acquired_early"],
+            "teardown took the lock while the worker was still running",
+        )
+        self.assertFalse(observed["worker_finished_before_release"])
+        self.assertTrue(observed["teardown_acquired_after"])
+
+    def test_a_bare_to_thread_would_leak_the_lock(self) -> None:
+        """The bug this replaced, kept as the contrast that justifies it."""
+
+        async def unguarded(operation):
+            return await asyncio.to_thread(operation)
+
+        observed = self._barrier_holds(unguarded)
+        self.assertTrue(observed["teardown_acquired_early"])
+
+    def test_shield_alone_would_leak_the_lock(self) -> None:
+        """Shielding without awaiting the worker is what actually shipped."""
+
+        async def shielded_only(operation):
+            turn = asyncio.shield(asyncio.to_thread(operation))
+            try:
+                return await turn
+            except asyncio.CancelledError:
+                raise
+
+        observed = self._barrier_holds(shielded_only)
+        self.assertTrue(observed["teardown_acquired_early"])
+
+    def test_every_core_turn_uses_the_shared_barrier(self) -> None:
+        """One rule: no path may run a Core turn on a bare worker thread."""
+        import ast
+
+        root = Path(__file__).resolve().parents[1] / "src" / "alx"
+        offenders = []
+        for path in (
+            root / "interfaces" / "live_voice.py",
+            root / "continuity" / "due_source.py",
+        ):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Await):
+                    continue
+                call = node.value
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "to_thread"
+                ):
+                    # The tick's due-scan reads outside the lock and starts no
+                    # Core turn; everything else must go through the barrier.
+                    rendered = ast.dump(call)
+                    if "due_opportunities" in rendered:
+                        continue
+                    offenders.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(offenders, [])
 
     def test_the_shutdown_sequence_takes_the_shared_lock(self) -> None:
         """Composition must wait on the lock before closing stores."""
@@ -422,24 +495,10 @@ class ShutdownOrderingTests(Harness):
             / "src" / "alx" / "bootstrap" / "live_voice.py"
         ).read_text(encoding="utf-8")
         finally_block = source[source.index("    finally:", source.index("TaskGroup")):]
-        lock_at = finally_block.index("core_turn_lock")
-        close_at = finally_block.index("conversation_store.close()")
-        self.assertLess(lock_at, close_at, "stores close only after the lock")
-
-    def test_the_turn_is_shielded_from_cancellation(self) -> None:
-        import ast
-
-        tree = ast.parse(
-            (Path(__file__).resolve().parents[1]
-             / "src" / "alx" / "continuity" / "due_source.py").read_text("utf-8")
+        self.assertLess(
+            finally_block.index("core_turn_lock"),
+            finally_block.index("conversation_store.close()"),
         )
-        shields = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "shield"
-        ]
-        self.assertEqual(len(shields), 1)
 
 
 class EndToEndContinuityTests(Harness):

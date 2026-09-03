@@ -283,5 +283,82 @@ class OneProductionPathTests(unittest.TestCase):
         self.assertNotIn("SERIAL", submit)
 
 
+class PersonTurnShutdownTests(unittest.TestCase):
+    """A person turn must hold the barrier exactly as an autonomous one does.
+
+    Typed, spoken and autonomous turns all write to the same stores, so they
+    all obey the same worker-lifetime rule. This exercises the real session
+    path rather than the barrier in isolation.
+    """
+
+    def test_a_blocked_person_turn_keeps_the_lock_until_it_finishes(self) -> None:
+        import threading
+
+        released = threading.Event()
+        started = threading.Event()
+        observed: dict = {}
+
+        class BlockingGateway:
+            def receive_conversation_turn(self, turn, step_budget, retention_until):
+                started.set()
+                released.wait(5)
+                observed["gateway_finished"] = True
+
+                class Outcome:
+                    class state:
+                        value = "finished_silently"
+                    response = None
+                    reason = None
+
+                return Outcome()
+
+        lock = asyncio.Lock()
+        session = VoiceSession(
+            BlockingGateway(),
+            type("T", (), {"transcribe": lambda self, audio: _never()})(),
+            None, "friedl", 4, 3650,
+            clock=lambda: NOW,
+            identifier_factory=lambda: "turn-1",
+            core_turn_lock=lock,
+        )
+
+        async def scenario() -> None:
+            typed: asyncio.Queue[str] = asyncio.Queue()
+            typed.put_nowait("a line that blocks")
+
+            async def consume():
+                async for _event in session.exchange("c1", _never(), None, typed):
+                    pass
+
+            task = asyncio.create_task(consume())
+            await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0.1)
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=0.3)
+                observed["teardown_early"] = True
+                lock.release()
+            except asyncio.TimeoutError:
+                observed["teardown_early"] = False
+            released.set()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(scenario())
+        self.assertFalse(
+            observed["teardown_early"],
+            "stores could have closed under a running person turn",
+        )
+
+
+async def _never():
+    """An audio stream that yields nothing, for tests that drive typed input."""
+    await asyncio.sleep(3)
+    if False:
+        yield None
+
+
 if __name__ == "__main__":
     unittest.main()
