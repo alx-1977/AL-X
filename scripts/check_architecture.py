@@ -586,6 +586,248 @@ def _frontend_violations(root: Path) -> list[Violation]:
     return found
 
 
+# EX-001 authorises the Sol/Luna split as a time-boxed experiment: two Cores,
+# one answering Friedl and one answering a turn nobody asked for. The whole
+# point is that the choice is provenance, never meaning. If selection ever keys
+# on a topic, a capability, a goal, notebook state, a keyword, content,
+# importance or a domain, deterministic code has begun deciding which AL/X
+# shows up before she has reasoned at all — which EX-001 explicitly prohibits
+# and which is Law 1 phrase routing one level up.
+#
+# So the gate is narrow and blunt: only `origin` may steer the two reasoners,
+# and only composition may hold both. A reviewer cannot be relied on to notice
+# a third branch added months from now.
+AUTONOMOUS_SELECTION_OWNER = "bootstrap/reasoning.py"
+AUTONOMOUS_SELECTION_COMPOSER = "bootstrap/live_voice.py"
+
+# Anything a selection must never read. These are the shapes a model router
+# takes when it stops being about provenance.
+SEMANTIC_SELECTION_TOKENS = frozenset(
+    {
+        "topic", "topics", "subject", "keyword", "keywords", "content",
+        "capability", "capabilities", "goal", "goals", "notebook", "research",
+        "memory", "memories", "intent", "importance", "priority", "urgency",
+        "domain", "category", "sentiment", "score", "threshold", "interest",
+    }
+)
+
+
+def _autonomous_selection_violations(
+    relative_text: str, tree: ast.AST
+) -> list[Violation]:
+    """Prove the experimental Core choice stays a choice about provenance.
+
+    Two rules. Only the composer and the reasoner module may name both
+    reasoners at all, so no third place can grow its own selection. And inside
+    the one selecting expression, the only thing consulted is the origin.
+    """
+    posix = relative_text.replace("\\", "/")
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != "OriginSelectedReasoner":
+            continue
+        if not posix.endswith(AUTONOMOUS_SELECTION_OWNER):
+            violations.append(
+                Violation(
+                    relative_text,
+                    node.lineno,
+                    "the experimental origin selection may live only in "
+                    + AUTONOMOUS_SELECTION_OWNER,
+                )
+            )
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Attribute):
+                continue
+            token = inner.attr.lower()
+            if token in SEMANTIC_SELECTION_TOKENS:
+                violations.append(
+                    Violation(
+                        relative_text,
+                        inner.lineno,
+                        "model selection may read only the cognition origin; "
+                        f"reading {inner.attr!r} would select on meaning",
+                    )
+                )
+    if posix.endswith(AUTONOMOUS_SELECTION_OWNER) or posix.endswith(
+        AUTONOMOUS_SELECTION_COMPOSER
+    ):
+        return violations
+    names = {
+        node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Attribute, ast.Name))
+    }
+    if "OriginSelectedReasoner" in names:
+        violations.append(
+            Violation(
+                relative_text,
+                0,
+                "only composition may reference the experimental origin "
+                "selection; a second selection site is a model router",
+            )
+        )
+    return violations
+
+
+NOTE_INTERPRETATION_METHODS = frozenset(
+    {
+        "lower", "upper", "casefold", "startswith", "endswith", "find",
+        "rfind", "index", "split", "rsplit", "partition", "search", "match",
+        "count", "replace", "strip", "encode", "translate", "title",
+    }
+)
+
+
+# A carried thought is AL/X's own unfinished thinking, and it is opaque for the
+# same reason her private note is: the moment code reads it, code has begun
+# deciding what she meant and when it should be raised. Only files that
+# legitimately hold her words are checked, so ordinary uses of the English word
+# "content" elsewhere are not swept up.
+OPAQUE_CONTENT_MODULES = (
+    "continuity/store.py",
+    "tools/continuity.py",
+    "continuity/source.py",
+    "bootstrap/autonomous.py",
+)
+
+
+def _note_interpretation_violations(
+    relative_text: str, tree: ast.AST
+) -> list[Violation]:
+    """Prove nothing reads the private note or a carried thought.
+
+    Catches string inspection applied to anything named `note`, and any
+    conditional whose test is a bare note value. Storing, passing and returning
+    it are all untouched, because those are transport rather than reading.
+    """
+    posix = relative_text.replace("\\", "/")
+    opaque_here = posix.endswith(OPAQUE_CONTENT_MODULES)
+    violations: list[Violation] = []
+
+    def names_a_note(node: ast.AST) -> bool:
+        # See through a conversion such as str(values["note"]): wrapping the
+        # note in a cast does not make reading it something else.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("str", "repr", "format")
+            and node.args
+        ):
+            return names_a_note(node.args[0])
+        opaque_names = ("note", "content") if opaque_here else ("note",)
+        if isinstance(node, ast.Name):
+            return node.id in opaque_names or node.id.endswith("_note")
+        if isinstance(node, ast.Attribute):
+            return node.attr in opaque_names or node.attr.endswith("_note")
+        if isinstance(node, ast.Subscript):
+            key = node.slice
+            return isinstance(key, ast.Constant) and key.value in opaque_names
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if (
+                node.func.attr in NOTE_INTERPRETATION_METHODS
+                and names_a_note(node.func.value)
+            ):
+                violations.append(
+                    Violation(
+                        relative_text,
+                        node.lineno,
+                        f"AL/X's own words may not be inspected: .{node.func.attr}()"
+                        " reads what she wrote",
+                    )
+                )
+        if isinstance(node, (ast.If, ast.IfExp)) and names_a_note(node.test):
+            violations.append(
+                Violation(
+                    relative_text,
+                    node.lineno,
+                    "deterministic code may not branch on AL/X's own words",
+                )
+            )
+        if isinstance(node, ast.Compare) and names_a_note(node.left):
+            # `note is None` and `isinstance(note, str)` ask whether a note
+            # exists and whether it is well-formed. Neither reads what it says,
+            # and a contract must be able to validate its own shape. Comparing
+            # a note to a value is different: that is reading it.
+            if all(
+                isinstance(operator, (ast.Is, ast.IsNot))
+                and isinstance(comparator, ast.Constant)
+                and comparator.value is None
+                for operator, comparator in zip(node.ops, node.comparators)
+            ):
+                continue
+            violations.append(
+                Violation(
+                    relative_text,
+                    node.lineno,
+                    "deterministic code may not compare AL/X's own words",
+                )
+            )
+    return violations
+
+
+# D-024: the opportunity source notices that something objective happened. It
+# may not read goals, notebook entries, memories, research or the private note,
+# and it may not rank, filter or defer an occasion by what the occasion might
+# be about. A filter there is the cheapest second mind to build and the most
+# damaging, because it decides what AL/X never gets to consider.
+#
+# Imports are the enforceable half: a module that cannot reach her state cannot
+# form an opinion about it.
+OPPORTUNITY_SOURCE_MODULE = "continuity/source.py"
+OPPORTUNITY_SOURCE_FORBIDDEN_IMPORTS = frozenset(
+    {"goals", "memories", "research", "specialists", "tools"}
+)
+OPPORTUNITY_SOURCE_FORBIDDEN_READS = frozenset(
+    {
+        "topic", "importance", "priority", "urgency", "category", "sentiment",
+        "score", "interest", "intent", "staleness", "sender", "subject",
+        "keywords", "content", "summary",
+    }
+)
+
+
+def _opportunity_source_violations(
+    relative_text: str, tree: ast.AST
+) -> list[Violation]:
+    """Prove the opportunity source stays a clock, not a critic."""
+    posix = relative_text.replace("\\", "/")
+    if not posix.endswith(OPPORTUNITY_SOURCE_MODULE):
+        return []
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = getattr(node, "module", "") or ""
+            names = [alias.name for alias in node.names]
+            for candidate in (module, *names):
+                parts = candidate.split(".")
+                if "alx" in parts:
+                    owner_index = parts.index("alx") + 1
+                    owner = parts[owner_index] if owner_index < len(parts) else ""
+                    if owner in OPPORTUNITY_SOURCE_FORBIDDEN_IMPORTS:
+                        violations.append(
+                            Violation(
+                                relative_text,
+                                node.lineno,
+                                "the opportunity source may not read AL/X's "
+                                f"state: importing {owner!r} lets it form an "
+                                "opinion about what deserves thought",
+                            )
+                        )
+        if isinstance(node, ast.Attribute) and node.attr in OPPORTUNITY_SOURCE_FORBIDDEN_READS:
+            violations.append(
+                Violation(
+                    relative_text,
+                    node.lineno,
+                    "the opportunity source notices objective events only; "
+                    f"reading {node.attr!r} would filter on meaning",
+                )
+            )
+    return violations
+
+
 def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
     root = root.resolve()
     rules = rules or load_rules(root)
@@ -635,6 +877,9 @@ def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
         visitor = SourceVisitor(relative_text, owner, rules)
         visitor.visit(tree)
         violations.extend(visitor.violations)
+        violations.extend(_autonomous_selection_violations(relative_text, tree))
+        violations.extend(_note_interpretation_violations(relative_text, tree))
+        violations.extend(_opportunity_source_violations(relative_text, tree))
         if owner == "interfaces":
             violations.extend(_voice_event_violations(path, relative_text, tree))
             violations.extend(_speech_synthesis_violations(relative_text, tree))

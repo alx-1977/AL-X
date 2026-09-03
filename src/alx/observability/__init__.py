@@ -1,5 +1,12 @@
 """Durable reasoning-usage telemetry, spending ceilings and guardrails."""
 
+from alx.observability.autonomous_budget import (
+    AutonomousBoundMissing,
+    AutonomousBudgetExceeded,
+    AutonomousModelUnpriced,
+    AutonomousReservation,
+    SQLiteAutonomousLedger,
+)
 from alx.observability.pricing import (
     USD_PER_MILLION,
     ConfiguredPricing,
@@ -19,6 +26,11 @@ from alx.observability.usage import (
 
 __all__ = [
     "USD_PER_MILLION",
+    "AutonomousBoundMissing",
+    "AutonomousBudgetExceeded",
+    "AutonomousModelUnpriced",
+    "AutonomousReservation",
+    "SQLiteAutonomousLedger",
     "XERO_BILL_BUDGET",
     "BudgetExceeded",
     "ExecutionBudget",

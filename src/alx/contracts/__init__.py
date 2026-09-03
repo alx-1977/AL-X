@@ -1,6 +1,16 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
-from alx.contracts.cognition import Cognition
+from alx.contracts.cognition import Cognition, CognitionOrigin
+from alx.contracts.continuity import (
+    AutonomousSpendAuthority,
+    CognitionOpportunity,
+    CognitionOpportunitySource,
+    DuplicateFutureCognition,
+    FutureCognitionNotFound,
+    FutureCognitionRequest,
+    FutureCognitionStatus,
+    FutureCognitionTooSoon,
+)
 from alx.contracts.usage import (
     CANONICAL_FIELDS,
     is_measured,
@@ -86,7 +96,6 @@ from alx.contracts.memory import (
     MemorySourceMatch,
 )
 from alx.contracts.mail import (
-    BackgroundEventSource,
     MailAccessError,
     MailAccount,
     MailAttachment,
@@ -106,7 +115,10 @@ from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
     "CANONICAL_FIELDS",
-    "Cognition",
+    "AutonomousSpendAuthority",
+    "Cognition", "CognitionOrigin", "CognitionOpportunity",
+    "CognitionOpportunitySource", "FutureCognitionRequest", "FutureCognitionStatus",
+    "FutureCognitionNotFound", "DuplicateFutureCognition", "FutureCognitionTooSoon",
     "is_measured",
     "normalise_usage",
     "DeletionRecord",
@@ -144,7 +156,7 @@ __all__ = [
     "ReasoningModel",
     "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
-    "BackgroundEventSource", "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
+    "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
     "MailObservationControl", "MailParticipants", "MailReference",
     "MailSearchCriteria", "MailSearchResult",
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",

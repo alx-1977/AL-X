@@ -25,9 +25,12 @@ from alx.contracts import (
     ResearchQuestion,
     SpecialistError,
 )
+from alx.contracts.models import (
+    PROTOCOL_INPUT_TOKEN_ALLOWANCE,
+    input_token_upper_bound,
+)
 
 
-PROTOCOL_INPUT_TOKEN_ALLOWANCE = 512
 
 
 class ResearchModelUnbounded(Exception):
@@ -78,25 +81,6 @@ def _plain(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_plain(item) for item in value]
     return value
-
-
-def input_token_upper_bound(request: ModelRequest) -> int:
-    """Conservatively bound the complete request, including schema and framing."""
-    wire = {
-        "messages": [
-            {"role": item.role.value, "content": item.content}
-            for item in request.messages
-        ],
-        "output_schema_name": request.output_schema_name,
-        "output_schema": _plain(request.output_schema),
-    }
-    encoded = json.dumps(
-        wire, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
-    # Supported transports use byte-level tokenization: a token consumes at
-    # least one encoded byte. The fixed allowance covers provider chat framing
-    # that is not present in the neutral request.
-    return len(encoded) + PROTOCOL_INPUT_TOKEN_ALLOWANCE
 
 
 class ResearchSpecialist:

@@ -85,6 +85,62 @@ class ConversationGateway:
             )
         return outcome
 
+    def receive_cognition_opportunity(
+        self,
+        conversation_id: str,
+        opportunity,
+        step_budget: int,
+        retention_until: datetime,
+    ) -> CoreOutcome:
+        """Give the sole Core one occasion nobody asked for.
+
+        The same durable conversation, the same Core, the same stores. The one
+        difference is the origin, which Phase 3 uses to select the reasoner and
+        which the Core sees as provenance. Her own note travels verbatim as
+        context; nothing here reads it.
+        """
+        if step_budget <= 0:
+            raise ValueError("step_budget must be positive")
+        event = BackgroundEvent(
+            opportunity.opportunity_id,
+            "cognition.opportunity",
+            opportunity.arose_at,
+            {"origin": opportunity.origin.value},
+            transient_data=(
+                {} if opportunity.note is None else {"note": opportunity.note}
+            ),
+            provenance=opportunity.provenance,
+        )
+        try:
+            conversation = self._conversation_store.load(conversation_id)
+        except ConversationNotFound:
+            conversation = self._conversation_store.create(
+                conversation_id, retention_until
+            )
+        transient_conversation = self._with_contextual_events(conversation, event)
+        outcome = self._core.process(
+            transient_conversation,
+            retention_until,
+            step_budget,
+            trigger_event_id=event.event_id,
+            origin=opportunity.origin,
+        )
+        if outcome.state is CoreState.RESPONDED and outcome.response is not None:
+            response_turn = ConversationTurn(
+                conversation_id,
+                self._identifier_factory(),
+                ConversationOrigin.ALX_RESPONSE,
+                outcome.response,
+                self._clock(),
+                provenance=outcome.response_provenance,
+            )
+            self._conversation_store.append(
+                response_turn,
+                retention_until,
+                self._conversation_store.load(conversation_id).revision,
+            )
+        return outcome
+
     def receive_background_event(
         self,
         conversation_id: str,

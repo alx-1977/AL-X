@@ -434,6 +434,103 @@ def _tier_settings(
     )
 
 
+AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
+# The exact provider, model and effort EX-001 approves for autonomous turns.
+# Not a default: the only value configuration may take.
+AUTONOMOUS_APPROVED_IDENTITY = ("openai", "gpt-5.6-luna", "max")
+# The input ceiling the autonomous reservation is computed against. Enforced on
+# the constructed request before dispatch: a bound nothing checks makes the
+# worst case a guess rather than a ceiling.
+#
+# 96,000 rather than 32,000, corrected in D-024a on 2026-09-03. A real Core
+# request measures roughly 59.6k input units with the full capability catalogue
+# and an empty conversation, so 32,000 guaranteed refusal and 64,000 left no
+# room for the conversation, goals and thoughts that make a turn worth having.
+# The alternative was a thinner prompt for the autonomous Core, which D-024a
+# forbids: both origins must reason in the same identity and capability
+# environment, or the experiment compares two different minds.
+AUTONOMOUS_MAX_INPUT_TOKENS = 96_000
+
+
+def autonomous_reasoning_settings(
+    environment: Mapping[str, str],
+) -> "ReasoningSettings | None":
+    """The Core that answers an autonomous turn, or None when unconfigured.
+
+    Recorded under D-024a as a time-boxed experiment. Absent configuration
+    disables the second reasoner entirely rather than falling back to the
+    conversational Core, because a silent fallback would make the experiment
+    invisible: an autonomous turn would still run, on a model nobody chose.
+    """
+    provider = environment.get("ALX_AUTONOMOUS_PROVIDER", "").strip().lower()
+    model = environment.get("ALX_AUTONOMOUS_MODEL", "").strip()
+    if not provider or not model:
+        return None
+    effort = environment.get("ALX_AUTONOMOUS_EFFORT", "max").strip().lower()
+    # EX-001 authorises one exact arrangement, so configuration may install one
+    # exact arrangement. Anything else would put an unapproved reasoning
+    # authority into production under cover of an exception that does not
+    # describe it, and a typo would do it silently. Widening this set requires
+    # widening the exception first, which is Friedl's decision and not a
+    # configuration change.
+    if (provider, model, effort) != AUTONOMOUS_APPROVED_IDENTITY:
+        approved = "/".join(AUTONOMOUS_APPROVED_IDENTITY)
+        raise ConfigurationError(
+            f"autonomous cognition is approved under EX-001 for {approved} "
+            f"only; refusing {provider}/{model}/{effort}"
+        )
+    key_name = {
+        "openai": "OPENAI_API_KEY",
+        "xai": "XAI_API_KEY",
+        "kimi": "KIMI_API_KEY",
+    }.get(provider, "ALX_AUTONOMOUS_API_KEY")
+    base_name = {
+        "openai": "OPENAI_BASE_URL",
+        "xai": "XAI_BASE_URL",
+        "kimi": "KIMI_BASE_URL",
+    }.get(provider, "ALX_AUTONOMOUS_BASE_URL")
+    base_fallback = {
+        "openai": "https://api.openai.com",
+        "xai": "https://api.x.ai",
+        "kimi": "https://api.moonshot.ai",
+    }.get(provider, "")
+    return ReasoningSettings(
+        provider=provider,
+        model=model,
+        api_key=_configured(
+            environment, "ALX_AUTONOMOUS_API_KEY", key_name, ""
+        ),
+        base_url=_configured(
+            environment, "ALX_AUTONOMOUS_BASE_URL", base_name, base_fallback
+        ).rstrip("/"),
+        timeout_seconds=_positive_integer(
+            environment, "ALX_AUTONOMOUS_TIMEOUT_SECONDS", 120
+        ),
+        streaming=_boolean(environment, "ALX_AUTONOMOUS_STREAMING", False),
+        service_tier=environment.get(
+            "ALX_AUTONOMOUS_SERVICE_TIER", "default"
+        ).strip().lower(),
+        effort=effort,
+    )
+
+
+def autonomous_cognition_daily_budget_usd(environment: Mapping[str, str]) -> float:
+    """Friedl's hard daily ceiling on autonomous Core cognition.
+
+    Denominated in USD because every recorded rate is USD and the provider
+    bills in USD, so no currency conversion happens anywhere in the spending
+    path. The Rand figure it was chosen from is recorded in D-024a, not
+    computed here: a fuse whose size moved with the exchange rate would be a
+    different ceiling every day.
+
+    Defaults to zero, so a runtime that has never been told it may spend on
+    autonomous cognition cannot.
+    """
+    return _number_in_range(
+        environment, "AUTONOMOUS_COGNITION_DAILY_BUDGET_USD", 0.0, 1000.0, 0.0
+    )
+
+
 def _research_budget(environment: Mapping[str, str]) -> "ResearchLimits":
     """Friedl's hard research spending boundary."""
     daily = _number_in_range(
@@ -513,6 +610,9 @@ class RuntimeSettings:
     # Cognition tiers for research. Configuration only: a tier chooses which
     # model answers a bounded question, never what AL/X investigates.
     research: ResearchSettings
+    # D-024a experiment: the Core that answers an autonomous turn. None when
+    # unconfigured, which disables the experiment entirely.
+    autonomous: "ReasoningSettings | None"
     speech_to_text: SpeechToTextSettings
     text_to_speech: TextToSpeechSettings
 
@@ -558,6 +658,7 @@ class RuntimeSettings:
             ),
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),
+            autonomous=autonomous_reasoning_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
                 model=_required(environment, "ALX_STT_MODEL"),

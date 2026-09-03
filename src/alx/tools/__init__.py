@@ -26,6 +26,14 @@ from alx.tools.xero import (
     SEARCH_XERO_CONTACTS,
     build_xero_executors,
 )
+from alx.tools.continuity import (
+    DEFINITIONS as CONTINUITY_DEFINITIONS,
+    MINIMUM_HORIZON_SECONDS,
+    OPEN_THOUGHT_LIMIT,
+    REQUEST_FUTURE_COGNITION,
+    WITHDRAW_FUTURE_COGNITION,
+    build_continuity_executors,
+)
 from alx.tools.notebook import (
     CORRECT_RESEARCH_ENTRY,
     DEFINITIONS as NOTEBOOK_DEFINITIONS,
@@ -50,6 +58,12 @@ from alx.tools.dhl import (
 )
 
 __all__ = [
+    "CONTINUITY_DEFINITIONS",
+    "MINIMUM_HORIZON_SECONDS",
+    "OPEN_THOUGHT_LIMIT",
+    "REQUEST_FUTURE_COGNITION",
+    "WITHDRAW_FUTURE_COGNITION",
+    "build_continuity_executors",
     "ACKNOWLEDGE_MAIL_MESSAGE",
     "ASK_RESEARCH_QUESTION",
     "RESEARCH_DEFINITION",

@@ -8,6 +8,7 @@ boundaries = [
   "goals",
   "memories",
   "research",
+  "continuity",
   "capabilities",
   "safety",
   "tools",
@@ -42,6 +43,7 @@ conversation = ["contracts", "core"]
 goals = ["contracts"]
 memories = ["contracts"]
 research = ["contracts"]
+continuity = ["contracts"]
 capabilities = ["contracts", "safety"]
 safety = ["contracts"]
 tools = ["contracts", "specialists"]
@@ -56,6 +58,7 @@ bootstrap = [
   "goals",
   "memories",
   "research",
+  "continuity",
   "capabilities",
   "safety",
   "tools",

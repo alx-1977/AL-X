@@ -18,8 +18,11 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.autonomous import LedgerSpendAuthority, OccasionSpendRelay
+from alx.bootstrap.continuity import build_continuity_runtime
+from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
-from alx.bootstrap.reasoning import build_model_reasoner
+from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
     BILL_TASK_CAPABILITIES,
@@ -28,6 +31,9 @@ from alx.bootstrap.xero import (
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
+    AUTONOMOUS_MAX_INPUT_TOKENS,
+    autonomous_cognition_daily_budget_usd,
+    AUTONOMOUS_MAX_OUTPUT_TOKENS,
     ConfigurationError,
     LiveVoiceSettings,
     MailSendSettings,
@@ -35,6 +41,12 @@ from alx.config import (
     RuntimeSettings,
     XeroSettings,
 )
+from alx.continuity import (
+    FutureCognitionSource,
+    SQLiteOpportunityLedger,
+)
+from alx.observability import ConfiguredPricingWorstCase
+from alx.observability.autonomous_budget import SQLiteAutonomousLedger
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
@@ -195,6 +207,63 @@ async def run(repository_root: Path) -> None:
     executors.update(notebook_runtime.executors)
     permissions.update(notebook_runtime.permissions)
 
+    # D-024: AL/X may ask for another cognition opportunity later. Phase 4
+    # creates and withdraws those requests durably; nothing honours them until
+    # the opportunity source exists, so this is inert on its own.
+    continuity_runtime = build_continuity_runtime(
+        storage_root,
+        voice_settings.goal_retention_days,
+        lambda: current_call_id[0],
+    )
+    for definition in continuity_runtime.definitions:
+        registry.register(definition)
+    policies.update(continuity_runtime.policies)
+    executors.update(continuity_runtime.executors)
+    permissions.update(continuity_runtime.permissions)
+
+    # D-024 Phases 2 and 5, composed but inert. The ledgers and the source are
+    # constructed here, once, so the paid path is real rather than something
+    # that only exists in tests. Nothing polls the source and nothing calls
+    # run_due(): activation is Phase 8 and is Friedl's to switch on.
+    #
+    # The source is enabled only when an autonomous Core is actually
+    # configured. Without one an autonomous turn would be refused at the
+    # reasoner anyway, so producing occasions nobody can answer would spend a
+    # reservation to reach a guaranteed refusal.
+    opportunity_ledger = SQLiteOpportunityLedger(
+        storage_root / "cognition-opportunities.sqlite3"
+    )
+    autonomous_budget = SQLiteAutonomousLedger(
+        storage_root / "autonomous-cognition-spend.sqlite3",
+        autonomous_cognition_daily_budget_usd(environment),
+        ConfiguredPricingWorstCase(),
+    )
+    # Carries what the reasoning boundary spends back to the occasion ledger,
+    # so every dollar is inspectable per occasion and not only per day.
+    occasion_spend = OccasionSpendRelay()
+    cognition_source = FutureCognitionSource(
+        continuity_runtime.store,
+        opportunity_ledger,
+        enabled=providers.autonomous is not None,
+    )
+    # Restart-safe continuation. A process that stopped between claiming an
+    # occasion and recording its outcome left a durable claim behind, and
+    # without this the request would stay pending while every later scan
+    # skipped it. Recovery reads persisted state only: an occasion with no
+    # dispatched reservation cannot have reached the provider and is reclaimed;
+    # one that did is retained for inspection rather than replayed.
+    reclaimed = cognition_source.recover(autonomous_budget)
+    if reclaimed:
+        LOGGER.info(
+            "Reclaimed %d cognition occasion(s) left claimed by a stopped run",
+            len(reclaimed),
+        )
+    LOGGER.info(
+        "Autonomous cognition composed: enabled=%s daily_budget_usd=%.4f",
+        cognition_source.enabled,
+        autonomous_cognition_daily_budget_usd(environment),
+    )
+
     # Paid research reaches AL/X as one capability through the same broker and
     # safety gate as everything else. It is absent unless a cognition tier is
     # enabled and a budget configured, so a runtime that has not been told it
@@ -320,18 +389,56 @@ async def run(repository_root: Path) -> None:
             usage.settle(current_conversation_id[0])
         return attempt
 
-    approval_windows = tuple(
-        value for value in (approval_ttl_seconds, xero_approval_ttl_seconds)
-        if value is not None
+    # EX-001, time-boxed: one Core answers Friedl, another answers a turn
+    # nobody asked for. Selection is one expression over CognitionOrigin, here
+    # and nowhere else. The origin boundary exists whether or not the
+    # experiment is configured: absent an autonomous Core an autonomous turn is
+    # refused, never answered by the conversational model, because a silent
+    # fallback would spend on a Core nobody selected and record the result as
+    # if the experiment had run.
+    conversational_reasoner = build_model_reasoner(
+        providers.reasoning, repository_root
     )
+    reasoner = OriginSelectedReasoner(
+        conversational_reasoner,
+        None if providers.autonomous is None
+        else build_model_reasoner(
+            providers.autonomous,
+            repository_root,
+            AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            AUTONOMOUS_MAX_INPUT_TOKENS,
+            # The bounds and the budget arrive together; ModelReasoner refuses
+            # a partial combination, so a bounded autonomous reasoner that
+            # could dispatch without withdrawing anything cannot be built.
+            LedgerSpendAuthority(
+                autonomous_budget,
+                provider_settings.autonomous.provider,
+                provider_settings.autonomous.model,
+                occasion_spend,
+                # Links each reservation to the occasion it serves. Without it
+                # reservations are stored anonymously and recovery cannot tell
+                # a dispatched turn from an undispatched claim, which would let
+                # it replay a call that may already have been billed.
+                occasion_spend.current_opportunity_id,
+            ),
+        ),
+    )
+
     core = CoreAgent(
         goal_store,
-        build_model_reasoner(providers.reasoning, repository_root),
+        reasoner,
         dispatch,
         registry.list_definitions(),
         memory_store,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
+        # One bounded, recency-ordered list, from the one continuity store,
+        # for every turn. There is deliberately no separate assembly for an
+        # unprompted turn: a second builder would decide what she is like when
+        # nobody is watching.
+        open_thoughts=lambda: continuity_runtime.store.open_thoughts(
+            OPEN_THOUGHT_LIMIT
+        ),
     )
     gateway = ConversationGateway(
         core,

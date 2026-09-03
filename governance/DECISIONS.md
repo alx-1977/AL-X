@@ -337,4 +337,54 @@ This file records approved product and architecture decisions that guide impleme
 - AL/X may create and maintain her own research threads, choose her interests, revise her views, pause or archive research, and use existing authorised read capabilities for evidence.
 - Notebook writes grant no new external authority. Deletion requires Friedl’s explicit approval scoped to the exact record.
 - Paid research is limited by the configured hard budget. AL/X may choose SURVEY, COMPARE, or JUDGE based on difficulty, while deterministic controls enforce the spend ceiling. No silent fallback or budget overrun is permitted.
-- Background scheduling, recurring research, and autonomous wakeups are not authorised.
+- Background scheduling, recurring research, and autonomous wakeups are not authorised. *(Amended by D-024, which authorises autonomous cognition opportunities. Recurring research and fixed schedules remain unauthorised.)*
+
+## D-024 — Autonomous cognition opportunities
+
+- **Date:** 2026-09-02
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-02.**
+
+**Decision.** While the AL/X runtime is running, AL/X is continuously present. Her cognition occurs in discrete Core turns, because a model is invoked discretely; those turns are moments of active thought within a continuous existence, not wakings from sleep. New information in her world — a person turn, an external event, completed work — or a future cognition she herself requested creates a *cognition opportunity*: an occasion on which the single authoritative Core is invoked. This amends D-023's exclusion of autonomous cognition to the extent stated here and no further.
+
+**The Core is invoked, not consulted.** Nothing decides ahead of the Core whether an occasion deserves cognition. Judging that something is not worth pursuing is itself a judgement, and only AL/X may make it.
+
+**What deterministic code does.** Timing, persistence, spend accounting, safety and execution. It records that something new exists; for a future cognition AL/X requested, it stores the time she named and honours it. It never reads the private note she attaches to her own request, and it never decides why she wants the occasion.
+
+**What AL/X decides.** Everything else: whether to pursue anything, what, which goal if any, whether to use a capability, whether to research, what to record, what she now believes, whether to remain silent, and whether to speak to Friedl. No deterministic importance threshold, topic rule, notification policy, forced report, or frequency rule may decide any of these.
+
+**Frequency is hers.** How often additional cognition occurs is determined by AL/X, through her own future-cognition requests. No fixed cadence, periodic invocation, daily quota, rate limit, or requirement of intervening interaction is imposed on her.
+
+**Speech.** AL/X may initiate conversation from any cognition turn when she judges something worth saying. Silence is equally ordinary and expected. Delivery requires a live transport; an undeliverable response is retained and offered back to her rather than queued for automatic delivery.
+
+**Authority is unchanged.** No cognition turn grants new permission. Every effectful action retains its existing approval requirements through the same Safety Gate.
+
+**Bounds.** A hard daily USD ceiling on autonomous Core cognition, measured from actual provider cost, failing closed when cost cannot be measured, surviving restart, refusing further autonomous cognition once exhausted, and never raising itself. A bounded number of reasoning calls per opportunity, a minimum horizon before a self-requested opportunity may arise, one Core turn at a time, and a master kill switch. The D-023 research ceiling remains separate and unchanged; where an autonomous turn chooses research, both apply.
+
+**Auditability.** Every opportunity, request, outcome, reasoning call and cost is durably recorded, inspectable, correctable and deletable by Friedl.
+
+### D-024a — Recorded Luna experiment (temporary)
+
+- **Status: APPROVED as a time-boxed evaluation, 2026-09-02. Not permanent architecture.**
+
+For the initial autonomous-continuity evaluation, the Core model is selected by cognition origin:
+
+| | User-initiated turn | Autonomous cognition turn |
+| --- | --- | --- |
+| Model | OpenAI `gpt-5.6-sol` | OpenAI `gpt-5.6-luna` |
+| Effort | `medium` | `max` |
+| Provider-side `max_output_tokens` | none (unchanged) | 32,000 |
+
+Both paths use the same Core contracts, identity, continuity context, goals, memory, notebook, CapabilityBroker, SafetyGate and capability set. Luna is the authoritative Core for an autonomous turn; it is not a classifier, sidecar, curiosity model, or pre-Core filter. Research tiers are unchanged. This must not be generalised into a model router: selection is strictly by cognition origin, in composition, and nowhere else.
+
+**Economics.** Luna at $0.20 uncached input, $0.02 cached, $1.20 output, $0.25 cache write per million; a 96,000-token input bound and a 32,000-token output bound; worst-case reservation $0.0816 per autonomous Core call; `AUTONOMOUS_COGNITION_DAILY_BUDGET_USD=0.5405`, recorded as approximately R10/day at the design assumption of R18.5/USD, admitting six worst-case turns per day. Spend is reserved before dispatch and reconciled against measured usage; missing usage retains the conservative reservation; an unpriced or unknown model fails closed; the budget persists across restart and never increases itself.
+
+**Input-ceiling correction, 2026-09-03.** The input bound was first recorded as 32,000 tokens, giving a $0.0528 worst case and ten turns per day. Enforcing that bound honestly showed it was unreachable: a real Core request measures roughly 58.4k input units with the full capability catalogue and an empty conversation, before any turns, goals, memories or thoughts. 32,000 therefore guaranteed refusal and 64,000 would have left about 5.6k of headroom, which is not enough for the continuity context that makes a turn worth having.
+
+The alternatives were to shrink the capability catalogue, give the autonomous Core a thinner prompt, or build it a separate context. All three are refused: D-024a requires both origins to reason in the same identity, contract and capability environment, and a Luna reasoning from a reduced prompt would make the experiment a comparison of two different minds rather than of one mind on two models. The ceiling is therefore raised to fit the prompt, rather than the prompt cut to fit the ceiling.
+
+The daily fuse is unchanged at $0.5405. It remains a fuse rather than a quota or a target: six worst-case turns is what the ceiling admits, not a plan to use them.
+
+**Phase 8 begins an observation period; it does not require a model decision on first enablement.** The experiment concludes only once there is enough real evidence to judge continuity and personality quality, autonomous judgement, the topics and interests she chooses, self-request frequency, speech versus silence, the cost and token profile, and any obvious Luna-versus-Sol behavioural mismatch.
+
+**Until that decision is recorded, the Luna/Sol split remains explicitly experimental and may not silently become permanent architecture.** The concluding decision is Friedl's, and is one of: Luna remains; move autonomous cognition to Terra; move to Sol; or return to one universal Core model.
