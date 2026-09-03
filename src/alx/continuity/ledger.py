@@ -101,6 +101,23 @@ class SQLiteOpportunityLedger:
                 ("reserved", provider, model, reserved_usd, opportunity_id),
             )
 
+    def release(self, opportunity_id: str) -> None:
+        """Give a claimed occasion back, so its request can mature again.
+
+        A turn that never happened is not a thought AL/X had. Keeping the row
+        would leave her request pending for ever while every later scan skipped
+        it: she asked to come back to something and silently never would.
+
+        Only an occasion that produced nothing is released. One that reached
+        the Core keeps its row, because that thought did happen and repeating
+        it would be a second paid turn for a request made once.
+        """
+        with self._connection:
+            self._connection.execute(
+                "DELETE FROM cognition_opportunities WHERE opportunity_id = ?",
+                (opportunity_id,),
+            )
+
     def record_outcome(
         self,
         opportunity_id: str,

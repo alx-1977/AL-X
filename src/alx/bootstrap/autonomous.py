@@ -125,7 +125,13 @@ class AutonomousCognitionRunner:
             )
         # The request is closed only once the turn actually happened, so a
         # refused or crashed occasion is not silently marked as taken.
-        if outcome_state != "error":
+        if outcome_state == "error":
+            # The turn did not happen, so the occasion is given back rather
+            # than kept. Its request stays pending and will mature again;
+            # holding the claim would leave her waiting on a cognition that
+            # could never arrive.
+            self._source.release(opportunity)
+        else:
             self._source.mark_honoured(opportunity)
         return True
 

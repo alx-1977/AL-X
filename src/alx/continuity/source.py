@@ -94,6 +94,15 @@ class FutureCognitionSource:
         """
         return self._ledger.record_created(opportunity)
 
+    def release(self, opportunity: CognitionOpportunity) -> None:
+        """Return an occasion that produced nothing, so it can arise again.
+
+        The claim exists to stop one request becoming two paid turns. When the
+        turn did not happen there is nothing to protect against, and holding
+        the claim would silently discard a cognition she asked for.
+        """
+        self._ledger.release(opportunity.opportunity_id)
+
     def mark_honoured(self, opportunity: CognitionOpportunity) -> None:
         """Close the request behind an occasion that has been acted on."""
         for reference in opportunity.references:

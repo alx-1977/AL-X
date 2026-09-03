@@ -278,5 +278,45 @@ class SingleIngressTests(unittest.TestCase):
                 self.assertNotIn(forbidden, source)
 
 
+class FailedOccasionRetryTests(PhaseFiveHarness):
+    """A turn that never happened must not consume the request forever.
+
+    The claim exists to stop one request becoming two paid turns. When the turn
+    failed there is nothing to protect against, and holding the claim would
+    leave her waiting on a cognition that could never arrive.
+    """
+
+    def test_a_failed_turn_can_be_retried_later(self) -> None:
+        self._request()
+        self._runner(gateway=RecordingGateway("raise")).run_due()
+        self.assertIs(
+            self.store.pending()[0].status, FutureCognitionStatus.PENDING
+        )
+        # The same request matures again rather than being skipped for ever.
+        again = self._runner().run_due()
+        self.assertEqual(again, ("self:r1",))
+
+    def test_a_failed_turn_leaves_no_ledger_row_behind(self) -> None:
+        self._request()
+        self._runner(gateway=RecordingGateway("raise")).run_due()
+        self.assertEqual(self.ledger.rows(), ())
+
+    def test_a_successful_turn_is_still_never_repeated(self) -> None:
+        """Releasing a failure must not weaken idempotence for a real turn."""
+        self._request()
+        self._runner().run_due()
+        self._runner().run_due()
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(self.store.pending(), ())
+
+    def test_a_retry_after_failure_runs_exactly_once(self) -> None:
+        self._request()
+        self._runner(gateway=RecordingGateway("raise")).run_due()
+        good = RecordingGateway()
+        self._runner(gateway=good).run_due()
+        self._runner(gateway=good).run_due()
+        self.assertEqual(len(good.calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
