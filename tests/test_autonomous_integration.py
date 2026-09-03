@@ -19,7 +19,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.autonomous import AutonomousCognitionRunner  # noqa: E402
-from alx.bootstrap.reasoning import build_model_reasoner  # noqa: E402
+from alx.bootstrap.reasoning import (  # noqa: E402
+    AutonomousReasonerUnavailable,
+    OriginSelectedReasoner,
+    build_model_reasoner,
+)
 from alx.config import (  # noqa: E402
     AUTONOMOUS_MAX_INPUT_TOKENS,
     AUTONOMOUS_MAX_OUTPUT_TOKENS,
@@ -103,16 +107,15 @@ class CompositionRootTests(unittest.TestCase):
         }
         self.assertNotIn("AutonomousCognitionRunner", names)
 
-    def test_exactly_one_reasoning_authority_is_constructed(self) -> None:
-        """Law 0 without an exception: one Core path, and only one."""
+    def test_the_origin_boundary_is_always_constructed(self) -> None:
+        """EX-001: the boundary exists even unconfigured, so nothing falls back."""
         tree = ast.parse(self.SOURCE)
         constructed = [
             node.func.id
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         ]
-        self.assertEqual(constructed.count("build_model_reasoner"), 1)
-        self.assertEqual(constructed.count("OriginSelectedReasoner"), 0)
+        self.assertEqual(constructed.count("OriginSelectedReasoner"), 1)
 
     def test_the_real_builder_accepts_and_applies_both_bounds(self) -> None:
         """Call the actual builder the way composition calls it.
@@ -161,6 +164,46 @@ class ProductionClockTests(unittest.TestCase):
         )
         deadline = runner._clock() + timedelta(days=3650)
         self.assertIsNotNone(deadline.utcoffset())
+
+
+
+class MissingLunaFailsClosedTests(unittest.TestCase):
+    """An autonomous turn must never be answered by the conversational Core.
+
+    EX-001 prohibits a fallback: answering with Sol would spend on a Core
+    nobody selected and record the result as if the experiment had run.
+    """
+
+    class Recording:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, context):
+            self.calls += 1
+            return object()
+
+    def _context(self, origin: CognitionOrigin) -> ReasoningContext:
+        return ReasoningContext(None, (), (), conversation_id="c1", origin=origin)
+
+    def test_a_person_turn_still_reaches_the_conversational_core(self) -> None:
+        sol = self.Recording()
+        OriginSelectedReasoner(sol, None).decide(
+            self._context(CognitionOrigin.PERSON_TURN)
+        )
+        self.assertEqual(sol.calls, 1)
+
+    def test_an_autonomous_turn_without_luna_makes_zero_sol_calls(self) -> None:
+        sol = self.Recording()
+        reasoner = OriginSelectedReasoner(sol, None)
+        for origin in (
+            CognitionOrigin.SELF_REQUESTED,
+            CognitionOrigin.EXTERNAL_EVENT,
+            CognitionOrigin.WORK_COMPLETED,
+        ):
+            with self.subTest(origin=origin):
+                with self.assertRaises(AutonomousReasonerUnavailable):
+                    reasoner.decide(self._context(origin))
+        self.assertEqual(sol.calls, 0)
 
 
 class InputBoundTests(unittest.TestCase):
