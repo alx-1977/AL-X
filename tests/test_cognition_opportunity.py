@@ -142,6 +142,16 @@ class MasterSwitchTests(PhaseFiveHarness):
 
 
 class OrderingTests(PhaseFiveHarness):
+    """The runner claims and invokes; the reasoner owns the money sequence.
+
+    Reservation moved into the reasoning boundary, because that is the only
+    place the exact request exists. Reserving out here meant paying against an
+    estimate of a request not yet built, and the request eventually sent could
+    then differ from the one the ceiling was checked against. The ordering
+    these tests used to assert is now asserted against the real request object
+    in test_autonomous_integration.py.
+    """
+
     def test_one_due_request_produces_exactly_one_invocation(self) -> None:
         self._request()
         attempted = self._runner().run_due()
@@ -149,71 +159,15 @@ class OrderingTests(PhaseFiveHarness):
         self.assertEqual(len(self.gateway.calls), 1)
         self.assertIs(self.gateway.calls[0].origin, CognitionOrigin.SELF_REQUESTED)
 
-    def test_the_reservation_happens_before_the_invocation(self) -> None:
-        """Money is withdrawn first, so a crash cannot dispatch unfunded."""
-        observed: list[str] = []
-
-        class OrderingGateway(RecordingGateway):
-            def receive_cognition_opportunity(inner, *args, **kwargs):
-                observed.append(f"invoked:{self.budget.spend_today():.4f}")
-                return super().receive_cognition_opportunity(*args, **kwargs)
-
-        self._request()
-        self._runner(gateway=OrderingGateway()).run_due()
-        # The full worst case was already withdrawn when the Core was invoked.
-        self.assertEqual(observed, ["invoked:0.0816"])
-
-    def test_an_exhausted_budget_refuses_before_dispatch(self) -> None:
-        for index in range(6):
-            self.budget.reserve(*LUNA, IN_BOUND, OUT_BOUND, f"filler-{index}")
-        self._request()
-        attempted = self._runner().run_due()
-        self.assertEqual(attempted, ())
-        self.assertEqual(self.gateway.calls, [])
-        self.assertIs(
-            self.store.pending()[0].status, FutureCognitionStatus.PENDING
-        )
-
-    def test_an_unpriced_model_refuses_before_dispatch(self) -> None:
-        self._request()
-        attempted = self._runner(model="gpt-5.6-nonesuch").run_due()
-        self.assertEqual(attempted, ())
-        self.assertEqual(self.gateway.calls, [])
-        self.assertEqual(self.budget.spend_today(), 0.0)
-
-    def test_a_missing_output_bound_refuses_before_dispatch(self) -> None:
-        self._request()
-        attempted = self._runner(out_bound=None).run_due()
-        self.assertEqual(attempted, ())
-        self.assertEqual(self.gateway.calls, [])
-        self.assertEqual(self.budget.spend_today(), 0.0)
-
-    def test_a_refused_occasion_leaves_the_request_for_later(self) -> None:
-        self._request()
-        self._runner(model="gpt-5.6-nonesuch").run_due()
-        self.assertIs(
-            self.store.pending()[0].status, FutureCognitionStatus.PENDING
-        )
-
-
-class SettlementTests(PhaseFiveHarness):
-    def test_measured_usage_reconciles_below_the_reservation(self) -> None:
+    def test_the_runner_reserves_nothing_itself(self) -> None:
+        """One reservation site, and it is not here."""
         self._request()
         self._runner().run_due()
-        spend = self.budget.spend_today()
-        self.assertGreater(spend, 0.0)
-        self.assertLess(spend, 0.0816)
+        self.assertEqual(self.budget.spend_today(), 0.0)
 
-    def test_missing_usage_retains_the_conservative_reservation(self) -> None:
+    def test_a_failed_turn_leaves_the_request_for_later(self) -> None:
         self._request()
-        self._runner(usage={}).run_due()
-        self.assertAlmostEqual(self.budget.spend_today(), 0.0816, places=6)
-
-    def test_a_failed_turn_still_settles_its_reservation(self) -> None:
-        """A crash must not leave money withdrawn and unaccounted."""
-        self._request()
-        self._runner(gateway=RecordingGateway("raise"), usage={}).run_due()
-        self.assertAlmostEqual(self.budget.spend_today(), 0.0816, places=6)
+        self._runner(gateway=RecordingGateway("raise")).run_due()
         self.assertIs(
             self.store.pending()[0].status, FutureCognitionStatus.PENDING
         )
@@ -276,26 +230,21 @@ class NoteTests(PhaseFiveHarness):
 
 
 class LedgerTests(PhaseFiveHarness):
-    def test_the_opportunity_is_recorded_with_identity_cost_and_counts(self) -> None:
+    def test_the_opportunity_is_recorded_with_identity_and_counts(self) -> None:
         self._request()
         self._runner().run_due()
         row = self.ledger.rows()[0]
         self.assertEqual(row["opportunity_id"], "self:r1")
         self.assertEqual(row["origin"], "self_requested")
-        self.assertEqual(row["provider"], "openai")
-        self.assertEqual(row["model"], "gpt-5.6-luna")
-        self.assertAlmostEqual(row["reserved_usd"], 0.0816, places=6)
-        self.assertIsNotNone(row["settled_usd"])
         self.assertEqual(row["input_tokens"], 14_000)
         self.assertEqual(row["cached_tokens"], 12_000)
         self.assertEqual(row["outcome"], "finished_silently")
 
-    def test_a_refusal_is_recorded_without_a_settled_cost(self) -> None:
+    def test_every_opportunity_is_recorded_exactly_once(self) -> None:
         self._request()
-        self._runner(model="gpt-5.6-nonesuch").run_due()
-        row = self.ledger.rows()[0]
-        self.assertTrue(row["outcome"].startswith("refused_"))
-        self.assertIsNone(row["settled_usd"])
+        self._runner().run_due()
+        self._runner().run_due()
+        self.assertEqual(len(self.ledger.rows()), 1)
 
 
 class SingleIngressTests(unittest.TestCase):

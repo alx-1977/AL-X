@@ -18,6 +18,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.autonomous import LedgerSpendAuthority
 from alx.bootstrap.continuity import build_continuity_runtime
 from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
@@ -398,6 +399,14 @@ async def run(repository_root: Path) -> None:
             repository_root,
             AUTONOMOUS_MAX_OUTPUT_TOKENS,
             AUTONOMOUS_MAX_INPUT_TOKENS,
+            # The bounds and the budget arrive together; ModelReasoner refuses
+            # a partial combination, so a bounded autonomous reasoner that
+            # could dispatch without withdrawing anything cannot be built.
+            LedgerSpendAuthority(
+                autonomous_budget,
+                provider_settings.autonomous.provider,
+                provider_settings.autonomous.model,
+            ),
         ),
     )
     core = CoreAgent(

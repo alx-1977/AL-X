@@ -2,6 +2,7 @@
 
 from alx.contracts.cognition import Cognition, CognitionOrigin
 from alx.contracts.continuity import (
+    AutonomousSpendAuthority,
     CognitionOpportunity,
     CognitionOpportunitySource,
     DuplicateFutureCognition,
@@ -114,6 +115,7 @@ from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
     "CANONICAL_FIELDS",
+    "AutonomousSpendAuthority",
     "Cognition", "CognitionOrigin", "CognitionOpportunity",
     "CognitionOpportunitySource", "FutureCognitionRequest", "FutureCognitionStatus",
     "FutureCognitionNotFound", "DuplicateFutureCognition", "FutureCognitionTooSoon",

@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from alx.contracts.continuity import AutonomousSpendAuthority
 from alx.contracts.models import input_token_upper_bound
 from alx.contracts import (
     AgentDecision,
@@ -839,6 +840,7 @@ class ModelReasoner:
         identity: str,
         max_output_tokens: int | None = None,
         max_input_tokens: int | None = None,
+        spend_authority: AutonomousSpendAuthority | None = None,
     ) -> None:
         """One reasoner over one model.
 
@@ -857,12 +859,58 @@ class ModelReasoner:
             raise ValueError("approved Laws and identity context are required")
         if max_output_tokens is not None and max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive when set")
+        if max_input_tokens is not None and max_input_tokens <= 0:
+            raise ValueError("max_input_tokens must be positive when set")
+        # A bounded reasoner is a spending reasoner, so the two arrive together
+        # or not at all. Allowing a bound without a budget would leave a path
+        # that measures a request and then sends it with nothing withdrawn,
+        # which is the weaker path this refuses to have.
+        if (max_input_tokens is None) != (spend_authority is None):
+            raise ValueError(
+                "an autonomous reasoner requires both an input ceiling and a "
+                "spend authority; neither may be configured without the other"
+            )
         self._model = model
         self._constitutional_context = f"{laws.strip()}\n\n{identity.strip()}"
         self._max_output_tokens = max_output_tokens
-        # The input ceiling the reservation was computed against. Conversation
-        # sets none; a spending path sets the same number it reserved for.
+        # The input ceiling the reservation is computed against. Conversation
+        # sets none; a spending path sets the same number it reserves for.
         self._max_input_tokens = max_input_tokens
+        self._spend_authority = spend_authority
+
+    def _spend_for(self, request: ModelRequest):
+        """Bound, price, reserve, dispatch and settle one exact request.
+
+        The whole money sequence lives here because this is the only place the
+        exact request exists. A caller that reserved first would be paying
+        against an estimate, and a caller that measured first would have to
+        rebuild the request to send it.
+
+        Nothing is truncated to fit. Shortening the Laws, her identity, the
+        catalogue or her own continuity context to buy a cheaper turn would
+        change who is reasoning, and that is the one trade this design may
+        never make: the turn does not happen, and the refusal is evidence.
+        """
+        assert self._max_input_tokens is not None
+        measured = input_token_upper_bound(request)
+        if measured > self._max_input_tokens:
+            # Before any reservation, so an oversized request never consumes
+            # the day's fuse on its way to a guaranteed refusal.
+            raise AutonomousRequestUnbounded(measured, self._max_input_tokens)
+        reservation = self._spend_authority.reserve(
+            self._max_input_tokens, self._max_output_tokens
+        )
+        usage: Any = None
+        try:
+            completion = self._model.complete(request)
+        except Exception:
+            # A failed call still settles: usage is unknown, so the full
+            # reservation stands rather than quietly returning to the pool.
+            self._spend_authority.settle(reservation, None)
+            raise
+        usage = getattr(completion, "usage", None)
+        self._spend_authority.settle(reservation, usage)
+        return completion
 
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
@@ -899,16 +947,14 @@ class ModelReasoner:
         )
 
     def _decide(self, context: ReasoningContext) -> AgentDecision:
+        # One construction. The object measured, authorised and sent is the
+        # same object: measuring one representation and dispatching another
+        # would check a ceiling against a request that never existed.
         request = self.build_request(context)
-        if self._max_input_tokens is not None:
-            # Measured on the complete constructed request, not estimated from
-            # its parts, and measured before anything is sent. A reservation
-            # taken against a ceiling the request does not respect would be a
-            # guess wearing a ceiling's name.
-            measured = input_token_upper_bound(request)
-            if measured > self._max_input_tokens:
-                raise AutonomousRequestUnbounded(measured, self._max_input_tokens)
-        completion = self._model.complete(request)
+        if self._spend_authority is None:
+            completion = self._model.complete(request)
+        else:
+            completion = self._spend_for(request)
         output = completion.output
         action = output["action"]
         disposition = action["type"]

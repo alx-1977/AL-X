@@ -43,6 +43,34 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPOSITION = ROOT / "src" / "alx" / "bootstrap" / "live_voice.py"
 
 
+class RecordingAuthority:
+    """A real spend authority that records what it was asked to do."""
+
+    def __init__(self, reservation: str = "res-1") -> None:
+        self.reservations: list[tuple[int, int]] = []
+        self.settlements: list = []
+        self._reservation = reservation
+
+    def reserve(self, max_input_tokens: int, max_output_tokens: int):
+        self.reservations.append((max_input_tokens, max_output_tokens))
+        return self._reservation
+
+    def settle(self, reservation, usage):
+        self.settlements.append((reservation, usage))
+        return 0.0
+
+
+def _bounded_reasoner(model, laws="laws", identity="identity", authority=None):
+    """An autonomous reasoner exactly as composition builds one."""
+    from alx.core.model_reasoner import ModelReasoner
+
+    return ModelReasoner(
+        model, laws, identity,
+        AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS,
+        authority or RecordingAuthority(),
+    )
+
+
 class CompositionRootTests(unittest.TestCase):
     """Phases 0-7 must be fully composed, and inert."""
 
@@ -97,7 +125,8 @@ class CompositionRootTests(unittest.TestCase):
         a positional TypeError. Only calling it proves the wiring.
         """
         reasoner = build_model_reasoner(
-            object(), ROOT, AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS
+            object(), ROOT, AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            AUTONOMOUS_MAX_INPUT_TOKENS, RecordingAuthority(),
         )
         self.assertEqual(reasoner._max_output_tokens, AUTONOMOUS_MAX_OUTPUT_TOKENS)
         self.assertEqual(reasoner._max_input_tokens, AUTONOMOUS_MAX_INPUT_TOKENS)
@@ -107,7 +136,7 @@ class CompositionRootTests(unittest.TestCase):
         import inspect
 
         signature = inspect.signature(build_model_reasoner)
-        signature.bind(object(), ROOT, 32_000, 96_000)
+        signature.bind(object(), ROOT, 32_000, 96_000, RecordingAuthority())
 
     def test_the_conversational_builder_still_takes_no_bounds(self) -> None:
         reasoner = build_model_reasoner(object(), ROOT)
@@ -215,10 +244,7 @@ class InputBoundTests(unittest.TestCase):
         from alx.core.model_reasoner import ModelReasoner
 
         model = self.NeverCalled()
-        reasoner = ModelReasoner(
-            model, "L" * 200_000, "I" * 200_000,
-            AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS,
-        )
+        reasoner = _bounded_reasoner(model, "L" * 200_000, "I" * 200_000)
         with self.assertRaises(AutonomousRequestUnbounded):
             reasoner.decide(
                 ReasoningContext(None, (), (), conversation_id="c1")
@@ -251,10 +277,7 @@ class InputBoundTests(unittest.TestCase):
 
         laws = "L" * 200_000
         model = self.NeverCalled()
-        reasoner = ModelReasoner(
-            model, laws, "identity",
-            AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS,
-        )
+        reasoner = _bounded_reasoner(model, laws, "identity")
         with self.assertRaises(AutonomousRequestUnbounded) as caught:
             reasoner.decide(ReasoningContext(None, (), (), conversation_id="c1"))
         # The measurement reflects the whole request, not a shortened one.
@@ -292,7 +315,6 @@ class ViableInputCeilingTests(unittest.TestCase):
 
     def _production_bound(self) -> int:
         from alx.contracts.models import input_token_upper_bound
-        from alx.core.model_reasoner import ModelReasoner
         from alx.tools import (
             CONTINUITY_DEFINITIONS, NOTEBOOK_DEFINITIONS, RESEARCH_DEFINITION,
         )
@@ -313,10 +335,7 @@ class ViableInputCeilingTests(unittest.TestCase):
             + tuple(CONTINUITY_DEFINITIONS) + tuple(MAIL)
             + tuple(XERO) + tuple(DHL)
         )
-        reasoner = ModelReasoner(
-            object(), laws, identity,
-            AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS,
-        )
+        reasoner = _bounded_reasoner(object(), laws, identity)
         return input_token_upper_bound(
             reasoner.build_request(
                 ReasoningContext(
@@ -340,104 +359,154 @@ class ViableInputCeilingTests(unittest.TestCase):
         self.assertEqual(AUTONOMOUS_MAX_OUTPUT_TOKENS, 32_000)
 
 
-class ReservationOrderingTests(unittest.TestCase):
-    """An oversized request must not reach the fuse, let alone the provider."""
+class SameRequestObjectTests(unittest.TestCase):
+    """Measured, authorised and dispatched must be one object.
 
-    class CountingBudget:
+    The earlier shape measured an estimate in the runner and let the reasoner
+    build a different request afterwards, so the ceiling was checked against a
+    request that was never sent and the reservation was already spent by the
+    time the real one was built.
+    """
+
+    class Capturing:
         def __init__(self) -> None:
-            self.reservations = 0
+            self.request = None
 
-        def reserve(self, *args, **kwargs):
-            self.reservations += 1
-            raise AssertionError("an oversized request must not reserve")
+        def complete(self, request):
+            self.request = request
 
-        def settle(self, *args, **kwargs):
-            raise AssertionError("nothing to settle")
+            class Completion:
+                output = {
+                    "action": {"type": "finish_silently"},
+                    "goal_id": None,
+                    "goal_update": None,
+                    "memory_proposals": [],
+                }
+                usage = {"input_tokens": 10, "output_tokens": 1}
 
-    class NeverGateway:
-        def receive_cognition_opportunity(self, *args, **kwargs):
-            raise AssertionError("an oversized request must not dispatch")
+            return Completion()
 
-    def _opportunity(self):
-        from alx.contracts.continuity import CognitionOpportunity
+    def test_the_dispatched_request_is_the_measured_one(self) -> None:
+        from alx.contracts.models import input_token_upper_bound
 
-        return CognitionOpportunity(
-            opportunity_id="self:r1",
+        authority = RecordingAuthority()
+        model = self.Capturing()
+        reasoner = _bounded_reasoner(model, authority=authority)
+        context = ReasoningContext(
+            None, (), (), conversation_id="c1",
             origin=CognitionOrigin.SELF_REQUESTED,
-            arose_at=datetime(2026, 9, 3, tzinfo=UTC),
-            references=("future_cognition:r1",),
-            note="a note",
         )
-
-    def _runner(self, measured: int, budget, ledger):
-        class OneOccasion:
-            def __init__(self, opportunity):
-                self._opportunity = opportunity
-
-            def due_opportunities(self):
-                return (self._opportunity,)
-
-            def claim(self, opportunity):
-                return True
-
-            def mark_honoured(self, opportunity):
-                raise AssertionError("a refused occasion is not honoured")
-
-        return AutonomousCognitionRunner(
-            OneOccasion(self._opportunity()),
-            ledger,
-            budget,
-            self.NeverGateway(),
-            "openai",
-            "gpt-5.6-luna",
-            AUTONOMOUS_MAX_INPUT_TOKENS,
-            AUTONOMOUS_MAX_OUTPUT_TOKENS,
-            "c1",
-            4,
-            3650,
-            within_input_bound=lambda opportunity: measured,
-        )
-
-    def test_an_oversized_request_makes_no_reservation_and_no_call(self) -> None:
-        class Ledger:
-            def __init__(self) -> None:
-                self.outcomes = []
-
-            def record_outcome(self, opportunity_id, outcome, **kwargs):
-                self.outcomes.append(outcome)
-
-            def record_reserved(self, *args, **kwargs):
-                raise AssertionError("nothing may be reserved")
-
-        budget, ledger = self.CountingBudget(), Ledger()
-        attempted = self._runner(
-            AUTONOMOUS_MAX_INPUT_TOKENS + 1, budget, ledger
-        ).run_due()
-        self.assertEqual(attempted, ())
-        self.assertEqual(budget.reservations, 0)
-        self.assertEqual(ledger.outcomes, ["refused_input_unbounded"])
-
-    def test_a_request_within_the_ceiling_proceeds_to_reservation(self) -> None:
-        """The check refuses only what does not fit."""
-
-        class Ledger:
-            def record_outcome(self, *args, **kwargs):
-                pass
-
-            def record_reserved(self, *args, **kwargs):
-                pass
-
-        class ReachedBudget(Exception):
+        expected = reasoner.build_request(context)
+        # The decision payload shape is incidental here; what matters is which
+        # request object reached the provider and whether it was authorised.
+        try:
+            reasoner.decide(context)
+        except Exception:
             pass
+        sent = model.request
+        self.assertIsNotNone(sent)
+        # Same content, and small enough that it was authorised rather than
+        # refused: one construction served measurement and dispatch.
+        self.assertEqual(
+            [item.content for item in sent.messages],
+            [item.content for item in expected.messages],
+        )
+        self.assertEqual(
+            input_token_upper_bound(sent), input_token_upper_bound(expected)
+        )
+        self.assertEqual(len(authority.reservations), 1)
 
-        class Budget:
-            def reserve(self, *args, **kwargs):
-                raise ReachedBudget()
+    def test_reservation_precedes_dispatch_for_the_same_request(self) -> None:
+        order: list[str] = []
 
-        runner = self._runner(AUTONOMOUS_MAX_INPUT_TOKENS - 1, Budget(), Ledger())
-        # The refusal path records and returns; reaching the budget at all
-        # proves the bound did not block a request that fits.
-        runner.run_due()
+        class Ordered(RecordingAuthority):
+            def reserve(inner, max_input_tokens, max_output_tokens):
+                order.append("reserved")
+                return super().reserve(max_input_tokens, max_output_tokens)
+
+            def settle(inner, reservation, usage):
+                order.append("settled")
+                return super().settle(reservation, usage)
+
+        class Model(SameRequestObjectTests.Capturing):
+            def complete(inner, request):
+                order.append("dispatched")
+                return super().complete(request)
+
+        reasoner = _bounded_reasoner(Model(), authority=Ordered())
+        try:
+            reasoner.decide(
+                ReasoningContext(None, (), (), conversation_id="c1",
+                                 origin=CognitionOrigin.SELF_REQUESTED)
+            )
+        except Exception:
+            pass
+        self.assertEqual(order, ["reserved", "dispatched", "settled"])
+
+    def test_an_oversized_real_request_never_reserves(self) -> None:
+        """No estimate: the real request is measured and refused."""
+
+        class NeverCalled:
+            def complete(self, request):
+                raise AssertionError("an oversized request must not dispatch")
+
+        authority = RecordingAuthority()
+        reasoner = _bounded_reasoner(
+            NeverCalled(), "L" * 400_000, "I" * 400_000, authority
+        )
+        with self.assertRaises(Exception) as caught:
+            reasoner.decide(ReasoningContext(None, (), (), conversation_id="c1"))
+        self.assertIn("above the", str(caught.exception))
+        self.assertEqual(authority.reservations, [])
+        self.assertEqual(authority.settlements, [])
+
+    def test_a_failed_dispatch_still_settles_its_reservation(self) -> None:
+        class Exploding:
+            def complete(self, request):
+                raise RuntimeError("provider exploded")
+
+        authority = RecordingAuthority()
+        reasoner = _bounded_reasoner(Exploding(), authority=authority)
+        with self.assertRaises(Exception):
+            reasoner.decide(
+                ReasoningContext(None, (), (), conversation_id="c1")
+            )
+        self.assertEqual(len(authority.reservations), 1)
+        self.assertEqual(len(authority.settlements), 1)
+        # Usage unknown, so the reservation stands rather than returning.
+        self.assertIsNone(authority.settlements[0][1])
+
+
+class MandatoryIntegrationTests(unittest.TestCase):
+    """A bounded reasoner without a budget must not be constructible."""
+
+    def test_a_bound_without_a_spend_authority_is_refused(self) -> None:
+        from alx.core.model_reasoner import ModelReasoner
+
+        with self.assertRaises(ValueError):
+            ModelReasoner(object(), "laws", "identity", 32_000, 96_000, None)
+
+    def test_a_spend_authority_without_a_bound_is_refused(self) -> None:
+        from alx.core.model_reasoner import ModelReasoner
+
+        with self.assertRaises(ValueError):
+            ModelReasoner(
+                object(), "laws", "identity", 32_000, None, RecordingAuthority()
+            )
+
+    def test_the_conversational_reasoner_needs_neither(self) -> None:
+        from alx.core.model_reasoner import ModelReasoner
+
+        reasoner = ModelReasoner(object(), "laws", "identity")
+        self.assertIsNone(reasoner._max_input_tokens)
+        self.assertIsNone(reasoner._spend_authority)
+
+    def test_the_runner_has_no_optional_bound_check_left(self) -> None:
+        """No code path may skip the ceiling."""
+        source = (
+            ROOT / "src" / "alx" / "bootstrap" / "autonomous.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("within_input_bound", source)
 
 
 if __name__ == "__main__":

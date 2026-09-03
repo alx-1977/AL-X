@@ -28,7 +28,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from alx.contracts.records import BackgroundEvent
 
@@ -230,3 +230,19 @@ class CarriedThoughtNotFound(FutureCognitionError):
 
 class DuplicateCarriedThought(FutureCognitionError):
     """A thought identifier names one thought permanently."""
+
+
+class AutonomousSpendAuthority(Protocol):
+    """Authorises one autonomous Core call and settles what it cost.
+
+    Stated here as a promise rather than imported from observability, because
+    `core` depends only on `contracts`. Bootstrap binds the real ledger to it.
+
+    `reserve` withdraws the worst case or raises; it never returns a smaller
+    allowance, a cheaper model or a shorter bound, because a ceiling that
+    quietly buys something lesser is not a ceiling.
+    """
+
+    def reserve(self, max_input_tokens: int, max_output_tokens: int) -> Any: ...
+
+    def settle(self, reservation: Any, usage: Any) -> float: ...

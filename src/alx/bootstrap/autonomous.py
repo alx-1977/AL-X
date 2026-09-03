@@ -49,7 +49,6 @@ class AutonomousCognitionRunner:
         retention_days: int,
         usage_of: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
-        within_input_bound: Callable[[CognitionOpportunity], int] | None = None,
     ) -> None:
         self._source = source
         self._ledger = ledger
@@ -64,9 +63,6 @@ class AutonomousCognitionRunner:
         self._retention_days = retention_days
         # Returns the measured usage of the turn just run, for settlement.
         self._usage_of = usage_of or (lambda: None)
-        # Measures the request this occasion would construct, so the ceiling is
-        # checked against the real thing rather than an estimate of it.
-        self._within_input_bound = within_input_bound
         # Timezone-aware, like every other clock in the runtime. A naive
         # datetime here would reach retention_until and the durable records,
         # where the contracts reject it, so the failure would surface as a
@@ -89,67 +85,12 @@ class AutonomousCognitionRunner:
         if not self._source.claim(opportunity):
             return False
 
-        # Step 3. Bound the request before the fuse is touched. A request that
-        # cannot fit must not consume the day's budget on its way to a refusal,
-        # so this happens before the reservation rather than inside the
-        # reasoner, where it would already have been paid for. Nothing is
-        # truncated to make it fit: shortening the Laws, her identity, the
-        # catalogue or her own context to save money would change who is
-        # reasoning, which is the one trade this design may never make.
-        if self._within_input_bound is not None:
-            try:
-                measured = self._within_input_bound(opportunity)
-            except Exception as error:
-                LOGGER.info("Autonomous request could not be bounded: %s", error)
-                self._ledger.record_outcome(
-                    opportunity.opportunity_id, "refused_unboundable"
-                )
-                return False
-            if measured > self._max_input_tokens:
-                LOGGER.info(
-                    "Autonomous request refused before reservation: %s input "
-                    "units above the %s ceiling",
-                    measured,
-                    self._max_input_tokens,
-                )
-                self._ledger.record_outcome(
-                    opportunity.opportunity_id, "refused_input_unbounded"
-                )
-                # No provider call, no reservation, no fuse consumed.
-                return False
-
-        # Step 4. Price and reserve, in one call that refuses rather than
-        # returning something cheaper. An unpriced model, a missing bound or an
-        # exhausted day all raise here, before dispatch.
-        try:
-            reservation = self._budget.reserve(
-                self._provider,
-                self._model,
-                self._max_input_tokens,
-                self._max_output_tokens,
-                opportunity.opportunity_id,
-            )
-        except Exception as error:
-            LOGGER.info(
-                "Autonomous cognition refused before dispatch: %s: %s",
-                type(error).__name__,
-                error,
-            )
-            self._ledger.record_outcome(
-                opportunity.opportunity_id, f"refused_{type(error).__name__}"
-            )
-            # The request stays pending. A refusal is not a thought she had.
-            return False
-        self._ledger.record_reserved(
-            opportunity.opportunity_id,
-            self._provider,
-            self._model,
-            reservation.reserved_usd,
-        )
-
-        # Step 5. Invoke the one Core, through the one gateway. Phase 3's
-        # origin selection routes this to the autonomous reasoner; nothing here
-        # chooses a model.
+        # Step 3. Invoke the one Core, through the one gateway. Phase 3's
+        # origin selection routes this to the autonomous reasoner, which owns
+        # the money sequence because it is the only place the exact request
+        # exists: it constructs the request once, measures that object, refuses
+        # or reserves against it, and dispatches the same object. Reserving
+        # here would be paying against an estimate of a request not yet built.
         outcome_state = "error"
         try:
             outcome = self._gateway.receive_cognition_opportunity(
@@ -162,18 +103,12 @@ class AutonomousCognitionRunner:
         except Exception as error:
             LOGGER.warning("Autonomous cognition turn failed: %s", error)
         finally:
-            # Step 6. Settle whatever happened. Usage that cannot be measured
-            # keeps the full reservation: a provider that reported nothing has
-            # not told us the turn was free.
-            settled = self._budget.settle(
-                reservation, self._provider, self._model, self._usage_of()
-            )
-            # Step 7. Persist the outcome. Identities, counts and money only.
+            # Step 4. Persist the outcome. Reservation and settlement already
+            # happened inside the reasoning boundary, against the exact request.
             self._ledger.record_outcome(
                 opportunity.opportunity_id,
                 outcome_state,
                 reasoning_calls=1,
-                settled_usd=settled,
                 usage=self._usage_of(),
             )
         # The request is closed only once the turn actually happened, so a
@@ -181,3 +116,30 @@ class AutonomousCognitionRunner:
         if outcome_state != "error":
             self._source.mark_honoured(opportunity)
         return True
+
+
+class LedgerSpendAuthority:
+    """Binds the durable autonomous ledger to the reasoning boundary.
+
+    The reasoner knows it must reserve before dispatching and settle after; it
+    does not know about SQLite, days or reconciliation. This adapter is the one
+    place those meet, so the money rules stay in observability and the ordering
+    stays where the exact request is.
+    """
+
+    def __init__(self, ledger: Any, provider: str, model: str) -> None:
+        self._ledger = ledger
+        self._provider = provider
+        self._model = model
+
+    def reserve(self, max_input_tokens: int, max_output_tokens: int) -> Any:
+        """Withdraw the worst case, or raise. Never a smaller allowance."""
+        return self._ledger.reserve(
+            self._provider, self._model, max_input_tokens, max_output_tokens
+        )
+
+    def settle(self, reservation: Any, usage: Any) -> float:
+        """Reconcile. Usage that cannot be priced keeps the full reservation."""
+        return self._ledger.settle(
+            reservation, self._provider, self._model, usage
+        )
