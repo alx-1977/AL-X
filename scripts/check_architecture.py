@@ -586,99 +586,6 @@ def _frontend_violations(root: Path) -> list[Violation]:
     return found
 
 
-# D-024a records the Sol/Luna split as a time-boxed experiment: two Cores, one
-# answering Friedl and one answering a turn nobody asked for. The whole point
-# is that the choice is provenance, never meaning. If selection ever keys on a
-# topic, a capability, a goal, notebook state, a keyword, content, importance
-# or a domain, deterministic code has begun deciding which AL/X shows up before
-# she has reasoned at all, and that is Law 1 phrase routing one level up.
-#
-# So the gate is narrow and blunt: only `origin` may steer the two reasoners,
-# and only composition may hold both. A reviewer cannot be relied on to notice
-# a third branch added months from now.
-AUTONOMOUS_SELECTION_OWNER = "bootstrap/reasoning.py"
-AUTONOMOUS_SELECTION_COMPOSER = "bootstrap/live_voice.py"
-
-# Anything a selection must never read. These are the shapes a model router
-# takes when it stops being about provenance.
-SEMANTIC_SELECTION_TOKENS = frozenset(
-    {
-        "topic", "topics", "subject", "keyword", "keywords", "content",
-        "capability", "capabilities", "goal", "goals", "notebook", "research",
-        "memory", "memories", "intent", "importance", "priority", "urgency",
-        "domain", "category", "sentiment", "score", "threshold", "interest",
-    }
-)
-
-
-def _autonomous_selection_violations(
-    relative_text: str, tree: ast.AST
-) -> list[Violation]:
-    """Prove the experimental Core choice stays a choice about provenance.
-
-    Two rules. Only the composer and the reasoner module may name both
-    reasoners at all, so no third place can grow its own selection. And inside
-    the one selecting expression, the only thing consulted is the origin.
-    """
-    posix = relative_text.replace("\\", "/")
-    violations: list[Violation] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or node.name != "OriginSelectedReasoner":
-            continue
-        if not posix.endswith(AUTONOMOUS_SELECTION_OWNER):
-            violations.append(
-                Violation(
-                    relative_text,
-                    node.lineno,
-                    "the experimental origin selection may live only in "
-                    + AUTONOMOUS_SELECTION_OWNER,
-                )
-            )
-        for inner in ast.walk(node):
-            if not isinstance(inner, ast.Attribute):
-                continue
-            token = inner.attr.lower()
-            if token in SEMANTIC_SELECTION_TOKENS:
-                violations.append(
-                    Violation(
-                        relative_text,
-                        inner.lineno,
-                        "model selection may read only the cognition origin; "
-                        f"reading {inner.attr!r} would select on meaning",
-                    )
-                )
-    if posix.endswith(AUTONOMOUS_SELECTION_OWNER) or posix.endswith(
-        AUTONOMOUS_SELECTION_COMPOSER
-    ):
-        return violations
-    # Nowhere else may hold both reasoners, which is what stops a second
-    # selection site appearing outside the one recorded experiment.
-    names = {
-        node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Attribute, ast.Name))
-    }
-    if "OriginSelectedReasoner" in names:
-        violations.append(
-            Violation(
-                relative_text,
-                0,
-                "only composition may reference the experimental origin "
-                "selection; a second selection site is a model router",
-            )
-        )
-    return violations
-
-
-# D-024: `note` is AL/X's private message to her future self. Deterministic
-# code persists it and hands it back verbatim; it may never parse, classify,
-# score, keyword-match, summarise or branch on it. The moment code reads that
-# note, code has begun deciding what she meant, which is the whole thing this
-# mechanism exists to avoid.
-#
-# The gate is structural because the violation is easy and tempting: a helpful
-# "skip empty notes" or "index notes for search" reads exactly like a
-# convenience and is exactly the breach.
 NOTE_INTERPRETATION_METHODS = frozenset(
     {
         "lower", "upper", "casefold", "startswith", "endswith", "find",
@@ -887,7 +794,6 @@ def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
         visitor = SourceVisitor(relative_text, owner, rules)
         visitor.visit(tree)
         violations.extend(visitor.violations)
-        violations.extend(_autonomous_selection_violations(relative_text, tree))
         violations.extend(_note_interpretation_violations(relative_text, tree))
         violations.extend(_opportunity_source_violations(relative_text, tree))
         if owner == "interfaces":

@@ -22,7 +22,7 @@ from alx.bootstrap.autonomous import LedgerSpendAuthority, OccasionSpendRelay
 from alx.bootstrap.continuity import build_continuity_runtime
 from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
-from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
+from alx.bootstrap.reasoning import build_model_reasoner
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
     BILL_TASK_CAPABILITIES,
@@ -377,42 +377,12 @@ async def run(repository_root: Path) -> None:
             usage.settle(current_conversation_id[0])
         return attempt
 
-    approval_windows = tuple(
-        value for value in (approval_ttl_seconds, xero_approval_ttl_seconds)
-        if value is not None
-    )
-    # D-024a, time-boxed experiment: one Core answers Friedl, another answers a
-    # turn nobody asked for. Selection is one expression over CognitionOrigin,
-    # here and nowhere else. Absent configuration there is one Core, exactly as
-    # before, because a missing experimental model must disable the experiment
-    # rather than silently route autonomous turns to the conversational Core.
-    conversational_reasoner = build_model_reasoner(
-        providers.reasoning, repository_root
-    )
-    # The origin boundary always exists, configured or not. When no autonomous
-    # Core is configured the autonomous side is None and an autonomous turn is
-    # refused; it is never answered by the conversational model, because that
-    # would spend Friedl's money on a Core nobody selected and record the
-    # result as if the experiment had run.
-    reasoner = OriginSelectedReasoner(
-        conversational_reasoner,
-        None if providers.autonomous is None
-        else build_model_reasoner(
-            providers.autonomous,
-            repository_root,
-            AUTONOMOUS_MAX_OUTPUT_TOKENS,
-            AUTONOMOUS_MAX_INPUT_TOKENS,
-            # The bounds and the budget arrive together; ModelReasoner refuses
-            # a partial combination, so a bounded autonomous reasoner that
-            # could dispatch without withdrawing anything cannot be built.
-            LedgerSpendAuthority(
-                autonomous_budget,
-                provider_settings.autonomous.provider,
-                provider_settings.autonomous.model,
-                occasion_spend,
-            ),
-        ),
-    )
+    # One Core for every turn. The D-024a Sol/Luna experiment is not
+    # implemented here: it requires an approved exception in
+    # governance/EXCEPTIONS.md, and until that exists the branch stands on one
+    # authoritative reasoning path as Law 0 requires.
+    reasoner = build_model_reasoner(providers.reasoning, repository_root)
+
     core = CoreAgent(
         goal_store,
         reasoner,
