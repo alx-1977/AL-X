@@ -208,6 +208,45 @@ class SQLiteAutonomousLedger:
                 database.close()
         return AutonomousReservation(reservation_id, required)
 
+    def mark_dispatched(self, reservation: AutonomousReservation) -> None:
+        """Record, before the call, that the provider is about to be reached.
+
+        Written and committed immediately before `complete()`, never after.
+        That ordering is the whole guarantee: a crash at any instant during the
+        call leaves this on disk, so a row still at `reserved` proves the
+        provider was never reached and the occasion is safe to replay. Writing
+        it afterwards would make the two histories indistinguishable and every
+        recovery a guess about whether money had already been spent.
+        """
+        with self._lock:
+            database = self._db()
+            try:
+                database.execute(
+                    "UPDATE autonomous_spend SET outcome = ? "
+                    "WHERE reservation_id = ? AND outcome = ?",
+                    ("dispatched", reservation.reservation_id, "reserved"),
+                )
+                database.commit()
+            finally:
+                database.close()
+
+    def dispatch_started(self, opportunity_id: str) -> bool:
+        """Whether any reservation for this occasion reached the provider.
+
+        The one question recovery asks of the spend ledger. True means a paid
+        call may already have happened, so the occasion must never be replayed.
+        """
+        database = self._db()
+        try:
+            row = database.execute(
+                "SELECT COUNT(*) FROM autonomous_spend "
+                "WHERE opportunity_id = ? AND outcome != ?",
+                (opportunity_id, "reserved"),
+            ).fetchone()
+            return bool(row[0])
+        finally:
+            database.close()
+
     def settle(
         self,
         reservation: AutonomousReservation,

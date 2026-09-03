@@ -49,11 +49,15 @@ class RecordingAuthority:
     def __init__(self, reservation: str = "res-1") -> None:
         self.reservations: list[tuple[int, int]] = []
         self.settlements: list = []
+        self.dispatched: list = []
         self._reservation = reservation
 
     def reserve(self, max_input_tokens: int, max_output_tokens: int):
         self.reservations.append((max_input_tokens, max_output_tokens))
         return self._reservation
+
+    def mark_dispatched(self, reservation):
+        self.dispatched.append(reservation)
 
     def settle(self, reservation, usage):
         self.settlements.append((reservation, usage))
@@ -401,6 +405,10 @@ class SameRequestObjectTests(unittest.TestCase):
                 order.append("reserved")
                 return super().reserve(max_input_tokens, max_output_tokens)
 
+            def mark_dispatched(inner, reservation):
+                order.append("marked")
+                return super().mark_dispatched(reservation)
+
             def settle(inner, reservation, usage):
                 order.append("settled")
                 return super().settle(reservation, usage)
@@ -418,7 +426,7 @@ class SameRequestObjectTests(unittest.TestCase):
             )
         except Exception:
             pass
-        self.assertEqual(order, ["reserved", "dispatched", "settled"])
+        self.assertEqual(order, ["reserved", "marked", "dispatched", "settled"])
 
     def test_an_oversized_real_request_never_reserves(self) -> None:
         """No estimate: the real request is measured and refused."""
@@ -505,6 +513,9 @@ class RequestObjectIdentityTests(unittest.TestCase):
                 events.append(("reserve", None))
                 return "reservation"
 
+            def mark_dispatched(inner, reservation):
+                events.append(("mark_dispatched", None))
+
             def settle(inner, reservation, usage):
                 events.append(("settle", None))
                 return 0.0
@@ -554,7 +565,9 @@ class RequestObjectIdentityTests(unittest.TestCase):
     def test_reserve_happens_after_construction_and_after_validation(self) -> None:
         events, _, _ = self._trace()
         order = [name for name, _ in events]
-        self.assertEqual(order, ["measure", "reserve", "complete", "settle"])
+        self.assertEqual(
+            order, ["measure", "reserve", "mark_dispatched", "complete", "settle"]
+        )
 
     def test_only_one_request_is_ever_constructed(self) -> None:
         """A rebuild after reservation would show a second distinct object."""
@@ -611,8 +624,11 @@ class OccasionCostIsRecordedTests(unittest.TestCase):
             reserved_usd = 0.0816
 
         class Ledger:
-            def reserve(self, provider, model, max_input, max_output):
+            def reserve(self, provider, model, max_input, max_output, opportunity_id=""):
                 return Reservation()
+
+            def mark_dispatched(self, reservation):
+                pass
 
             def settle(self, reservation, provider, model, usage):
                 return 0.0079

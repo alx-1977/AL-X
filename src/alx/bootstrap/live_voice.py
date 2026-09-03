@@ -246,6 +246,18 @@ async def run(repository_root: Path) -> None:
         opportunity_ledger,
         enabled=providers.autonomous is not None,
     )
+    # Restart-safe continuation. A process that stopped between claiming an
+    # occasion and recording its outcome left a durable claim behind, and
+    # without this the request would stay pending while every later scan
+    # skipped it. Recovery reads persisted state only: an occasion with no
+    # dispatched reservation cannot have reached the provider and is reclaimed;
+    # one that did is retained for inspection rather than replayed.
+    reclaimed = cognition_source.recover(autonomous_budget)
+    if reclaimed:
+        LOGGER.info(
+            "Reclaimed %d cognition occasion(s) left claimed by a stopped run",
+            len(reclaimed),
+        )
     LOGGER.info(
         "Autonomous cognition composed: enabled=%s daily_budget_usd=%.4f",
         cognition_source.enabled,

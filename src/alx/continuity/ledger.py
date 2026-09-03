@@ -147,6 +147,36 @@ class SQLiteOpportunityLedger:
                 ),
             )
 
+    def unfinished(self) -> tuple[dict[str, Any], ...]:
+        """Rows whose occasion never reached a terminal outcome.
+
+        These are the only candidates for recovery. A row with any other
+        outcome records a turn that happened or was refused, and is never
+        reclaimed.
+        """
+        return tuple(
+            dict(row)
+            for row in self._connection.execute(
+                "SELECT * FROM cognition_opportunities WHERE outcome IN (?, ?)",
+                ("created", "reserved"),
+            ).fetchall()
+        )
+
+    def mark_unreconciled(self, opportunity_id: str) -> None:
+        """Retain an occasion whose replay cannot be proven safe.
+
+        Terminal, so it is never offered again, and distinct from a completed
+        turn so Friedl can see that a paid call may have happened without a
+        recorded result. Retained for inspection rather than silently replayed
+        or silently dropped.
+        """
+        with self._connection:
+            self._connection.execute(
+                "UPDATE cognition_opportunities SET outcome = ? "
+                "WHERE opportunity_id = ?",
+                ("unreconciled", opportunity_id),
+            )
+
     def rows(self) -> tuple[dict[str, Any], ...]:
         return tuple(
             dict(row)

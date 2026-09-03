@@ -146,9 +146,17 @@ class LedgerSpendAuthority:
     """
 
     def __init__(
-        self, ledger: Any, provider: str, model: str, observer: Any = None
+        self,
+        ledger: Any,
+        provider: str,
+        model: str,
+        observer: Any = None,
+        opportunity_id: Any = None,
     ) -> None:
         self._ledger = ledger
+        # Which occasion is being served, asked at reserve time. The reasoner
+        # does not know; the relay does.
+        self._opportunity_id = opportunity_id or (lambda: "")
         self._provider = provider
         self._model = model
         # Reports what was withdrawn and settled so the opportunity ledger can
@@ -160,13 +168,23 @@ class LedgerSpendAuthority:
     def reserve(self, max_input_tokens: int, max_output_tokens: int) -> Any:
         """Withdraw the worst case, or raise. Never a smaller allowance."""
         reservation = self._ledger.reserve(
-            self._provider, self._model, max_input_tokens, max_output_tokens
+            self._provider,
+            self._model,
+            max_input_tokens,
+            max_output_tokens,
+            # Links the withdrawal to the occasion, so recovery can ask this
+            # ledger whether that occasion ever reached the provider.
+            self._opportunity_id(),
         )
         if self._observer is not None:
             self._observer.reserved(
                 self._provider, self._model, reservation.reserved_usd
             )
         return reservation
+
+    def mark_dispatched(self, reservation: Any) -> None:
+        """Durably record that the provider is about to be reached."""
+        self._ledger.mark_dispatched(reservation)
 
     def settle(self, reservation: Any, usage: Any) -> float:
         """Reconcile. Usage that cannot be priced keeps the full reservation."""

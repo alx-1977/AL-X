@@ -56,6 +56,37 @@ class FutureCognitionSource:
         """One request matures into one opportunity, permanently."""
         return f"self:{request_id}"
 
+    def recover(self, spend: Any = None) -> tuple[str, ...]:
+        """Reclaim occasions that a stopped process left claimed.
+
+        Recovery reads durable state and nothing else. There is no age, no
+        timeout, no lease and no staleness: an occasion is reclaimable when the
+        records *prove* no provider call can have happened, and is retained
+        otherwise.
+
+        The proof is one fact. A spend row is marked dispatched before the
+        provider is called, so an occasion with no dispatched reservation
+        cannot have reached one. Its claim is dropped and the request matures
+        again. An occasion that did reach dispatch may already have been billed
+        and answered, so it is never replayed: a duplicate paid turn for a
+        request AL/X made once is worse than one she asked for and did not get,
+        because the second is visible and the first is not.
+
+        Returns the occasions reclaimed. Idempotent: a second call finds
+        nothing, because the rows it acted on are gone or terminal.
+        """
+        reclaimed: list[str] = []
+        for row in self._ledger.unfinished():
+            opportunity_id = row["opportunity_id"]
+            if spend is not None and spend.dispatch_started(opportunity_id):
+                # Provable dispatch. Retain for inspection; never replay.
+                self._ledger.mark_unreconciled(opportunity_id)
+                continue
+            # No dispatch is recorded, so the provider was never reached.
+            self._ledger.release(opportunity_id)
+            reclaimed.append(opportunity_id)
+        return tuple(reclaimed)
+
     def due_opportunities(self) -> tuple[CognitionOpportunity, ...]:
         """Every occasion whose time has come and which has not been created.
 

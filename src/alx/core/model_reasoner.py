@@ -901,6 +901,10 @@ class ModelReasoner:
             self._max_input_tokens, self._max_output_tokens
         )
         usage: Any = None
+        # Durable, and committed before the call. A crash from here on leaves
+        # proof that the provider may have run, so recovery refuses to replay
+        # this occasion rather than risking a second paid turn for one request.
+        self._spend_authority.mark_dispatched(reservation)
         try:
             completion = self._model.complete(request)
         except Exception:
