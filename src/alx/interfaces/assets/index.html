@@ -26,6 +26,12 @@
         <time id="diagnostic-elapsed">00:00.0</time>
       </div>
       <div id="diagnostic-log" class="diagnostics__log" role="log" aria-live="polite"></div>
+      <form id="console-form" class="diagnostics__input" autocomplete="off">
+        <label class="diagnostics__prompt" for="console-input">You &gt;</label>
+        <textarea id="console-input" rows="1" spellcheck="false"
+          placeholder="Type to AL/X — Enter sends, Shift+Enter for a new line"
+          aria-label="Type to AL/X"></textarea>
+      </form>
       <footer>Content and credentials are never displayed</footer>
     </aside>
     <script type="module" src="/app.js"></script>

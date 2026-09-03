@@ -281,6 +281,17 @@ class StartupSmokeTest(unittest.TestCase):
                 # Calling it is what proves the names it closes over exist.
                 self.assertEqual(tuple(supplier()), ())
 
+    def test_the_runtime_starts_without_a_speech_transport(self) -> None:
+        """Quiet evening testing: no audio, everything else identical."""
+        observed = self._run_runtime({"ALX_TTS_PROVIDER": "none"})
+        self.assertTrue(observed["served"])
+
+    def test_a_silent_runtime_still_builds_every_store(self) -> None:
+        observed = self._run_runtime({"ALX_TTS_PROVIDER": "none"})
+        for name in ("goals.sqlite3", "conversations.sqlite3", "continuity.sqlite3"):
+            with self.subTest(store=name):
+                self.assertIn(name, observed["storage"])
+
     def test_the_runtime_shuts_down_cleanly(self) -> None:
         """Cancellation must unwind composition without raising."""
         observed = self._run_runtime(self._commissioning())

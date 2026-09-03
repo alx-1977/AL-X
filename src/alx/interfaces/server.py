@@ -46,6 +46,11 @@ LOGGER = logging.getLogger(__name__)
 # nothing external happened, the goal is unchanged, and a dispatch that was
 # checkpointed but never sent is closed as an unknown outcome on the next turn
 # rather than repeated. The diagnostics panel still names the fault.
+# The one non-audio frame the socket accepts. A transport shape, like
+# "audio.end" in the other direction; it names a frame format and never a
+# meaning, and nothing branches on what the frame carries.
+TYPED_FRAME = "person.text"
+
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
     {
         "speech_transcription_error",
@@ -97,6 +102,10 @@ class LiveVoiceServer:
         # handed to a real listener or it is undelivered; a count of open
         # sockets cannot tell the difference.
         self._delivery_queues: dict[str, list[Any]] = {}
+        # Typed lines waiting to become person turns. Separate from delivery
+        # because one carries input and the other carries output; conflating
+        # them is how a console starts inferring where text should go.
+        self._typed_queues: dict[str, list[Any]] = {}
 
     def deliver(self, conversation_id: str, response: str) -> ResponseDelivery:
         """Speak an autonomous response through the one existing synthesis path.
@@ -129,6 +138,41 @@ class LiveVoiceServer:
             else ResponseDelivery.UNDELIVERABLE
         )
 
+    # A typed line is at most this long. Not a judgement about what is worth
+    # saying: a bound so one frame cannot exhaust memory or the input ceiling.
+    MAX_TYPED_CHARACTERS = 8_000
+
+    def _queue_typed_turn(self, conversation_id: str, payload: str) -> None:
+        """Hand a typed line to the session, or drop a malformed frame.
+
+        Dropping rather than raising: a browser sending nonsense must not end a
+        conversation, and there is nothing here to tell Friedl that would not be
+        the transport speaking in AL/X's voice.
+        """
+        try:
+            frame = json.loads(payload)
+        except (ValueError, TypeError):
+            LOGGER.info("Ignoring an unparseable console frame")
+            return
+        # A wire-protocol discriminator, not language routing: this reads the
+        # frame's declared shape, never what Friedl wrote. The line itself is
+        # carried to the Core untouched and uninspected.
+        if not isinstance(frame, dict) or frame.get("type") != TYPED_FRAME:
+            LOGGER.info("Ignoring an unsupported console frame")
+            return
+        content = frame.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return
+        if len(content) > self.MAX_TYPED_CHARACTERS:
+            LOGGER.info("Ignoring an oversized console frame")
+            return
+        queues = getattr(self, "_typed_queues", {}).get(conversation_id) or []
+        for queue in queues:
+            try:
+                queue.put_nowait(content)
+            except Exception:
+                continue
+
     def _delivery_queue(self, conversation_id: str):
         """The queue this exchange should drain, if a listener registered one."""
         queues = getattr(self, "_delivery_queues", {}).get(conversation_id) or []
@@ -159,6 +203,8 @@ class LiveVoiceServer:
         # socket count that cannot say whether anyone took it.
         deliveries: asyncio.Queue[str] = asyncio.Queue()
         self._delivery_queues.setdefault(conversation_id, []).append(deliveries)
+        typed: asyncio.Queue[str] = asyncio.Queue()
+        self._typed_queues.setdefault(conversation_id, []).append(typed)
         LOGGER.info("Voice session connected")
 
         await connection.send(
@@ -183,6 +229,11 @@ class LiveVoiceServer:
                 queues.remove(deliveries)
             if not queues:
                 self._delivery_queues.pop(conversation_id, None)
+            waiting = self._typed_queues.get(conversation_id, [])
+            if typed in waiting:
+                waiting.remove(typed)
+            if not waiting:
+                self._typed_queues.pop(conversation_id, None)
 
     async def _exchange_once(
         self, connection: ServerConnection, conversation_id: str
@@ -215,6 +266,17 @@ class LiveVoiceServer:
                             {
                                 "type": "diagnostic",
                                 **event.diagnostic,
+                            }
+                        )
+                    )
+                    continue
+                if event.kind is VoiceEventKind.TEXT:
+                    await connection.send(
+                        json.dumps(
+                            {
+                                "type": "alx.text",
+                                "stream": "ALX",
+                                "content": event.text,
                             }
                         )
                     )
@@ -278,6 +340,12 @@ class LiveVoiceServer:
     ) -> AsyncIterator[AudioChunk]:
         sequence = 0
         async for payload in connection:
+            if isinstance(payload, str):
+                # The only non-audio frame the socket accepts. It carries what
+                # Friedl typed and nothing else: no command, no destination, no
+                # grammar. Where it goes is decided here, not by what it says.
+                self._queue_typed_turn(stream_id, payload)
+                continue
             if not isinstance(payload, bytes) or not payload:
                 continue
             if sequence == 0:

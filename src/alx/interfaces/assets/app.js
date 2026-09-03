@@ -2,6 +2,8 @@ const begin = document.querySelector("#begin");
 const activation = document.querySelector("#activation");
 const status = document.querySelector("#status");
 const diagnosticLog = document.querySelector("#diagnostic-log");
+const consoleForm = document.querySelector("#console-form");
+const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
@@ -38,10 +40,15 @@ function clockTime() {
   }).format(new Date());
 }
 
-function diagnostic(message, tone = "info") {
+// A line carries two independent labels. `stream` says where the data came
+// from; `tone` says how it reads. Future SERIAL or BUILD sources are new
+// stream values, not a new renderer — and neither label ever decides where
+// keyboard input goes.
+function diagnostic(message, tone = "info", stream = "SYSTEM") {
   const line = document.createElement("div");
   line.className = "diagnostic-line";
   line.dataset.tone = tone;
+  line.dataset.stream = stream;
   const timestamp = document.createElement("time");
   timestamp.textContent = clockTime();
   const content = document.createElement("span");
@@ -200,6 +207,10 @@ function handleControl(message) {
       });
     return;
   }
+  if (message.type === "alx.text") {
+    diagnostic(`ALX > ${message.content}`, "ok", message.stream || "ALX");
+    return;
+  }
   if (message.type === "diagnostic") {
     if (message.code === "microphone.audio_received") {
       diagnostic("AL/X server received microphone audio", "ok");
@@ -334,4 +345,61 @@ begin.addEventListener("click", async () => {
     beginDiagnosticStage("Disconnected");
     diagnostic("Voice transport closed", "error");
   };
+});
+
+// --- typed input ----------------------------------------------------------
+//
+// The keyboard's destination is fixed here, in code, and is never read out of
+// what was typed. There is deliberately no command grammar: a line beginning
+// with a slash is a line beginning with a slash, and it reaches AL/X verbatim.
+// When a second input target exists it will be an explicit selection, not a
+// prefix the console interprets.
+const typedHistory = [];
+let historyCursor = 0;
+
+function submitTypedLine() {
+  const content = consoleInput.value.trim();
+  if (!content) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    diagnostic("Not connected · start AL/X first", "error");
+    return;
+  }
+  socket.send(JSON.stringify({ type: "person.text", content }));
+  diagnostic(`You > ${content}`, "info", "ALX");
+  typedHistory.push(content);
+  historyCursor = typedHistory.length;
+  consoleInput.value = "";
+  consoleInput.style.height = "auto";
+}
+
+consoleForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitTypedLine();
+});
+
+consoleInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    submitTypedLine();
+    return;
+  }
+  if (event.key === "ArrowUp" && !consoleInput.value.includes("\n")) {
+    if (!typedHistory.length) return;
+    event.preventDefault();
+    historyCursor = Math.max(0, historyCursor - 1);
+    consoleInput.value = typedHistory[historyCursor] ?? "";
+    return;
+  }
+  if (event.key === "ArrowDown" && !consoleInput.value.includes("\n")) {
+    if (!typedHistory.length) return;
+    event.preventDefault();
+    historyCursor = Math.min(typedHistory.length, historyCursor + 1);
+    consoleInput.value = typedHistory[historyCursor] ?? "";
+  }
+});
+
+// Grow with multiline input, within the height the panel allows.
+consoleInput.addEventListener("input", () => {
+  consoleInput.style.height = "auto";
+  consoleInput.style.height = `${consoleInput.scrollHeight}px`;
 });

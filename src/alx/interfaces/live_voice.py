@@ -35,6 +35,8 @@ class VoiceEventKind(str, Enum):
     LISTENING = "listening"
     AUDIO = "audio"
     DIAGNOSTIC = "diagnostic"
+    # AL/X's final wording, for the console. Rendered, never re-derived.
+    TEXT = "text"
     ERROR = "error"
 
 
@@ -44,8 +46,13 @@ class VoiceEvent:
     audio: AudioChunk | None = None
     reason: str | None = None
     diagnostic: Mapping[str, Any] | None = None
+    text: str | None = None
 
     def __post_init__(self) -> None:
+        if self.kind is VoiceEventKind.TEXT and not self.text:
+            raise ValueError("text events require AL/X's wording")
+        if self.kind is not VoiceEventKind.TEXT and self.text is not None:
+            raise ValueError("only text events may carry wording")
         if self.kind is VoiceEventKind.AUDIO and self.audio is None:
             raise ValueError("audio events require an audio chunk")
         if self.kind is not VoiceEventKind.AUDIO and self.audio is not None:
@@ -86,7 +93,7 @@ class VoiceSession:
         self,
         gateway: ConversationGateway,
         transcriber: SpeechTranscriber,
-        synthesizer: SpeechSynthesizer,
+        synthesizer: SpeechSynthesizer | None,
         person_id: str,
         step_budget: int,
         retention_days: int,
@@ -124,6 +131,7 @@ class VoiceSession:
         conversation_id: str,
         audio: AsyncIterable[AudioChunk],
         deliveries: "asyncio.Queue[str] | None" = None,
+        typed: "asyncio.Queue[str] | None" = None,
     ) -> AsyncIterator[VoiceEvent]:
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
@@ -145,6 +153,12 @@ class VoiceSession:
             except Exception:
                 await incoming.put(("error", "background_event_error"))
 
+        async def receive_typed_lines() -> None:
+            """What Friedl typed, on its way to the one person-turn path."""
+            assert typed is not None
+            while True:
+                await incoming.put(("typed", await typed.get()))
+
         async def receive_autonomous_responses() -> None:
             """Her own words, arriving from a turn nobody asked for.
 
@@ -160,6 +174,8 @@ class VoiceSession:
         tasks = [asyncio.create_task(receive_transcriptions())]
         if deliveries is not None:
             tasks.append(asyncio.create_task(receive_autonomous_responses()))
+        if typed is not None:
+            tasks.append(asyncio.create_task(receive_typed_lines()))
         if self._event_source is not None:
             tasks.append(asyncio.create_task(receive_events()))
         try:
@@ -209,12 +225,25 @@ class VoiceSession:
                                 now + timedelta(days=self._retention_days),
                             )
                         else:
-                            LOGGER.info("Cartesia event received: %s", item.state.value)
+                            # Spoken and typed converge here, before the
+                            # gateway. They differ only in provenance and in
+                            # whether a transcriber was involved; from this
+                            # point there is one person-turn path, one Core
+                            # call, one conversation and one goal treatment.
+                            if kind == "typed":
+                                origin = ConversationOrigin.TYPED
+                                content = item
+                            else:
+                                LOGGER.info(
+                                    "Cartesia event received: %s", item.state.value
+                                )
+                                origin = ConversationOrigin.SPEECH_TRANSCRIPT
+                                content = item.content
                             turn = ConversationTurn(
                                 conversation_id=conversation_id,
                                 turn_id=self._identifier_factory(),
-                                origin=ConversationOrigin.SPEECH_TRANSCRIPT,
-                                content=item.content,
+                                origin=origin,
+                                content=content,
                                 occurred_at=now,
                                 person_id=self._person_id,
                             )
@@ -270,6 +299,10 @@ class VoiceSession:
             )
             yield VoiceEvent(VoiceEventKind.LISTENING)
             return
+        # The console mirrors what the one response path produced. It is not a
+        # second response implementation: the wording is the Core's own, and it
+        # is emitted whether or not anything is audible.
+        yield VoiceEvent(VoiceEventKind.TEXT, text=outcome.response)
         async for speech_event in self._speak(conversation_id, outcome.response):
             yield speech_event
 
@@ -280,6 +313,12 @@ class VoiceSession:
         unprompted speech would be a second voice, and the wording reaching it
         is the Core's own either way.
         """
+        if self._synthesizer is None:
+            # No speech transport. Her wording already reached the console, and
+            # the turn is complete; a missing speaker changes nothing about
+            # what she decided or what was recorded.
+            yield VoiceEvent(VoiceEventKind.LISTENING)
+            return
         yield VoiceEvent(VoiceEventKind.SPEAKING)
         LOGGER.info("Speech synthesis started")
         try:

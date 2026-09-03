@@ -183,3 +183,37 @@ html, body {
   .diagnostics { left: .75rem; bottom: .75rem; width: calc(100vw - 1.5rem); }
   .diagnostics__log { height: 8.5rem; }
 }
+
+/* The console gained an input line. It keeps the panel's existing look: a
+   prompt, a flat field, no chat bubbles. */
+.diagnostics__input {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.diagnostics__prompt {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  padding-top: 0.15rem;
+  white-space: nowrap;
+}
+
+.diagnostics__input textarea {
+  flex: 1;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  max-height: 6rem;
+}
+
+/* Stream is where a line came from; tone is how it reads. Kept separate so a
+   later SERIAL or BUILD stream needs a value here, not a new renderer. */
+.diagnostic-line[data-stream="ALX"] time { opacity: 0.5; }
+.diagnostic-line[data-stream="ALX"] span { color: #cfe8ff; }

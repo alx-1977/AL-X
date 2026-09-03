@@ -154,6 +154,9 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             [item.kind for item in observed],
             [
                 VoiceEventKind.THINKING,
+                # Her wording reaches the console before it is spoken, so a
+                # silent runtime still shows what she said.
+                VoiceEventKind.TEXT,
                 VoiceEventKind.SPEAKING,
                 VoiceEventKind.AUDIO,
                 VoiceEventKind.AUDIO,
@@ -245,6 +248,9 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             [
                 VoiceEventKind.HEARING,
                 VoiceEventKind.THINKING,
+                # Her wording reaches the console before it is spoken, so a
+                # silent runtime still shows what she said.
+                VoiceEventKind.TEXT,
                 VoiceEventKind.SPEAKING,
                 VoiceEventKind.AUDIO,
                 VoiceEventKind.AUDIO,
@@ -325,6 +331,9 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
                 VoiceEventKind.ERROR,
                 VoiceEventKind.LISTENING,
                 VoiceEventKind.THINKING,
+                # Her wording reaches the console before it is spoken, so a
+                # silent runtime still shows what she said.
+                VoiceEventKind.TEXT,
                 VoiceEventKind.SPEAKING,
                 VoiceEventKind.AUDIO,
                 VoiceEventKind.AUDIO,

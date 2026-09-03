@@ -63,3 +63,17 @@ provenance and retention still validate against all of it.
   reasoning-effort parameter. Non-default values are logged as ignored, and
   medium passes silently because it is the effective default. The setting only
   changes behaviour on OpenAI.
+
+## iCloud mail reconciliation (raised 2026-09-03, deferred)
+
+AL/X only learns a message is handled when she handles it. Mail that Friedl
+clears himself in iCloud stays observed on her side, so the two views diverge —
+and the longer the runtime is down, the wider the gap.
+
+Observed while commissioning Phase 8: 48 done, 1 current, cursor stuck at the
+same UID since 2026-09-02, because the runtime was not running. Nothing was
+queued; nothing had been seen.
+
+Not a bug in D-014's one-at-a-time attention, which is deliberate. The question
+is whether server-side state (Seen, moved, deleted) should reconcile into her
+observations, and that needs its own design decision rather than a patch.
