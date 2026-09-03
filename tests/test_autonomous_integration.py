@@ -22,6 +22,7 @@ from alx.bootstrap.autonomous import AutonomousCognitionRunner  # noqa: E402
 from alx.bootstrap.reasoning import (  # noqa: E402
     AutonomousReasonerUnavailable,
     OriginSelectedReasoner,
+    build_model_reasoner,
 )
 from alx.config import (  # noqa: E402
     AUTONOMOUS_MAX_INPUT_TOKENS,
@@ -88,9 +89,30 @@ class CompositionRootTests(unittest.TestCase):
         ]
         self.assertEqual(constructed.count("OriginSelectedReasoner"), 1)
 
-    def test_the_autonomous_reasoner_receives_both_bounds(self) -> None:
-        self.assertIn("AUTONOMOUS_MAX_OUTPUT_TOKENS", self.SOURCE)
-        self.assertIn("AUTONOMOUS_MAX_INPUT_TOKENS", self.SOURCE)
+    def test_the_real_builder_accepts_and_applies_both_bounds(self) -> None:
+        """Call the actual builder the way composition calls it.
+
+        A name-presence check passed here while the builder took only three
+        arguments, so a Luna-configured runtime would have died at startup with
+        a positional TypeError. Only calling it proves the wiring.
+        """
+        reasoner = build_model_reasoner(
+            object(), ROOT, AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS
+        )
+        self.assertEqual(reasoner._max_output_tokens, AUTONOMOUS_MAX_OUTPUT_TOKENS)
+        self.assertEqual(reasoner._max_input_tokens, AUTONOMOUS_MAX_INPUT_TOKENS)
+
+    def test_the_builder_signature_matches_the_composition_call(self) -> None:
+        """The composition call must be satisfiable by the real signature."""
+        import inspect
+
+        signature = inspect.signature(build_model_reasoner)
+        signature.bind(object(), ROOT, 32_000, 96_000)
+
+    def test_the_conversational_builder_still_takes_no_bounds(self) -> None:
+        reasoner = build_model_reasoner(object(), ROOT)
+        self.assertIsNone(reasoner._max_output_tokens)
+        self.assertIsNone(reasoner._max_input_tokens)
 
 
 class ProductionClockTests(unittest.TestCase):
@@ -257,6 +279,165 @@ class OneSharedBoundingPrimitiveTests(unittest.TestCase):
             if "def input_token_upper_bound" in path.read_text(encoding="utf-8")
         )
         self.assertEqual(definitions, ["contracts/models.py"])
+
+
+class ViableInputCeilingTests(unittest.TestCase):
+    """The ceiling must fit the Core prompt AL/X actually reasons with.
+
+    D-024a forbids a thinner prompt for the autonomous Core: both origins must
+    reason in the same identity and capability environment, or the experiment
+    compares two different minds. So the ceiling accommodates the prompt rather
+    than the prompt being cut to fit the ceiling.
+    """
+
+    def _production_bound(self) -> int:
+        from alx.contracts.models import input_token_upper_bound
+        from alx.core.model_reasoner import ModelReasoner
+        from alx.tools import (
+            CONTINUITY_DEFINITIONS, NOTEBOOK_DEFINITIONS, RESEARCH_DEFINITION,
+        )
+        from alx.tools.mail import DEFINITIONS as MAIL
+
+        try:
+            from alx.tools.xero import DEFINITIONS as XERO
+        except Exception:
+            XERO = ()
+        try:
+            from alx.tools.dhl import DEFINITIONS as DHL
+        except Exception:
+            DHL = ()
+        laws = (ROOT / "LAWS_OF_ALX.md").read_text(encoding="utf-8")
+        identity = (ROOT / "IDENTITY_AND_MEMORY.md").read_text(encoding="utf-8")
+        capabilities = (
+            tuple(NOTEBOOK_DEFINITIONS) + (RESEARCH_DEFINITION,)
+            + tuple(CONTINUITY_DEFINITIONS) + tuple(MAIL)
+            + tuple(XERO) + tuple(DHL)
+        )
+        reasoner = ModelReasoner(
+            object(), laws, identity,
+            AUTONOMOUS_MAX_OUTPUT_TOKENS, AUTONOMOUS_MAX_INPUT_TOKENS,
+        )
+        return input_token_upper_bound(
+            reasoner.build_request(
+                ReasoningContext(
+                    None, (), capabilities, conversation_id="c1",
+                    origin=CognitionOrigin.SELF_REQUESTED,
+                )
+            )
+        )
+
+    def test_the_real_empty_context_request_fits_the_ceiling(self) -> None:
+        """32,000 guaranteed refusal; the corrected ceiling must not."""
+        self.assertLess(self._production_bound(), AUTONOMOUS_MAX_INPUT_TOKENS)
+
+    def test_headroom_remains_for_real_continuity_context(self) -> None:
+        """A ceiling with no room for conversation buys nothing."""
+        headroom = AUTONOMOUS_MAX_INPUT_TOKENS - self._production_bound()
+        self.assertGreater(headroom, 20_000)
+
+    def test_the_ceiling_is_the_corrected_figure(self) -> None:
+        self.assertEqual(AUTONOMOUS_MAX_INPUT_TOKENS, 96_000)
+        self.assertEqual(AUTONOMOUS_MAX_OUTPUT_TOKENS, 32_000)
+
+
+class ReservationOrderingTests(unittest.TestCase):
+    """An oversized request must not reach the fuse, let alone the provider."""
+
+    class CountingBudget:
+        def __init__(self) -> None:
+            self.reservations = 0
+
+        def reserve(self, *args, **kwargs):
+            self.reservations += 1
+            raise AssertionError("an oversized request must not reserve")
+
+        def settle(self, *args, **kwargs):
+            raise AssertionError("nothing to settle")
+
+    class NeverGateway:
+        def receive_cognition_opportunity(self, *args, **kwargs):
+            raise AssertionError("an oversized request must not dispatch")
+
+    def _opportunity(self):
+        from alx.contracts.continuity import CognitionOpportunity
+
+        return CognitionOpportunity(
+            opportunity_id="self:r1",
+            origin=CognitionOrigin.SELF_REQUESTED,
+            arose_at=datetime(2026, 9, 3, tzinfo=UTC),
+            references=("future_cognition:r1",),
+            note="a note",
+        )
+
+    def _runner(self, measured: int, budget, ledger):
+        class OneOccasion:
+            def __init__(self, opportunity):
+                self._opportunity = opportunity
+
+            def due_opportunities(self):
+                return (self._opportunity,)
+
+            def claim(self, opportunity):
+                return True
+
+            def mark_honoured(self, opportunity):
+                raise AssertionError("a refused occasion is not honoured")
+
+        return AutonomousCognitionRunner(
+            OneOccasion(self._opportunity()),
+            ledger,
+            budget,
+            self.NeverGateway(),
+            "openai",
+            "gpt-5.6-luna",
+            AUTONOMOUS_MAX_INPUT_TOKENS,
+            AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            "c1",
+            4,
+            3650,
+            within_input_bound=lambda opportunity: measured,
+        )
+
+    def test_an_oversized_request_makes_no_reservation_and_no_call(self) -> None:
+        class Ledger:
+            def __init__(self) -> None:
+                self.outcomes = []
+
+            def record_outcome(self, opportunity_id, outcome, **kwargs):
+                self.outcomes.append(outcome)
+
+            def record_reserved(self, *args, **kwargs):
+                raise AssertionError("nothing may be reserved")
+
+        budget, ledger = self.CountingBudget(), Ledger()
+        attempted = self._runner(
+            AUTONOMOUS_MAX_INPUT_TOKENS + 1, budget, ledger
+        ).run_due()
+        self.assertEqual(attempted, ())
+        self.assertEqual(budget.reservations, 0)
+        self.assertEqual(ledger.outcomes, ["refused_input_unbounded"])
+
+    def test_a_request_within_the_ceiling_proceeds_to_reservation(self) -> None:
+        """The check refuses only what does not fit."""
+
+        class Ledger:
+            def record_outcome(self, *args, **kwargs):
+                pass
+
+            def record_reserved(self, *args, **kwargs):
+                pass
+
+        class ReachedBudget(Exception):
+            pass
+
+        class Budget:
+            def reserve(self, *args, **kwargs):
+                raise ReachedBudget()
+
+        runner = self._runner(AUTONOMOUS_MAX_INPUT_TOKENS - 1, Budget(), Ledger())
+        # The refusal path records and returns; reaching the budget at all
+        # proves the bound did not block a request that fits.
+        runner.run_due()
 
 
 if __name__ == "__main__":

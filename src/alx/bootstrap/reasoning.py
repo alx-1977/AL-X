@@ -12,17 +12,22 @@ def build_model_reasoner(
     model: ReasoningModel,
     repository_root: Path,
     max_output_tokens: int | None = None,
+    max_input_tokens: int | None = None,
 ) -> ModelReasoner:
     """Build a reasoner over the approved Laws and identity.
 
     Every reasoner reads the same two approved documents, so a second Core
     built here is the same AL/X over a different model, never a different mind.
-    `max_output_tokens` is the provider-side generation ceiling: conversation
-    passes None, and a path spending against a dollar ceiling passes its bound.
+    The two bounds are the ceilings a reservation is computed against, so both
+    travel together: conversation passes neither, and a path spending against a
+    dollar ceiling passes both. Passing only one would leave a reservation
+    resting on a bound nothing enforces.
     """
     laws = (repository_root / "LAWS_OF_ALX.md").read_text(encoding="utf-8")
     identity = (repository_root / "IDENTITY_AND_MEMORY.md").read_text(encoding="utf-8")
-    return ModelReasoner(model, laws, identity, max_output_tokens)
+    return ModelReasoner(
+        model, laws, identity, max_output_tokens, max_input_tokens
+    )
 
 
 class AutonomousReasonerUnavailable(Exception):

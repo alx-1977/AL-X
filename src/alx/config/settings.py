@@ -438,7 +438,15 @@ AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
 # The input ceiling the autonomous reservation is computed against. Enforced on
 # the constructed request before dispatch: a bound nothing checks makes the
 # worst case a guess rather than a ceiling.
-AUTONOMOUS_MAX_INPUT_TOKENS = 32_000
+#
+# 96,000 rather than 32,000, corrected in D-024a on 2026-09-03. A real Core
+# request measures roughly 59.6k input units with the full capability catalogue
+# and an empty conversation, so 32,000 guaranteed refusal and 64,000 left no
+# room for the conversation, goals and thoughts that make a turn worth having.
+# The alternative was a thinner prompt for the autonomous Core, which D-024a
+# forbids: both origins must reason in the same identity and capability
+# environment, or the experiment compares two different minds.
+AUTONOMOUS_MAX_INPUT_TOKENS = 96_000
 
 
 def autonomous_reasoning_settings(

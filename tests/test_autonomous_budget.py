@@ -28,7 +28,7 @@ from alx.observability.autonomous_budget import (  # noqa: E402
 # D-024a: R10/day at the recorded R18.5/USD assumption.
 DAILY = 0.5405
 LUNA = ("openai", "gpt-5.6-luna")
-IN_BOUND, OUT_BOUND = 32_000, 32_000
+IN_BOUND, OUT_BOUND = 96_000, 32_000
 
 
 def _measured(output_tokens: int = 6_000) -> dict[str, int]:
@@ -55,13 +55,13 @@ class AutonomousBudgetTests(unittest.TestCase):
         return self.ledger.reserve(*LUNA, IN_BOUND, OUT_BOUND)
 
     def test_the_worst_case_is_the_approved_figure(self) -> None:
-        """D-024a records $0.0528 per autonomous turn at 32k/32k."""
+        """D-024a records $0.0816 per autonomous turn at 96k/32k."""
         self.assertAlmostEqual(
-            self.ledger.worst_case_usd(*LUNA, IN_BOUND, OUT_BOUND), 0.0528, places=6
+            self.ledger.worst_case_usd(*LUNA, IN_BOUND, OUT_BOUND), 0.0816, places=6
         )
 
-    def test_the_daily_ceiling_admits_ten_worst_case_turns(self) -> None:
-        for index in range(10):
+    def test_the_daily_ceiling_admits_six_worst_case_turns(self) -> None:
+        for index in range(6):
             with self.subTest(turn=index):
                 self._reserve()
         with self.assertRaises(AutonomousBudgetExceeded):
@@ -83,7 +83,7 @@ class AutonomousBudgetTests(unittest.TestCase):
 
     def test_measured_usage_reconciles_and_returns_the_difference(self) -> None:
         reservation = self._reserve()
-        self.assertAlmostEqual(self.ledger.spend_today(), 0.0528, places=6)
+        self.assertAlmostEqual(self.ledger.spend_today(), 0.0816, places=6)
         actual = self.ledger.settle(reservation, *LUNA, _measured())
         self.assertLess(actual, reservation.reserved_usd)
         self.assertAlmostEqual(self.ledger.spend_today(), actual, places=6)
@@ -93,7 +93,7 @@ class AutonomousBudgetTests(unittest.TestCase):
         reservation = self._reserve()
         actual = self.ledger.settle(reservation, *LUNA, {})
         self.assertEqual(actual, reservation.reserved_usd)
-        self.assertAlmostEqual(self.ledger.spend_today(), 0.0528, places=6)
+        self.assertAlmostEqual(self.ledger.spend_today(), 0.0816, places=6)
 
     def test_malformed_usage_retains_the_full_reservation(self) -> None:
         reservation = self._reserve()
@@ -108,10 +108,10 @@ class AutonomousBudgetTests(unittest.TestCase):
         """A crash mid-call must not hand back the money it withdrew."""
         self._reserve()
         reopened = self._ledger()
-        self.assertAlmostEqual(reopened.spend_today(), 0.0528, places=6)
+        self.assertAlmostEqual(reopened.spend_today(), 0.0816, places=6)
 
     def test_a_restart_cannot_hand_back_a_fresh_day(self) -> None:
-        for _ in range(10):
+        for _ in range(6):
             self._reserve()
         reopened = self._ledger()
         with self.assertRaises(AutonomousBudgetExceeded):
@@ -119,7 +119,7 @@ class AutonomousBudgetTests(unittest.TestCase):
 
     def test_the_ledger_never_raises_its_own_ceiling(self) -> None:
         """No path may increase the budget; exhaustion is final for the day."""
-        for _ in range(10):
+        for _ in range(6):
             self._reserve()
         for _ in range(3):
             with self.assertRaises(AutonomousBudgetExceeded):
@@ -128,15 +128,15 @@ class AutonomousBudgetTests(unittest.TestCase):
 
     def test_a_refusal_never_selects_a_cheaper_model_or_bound(self) -> None:
         """A ceiling that quietly buys something lesser is not a ceiling."""
-        for _ in range(10):
+        for _ in range(6):
             self._reserve()
         with self.assertRaises(AutonomousBudgetExceeded) as caught:
             self._reserve()
-        self.assertAlmostEqual(caught.exception.required_usd, 0.0528, places=6)
-        self.assertEqual(self.ledger.spend_today(), 10 * 0.0528)
+        self.assertAlmostEqual(caught.exception.required_usd, 0.0816, places=6)
+        self.assertAlmostEqual(self.ledger.spend_today(), 6 * 0.0816, places=6)
 
     def test_an_exhausted_day_leaves_no_partial_withdrawal(self) -> None:
-        for _ in range(10):
+        for _ in range(6):
             self._reserve()
         before = self.ledger.spend_today()
         with self.assertRaises(AutonomousBudgetExceeded):

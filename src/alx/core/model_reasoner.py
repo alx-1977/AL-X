@@ -871,8 +871,16 @@ class ModelReasoner:
             reason = str(error).strip() or type(error).__name__
             raise DecisionValidationError(reason) from error
 
-    def _decide(self, context: ReasoningContext) -> AgentDecision:
-        request = ModelRequest(
+    def build_request(self, context: ReasoningContext) -> ModelRequest:
+        """The exact request this reasoner would send for one context.
+
+        Exposed so a caller can measure the real thing before spending against
+        it. There is one construction, used both to measure and to dispatch: a
+        second assembly for measurement would drift from the one that is sent,
+        and the bound would then be checked against a request that never
+        existed.
+        """
+        return ModelRequest(
                 (
                     # Stable prefix first, volatile task material last, so a
                     # cache can reuse everything up to the changing content.
@@ -889,6 +897,9 @@ class ModelReasoner:
                 CACHE_KEY,
                 self._max_output_tokens,
         )
+
+    def _decide(self, context: ReasoningContext) -> AgentDecision:
+        request = self.build_request(context)
         if self._max_input_tokens is not None:
             # Measured on the complete constructed request, not estimated from
             # its parts, and measured before anything is sent. A reservation

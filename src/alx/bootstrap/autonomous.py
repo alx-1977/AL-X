@@ -49,6 +49,7 @@ class AutonomousCognitionRunner:
         retention_days: int,
         usage_of: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
+        within_input_bound: Callable[[CognitionOpportunity], int] | None = None,
     ) -> None:
         self._source = source
         self._ledger = ledger
@@ -63,6 +64,9 @@ class AutonomousCognitionRunner:
         self._retention_days = retention_days
         # Returns the measured usage of the turn just run, for settlement.
         self._usage_of = usage_of or (lambda: None)
+        # Measures the request this occasion would construct, so the ceiling is
+        # checked against the real thing rather than an estimate of it.
+        self._within_input_bound = within_input_bound
         # Timezone-aware, like every other clock in the runtime. A naive
         # datetime here would reach retention_until and the durable records,
         # where the contracts reject it, so the failure would surface as a
@@ -85,9 +89,38 @@ class AutonomousCognitionRunner:
         if not self._source.claim(opportunity):
             return False
 
-        # Step 3 and 4. Price, bounds, and the reservation, in one call that
-        # refuses rather than returning something cheaper. An unpriced model, a
-        # missing bound or an exhausted day all raise here, before dispatch.
+        # Step 3. Bound the request before the fuse is touched. A request that
+        # cannot fit must not consume the day's budget on its way to a refusal,
+        # so this happens before the reservation rather than inside the
+        # reasoner, where it would already have been paid for. Nothing is
+        # truncated to make it fit: shortening the Laws, her identity, the
+        # catalogue or her own context to save money would change who is
+        # reasoning, which is the one trade this design may never make.
+        if self._within_input_bound is not None:
+            try:
+                measured = self._within_input_bound(opportunity)
+            except Exception as error:
+                LOGGER.info("Autonomous request could not be bounded: %s", error)
+                self._ledger.record_outcome(
+                    opportunity.opportunity_id, "refused_unboundable"
+                )
+                return False
+            if measured > self._max_input_tokens:
+                LOGGER.info(
+                    "Autonomous request refused before reservation: %s input "
+                    "units above the %s ceiling",
+                    measured,
+                    self._max_input_tokens,
+                )
+                self._ledger.record_outcome(
+                    opportunity.opportunity_id, "refused_input_unbounded"
+                )
+                # No provider call, no reservation, no fuse consumed.
+                return False
+
+        # Step 4. Price and reserve, in one call that refuses rather than
+        # returning something cheaper. An unpriced model, a missing bound or an
+        # exhausted day all raise here, before dispatch.
         try:
             reservation = self._budget.reserve(
                 self._provider,

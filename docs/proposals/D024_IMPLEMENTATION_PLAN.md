@@ -83,8 +83,8 @@ worst case charges input at uncached **plus cache-write** rate and output at the
 rate → withdraw or refuse, under one lock and one transaction.
 
 **Tests:**
-- worst case for Luna at 32k/32k is exactly `$0.0528`;
-- `$0.5405` admits 10 worst-case reservations and refuses the 11th;
+- worst case for Luna at 96k/32k is exactly `$0.0816`;
+- `$0.5405` admits 6 worst-case reservations and refuses the 7th;
 - an unpriced model refuses **before** dispatch;
 - a request without a finite output bound refuses;
 - measured usage reconciles and returns the difference;

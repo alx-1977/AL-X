@@ -33,7 +33,7 @@ NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 DUE = NOW - timedelta(minutes=5)
 DAILY = 0.5405
 LUNA = ("openai", "gpt-5.6-luna")
-IN_BOUND, OUT_BOUND = 32_000, 32_000
+IN_BOUND, OUT_BOUND = 96_000, 32_000
 NOTE = "the compressor curve still bothers me"
 
 
@@ -161,10 +161,10 @@ class OrderingTests(PhaseFiveHarness):
         self._request()
         self._runner(gateway=OrderingGateway()).run_due()
         # The full worst case was already withdrawn when the Core was invoked.
-        self.assertEqual(observed, ["invoked:0.0528"])
+        self.assertEqual(observed, ["invoked:0.0816"])
 
     def test_an_exhausted_budget_refuses_before_dispatch(self) -> None:
-        for index in range(10):
+        for index in range(6):
             self.budget.reserve(*LUNA, IN_BOUND, OUT_BOUND, f"filler-{index}")
         self._request()
         attempted = self._runner().run_due()
@@ -202,18 +202,18 @@ class SettlementTests(PhaseFiveHarness):
         self._runner().run_due()
         spend = self.budget.spend_today()
         self.assertGreater(spend, 0.0)
-        self.assertLess(spend, 0.0528)
+        self.assertLess(spend, 0.0816)
 
     def test_missing_usage_retains_the_conservative_reservation(self) -> None:
         self._request()
         self._runner(usage={}).run_due()
-        self.assertAlmostEqual(self.budget.spend_today(), 0.0528, places=6)
+        self.assertAlmostEqual(self.budget.spend_today(), 0.0816, places=6)
 
     def test_a_failed_turn_still_settles_its_reservation(self) -> None:
         """A crash must not leave money withdrawn and unaccounted."""
         self._request()
         self._runner(gateway=RecordingGateway("raise"), usage={}).run_due()
-        self.assertAlmostEqual(self.budget.spend_today(), 0.0528, places=6)
+        self.assertAlmostEqual(self.budget.spend_today(), 0.0816, places=6)
         self.assertIs(
             self.store.pending()[0].status, FutureCognitionStatus.PENDING
         )
@@ -284,7 +284,7 @@ class LedgerTests(PhaseFiveHarness):
         self.assertEqual(row["origin"], "self_requested")
         self.assertEqual(row["provider"], "openai")
         self.assertEqual(row["model"], "gpt-5.6-luna")
-        self.assertAlmostEqual(row["reserved_usd"], 0.0528, places=6)
+        self.assertAlmostEqual(row["reserved_usd"], 0.0816, places=6)
         self.assertIsNotNone(row["settled_usd"])
         self.assertEqual(row["input_tokens"], 14_000)
         self.assertEqual(row["cached_tokens"], 12_000)
