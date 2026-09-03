@@ -238,5 +238,129 @@ class NoTimeBasedRuleTests(unittest.TestCase):
                 self.assertNotIn(forbidden, names)
 
 
+class ProductionWiringTests(unittest.TestCase):
+    """Recovery must work through the objects composition actually builds.
+
+    The earlier recovery tests called the spend ledger directly with an
+    explicit opportunity id, so they passed while composition was storing every
+    reservation anonymously. A dispatched turn then looked undispatched, and
+    recovery would have replayed a call that may already have been billed.
+    """
+
+    def test_the_relay_links_a_reservation_to_its_occasion(self) -> None:
+        from alx.bootstrap.autonomous import LedgerSpendAuthority, OccasionSpendRelay
+
+        with tempfile.TemporaryDirectory() as directory:
+            budget = SQLiteAutonomousLedger(
+                Path(directory) / "s.sqlite3", 0.5405, ConfiguredPricingWorstCase()
+            )
+            relay = OccasionSpendRelay()
+            # Built exactly as composition builds it.
+            authority = LedgerSpendAuthority(
+                budget, *LUNA, relay, relay.current_opportunity_id
+            )
+
+            class Spend:
+                provider = ""
+                model = ""
+                reserved_usd = 0.0
+                settled_usd = None
+                dispatched = False
+
+            relay.watch(Spend(), "self:r1")
+            reservation = authority.reserve(IN_BOUND, OUT_BOUND)
+            authority.mark_dispatched(reservation)
+            # The decisive assertion: recovery can find this occasion's call.
+            self.assertTrue(budget.dispatch_started("self:r1"))
+
+    def test_an_anonymous_reservation_would_be_invisible_to_recovery(self) -> None:
+        """Names the failure mode, so a regression is unambiguous."""
+        from alx.bootstrap.autonomous import LedgerSpendAuthority
+
+        with tempfile.TemporaryDirectory() as directory:
+            budget = SQLiteAutonomousLedger(
+                Path(directory) / "s.sqlite3", 0.5405, ConfiguredPricingWorstCase()
+            )
+            authority = LedgerSpendAuthority(budget, *LUNA, None, None)
+            reservation = authority.reserve(IN_BOUND, OUT_BOUND)
+            authority.mark_dispatched(reservation)
+            self.assertFalse(budget.dispatch_started("self:r1"))
+
+    def test_composition_passes_the_occasion_callback(self) -> None:
+        import ast
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "alx" / "bootstrap" / "live_voice.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        call = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "LedgerSpendAuthority"
+        )
+        # Five arguments: ledger, provider, model, observer, occasion callback.
+        self.assertEqual(len(call.args), 5)
+
+
+class OutcomePersistenceFailureTests(RecoveryHarness):
+    """A failed audit write must not also strand the request."""
+
+    class BrokenLedger:
+        def __init__(self, real) -> None:
+            self._real = real
+            self.released: list[str] = []
+
+        def record_created(self, opportunity):
+            return self._real.record_created(opportunity)
+
+        def exists(self, opportunity_id):
+            return self._real.exists(opportunity_id)
+
+        def unfinished(self):
+            return self._real.unfinished()
+
+        def release(self, opportunity_id):
+            self.released.append(opportunity_id)
+            return self._real.release(opportunity_id)
+
+        def mark_unreconciled(self, opportunity_id):
+            return self._real.mark_unreconciled(opportunity_id)
+
+        def record_reserved(self, *args, **kwargs):
+            raise RuntimeError("disk full")
+
+        def record_outcome(self, *args, **kwargs):
+            raise RuntimeError("disk full")
+
+        def rows(self):
+            return self._real.rows()
+
+    def test_a_failed_outcome_write_still_releases_an_undispatched_claim(self) -> None:
+        from alx.bootstrap.autonomous import AutonomousCognitionRunner
+
+        broken = self.BrokenLedger(self.ledger)
+        source = FutureCognitionSource(
+            self.store, broken, enabled=True, clock=lambda: NOW
+        )
+
+        class Gateway:
+            def receive_cognition_opportunity(self, *args, **kwargs):
+                class Outcome:
+                    class state:
+                        value = "finished_silently"
+
+                return Outcome()
+
+        AutonomousCognitionRunner(
+            source, broken, Gateway(), "c1", 4, 3650, clock=lambda: NOW
+        ).run_due()
+        # The write failed, but the claim was still cleaned up in-process.
+        self.assertEqual(broken.released, ["self:r1"])
+        self.assertTrue(self._still_pending())
+        self.assertTrue(source.due_opportunities())
+
+
 if __name__ == "__main__":
     unittest.main()

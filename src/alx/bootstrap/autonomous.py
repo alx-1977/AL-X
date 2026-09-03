@@ -93,7 +93,7 @@ class AutonomousCognitionRunner:
         # what the reasoning boundary spends lands on the right ledger row.
         spend = _OccasionSpend()
         if self._spend_observer is not None:
-            self._spend_observer.watch(spend)
+            self._spend_observer.watch(spend, opportunity.opportunity_id)
         try:
             outcome = self._gateway.receive_cognition_opportunity(
                 self._conversation_id,
@@ -107,32 +107,66 @@ class AutonomousCognitionRunner:
         finally:
             # Step 4. Persist the outcome. Reservation and settlement already
             # happened inside the reasoning boundary, against the exact request.
+            #
+            # A failure to write the audit record must not escape and skip the
+            # claim cleanup below. Losing the record is bad; losing the record
+            # *and* stranding the request until the next restart is worse, and
+            # the cleanup is what keeps her cognition recoverable in this
+            # process rather than only in the next one.
             if self._spend_observer is not None:
                 self._spend_observer.release()
-            if spend.provider:
-                self._ledger.record_reserved(
+            try:
+                if spend.provider:
+                    self._ledger.record_reserved(
+                        opportunity.opportunity_id,
+                        spend.provider,
+                        spend.model,
+                        spend.reserved_usd,
+                    )
+                self._ledger.record_outcome(
                     opportunity.opportunity_id,
-                    spend.provider,
-                    spend.model,
-                    spend.reserved_usd,
+                    outcome_state,
+                    reasoning_calls=1,
+                    settled_usd=spend.settled_usd,
+                    usage=self._usage_of(),
                 )
-            self._ledger.record_outcome(
-                opportunity.opportunity_id,
-                outcome_state,
-                reasoning_calls=1,
-                settled_usd=spend.settled_usd,
-                usage=self._usage_of(),
-            )
+            except Exception as error:
+                LOGGER.warning(
+                    "Could not record the outcome of %s: %s",
+                    opportunity.opportunity_id,
+                    error,
+                )
+                # The turn's own result is unknown to the ledger now, so it is
+                # treated as one that did not complete. Startup recovery will
+                # reconcile the row from durable state if it survived.
+                outcome_state = "error"
         # The request is closed only once the turn actually happened, so a
         # refused or crashed occasion is not silently marked as taken.
-        if outcome_state == "error":
-            # The turn did not happen, so the occasion is given back rather
-            # than kept. Its request stays pending and will mature again;
-            # holding the claim would leave her waiting on a cognition that
-            # could never arrive.
-            self._source.release(opportunity)
-        else:
-            self._source.mark_honoured(opportunity)
+        try:
+            if outcome_state == "error":
+                # The turn did not happen, so the occasion is given back rather
+                # than kept. Its request stays pending and will mature again;
+                # holding the claim would leave her waiting on a cognition that
+                # could never arrive.
+                #
+                # Except when the provider was reached: that call may already
+                # have been billed and answered, so the occasion is retained
+                # for inspection rather than replayed, by the same rule startup
+                # recovery applies.
+                if spend.dispatched:
+                    self._ledger.mark_unreconciled(opportunity.opportunity_id)
+                else:
+                    self._source.release(opportunity)
+            else:
+                self._source.mark_honoured(opportunity)
+        except Exception as error:
+            # Cleanup itself failed. The durable claim survives, and startup
+            # recovery decides from persisted state whether it may be replayed.
+            LOGGER.warning(
+                "Could not close %s; leaving it for startup recovery: %s",
+                opportunity.opportunity_id,
+                error,
+            )
         return True
 
 
@@ -185,6 +219,8 @@ class LedgerSpendAuthority:
     def mark_dispatched(self, reservation: Any) -> None:
         """Durably record that the provider is about to be reached."""
         self._ledger.mark_dispatched(reservation)
+        if self._observer is not None:
+            self._observer.dispatched()
 
     def settle(self, reservation: Any, usage: Any) -> float:
         """Reconcile. Usage that cannot be priced keeps the full reservation."""
@@ -204,6 +240,9 @@ class _OccasionSpend:
         self.model = ""
         self.reserved_usd = 0.0
         self.settled_usd: float | None = None
+        # Whether the provider was reached. Governs whether a failed turn may
+        # be released or must be retained, by the same rule as recovery.
+        self.dispatched = False
 
 
 class OccasionSpendRelay:
@@ -217,18 +256,35 @@ class OccasionSpendRelay:
 
     def __init__(self) -> None:
         self._current: Any = None
+        self._opportunity_id = ""
 
-    def watch(self, spend: Any) -> None:
+    def watch(self, spend: Any, opportunity_id: str = "") -> None:
         self._current = spend
+        self._opportunity_id = opportunity_id
 
     def release(self) -> None:
         self._current = None
+        self._opportunity_id = ""
+
+    def current_opportunity_id(self) -> str:
+        """Which occasion is being served, for linking its reservation.
+
+        The spend ledger stores this so recovery can ask whether a given
+        occasion ever reached the provider. Without it every reservation is
+        stored anonymously and a dispatched turn looks undispatched, which
+        would let recovery replay a call that may already have been billed.
+        """
+        return self._opportunity_id
 
     def reserved(self, provider: str, model: str, reserved_usd: float) -> None:
         if self._current is not None:
             self._current.provider = provider
             self._current.model = model
             self._current.reserved_usd = reserved_usd
+
+    def dispatched(self) -> None:
+        if self._current is not None:
+            self._current.dispatched = True
 
     def settled(self, settled_usd: float) -> None:
         if self._current is not None:

@@ -415,6 +415,11 @@ async def run(repository_root: Path) -> None:
                 provider_settings.autonomous.provider,
                 provider_settings.autonomous.model,
                 occasion_spend,
+                # Links each reservation to the occasion it serves. Without it
+                # reservations are stored anonymously and recovery cannot tell
+                # a dispatched turn from an undispatched claim, which would let
+                # it replay a call that may already have been billed.
+                occasion_spend.current_opportunity_id,
             ),
         ),
     )
