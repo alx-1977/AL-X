@@ -362,5 +362,76 @@ class OutcomePersistenceFailureTests(RecoveryHarness):
         self.assertTrue(source.due_opportunities())
 
 
+class ApprovedIdentityOnlyTests(unittest.TestCase):
+    """Configuration may install only what EX-001 approves.
+
+    An exception authorising one exact arrangement is worth little if
+    configuration can install a different reasoning authority under it. A typo
+    would do it silently, in production, with the exception appearing to cover
+    it.
+    """
+
+    def _settings(self, **overrides):
+        from alx.config.settings import autonomous_reasoning_settings
+
+        environment = {
+            "ALX_AUTONOMOUS_PROVIDER": "openai",
+            "ALX_AUTONOMOUS_MODEL": "gpt-5.6-luna",
+            "OPENAI_API_KEY": "key",
+        }
+        environment.update(overrides)
+        return autonomous_reasoning_settings(environment)
+
+    def test_the_approved_arrangement_is_accepted(self) -> None:
+        settings = self._settings()
+        self.assertEqual(
+            (settings.provider, settings.model, settings.effort),
+            ("openai", "gpt-5.6-luna", "max"),
+        )
+
+    def test_another_provider_is_refused(self) -> None:
+        from alx.config.settings import ConfigurationError
+
+        with self.assertRaises(ConfigurationError):
+            self._settings(
+                ALX_AUTONOMOUS_PROVIDER="xai",
+                ALX_AUTONOMOUS_MODEL="grok-4.5",
+                XAI_API_KEY="key",
+            )
+
+    def test_another_model_is_refused(self) -> None:
+        from alx.config.settings import ConfigurationError
+
+        for model in ("gpt-5.4-nano", "gpt-5.6-sol", "gpt-5.6-luna-preview"):
+            with self.subTest(model=model):
+                with self.assertRaises(ConfigurationError):
+                    self._settings(ALX_AUTONOMOUS_MODEL=model)
+
+    def test_another_effort_is_refused(self) -> None:
+        from alx.config.settings import ConfigurationError
+
+        for effort in ("low", "medium", "high", "none"):
+            with self.subTest(effort=effort):
+                with self.assertRaises(ConfigurationError):
+                    self._settings(ALX_AUTONOMOUS_EFFORT=effort)
+
+    def test_an_unconfigured_runtime_is_still_simply_absent(self) -> None:
+        """Refusing a wrong arrangement must not break having none."""
+        from alx.config.settings import autonomous_reasoning_settings
+
+        self.assertIsNone(autonomous_reasoning_settings({}))
+
+    def test_the_approved_identity_matches_the_exception(self) -> None:
+        from alx.config.settings import AUTONOMOUS_APPROVED_IDENTITY
+
+        register = (
+            Path(__file__).resolve().parents[1] / "governance" / "EXCEPTIONS.md"
+        ).read_text(encoding="utf-8")
+        provider, model, effort = AUTONOMOUS_APPROVED_IDENTITY
+        self.assertIn(model, register)
+        self.assertIn(f"`{effort}`", register)
+        self.assertEqual(provider, "openai")
+
+
 if __name__ == "__main__":
     unittest.main()

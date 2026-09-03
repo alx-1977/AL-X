@@ -435,6 +435,9 @@ def _tier_settings(
 
 
 AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
+# The exact provider, model and effort EX-001 approves for autonomous turns.
+# Not a default: the only value configuration may take.
+AUTONOMOUS_APPROVED_IDENTITY = ("openai", "gpt-5.6-luna", "max")
 # The input ceiling the autonomous reservation is computed against. Enforced on
 # the constructed request before dispatch: a bound nothing checks makes the
 # worst case a guess rather than a ceiling.
@@ -463,6 +466,19 @@ def autonomous_reasoning_settings(
     model = environment.get("ALX_AUTONOMOUS_MODEL", "").strip()
     if not provider or not model:
         return None
+    effort = environment.get("ALX_AUTONOMOUS_EFFORT", "max").strip().lower()
+    # EX-001 authorises one exact arrangement, so configuration may install one
+    # exact arrangement. Anything else would put an unapproved reasoning
+    # authority into production under cover of an exception that does not
+    # describe it, and a typo would do it silently. Widening this set requires
+    # widening the exception first, which is Friedl's decision and not a
+    # configuration change.
+    if (provider, model, effort) != AUTONOMOUS_APPROVED_IDENTITY:
+        approved = "/".join(AUTONOMOUS_APPROVED_IDENTITY)
+        raise ConfigurationError(
+            f"autonomous cognition is approved under EX-001 for {approved} "
+            f"only; refusing {provider}/{model}/{effort}"
+        )
     key_name = {
         "openai": "OPENAI_API_KEY",
         "xai": "XAI_API_KEY",
@@ -494,7 +510,7 @@ def autonomous_reasoning_settings(
         service_tier=environment.get(
             "ALX_AUTONOMOUS_SERVICE_TIER", "default"
         ).strip().lower(),
-        effort=environment.get("ALX_AUTONOMOUS_EFFORT", "max").strip().lower(),
+        effort=effort,
     )
 
 
