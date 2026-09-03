@@ -163,7 +163,7 @@ class ProductionClockTests(unittest.TestCase):
     def test_the_runner_default_clock_is_timezone_aware(self) -> None:
         runner = AutonomousCognitionRunner(
             source=None, ledger=None, gateway=None,
-            conversation_id="c1", step_budget=4, retention_days=3650,
+            step_budget=4, retention_days=3650,
         )
         now = runner._clock()
         self.assertIsNotNone(now.tzinfo)
@@ -173,7 +173,7 @@ class ProductionClockTests(unittest.TestCase):
         """A naive clock would be rejected downstream by the contracts."""
         runner = AutonomousCognitionRunner(
             source=None, ledger=None, gateway=None,
-            conversation_id="c1", step_budget=4, retention_days=3650,
+            step_budget=4, retention_days=3650,
         )
         deadline = runner._clock() + timedelta(days=3650)
         self.assertIsNotNone(deadline.utcoffset())
@@ -679,7 +679,7 @@ class OccasionCostIsRecordedTests(unittest.TestCase):
             try:
                 ledger.record_created(opportunity)
                 AutonomousCognitionRunner(
-                    Source(), ledger, Gateway(), "c1", 4, 3650,
+                    Source(), ledger, Gateway(), 4, 3650,
                     spend_observer=relay,
                 ).run_one(opportunity)
                 row = ledger.rows()[0]

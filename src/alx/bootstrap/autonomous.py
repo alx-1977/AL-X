@@ -39,7 +39,6 @@ class AutonomousCognitionRunner:
         source: Any,
         ledger: Any,
         gateway: Any,
-        conversation_id: str,
         step_budget: int,
         retention_days: int,
         response_transport: Any = None,
@@ -56,7 +55,6 @@ class AutonomousCognitionRunner:
         self._source = source
         self._ledger = ledger
         self._gateway = gateway
-        self._conversation_id = conversation_id
         self._step_budget = step_budget
         self._retention_days = retention_days
         # Where a RESPONDED autonomous turn is offered for delivery. Asked
@@ -90,7 +88,25 @@ class AutonomousCognitionRunner:
         if not self._source.claim(opportunity):
             return False
 
-        # Step 2a. The commissioning latch, when one is set. It counts dispatch
+        # Step 2a. A self-requested occasion must know the thread it arose in.
+        # An empty conversation is unknown provenance, not a default: it means
+        # a request predating the migration that recorded it. Continuing it on
+        # the person's thread would append an old thought to a conversation it
+        # never belonged to, which is the fork this design exists to remove.
+        # So it refuses, durably and visibly, before anything is spent.
+        if not opportunity.conversation_id:
+            LOGGER.info(
+                "Refusing %s: no originating conversation is recorded",
+                opportunity.opportunity_id,
+            )
+            self._ledger.record_outcome(
+                opportunity.opportunity_id, "refused_unknown_conversation"
+            )
+            # The claim is kept, so it is not offered again and cannot later
+            # attach itself to some other thread. The row remains inspectable.
+            return False
+
+        # Step 2b. The commissioning latch, when one is set. It counts dispatch
         # attempts rather than dollars, because the financial fuse cannot limit
         # turns: a reservation reconciles to actual spend, so a cheap turn
         # returns most of its withdrawal and the next one fits. Counting the
@@ -130,7 +146,7 @@ class AutonomousCognitionRunner:
             # the configured id only for origins that have no originating
             # conversation, which SELF_REQUESTED always does.
             outcome = self._gateway.receive_cognition_opportunity(
-                opportunity.conversation_id or self._conversation_id,
+                opportunity.conversation_id,
                 opportunity,
                 self._step_budget,
                 self._clock() + timedelta(days=self._retention_days),
@@ -148,7 +164,7 @@ class AutonomousCognitionRunner:
                 if self._response_transport is not None:
                     try:
                         delivered = self._response_transport.deliver(
-                            opportunity.conversation_id or self._conversation_id,
+                            opportunity.conversation_id,
                             outcome.response or "",
                         )
                     except Exception as error:

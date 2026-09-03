@@ -107,7 +107,8 @@ class PhaseFiveHarness(unittest.TestCase):
     def _request(self, request_id: str = "r1", note: str = NOTE) -> None:
         self.store.create(
             FutureCognitionRequest(
-                request_id=request_id, not_before=DUE, note=note, requested_at=NOW
+                request_id=request_id, not_before=DUE, note=note,
+                requested_at=NOW, conversation_id="conversation-1",
             )
         )
 
@@ -131,7 +132,6 @@ class PhaseFiveHarness(unittest.TestCase):
             self._source(enabled),
             self.ledger,
             gateway or self.gateway,
-            "conversation-1",
             4,
             3650,
             usage_of=lambda: self.usage if usage is None else usage,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import logging
 import mimetypes
 from collections.abc import AsyncIterator
@@ -106,33 +107,69 @@ class LiveVoiceServer:
         # because one carries input and the other carries output; conflating
         # them is how a console starts inferring where text should go.
         self._typed_queues: dict[str, list[Any]] = {}
+        # The loop that owns those queues, captured when a listener registers.
+        # Delivery from a worker thread has to hand the work back to it.
+        self._delivery_loop: Any = None
 
     def deliver(self, conversation_id: str, response: str) -> ResponseDelivery:
         """Speak an autonomous response through the one existing synthesis path.
 
-        Delivery means a live connection accepted the response for synthesis,
-        never merely that a socket exists: a response handed to nobody is
-        undelivered even with a browser attached, and reporting otherwise would
-        discard her words while recording success.
+        Called from the Core worker thread, while the event loop owns the
+        queues a listener is waiting on. `asyncio.Queue` is not thread-safe, so
+        the enqueue is performed *by the loop* and this waits for the loop to
+        say it happened. Scheduling is not delivery: a callback that never runs
+        because the loop is closing would otherwise report success while her
+        words were lost, which is the failure this whole path exists to avoid.
+
+        DELIVERED therefore means one live listener actually received it.
+        Everything else — no listener, a listener that vanished between lookup
+        and enqueue, a closing loop, a queue that refused — is UNDELIVERABLE,
+        and the occasion records the fact.
 
         There is deliberately no second speech implementation here. The audio
         is produced by the same synthesizer the person-turn path uses, and the
         wording is the Core's own, unaltered.
         """
-        deliveries = [
-            queue
-            for queue in self._delivery_queues.get(conversation_id, ())
-        ]
-        if not deliveries:
+        registered = self._delivery_queues.get(conversation_id) or []
+        if not registered:
             return ResponseDelivery.UNDELIVERABLE
-        accepted = False
-        for queue in deliveries:
-            try:
-                queue.put_nowait(response)
-                accepted = True
-            except Exception:
-                # A queue that cannot take it is a listener that is going away.
-                continue
+        # Snapshot: the listener may go away while this runs, which the loop
+        # side re-checks rather than assuming.
+        listeners = list(registered)
+        loop = self._delivery_loop
+        if loop is None or loop.is_closed():
+            return ResponseDelivery.UNDELIVERABLE
+
+        acknowledged: "queue.Queue[bool]" = queue.Queue(maxsize=1)
+
+        def enqueue_on_loop() -> None:
+            """Runs on the loop thread, where touching the queue is safe."""
+            accepted = False
+            current = self._delivery_queues.get(conversation_id) or []
+            for waiting in listeners:
+                if waiting not in current:
+                    # Detached between lookup and here.
+                    continue
+                try:
+                    waiting.put_nowait(response)
+                    accepted = True
+                except Exception:
+                    continue
+            acknowledged.put(accepted)
+
+        try:
+            loop.call_soon_threadsafe(enqueue_on_loop)
+        except RuntimeError:
+            # The loop stopped between the check above and now.
+            return ResponseDelivery.UNDELIVERABLE
+        try:
+            # Bounded so a loop that dies mid-turn cannot hold the Core worker
+            # forever. The callback takes no lock, so it cannot be blocked by
+            # the Core-turn lock this thread is holding: it only touches a
+            # queue and answers.
+            accepted = acknowledged.get(timeout=self.DELIVERY_ACK_SECONDS)
+        except queue.Empty:
+            return ResponseDelivery.UNDELIVERABLE
         return (
             ResponseDelivery.DELIVERED if accepted
             else ResponseDelivery.UNDELIVERABLE
@@ -141,6 +178,12 @@ class LiveVoiceServer:
     # A typed line is at most this long. Not a judgement about what is worth
     # saying: a bound so one frame cannot exhaust memory or the input ceiling.
     MAX_TYPED_CHARACTERS = 8_000
+
+    # How long the Core worker waits for the loop to confirm an enqueue. Not a
+    # delivery policy: a bound so a loop that stops mid-turn cannot hold the
+    # worker open, and exceeding it is reported as undelivered rather than
+    # guessed at.
+    DELIVERY_ACK_SECONDS = 5.0
 
     def _queue_typed_turn(self, conversation_id: str, payload: str) -> None:
         """Hand a typed line to the session, or drop a malformed frame.
@@ -205,6 +248,7 @@ class LiveVoiceServer:
         self._delivery_queues.setdefault(conversation_id, []).append(deliveries)
         typed: asyncio.Queue[str] = asyncio.Queue()
         self._typed_queues.setdefault(conversation_id, []).append(typed)
+        self._delivery_loop = asyncio.get_running_loop()
         LOGGER.info("Voice session connected")
 
         await connection.send(

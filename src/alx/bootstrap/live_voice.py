@@ -497,9 +497,6 @@ async def run(repository_root: Path) -> None:
         cognition_source,
         opportunity_ledger,
         gateway,
-        # Only a fallback for origins with no originating conversation.
-        # SELF_REQUESTED always has one, inherited from the turn that asked.
-        voice_settings.primary_person_id,
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
         response_transport=server,

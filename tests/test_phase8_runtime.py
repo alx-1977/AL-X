@@ -101,7 +101,7 @@ class Harness(unittest.TestCase):
 
     def _request(self, request_id: str = "r1", not_before=DUE) -> None:
         self.store.create(
-            FutureCognitionRequest(request_id, not_before, "a note", NOW - timedelta(hours=1))
+            FutureCognitionRequest(request_id, not_before, "a note", NOW - timedelta(hours=1), conversation_id="conversation-1")
         )
 
     def _source(self, enabled: bool = True) -> FutureCognitionSource:
@@ -115,7 +115,6 @@ class Harness(unittest.TestCase):
             source or self._source(),
             self.ledger,
             gateway,
-            "conversation-1",
             4,
             3650,
             clock=lambda: NOW,
@@ -598,7 +597,7 @@ class EndToEndContinuityTests(Harness):
         producer = DueCognitionSource(
             source,
             AutonomousCognitionRunner(
-                source, self.ledger, Gateway("responded"), "c1", 4, 3650,
+                source, self.ledger, Gateway("responded"), 4, 3650,
                 clock=lambda: NOW, response_transport=transport,
             ),
             asyncio.Lock(), 30.0,
