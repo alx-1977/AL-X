@@ -219,6 +219,21 @@ class SQLiteOpportunityLedger:
                 (opportunity_id,),
             )
 
+    def resolve_undelivered(self, opportunity_id: str) -> bool:
+        """Close one undelivered occasion because AL/X decided what to do.
+
+        Only she may close it. Nothing expires it, nothing infers resolution
+        because similar words were later spoken, and there is no priority or
+        ordering beyond when it happened.
+        """
+        with self._connection:
+            changed = self._connection.execute(
+                "UPDATE cognition_opportunities SET response_undelivered = 0 "
+                "WHERE opportunity_id = ? AND response_undelivered = 1",
+                (opportunity_id,),
+            ).rowcount
+        return bool(changed)
+
     def undelivered(self) -> tuple[dict[str, Any], ...]:
         """Occasions whose response could not be delivered, newest last."""
         return tuple(

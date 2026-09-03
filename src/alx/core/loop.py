@@ -106,7 +106,8 @@ class CoreAgent:
                  identifier_factory: Callable[[], str] | None = None,
                  approval_ttl_seconds: int | None = None,
                  budget_check: Callable[[str], None] | None = None,
-                 open_thoughts: Callable[[], tuple] | None = None) -> None:
+                 open_thoughts: Callable[[], tuple] | None = None,
+                 undelivered_responses: Callable[[], tuple] | None = None) -> None:
         self._store = store
         self._reasoner = reasoner
         self._dispatch = dispatch
@@ -124,6 +125,10 @@ class CoreAgent:
         # Core asks for them; it never reaches the store itself, and the same
         # call is made for every turn whatever its origin.
         self._open_thoughts = open_thoughts or (lambda: ())
+        # Occasions whose response had nowhere to go. Supplied by the one
+        # opportunity ledger; the Core is shown that it happened and nothing
+        # deterministic decides whether it still matters.
+        self._undelivered_responses = undelivered_responses or (lambda: ())
 
     def process(self, conversation: ConversationSnapshot, retention_until: datetime,
                 step_budget: int, trigger_event_id: str | None = None,
@@ -197,6 +202,7 @@ class CoreAgent:
                     unfinished_goals=summaries,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
+                    undelivered_responses=self._undelivered_responses(),
                 ))
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)

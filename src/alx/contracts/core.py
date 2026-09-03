@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Mapping, Protocol
 
 from alx.contracts.capabilities import CapabilityDefinition
 from alx.contracts.cognition import CognitionOrigin
@@ -171,11 +171,18 @@ class ReasoningContext:
     # differently for an unprompted turn would be a second builder deciding
     # what she is like when nobody is watching.
     carried_thoughts: tuple[CarriedThought, ...] = ()
+    # Autonomous occasions whose response never reached anyone. References and
+    # timing only: the words are not kept, so she is told that it happened and
+    # decides afresh whether anything still needs saying.
+    undelivered_responses: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
+        object.__setattr__(
+            self, "undelivered_responses", tuple(self.undelivered_responses)
+        )
         if self.active_goal is not None and not any(
             item.goal_id == self.active_goal.goal_id for item in self.unfinished_goals
         ):

@@ -74,6 +74,24 @@ class DueCognitionSource:
         for opportunity in opportunities:
             # Held across the whole turn, exactly as the voice path holds it.
             async with self._core_turn_lock:
-                if await asyncio.to_thread(self._runner.run_one, opportunity):
+                # Shielded because cancelling the await would unwind this
+                # coroutine and release the lock while the worker thread kept
+                # writing to stores that shutdown is about to close. The turn
+                # is short and reaches its own durable boundary; letting it
+                # finish is the only way the lock can mean what it says.
+                turn = asyncio.shield(
+                    asyncio.to_thread(self._runner.run_one, opportunity)
+                )
+                try:
+                    completed = await turn
+                except asyncio.CancelledError:
+                    # Shutdown arrived mid-turn. The shielded work is still
+                    # running against stores that are about to close, so wait
+                    # for its durable boundary before letting the cancellation
+                    # propagate. Awaiting a shielded task after cancellation is
+                    # the only point where the lock can still be held.
+                    await asyncio.gather(turn, return_exceptions=True)
+                    raise
+                if completed:
                     run += 1
         return run

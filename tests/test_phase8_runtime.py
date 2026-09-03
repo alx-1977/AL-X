@@ -49,6 +49,7 @@ class _State:
 class _Outcome:
     def __init__(self, value: str) -> None:
         self.state = _State(value)
+        self.response = "Something I wanted to say." if value == "responded" else None
 
 
 class Gateway:
@@ -61,6 +62,22 @@ class Gateway:
     def receive_cognition_opportunity(self, *args, **kwargs):
         self.turns += 1
         return _Outcome(self._outcome)
+
+
+class _Transport:
+    """Accepts, or cannot. Mirrors the real port's two mechanical outcomes."""
+
+    def __init__(self, accepts: bool) -> None:
+        self.accepts = accepts
+        self.delivered: list[str] = []
+
+    def deliver(self, conversation_id, response):
+        from alx.contracts import ResponseDelivery
+
+        if not self.accepts:
+            return ResponseDelivery.UNDELIVERABLE
+        self.delivered.append(response)
+        return ResponseDelivery.DELIVERED
 
 
 class Harness(unittest.TestCase):
@@ -93,6 +110,7 @@ class Harness(unittest.TestCase):
         )
 
     def _runner(self, gateway, source=None, transport=True, commissioning=None):
+        """`transport=True` means a listener actually accepts the response."""
         return AutonomousCognitionRunner(
             source or self._source(),
             self.ledger,
@@ -101,7 +119,7 @@ class Harness(unittest.TestCase):
             4,
             3650,
             clock=lambda: NOW,
-            transport_available=lambda: transport,
+            response_transport=_Transport(transport),
             commissioning_limit=commissioning,
         )
 
@@ -340,6 +358,195 @@ class CommissioningLatchTests(Harness):
         self.assertEqual(self._tick(gateway, commissioning=None), 5)
         self.assertEqual(gateway.turns, 5)
         self.assertEqual(self.ledger.commissioning_dispatches(), 0)
+
+
+class ShutdownOrderingTests(Harness):
+    """Stores must not close under a Core turn still writing to them."""
+
+    def test_cancellation_waits_for_an_in_flight_turn(self) -> None:
+        """Deliberately block inside to_thread, then shut down."""
+        import threading
+
+        self._request()
+        released = threading.Event()
+        entered = threading.Event()
+        store_open = []
+
+        class BlockingGateway:
+            def receive_cognition_opportunity(self, *args, **kwargs):
+                entered.set()
+                released.wait(5)
+                # Still writing when shutdown began: the store must be usable.
+                store_open.append(self_store_usable())
+                return _Outcome("finished_silently")
+
+        def self_store_usable() -> bool:
+            try:
+                self.store.pending()
+                return True
+            except Exception:
+                return False
+
+        source = self._source()
+        producer = DueCognitionSource(
+            source, self._runner(BlockingGateway(), source),
+            asyncio.Lock(), 30.0,
+        )
+
+        async def scenario():
+            task = asyncio.create_task(producer.tick())
+            await asyncio.to_thread(entered.wait, 5)
+            task.cancel()                      # shutdown arrives mid-turn
+            await asyncio.sleep(0.05)
+            # The blocked Core turn has not been abandoned: it has neither
+            # completed nor been discarded while its worker still runs.
+            finished_early = entered.is_set() and bool(store_open)
+            released.set()                     # let the Core turn finish
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return finished_early
+
+        finished_early = asyncio.run(scenario())
+        # The turn ran to its own boundary rather than being cut short.
+        self.assertFalse(finished_early, "the turn must not finish before release")
+        # And it saw a usable store throughout, which is the property that
+        # matters: shutdown cannot close SQLite under a writing Core turn.
+        self.assertEqual(store_open, [True])
+
+    def test_the_shutdown_sequence_takes_the_shared_lock(self) -> None:
+        """Composition must wait on the lock before closing stores."""
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "alx" / "bootstrap" / "live_voice.py"
+        ).read_text(encoding="utf-8")
+        finally_block = source[source.index("    finally:", source.index("TaskGroup")):]
+        lock_at = finally_block.index("core_turn_lock")
+        close_at = finally_block.index("conversation_store.close()")
+        self.assertLess(lock_at, close_at, "stores close only after the lock")
+
+    def test_the_turn_is_shielded_from_cancellation(self) -> None:
+        import ast
+
+        tree = ast.parse(
+            (Path(__file__).resolve().parents[1]
+             / "src" / "alx" / "continuity" / "due_source.py").read_text("utf-8")
+        )
+        shields = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "shield"
+        ]
+        self.assertEqual(len(shields), 1)
+
+
+class EndToEndContinuityTests(Harness):
+    """The scenario D-024 exists for, traced through production objects."""
+
+    def _request_in(self, conversation_id: str, request_id: str) -> None:
+        from alx.tools.continuity import (
+            REQUEST_FUTURE_COGNITION, build_continuity_executors,
+        )
+
+        build_continuity_executors(
+            self.store, 3650, lambda: "call-1", clock=lambda: NOW,
+            conversation_id_source=lambda: conversation_id,
+        )[REQUEST_FUTURE_COGNITION]({
+            "request_id": request_id,
+            "not_before": (NOW + timedelta(seconds=90)).isoformat(),
+            "note": "the compressor curve still bothers me",
+        })
+
+    def test_a_thought_returns_to_the_conversation_it_arose_in(self) -> None:
+        self._request_in("conversation-A", "r1")
+        self._restart()                       # survives a restart
+        seen: list[str] = []
+
+        class Recording(Gateway):
+            def receive_cognition_opportunity(inner, conversation_id, *args, **kw):
+                seen.append(conversation_id)
+                return super().receive_cognition_opportunity(
+                    conversation_id, *args, **kw
+                )
+
+        source = FutureCognitionSource(
+            self.store, self.ledger, enabled=True,
+            clock=lambda: NOW + timedelta(minutes=5),
+        )
+        self._tick(Recording(), source=source)
+        self.assertEqual(seen, ["conversation-A"])
+
+    def test_two_conversations_never_contaminate_each_other(self) -> None:
+        self._request_in("conversation-A", "r-a")
+        self._request_in("conversation-B", "r-b")
+        seen: list[str] = []
+
+        class Recording(Gateway):
+            def receive_cognition_opportunity(inner, conversation_id, *args, **kw):
+                seen.append(conversation_id)
+                return super().receive_cognition_opportunity(
+                    conversation_id, *args, **kw
+                )
+
+        source = FutureCognitionSource(
+            self.store, self.ledger, enabled=True,
+            clock=lambda: NOW + timedelta(minutes=5),
+        )
+        self._tick(Recording(), source=source)
+        self.assertEqual(sorted(seen), ["conversation-A", "conversation-B"])
+
+    def test_the_full_undelivered_cycle(self) -> None:
+        """Responded with nobody listening, then resolved by AL/X alone."""
+        from alx.tools.continuity import (
+            RESOLVE_UNDELIVERED_RESPONSE, build_continuity_executors,
+        )
+
+        self._request()
+        self._tick(Gateway("responded"), transport=False)
+        # Recorded as a fact she can see.
+        self.assertEqual(len(self.ledger.undelivered()), 1)
+        # Nothing resolves it on its own, however many ticks pass.
+        for _ in range(5):
+            self._tick(Gateway())
+        self.assertEqual(len(self.ledger.undelivered()), 1)
+        # Only her explicit act closes it.
+        execute = build_continuity_executors(
+            self.store, 3650, lambda: "call-1", clock=lambda: NOW,
+            occasions=self.ledger,
+        )[RESOLVE_UNDELIVERED_RESPONSE]
+        result = execute({"opportunity_id": "self:r1"})
+        self.assertEqual(result.values["opportunity_id"], "self:r1")
+        self.assertEqual(self.ledger.undelivered(), ())
+
+    def test_resolving_an_unknown_occasion_fails_safely(self) -> None:
+        from alx.tools.continuity import (
+            RESOLVE_UNDELIVERED_RESPONSE, build_continuity_executors,
+        )
+
+        execute = build_continuity_executors(
+            self.store, 3650, lambda: "c", clock=lambda: NOW,
+            occasions=self.ledger,
+        )[RESOLVE_UNDELIVERED_RESPONSE]
+        result = execute({"opportunity_id": "self:nope"})
+        self.assertEqual(result.failure["code"], "occasion_not_found")
+
+    def test_delivered_responses_reach_the_transport_exactly_once(self) -> None:
+        self._request()
+        transport = _Transport(True)
+        source = self._source()
+        producer = DueCognitionSource(
+            source,
+            AutonomousCognitionRunner(
+                source, self.ledger, Gateway("responded"), "c1", 4, 3650,
+                clock=lambda: NOW, response_transport=transport,
+            ),
+            asyncio.Lock(), 30.0,
+        )
+        asyncio.run(producer.tick())
+        self.assertEqual(len(transport.delivered), 1)
+        self.assertEqual(self.ledger.undelivered(), ())
 
 
 if __name__ == "__main__":

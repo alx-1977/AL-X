@@ -353,9 +353,11 @@ class OutcomePersistenceFailureTests(RecoveryHarness):
 
                 return Outcome()
 
-        AutonomousCognitionRunner(
+        runner = AutonomousCognitionRunner(
             source, broken, Gateway(), "c1", 4, 3650, clock=lambda: NOW
-        ).run_due()
+        )
+        for due in source.due_opportunities():
+            runner.run_one(due)
         # The write failed, but the claim was still cleaned up in-process.
         self.assertEqual(broken.released, ["self:r1"])
         self.assertTrue(self._still_pending())

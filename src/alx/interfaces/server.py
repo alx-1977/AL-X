@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -14,7 +15,9 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from alx.contracts import AudioChunk
+from typing import Any
+
+from alx.contracts import AudioChunk, ResponseDelivery
 from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
 
 
@@ -90,18 +93,46 @@ class LiveVoiceServer:
         # Set when a mid-exchange recovery happens, cleared by the next audio
         # frame. It proves the microphone iterator survived the recovery.
         self._await_audio_confirmation = False
-        # How many voice connections are open. A count rather than a flag, so
-        # two browsers closing one tab does not read as silence.
-        self._live_connections = 0
+        # Live delivery queues per conversation. An autonomous response is
+        # handed to a real listener or it is undelivered; a count of open
+        # sockets cannot tell the difference.
+        self._delivery_queues: dict[str, list[Any]] = {}
 
-    def has_live_transport(self) -> bool:
-        """Whether a voice connection could carry speech right now.
+    def deliver(self, conversation_id: str, response: str) -> ResponseDelivery:
+        """Speak an autonomous response through the one existing synthesis path.
 
-        Asked only after the Core has already decided to speak, so it never
-        influences whether cognition happens. Absence of a listener must not
-        stop her thinking; it only means what she said had nowhere to go.
+        Delivery means a live connection accepted the response for synthesis,
+        never merely that a socket exists: a response handed to nobody is
+        undelivered even with a browser attached, and reporting otherwise would
+        discard her words while recording success.
+
+        There is deliberately no second speech implementation here. The audio
+        is produced by the same synthesizer the person-turn path uses, and the
+        wording is the Core's own, unaltered.
         """
-        return self._live_connections > 0
+        deliveries = [
+            queue
+            for queue in self._delivery_queues.get(conversation_id, ())
+        ]
+        if not deliveries:
+            return ResponseDelivery.UNDELIVERABLE
+        accepted = False
+        for queue in deliveries:
+            try:
+                queue.put_nowait(response)
+                accepted = True
+            except Exception:
+                # A queue that cannot take it is a listener that is going away.
+                continue
+        return (
+            ResponseDelivery.DELIVERED if accepted
+            else ResponseDelivery.UNDELIVERABLE
+        )
+
+    def _delivery_queue(self, conversation_id: str):
+        """The queue this exchange should drain, if a listener registered one."""
+        queues = getattr(self, "_delivery_queues", {}).get(conversation_id) or []
+        return queues[-1] if queues else None
 
     async def serve_forever(self) -> None:
         origins = (f"http://{self._host}:{self._port}", None)
@@ -123,7 +154,11 @@ class LiveVoiceServer:
             await connection.close(code=1008, reason="unsupported_transport_path")
             return
         conversation_id = self._conversation_id(parse_qs(parsed.query))
-        self._live_connections += 1
+        # Registered while this connection can actually carry speech, so an
+        # autonomous response is offered to a live listener rather than to a
+        # socket count that cannot say whether anyone took it.
+        deliveries: asyncio.Queue[str] = asyncio.Queue()
+        self._delivery_queues.setdefault(conversation_id, []).append(deliveries)
         LOGGER.info("Voice session connected")
 
         await connection.send(
@@ -143,7 +178,11 @@ class LiveVoiceServer:
                 LOGGER.info("Resuming voice session on the same conversation")
 
         finally:
-            self._live_connections -= 1
+            queues = self._delivery_queues.get(conversation_id, [])
+            if deliveries in queues:
+                queues.remove(deliveries)
+            if not queues:
+                self._delivery_queues.pop(conversation_id, None)
 
     async def _exchange_once(
         self, connection: ServerConnection, conversation_id: str
@@ -153,6 +192,7 @@ class LiveVoiceServer:
             async for event in self._session.exchange(
                 conversation_id,
                 self._audio(connection, conversation_id),
+                self._delivery_queue(conversation_id),
             ):
                 if event.kind is VoiceEventKind.AUDIO:
                     assert event.audio is not None

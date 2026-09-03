@@ -123,6 +123,7 @@ class VoiceSession:
         self,
         conversation_id: str,
         audio: AsyncIterable[AudioChunk],
+        deliveries: "asyncio.Queue[str] | None" = None,
     ) -> AsyncIterator[VoiceEvent]:
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
@@ -144,7 +145,21 @@ class VoiceSession:
             except Exception:
                 await incoming.put(("error", "background_event_error"))
 
+        async def receive_autonomous_responses() -> None:
+            """Her own words, arriving from a turn nobody asked for.
+
+            Queued by the transport when an autonomous turn returns RESPONDED,
+            and spoken here through the same synthesis a person turn uses.
+            There is no second speech path: this only carries the Core's
+            wording to the one that already exists.
+            """
+            assert deliveries is not None
+            while True:
+                await incoming.put(("autonomous_response", await deliveries.get()))
+
         tasks = [asyncio.create_task(receive_transcriptions())]
+        if deliveries is not None:
+            tasks.append(asyncio.create_task(receive_autonomous_responses()))
         if self._event_source is not None:
             tasks.append(asyncio.create_task(receive_events()))
         try:
@@ -164,6 +179,13 @@ class VoiceSession:
                 if kind == "transcription_end":
                     if self._event_source is None:
                         return
+                    continue
+                if kind == "autonomous_response":
+                    # Straight to the existing synthesis, unaltered. The Core
+                    # already decided both that this was worth saying and how
+                    # to say it; nothing here rewords or withholds it.
+                    async for speech_event in self._speak(conversation_id, item):
+                        yield speech_event
                     continue
                 if kind == "transcription" and item.state is TranscriptionState.PARTIAL:
                     LOGGER.info("Cartesia event received: %s", item.state.value)
@@ -248,11 +270,21 @@ class VoiceSession:
             )
             yield VoiceEvent(VoiceEventKind.LISTENING)
             return
+        async for speech_event in self._speak(conversation_id, outcome.response):
+            yield speech_event
+
+    async def _speak(self, conversation_id: str, response: str):
+        """The one synthesis path. Person turns and autonomous turns share it.
+
+        Extracted rather than duplicated: a second implementation for
+        unprompted speech would be a second voice, and the wording reaching it
+        is the Core's own either way.
+        """
         yield VoiceEvent(VoiceEventKind.SPEAKING)
         LOGGER.info("Speech synthesis started")
         try:
             async for chunk in self._synthesizer.synthesize(
-                outcome.response, conversation_id
+                response, conversation_id
             ):
                 if self._diagnostics is not None:
                     for diagnostic in self._diagnostics.drain(conversation_id):

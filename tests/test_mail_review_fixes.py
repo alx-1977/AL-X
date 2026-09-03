@@ -385,7 +385,7 @@ class SessionResilienceTests(unittest.TestCase):
         consumed: list[str] = []
 
         class Session:
-            async def exchange(self, conversation_id, audio):
+            async def exchange(self, conversation_id, audio, deliveries=None):
                 exchanges.append(1)
                 iterator = audio.__aiter__()
                 consumed.append(await iterator.__anext__())
@@ -403,6 +403,7 @@ class SessionResilienceTests(unittest.TestCase):
         server = LiveVoiceServer.__new__(LiveVoiceServer)
         server._session = Session()
         server._await_audio_confirmation = False
+        server._delivery_queues = {}
 
         async def audio():
             yield "before the failure"

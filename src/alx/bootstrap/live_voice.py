@@ -214,6 +214,9 @@ async def run(repository_root: Path) -> None:
     executors.update(notebook_runtime.executors)
     permissions.update(notebook_runtime.permissions)
 
+    opportunity_ledger = SQLiteOpportunityLedger(
+        storage_root / "cognition-opportunities.sqlite3"
+    )
     # D-024: AL/X may ask for another cognition opportunity later. Phase 4
     # creates and withdraws those requests durably; nothing honours them until
     # the opportunity source exists, so this is inert on its own.
@@ -221,6 +224,14 @@ async def run(repository_root: Path) -> None:
         storage_root,
         voice_settings.goal_retention_days,
         lambda: current_call_id[0],
+        # The conversation the executing Core turn belongs to, taken from the
+        # runtime rather than from AL/X. A capability argument could name any
+        # thread, and a thought would then be able to attach itself to a
+        # conversation it did not arise in.
+        conversation_id_source=lambda: current_conversation_id[0],
+        # So she can close an undelivered occasion once she has decided what
+        # to do about it. Only she may: nothing expires it.
+        occasions=opportunity_ledger,
     )
     for definition in continuity_runtime.definitions:
         registry.register(definition)
@@ -237,9 +248,6 @@ async def run(repository_root: Path) -> None:
     # configured. Without one an autonomous turn would be refused at the
     # reasoner anyway, so producing occasions nobody can answer would spend a
     # reservation to reach a guaranteed refusal.
-    opportunity_ledger = SQLiteOpportunityLedger(
-        storage_root / "cognition-opportunities.sqlite3"
-    )
     autonomous_budget = SQLiteAutonomousLedger(
         storage_root / "autonomous-cognition-spend.sqlite3",
         autonomous_cognition_daily_budget_usd(environment),
@@ -446,6 +454,7 @@ async def run(repository_root: Path) -> None:
         open_thoughts=lambda: continuity_runtime.store.open_thoughts(
             OPEN_THOUGHT_LIMIT
         ),
+        undelivered_responses=lambda: opportunity_ledger.undelivered(),
     )
     gateway = ConversationGateway(
         core,
@@ -481,10 +490,12 @@ async def run(repository_root: Path) -> None:
         cognition_source,
         opportunity_ledger,
         gateway,
-        voice_settings.autonomous_conversation_id,
+        # Only a fallback for origins with no originating conversation.
+        # SELF_REQUESTED always has one, inherited from the turn that asked.
+        voice_settings.primary_person_id,
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
-        transport_available=server.has_live_transport,
+        response_transport=server,
         commissioning_limit=autonomous_commissioning_limit(environment),
     )
     due_cognition = DueCognitionSource(
@@ -498,6 +509,14 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(server.serve_forever())
             runtime_tasks.create_task(due_cognition.run())
     finally:
+        # Cancelling the producer does not stop work already running inside
+        # asyncio.to_thread: the coroutine unwinds while the worker keeps going.
+        # Closing the stores here would then pull SQLite connections out from
+        # under a Core turn mid-write. Taking the shared lock waits for whatever
+        # critical section is executing to reach its own durable boundary, and
+        # nothing new can start because the producer is already cancelled.
+        async with core_turn_lock:
+            pass
         mail_runtime.observations.close()
         conversation_store.close()
         memory_store.close()

@@ -107,6 +107,8 @@ class FutureCognitionSource:
                     opportunity_id=opportunity_id,
                     origin=CognitionOrigin.SELF_REQUESTED,
                     arose_at=request.not_before,
+                    # The occasion returns to the thread the thought arose in.
+                    conversation_id=request.conversation_id,
                     references=(f"future_cognition:{request.request_id}",),
                     # Carried, not read. This module never looks inside it.
                     note=request.note,

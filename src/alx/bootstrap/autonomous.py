@@ -26,7 +26,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from alx.contracts import CognitionOpportunity
+from alx.contracts import CognitionOpportunity, ResponseDelivery
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class AutonomousCognitionRunner:
         conversation_id: str,
         step_budget: int,
         retention_days: int,
-        transport_available: Callable[[], bool] | None = None,
+        response_transport: Any = None,
         usage_of: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         spend_observer: Any = None,
@@ -59,10 +59,11 @@ class AutonomousCognitionRunner:
         self._conversation_id = conversation_id
         self._step_budget = step_budget
         self._retention_days = retention_days
-        # Whether a live transport could deliver speech right now. Asked only
-        # after the Core has decided to speak, so it never influences whether
-        # cognition happens: absent transport must not make her stop thinking.
-        self._transport_available = transport_available or (lambda: True)
+        # Where a RESPONDED autonomous turn is offered for delivery. Asked
+        # only after the Core has decided to speak, so it never influences
+        # whether cognition happens: absent transport must not stop her
+        # thinking, it only means what she said had nowhere to go.
+        self._response_transport = response_transport
         # Returns the measured usage of the turn just run, for settlement.
         self._usage_of = usage_of or (lambda: None)
         self._spend_observer = spend_observer
@@ -75,26 +76,15 @@ class AutonomousCognitionRunner:
         # broken turn rather than as the wrong time.
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def run_due(self) -> tuple[str, ...]:
-        """Run every occasion that is due now. Returns what was attempted."""
-        # Step 1. The master switch. `due_opportunities` returns nothing when
-        # autonomous cognition is disabled, and touches no request.
-        attempted: list[str] = []
-        for opportunity in self._source.due_opportunities():
-            if self._run_one(opportunity):
-                attempted.append(opportunity.opportunity_id)
-        return tuple(attempted)
-
     def run_one(self, opportunity: CognitionOpportunity) -> bool:
-        """Run one occasion the tick has already found.
+        """Run one occasion the producer has already found.
 
-        The public entry for the process-lifetime producer. `run_due` remains
-        for callers that want the scan and the run together; both reach the
-        same single implementation, so there is one production path.
+        The only public entry into claim, Core, spend and persistence. A
+        scan-and-run variant used to sit beside this one; both reached the same
+        internals, but Law 0 is about callable production routes rather than
+        shared implementation, so it was deleted rather than kept as a
+        convenience.
         """
-        return self._run_one(opportunity)
-
-    def _run_one(self, opportunity: CognitionOpportunity) -> bool:
         # Step 2. Claim it before spending anything, so a crash loses the turn
         # rather than paying for it twice.
         if not self._source.claim(opportunity):
@@ -135,8 +125,12 @@ class AutonomousCognitionRunner:
         if self._spend_observer is not None:
             self._spend_observer.watch(spend, opportunity.opportunity_id)
         try:
+            # The thread the thought arose in, so a matured occasion continues
+            # that history rather than starting a private one. Falls back to
+            # the configured id only for origins that have no originating
+            # conversation, which SELF_REQUESTED always does.
             outcome = self._gateway.receive_cognition_opportunity(
-                self._conversation_id,
+                opportunity.conversation_id or self._conversation_id,
                 opportunity,
                 self._step_budget,
                 self._clock() + timedelta(days=self._retention_days),
@@ -146,8 +140,22 @@ class AutonomousCognitionRunner:
             # the occasion, recorded and nothing more: the words are not kept,
             # so nothing can replay them, and no rule here decides whether it
             # still matters. She sees the fact on a later turn and chooses.
-            if outcome_state == "responded" and not self._transport_available():
-                undelivered = True
+            if outcome_state == "responded":
+                # Delivered means the transport accepted it for synthesis, not
+                # that a socket exists. Anything else is undelivered, including
+                # a transport that failed while accepting.
+                delivered = ResponseDelivery.UNDELIVERABLE
+                if self._response_transport is not None:
+                    try:
+                        delivered = self._response_transport.deliver(
+                            opportunity.conversation_id or self._conversation_id,
+                            outcome.response or "",
+                        )
+                    except Exception as error:
+                        LOGGER.warning(
+                            "Autonomous response delivery failed: %s", error
+                        )
+                undelivered = delivered is not ResponseDelivery.DELIVERED
         except Exception as error:
             LOGGER.warning("Autonomous cognition turn failed: %s", error)
         finally:

@@ -80,6 +80,10 @@ appear in your most recent response, so a draft stated earlier and left behind
 cannot be released later by an answer to some other question. It constrains
 sending only. You may draft, reconsider, abandon a message, or ask anything you
 like in any order, and nothing needs permission except the send itself.
+undelivered_responses names autonomous occasions where you decided to say something
+and no one was there to hear it. The words are not kept, deliberately: decide afresh
+whether anything still matters, say it if so, and resolve the occasion either way
+through the capability. Nothing resolves or expires it for you.
 carried_thoughts holds things you decided were worth keeping on your mind, in your
 own words. They are not tasks and nothing acts on them by itself. You may revisit
 one, let one go, or bring one into conversation when it genuinely fits; when you
@@ -469,6 +473,22 @@ def _context_payload(context: ReasoningContext) -> str:
                 "formed_at": item.formed_at.isoformat(),
             }
             for item in context.carried_thoughts
+        ],
+        # References and timing only. Not the words: an undelivered response is
+        # a fact about an occasion, and reprinting the prose would make this a
+        # delivery queue.
+        "undelivered_responses": [
+            {
+                "opportunity_id": item.get("opportunity_id"),
+                "origin": item.get("origin"),
+                "arose_at": item.get("arose_at"),
+                "references": [
+                    reference
+                    for reference in (item.get("refs") or "").split("\x1f")
+                    if reference
+                ],
+            }
+            for item in context.undelivered_responses
         ],
         "unfinished_goals": [
             {

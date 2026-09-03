@@ -68,6 +68,11 @@ class FutureCognitionRequest:
     not_before: datetime
     note: str
     requested_at: datetime
+    # The thread this thought arose in. Inherited from the Core turn that
+    # created the request, never chosen by AL/X as a capability argument: a
+    # call that could name any conversation could attach a thought to someone
+    # else's history. A matured occasion returns to the thread that asked.
+    conversation_id: str = ""
     references: tuple[str, ...] = ()
     status: FutureCognitionStatus = FutureCognitionStatus.PENDING
     provenance: "ContentProvenance | None" = None
@@ -140,6 +145,9 @@ class CognitionOpportunity:
     opportunity_id: str
     origin: "CognitionOrigin"
     arose_at: datetime
+    # The thread a self-requested occasion belongs to, carried from the
+    # request. Empty for origins that have no originating conversation.
+    conversation_id: str = ""
     references: tuple[str, ...] = ()
     note: str | None = None
     provenance: "ContentProvenance | None" = None
@@ -248,3 +256,28 @@ class AutonomousSpendAuthority(Protocol):
     def mark_dispatched(self, reservation: Any) -> None: ...
 
     def settle(self, reservation: Any, usage: Any) -> float: ...
+
+
+class ResponseDelivery(str, Enum):
+    """Whether a response actually reached a listener.
+
+    Mechanical, not a judgement. DELIVERED means the transport accepted the
+    response for synthesis; UNDELIVERABLE means there was nothing to accept it,
+    or that accepting it failed. The existence of a socket is not delivery, and
+    nothing here weighs whether the response mattered.
+    """
+
+    DELIVERED = "delivered"
+    UNDELIVERABLE = "undeliverable"
+
+
+class AutonomousResponseTransport(Protocol):
+    """The one way an autonomous response reaches a listener.
+
+    Implemented by the live transport, so an autonomous RESPONDED goes through
+    the same synthesis the person-turn path uses. A second speech
+    implementation for unprompted turns would be a second voice, which Law 0
+    and the "who may author AL/X's words" clarification both forbid.
+    """
+
+    def deliver(self, conversation_id: str, response: str) -> ResponseDelivery: ...

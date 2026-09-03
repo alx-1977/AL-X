@@ -57,6 +57,7 @@ class SQLiteContinuityStore:
                     not_before TEXT NOT NULL,
                     note TEXT NOT NULL,
                     requested_at TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL DEFAULT '',
                     refs TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     content_origins TEXT,
@@ -89,6 +90,17 @@ class SQLiteContinuityStore:
                 "CREATE INDEX IF NOT EXISTS carried_thoughts_open "
                 "ON carried_thoughts(status, formed_at)"
             )
+            existing = {
+                row[1]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(future_cognition)"
+                ).fetchall()
+            }
+            if "conversation_id" not in existing:
+                self._connection.execute(
+                    "ALTER TABLE future_cognition "
+                    "ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+                )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
@@ -101,6 +113,7 @@ class SQLiteContinuityStore:
             # message than the one she left herself.
             note=row["note"],
             requested_at=datetime.fromisoformat(row["requested_at"]),
+            conversation_id=row["conversation_id"],
             references=tuple(item for item in row["refs"].split("\x1f") if item),
             status=FutureCognitionStatus(row["status"]),
             provenance=provenance_from_storage(
@@ -118,14 +131,16 @@ class SQLiteContinuityStore:
             with self._connection:
                 self._connection.execute(
                     "INSERT INTO future_cognition(request_id, not_before, note, "
-                    "requested_at, refs, status, content_origins, "
-                    "content_recorded_at, content_expires_at, mail_references) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "requested_at, conversation_id, refs, status, "
+                    "content_origins, content_recorded_at, content_expires_at, "
+                    "mail_references) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         request.request_id,
                         request.not_before.isoformat(),
                         request.note,
                         request.requested_at.isoformat(),
+                        request.conversation_id,
                         "\x1f".join(request.references),
                         request.status.value,
                         *stored,

@@ -253,6 +253,10 @@ class ContractShapeTests(unittest.TestCase):
             fields,
             {
                 "request_id", "not_before", "note", "requested_at",
+                # Inherited from the executing turn, never a capability
+                # argument: it says which thread the thought arose in, not
+                # anything about what the thought is.
+                "conversation_id",
                 "references", "status", "provenance",
             },
         )
@@ -304,6 +308,73 @@ class OneMaturationPathTests(unittest.TestCase):
                 source = (self.SOURCE / module).read_text(encoding="utf-8")
                 self.assertNotIn("SQLiteContinuityStore", source)
                 self.assertNotIn("alx.continuity", source)
+
+
+class ConversationInheritanceTests(unittest.TestCase):
+    """A thought returns to the thread it arose in, and AL/X cannot choose."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.store = SQLiteContinuityStore(
+            Path(self._dir.name) / "continuity.sqlite3"
+        )
+        self.addCleanup(self.store.close)
+
+    def _execute(self, conversation_id: str):
+        return build_continuity_executors(
+            self.store, 3650, lambda: "call-1", clock=lambda: NOW,
+            conversation_id_source=lambda: conversation_id,
+        )
+
+    def test_the_request_inherits_the_executing_conversation(self) -> None:
+        self._execute("conversation-A")[REQUEST_FUTURE_COGNITION]({
+            "request_id": "r1",
+            "not_before": LATER.isoformat(),
+            "note": "come back to this",
+        })
+        self.assertEqual(self.store.load("r1").conversation_id, "conversation-A")
+
+    def test_two_conversations_keep_their_own_requests(self) -> None:
+        for name in ("conversation-A", "conversation-B"):
+            self._execute(name)[REQUEST_FUTURE_COGNITION]({
+                "request_id": f"r-{name}",
+                "not_before": LATER.isoformat(),
+                "note": "mine",
+            })
+        self.assertEqual(
+            self.store.load("r-conversation-A").conversation_id, "conversation-A"
+        )
+        self.assertEqual(
+            self.store.load("r-conversation-B").conversation_id, "conversation-B"
+        )
+
+    def test_alx_cannot_name_a_conversation_herself(self) -> None:
+        """The schema has no conversation field, so a thought cannot move."""
+        self.assertNotIn(
+            "conversation_id", REQUEST_DEFINITION.input_schema.properties
+        )
+        result = self._execute("conversation-A")[REQUEST_FUTURE_COGNITION]({
+            "request_id": "r1",
+            "not_before": LATER.isoformat(),
+            "note": "x",
+            "conversation_id": "conversation-B",
+        })
+        # Extra properties are refused outright by the declared schema shape.
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(self.store.load("r1").conversation_id, "conversation-A")
+
+    def test_the_conversation_survives_restart(self) -> None:
+        self._execute("conversation-A")[REQUEST_FUTURE_COGNITION]({
+            "request_id": "r1",
+            "not_before": LATER.isoformat(),
+            "note": "x",
+        })
+        path = Path(self._dir.name) / "continuity.sqlite3"
+        self.store.close()
+        reopened = SQLiteContinuityStore(path)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.load("r1").conversation_id, "conversation-A")
 
 
 if __name__ == "__main__":

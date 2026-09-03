@@ -766,12 +766,6 @@ class LiveVoiceSettings:
     primary_person_id: str
     goal_retention_days: int
     core_step_budget: int
-    # The durable thread an autonomous turn belongs to. A voice connection
-    # names its own conversation, but an occasion nobody opened has no
-    # connection to ask, and a fresh id per turn would give each unprompted
-    # thought its own private history. Defaults to the person's own thread,
-    # so a cognition she asked for continues the conversation she is in.
-    autonomous_conversation_id: str = ""
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> LiveVoiceSettings:
@@ -786,7 +780,4 @@ class LiveVoiceSettings:
                 environment, "ALX_GOAL_RETENTION_DAYS", 3650
             ),
             core_step_budget=_positive_integer(environment, "ALX_CORE_STEP_BUDGET", 8),
-            autonomous_conversation_id=environment.get(
-                "ALX_AUTONOMOUS_CONVERSATION_ID", ""
-            ).strip() or _required(environment, "ALX_PRIMARY_PERSON_ID"),
         )
