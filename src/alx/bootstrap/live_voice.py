@@ -18,7 +18,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
-from alx.bootstrap.autonomous import LedgerSpendAuthority
+from alx.bootstrap.autonomous import LedgerSpendAuthority, OccasionSpendRelay
 from alx.bootstrap.continuity import build_continuity_runtime
 from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
@@ -238,6 +238,9 @@ async def run(repository_root: Path) -> None:
         autonomous_cognition_daily_budget_usd(environment),
         ConfiguredPricingWorstCase(),
     )
+    # Carries what the reasoning boundary spends back to the occasion ledger,
+    # so every dollar is inspectable per occasion and not only per day.
+    occasion_spend = OccasionSpendRelay()
     cognition_source = FutureCognitionSource(
         continuity_runtime.store,
         opportunity_ledger,
@@ -406,6 +409,7 @@ async def run(repository_root: Path) -> None:
                 autonomous_budget,
                 provider_settings.autonomous.provider,
                 provider_settings.autonomous.model,
+                occasion_spend,
             ),
         ),
     )

@@ -607,5 +607,92 @@ class NoOptionalBoundPathTests(unittest.TestCase):
         self.assertNotIn(".settle(", source)
 
 
+class OccasionCostIsRecordedTests(unittest.TestCase):
+    """D-024 requires every dollar inspectable per occasion, not only per day.
+
+    Moving spend into the reasoning boundary left the opportunity ledger with
+    no provider, model or cost, so the record used to judge the experiment
+    would have shown which occasions ran but not what any of them cost.
+    """
+
+    def test_reserved_and_settled_cost_reach_the_opportunity_row(self) -> None:
+        import tempfile
+        from alx.bootstrap.autonomous import (
+            AutonomousCognitionRunner, LedgerSpendAuthority, OccasionSpendRelay,
+        )
+        from alx.continuity import SQLiteOpportunityLedger
+        from alx.contracts.continuity import CognitionOpportunity
+
+        class Reservation:
+            reservation_id = "res-1"
+            reserved_usd = 0.0816
+
+        class Ledger:
+            def reserve(self, provider, model, max_input, max_output):
+                return Reservation()
+
+            def settle(self, reservation, provider, model, usage):
+                return 0.0079
+
+        opportunity = CognitionOpportunity(
+            "self:r1", CognitionOrigin.SELF_REQUESTED,
+            datetime(2026, 9, 3, tzinfo=UTC), ("future_cognition:r1",),
+        )
+
+        class Source:
+            def due_opportunities(self):
+                return (opportunity,)
+
+            def claim(self, item):
+                return True
+
+            def mark_honoured(self, item):
+                pass
+
+        relay = OccasionSpendRelay()
+        authority = LedgerSpendAuthority(
+            Ledger(), "openai", "gpt-5.6-luna", relay
+        )
+
+        class Gateway:
+            def receive_cognition_opportunity(self, *args, **kwargs):
+                # Stands in for the reasoning boundary authorising the turn.
+                reservation = authority.reserve(96_000, 32_000)
+                authority.settle(reservation, {"input_tokens": 1})
+
+                class Outcome:
+                    class state:
+                        value = "finished_silently"
+
+                return Outcome()
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = SQLiteOpportunityLedger(Path(directory) / "o.sqlite3")
+            try:
+                ledger.record_created(opportunity)
+                AutonomousCognitionRunner(
+                    Source(), ledger, Gateway(), "c1", 4, 3650,
+                    spend_observer=relay,
+                ).run_due()
+                row = ledger.rows()[0]
+                self.assertEqual(row["provider"], "openai")
+                self.assertEqual(row["model"], "gpt-5.6-luna")
+                self.assertAlmostEqual(row["reserved_usd"], 0.0816, places=6)
+                self.assertAlmostEqual(row["settled_usd"], 0.0079, places=6)
+            finally:
+                ledger.close()
+
+    def test_the_relay_is_wired_in_the_composition_root(self) -> None:
+        import ast
+
+        tree = ast.parse(COMPOSITION.read_text(encoding="utf-8"))
+        constructed = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        self.assertEqual(constructed.count("OccasionSpendRelay"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
