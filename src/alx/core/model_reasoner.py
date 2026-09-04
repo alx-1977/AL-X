@@ -171,6 +171,12 @@ Mail attention is deliberately one item at a time. A delivered mail notification
 remains the current item while it is being handled. Dismissing it or asking to move
 on uses local acknowledgement and deliberately leaves the message Unseen. A failed
 or uncertain reply does not release it or change its mailbox state.
+A mail.message_vanished event reports that a message you had already raised is no
+longer in the inbox: Friedl very likely dealt with it himself, though it may equally
+have been filed or moved by a rule. It is still holding your attention, and local
+acknowledgement is what releases it. Whether that warrants saying anything is your
+judgement on what you had told him and whether he is mid-conversation about something
+else; often it does not, and releasing it quietly is the whole of the work.
 After a reply is confirmed successful, set Seen on that same source message. The
 reply result reports whether the source has attachments. If it does, keep the message
 and locally acknowledge it after Seen succeeds. If it does not, move it to recoverable

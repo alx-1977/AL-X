@@ -353,6 +353,7 @@ class SQLiteMailObservationState:
                 "(mailbox_id TEXT NOT NULL, uid_validity TEXT NOT NULL, uid INTEGER NOT NULL, "
                 "event_json TEXT NOT NULL, state TEXT NOT NULL, content_origins TEXT, "
                 "content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT, "
+                "reported_vanished INTEGER NOT NULL DEFAULT 0, "
                 "PRIMARY KEY(mailbox_id, uid_validity, uid))"
             )
             columns = {
@@ -371,6 +372,14 @@ class SQLiteMailObservationState:
                     self._connection.execute(
                         f'ALTER TABLE mail_observations ADD COLUMN "{column}" TEXT'
                     )
+            # Records that an announced disappearance has been reported to AL/X
+            # once. It is not a presentation state: the observation keeps its
+            # own state until she releases it.
+            if "reported_vanished" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE mail_observations "
+                    "ADD COLUMN reported_vanished INTEGER NOT NULL DEFAULT 0"
+                )
 
     def close(self) -> None:
         self._connection.close()
@@ -454,6 +463,97 @@ class SQLiteMailObservationState:
                     (highest, mailbox_id),
                 )
 
+    def reconcile(
+        self,
+        mailbox_id: str,
+        uid_validity: str,
+        present: tuple[int, ...],
+    ) -> tuple[BackgroundEvent, ...]:
+        """Settle observations whose message has left the mailbox.
+
+        Whether a tracked identifier is still in the mailbox has one correct
+        answer, so Law 2 places the detection here. What its disappearance
+        means does not, so this decides nothing about it.
+
+        A `pending` observation was never announced: nothing was said about it
+        and nothing is owed, so it is settled silently.
+
+        A `current` or `presented` observation has already been put in front of
+        Friedl. Releasing it quietly would leave AL/X unable to account for
+        something he heard her say, so it is returned as an event for her to
+        reason about. She releases it herself; this does not.
+
+        Only identifiers at or below the cursor are considered. A higher one has
+        not been scanned yet and its absence carries no meaning.
+        """
+        row = self._connection.execute(
+            "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
+            (mailbox_id,),
+        ).fetchone()
+        if row is None or row[0] != uid_validity:
+            return ()
+        last_uid = int(row[1])
+        live = set(present)
+        rows = self._connection.execute(
+            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+            "content_recorded_at, content_expires_at, mail_references, state "
+            "FROM mail_observations WHERE mailbox_id = ? AND uid_validity = ? "
+            "AND state IN ('pending', 'current', 'presented') "
+            "AND COALESCE(reported_vanished, 0) = 0 ORDER BY uid",
+            (mailbox_id, uid_validity),
+        ).fetchall()
+        vanished = [
+            candidate
+            for candidate in rows
+            if int(candidate[2]) <= last_uid and int(candidate[2]) not in live
+        ]
+        silent = tuple(item for item in vanished if item[8] == "pending")
+        announced = tuple(item for item in vanished if item[8] != "pending")
+        if silent:
+            with self._connection:
+                for item in silent:
+                    self._connection.execute(
+                        "UPDATE mail_observations SET state = 'done', event_json = ? "
+                        "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
+                        (
+                            json.dumps(
+                                {
+                                    "mailbox_id": item[0],
+                                    "uid_validity": item[1],
+                                    "uid": str(item[2]),
+                                },
+                                separators=(",", ":"),
+                            ),
+                            item[0],
+                            item[1],
+                            int(item[2]),
+                        ),
+                    )
+        if announced:
+            # Reported once, durably. An unreleased observation would otherwise
+            # be re-reported every poll, and after a restart an in-process
+            # guard would not remember that Friedl had already been told.
+            with self._connection:
+                for item in announced:
+                    self._connection.execute(
+                        "UPDATE mail_observations SET reported_vanished = 1 "
+                        "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
+                        (item[0], item[1], int(item[2])),
+                    )
+        return tuple(self._vanished_event(item) for item in announced)
+
+    @staticmethod
+    def _vanished_event(row) -> BackgroundEvent:
+        """The same observation, reported as gone rather than as arrived."""
+        data = dict(json.loads(row[3]))
+        return BackgroundEvent(
+            f"mail:{row[1]}:{row[2]}:vanished",
+            "mail.message_vanished",
+            datetime.now(UTC),
+            data,
+            provenance=provenance_from_storage(*row[4:8]),
+        )
+
     def current(self) -> BackgroundEvent | None:
         """Return the one observation eligible for delivery.
 
@@ -523,10 +623,16 @@ class SQLiteMailObservationState:
         Friedl -- so it is reported rather than raised. It killed two live
         voice sessions on 2026-09-04 when raised.
 
+        A vanished report announces no mail and so presents nothing. Delivering
+        it records no state: the observation it refers to stays exactly as it
+        was until AL/X releases it herself.
+
         A malformed identifier is still an error, because nothing can be
         recorded for it and the caller passed something impossible.
         """
         parts = event_id.split(":")
+        if len(parts) == 4 and parts[0] == "mail" and parts[3] == "vanished":
+            return False
         if len(parts) != 3 or parts[0] != "mail" or not parts[2].isdigit():
             raise MailAccessError("observation_unavailable")
         with self._connection:
@@ -598,7 +704,8 @@ class ICloudMailAdapter:
         except Exception:
             pass
 
-    def scan(self) -> None:
+    def scan(self) -> tuple[BackgroundEvent, ...]:
+        """Observe the mailbox once. Returns observations found to have gone."""
         connection = self._open()
         try:
             status, _ = connection.select("INBOX", readonly=True)
@@ -608,11 +715,15 @@ class ICloudMailAdapter:
             status, values = connection.uid("search", None, "ALL")
             if status != "OK":
                 raise MailAccessError("search_failed")
-            identifiers = tuple(
+            present = tuple(
                 int(value) for value in (values[0] or b"").split() if value.isdigit()
             )
+            # Reconcile before narrowing: what is still in the mailbox is known
+            # only from the full listing, and an observation Friedl handled
+            # himself is settled from the same evidence that finds new mail.
+            vanished = self._observations.reconcile("INBOX", validity, present)
             identifiers = self._observations.new_identifiers(
-                "INBOX", validity, identifiers
+                "INBOX", validity, present
             )
             found: list[tuple[int, dict[str, str]]] = []
             for uid in identifiers:
@@ -637,6 +748,7 @@ class ICloudMailAdapter:
             self._observations.discover(
                 "INBOX", validity, tuple(found), tuple(identifiers)
             )
+            return vanished
         finally:
             self._close(connection)
 
@@ -644,11 +756,16 @@ class ICloudMailAdapter:
         emitted_event_id: str | None = None
         while True:
             try:
-                await asyncio.to_thread(self.scan)
+                vanished = await asyncio.to_thread(self.scan)
             except MailAccessError as error:
                 LOGGER.warning("Mail observation unavailable: %s", error.code)
                 await asyncio.sleep(self._poll_seconds)
                 continue
+            # An announced observation whose message has gone is reported
+            # before any new arrival, so AL/X settles what she already told
+            # Friedl about before taking on the next thing.
+            for event in vanished:
+                yield event
             current = self._observations.current()
             if current is not None and current.event_id != emitted_event_id:
                 emitted_event_id = current.event_id
