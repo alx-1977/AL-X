@@ -181,7 +181,11 @@ class CognitionOpportunitySource(Protocol):
 
     def events(self) -> AsyncIterator[BackgroundEvent]: ...
 
-    def record_delivery(self, event_id: str) -> None: ...
+    # True when the observation moved to `presented`; False when it was no
+    # longer current and there was nothing to record. A benign reconciliation
+    # race must not be raised: it reached the transport and killed two live
+    # sessions on 2026-09-04.
+    def record_delivery(self, event_id: str) -> bool: ...
 
 
 class CarriedThoughtStatus(str, Enum):

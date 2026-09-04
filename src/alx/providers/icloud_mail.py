@@ -513,7 +513,19 @@ class SQLiteMailObservationState:
         ).fetchall()
         return tuple(self._event(row) for row in rows)
 
-    def record_delivery(self, event_id: str) -> None:
+    def record_delivery(self, event_id: str) -> bool:
+        """Mark a delivered observation `presented`. True when it moved.
+
+        False means the observation was no longer `current` and there was
+        nothing to record: AL/X may have acknowledged or trashed it during the
+        very turn that announced it, or a later scan reconciled it away. That
+        is a benign race, not a fault -- the announcement already reached
+        Friedl -- so it is reported rather than raised. It killed two live
+        voice sessions on 2026-09-04 when raised.
+
+        A malformed identifier is still an error, because nothing can be
+        recorded for it and the caller passed something impossible.
+        """
         parts = event_id.split(":")
         if len(parts) != 3 or parts[0] != "mail" or not parts[2].isdigit():
             raise MailAccessError("observation_unavailable")
@@ -523,8 +535,7 @@ class SQLiteMailObservationState:
                 "WHERE uid_validity = ? AND uid = ? AND state = 'current'",
                 (parts[1], int(parts[2])),
             ).rowcount
-        if not updated:
-            raise MailAccessError("observation_unavailable")
+        return bool(updated)
 
     def acknowledge(self, reference: MailReference) -> None:
         minimal = json.dumps(
@@ -938,8 +949,8 @@ class ICloudMailAdapter:
     def acknowledge(self, reference: MailReference) -> None:
         self._observations.acknowledge(reference)
 
-    def record_delivery(self, event_id: str) -> None:
-        self._observations.record_delivery(event_id)
+    def record_delivery(self, event_id: str) -> bool:
+        return self._observations.record_delivery(event_id)
 
     def contextual_events(self) -> tuple[BackgroundEvent, ...]:
         return self._observations.contextual_events()

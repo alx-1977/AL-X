@@ -462,6 +462,12 @@ async def run(repository_root: Path) -> None:
             OPEN_THOUGHT_LIMIT
         ),
         undelivered_responses=lambda: opportunity_ledger.undelivered(),
+        # A refused goal proposal left no trace on 2026-09-04, so a live
+        # rejection could not be diagnosed. Mechanical facts to the log only:
+        # which references were cited, and which rule refused them.
+        record_goal_rejection=lambda record: LOGGER.info(
+            "Goal proposal rejected: %s", record,
+        ),
     )
     gateway = ConversationGateway(
         core,

@@ -269,9 +269,19 @@ class VoiceSession:
                     yield response_event
                 if kind == "background" and delivered:
                     assert self._event_source is not None
-                    await run_core_worker(
+                    recorded = await run_core_worker(
                         self._event_source.record_delivery, item.event_id
                     )
+                    if not recorded:
+                        # The observation was reconciled away while she was
+                        # answering it -- acknowledged in the same turn, or
+                        # cleared by a later scan. She has already spoken, so
+                        # there is nothing to repair and nothing to say; the
+                        # session continues.
+                        LOGGER.info(
+                            "Mail delivery already reconciled: %s",
+                            item.event_id,
+                        )
         finally:
             for task in tasks:
                 task.cancel()
