@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     AudioChunk,
+    run_core_worker,
     CognitionOpportunitySource,
     ConversationOrigin,
     ConversationTurn,
@@ -35,6 +36,8 @@ class VoiceEventKind(str, Enum):
     LISTENING = "listening"
     AUDIO = "audio"
     DIAGNOSTIC = "diagnostic"
+    # AL/X's final wording, for the console. Rendered, never re-derived.
+    TEXT = "text"
     ERROR = "error"
 
 
@@ -44,8 +47,13 @@ class VoiceEvent:
     audio: AudioChunk | None = None
     reason: str | None = None
     diagnostic: Mapping[str, Any] | None = None
+    text: str | None = None
 
     def __post_init__(self) -> None:
+        if self.kind is VoiceEventKind.TEXT and not self.text:
+            raise ValueError("text events require AL/X's wording")
+        if self.kind is not VoiceEventKind.TEXT and self.text is not None:
+            raise ValueError("only text events may carry wording")
         if self.kind is VoiceEventKind.AUDIO and self.audio is None:
             raise ValueError("audio events require an audio chunk")
         if self.kind is not VoiceEventKind.AUDIO and self.audio is not None:
@@ -86,7 +94,7 @@ class VoiceSession:
         self,
         gateway: ConversationGateway,
         transcriber: SpeechTranscriber,
-        synthesizer: SpeechSynthesizer,
+        synthesizer: SpeechSynthesizer | None,
         person_id: str,
         step_budget: int,
         retention_days: int,
@@ -94,6 +102,7 @@ class VoiceSession:
         identifier_factory: Callable[[], str] | None = None,
         diagnostics: VoiceDiagnosticBuffer | None = None,
         event_source: CognitionOpportunitySource | None = None,
+        core_turn_lock: asyncio.Lock | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")
@@ -111,12 +120,19 @@ class VoiceSession:
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._diagnostics = diagnostics
         self._event_source = event_source
-        self._core_turn_lock = asyncio.Lock()
+        # Given by the runtime, so person turns and autonomous turns serialize
+        # through one authority. Turn serialization is a property of AL/X
+        # having one Core, not of voice: a lock owned here would let an
+        # autonomous turn run while Friedl was speaking. One is created here
+        # only when no runtime supplied one, which is the test path.
+        self._core_turn_lock = core_turn_lock or asyncio.Lock()
 
     async def exchange(
         self,
         conversation_id: str,
         audio: AsyncIterable[AudioChunk],
+        deliveries: "asyncio.Queue[str] | None" = None,
+        typed: "asyncio.Queue[str] | None" = None,
     ) -> AsyncIterator[VoiceEvent]:
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
@@ -138,7 +154,29 @@ class VoiceSession:
             except Exception:
                 await incoming.put(("error", "background_event_error"))
 
+        async def receive_typed_lines() -> None:
+            """What Friedl typed, on its way to the one person-turn path."""
+            assert typed is not None
+            while True:
+                await incoming.put(("typed", await typed.get()))
+
+        async def receive_autonomous_responses() -> None:
+            """Her own words, arriving from a turn nobody asked for.
+
+            Queued by the transport when an autonomous turn returns RESPONDED,
+            and spoken here through the same synthesis a person turn uses.
+            There is no second speech path: this only carries the Core's
+            wording to the one that already exists.
+            """
+            assert deliveries is not None
+            while True:
+                await incoming.put(("autonomous_response", await deliveries.get()))
+
         tasks = [asyncio.create_task(receive_transcriptions())]
+        if deliveries is not None:
+            tasks.append(asyncio.create_task(receive_autonomous_responses()))
+        if typed is not None:
+            tasks.append(asyncio.create_task(receive_typed_lines()))
         if self._event_source is not None:
             tasks.append(asyncio.create_task(receive_events()))
         try:
@@ -159,6 +197,13 @@ class VoiceSession:
                     if self._event_source is None:
                         return
                     continue
+                if kind == "autonomous_response":
+                    # Straight to the existing synthesis, unaltered. The Core
+                    # already decided both that this was worth saying and how
+                    # to say it; nothing here rewords or withholds it.
+                    async for speech_event in self._speak(conversation_id, item):
+                        yield speech_event
+                    continue
                 if kind == "transcription" and item.state is TranscriptionState.PARTIAL:
                     LOGGER.info("Cartesia event received: %s", item.state.value)
                     yield VoiceEvent(VoiceEventKind.HEARING)
@@ -173,7 +218,7 @@ class VoiceSession:
                 try:
                     async with self._core_turn_lock:
                         if kind == "background":
-                            outcome = await asyncio.to_thread(
+                            outcome = await run_core_worker(
                                 self._gateway.receive_background_event,
                                 conversation_id,
                                 item,
@@ -181,16 +226,29 @@ class VoiceSession:
                                 now + timedelta(days=self._retention_days),
                             )
                         else:
-                            LOGGER.info("Cartesia event received: %s", item.state.value)
+                            # Spoken and typed converge here, before the
+                            # gateway. They differ only in provenance and in
+                            # whether a transcriber was involved; from this
+                            # point there is one person-turn path, one Core
+                            # call, one conversation and one goal treatment.
+                            if kind == "typed":
+                                origin = ConversationOrigin.TYPED
+                                content = item
+                            else:
+                                LOGGER.info(
+                                    "Cartesia event received: %s", item.state.value
+                                )
+                                origin = ConversationOrigin.SPEECH_TRANSCRIPT
+                                content = item.content
                             turn = ConversationTurn(
                                 conversation_id=conversation_id,
                                 turn_id=self._identifier_factory(),
-                                origin=ConversationOrigin.SPEECH_TRANSCRIPT,
-                                content=item.content,
+                                origin=origin,
+                                content=content,
                                 occurred_at=now,
                                 person_id=self._person_id,
                             )
-                            outcome = await asyncio.to_thread(
+                            outcome = await run_core_worker(
                                 self._gateway.receive_conversation_turn,
                                 turn,
                                 self._step_budget,
@@ -211,9 +269,19 @@ class VoiceSession:
                     yield response_event
                 if kind == "background" and delivered:
                     assert self._event_source is not None
-                    await asyncio.to_thread(
+                    recorded = await run_core_worker(
                         self._event_source.record_delivery, item.event_id
                     )
+                    if not recorded:
+                        # The observation was reconciled away while she was
+                        # answering it -- acknowledged in the same turn, or
+                        # cleared by a later scan. She has already spoken, so
+                        # there is nothing to repair and nothing to say; the
+                        # session continues.
+                        LOGGER.info(
+                            "Mail delivery already reconciled: %s",
+                            item.event_id,
+                        )
         finally:
             for task in tasks:
                 task.cancel()
@@ -224,10 +292,11 @@ class VoiceSession:
             for diagnostic in self._diagnostics.drain(conversation_id):
                 yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=diagnostic)
         LOGGER.info(
-            "Authoritative Core turn finished: state=%s reason=%s response=%s",
+            "Authoritative Core turn finished: state=%s reason=%s response=%s memory=%s",
             outcome.state.value,
             outcome.reason,
             outcome.response is not None,
+            outcome.memory_state or "ok",
         )
         if outcome.state.value == "finished_silently":
             # Silence is an explicit authoritative Core result, not a missing
@@ -242,11 +311,31 @@ class VoiceSession:
             )
             yield VoiceEvent(VoiceEventKind.LISTENING)
             return
+        # The console mirrors what the one response path produced. It is not a
+        # second response implementation: the wording is the Core's own, and it
+        # is emitted whether or not anything is audible.
+        yield VoiceEvent(VoiceEventKind.TEXT, text=outcome.response)
+        async for speech_event in self._speak(conversation_id, outcome.response):
+            yield speech_event
+
+    async def _speak(self, conversation_id: str, response: str):
+        """The one synthesis path. Person turns and autonomous turns share it.
+
+        Extracted rather than duplicated: a second implementation for
+        unprompted speech would be a second voice, and the wording reaching it
+        is the Core's own either way.
+        """
+        if self._synthesizer is None:
+            # No speech transport. Her wording already reached the console, and
+            # the turn is complete; a missing speaker changes nothing about
+            # what she decided or what was recorded.
+            yield VoiceEvent(VoiceEventKind.LISTENING)
+            return
         yield VoiceEvent(VoiceEventKind.SPEAKING)
         LOGGER.info("Speech synthesis started")
         try:
             async for chunk in self._synthesizer.synthesize(
-                outcome.response, conversation_id
+                response, conversation_id
             ):
                 if self._diagnostics is not None:
                     for diagnostic in self._diagnostics.drain(conversation_id):

@@ -33,7 +33,9 @@ class RuntimeProviders:
     # autonomous turn to the conversational Core under another name.
     autonomous: ReasoningModel | None
     speech_to_text: SpeechTranscriber
-    text_to_speech: SpeechSynthesizer
+    # None when no speech transport is configured. Audio is then absent and
+    # nothing else differs: the Core never learns whether anyone could hear.
+    text_to_speech: SpeechSynthesizer | None
 
 
 
@@ -128,7 +130,12 @@ def build_runtime_providers(
         raise ConfigurationError(
             f"speech-to-text provider adapter is not installed: {settings.speech_to_text.provider}"
         )
-    if settings.text_to_speech.provider != "elevenlabs":
+    # Speech is a transport capability. A runtime configured without it starts,
+    # reasons and records identically; only audio is absent. Refusing to start
+    # would make being heard a precondition for thinking, and telling the Core
+    # about it would let a missing speaker change what she says.
+    speech_configured = settings.text_to_speech.provider.strip().lower() != "none"
+    if speech_configured and settings.text_to_speech.provider != "elevenlabs":
         raise ConfigurationError(
             f"text-to-speech provider adapter is not installed: {settings.text_to_speech.provider}"
         )
@@ -148,7 +155,7 @@ def build_runtime_providers(
             settings.speech_to_text.turn_end_threshold,
             settings.speech_to_text.turn_end_timeout_ms,
         ),
-        text_to_speech=ElevenLabsSynthesizer(
+        text_to_speech=None if not speech_configured else ElevenLabsSynthesizer(
             settings.text_to_speech.model,
             settings.text_to_speech.api_key,
             settings.text_to_speech.voice_id,

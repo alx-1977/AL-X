@@ -46,7 +46,7 @@ class RecoveryHarness(unittest.TestCase):
         self.root = Path(self._dir.name)
         self._open()
         self.store.create(
-            FutureCognitionRequest("r1", DUE, "a note", NOW - timedelta(hours=1))
+            FutureCognitionRequest("r1", DUE, "a note", NOW - timedelta(hours=1), conversation_id="conversation-1")
         )
 
     def _open(self) -> None:
@@ -353,9 +353,11 @@ class OutcomePersistenceFailureTests(RecoveryHarness):
 
                 return Outcome()
 
-        AutonomousCognitionRunner(
-            source, broken, Gateway(), "c1", 4, 3650, clock=lambda: NOW
-        ).run_due()
+        runner = AutonomousCognitionRunner(
+            source, broken, Gateway(), 4, 3650, clock=lambda: NOW
+        )
+        for due in source.due_opportunities():
+            runner.run_one(due)
         # The write failed, but the claim was still cleaned up in-process.
         self.assertEqual(broken.released, ["self:r1"])
         self.assertTrue(self._still_pending())

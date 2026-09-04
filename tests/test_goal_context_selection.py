@@ -331,7 +331,7 @@ class GoalSummaryTests(Fixture):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
             AgentDecision(response="Working on it.", goal_id="goal-invented"),
-            AssertionError("a paid retry occurred"),
+            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.ERROR)
@@ -375,7 +375,7 @@ class SelectionUsesTheCanonicalPathTests(Fixture):
                 ),
                 memory_proposals=(ungrounded,),
             ),
-            AssertionError("a paid retry occurred"),
+            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.ERROR)
@@ -481,13 +481,25 @@ class SelectionCannotBuyReasoningTests(Fixture):
 
 
 class BlockedDispatchTests(Fixture):
-    """An impossible dispatch costs one decision and never a retry loop."""
+    """An impossible dispatch costs one explanation and never a retry loop.
 
-    def assert_one_decision_then_checkpoint(self, reasoner) -> None:
+    It used to cost exactly one decision and stop. That left Friedl with
+    silence when a reasonable request could not be grounded, so the refusal is
+    now returned to the Core once, with its reason, and she may answer. The
+    allowance is one per turn: a second refused call ends the turn exactly as
+    before, so a runaway still cannot spend the step budget.
+    """
+
+    def assert_one_explanation_then_checkpoint(self, reasoner) -> None:
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED, outcome.reason)
         self.assertEqual(outcome.reason, "active_goal_required")
-        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(
+            len(reasoner.contexts), 2,
+            "one decision, then one chance to explain -- never more",
+        )
+        self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"],
+                         "active_goal_required")
         self.assertEqual(self.broker.calls, [])
 
     def test_effectful_call_against_a_selected_paused_goal_is_one_decision(self) -> None:
@@ -495,16 +507,16 @@ class BlockedDispatchTests(Fixture):
         reasoner = Queued(
             AgentDecision(call=removal(), goal_id="goal-a",
                           approval_proposal=approval()),
-            AssertionError("a paid retry occurred against the same state"),
+            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
         )
-        self.assert_one_decision_then_checkpoint(reasoner)
+        self.assert_one_explanation_then_checkpoint(reasoner)
 
     def test_effectful_call_without_any_goal_is_one_decision(self) -> None:
         reasoner = Queued(
             AgentDecision(call=removal(), approval_proposal=approval()),
-            AssertionError("a paid retry occurred against the same state"),
+            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
         )
-        self.assert_one_decision_then_checkpoint(reasoner)
+        self.assert_one_explanation_then_checkpoint(reasoner)
         self.assertEqual(self.store.list_goals(), ())
 
     def test_a_mutation_that_pauses_the_goal_cannot_carry_an_effectful_call(self) -> None:
@@ -518,21 +530,35 @@ class BlockedDispatchTests(Fixture):
                 ),
                 approval_proposal=approval(),
             ),
-            AssertionError("a paid retry occurred"),
+            # Told the reason, she repeats the same pausing mutation: the
+            # state is unchanged, so the turn stops there.
+            AgentDecision(
+                call=removal(), goal_id="goal-a",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.AWAIT_INPUT,
+                    outstanding_work=(WorkItem("w-2", "waiting"),),
+                ),
+                approval_proposal=approval(),
+            ),
         )
-        self.assert_one_decision_then_checkpoint(reasoner)
+        self.assert_one_explanation_then_checkpoint(reasoner)
         self.assertEqual(self.store.load("goal-a").state.status, GoalStatus.ACTIVE)
 
     def test_the_step_budget_is_not_the_protection(self) -> None:
-        """Twenty-five steps were available; one was used."""
+        """Twenty-five steps were available; two were used.
+
+        One to decide, one to explain the refusal. The dedup, not the budget,
+        is what stops it there -- an insistent Core cannot buy a third.
+        """
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
             AgentDecision(call=removal(), goal_id="goal-a",
                           approval_proposal=approval()),
-            *([AssertionError("retry")] * 24),
+            *([AgentDecision(call=removal(), goal_id="goal-a",
+                             approval_proposal=approval())] * 24),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(len(reasoner.contexts), 2)
 
     def test_the_transport_keeps_listening_after_a_blocked_dispatch(self) -> None:
         from alx.interfaces.server import (
@@ -587,7 +613,7 @@ class MemoryFaultDoesNotEndTheConversationTests(Fixture):
         reasoner = Queued(
             AgentDecision(response="Noted.", goal_id="goal-a",
                           memory_proposals=(self.memory(),)),
-            AssertionError("a paid retry occurred"),
+            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
         )
         outcome = self.failing_agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.ERROR)
@@ -815,17 +841,25 @@ class RunawayScenarioTests(unittest.TestCase):
             ApprovalLifecycle.CONSUMED,
         )
 
-    def test_no_eligible_context_stops_after_one_decision_with_the_approval_unconsumed(self) -> None:
+    def test_no_eligible_context_stops_after_one_explanation_with_the_approval_unconsumed(self) -> None:
+        """One decision, one explanation, then stop.
+
+        What matters here is unchanged: the approval is never consumed, the
+        goal is untouched, nothing reaches the broker, and the person's turn
+        is still recorded durably.
+        """
         before = self.goals.load("goal-a")
         reasoner = Queued(
             AgentDecision(call=removal(), goal_id="goal-a",
                           approval_proposal=approval()),
-            *([AssertionError("a paid retry occurred")] * 24),
+            # One explanation is offered; asking again ends the turn.
+            *([AgentDecision(call=removal(), goal_id="goal-a",
+                             approval_proposal=approval())] * 24),
         )
         outcome = self.gateway(reasoner).receive_conversation_turn(TURNS[2], 25, RETENTION)
         self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "active_goal_required")
-        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(len(reasoner.contexts), 2)
         self.assertEqual(self.broker.calls, [])
         self.assertEqual(self.goals.load("goal-a"), before)
         self.assertTrue(

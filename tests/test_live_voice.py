@@ -29,7 +29,8 @@ from alx.contracts import (  # noqa: E402
     TranscriptionState,
 )
 from alx.interfaces import VoiceDiagnosticBuffer, VoiceEventKind, VoiceSession  # noqa: E402
-from alx.core import CoreState  # noqa: E402
+from alx.core import CoreState
+from alx.core.loop import CoreOutcome  # noqa: E402
 from alx.conversation import SQLiteConversationStore  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.goals.store import _goal_to_data  # noqa: E402
@@ -100,7 +101,10 @@ def outcome(
     reason=None,
     core_state=CoreState.RESPONDED,
 ):
-    return SimpleNamespace(
+    # The real contract, not a look-alike: a SimpleNamespace silently lacks
+    # any field the loop later adds, so these tests kept passing while the
+    # transport read something that did not exist.
+    return CoreOutcome(
         state=core_state,
         snapshot=SimpleNamespace(state=SimpleNamespace(status=status)),
         response=response,
@@ -154,6 +158,9 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             [item.kind for item in observed],
             [
                 VoiceEventKind.THINKING,
+                # Her wording reaches the console before it is spoken, so a
+                # silent runtime still shows what she said.
+                VoiceEventKind.TEXT,
                 VoiceEventKind.SPEAKING,
                 VoiceEventKind.AUDIO,
                 VoiceEventKind.AUDIO,
@@ -245,6 +252,9 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             [
                 VoiceEventKind.HEARING,
                 VoiceEventKind.THINKING,
+                # Her wording reaches the console before it is spoken, so a
+                # silent runtime still shows what she said.
+                VoiceEventKind.TEXT,
                 VoiceEventKind.SPEAKING,
                 VoiceEventKind.AUDIO,
                 VoiceEventKind.AUDIO,
@@ -325,6 +335,9 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
                 VoiceEventKind.ERROR,
                 VoiceEventKind.LISTENING,
                 VoiceEventKind.THINKING,
+                # Her wording reaches the console before it is spoken, so a
+                # silent runtime still shows what she said.
+                VoiceEventKind.TEXT,
                 VoiceEventKind.SPEAKING,
                 VoiceEventKind.AUDIO,
                 VoiceEventKind.AUDIO,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Mapping, Protocol
 
 from alx.contracts.capabilities import CapabilityDefinition
 from alx.contracts.cognition import CognitionOrigin
@@ -171,11 +171,30 @@ class ReasoningContext:
     # differently for an unprompted turn would be a second builder deciding
     # what she is like when nobody is watching.
     carried_thoughts: tuple[CarriedThought, ...] = ()
+    # Autonomous occasions whose response never reached anyone. References and
+    # timing only: the words are not kept, so she is told that it happened and
+    # decides afresh whether anything still needs saying.
+    undelivered_responses: tuple[Mapping[str, Any], ...] = ()
+    # Memory identifiers she proposed this turn that already name a different
+    # memory. Mechanical facts only -- the identifier, and the content already
+    # stored under it -- because whether to supersede it, choose another
+    # identifier, or let the write go is hers to judge under Law 3.
+    memory_conflicts: tuple[Mapping[str, Any], ...] = ()
+    # Calls refused this turn before any approval or dispatch, with the
+    # mechanical reason. She is told once so she can explain or correct;
+    # repeating the same refused call ends the turn rather than buying
+    # another reasoning step against an unchanged state.
+    refused_calls: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
+        object.__setattr__(self, "memory_conflicts", tuple(self.memory_conflicts))
+        object.__setattr__(self, "refused_calls", tuple(self.refused_calls))
+        object.__setattr__(
+            self, "undelivered_responses", tuple(self.undelivered_responses)
+        )
         if self.active_goal is not None and not any(
             item.goal_id == self.active_goal.goal_id for item in self.unfinished_goals
         ):
@@ -335,6 +354,8 @@ class DurableMemoryStore(Protocol):
         query: MemoryQuery,
         as_of: datetime,
     ) -> tuple[MemorySnapshot, ...]: ...
+
+    def load(self, memory_id: str) -> MemorySnapshot: ...
 
 
 class CapabilityDispatch(Protocol):

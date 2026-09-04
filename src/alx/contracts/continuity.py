@@ -24,6 +24,7 @@ time. It confers no priority, no importance and no ordering beyond time.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -68,6 +69,11 @@ class FutureCognitionRequest:
     not_before: datetime
     note: str
     requested_at: datetime
+    # The thread this thought arose in. Inherited from the Core turn that
+    # created the request, never chosen by AL/X as a capability argument: a
+    # call that could name any conversation could attach a thought to someone
+    # else's history. A matured occasion returns to the thread that asked.
+    conversation_id: str = ""
     references: tuple[str, ...] = ()
     status: FutureCognitionStatus = FutureCognitionStatus.PENDING
     provenance: "ContentProvenance | None" = None
@@ -140,6 +146,9 @@ class CognitionOpportunity:
     opportunity_id: str
     origin: "CognitionOrigin"
     arose_at: datetime
+    # The thread a self-requested occasion belongs to, carried from the
+    # request. Empty for origins that have no originating conversation.
+    conversation_id: str = ""
     references: tuple[str, ...] = ()
     note: str | None = None
     provenance: "ContentProvenance | None" = None
@@ -172,7 +181,11 @@ class CognitionOpportunitySource(Protocol):
 
     def events(self) -> AsyncIterator[BackgroundEvent]: ...
 
-    def record_delivery(self, event_id: str) -> None: ...
+    # True when the observation moved to `presented`; False when it was no
+    # longer current and there was nothing to record. A benign reconciliation
+    # race must not be raised: it reached the transport and killed two live
+    # sessions on 2026-09-04.
+    def record_delivery(self, event_id: str) -> bool: ...
 
 
 class CarriedThoughtStatus(str, Enum):
@@ -248,3 +261,56 @@ class AutonomousSpendAuthority(Protocol):
     def mark_dispatched(self, reservation: Any) -> None: ...
 
     def settle(self, reservation: Any, usage: Any) -> float: ...
+
+
+class ResponseDelivery(str, Enum):
+    """Whether a response actually reached a listener.
+
+    Mechanical, not a judgement. DELIVERED means the transport accepted the
+    response for synthesis; UNDELIVERABLE means there was nothing to accept it,
+    or that accepting it failed. The existence of a socket is not delivery, and
+    nothing here weighs whether the response mattered.
+    """
+
+    DELIVERED = "delivered"
+    UNDELIVERABLE = "undeliverable"
+
+
+class AutonomousResponseTransport(Protocol):
+    """The one way an autonomous response reaches a listener.
+
+    Implemented by the live transport, so an autonomous RESPONDED goes through
+    the same synthesis the person-turn path uses. A second speech
+    implementation for unprompted turns would be a second voice, which Law 0
+    and the "who may author AL/X's words" clarification both forbid.
+    """
+
+    def deliver(self, conversation_id: str, response: str) -> ResponseDelivery: ...
+
+
+async def run_core_worker(operation: Any, *arguments: Any) -> Any:
+    """Run one Core turn on a worker thread, and outlive cancellation.
+
+    A Core turn writes to durable stores from a worker thread, and shutdown
+    closes those stores once it can take the Core-turn lock. So the lock must
+    stay held until the worker has actually finished, not until the coroutine
+    awaiting it has been cancelled.
+
+    `asyncio.shield` alone does not do that. Cancelling the outer task raises
+    inside the `async with`, the block unwinds, the lock releases, and the
+    worker keeps writing into stores that teardown is already closing. The
+    cancellation must therefore be caught and the *worker* awaited — not the
+    shield wrapper, which is already cancelled — because that await is the last
+    one still running inside the lock.
+
+    Every kind of turn uses this: spoken, typed, background and autonomous. One
+    rule, because a store does not care which sort of turn was writing to it.
+    """
+    worker = asyncio.ensure_future(asyncio.to_thread(operation, *arguments))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Not a timeout and not a guess: this returns exactly when the worker
+        # reaches its own durable boundary.
+        await asyncio.wait({worker})
+        raise

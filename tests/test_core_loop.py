@@ -408,14 +408,20 @@ class CoreTests(unittest.TestCase):
 
         reasoner = Queued(
             AgentDecision(call=call),
-            AssertionError("a second paid decision occurred"),
+            # The refusal returns to her once with its reason; repeating the
+            # same impossible call ends the turn.
+            AgentDecision(call=CapabilityCall("call-2", "change", {})),
+            AssertionError("a third paid decision occurred"),
         )
         agent = CoreAgent(self.store, reasoner, dispatch, (effectful,), clock=lambda: NOW)
         outcome = agent.process(conversation(), RETENTION, 25)
         self.assertEqual(dispatched, [], "nothing may act without an active goal")
         self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "active_goal_required")
-        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(
+            reasoner.contexts[1].refused_calls[0]["reason"], "active_goal_required",
+        )
         self.assertEqual(self.store.list_goals(), ())
 
     def test_attention_state_tool_can_serve_ordinary_conversation(self) -> None:

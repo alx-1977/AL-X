@@ -38,6 +38,7 @@ WITHDRAW_FUTURE_COGNITION = "withdraw_future_cognition"
 RECORD_CARRIED_THOUGHT = "record_carried_thought"
 WITHDRAW_CARRIED_THOUGHT = "withdraw_carried_thought"
 MARK_CARRIED_THOUGHT_RAISED = "mark_carried_thought_raised"
+RESOLVE_UNDELIVERED_RESPONSE = "resolve_undelivered_response"
 
 # How many open thoughts one reasoning turn is shown. A fixed uniform bound, so
 # a long list is trimmed by count rather than by anyone deciding which of her
@@ -58,6 +59,7 @@ _FAILURES = (
     "request_not_found",
     "thought_not_found",
     "thought_already_exists",
+    "occasion_not_found",
     "request_already_exists",
     "requested_time_too_soon",
     "storage_failed",
@@ -198,12 +200,30 @@ MARK_RAISED_DEFINITION = CapabilityDefinition(
 )
 
 
+RESOLVE_UNDELIVERED_DEFINITION = CapabilityDefinition(
+    RESOLVE_UNDELIVERED_RESPONSE,
+    "Close an autonomous occasion whose response never reached Friedl, once "
+    "you have decided what to do about it. Say something now and resolve it, "
+    "or resolve it because it no longer matters. Nothing resolves it for you.",
+    StructuredSchema(
+        ValueKind.OBJECT, {"opportunity_id": _STRING}, ("opportunity_id",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT, {"opportunity_id": _STRING}, ("opportunity_id",),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
 DEFINITIONS = (
     REQUEST_DEFINITION,
     WITHDRAW_DEFINITION,
     RECORD_THOUGHT_DEFINITION,
     WITHDRAW_THOUGHT_DEFINITION,
     MARK_RAISED_DEFINITION,
+    RESOLVE_UNDELIVERED_DEFINITION,
 )
 
 
@@ -212,9 +232,15 @@ def build_continuity_executors(
     retention_days: int,
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
+    conversation_id_source: Callable[[], str] | None = None,
+    occasions: Any = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Bind both primitives to the one durable continuity store."""
     now_of = clock or (lambda: datetime.now(UTC))
+    # Deterministic, from the executing turn. Never a capability argument: the
+    # schema has no conversation field, so a request cannot name a thread it
+    # did not arise in.
+    conversation_of = conversation_id_source or (lambda: "")
 
     def request(values: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
@@ -232,6 +258,7 @@ def build_continuity_executors(
                 # Carried verbatim. Never inspected.
                 note=str(values["note"]),
                 requested_at=now,
+                conversation_id=conversation_of(),
                 references=tuple(
                     str(item) for item in values.get("references", ()) or ()
                 ),
@@ -321,7 +348,34 @@ def build_continuity_executors(
 
         return run
 
+    def resolve_undelivered(values: Mapping[str, Any]) -> CapabilityResult:
+        call_id = call_id_source()
+        try:
+            opportunity_id = str(values["opportunity_id"])
+            if occasions is None:
+                return _failed(
+                    call_id, RESOLVE_UNDELIVERED_RESPONSE, "occasion_not_found"
+                )
+            if not occasions.resolve_undelivered(opportunity_id):
+                return _failed(
+                    call_id, RESOLVE_UNDELIVERED_RESPONSE, "occasion_not_found"
+                )
+        except (KeyError, TypeError, ValueError):
+            return _failed(
+                call_id, RESOLVE_UNDELIVERED_RESPONSE, "arguments_unusable"
+            )
+        except Exception:
+            return _failed(call_id, RESOLVE_UNDELIVERED_RESPONSE, "storage_failed")
+        return CapabilityResult(
+            call_id,
+            RESOLVE_UNDELIVERED_RESPONSE,
+            CapabilityResultState.SUCCEEDED,
+            {"opportunity_id": opportunity_id},
+            durable_values={"opportunity_id": opportunity_id},
+        )
+
     return {
+        RESOLVE_UNDELIVERED_RESPONSE: resolve_undelivered,
         REQUEST_FUTURE_COGNITION: request,
         WITHDRAW_FUTURE_COGNITION: withdraw,
         RECORD_CARRIED_THOUGHT: record_thought,

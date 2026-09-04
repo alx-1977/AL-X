@@ -26,7 +26,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from alx.contracts import CognitionOpportunity
+from alx.contracts import CognitionOpportunity, ResponseDelivery
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,12 +39,13 @@ class AutonomousCognitionRunner:
         source: Any,
         ledger: Any,
         gateway: Any,
-        conversation_id: str,
         step_budget: int,
         retention_days: int,
+        response_transport: Any = None,
         usage_of: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         spend_observer: Any = None,
+        commissioning_limit: int | None = None,
     ) -> None:
         # Deliberately no budget, provider, model or token bounds. Those belong
         # to the reasoning boundary, which is the only place the exact request
@@ -54,33 +55,77 @@ class AutonomousCognitionRunner:
         self._source = source
         self._ledger = ledger
         self._gateway = gateway
-        self._conversation_id = conversation_id
         self._step_budget = step_budget
         self._retention_days = retention_days
+        # Where a RESPONDED autonomous turn is offered for delivery. Asked
+        # only after the Core has decided to speak, so it never influences
+        # whether cognition happens: absent transport must not stop her
+        # thinking, it only means what she said had nowhere to go.
+        self._response_transport = response_transport
         # Returns the measured usage of the turn just run, for settlement.
         self._usage_of = usage_of or (lambda: None)
         self._spend_observer = spend_observer
+        # Temporary commissioning safety for the first supervised activation.
+        # None in normal operation, so there is no turn quota at all.
+        self._commissioning_limit = commissioning_limit
         # Timezone-aware, like every other clock in the runtime. A naive
         # datetime here would reach retention_until and the durable records,
         # where the contracts reject it, so the failure would surface as a
         # broken turn rather than as the wrong time.
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def run_due(self) -> tuple[str, ...]:
-        """Run every occasion that is due now. Returns what was attempted."""
-        # Step 1. The master switch. `due_opportunities` returns nothing when
-        # autonomous cognition is disabled, and touches no request.
-        attempted: list[str] = []
-        for opportunity in self._source.due_opportunities():
-            if self._run_one(opportunity):
-                attempted.append(opportunity.opportunity_id)
-        return tuple(attempted)
+    def run_one(self, opportunity: CognitionOpportunity) -> bool:
+        """Run one occasion the producer has already found.
 
-    def _run_one(self, opportunity: CognitionOpportunity) -> bool:
+        The only public entry into claim, Core, spend and persistence. A
+        scan-and-run variant used to sit beside this one; both reached the same
+        internals, but Law 0 is about callable production routes rather than
+        shared implementation, so it was deleted rather than kept as a
+        convenience.
+        """
         # Step 2. Claim it before spending anything, so a crash loses the turn
         # rather than paying for it twice.
         if not self._source.claim(opportunity):
             return False
+
+        # Step 2a. A self-requested occasion must know the thread it arose in.
+        # An empty conversation is unknown provenance, not a default: it means
+        # a request predating the migration that recorded it. Continuing it on
+        # the person's thread would append an old thought to a conversation it
+        # never belonged to, which is the fork this design exists to remove.
+        # So it refuses, durably and visibly, before anything is spent.
+        if not opportunity.conversation_id:
+            LOGGER.info(
+                "Refusing %s: no originating conversation is recorded",
+                opportunity.opportunity_id,
+            )
+            self._ledger.record_outcome(
+                opportunity.opportunity_id, "refused_unknown_conversation"
+            )
+            # The claim is kept, so it is not offered again and cannot later
+            # attach itself to some other thread. The row remains inspectable.
+            return False
+
+        # Step 2b. The commissioning latch, when one is set. It counts dispatch
+        # attempts rather than dollars, because the financial fuse cannot limit
+        # turns: a reservation reconciles to actual spend, so a cheap turn
+        # returns most of its withdrawal and the next one fits. Counting the
+        # attempt before making it means a crash mid-call cannot come back and
+        # spend again for want of a record.
+        if self._commissioning_limit is not None:
+            attempted = self._ledger.record_commissioning_dispatch()
+            if attempted > self._commissioning_limit:
+                LOGGER.info(
+                    "Commissioning latch closed: %d dispatch(es) already "
+                    "attempted, limit %d",
+                    attempted,
+                    self._commissioning_limit,
+                )
+                self._ledger.record_outcome(
+                    opportunity.opportunity_id, "refused_commissioning_latch"
+                )
+                self._source.release(opportunity)
+                return False
 
         # Step 3. Invoke the one Core, through the one gateway. Phase 3's
         # origin selection routes this to the autonomous reasoner, which owns
@@ -92,16 +137,41 @@ class AutonomousCognitionRunner:
         # Bind cost reporting to this occasion for the duration of the turn, so
         # what the reasoning boundary spends lands on the right ledger row.
         spend = _OccasionSpend()
+        undelivered = False
         if self._spend_observer is not None:
             self._spend_observer.watch(spend, opportunity.opportunity_id)
         try:
+            # The thread the thought arose in, so a matured occasion continues
+            # that history rather than starting a private one. Falls back to
+            # the configured id only for origins that have no originating
+            # conversation, which SELF_REQUESTED always does.
             outcome = self._gateway.receive_cognition_opportunity(
-                self._conversation_id,
+                opportunity.conversation_id,
                 opportunity,
                 self._step_budget,
                 self._clock() + timedelta(days=self._retention_days),
             )
             outcome_state = outcome.state.value
+            # She decided to speak. Whether anyone could hear is a fact about
+            # the occasion, recorded and nothing more: the words are not kept,
+            # so nothing can replay them, and no rule here decides whether it
+            # still matters. She sees the fact on a later turn and chooses.
+            if outcome_state == "responded":
+                # Delivered means the transport accepted it for synthesis, not
+                # that a socket exists. Anything else is undelivered, including
+                # a transport that failed while accepting.
+                delivered = ResponseDelivery.UNDELIVERABLE
+                if self._response_transport is not None:
+                    try:
+                        delivered = self._response_transport.deliver(
+                            opportunity.conversation_id,
+                            outcome.response or "",
+                        )
+                    except Exception as error:
+                        LOGGER.warning(
+                            "Autonomous response delivery failed: %s", error
+                        )
+                undelivered = delivered is not ResponseDelivery.DELIVERED
         except Exception as error:
             LOGGER.warning("Autonomous cognition turn failed: %s", error)
         finally:
@@ -130,6 +200,10 @@ class AutonomousCognitionRunner:
                     settled_usd=spend.settled_usd,
                     usage=self._usage_of(),
                 )
+                if undelivered:
+                    self._ledger.mark_response_undelivered(
+                        opportunity.opportunity_id
+                    )
             except Exception as error:
                 LOGGER.warning(
                     "Could not record the outcome of %s: %s",

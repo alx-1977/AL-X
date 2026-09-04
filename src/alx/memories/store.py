@@ -9,6 +9,7 @@ from pathlib import Path
 
 from alx.contracts import (
     MemoryCorrection,
+    MemoryIdentityConflict,
     MemoryKind,
     MemoryProposal,
     MemoryQuery,
@@ -53,10 +54,6 @@ class SupersededMemoryNotFound(MemoryStoreError):
 
 
 class InvalidMemorySupersession(MemoryStoreError):
-    pass
-
-
-class MemoryIdentityConflict(MemoryStoreError):
     pass
 
 

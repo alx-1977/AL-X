@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import queue
 import logging
 import mimetypes
 from collections.abc import AsyncIterator
@@ -14,7 +16,9 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from alx.contracts import AudioChunk
+from typing import Any
+
+from alx.contracts import AudioChunk, ResponseDelivery
 from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
 
 
@@ -43,6 +47,11 @@ LOGGER = logging.getLogger(__name__)
 # nothing external happened, the goal is unchanged, and a dispatch that was
 # checkpointed but never sent is closed as an unknown outcome on the next turn
 # rather than repeated. The diagnostics panel still names the fault.
+# The one non-audio frame the socket accepts. A transport shape, like
+# "audio.end" in the other direction; it names a frame format and never a
+# meaning, and nothing branches on what the frame carries.
+TYPED_FRAME = "person.text"
+
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
     {
         "speech_transcription_error",
@@ -90,6 +99,137 @@ class LiveVoiceServer:
         # Set when a mid-exchange recovery happens, cleared by the next audio
         # frame. It proves the microphone iterator survived the recovery.
         self._await_audio_confirmation = False
+        # Live delivery queues per conversation. An autonomous response is
+        # handed to a real listener or it is undelivered; a count of open
+        # sockets cannot tell the difference.
+        self._delivery_queues: dict[str, list[Any]] = {}
+        # Typed lines waiting to become person turns. Separate from delivery
+        # because one carries input and the other carries output; conflating
+        # them is how a console starts inferring where text should go.
+        self._typed_queues: dict[str, list[Any]] = {}
+        # The loop that owns those queues, captured when a listener registers.
+        # Delivery from a worker thread has to hand the work back to it.
+        self._delivery_loop: Any = None
+
+    def deliver(self, conversation_id: str, response: str) -> ResponseDelivery:
+        """Speak an autonomous response through the one existing synthesis path.
+
+        Called from the Core worker thread, while the event loop owns the
+        queues a listener is waiting on. `asyncio.Queue` is not thread-safe, so
+        the enqueue is performed *by the loop* and this waits for the loop to
+        say it happened. Scheduling is not delivery: a callback that never runs
+        because the loop is closing would otherwise report success while her
+        words were lost, which is the failure this whole path exists to avoid.
+
+        DELIVERED therefore means one live listener actually received it.
+        Everything else — no listener, a listener that vanished between lookup
+        and enqueue, a closing loop, a queue that refused — is UNDELIVERABLE,
+        and the occasion records the fact.
+
+        There is deliberately no second speech implementation here. The audio
+        is produced by the same synthesizer the person-turn path uses, and the
+        wording is the Core's own, unaltered.
+        """
+        registered = self._delivery_queues.get(conversation_id) or []
+        if not registered:
+            return ResponseDelivery.UNDELIVERABLE
+        # Snapshot: the listener may go away while this runs, which the loop
+        # side re-checks rather than assuming.
+        listeners = list(registered)
+        loop = self._delivery_loop
+        if loop is None or loop.is_closed():
+            return ResponseDelivery.UNDELIVERABLE
+
+        acknowledged: "queue.Queue[bool]" = queue.Queue(maxsize=1)
+
+        def enqueue_on_loop() -> None:
+            """Runs on the loop thread, where touching the queue is safe."""
+            accepted = False
+            current = self._delivery_queues.get(conversation_id) or []
+            for waiting in listeners:
+                if waiting not in current:
+                    # Detached between lookup and here.
+                    continue
+                try:
+                    waiting.put_nowait(response)
+                    accepted = True
+                except Exception:
+                    continue
+            acknowledged.put(accepted)
+
+        try:
+            loop.call_soon_threadsafe(enqueue_on_loop)
+        except RuntimeError:
+            # The loop stopped between the check above and now.
+            return ResponseDelivery.UNDELIVERABLE
+        try:
+            # Bounded so a loop that dies mid-turn cannot hold the Core worker
+            # forever. The callback takes no lock, so it cannot be blocked by
+            # the Core-turn lock this thread is holding: it only touches a
+            # queue and answers.
+            accepted = acknowledged.get(timeout=self.DELIVERY_ACK_SECONDS)
+        except queue.Empty:
+            return ResponseDelivery.UNDELIVERABLE
+        return (
+            ResponseDelivery.DELIVERED if accepted
+            else ResponseDelivery.UNDELIVERABLE
+        )
+
+    # A typed line is at most this long. Not a judgement about what is worth
+    # saying: a bound so one frame cannot exhaust memory or the input ceiling.
+    MAX_TYPED_CHARACTERS = 8_000
+
+    # How long the Core worker waits for the loop to confirm an enqueue. Not a
+    # delivery policy: a bound so a loop that stops mid-turn cannot hold the
+    # worker open, and exceeding it is reported as undelivered rather than
+    # guessed at.
+    DELIVERY_ACK_SECONDS = 5.0
+
+    def _queue_typed_turn(self, conversation_id: str, payload: str) -> None:
+        """Hand a typed line to the session, or drop a malformed frame.
+
+        Dropping rather than raising: a browser sending nonsense must not end a
+        conversation, and there is nothing here to tell Friedl that would not be
+        the transport speaking in AL/X's voice.
+        """
+        try:
+            frame = json.loads(payload)
+        except (ValueError, TypeError):
+            LOGGER.info("Ignoring an unparseable console frame")
+            return
+        # A wire-protocol discriminator, not language routing: this reads the
+        # frame's declared shape, never what Friedl wrote. The line itself is
+        # carried to the Core untouched and uninspected.
+        if not isinstance(frame, dict) or frame.get("type") != TYPED_FRAME:
+            LOGGER.info("Ignoring an unsupported console frame")
+            return
+        content = frame.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return
+        if len(content) > self.MAX_TYPED_CHARACTERS:
+            LOGGER.info("Ignoring an oversized console frame")
+            return
+        queues = getattr(self, "_typed_queues", {}).get(conversation_id) or []
+        for queue in queues:
+            try:
+                queue.put_nowait(content)
+            except Exception:
+                continue
+
+    def _typed_queue(self, conversation_id: str):
+        """The queue this exchange drains typed lines from.
+
+        Registered when the connection opens, and handed to the session here.
+        Without this the lines are queued and nobody reads them: the frame
+        arrives, the queue grows, and the turn never happens.
+        """
+        queues = getattr(self, "_typed_queues", {}).get(conversation_id) or []
+        return queues[-1] if queues else None
+
+    def _delivery_queue(self, conversation_id: str):
+        """The queue this exchange should drain, if a listener registered one."""
+        queues = getattr(self, "_delivery_queues", {}).get(conversation_id) or []
+        return queues[-1] if queues else None
 
     async def serve_forever(self) -> None:
         origins = (f"http://{self._host}:{self._port}", None)
@@ -111,7 +251,16 @@ class LiveVoiceServer:
             await connection.close(code=1008, reason="unsupported_transport_path")
             return
         conversation_id = self._conversation_id(parse_qs(parsed.query))
+        # Registered while this connection can actually carry speech, so an
+        # autonomous response is offered to a live listener rather than to a
+        # socket count that cannot say whether anyone took it.
+        deliveries: asyncio.Queue[str] = asyncio.Queue()
+        self._delivery_queues.setdefault(conversation_id, []).append(deliveries)
+        typed: asyncio.Queue[str] = asyncio.Queue()
+        self._typed_queues.setdefault(conversation_id, []).append(typed)
+        self._delivery_loop = asyncio.get_running_loop()
         LOGGER.info("Voice session connected")
+
         await connection.send(
             json.dumps(
                 {
@@ -124,8 +273,21 @@ class LiveVoiceServer:
         # A transcription transport can drop while the person is simply silent.
         # That ends one exchange but not the conversation, so it is re-entered on
         # the same durable conversation while the browser socket stays open.
-        while await self._exchange_once(connection, conversation_id):
-            LOGGER.info("Resuming voice session on the same conversation")
+        try:
+            while await self._exchange_once(connection, conversation_id):
+                LOGGER.info("Resuming voice session on the same conversation")
+
+        finally:
+            queues = self._delivery_queues.get(conversation_id, [])
+            if deliveries in queues:
+                queues.remove(deliveries)
+            if not queues:
+                self._delivery_queues.pop(conversation_id, None)
+            waiting = self._typed_queues.get(conversation_id, [])
+            if typed in waiting:
+                waiting.remove(typed)
+            if not waiting:
+                self._typed_queues.pop(conversation_id, None)
 
     async def _exchange_once(
         self, connection: ServerConnection, conversation_id: str
@@ -135,6 +297,8 @@ class LiveVoiceServer:
             async for event in self._session.exchange(
                 conversation_id,
                 self._audio(connection, conversation_id),
+                self._delivery_queue(conversation_id),
+                self._typed_queue(conversation_id),
             ):
                 if event.kind is VoiceEventKind.AUDIO:
                     assert event.audio is not None
@@ -157,6 +321,17 @@ class LiveVoiceServer:
                             {
                                 "type": "diagnostic",
                                 **event.diagnostic,
+                            }
+                        )
+                    )
+                    continue
+                if event.kind is VoiceEventKind.TEXT:
+                    await connection.send(
+                        json.dumps(
+                            {
+                                "type": "alx.text",
+                                "stream": "ALX",
+                                "content": event.text,
                             }
                         )
                     )
@@ -220,6 +395,12 @@ class LiveVoiceServer:
     ) -> AsyncIterator[AudioChunk]:
         sequence = 0
         async for payload in connection:
+            if isinstance(payload, str):
+                # The only non-audio frame the socket accepts. It carries what
+                # Friedl typed and nothing else: no command, no destination, no
+                # grammar. Where it goes is decided here, not by what it says.
+                self._queue_typed_turn(stream_id, payload)
+                continue
             if not isinstance(payload, bytes) or not payload:
                 continue
             if sequence == 0:

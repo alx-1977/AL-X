@@ -2,7 +2,10 @@
 
 from alx.contracts.cognition import Cognition, CognitionOrigin
 from alx.contracts.continuity import (
+    AutonomousResponseTransport,
+    run_core_worker,
     AutonomousSpendAuthority,
+    ResponseDelivery,
     CognitionOpportunity,
     CognitionOpportunitySource,
     DuplicateFutureCognition,
@@ -88,7 +91,7 @@ from alx.contracts.models import (
 )
 from alx.contracts.memory import (
     MemoryCorrection,
-    MemoryKind,
+    MemoryIdentityConflict, MemoryKind,
     MemoryProposal,
     MemoryQuery,
     MemoryRevision,
@@ -115,7 +118,7 @@ from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
     "CANONICAL_FIELDS",
-    "AutonomousSpendAuthority",
+    "AutonomousResponseTransport", "run_core_worker", "AutonomousSpendAuthority", "ResponseDelivery",
     "Cognition", "CognitionOrigin", "CognitionOpportunity",
     "CognitionOpportunitySource", "FutureCognitionRequest", "FutureCognitionStatus",
     "FutureCognitionNotFound", "DuplicateFutureCognition", "FutureCognitionTooSoon",
@@ -154,7 +157,8 @@ __all__ = [
     "TranscriptionState",
     "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",
     "ReasoningModel",
-    "MemoryCorrection", "MemoryKind", "MemoryProposal", "MemoryQuery",
+    "MemoryCorrection", "MemoryIdentityConflict", "MemoryKind",
+    "MemoryProposal", "MemoryQuery",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
     "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
     "MailObservationControl", "MailParticipants", "MailReference",

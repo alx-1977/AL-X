@@ -44,6 +44,15 @@ class MemorySourceMatch(str, Enum):
     ALL = "all"
 
 
+class MemoryIdentityConflict(Exception):
+    """A proposed memory_id already names a memory with different content.
+
+    Defined here rather than in the store because it is not a storage fault:
+    it is a question about meaning that only the Core may answer, so the
+    reasoning loop has to recognise it without importing the memory package.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryQuery:
     """Structured retrieval scope chosen semantically by the AL/X Core."""

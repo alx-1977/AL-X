@@ -95,21 +95,30 @@ class CompositionRootTests(unittest.TestCase):
             with self.subTest(component=name):
                 self.assertEqual(constructed.count(name), 1)
 
-    def test_no_poller_is_started_and_run_due_is_never_called(self) -> None:
-        """Phase 8 activation stays out of scope."""
+    def test_exactly_one_due_cognition_producer_is_started(self) -> None:
+        """Phase 8: one tick, in the process-lifetime scope, and only one.
+
+        This previously asserted no producer existed at all, which was correct
+        while Phase 8 was out of scope. Now that it is implemented, the
+        property worth holding is that there is exactly one — a second would be
+        a competing production path to the same outcome.
+        """
         tree = ast.parse(self.SOURCE)
-        called = {
-            node.func.attr
+        constructed = [
+            node.func.id
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        }
-        self.assertNotIn("run_due", called)
-        names = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-        }
-        self.assertNotIn("AutonomousCognitionRunner", names)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        self.assertEqual(constructed.count("DueCognitionSource"), 1)
+        self.assertEqual(constructed.count("AutonomousCognitionRunner"), 1)
+
+    def test_the_producer_lives_for_the_process_not_a_voice_session(self) -> None:
+        """Her continuity must not depend on someone currently listening."""
+        session = (
+            ROOT / "src" / "alx" / "interfaces" / "live_voice.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("DueCognitionSource", session)
+        self.assertNotIn("AutonomousCognitionRunner", session)
 
     def test_the_origin_boundary_is_always_constructed(self) -> None:
         """EX-001: the boundary exists even unconfigured, so nothing falls back."""
@@ -154,7 +163,7 @@ class ProductionClockTests(unittest.TestCase):
     def test_the_runner_default_clock_is_timezone_aware(self) -> None:
         runner = AutonomousCognitionRunner(
             source=None, ledger=None, gateway=None,
-            conversation_id="c1", step_budget=4, retention_days=3650,
+            step_budget=4, retention_days=3650,
         )
         now = runner._clock()
         self.assertIsNotNone(now.tzinfo)
@@ -164,7 +173,7 @@ class ProductionClockTests(unittest.TestCase):
         """A naive clock would be rejected downstream by the contracts."""
         runner = AutonomousCognitionRunner(
             source=None, ledger=None, gateway=None,
-            conversation_id="c1", step_budget=4, retention_days=3650,
+            step_budget=4, retention_days=3650,
         )
         deadline = runner._clock() + timedelta(days=3650)
         self.assertIsNotNone(deadline.utcoffset())
@@ -670,9 +679,9 @@ class OccasionCostIsRecordedTests(unittest.TestCase):
             try:
                 ledger.record_created(opportunity)
                 AutonomousCognitionRunner(
-                    Source(), ledger, Gateway(), "c1", 4, 3650,
+                    Source(), ledger, Gateway(), 4, 3650,
                     spend_observer=relay,
-                ).run_due()
+                ).run_one(opportunity)
                 row = ledger.rows()[0]
                 self.assertEqual(row["provider"], "openai")
                 self.assertEqual(row["model"], "gpt-5.6-luna")
@@ -691,6 +700,68 @@ class OccasionCostIsRecordedTests(unittest.TestCase):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         ]
         self.assertEqual(constructed.count("OccasionSpendRelay"), 1)
+
+
+class UndeliveredReachesCoreTests(unittest.TestCase):
+    """The fact must be wired into the Core, not merely persisted.
+
+    A mutation that stopped supplying undelivered occasions to CoreAgent
+    survived every other test: the state was written and never read, which was
+    Greptile's original finding. This asserts the composition actually connects
+    the ledger to the reasoning context.
+    """
+
+    def test_composition_supplies_undelivered_occasions_to_the_core(self) -> None:
+        import ast
+
+        tree = ast.parse(COMPOSITION.read_text(encoding="utf-8"))
+        core = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "CoreAgent"
+        )
+        supplied = {
+            keyword.arg: ast.dump(keyword.value) for keyword in core.keywords
+        }
+        self.assertIn("undelivered_responses", supplied)
+        self.assertIn("undelivered", supplied["undelivered_responses"])
+
+    def test_exactly_one_public_runner_entry_point_exists(self) -> None:
+        """Law 0: one callable route through claim, Core, spend, persistence.
+
+        A scan-and-run variant sat beside run_one and reached the same
+        internals. Law 0 is about callable production routes rather than shared
+        implementation, so it was deleted rather than kept as a convenience.
+        """
+        import ast
+
+        from alx.bootstrap import autonomous
+
+        tree = ast.parse(
+            (ROOT / "src" / "alx" / "bootstrap" / "autonomous.py")
+            .read_text(encoding="utf-8")
+        )
+        runner = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and node.name == "AutonomousCognitionRunner"
+        )
+        public = sorted(
+            item.name
+            for item in runner.body
+            if isinstance(item, ast.FunctionDef)
+            and not item.name.startswith("_")
+        )
+        self.assertEqual(public, ["run_one"])
+
+    def test_the_core_passes_them_into_the_reasoning_context(self) -> None:
+        import inspect
+
+        from alx.core.loop import CoreAgent
+
+        source = inspect.getsource(CoreAgent.process)
+        self.assertIn("undelivered_responses=self._undelivered_responses()", source)
 
 
 if __name__ == "__main__":

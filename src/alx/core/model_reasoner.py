@@ -80,6 +80,10 @@ appear in your most recent response, so a draft stated earlier and left behind
 cannot be released later by an answer to some other question. It constrains
 sending only. You may draft, reconsider, abandon a message, or ask anything you
 like in any order, and nothing needs permission except the send itself.
+undelivered_responses names autonomous occasions where you decided to say something
+and no one was there to hear it. The words are not kept, deliberately: decide afresh
+whether anything still matters, say it if so, and resolve the occasion either way
+through the capability. Nothing resolves or expires it for you.
 carried_thoughts holds things you decided were worth keeping on your mind, in your
 own words. They are not tasks and nothing acts on them by itself. You may revisit
 one, let one go, or bring one into conversation when it genuinely fits; when you
@@ -107,6 +111,16 @@ timestamps; do not invent one. Factual memory has null
 person_id and null meaning. Relationship memory requires the matching person_id
 and null meaning. Autobiographical memory has null person_id and requires your
 first-person meaning reflection.
+retrieved_memories holds only what you asked for this turn; it starts empty and
+is never the whole store. Memories you formed in earlier conversations are not
+shown to you unless you retrieve them, so before forming a memory about
+something you may already have recorded, consider one retrieval to see what is
+there. Whether an existing memory already covers it, and whether to leave it,
+add to it, or supersede it, is your judgement.
+A retrieval must be narrowed by more than memory kind: give at least one of
+memory_ids, memory_person_id, memory_formed_after, memory_formed_before or
+memory_source_references. Kinds alone would replay the whole store and is
+refused, which ends the turn without an answer.
 A memory identifier names one memory permanently. Every memory you form takes a
 new identifier, including one that refines or corrects something you already
 remember. To replace an earlier memory, give the new one its own identifier and
@@ -115,6 +129,12 @@ kept and its history stays inspectable. A superseding memory must be the same
 kind and concern the same person as the one it replaces. Reusing an identifier
 that already exists changes nothing and is refused, so an identifier you have
 seen among retrieved_memories is not available for a new memory.
+When memory_identifier_conflicts is present, a memory you proposed reused an
+identifier that already holds different content, and nothing was stored for it.
+The entry shows what that identifier already means. Decide what to do: keep the
+existing memory and drop yours, form yours under a different identifier, or
+supersede the existing one. Repeating the same identifier with the same content
+stores nothing again.
 In a goal update, null replacement fields preserve
 their current values; arrays of new history/evidence contain additions only. Return
 only the required structured decision.
@@ -470,6 +490,22 @@ def _context_payload(context: ReasoningContext) -> str:
             }
             for item in context.carried_thoughts
         ],
+        # References and timing only. Not the words: an undelivered response is
+        # a fact about an occasion, and reprinting the prose would make this a
+        # delivery queue.
+        "undelivered_responses": [
+            {
+                "opportunity_id": item.get("opportunity_id"),
+                "origin": item.get("origin"),
+                "arose_at": item.get("arose_at"),
+                "references": [
+                    reference
+                    for reference in (item.get("refs") or "").split("\x1f")
+                    if reference
+                ],
+            }
+            for item in context.undelivered_responses
+        ],
         "unfinished_goals": [
             {
                 "goal_id": item.goal_id,
@@ -555,6 +591,9 @@ def _context_payload(context: ReasoningContext) -> str:
             }
             for item in context.memories
         ],
+        # Identifiers she proposed that already name something else. The facts
+        # only; what to do about each is her decision.
+        "memory_identifier_conflicts": [dict(item) for item in context.memory_conflicts],
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
