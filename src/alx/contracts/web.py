@@ -27,6 +27,31 @@ MAX_REDIRECTS = 3
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 ALLOWED_PORTS = frozenset({80, 443})
 
+# Every field a page controls needs its own ceiling, not just the body. A
+# title is attacker-chosen text exactly as the body is, and unlike the body it
+# is persisted in durable goal state, so an unbounded one would bloat the Core
+# prompt and the goal store permanently. These are mechanical context and
+# storage limits; they say nothing about which content matters.
+MAX_TITLE_CHARACTERS = 300
+MAX_PUBLISHER_CHARACTERS = 200
+MAX_URL_CHARACTERS = 2_048
+
+# The whole retrieval, not one socket operation. A per-operation timeout is
+# reset by every chunk that arrives, so a server sending one byte at a time
+# can hold a request open indefinitely without ever tripping it.
+TOTAL_DEADLINE_SECONDS = 20.0
+CONNECT_TIMEOUT_SECONDS = 10.0
+
+# Worst-case durable metadata per retrieval, used to prove the goal store
+# cannot be bloated by a hostile page. Three URLs, a title and a publisher,
+# plus room for field names and the retrieval timestamp.
+MAX_DURABLE_METADATA_CHARACTERS = (
+    3 * MAX_URL_CHARACTERS
+    + MAX_TITLE_CHARACTERS
+    + MAX_PUBLISHER_CHARACTERS
+    + 512
+)
+
 # D-025 declares only textual content types readable in V1.
 ALLOWED_CONTENT_TYPES = frozenset(
     {"text/html", "application/xhtml+xml", "text/plain"}
@@ -90,13 +115,20 @@ class PublicUrl:
     the connection honest: the socket goes to `addresses`, while TLS and the
     `Host` header keep using `host`. Splitting them across call sites is how a
     pinned connection quietly loses its certificate check.
+
+    The parts are kept separately, never as one string to be edited later.
+    Substituting an address into a URL by text is how `EXAMPLE.COM` survived
+    into a transport destination and was resolved a second time: the spelling
+    that was validated and the spelling that was replaced were not the same
+    string. Both URLs below are therefore built from validated components.
     """
 
-    url: str
     scheme: str
     host: str
     port: int
     addresses: tuple[PublicAddress, ...]
+    path: str = "/"
+    query: str = ""
 
     def __post_init__(self) -> None:
         if self.scheme not in ALLOWED_SCHEMES:
@@ -105,12 +137,50 @@ class PublicUrl:
             raise ValueError(f"port is not a public web port: {self.port}")
         if not self.host.strip():
             raise ValueError("host must not be blank")
+        if self.host != self.host.strip().lower().rstrip("."):
+            raise ValueError("host must already be normalised")
         if not self.addresses:
             raise ValueError("a public URL requires at least one validated address")
+        if not self.path.startswith("/"):
+            raise ValueError("path must be absolute")
 
     @property
     def source_domain(self) -> str:
         return self.host
+
+    def _authority(self, host: str) -> str:
+        bracketed = f"[{host}]" if ":" in host else host
+        default = 80 if self.scheme == "http" else 443
+        return bracketed if self.port == default else f"{bracketed}:{self.port}"
+
+    @property
+    def url(self) -> str:
+        """What AL/X asked for and what provenance records: the hostname URL.
+
+        This is never the transport destination. A citation naming an IP
+        address is not something a person can open, and it is not what she
+        requested.
+        """
+        return f"{self.scheme}://{self._authority(self.host)}{self.path}{self.query}"
+
+    def transport_url(self, address: "PublicAddress") -> str:
+        """Where the socket actually goes: one validated literal address.
+
+        The hostname does not appear here at all, so nothing downstream can
+        resolve it a second time. `Host` and `sni_hostname` carry the name
+        instead, which is what keeps the certificate check honest.
+        """
+        if address not in self.addresses:
+            raise ValueError("transport address was not validated for this url")
+        return (
+            f"{self.scheme}://{self._authority(address.literal)}"
+            f"{self.path}{self.query}"
+        )
+
+    @property
+    def host_header(self) -> str:
+        """The `Host` a well-behaved client would have sent for this URL."""
+        return self._authority(self.host)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +202,10 @@ class WebPage:
     content_omitted_characters: int = 0
     title: str | None = None
     publisher: str | None = None
+    # What the publisher says its own address is. Reported beside the fetched
+    # URL, never in place of it: a page's claim about its identity is not the
+    # same fact as where the page was actually read from.
+    canonical_url: str | None = None
 
     def __post_init__(self) -> None:
         if not self.requested_url.strip() or not self.final_url.strip():
@@ -140,11 +214,22 @@ class WebPage:
             raise ValueError("retrieved_at must be timezone aware")
         if self.content_omitted_characters < 0:
             raise ValueError("omitted characters cannot be negative")
-        if len(self.content) > MAX_EXTRACTED_CHARACTERS:
-            raise ValueError(
-                "extracted content exceeds the D-025 bound; it must be cut "
-                "with the shortfall reported, never returned whole"
-            )
+        # Enforced on the record itself, so no construction path can return an
+        # unbounded field. Every one of these is attacker-chosen text.
+        for value, ceiling, name in (
+            (self.content, MAX_EXTRACTED_CHARACTERS, "content"),
+            (self.title, MAX_TITLE_CHARACTERS, "title"),
+            (self.publisher, MAX_PUBLISHER_CHARACTERS, "publisher"),
+            (self.requested_url, MAX_URL_CHARACTERS, "requested_url"),
+            (self.final_url, MAX_URL_CHARACTERS, "final_url"),
+            (self.canonical_url, MAX_URL_CHARACTERS, "canonical_url"),
+            (self.source_domain, MAX_URL_CHARACTERS, "source_domain"),
+        ):
+            if value is not None and len(value) > ceiling:
+                raise ValueError(
+                    f"{name} exceeds its D-025 bound; it must be cut before "
+                    "it reaches the Core or durable state, never returned whole"
+                )
 
 
 class WebFetchProvider(Protocol):

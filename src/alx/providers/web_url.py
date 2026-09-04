@@ -28,7 +28,7 @@ import ipaddress
 import socket
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from alx.contracts.web import (
     ALLOWED_PORTS,
@@ -51,12 +51,43 @@ def _refuse(detail: str) -> WebRetrievalError:
     return WebRetrievalError(URL_NOT_PUBLIC, detail)
 
 
+# Ranges Python's own flags do not refuse, or refuse inconsistently between
+# versions. Each is a real destination that is not the public internet, so
+# each is named explicitly rather than left to `is_global` to catch.
+_EXCLUDED_NETWORKS = (
+    # RFC 6598 carrier-grade NAT. Neither private nor global to Python, and
+    # routable straight into a carrier's or a hosting provider's own network.
+    ipaddress.ip_network("100.64.0.0/10"),
+    # Deprecated 6to4 relay anycast: is_global is True, and it is a tunnel.
+    ipaddress.ip_network("192.88.99.0/24"),
+    # Benchmarking range, frequently wired to internal test infrastructure.
+    ipaddress.ip_network("198.18.0.0/15"),
+    # Documentation ranges: never a real public destination.
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    ipaddress.ip_network("2001:db8::/32"),
+    # NAT64 well-known prefix: an embedded IPv4 destination behind a translator.
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    # ORCHID / deprecated ORCHID: not routable destinations.
+    ipaddress.ip_network("2001:10::/28"),
+    ipaddress.ip_network("2001:20::/28"),
+)
+
+
 def is_public_address(value: str) -> bool:
     """Report whether one literal address is on the public internet.
 
-    An IPv4-mapped IPv6 address is unwrapped before classification. Without
-    that, `::ffff:127.0.0.1` presents as an ordinary global IPv6 address and
-    every loopback rule above is bypassed by spelling.
+    Acceptance requires two things, not one: the address must be globally
+    routable *and* outside every category this boundary excludes. Neither test
+    is sufficient alone. `is_global` misses RFC 6598 shared space, which is a
+    real reachable network; and it is True for multicast and for the 6to4
+    relay prefix, so it cannot simply replace the category flags either.
+
+    Embedded IPv4 addresses are unwrapped before classification. Without that,
+    `::ffff:127.0.0.1` presents as an ordinary global IPv6 address and every
+    loopback rule is bypassed by spelling alone.
     """
     try:
         address = ipaddress.ip_address(value)
@@ -73,14 +104,19 @@ def is_public_address(value: str) -> bool:
             # Teredo carries the server address in the high bits; the tunnel
             # can reach anything, so it is refused rather than unwrapped.
             return False
-    return not (
+    if (
         address.is_loopback
         or address.is_private
         or address.is_link_local
         or address.is_multicast
         or address.is_reserved
         or address.is_unspecified
-    )
+    ):
+        return False
+    if any(address in network for network in _EXCLUDED_NETWORKS
+           if network.version == address.version):
+        return False
+    return address.is_global
 
 
 def _validated_addresses(
@@ -184,10 +220,17 @@ def parse_public_url(raw: str, resolver: Resolver | None = None) -> PublicUrl:
             host, port, resolver or system_resolver
         )
 
-    normalised = urlunsplit(
-        (scheme, parts.netloc, parts.path or "/", parts.query, "")
+    # Components, never a string to be edited later. The transport URL and the
+    # provenance URL are both built from these, so the spelling that was
+    # validated is necessarily the spelling that is used.
+    return PublicUrl(
+        scheme,
+        host,
+        port,
+        addresses,
+        path=parts.path or "/",
+        query=f"?{parts.query}" if parts.query else "",
     )
-    return PublicUrl(normalised, scheme, host, port, addresses)
 
 
 def _as_literal(host: str) -> str | None:

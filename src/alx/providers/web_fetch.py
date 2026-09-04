@@ -24,18 +24,24 @@ from __future__ import annotations
 import gzip
 import re
 import zlib
+from collections.abc import Callable
 from datetime import UTC, datetime
-from html import unescape
 from html.parser import HTMLParser
+from time import monotonic as monotonic_clock
 from urllib.parse import urljoin
 
 import httpx
 
 from alx.contracts.web import (
     ALLOWED_CONTENT_TYPES,
+    CONNECT_TIMEOUT_SECONDS,
     MAX_DOWNLOAD_BYTES,
     MAX_EXTRACTED_CHARACTERS,
+    MAX_PUBLISHER_CHARACTERS,
     MAX_REDIRECTS,
+    MAX_TITLE_CHARACTERS,
+    MAX_URL_CHARACTERS,
+    TOTAL_DEADLINE_SECONDS,
     PAGE_TOO_LARGE,
     PROVIDER_FAILED,
     RETRIEVAL_BLOCKED,
@@ -170,27 +176,53 @@ def _decompress(raw: bytes, encoding: str) -> bytes:
 
     A compressed response that expands past the ceiling is refused. Trusting
     the compressed size would let a small download become an unbounded buffer.
+
+    Every concatenated member is consumed, not just the first. A gzip stream
+    may hold several members, and returning only the first would hand back
+    part of a page while reporting a complete read — evidence that is wrong
+    without saying so. The aggregate output is held to the same ceiling, and
+    input that cannot be consumed is a failure rather than a silent truncation.
     """
     encoding = encoding.lower().strip()
+    if encoding in ("", "identity"):
+        return raw
+    if encoding not in ("gzip", "deflate", "x-gzip"):
+        raise WebRetrievalError(
+            UNSUPPORTED_CONTENT_TYPE, f"content encoding: {encoding}"
+        )
+    window = 16 + zlib.MAX_WBITS if encoding in ("gzip", "x-gzip") else zlib.MAX_WBITS
+    remaining = raw
+    chunks: list[bytes] = []
+    total = 0
     try:
-        if encoding == "gzip":
-            machine = zlib.decompressobj(16 + zlib.MAX_WBITS)
-        elif encoding == "deflate":
-            machine = zlib.decompressobj()
-        elif encoding in ("", "identity"):
-            return raw
-        else:
-            raise WebRetrievalError(
-                UNSUPPORTED_CONTENT_TYPE, f"content encoding: {encoding}"
-            )
-        out = machine.decompress(raw, MAX_DOWNLOAD_BYTES + 1)
-        if len(out) > MAX_DOWNLOAD_BYTES:
-            raise WebRetrievalError(PAGE_TOO_LARGE, "decompressed beyond the bound")
-        return out
+        while remaining:
+            machine = zlib.decompressobj(window)
+            produced = machine.decompress(remaining, MAX_DOWNLOAD_BYTES + 1 - total)
+            total += len(produced)
+            if total > MAX_DOWNLOAD_BYTES:
+                raise WebRetrievalError(
+                    PAGE_TOO_LARGE, "decompressed beyond the bound"
+                )
+            chunks.append(produced)
+            if machine.unconsumed_tail:
+                # Output was cut short by the ceiling rather than by the end of
+                # the stream, so the remaining input cannot fit either.
+                raise WebRetrievalError(
+                    PAGE_TOO_LARGE, "decompressed beyond the bound"
+                )
+            if not machine.eof:
+                # A member that never ended means the body was truncated in
+                # transit. Returning what arrived would be partial evidence.
+                raise WebRetrievalError(PROVIDER_FAILED, "incomplete compressed body")
+            leftover = machine.unused_data
+            if leftover == remaining:
+                raise WebRetrievalError(PROVIDER_FAILED, "compressed body stalled")
+            remaining = leftover
     except WebRetrievalError:
         raise
     except (zlib.error, gzip.BadGzipFile, OSError):
         raise WebRetrievalError(PROVIDER_FAILED, "malformed compression") from None
+    return b"".join(chunks)
 
 
 def _charset(content_type: str, body: bytes) -> str:
@@ -211,30 +243,49 @@ class HttpWebFetchProvider:
         self,
         client: httpx.Client | None = None,
         resolver: Resolver | None = None,
-        connect_timeout: float = 10.0,
-        total_timeout: float = 20.0,
+        connect_timeout: float = CONNECT_TIMEOUT_SECONDS,
+        total_deadline: float = TOTAL_DEADLINE_SECONDS,
         now: object = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._client = client or httpx.Client(
-            timeout=httpx.Timeout(total_timeout, connect=connect_timeout),
+            # Per-operation bounds only. They stop one stalled socket; they do
+            # not bound the retrieval, because every arriving chunk resets the
+            # read timer. The wall-clock deadline below is what actually ends
+            # a slow-drip response.
+            timeout=httpx.Timeout(total_deadline, connect=connect_timeout),
             # Redirects are revalidated by hand; httpx must never follow one.
             follow_redirects=False,
             # No cookie jar: a public reader keeps no session across requests.
             cookies=None,
         )
         self._resolver = resolver
+        self._total_deadline = total_deadline
         self._now = now or (lambda: datetime.now(UTC))
+        # Injected so a deadline can be proved with a controlled clock rather
+        # than by sleeping, which would make the test slow and flaky.
+        self._monotonic = monotonic or monotonic_clock
 
     def fetch(self, url: str, max_characters: int = MAX_EXTRACTED_CHARACTERS) -> WebPage:
-        """Retrieve one page, following at most MAX_REDIRECTS validated hops."""
+        """Retrieve one page, following at most MAX_REDIRECTS validated hops.
+
+        One deadline covers the whole operation — resolution, connection,
+        headers, every redirect, body streaming and decompression. It is taken
+        once here and never extended, so a redirect chain cannot buy more time
+        than a single request would have had.
+        """
         bound = max(1, min(int(max_characters), MAX_EXTRACTED_CHARACTERS))
-        requested = url
+        requested = url[:MAX_URL_CHARACTERS]
         current = url
         seen: set[str] = set()
+        expires_at = self._monotonic() + self._total_deadline
 
         for _hop in range(MAX_REDIRECTS + 1):
+            self._check_deadline(expires_at)
             # Every hop is revalidated in full: scheme, credentials, port, and
-            # every address the new hostname resolves to.
+            # every address the new hostname resolves to. Nothing from the
+            # previous hop survives — the address, Host and SNI are all derived
+            # from this newly validated URL.
             public = parse_public_url(current, self._resolver)
             if public.url in seen:
                 raise WebRetrievalError(RETRIEVAL_BLOCKED, "redirect loop")
@@ -242,16 +293,20 @@ class HttpWebFetchProvider:
 
             try:
                 with self._request(public) as response:
+                    self._check_deadline(expires_at)
                     if response.status_code in (301, 302, 303, 307, 308):
                         location = response.headers.get("location", "").strip()
                         if not location:
                             raise WebRetrievalError(
                                 RETRIEVAL_BLOCKED, "redirect without location"
                             )
+                        # Resolved against the validated hostname URL, never
+                        # against the pinned transport URL, so a relative
+                        # Location cannot inherit the literal address.
                         current = urljoin(public.url, location)
                         continue
 
-                    return self._page(requested, public, response, bound)
+                    return self._page(requested, public, response, bound, expires_at)
             except httpx.TimeoutException:
                 raise WebRetrievalError(
                     RETRIEVAL_TIMEOUT, "request timed out"
@@ -262,6 +317,10 @@ class HttpWebFetchProvider:
                 ) from None
 
         raise WebRetrievalError(RETRIEVAL_BLOCKED, "too many redirects")
+
+    def _check_deadline(self, expires_at: float) -> None:
+        if self._monotonic() >= expires_at:
+            raise WebRetrievalError(RETRIEVAL_TIMEOUT, "total deadline expired")
 
     def _request(self, public):
         """Connect to a validated address while keeping the real hostname.
@@ -278,23 +337,14 @@ class HttpWebFetchProvider:
         rather than a bound.
         """
         address = public.addresses[0]
-        authority = (
-            f"[{address.literal}]" if ":" in address.literal else address.literal
-        )
-        pinned = public.url.replace(f"//{public.host}", f"//{authority}", 1)
-        if f":{public.port}" not in pinned.split("/")[2]:
-            pinned = pinned.replace(f"//{authority}", f"//{authority}:{public.port}", 1)
-
-        host_header = (
-            public.host
-            if public.port in (80, 443)
-            else f"{public.host}:{public.port}"
-        )
         return self._client.stream(
             "GET",
-            pinned,
+            # Built from validated components, never by editing the original
+            # URL. A text substitution missed `EXAMPLE.COM`, leaving the
+            # hostname in the destination for httpx to resolve a second time.
+            public.transport_url(address),
             headers={
-                "Host": host_header,
+                "Host": public.host_header,
                 "User-Agent": "AL/X-web-reader/1.0 (+public read-only)",
                 "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
                 "Accept-Encoding": "gzip, deflate",
@@ -304,7 +354,14 @@ class HttpWebFetchProvider:
             extensions={"sni_hostname": public.host},
         )
 
-    def _page(self, requested: str, public, response: httpx.Response, bound: int) -> WebPage:
+    def _page(
+        self,
+        requested: str,
+        public,
+        response: httpx.Response,
+        bound: int,
+        expires_at: float,
+    ) -> WebPage:
         status = response.status_code
         if status in (401, 403, 429):
             raise WebRetrievalError(RETRIEVAL_BLOCKED, f"status {status}")
@@ -313,11 +370,17 @@ class HttpWebFetchProvider:
 
         content_type = response.headers.get("content-type", "")
         media = content_type.split(";")[0].strip().lower()
-        if media and media not in ALLOWED_CONTENT_TYPES:
-            raise WebRetrievalError(UNSUPPORTED_CONTENT_TYPE, media)
+        # Fails closed. D-025 authorises only the declared textual types, and
+        # an absent or unparseable type is not one of them. Bytes that happen
+        # to decode are not evidence that a response was ever text.
+        if media not in ALLOWED_CONTENT_TYPES:
+            raise WebRetrievalError(
+                UNSUPPORTED_CONTENT_TYPE, media or "missing content type"
+            )
 
-        raw = self._read_bounded(response)
+        raw = self._read_bounded(response, expires_at)
         body = _decompress(raw, response.headers.get("content-encoding", ""))
+        self._check_deadline(expires_at)
         markup = body.decode(_charset(content_type, body), errors="replace")
 
         if media == "text/plain":
@@ -333,32 +396,54 @@ class HttpWebFetchProvider:
             )
 
         omitted = max(0, len(text) - bound)
-        final = str(response.url)
-        # A canonical link is the publisher's own statement of the page's
-        # address. It is recorded as the final URL only when it names the same
-        # host, so a canonical tag cannot move provenance to another site.
-        if canonical:
-            resolved = urljoin(public.url, canonical)
-            try:
-                if parse_public_url(resolved, self._resolver).host == public.host:
-                    final = resolved
-            except WebRetrievalError:
-                pass
+        # Provenance is the validated hostname URL of the hop actually fetched
+        # — never the pinned transport URL, which names an IP address nobody
+        # can open, and never the page's own claim about itself.
+        final = public.url
+        canonical_url = self._canonical(public, canonical)
 
         return WebPage(
             requested_url=requested,
-            final_url=final,
+            final_url=final[:MAX_URL_CHARACTERS],
             source_domain=public.source_domain,
             retrieved_at=self._now(),
             http_status=status,
             content=text[:bound],
             content_omitted_characters=omitted,
-            title=title or None,
-            publisher=publisher or None,
+            # Every page-controlled field is cut to its own ceiling. A title is
+            # attacker-chosen text just as the body is, and it is the half that
+            # reaches durable state.
+            title=(title.strip()[:MAX_TITLE_CHARACTERS] or None) if title else None,
+            publisher=(
+                (publisher.strip()[:MAX_PUBLISHER_CHARACTERS] or None)
+                if publisher
+                else None
+            ),
+            canonical_url=canonical_url,
         )
 
-    @staticmethod
-    def _read_bounded(response: httpx.Response) -> bytes:
+    def _canonical(self, public, declared: str | None) -> str | None:
+        """The publisher's claim about its own address, reported separately.
+
+        It is never allowed to become `final_url`. A page asserting where it
+        lives is not the same fact as where it was read from, and letting the
+        assertion win would let a page rewrite its own provenance. It is kept
+        only when it validates as public and names the same host, so it cannot
+        even point the reader at another site.
+        """
+        if not declared or len(declared) > MAX_URL_CHARACTERS:
+            return None
+        try:
+            resolved = urljoin(public.url, declared)
+            if len(resolved) > MAX_URL_CHARACTERS:
+                return None
+            if parse_public_url(resolved, self._resolver).host != public.host:
+                return None
+        except (WebRetrievalError, ValueError):
+            return None
+        return resolved
+
+    def _read_bounded(self, response: httpx.Response, expires_at: float) -> bytes:
         """Count the bytes actually on the wire; never trust Content-Length.
 
         A declared length is a claim by the server, so the arriving bytes are
@@ -371,6 +456,10 @@ class HttpWebFetchProvider:
         chunks: list[bytes] = []
         total = 0
         for chunk in response.iter_raw():
+            # Checked per chunk, because a per-operation read timeout is reset
+            # by every byte that arrives. A server drip-feeding one byte before
+            # each timeout would otherwise hold this request open forever.
+            self._check_deadline(expires_at)
             total += len(chunk)
             if total > MAX_DOWNLOAD_BYTES:
                 raise WebRetrievalError(PAGE_TOO_LARGE, "download exceeded the bound")

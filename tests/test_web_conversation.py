@@ -342,6 +342,166 @@ class WebConversationTests(unittest.TestCase):
         )
         self.assertEqual(len(self.store.list_goals()), 1)
 
+    def test_a_correction_changes_which_page_she_reads(self) -> None:
+        """Friedl corrects an earlier assumption; no new code path is needed."""
+        corrected = "https://example.com/2026-report"
+        fetcher = StubFetcher(StubFetcher.page(), StubFetcher.page("Ninety percent."))
+        first = Queued(
+            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(response="That one says sixty percent."),
+        )
+        self.agent(first, fetcher).process(
+            conversation("read the reservoir report"), RETENTION, 3
+        )
+
+        # The correction arrives as ordinary conversation. She reads the page
+        # she is now told is the right one and revises what she reports.
+        after = Queued(
+            AgentDecision(
+                call=CapabilityCall(
+                    "call-web-2", ASK_WEB_PAGE,
+                    {"page_id": "p2", "url": corrected},
+                )
+            ),
+            AgentDecision(response="Corrected: the 2026 report says ninety percent."),
+            selects="goal-1",
+        )
+        outcome = self.agent(after, fetcher, identifiers=()).process(
+            conversation("no, I meant the 2026 one"), RETENTION, 3
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(fetcher.calls, [URL, corrected])
+        # One goal throughout: a correction refines the work, it does not
+        # start a second piece of it.
+        self.assertEqual(len(self.store.list_goals()), 1)
+        capabilities = [
+            item.call.capability_id
+            for item in self.store.load("goal-1").state.attempts
+        ]
+        self.assertEqual(capabilities, [ASK_WEB_PAGE, ASK_WEB_PAGE])
+
+    def test_an_interruption_is_followed_by_resumption(self) -> None:
+        """Unrelated conversation between two turns loses none of the work."""
+        fetcher = StubFetcher()
+        first = Queued(
+            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(response="Sixty percent."),
+        )
+        self.agent(first, fetcher).process(
+            conversation("read the reservoir report"), RETENTION, 3
+        )
+
+        # An interruption about something else entirely, attaching to no goal.
+        interruption = Queued(AgentDecision(response="Twenty past four."))
+        self.agent(interruption, fetcher, identifiers=()).process(
+            conversation("hang on, what's the time?"), RETENTION, 2
+        )
+
+        # She picks the work up again: first naming the goal to see its state,
+        # then answering from what that state already holds.
+        resumed = Queued(
+            AgentDecision(goal_id="goal-1"),
+            AgentDecision(response="Back to the reservoir: sixty percent."),
+            selects="goal-1",
+        )
+        outcome = self.agent(resumed, fetcher, identifiers=()).process(
+            conversation("right, back to the reservoir"), RETENTION, 3
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(len(self.store.list_goals()), 1)
+        # The retrieval made before the interruption is still hers to cite,
+        # and no page was fetched again to recover it.
+        attempt = resumed.contexts[-1].active_goal.attempts[-1]
+        self.assertEqual(attempt.call.call_id, "call-web-1")
+        self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(fetcher.calls, [URL])
+
+    def test_she_verifies_the_retrieval_before_claiming_completion(self) -> None:
+        """A failed read is not a finished goal, however tempting the story."""
+        fetcher = StubFetcher(
+            WebRetrievalError("retrieval_blocked"), StubFetcher.page()
+        )
+        reasoner = Queued(
+            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            # She does not declare completion on the failure. She looks again.
+            AgentDecision(
+                call=CapabilityCall(
+                    "call-web-2", ASK_WEB_PAGE,
+                    {"page_id": "p2", "url": "https://example.org/mirror"},
+                )
+            ),
+            AgentDecision(
+                response="Sixty percent, and I have read the page myself.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.REQUEST_COMPLETION,
+                    new_evidence=(
+                        Evidence(
+                            "evidence-1",
+                            "web_page",
+                            {"url": "https://example.org/mirror",
+                             "retrieved_at": NOW.isoformat()},
+                            supports=("criterion-1",),
+                            source_references=("attempt:call-web-2",),
+                        ),
+                    ),
+                ),
+                response_requires_goal_commit=True,
+            ),
+        )
+        outcome = self.agent(reasoner, fetcher).process(
+            conversation("read the reservoir report"), RETENTION, 4
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        state = self.store.load("goal-1").state
+        # Completion cites the successful read, not the blocked one.
+        self.assertEqual(
+            state.evidence[-1].source_references, ("attempt:call-web-2",)
+        )
+        failed, succeeded = state.attempts
+        self.assertIs(failed.result.state, CapabilityResultState.FAILED)
+        self.assertIs(succeeded.result.state, CapabilityResultState.SUCCEEDED)
+
+
+class ScenariosNotApplicableTests(unittest.TestCase):
+    """Why two of the nine required scenarios have no test in this slice.
+
+    LAW_ENFORCEMENT requires nine scenarios for a conversational capability.
+    Seven are exercised above. The remaining two are recorded here rather than
+    silently omitted, because a missing scenario and an inapplicable one look
+    identical from a test list.
+    """
+
+    def test_no_approval_pause_exists_to_exercise(self) -> None:
+        """Reading a public page is not a consequential action.
+
+        D-025 makes the network boundary, the resource bounds and GET-only the
+        control, deliberately rather than an approval ceremony: asking Friedl
+        to approve each page would make reading something he directs rather
+        than something she does while thinking. There is therefore no approval
+        pause in this capability to test. Any future capability that writes,
+        posts or spends would need its own decision and its own gate.
+        """
+        from alx.bootstrap.web import build_web_runtime
+
+        runtime = build_web_runtime(True, lambda: "call-1")
+        self.addCleanup(runtime.provider.close)
+        self.assertFalse(runtime.policies[ASK_WEB_PAGE].approval_required)
+
+    def test_this_slice_registers_only_one_capability(self) -> None:
+        """A multi-capability goal needs a second capability to combine with.
+
+        Steps 1-3 deliver `ask_web_page` alone; `ask_web_search` waits for the
+        step-3 review. The multi-capability scenario becomes testable, and must
+        be tested, when search lands.
+        """
+        from alx.bootstrap.web import build_web_runtime
+
+        runtime = build_web_runtime(True, lambda: "call-1")
+        self.addCleanup(runtime.provider.close)
+        self.assertEqual(
+            [item.capability_id for item in runtime.definitions], [ASK_WEB_PAGE]
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

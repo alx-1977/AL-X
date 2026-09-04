@@ -73,6 +73,9 @@ DEFINITION = CapabilityDefinition(
             "content_omitted_characters": _INTEGER,
             "title": _STRING,
             "publisher": _STRING,
+            # The publisher's own claim about this page's address, reported
+            # beside the fetched URL and never in place of it.
+            "canonical_url": _STRING,
         },
         (
             "requested_url",
@@ -148,6 +151,8 @@ def build_web_executors(
             values["title"] = page.title
         if page.publisher:
             values["publisher"] = page.publisher
+        if page.canonical_url:
+            values["canonical_url"] = page.canonical_url
         if page.content_omitted_characters > 0:
             values["content_omitted_characters"] = page.content_omitted_characters
 
@@ -169,6 +174,7 @@ def build_web_executors(
                     "http_status",
                     "title",
                     "publisher",
+                    "canonical_url",
                     "content_omitted_characters",
                 )
                 if key in values
