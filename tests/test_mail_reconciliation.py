@@ -77,9 +77,12 @@ class MailReconciliationTest(unittest.TestCase):
     def test_a_pending_observation_that_vanishes_is_settled_silently(self) -> None:
         self.discover(1, 2)
         self.present(1)
-        events = self.state.reconcile("INBOX", VALIDITY, (1,))
-        self.assertEqual(events, (), "nothing was said about uid 2, so nothing is owed")
+        self.assertEqual(
+            self.state.reconcile("INBOX", VALIDITY, (1,)), 0,
+            "nothing was said about uid 2, so nothing is owed",
+        )
         self.assertEqual(self.states()[2], "done")
+        self.assertEqual(self.state.pending_vanished(), ())
 
     def test_settling_a_pending_observation_discards_its_content(self) -> None:
         """Retention: a settled observation keeps references, not headers."""
@@ -96,7 +99,8 @@ class MailReconciliationTest(unittest.TestCase):
     def test_a_presented_observation_that_vanishes_is_returned_to_her(self) -> None:
         self.discover(1)
         self.present(1)
-        events = self.state.reconcile("INBOX", VALIDITY, ())
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), 1)
+        events = self.state.pending_vanished()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].kind, "mail.message_vanished")
         self.assertEqual(events[0].data["uid"], "1")
@@ -125,9 +129,13 @@ class MailReconciliationTest(unittest.TestCase):
         """Otherwise every 15-second poll spends a reasoning call on it."""
         self.discover(1)
         self.present(1)
-        self.assertEqual(len(self.state.reconcile("INBOX", VALIDITY, ())), 1)
-        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), ())
-        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), ())
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), 1)
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), 0)
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), 0)
+        self.assertEqual(
+            len(self.state.pending_vanished()), 1,
+            "detected once, and still awaiting delivery",
+        )
 
     def test_the_report_is_not_repeated_after_a_restart(self) -> None:
         """An in-process guard would forget; a stranded ghost outlives the run."""
@@ -137,7 +145,11 @@ class MailReconciliationTest(unittest.TestCase):
         self.state.close()
         restarted = SQLiteMailObservationState(self.path)
         self.addCleanup(restarted.close)
-        self.assertEqual(restarted.reconcile("INBOX", VALIDITY, ()), ())
+        self.assertEqual(restarted.reconcile("INBOX", VALIDITY, ()), 0)
+        self.assertEqual(
+            len(restarted.pending_vanished()), 1,
+            "found before the restart, still undelivered, so still carried",
+        )
         self.assertEqual(
             restarted.current(), None,
             "and the observation is still hers to release",
@@ -146,9 +158,14 @@ class MailReconciliationTest(unittest.TestCase):
     def test_delivering_a_vanished_report_records_no_presentation(self) -> None:
         self.discover(1)
         self.present(1)
-        event = self.state.reconcile("INBOX", VALIDITY, ())[0]
+        self.state.reconcile("INBOX", VALIDITY, ())
+        event = self.state.pending_vanished()[0]
         self.assertFalse(self.state.record_delivery(event.event_id))
         self.assertEqual(self.states()[1], "presented")
+        self.assertEqual(
+            self.state.pending_vanished(), (),
+            "carried once; a later session does not repeat it",
+        )
 
     # -- what reconciliation must not do ---------------------------------
 
@@ -169,7 +186,7 @@ class MailReconciliationTest(unittest.TestCase):
     def test_a_message_still_in_the_mailbox_is_left_alone(self) -> None:
         self.discover(1, 2)
         self.present(1)
-        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1, 2)), ())
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1, 2)), 0)
         self.assertEqual(self.states(), {1: "presented", 2: "pending"})
 
     def test_reconciliation_does_not_move_the_cursor(self) -> None:
@@ -186,7 +203,7 @@ class MailReconciliationTest(unittest.TestCase):
         """Identifiers from another generation are not comparable."""
         self.discover(1)
         self.present(1)
-        self.assertEqual(self.state.reconcile("INBOX", "999", ()), ())
+        self.assertEqual(self.state.reconcile("INBOX", "999", ()), 0)
         self.assertEqual(self.states()[1], "presented")
 
 
@@ -299,17 +316,23 @@ class ScanReportsDisappearanceTest(unittest.TestCase):
         self.state.record_delivery(event.event_id)
 
         del self.imap.items[2]                      # Friedl deletes it himself
-        reported = self.adapter.scan()
+        self.adapter.scan()
 
+        reported = self.state.pending_vanished()
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0].kind, "mail.message_vanished")
         self.assertEqual(reported[0].data["uid"], "2")
-        self.assertEqual(self.adapter.scan(), (), "and only once")
+        self.adapter.scan()
+        self.assertEqual(
+            len(self.state.pending_vanished()), 1,
+            "found once; scanning again neither repeats nor loses it",
+        )
 
-    def test_scan_still_reports_nothing_when_the_mailbox_is_unchanged(self) -> None:
+    def test_scan_finds_nothing_vanished_when_the_mailbox_is_unchanged(self) -> None:
         self.adapter.scan()
         self.imap.items[2] = message("Order received", "body")
-        self.assertEqual(self.adapter.scan(), ())
+        self.adapter.scan()
+        self.assertEqual(self.state.pending_vanished(), ())
 
 
 if __name__ == "__main__":

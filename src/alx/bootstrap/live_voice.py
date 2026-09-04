@@ -53,6 +53,7 @@ from alx.continuity import (
     SQLiteOpportunityLedger,
 )
 from alx.observability import ConfiguredPricingWorstCase
+from alx.providers import MailPoller
 from alx.observability.autonomous_budget import SQLiteAutonomousLedger
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
@@ -165,8 +166,9 @@ async def run(repository_root: Path) -> None:
     current_goal_state: ContextVar[Any] = ContextVar(
         "alx_current_notebook_goal_state", default=None
     )
+    mail_settings = MailSettings.from_environment(environment)
     mail_runtime = build_mail_runtime(
-        MailSettings.from_environment(environment),
+        mail_settings,
         storage_root,
         lambda: current_call_id[0],
     )
@@ -514,10 +516,23 @@ async def run(repository_root: Path) -> None:
         core_turn_lock,
         autonomous_due_check_seconds(environment),
     )
+    # Watching the mailbox is not a property of whether Friedl has a browser
+    # open, so the scan lives here beside the transport rather than inside a
+    # voice exchange. It is purely mechanical: it discovers, advances the
+    # cursor and reconciles into durable state, and makes no Core call. What
+    # it finds reaches AL/X through the one delivery path a session already
+    # owns.
+    mail_store_lock = asyncio.Lock()
+    mail_poller = MailPoller(
+        mail_runtime.source,
+        mail_settings.poll_seconds,
+        mail_store_lock,
+    )
     try:
         async with asyncio.TaskGroup() as runtime_tasks:
             runtime_tasks.create_task(server.serve_forever())
             runtime_tasks.create_task(due_cognition.run())
+            runtime_tasks.create_task(mail_poller.run())
     finally:
         # Cancelling the producer does not stop work already running inside
         # asyncio.to_thread: the coroutine unwinds while the worker keeps going.
@@ -526,6 +541,11 @@ async def run(repository_root: Path) -> None:
         # critical section is executing to reach its own durable boundary, and
         # nothing new can start because the producer is already cancelled.
         async with core_turn_lock:
+            pass
+        # The same wait for the mail scan: cancelling its task does not stop a
+        # scan already running on a worker thread, and closing the observation
+        # store under one would pull SQLite out from beneath a write.
+        async with mail_store_lock:
             pass
         mail_runtime.observations.close()
         conversation_store.close()

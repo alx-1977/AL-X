@@ -691,9 +691,19 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "create_task"
         ]
-        # Exactly two: the voice server, and the due-cognition tick.
-        self.assertEqual(len(scheduled), 2)
-        for call in scheduled:
-            rendered = ast.dump(call)
-            with self.subTest(task=rendered[:60]):
-                self.assertNotIn("research", rendered.lower())
+        # Exactly three: the voice server, the due-cognition tick, and the
+        # mechanical mail poll. Each is named, so a fourth scheduled activity
+        # fails here rather than passing on a count.
+        rendered = [ast.dump(call) for call in scheduled]
+        self.assertEqual(len(scheduled), 3, rendered)
+        self.assertEqual(
+            sorted(
+                name
+                for name in ("serve_forever", "due_cognition", "mail_poller")
+                if any(name in item for item in rendered)
+            ),
+            ["due_cognition", "mail_poller", "serve_forever"],
+        )
+        for item in rendered:
+            with self.subTest(task=item[:60]):
+                self.assertNotIn("research", item.lower())

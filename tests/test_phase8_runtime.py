@@ -255,7 +255,31 @@ class SharedLockTests(Harness):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "Lock"
         ]
-        self.assertEqual(len(locks), 1)
+        # Two, and only these two, each guarding a different thing: one Core
+        # turn at a time, and no store closed under a running mail scan. They
+        # are deliberately not the same object -- a mechanical IMAP round trip
+        # must not block a person turn, and holding the turn lock for one would
+        # couple discovery to cognition.
+        assigned = [
+            node.targets[0].id
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "Lock"
+        ]
+        self.assertEqual(len(locks), 2)
+        self.assertEqual(sorted(assigned), ["core_turn_lock", "mail_store_lock"])
+
+    def test_the_mail_scan_does_not_take_the_core_turn_lock(self) -> None:
+        """Discovery must not be able to stall a person turn, or be stalled."""
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "alx" / "providers" / "mail_poller.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("core_turn_lock", source)
 
     def test_both_paths_receive_the_same_lock_object(self) -> None:
         source = (

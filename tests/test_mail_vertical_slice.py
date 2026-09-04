@@ -252,6 +252,9 @@ class MailProviderTests(unittest.TestCase):
 
         self.adapter.scan()
         self.imap.items[2] = message("New quote", "The quote is R2,000")
+        # Discovery is the process poller's job now, so the delivery stream is
+        # asked only to carry what scanning has already made durable.
+        self.adapter.scan()
         event = asyncio.run(self._next_event())
         self.assertEqual(event.transient_data["body"], "The quote is R2,000")
         self.assertNotIn("body", event.data)
@@ -350,6 +353,9 @@ class MailProviderTests(unittest.TestCase):
 
         self.adapter.scan()
         self.imap.items[2] = message("Retry me", "Transient body")
+        # The process poller discovers; each session then carries what is
+        # already durable, which is what makes the re-offer possible.
+        self.adapter.scan()
         first = asyncio.run(self._next_event())
         second = asyncio.run(self._next_event())
         self.assertEqual(first.event_id, second.event_id)
