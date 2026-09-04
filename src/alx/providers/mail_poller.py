@@ -57,15 +57,41 @@ class MailPoller:
                 LOGGER.warning("Mail scan failed: %s", error)
 
     async def tick(self) -> None:
-        """One scan, run so that shutdown cannot close the store beneath it."""
+        """One scan, run so that shutdown cannot close the store beneath it.
+
+        Two things must both hold once cancellation has been requested: the
+        in-flight scan finishes before teardown closes the store, and the
+        poller then stops. They pull in opposite directions, because waiting
+        for a worker ordinarily means taking its outcome, and a scan that fails
+        while we are stopping would otherwise report an ordinary scan failure
+        to `run`, which resumes polling. Shutdown would then never complete.
+
+        So completion and result are separated. `asyncio.wait` waits for the
+        worker to finish without ever retrieving what it finished with; the
+        exception is retrieved only to be logged, and the CancelledError is
+        re-raised regardless. Outside cancellation nothing changes: the scan's
+        outcome propagates to `run` exactly as before.
+        """
         async with self._store_lock:
             worker = asyncio.ensure_future(asyncio.to_thread(self._source.scan))
             try:
                 await asyncio.shield(worker)
             except asyncio.CancelledError:
-                # The scan is already running on a worker thread and will write
-                # whatever it found. Waiting for it here keeps the lock held
-                # until it is finished, so teardown cannot close the store
-                # under it.
-                await worker
+                # Wait for the worker to complete, and deliberately not for
+                # its outcome. `await worker` would raise the scan's own
+                # exception here and carry the cancellation away with it,
+                # which is how a failing scan once made the poller
+                # unstoppable: `run` saw an ordinary scan failure and polled
+                # again, so shutdown during a mailbox outage never finished.
+                #
+                # `gather(return_exceptions=True)` returns once the scan has
+                # finished, whether it succeeded or raised, and hands back a
+                # value nothing here reads. Marking the failure handled also
+                # keeps asyncio from rendering the exception and its traceback
+                # at collection, which would leak exactly the private runtime
+                # state D-012 exists to keep out of the logs.
+                #
+                # Either way the cancellation below is what leaves this frame,
+                # and the store stays locked until the scan is done.
+                await asyncio.gather(worker, return_exceptions=True)
                 raise
