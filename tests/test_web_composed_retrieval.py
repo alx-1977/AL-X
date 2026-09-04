@@ -294,6 +294,43 @@ class ProvenanceCompositionTests(ComposedTestCase):
         self.assertEqual(result.final_url, "http://example.com/hijack")
         self.assertIsNone(result.canonical_url)
 
+    def test_a_canonical_link_never_resolves_a_hostname(self) -> None:
+        """A page must not be able to spend the caller's time on a lookup.
+
+        The canonical host is compared textually against the hostname already
+        validated for this hop. Resolving it would let a page choose a name
+        for this process to look up, after the last deadline check.
+        """
+        ROUTES["/c"] = page(
+            "<html><head><link rel='canonical' href='http://slow.example/x'>"
+            "</head><body><p>ordinary article text</p></body></html>"
+        )
+        lookups = []
+
+        def counting(host: str, port: int):
+            lookups.append(host)
+            return resolving({})(host, port)
+
+        result = self.provider(resolver=counting).fetch("http://example.com/c")
+        self.assertEqual(lookups, ["example.com"])
+        self.assertIsNone(result.canonical_url)
+
+    def test_a_canonical_link_is_refused_once_the_deadline_has_passed(self) -> None:
+        ROUTES["/c"] = page(
+            "<html><head><link rel='canonical' href='http://example.com/pref'>"
+            "</head><body><p>ordinary article text</p></body></html>"
+        )
+        # Every earlier checkpoint is inside the budget; time runs out only
+        # at the canonical check, which is the one under test here.
+        ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0] + [999.0] * 200)
+        provider = HttpWebFetchProvider(
+            client=self.client, resolver=resolving({}),
+            total_deadline=20.0, monotonic=lambda: next(ticks),
+        )
+        with self.assertRaises(WebRetrievalError) as caught:
+            provider.fetch("http://example.com/c")
+        self.assertEqual(caught.exception.code, RETRIEVAL_TIMEOUT)
+
     def test_a_private_canonical_is_discarded(self) -> None:
         ROUTES["/p"] = page(
             "<html><head><link rel='canonical' href='http://127.0.0.1/admin'>"
@@ -302,6 +339,32 @@ class ProvenanceCompositionTests(ComposedTestCase):
         result = self.provider().fetch("http://example.com/p")
         self.assertIsNone(result.canonical_url)
         self.assertEqual(result.final_url, "http://example.com/p")
+
+
+class OverlongUrlTests(ComposedTestCase):
+    """A URL too long to record is refused, never fetched and mis-cited."""
+
+    def test_an_overlong_url_is_refused_before_any_request(self) -> None:
+        long_url = "http://example.com/" + "b" * (MAX_URL_CHARACTERS + 100)
+        with self.assertRaises(WebRetrievalError) as caught:
+            self.provider().fetch(long_url)
+        self.assertEqual(caught.exception.code, URL_NOT_PUBLIC)
+        self.assertEqual(self.transport.sent, [])
+
+    def test_an_overlong_redirect_target_is_refused(self) -> None:
+        ROUTES["/go"] = redirect("http://example.com/" + "b" * (MAX_URL_CHARACTERS + 100))
+        with self.assertRaises(WebRetrievalError) as caught:
+            self.provider().fetch("http://example.com/go")
+        self.assertEqual(caught.exception.code, URL_NOT_PUBLIC)
+        self.assertEqual(len(self.transport.sent), 1)
+
+    def test_a_recorded_url_is_never_a_shortened_one(self) -> None:
+        """What is cited must be exactly what was fetched."""
+        path = "/x" + "y" * 1500
+        ROUTES[path] = page("<html><body><p>ordinary article text</p></body></html>")
+        result = self.provider().fetch(f"http://example.com{path}")
+        self.assertEqual(result.requested_url, f"http://example.com{path}")
+        self.assertEqual(result.final_url, f"http://example.com{path}")
 
 
 class MetadataBoundTests(ComposedTestCase):

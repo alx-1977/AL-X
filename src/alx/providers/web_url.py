@@ -33,6 +33,7 @@ from urllib.parse import urlsplit
 from alx.contracts.web import (
     ALLOWED_PORTS,
     ALLOWED_SCHEMES,
+    MAX_URL_CHARACTERS,
     URL_NOT_PUBLIC,
     PublicAddress,
     PublicUrl,
@@ -166,6 +167,11 @@ def parse_public_url(raw: str, resolver: Resolver | None = None) -> PublicUrl:
     if not isinstance(raw, str) or not raw.strip():
         raise _refuse("blank url")
     candidate = raw.strip()
+    # Refused, never shortened. A URL cut to fit a field names a different
+    # resource than the one that would be fetched, so truncating here would
+    # produce a citation that silently points somewhere else.
+    if len(candidate) > MAX_URL_CHARACTERS:
+        raise _refuse("url is longer than the recordable bound")
     try:
         parts = urlsplit(candidate)
     except ValueError:

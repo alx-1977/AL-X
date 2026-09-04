@@ -28,12 +28,13 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from time import monotonic as monotonic_clock
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from alx.contracts.web import (
     ALLOWED_CONTENT_TYPES,
+    ALLOWED_SCHEMES,
     CONNECT_TIMEOUT_SECONDS,
     MAX_DOWNLOAD_BYTES,
     MAX_EXTRACTED_CHARACTERS,
@@ -275,7 +276,7 @@ class HttpWebFetchProvider:
         than a single request would have had.
         """
         bound = max(1, min(int(max_characters), MAX_EXTRACTED_CHARACTERS))
-        requested = url[:MAX_URL_CHARACTERS]
+        requested = url
         current = url
         seen: set[str] = set()
         expires_at = self._monotonic() + self._total_deadline
@@ -400,11 +401,11 @@ class HttpWebFetchProvider:
         # — never the pinned transport URL, which names an IP address nobody
         # can open, and never the page's own claim about itself.
         final = public.url
-        canonical_url = self._canonical(public, canonical)
+        canonical_url = self._canonical(public, canonical, expires_at)
 
         return WebPage(
             requested_url=requested,
-            final_url=final[:MAX_URL_CHARACTERS],
+            final_url=final,
             source_domain=public.source_domain,
             retrieved_at=self._now(),
             http_status=status,
@@ -422,24 +423,39 @@ class HttpWebFetchProvider:
             canonical_url=canonical_url,
         )
 
-    def _canonical(self, public, declared: str | None) -> str | None:
+    def _canonical(
+        self, public, declared: str | None, expires_at: float
+    ) -> str | None:
         """The publisher's claim about its own address, reported separately.
 
         It is never allowed to become `final_url`. A page asserting where it
         lives is not the same fact as where it was read from, and letting the
         assertion win would let a page rewrite its own provenance. It is kept
-        only when it validates as public and names the same host, so it cannot
-        even point the reader at another site.
+        only when it names the same host, so it cannot even point the reader
+        at another site.
+
+        Validated without resolving anything. The host is compared textually
+        against the hostname already validated for this hop, so a page cannot
+        spend the caller's remaining time on a DNS lookup for a name of its
+        choosing — the deadline is checked, and a canonical link is metadata
+        rather than a destination this fetch will ever connect to.
         """
         if not declared or len(declared) > MAX_URL_CHARACTERS:
             return None
+        self._check_deadline(expires_at)
         try:
             resolved = urljoin(public.url, declared)
             if len(resolved) > MAX_URL_CHARACTERS:
                 return None
-            if parse_public_url(resolved, self._resolver).host != public.host:
+            parts = urlsplit(resolved)
+            if parts.scheme.lower() not in ALLOWED_SCHEMES:
                 return None
-        except (WebRetrievalError, ValueError):
+            if "@" in parts.netloc:
+                return None
+            host = (parts.hostname or "").strip().rstrip(".").lower()
+        except ValueError:
+            return None
+        if host != public.host:
             return None
         return resolved
 
