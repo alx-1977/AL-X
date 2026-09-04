@@ -13,6 +13,7 @@ import mimetypes
 import re
 import sqlite3
 import zipfile
+from threading import RLock
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from email import policy
@@ -339,10 +340,39 @@ def _payload(values) -> bytes:
 
 
 class SQLiteMailObservationState:
-    """Persist only IMAP references, headers, and presentation state—never bodies."""
+    """Persist only IMAP references, headers, and presentation state—never bodies.
+
+    One concurrent state machine. The process poller writes from its worker
+    thread while a voice session reads context, delivers and acknowledges from
+    another, over one shared connection, so every transition states the value
+    it expects to replace and is applied under `_lock`. A transition that
+    matches nothing has been overtaken; it is re-read rather than forced,
+    because the later state is the true one.
+
+        pending ──current()──> current ──record_delivery()──> presented
+           │                      │                              │
+           │                      └───────── acknowledge() ──────>│
+           └──────────────── acknowledge() ─────────────────> done <┘
+           └── reconcile(), never exposed ──────────────────> done
+
+    Two orthogonal facts travel beside `state` and never move backwards:
+
+    `context_exposed`  0 until the observation is put in front of the Core as
+                       waiting context, 1 afterwards. It records only that she
+                       was shown it, never that she said anything about it.
+
+    `reported_vanished` 0 not vanished, 1 found gone and awaiting delivery,
+                       2 carried to her. Durable so a disappearance found with
+                       no session open survives until one returns.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self._connection = sqlite3.connect(str(path), check_same_thread=False)
+        # Serializes every transition of this store across the poller thread
+        # and the Core-turn thread. Deliberately not the Core-turn lock: a
+        # mechanical store write must never wait on a reasoning turn, nor a
+        # reasoning turn on an IMAP round trip.
+        self._lock = RLock()
         with self._connection:
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS mail_cursor "
@@ -354,6 +384,7 @@ class SQLiteMailObservationState:
                 "event_json TEXT NOT NULL, state TEXT NOT NULL, content_origins TEXT, "
                 "content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT, "
                 "reported_vanished INTEGER NOT NULL DEFAULT 0, "
+                "context_exposed INTEGER NOT NULL DEFAULT 0, "
                 "PRIMARY KEY(mailbox_id, uid_validity, uid))"
             )
             columns = {
@@ -380,6 +411,14 @@ class SQLiteMailObservationState:
                     "ALTER TABLE mail_observations "
                     "ADD COLUMN reported_vanished INTEGER NOT NULL DEFAULT 0"
                 )
+            # Records that the Core was shown this observation as waiting
+            # context. Existing rows default to 0: nothing before this column
+            # existed was shown as waiting, because the context did not exist.
+            if "context_exposed" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE mail_observations "
+                    "ADD COLUMN context_exposed INTEGER NOT NULL DEFAULT 0"
+                )
 
     def close(self) -> None:
         self._connection.close()
@@ -390,23 +429,27 @@ class SQLiteMailObservationState:
         uid_validity: str,
         identifiers: tuple[int, ...],
     ) -> tuple[int, ...]:
-        row = self._connection.execute(
-            "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
-            (mailbox_id,),
-        ).fetchone()
-        highest = max(identifiers, default=0)
-        with self._connection:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
+                (mailbox_id,),
+            ).fetchone()
             if row is None or row[0] != uid_validity:
-                self._connection.execute(
-                    "DELETE FROM mail_observations WHERE mailbox_id = ?",
-                    (mailbox_id,),
-                )
-                self._connection.execute(
-                    "INSERT OR REPLACE INTO mail_cursor(mailbox_id, uid_validity, last_uid) VALUES (?, ?, ?)",
-                    (mailbox_id, uid_validity, highest),
-                )
+                # A new mailbox generation: every stored identifier belongs to
+                # the old one and means nothing now.
+                with self._connection:
+                    self._connection.execute(
+                        "DELETE FROM mail_observations WHERE mailbox_id = ?",
+                        (mailbox_id,),
+                    )
+                    self._connection.execute(
+                        "INSERT OR REPLACE INTO mail_cursor"
+                        "(mailbox_id, uid_validity, last_uid) VALUES (?, ?, ?)",
+                        (mailbox_id, uid_validity, max(identifiers, default=0)),
+                    )
                 return ()
-        return tuple(uid for uid in identifiers if uid > int(row[1]))
+            last_uid = int(row[1])
+        return tuple(uid for uid in identifiers if uid > last_uid)
 
     def discover(
         self,
@@ -415,13 +458,21 @@ class SQLiteMailObservationState:
         found: tuple[tuple[int, dict[str, str]], ...],
         attempted: tuple[int, ...] = (),
     ) -> None:
-        row = self._connection.execute(
-            "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
-            (mailbox_id,),
-        ).fetchone()
-        if row is None or row[0] != uid_validity:
-            raise MailAccessError("cursor_unavailable")
-        last_uid = int(row[1])
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
+                (mailbox_id,),
+            ).fetchone()
+            if row is None or row[0] != uid_validity:
+                raise MailAccessError("cursor_unavailable")
+            last_uid = int(row[1])
+            self._record_discovered(
+                mailbox_id, uid_validity, found, attempted, last_uid
+            )
+
+    def _record_discovered(
+        self, mailbox_id, uid_validity, found, attempted, last_uid
+    ) -> None:
         # The cursor advances across the identifiers this scan actually tried,
         # stopping before the first that failed so it is retried next time.
         # IMAP identifiers increase but need not be contiguous, so a permanent
@@ -475,13 +526,18 @@ class SQLiteMailObservationState:
         answer, so Law 2 places the detection here. What its disappearance
         means does not, so this decides nothing about it.
 
-        A `pending` observation was never announced: nothing was said about it
-        and nothing is owed, so it is settled silently.
+        A `pending` observation the Core has never been shown was never put in
+        front of Friedl: nothing is owed, so it is settled silently.
 
-        A `current` or `presented` observation has already been put in front of
-        Friedl. Releasing it quietly would leave AL/X unable to account for
-        something he heard her say, so it is returned as an event for her to
+        Anything the Core has seen -- a `current` or `presented` observation,
+        or a `pending` one already shown as waiting context -- is hers to
+        account for. Releasing it quietly would leave her unable to explain
+        something she may have raised, so it is queued as a fact for her to
         reason about. She releases it herself; this does not.
+
+        The branch is decided by durable mechanical facts, `state` and
+        `context_exposed`, never by reading who sent the message or what it
+        says.
 
         Only identifiers at or below the cursor are considered. A higher one has
         not been scanned yet and its absence carries no meaning.
@@ -492,62 +548,96 @@ class SQLiteMailObservationState:
         recorded here and delivered later by `pending_vanished`. Returning it
         only in memory would lose it exactly when no session was open.
         """
-        row = self._connection.execute(
-            "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
-            (mailbox_id,),
-        ).fetchone()
-        if row is None or row[0] != uid_validity:
-            return 0
-        last_uid = int(row[1])
-        live = set(present)
-        rows = self._connection.execute(
-            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
-            "content_recorded_at, content_expires_at, mail_references, state "
-            "FROM mail_observations WHERE mailbox_id = ? AND uid_validity = ? "
-            "AND state IN ('pending', 'current', 'presented') "
-            "AND COALESCE(reported_vanished, 0) = ? ORDER BY uid",
-            (mailbox_id, uid_validity, self._NOT_VANISHED),
-        ).fetchall()
-        vanished = [
-            candidate
-            for candidate in rows
-            if int(candidate[2]) <= last_uid and int(candidate[2]) not in live
-        ]
-        silent = tuple(item for item in vanished if item[8] == "pending")
-        announced = tuple(item for item in vanished if item[8] != "pending")
-        if silent:
-            with self._connection:
-                for item in silent:
-                    self._connection.execute(
-                        "UPDATE mail_observations SET state = 'done', event_json = ? "
-                        "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
-                        (
-                            json.dumps(
-                                {
-                                    "mailbox_id": item[0],
-                                    "uid_validity": item[1],
-                                    "uid": str(item[2]),
-                                },
-                                separators=(",", ":"),
-                            ),
-                            item[0],
-                            item[1],
-                            int(item[2]),
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
+                (mailbox_id,),
+            ).fetchone()
+            if row is None or row[0] != uid_validity:
+                return 0
+            last_uid = int(row[1])
+            live = set(present)
+            rows = self._connection.execute(
+                "SELECT uid, state, context_exposed FROM mail_observations "
+                "WHERE mailbox_id = ? AND uid_validity = ? "
+                "AND state IN ('pending', 'current', 'presented') "
+                "AND COALESCE(reported_vanished, 0) = ? ORDER BY uid",
+                (mailbox_id, uid_validity, self._NOT_VANISHED),
+            ).fetchall()
+            announced = 0
+            for uid, state, exposed in rows:
+                if int(uid) > last_uid or int(uid) in live:
+                    continue
+                # A pending observation the Core has never been shown was
+                # never put in front of Friedl, so nothing is owed and it is
+                # settled. Once it has been shown as waiting, its
+                # disappearance is hers to account for exactly as an announced
+                # one is. Nothing here reads the subject, the sender or the
+                # body to decide which.
+                if state == "pending" and not exposed:
+                    if self._settle_silently(mailbox_id, uid_validity, int(uid)):
+                        continue
+                    # Overtaken between the read and the write: it has been
+                    # promoted or released since. The later state is the true
+                    # one, so it is left for the next scan rather than forced.
+                    continue
+                if self._mark_vanished(mailbox_id, uid_validity, int(uid), state):
+                    announced += 1
+            return announced
+
+    def _settle_silently(
+        self, mailbox_id: str, uid_validity: str, uid: int
+    ) -> bool:
+        """Complete an unexposed pending observation. False when overtaken."""
+        with self._connection:
+            return bool(
+                self._connection.execute(
+                    "UPDATE mail_observations SET state = 'done', event_json = ? "
+                    "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ? "
+                    "AND state = 'pending' AND context_exposed = 0",
+                    (
+                        json.dumps(
+                            {
+                                "mailbox_id": mailbox_id,
+                                "uid_validity": uid_validity,
+                                "uid": str(uid),
+                            },
+                            separators=(",", ":"),
                         ),
-                    )
-        if announced:
-            # Detected once, durably: `1` means found gone and awaiting
-            # delivery. Without this an unreleased observation would be
-            # detected again every poll, and after a restart an in-process
-            # guard would not remember it had been found at all.
-            with self._connection:
-                for item in announced:
-                    self._connection.execute(
-                        "UPDATE mail_observations SET reported_vanished = 1 "
-                        "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
-                        (item[0], item[1], int(item[2])),
-                    )
-        return len(announced)
+                        mailbox_id,
+                        uid_validity,
+                        uid,
+                    ),
+                ).rowcount
+            )
+
+    def _mark_vanished(
+        self, mailbox_id: str, uid_validity: str, uid: int, state: str
+    ) -> bool:
+        """Queue one disappearance for AL/X. False when overtaken.
+
+        The row keeps its own state: this records only that it was found gone
+        and is awaiting delivery. A concurrent promotion is harmless, because
+        the disappearance is queued rather than the state overwritten -- but
+        the observed state is still required to match, so a row released to
+        `done` meanwhile is not resurrected.
+        """
+        with self._connection:
+            return bool(
+                self._connection.execute(
+                    "UPDATE mail_observations SET reported_vanished = ? "
+                    "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ? "
+                    "AND state = ? AND COALESCE(reported_vanished, 0) = ?",
+                    (
+                        self._VANISHED_UNDELIVERED,
+                        mailbox_id,
+                        uid_validity,
+                        uid,
+                        state,
+                        self._NOT_VANISHED,
+                    ),
+                ).rowcount
+            )
 
     # Detection states for `reported_vanished`. Delivery is recorded separately
     # from detection so that finding a message gone while nobody is connected
@@ -557,14 +647,21 @@ class SQLiteMailObservationState:
     _VANISHED_DELIVERED = 2
 
     def pending_vanished(self) -> tuple[BackgroundEvent, ...]:
-        """Disappearances found but not yet carried to AL/X."""
-        rows = self._connection.execute(
-            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
-            "content_recorded_at, content_expires_at, mail_references "
-            "FROM mail_observations WHERE reported_vanished = ? "
-            "AND state IN ('current', 'presented') ORDER BY uid",
-            (self._VANISHED_UNDELIVERED,),
-        ).fetchall()
+        """Disappearances found but not yet carried to AL/X.
+
+        Every state reconciliation can queue one from is included. A `pending`
+        observation qualifies once it has been exposed as waiting context, and
+        omitting it here would strand the row: queued for ever and delivered
+        never.
+        """
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references "
+                "FROM mail_observations WHERE reported_vanished = ? "
+                "AND state IN ('pending', 'current', 'presented') ORDER BY uid",
+                (self._VANISHED_UNDELIVERED,),
+            ).fetchall()
         return tuple(self._vanished_event(row) for row in rows)
 
     def record_vanished_delivery(self, event_id: str) -> bool:
@@ -575,9 +672,14 @@ class SQLiteMailObservationState:
         tolerates rather than raises.
         """
         parts = event_id.split(":")
-        if len(parts) != 4 or parts[0] != "mail" or parts[3] != "vanished":
+        if (
+            len(parts) != 4
+            or parts[0] != "mail"
+            or not parts[2].isdigit()
+            or parts[3] != "vanished"
+        ):
             raise MailAccessError("observation_unavailable")
-        with self._connection:
+        with self._lock, self._connection:
             updated = self._connection.execute(
                 "UPDATE mail_observations SET reported_vanished = ? "
                 "WHERE uid_validity = ? AND uid = ? AND reported_vanished = ?",
@@ -610,30 +712,36 @@ class SQLiteMailObservationState:
         While it is presented, later pending observations stay queued and do
         not enter the conversation behind Friedl's back.
         """
-        presented = self._connection.execute(
-            "SELECT 1 FROM mail_observations WHERE state = 'presented' LIMIT 1"
-        ).fetchone()
-        if presented is not None:
-            return None
-        row = self._connection.execute(
-            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
-            "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-            "WHERE state = 'current' ORDER BY uid LIMIT 1"
-        ).fetchone()
-        if row is None:
+        with self._lock:
+            presented = self._connection.execute(
+                "SELECT 1 FROM mail_observations WHERE state = 'presented' LIMIT 1"
+            ).fetchone()
+            if presented is not None:
+                return None
             row = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-                "WHERE state = 'pending' ORDER BY uid LIMIT 1"
+                "WHERE state = 'current' ORDER BY uid LIMIT 1"
             ).fetchone()
             if row is None:
-                return None
-            with self._connection:
-                self._connection.execute(
-                    "UPDATE mail_observations SET state = 'current' "
-                    "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
-                    row[:3],
-                )
+                row = self._connection.execute(
+                    "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+                    "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
+                    "WHERE state = 'pending' ORDER BY uid LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                with self._connection:
+                    promoted = self._connection.execute(
+                        "UPDATE mail_observations SET state = 'current' "
+                        "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ? "
+                        "AND state = 'pending'",
+                        row[:3],
+                    ).rowcount
+                if not promoted:
+                    # Settled or promoted between the read and the write.
+                    # Nothing is eligible on this pass; the next one re-reads.
+                    return None
         return self._event(row)
 
     @staticmethod
@@ -665,19 +773,36 @@ class SQLiteMailObservationState:
         `pending` and none of them becomes current merely by being seen. They
         already carry mail provenance and its expiry, so showing them retains
         nothing new.
+
+        The waiting window is the *oldest* pending observations, because that
+        is the order delivery will present them in. Showing the newest instead
+        would let a burst of recent mail hide the older items that are actually
+        next, and she would be judging a queue she is not going to be given.
+
+        Being shown one is recorded durably: from here on its disappearance is
+        hers to account for, not something reconciliation may settle quietly.
         """
-        rows = self._connection.execute(
-            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
-            "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-            "WHERE state IN ('current', 'presented') ORDER BY uid DESC LIMIT ?",
-            (self.CONTEXTUAL_EVENT_LIMIT,),
-        ).fetchall()
-        waiting = self._connection.execute(
-            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
-            "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-            "WHERE state = 'pending' ORDER BY uid DESC LIMIT ?",
-            (self.WAITING_EVENT_LIMIT,),
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
+                "WHERE state IN ('current', 'presented') ORDER BY uid DESC LIMIT ?",
+                (self.CONTEXTUAL_EVENT_LIMIT,),
+            ).fetchall()
+            waiting = self._connection.execute(
+                "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
+                "WHERE state = 'pending' ORDER BY uid LIMIT ?",
+                (self.WAITING_EVENT_LIMIT,),
+            ).fetchall()
+            if waiting:
+                with self._connection:
+                    for row in waiting:
+                        self._connection.execute(
+                            "UPDATE mail_observations SET context_exposed = 1 "
+                            "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
+                            (row[0], row[1], int(row[2])),
+                        )
         return (
             *(self._event(row) for row in rows),
             *(self._waiting_event(row) for row in waiting),
@@ -718,7 +843,7 @@ class SQLiteMailObservationState:
             return False
         if len(parts) != 3 or parts[0] != "mail" or not parts[2].isdigit():
             raise MailAccessError("observation_unavailable")
-        with self._connection:
+        with self._lock, self._connection:
             updated = self._connection.execute(
                 "UPDATE mail_observations SET state = 'presented' "
                 "WHERE uid_validity = ? AND uid = ? AND state = 'current'",
@@ -735,10 +860,14 @@ class SQLiteMailObservationState:
             },
             separators=(",", ":"),
         )
-        with self._connection:
+        # Releasing is hers, so any live state may be released and only an
+        # already-settled or absent row is refused. The predicate keeps a
+        # `done` row from being rewritten by a repeated release.
+        with self._lock, self._connection:
             updated = self._connection.execute(
                 "UPDATE mail_observations SET state = 'done', event_json = ? "
-                "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
+                "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ? "
+                "AND state IN ('pending', 'current', 'presented')",
                 (minimal, reference.mailbox_id, reference.uid_validity, int(reference.uid)),
             ).rowcount
         if not updated:

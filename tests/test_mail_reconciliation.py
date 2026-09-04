@@ -241,10 +241,11 @@ class BurstContextTest(unittest.TestCase):
         return [(e.kind, e.data["uid"]) for e in self.state.contextual_events()]
 
     def test_she_sees_what_is_waiting_behind_what_she_holds(self) -> None:
+        """Waiting is shown in delivery order, oldest first."""
         self.assertEqual(
             self.kinds(),
-            [("mail.message_arrived", "1"), ("mail.message_waiting", "4"),
-             ("mail.message_waiting", "3"), ("mail.message_waiting", "2")],
+            [("mail.message_arrived", "1"), ("mail.message_waiting", "2"),
+             ("mail.message_waiting", "3"), ("mail.message_waiting", "4")],
         )
 
     def test_a_waiting_item_carries_its_subject_and_sender(self) -> None:
