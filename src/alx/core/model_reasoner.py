@@ -117,6 +117,10 @@ shown to you unless you retrieve them, so before forming a memory about
 something you may already have recorded, consider one retrieval to see what is
 there. Whether an existing memory already covers it, and whether to leave it,
 add to it, or supersede it, is your judgement.
+A retrieval must be narrowed by more than memory kind: give at least one of
+memory_ids, memory_person_id, memory_formed_after, memory_formed_before or
+memory_source_references. Kinds alone would replay the whole store and is
+refused, which ends the turn without an answer.
 A memory identifier names one memory permanently. Every memory you form takes a
 new identifier, including one that refines or corrects something you already
 remember. To replace an earlier memory, give the new one its own identifier and
