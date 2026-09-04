@@ -766,6 +766,10 @@ class LiveVoiceSettings:
     primary_person_id: str
     goal_retention_days: int
     core_step_budget: int
+    # D-025 public web reading. Off until a runtime is told it may read, so a
+    # runtime that has never been configured for the web has no such
+    # capability registered at all.
+    web_read_enabled: bool
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> LiveVoiceSettings:
@@ -780,4 +784,5 @@ class LiveVoiceSettings:
                 environment, "ALX_GOAL_RETENTION_DAYS", 3650
             ),
             core_step_budget=_positive_integer(environment, "ALX_CORE_STEP_BUDGET", 8),
+            web_read_enabled=_boolean(environment, "ALX_WEB_READ_ENABLED", False),
         )

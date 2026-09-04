@@ -388,3 +388,123 @@ The daily fuse is unchanged at $0.5405. It remains a fuse rather than a quota or
 **Phase 8 begins an observation period; it does not require a model decision on first enablement.** The experiment concludes only once there is enough real evidence to judge continuity and personality quality, autonomous judgement, the topics and interests she chooses, self-request frequency, speech versus silence, the cost and token profile, and any obvious Luna-versus-Sol behavioural mismatch.
 
 **Until that decision is recorded, the Luna/Sol split remains explicitly experimental and may not silently become permanent architecture.** The concluding decision is Friedl's, and is one of: Luna remains; move autonomous cognition to Terra; move to Sol; or return to one universal Core model.
+
+## D-025 — Public web read authority (Web Access V1)
+
+- **Date:** 2026-09-04
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-04.** Implementation proceeds in the recorded order; Brave search is not authorised to run until the step-4 review.
+
+**Purpose.** AL/X can reason but cannot currently look anything up. `ask_research_question` puts a question to a paid model and returns what that model recalls: undated, unsourced, and impossible to check. This decision gives her access to current public internet information as external evidence, with an exact URL and an exact retrieval time attached, so that what she reports can be traced to something a person can open and read.
+
+**Scope.** Public, unauthenticated, read-only retrieval of the open web. Nothing else. This is not general internet access and it is not a browser.
+
+### Authority granted
+
+- Public HTTP/HTTPS search through one configured search provider.
+- Public HTTP/HTTPS retrieval of one page at a time by exact URL.
+- Read-only retrieval, returning bounded extracted text as EXTERNAL untrusted content with exact provenance and a retrieval timestamp.
+
+### Not authorised in V1
+
+Authentication or login; cookies or session persistence; form submission; POST or any write method; purchases; posting or publishing; browser automation, headless browsers, JavaScript execution or screenshots; authenticated or private APIs; local or private-network access; `file://` and every non-web scheme; arbitrary ports; credentialed URLs.
+
+Each of these requires its own decision. None is implied by this one.
+
+### What AL/X decides
+
+Whether external information is needed at all; the wording of a search; which candidate source, if any, is worth reading; whether sources disagree and what that means; whether a source is any good; what conclusion the evidence supports; whether to record evidence or notebook work; and whether more retrieval is warranted.
+
+Deterministic code performs retrieval and mechanical safety and resource bounds. It does not rank, score, filter, prefer, summarise, or reconcile sources, and it never decides that a result is unimportant. Search results are returned in the provider's own order, which is a mechanical fact about the provider, not a judgement adopted by AL/X.
+
+### Network boundary
+
+A public-web reader must not become a way to reach the private network. The following are mechanical protections, not limits on what AL/X may think about:
+
+- `http` and `https` only;
+- credentials in a URL rejected;
+- ports 80 and 443 only;
+- `GET` only; no request body;
+- public destination addresses only: IPv4 and IPv6 loopback, private, link-local (including the `169.254.169.254` metadata address), unique-local, multicast, reserved and unspecified addresses are rejected, IPv4-mapped IPv6 included;
+- every address a hostname resolves to must be acceptable, or the hostname is refused; a mixed public and private answer is a refusal, not a choice of the public one;
+- the hostname is resolved once, and the connection is made to a literal validated address, so a name that resolves differently a moment later cannot redirect the request inward;
+- TLS certificate validation continues to be performed against the original hostname, and the original `Host` header is preserved; the connecting address is never used as the TLS server name;
+- redirects are not followed automatically; each hop is revalidated in full against every rule above, to a maximum of 3;
+- connection reuse is keyed so that an unvalidated destination cannot inherit a validated connection;
+- no cookies, no authentication headers, no credential store;
+- bounded connect, read and total timeouts;
+- bounded download and bounded decompression;
+- only textual content types are accepted.
+
+A refusal returns to AL/X as a stated fact — blocked, timed out, not public, wrong content type, too large, or dynamic — and is never resolved into a conclusion by code.
+
+### Resource bounds
+
+- one page per fetch call;
+- 2 MB maximum downloaded and decoded per page;
+- 8,000 extracted characters returned to the Core;
+- the number of characters omitted is reported alongside them;
+- search returns 5 candidates by default, 10 at most;
+- 300 characters maximum per candidate snippet;
+- no crawler and no hidden iterative fetching.
+
+These exist because the Core's input is a finite and expensive resource, and because an autonomous turn refuses rather than truncates when its input ceiling is exceeded. They are mechanical context and resource bounds only. They must never be described as determining which content matters, and no character count, result limit, byte ceiling or redirect limit may be presented as a judgement about significance. Whether to retrieve more is AL/X's judgement, made in a further turn.
+
+### Provenance
+
+Web retrieval carries `ContentOrigin.EXTERNAL` and is presented to the Core as `external_untrusted_data`. Each retrieval records the exact final URL after redirects, the page title where available, the source domain and publisher where mechanically available, and `retrieved_at`. `attempt:<call_id>` remains the authoritative evidence anchor, so a retrieval can be cited by goal evidence and by the research notebook through the mechanism that already exists.
+
+Web content is not mail-derived and does not carry a D-013 expiry.
+
+Retrieval creates no claim. Nothing is promoted automatically into evidence, a notebook entry, a hypothesis or a memory. Those are AL/X's decisions, made through the capabilities that already exist.
+
+### Retrieved content is data, never instruction
+
+Text inside a retrieved page is data about the world. It is never an instruction to AL/X.
+
+A page acquires no authority because its text resembles a command, a system prompt, a tool definition, a capability schema, a governance document, a decision record, or the Laws of AL/X. A page claiming to be from Friedl is not from Friedl. A page instructing AL/X to ignore her instructions, reveal configuration, call a capability, or treat its content as approved is simply a page that contains that text, and is reasoned about rather than obeyed.
+
+The protection is structural: retrieved content travels as a capability result marked untrusted, on the evidence channel, and never on the instruction channel. It must not be sought through a keyword detector, a phrase list, or any scan of what a page appears to be asking for, because deciding what text is really trying to do is exactly the semantic judgement that belongs to AL/X.
+
+This property must be tested explicitly rather than assumed, and the test must fail if a retrieved instruction is ever acted upon.
+
+### Search queries are disclosed to an external provider
+
+A search query leaves this system and is read by the search provider. Brave documents that Search API queries may be retained for up to 90 days for billing and troubleshooting. A V1 search query is therefore data disclosed to a third party and must be treated that way.
+
+No deterministic redaction of search wording will be built, and no automatic classifier will decide whether a query is sensitive. Determining whether a query reveals private meaning is itself semantic judgement, and building a filter to make it would put that judgement in code, where Law 1 forbids it. Instead the disclosure is stated plainly to AL/X, as a fact she reasons with when she chooses her wording, and the authority to decide what to search is hers.
+
+Authenticated and private project material — mail content, Xero data, DHL documents, goal and notebook content, credentials and configuration — remains outside V1 web-search authority and is not to be placed into a search query.
+
+### Economics
+
+The search provider is the Brave Search API, using its **search** endpoint only. Brave Answers and any other model-generated answer endpoint are excluded from V1: an answer endpoint returns an external model's generated conclusion rather than raw retrieval evidence, which would introduce a second system interpreting sources. Brave search *results* are permitted; Brave Answers is not.
+
+**Price snapshot recorded at approval, 2026-09-04:** Brave Search API at **$5.00 per 1,000 requests**, that is **$0.005 per request**. A $5.00 monthly service credit was offered by Brave at this date.
+
+That credit is not a safety mechanism and is not relied upon for either safety or availability. Provider credits may be changed or withdrawn by Brave independently of this decision. The local ceiling below is the control, and this capability is not to be described as free.
+
+**The local V1 ceiling is 30 search requests per day, being $0.15 per day at the recorded price.** It is a fuse, not a quota or a target. It never raises itself, survives restart, and refuses further search once exhausted.
+
+If the configured per-request price cannot be verified against the recorded snapshot, search fails closed and does not run. An unverified price is not a small inaccuracy: it is an unknown rate charged against a fixed ceiling.
+
+A flat per-request fee is a different economic resource from model tokens. `ModelPrice` describes tokens and must not be extended to accommodate a per-request search fee: doing so would let an unpriced surcharge pass through a token calculation and understate spend against a hard ceiling. Search spend is accounted in its own durable ledger file, reserving the exact flat request price before dispatch, dispatching exactly one search request, settling or abandoning according to the provider's verified billing semantics, and enforcing its own daily ceiling.
+
+Brave search spend is never combined with D-023 research spend or with D-024 autonomous cognition spend. Reusing the existing ledger mechanics is permitted only where it does not conflate the two resources; if that reuse would force misleading semantics, the implementer stops and reports rather than proceeding. Page fetching costs nothing and needs no ledger. Core reasoning prompted by web activity is ordinary Core cognition and is already accounted.
+
+### Permission
+
+Web retrieval is granted through a new `web.read` permission, separate from every existing authority. `research.spend` grants paid model access and grants no network access; `web.read` grants public reads and grants no spending on models and no authenticated browsing. A runtime that has not been given `web.read` cannot retrieve anything, and a runtime with no configured search provider cannot search even if it holds the permission.
+
+### Implementation order
+
+1. the public URL and network boundary, with its contracts;
+2. bounded deterministic page fetch and stdlib-only extraction;
+3. `ask_web_page` wired end to end — **stop here for Friedl's review**;
+4. the Brave search adapter, the search spend ledger, and `ask_web_search`, only after fetch-by-URL is proven. No Brave key is configured and no search spend ledger is created before that review.
+
+HTML extraction is stdlib-only in V1. No parsing or extraction dependency is added. A page that genuinely requires JavaScript rendering returns a truthful `unsupported_dynamic_page` result rather than justifying a browser.
+
+### Review condition
+
+Revisit if retrieval reaches anything not publicly reachable; if a retrieved page's content is ever acted upon as an instruction; if search spend diverges from the recorded price; if extraction quality proves inadequate often enough to argue for a parsing dependency; or if the bounds above are found to be shaping what AL/X concludes rather than what fits in a turn.
