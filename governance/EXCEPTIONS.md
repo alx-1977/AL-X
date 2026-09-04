@@ -217,3 +217,70 @@ precedent for any future dual-Core or routing proposal.
 
 The exception does not renew by silence, by continued operation, by the
 experiment producing good results, or by the passage of time.
+
+---
+
+## EX-002 — Merging PR #14 at `16bf2d9` without its `Greptile Review` status
+
+### Register metadata
+
+- **Law:** Law 0 enforcement via `docs/LAW_ENFORCEMENT.md` gate policy — "A change fails if any applicable automated gate fails" and "Disabling a gate is not a workaround". `main` requires the status checks `law-gates` and `Greptile Review`; this suspends the second one for one merge.
+- **Scope:** Pull request #14 only. Authorised implementation head `16bf2d9740098e69f9221561607777dfa1fa4896`; merge head is the single commit that adds this exception record on top of that implementation and changes nothing else. The `Greptile Review` required-status requirement on `main` is suspended for the duration of that single squash merge and restored immediately afterwards. Nothing else.
+- **Necessity:** The account's Greptile review credits are exhausted, so the required `Greptile Review` status cannot be produced for this head by any legitimate means. Waiting would block AL/X development for the remainder of the billing period.
+- **Alternatives:** wait for credits; merge the reviewed parent `4cd1035` instead. Both rejected below.
+- **Risks and safeguards:** one unreviewed commit above a 5/5-reviewed parent, narrowly scoped to canonical provenance; guarded by the reviewed parent, the full test suite, both law gates, `law-gates` in CI, and a mandatory retrospective review. Set out in full below.
+- **Approved by Friedl:** yes, explicitly, for this exact PR, this exact head and this exact mechanism.
+- **Approval date:** 2026-09-04.
+- **Expiry or review condition:** expires immediately once PR #14 is merged and `Greptile Review` is restored as a required check. A retrospective Greptile review of `16bf2d9` remains outstanding until credits allow it.
+
+### Authorised target
+
+The implementation authorised here is `16bf2d9`. The commit actually merged
+is the one that adds this exception record on top of it and changes nothing
+else: the trees under
+`src/`, `tests/`, `requirements.txt` and `architecture/` are byte-identical
+between the two, and `src/` carries the same tree hash `a0b8198` in both. The
+governance record therefore lands on `main` together with the merge it
+authorises, rather than the merge arriving unexplained.
+
+Any commit other than these two is outside this exception.
+
+### Why this is necessary
+
+`Greptile Review` is a required status check on `main`. It is produced by a paid external service, and the account has no review credits remaining. The check therefore cannot report on `16bf2d9` at all — this is not a failing gate or a false positive, it is a gate that cannot run.
+
+Three mechanisms were available and two are refused outright. Posting a synthetic `Greptile Review` success status would fabricate evidence that a review happened, which is worse than any merge it would unblock. An administrative override bypassing all branch protection would suspend `law-gates`, linear history and conversation resolution along with it, none of which are obstructed. This exception therefore suspends exactly one named check, for one named head, and restores it immediately.
+
+### Alternatives considered and why they were rejected
+
+**Wait for credits.** Correct in principle and rejected on cost: it blocks the branch, and everything built on it, for the remainder of the billing period. The delay buys a review of a commit whose parent is already reviewed 5/5 and whose own change is small and adversarially tested.
+
+**Merge the reviewed parent `4cd1035` instead.** Rejected because it is knowingly the worse code. `4cd1035` carries a real defect that `16bf2d9` fixes: `urljoin` treats unparseable input as a relative path, so a malformed canonical such as `ht!tp://[[[/x` is grafted onto the fetched host and recorded as `http://example.com/ht!tp:/[[[/x` — a durable citation to a page that never existed. Merging the reviewed head would mean deliberately shipping a known false-provenance bug in the milestone whose entire purpose is exact provenance. Greptile did not find that defect; tracing the composed path did.
+
+### Compensating safeguards
+
+- The parent commit `4cd1035` was reviewed by Greptile at 5/5 with no outstanding findings.
+- The change from that reviewed parent is narrowly scoped: rejecting malformed and fragment-only canonical metadata, and the composed tests and Law 0 source assertions that prove it.
+- No implementation behaviour outside canonical provenance handling is altered by the unreviewed commit.
+- The full suite passes: 1504 tests, 1788 subtests.
+- `scripts/check_governance.py` passes.
+- `scripts/check_architecture.py` passes.
+- The `law-gates` CI check passes on the exact head.
+- Four mutation checks prove the new guards are load-bearing: a hand-built authority without IPv6 brackets, a canonical inheriting the page scheme, a disallowed canonical port admitted, and the malformed-canonical guard removed.
+- Every accepted canonical is asserted to survive `parse_public_url`, so a recorded citation is re-fetchable by construction.
+- All ten of PR #14's review threads are resolved.
+
+### Narrow scope
+
+This exception authorises removing the `Greptile Review` context from the required status checks on `main` for long enough to merge PR #14 at `16bf2d9`, and nothing else. It does not authorise:
+
+- altering `law-gates`, `enforce_admins`, `required_linear_history`, `required_conversation_resolution`, or any other protection setting;
+- posting, forging or simulating any status check;
+- merging any other pull request, or any other head of this pull request;
+- skipping review on any future change, including further Web Access work.
+
+### Expiry and mandatory review
+
+This exception expires immediately once PR #14 is merged and `Greptile Review` is restored as a required status check on `main`. Restoration is part of the exception, not a follow-up task.
+
+**A retrospective Greptile review of `16bf2d9` remains outstanding** and must be obtained once review credits are available. If that review finds anything, it is fixed as ordinary work under the restored gate. This exception is not precedent: the next head requires the check like any other, and exhausted credits are a reason to stop, not a standing reason to merge unreviewed.
