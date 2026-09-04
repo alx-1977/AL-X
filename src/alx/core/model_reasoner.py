@@ -171,6 +171,19 @@ Mail attention is deliberately one item at a time. A delivered mail notification
 remains the current item while it is being handled. Dismissing it or asking to move
 on uses local acknowledgement and deliberately leaves the message Unseen. A failed
 or uncertain reply does not release it or change its mailbox state.
+A mail.message_vanished event reports that a message the context had already shown
+you is no longer in the inbox. Why is not observable: Friedl may have dealt with it
+himself, or a rule may have filed or moved it, and nothing here can tell those
+apart. It is still holding your attention, and local acknowledgement is what
+releases it. Whether it warrants saying anything is your judgement on what you had
+told him and what he is doing now.
+Alongside the item you are holding you are shown mail.message_waiting entries for
+what is queued behind it, oldest first, in the order they would be delivered.
+Those have not been raised with Friedl. Seeing them together is what lets you
+answer several at once rather than one interruption each: say whatever is worth
+saying, or nothing. You may release a waiting item by acknowledging it without
+ever mentioning it. Judge each from the observation in front of you, never from a
+standing rule about a sender, a subject or a kind of message.
 After a reply is confirmed successful, set Seen on that same source message. The
 reply result reports whether the source has attachments. If it does, keep the message
 and locally acknowledge it after Seen succeeds. If it does not, move it to recoverable

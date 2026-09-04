@@ -217,5 +217,61 @@ class MutationTests(unittest.TestCase):
         )
 
 
+# Mail scanning had exactly one production owner before this change and has
+# exactly one after it. The owner moved from the voice exchange to the process,
+# so the session-scoped loop is gone rather than kept as a fallback.
+MAIL_SOURCE = REPOSITORY_ROOT / "src/alx/providers/icloud_mail.py"
+MAIL_POLLER_SOURCE = REPOSITORY_ROOT / "src/alx/providers/mail_poller.py"
+BOOTSTRAP_SOURCE = REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py"
+SESSION_SOURCE = REPOSITORY_ROOT / "src/alx/interfaces/live_voice.py"
+
+
+def scan_call_sites(text: str) -> list[str]:
+    """Every line that actually invokes the mailbox scan."""
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if ".scan()" in line or "self._source.scan" in line
+    ]
+
+
+class OneMailScannerTest(unittest.TestCase):
+    """Law 0 for mail observation: one loop watches the mailbox."""
+
+    def test_exactly_one_production_scan_call_site_exists(self) -> None:
+        sites = []
+        for path in (MAIL_SOURCE, MAIL_POLLER_SOURCE, BOOTSTRAP_SOURCE,
+                     SESSION_SOURCE):
+            sites.extend(scan_call_sites(path.read_text()))
+        self.assertEqual(len(sites), 1, sites)
+
+    def test_the_scanner_is_owned_by_the_process_not_a_session(self) -> None:
+        self.assertIn("mail_poller.run()", BOOTSTRAP_SOURCE.read_text())
+        self.assertEqual(
+            scan_call_sites(SESSION_SOURCE.read_text()), [],
+            "the voice session must not invoke the scanner",
+        )
+
+    def test_the_delivery_stream_does_not_scan(self) -> None:
+        """`events` carries durable facts; it must not poll the mailbox."""
+        text = MAIL_SOURCE.read_text()
+        events = text[text.index("    async def events(self):"):]
+        events = events[: events.index("\n    def ")]
+        self.assertNotIn(".scan", events)
+
+    def test_restoring_the_session_scanner_is_caught(self) -> None:
+        """The mutation the enforcement specification requires."""
+        mutated = MAIL_SOURCE.read_text().replace(
+            "        emitted_event_id: str | None = None",
+            "        emitted_event_id: str | None = None\n"
+            "        await asyncio.to_thread(self.scan())",
+            1,
+        )
+        sites = scan_call_sites(mutated) + scan_call_sites(
+            MAIL_POLLER_SOURCE.read_text()
+        )
+        self.assertEqual(len(sites), 2, "a second scan loop must be visible")
+
+
 if __name__ == "__main__":
     unittest.main()

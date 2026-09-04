@@ -252,6 +252,9 @@ class MailProviderTests(unittest.TestCase):
 
         self.adapter.scan()
         self.imap.items[2] = message("New quote", "The quote is R2,000")
+        # Discovery is the process poller's job now, so the delivery stream is
+        # asked only to carry what scanning has already made durable.
+        self.adapter.scan()
         event = asyncio.run(self._next_event())
         self.assertEqual(event.transient_data["body"], "The quote is R2,000")
         self.assertNotIn("body", event.data)
@@ -350,6 +353,9 @@ class MailProviderTests(unittest.TestCase):
 
         self.adapter.scan()
         self.imap.items[2] = message("Retry me", "Transient body")
+        # The process poller discovers; each session then carries what is
+        # already durable, which is what makes the re-offer possible.
+        self.adapter.scan()
         first = asyncio.run(self._next_event())
         second = asyncio.run(self._next_event())
         self.assertEqual(first.event_id, second.event_id)
@@ -413,9 +419,18 @@ class MailProviderTests(unittest.TestCase):
         first = self.state.current()
         self.adapter.record_delivery(first.event_id)
         self.assertIsNone(self.state.current())
+        # Only "Promotion" has been announced. "Parts order" is visible to her
+        # as waiting -- that is how a burst is judged in one turn -- but it is
+        # not delivered and does not become current on its own.
         self.assertEqual(
-            [item.data["subject"] for item in self.adapter.contextual_events()],
-            ["Promotion"],
+            [
+                (item.kind, item.data["subject"])
+                for item in self.adapter.contextual_events()
+            ],
+            [
+                ("mail.message_arrived", "Promotion"),
+                ("mail.message_waiting", "Parts order"),
+            ],
         )
         self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
         second = self.state.current()
@@ -433,9 +448,14 @@ class MailProviderTests(unittest.TestCase):
             if item is None:
                 break
             self.adapter.record_delivery(item.event_id)
+        events = self.adapter.contextual_events()
+        announced = [e for e in events if e.kind == "mail.message_arrived"]
+        waiting = [e for e in events if e.kind == "mail.message_waiting"]
         self.assertLessEqual(
-            len(self.adapter.contextual_events()),
-            SQLiteMailObservationState.CONTEXTUAL_EVENT_LIMIT,
+            len(announced), SQLiteMailObservationState.CONTEXTUAL_EVENT_LIMIT
+        )
+        self.assertLessEqual(
+            len(waiting), SQLiteMailObservationState.WAITING_EVENT_LIMIT
         )
 
     def test_delivered_item_stays_context_and_blocks_later_delivery(self) -> None:
