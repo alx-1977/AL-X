@@ -781,6 +781,17 @@ class SQLiteMailObservationState:
 
         Being shown one is recorded durably: from here on its disappearance is
         hers to account for, not something reconciliation may settle quietly.
+
+        The mark is written as the context is built, before the turn runs. A
+        turn that then fails leaves an observation marked exposed that she
+        never evaluated, and if it later disappears she is given one fact she
+        did not strictly need. That is the deliberate direction to err in: the
+        alternative, recording exposure only after a turn succeeds, loses the
+        mark when a turn that did show her the mail fails afterwards, and the
+        disappearance is then settled silently -- which is exactly the defect
+        this column exists to prevent. An unnecessary fact costs one reasoning
+        call and she decides what to do with it; a missing one leaves her
+        unable to account for something she may have raised.
         """
         with self._lock:
             rows = self._connection.execute(

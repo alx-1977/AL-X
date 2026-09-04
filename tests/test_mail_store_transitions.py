@@ -126,6 +126,28 @@ class ExposedPendingAuthorityTest(Harness):
         self.assertEqual(self.rows()[2][0], "pending")
         self.assertEqual(self.state.current().data["uid"], "1")
 
+    def test_exposure_is_recorded_before_the_turn_runs(self) -> None:
+        """A deliberate direction to err in, not an oversight.
+
+        The mark is written as context is built. A turn that then fails leaves
+        a row marked exposed that AL/X never evaluated, so a later
+        disappearance gives her one fact she did not strictly need. The
+        alternative -- marking only after a successful turn -- loses the mark
+        when a turn that *did* show her the mail fails afterwards, and the
+        disappearance is then settled silently. An unnecessary fact costs one
+        reasoning call she can dismiss; a missing one leaves her unable to
+        account for something she may have raised.
+        """
+        self.discover(1, 2)
+        self.state.contextual_events()          # the turn has not run yet
+        self.assertEqual(self.rows()[2][1], 1)
+        # The turn now fails and uid 2 later leaves the mailbox.
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1,)), 1)
+        self.assertEqual(
+            [event.data["uid"] for event in self.state.pending_vanished()], ["2"],
+            "she is given the fact rather than losing it",
+        )
+
     def test_the_branch_reads_no_subject_or_sender(self) -> None:
         """Law 1: the choice is made from state, never from content."""
         text = SOURCE.read_text()
