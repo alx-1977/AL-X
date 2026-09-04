@@ -758,12 +758,18 @@ class SQLiteMailObservationState:
     # One new observation is announced at a time. The bound also keeps context
     # safe if legacy state contains more than one already-presented observation.
     CONTEXTUAL_EVENT_LIMIT = 5
-    # Mail arrives in bursts, and a burst is mostly receipts and notifications.
-    # Announcing each in turn would spend a reasoning call and a spoken
-    # interruption on every one. So AL/X is shown what is waiting as well as
-    # what she is holding, and judges in a single turn what is worth saying --
-    # possibly nothing. Deciding that here, by sender or subject, would be
-    # exactly the routing Law 1 forbids.
+    # Mail arrives in bursts, and announcing each item in turn would spend a
+    # reasoning call and an interruption on every one. So AL/X is shown what is
+    # waiting as well as what she is holding, and judges in a single turn what
+    # is worth saying -- possibly nothing. Deciding that here, by sender or
+    # subject, would be exactly the routing Law 1 forbids.
+    #
+    # The number is a context size bound and nothing else: it says how much of
+    # the queue fits in one turn, never which mail deserves to be there. The
+    # window is the oldest pending, so what she is shown is what she will be
+    # given next whatever this value is, and changing it changes only how far
+    # ahead she can see. It sits beside CONTEXTUAL_EVENT_LIMIT for the same
+    # reason that one does.
     WAITING_EVENT_LIMIT = 10
 
     def contextual_events(self) -> tuple[BackgroundEvent, ...]:

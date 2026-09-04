@@ -372,6 +372,22 @@ class PromptJudgementTest(unittest.TestCase):
     def test_judgement_is_returned_to_her(self) -> None:
         self.assertIn("your judgement", self.guidance())
 
+    def test_no_category_prior_survives_in_the_mail_provider_either(self) -> None:
+        """The prompt was cleaned; a comment beside the code had kept the prior.
+
+        Removing a standing assumption from the guidance but leaving it in the
+        source that produces the context is only half a fix: the next person to
+        read the provider learns the rule anyway.
+        """
+        text = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "alx" / "providers" / "icloud_mail.py"
+        ).read_text().lower()
+        for phrase in ("mostly receipts", "receipts and notifications",
+                       "usually right", "addressed to nobody"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, text)
+
 
 if __name__ == "__main__":
     unittest.main()
