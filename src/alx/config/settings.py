@@ -758,6 +758,60 @@ class RuntimeSettings:
         )
 
 
+# The exact price D-025 records for the Brave Search API. Configuration must
+# match it: an unverified rate charged against a ceiling sized for another one
+# is not a ceiling, and D-025 requires search to fail closed rather than run at
+# a price nobody approved.
+APPROVED_SEARCH_USD_PER_REQUEST = 0.005
+
+
+@dataclass(frozen=True, slots=True)
+class WebSearchSettings:
+    """Paid public web search, off until every field is configured and valid."""
+
+    enabled: bool
+    api_key: str
+    usd_per_request: float
+    daily_requests: int
+    daily_usd: float
+
+    @property
+    def is_usable(self) -> bool:
+        """Whether production search may be registered at all.
+
+        Every condition is required. There is no degraded mode: a search that
+        ran without accounting would spend against a ceiling nobody measures,
+        and a fallback provider would be a second production path.
+        """
+        return bool(
+            self.enabled
+            and self.api_key.strip()
+            and self.usd_per_request == APPROVED_SEARCH_USD_PER_REQUEST
+            and self.daily_requests > 0
+            and self.daily_usd > 0
+            and self.daily_usd >= self.usd_per_request
+        )
+
+
+def _web_search_settings(environment: Mapping[str, str]) -> WebSearchSettings:
+    """Read search configuration, defaulting to off and unpriced."""
+    return WebSearchSettings(
+        enabled=_boolean(environment, "ALX_WEB_SEARCH_ENABLED", False),
+        api_key=environment.get("BRAVE_SEARCH_API_KEY", "").strip(),
+        usd_per_request=_number_in_range(
+            environment, "BRAVE_SEARCH_USD_PER_REQUEST", 0.0, 1.0, 0.0
+        ),
+        daily_requests=_integer_in_range(
+            environment, "BRAVE_SEARCH_DAILY_REQUESTS", 0, 10_000
+        )
+        if environment.get("BRAVE_SEARCH_DAILY_REQUESTS")
+        else 0,
+        daily_usd=_number_in_range(
+            environment, "BRAVE_SEARCH_DAILY_USD", 0.0, 100.0, 0.0
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LiveVoiceSettings:
     host: str
@@ -770,6 +824,10 @@ class LiveVoiceSettings:
     # runtime that has never been configured for the web has no such
     # capability registered at all.
     web_read_enabled: bool
+    # D-025 paid public web search. Separate from web_read_enabled: reading a
+    # URL costs nothing, searching costs money, so a runtime may be authorised
+    # to read without being authorised to spend on discovery.
+    web_search: "WebSearchSettings"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> LiveVoiceSettings:
@@ -785,4 +843,5 @@ class LiveVoiceSettings:
             ),
             core_step_budget=_positive_integer(environment, "ALX_CORE_STEP_BUDGET", 8),
             web_read_enabled=_boolean(environment, "ALX_WEB_READ_ENABLED", False),
+            web_search=_web_search_settings(environment),
         )

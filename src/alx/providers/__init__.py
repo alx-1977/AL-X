@@ -7,12 +7,14 @@ from alx.providers.xai import XAIReasoningModel
 from alx.providers.icloud_mail import ICloudMailAdapter, SQLiteMailObservationState
 from alx.providers.mail_poller import MailPoller
 from alx.providers.web_fetch import HttpWebFetchProvider
+from alx.providers.web_search import BraveWebSearchProvider
 from alx.providers.web_url import is_public_address, parse_public_url
 from alx.providers.icloud_mail_send import ICloudMailSender
 from alx.providers.xero import SQLiteXeroOAuth, XeroAccountingAdapter
 from alx.providers.dhl import DhlImportAnalyzerAdapter
 
 __all__ = [
+    "BraveWebSearchProvider",
     "HttpWebFetchProvider",
     "is_public_address",
     "parse_public_url",

@@ -1,6 +1,7 @@
 """Validated runtime configuration without behavioural authority."""
 
 from alx.config.settings import (
+    WebSearchSettings,
     AUTONOMOUS_MAX_INPUT_TOKENS,
     AUTONOMOUS_MAX_OUTPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
@@ -21,6 +22,7 @@ from alx.config.settings import (
 )
 
 __all__ = [
+    "WebSearchSettings",
     "AUTONOMOUS_MAX_INPUT_TOKENS",
     "AUTONOMOUS_MAX_OUTPUT_TOKENS",
     "autonomous_cognition_daily_budget_usd",

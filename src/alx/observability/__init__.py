@@ -24,7 +24,20 @@ from alx.observability.usage import (
     SQLiteUsageRecorder,
 )
 
+from alx.observability.search_budget import (
+    SQLiteSearchLedger,
+    SearchBudget,
+    SearchBudgetExceeded,
+    SearchLedgerCorrupt,
+    SearchReservation,
+)
+
 __all__ = [
+    "SQLiteSearchLedger",
+    "SearchBudget",
+    "SearchBudgetExceeded",
+    "SearchLedgerCorrupt",
+    "SearchReservation",
     "USD_PER_MILLION",
     "AutonomousBoundMissing",
     "AutonomousBudgetExceeded",

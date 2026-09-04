@@ -307,6 +307,8 @@ async def run(repository_root: Path) -> None:
     web_runtime = build_web_runtime(
         voice_settings.web_read_enabled,
         lambda: current_call_id[0],
+        voice_settings.web_search,
+        storage_root,
     )
     if web_runtime is not None:
         for definition in web_runtime.definitions:
@@ -568,6 +570,8 @@ async def run(repository_root: Path) -> None:
         notebook_runtime.store.close()
         if web_runtime is not None:
             web_runtime.provider.close()
+            if web_runtime.searcher is not None:
+                web_runtime.searcher.close()
         goal_store.close()
 
 
