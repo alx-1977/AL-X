@@ -43,6 +43,7 @@ from alx.contracts.web import (
     WebRetrievalError,
 )
 from alx.providers.web_fetch import HttpWebFetchProvider
+from alx.providers.web_url import parse_public_url
 from alx.tools import ASK_WEB_PAGE
 from alx.tools.web import build_web_executors
 
@@ -330,6 +331,41 @@ class ProvenanceCompositionTests(ComposedTestCase):
         with self.assertRaises(WebRetrievalError) as caught:
             provider.fetch("http://example.com/c")
         self.assertEqual(caught.exception.code, RETRIEVAL_TIMEOUT)
+
+    def test_a_recorded_canonical_is_normalised_and_refetchable(self) -> None:
+        """A citation must name something AL/X could actually open."""
+        cases = {
+            "http://EXAMPLE.COM/x": "http://example.com/x",
+            "http://example.com./x": "http://example.com/x",
+            "http://example.com:80/x": "http://example.com/x",
+            "/relative": "http://example.com/relative",
+        }
+        for href, expected in cases.items():
+            with self.subTest(href=href):
+                ROUTES["/c"] = page(
+                    f"<html><head><link rel='canonical' href='{href}'></head>"
+                    "<body><p>ordinary article text</p></body></html>"
+                )
+                result = self.provider().fetch("http://example.com/c")
+                self.assertEqual(result.canonical_url, expected)
+                # And it survives the boundary if she ever asks to read it.
+                parse_public_url(result.canonical_url, resolving({}))
+
+    def test_a_canonical_on_a_forbidden_port_is_discarded(self) -> None:
+        """Recording it would durably cite a URL the boundary would refuse."""
+        ROUTES["/c"] = page(
+            "<html><head><link rel='canonical' href='http://example.com:8080/x'>"
+            "</head><body><p>ordinary article text</p></body></html>"
+        )
+        self.assertIsNone(self.provider().fetch("http://example.com/c").canonical_url)
+
+    def test_a_credentialed_canonical_is_discarded(self) -> None:
+        ROUTES["/c"] = page(
+            "<html><head><link rel='canonical' "
+            "href='http://example.com@evil.example/x'></head>"
+            "<body><p>ordinary article text</p></body></html>"
+        )
+        self.assertIsNone(self.provider().fetch("http://example.com/c").canonical_url)
 
     def test_a_private_canonical_is_discarded(self) -> None:
         ROUTES["/p"] = page(

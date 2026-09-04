@@ -34,6 +34,7 @@ import httpx
 
 from alx.contracts.web import (
     ALLOWED_CONTENT_TYPES,
+    ALLOWED_PORTS,
     ALLOWED_SCHEMES,
     CONNECT_TIMEOUT_SECONDS,
     MAX_DOWNLOAD_BYTES,
@@ -439,6 +440,11 @@ class HttpWebFetchProvider:
         spend the caller's remaining time on a DNS lookup for a name of its
         choosing — the deadline is checked, and a canonical link is metadata
         rather than a destination this fetch will ever connect to.
+
+        What is kept is normalised and held to the same scheme, port and
+        credential rules as any other URL. A citation recorded in a spelling
+        this boundary would itself refuse — port 8080, say — would be a
+        durable pointer at something AL/X could never open.
         """
         if not declared or len(declared) > MAX_URL_CHARACTERS:
             return None
@@ -448,16 +454,25 @@ class HttpWebFetchProvider:
             if len(resolved) > MAX_URL_CHARACTERS:
                 return None
             parts = urlsplit(resolved)
-            if parts.scheme.lower() not in ALLOWED_SCHEMES:
+            scheme = parts.scheme.lower()
+            if scheme not in ALLOWED_SCHEMES:
                 return None
             if "@" in parts.netloc:
                 return None
             host = (parts.hostname or "").strip().rstrip(".").lower()
+            port = parts.port
         except ValueError:
             return None
         if host != public.host:
             return None
-        return resolved
+        default = 80 if scheme == "http" else 443
+        if port is not None and port not in ALLOWED_PORTS:
+            return None
+        # Rebuilt from the checked parts rather than echoed back, so the
+        # recorded citation is the same shape as every other URL here.
+        authority = host if (port or default) == default else f"{host}:{port}"
+        query = f"?{parts.query}" if parts.query else ""
+        return f"{scheme}://{authority}{parts.path or '/'}{query}"
 
     def _read_bounded(self, response: httpx.Response, expires_at: float) -> bytes:
         """Count the bytes actually on the wire; never trust Content-Length.
