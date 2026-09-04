@@ -351,6 +351,40 @@ class ProvenanceCompositionTests(ComposedTestCase):
                 # And it survives the boundary if she ever asks to read it.
                 parse_public_url(result.canonical_url, resolving({}))
 
+    def test_a_canonical_keeps_its_own_scheme(self) -> None:
+        """An http page may legitimately declare an https canonical."""
+        ROUTES["/c"] = page(
+            "<html><head><link rel='canonical' href='https://example.com/secure'>"
+            "</head><body><p>ordinary article text</p></body></html>"
+        )
+        result = self.provider().fetch("http://example.com/c")
+        self.assertEqual(result.canonical_url, "https://example.com/secure")
+        self.assertEqual(result.final_url, "http://example.com/c")
+
+    def test_an_ipv6_canonical_keeps_its_brackets(self) -> None:
+        """Rebuilding an authority by hand is how brackets get lost."""
+        literal = "2606:2800:220:1:248:1893:25c8:1946"
+        resolver = resolving({}, literal)
+        ROUTES["/c"] = page(
+            f"<html><head><link rel='canonical' href='https://[{literal}]/pref'>"
+            "</head><body><p>ordinary article text</p></body></html>"
+        )
+        result = self.provider(resolver=resolver).fetch(f"https://[{literal}]/c")
+        self.assertEqual(result.canonical_url, f"https://[{literal}]/pref")
+        # A citation that cannot be reopened is not provenance.
+        parse_public_url(result.canonical_url, resolver)
+
+    def test_a_relative_canonical_on_ipv6_keeps_its_brackets(self) -> None:
+        literal = "2606:2800:220:1:248:1893:25c8:1946"
+        resolver = resolving({}, literal)
+        ROUTES["/c"] = page(
+            "<html><head><link rel='canonical' href='/rel'></head>"
+            "<body><p>ordinary article text</p></body></html>"
+        )
+        result = self.provider(resolver=resolver).fetch(f"https://[{literal}]/c")
+        self.assertEqual(result.canonical_url, f"https://[{literal}]/rel")
+        parse_public_url(result.canonical_url, resolver)
+
     def test_a_canonical_on_a_forbidden_port_is_discarded(self) -> None:
         """Recording it would durably cite a URL the boundary would refuse."""
         ROUTES["/c"] = page(

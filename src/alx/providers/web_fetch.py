@@ -25,6 +25,7 @@ import gzip
 import re
 import zlib
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from time import monotonic as monotonic_clock
@@ -465,14 +466,23 @@ class HttpWebFetchProvider:
             return None
         if host != public.host:
             return None
-        default = 80 if scheme == "http" else 443
         if port is not None and port not in ALLOWED_PORTS:
             return None
         # Rebuilt from the checked parts rather than echoed back, so the
-        # recorded citation is the same shape as every other URL here.
-        authority = host if (port or default) == default else f"{host}:{port}"
-        query = f"?{parts.query}" if parts.query else ""
-        return f"{scheme}://{authority}{parts.path or '/'}{query}"
+        # recorded citation is the same shape as every other URL here — and
+        # rebuilt by the same code, because a second copy of the authority
+        # rules is how this one lost its IPv6 brackets and recorded a
+        # citation that could never be opened again.
+        return replace(
+            public,
+            scheme=scheme,
+            # A canonical may legitimately name https where the hop was http.
+            # Its own port wins when it gave one; otherwise the default for
+            # its own scheme, not the port this hop happened to use.
+            port=port or (80 if scheme == "http" else 443),
+            path=parts.path or "/",
+            query=f"?{parts.query}" if parts.query else "",
+        ).url
 
     def _read_bounded(self, response: httpx.Response, expires_at: float) -> bytes:
         """Count the bytes actually on the wire; never trust Content-Length.
