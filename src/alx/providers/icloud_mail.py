@@ -599,19 +599,52 @@ class SQLiteMailObservationState:
             provenance=provenance_from_storage(*row[4:]),
         )
 
-    # One new observation is presented at a time. The bound also keeps context
+    # One new observation is announced at a time. The bound also keeps context
     # safe if legacy state contains more than one already-presented observation.
     CONTEXTUAL_EVENT_LIMIT = 5
+    # Mail arrives in bursts, and a burst is mostly receipts and notifications.
+    # Announcing each in turn would spend a reasoning call and a spoken
+    # interruption on every one. So AL/X is shown what is waiting as well as
+    # what she is holding, and judges in a single turn what is worth saying --
+    # possibly nothing. Deciding that here, by sender or subject, would be
+    # exactly the routing Law 1 forbids.
+    WAITING_EVENT_LIMIT = 10
 
     def contextual_events(self) -> tuple[BackgroundEvent, ...]:
-        """Report the current or already-presented referents, newest first."""
+        """Report what she is holding, then what is waiting behind it.
+
+        Waiting observations are context, not announcements: they stay
+        `pending` and none of them becomes current merely by being seen. They
+        already carry mail provenance and its expiry, so showing them retains
+        nothing new.
+        """
         rows = self._connection.execute(
             "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
             "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
             "WHERE state IN ('current', 'presented') ORDER BY uid DESC LIMIT ?",
             (self.CONTEXTUAL_EVENT_LIMIT,),
         ).fetchall()
-        return tuple(self._event(row) for row in rows)
+        waiting = self._connection.execute(
+            "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+            "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
+            "WHERE state = 'pending' ORDER BY uid DESC LIMIT ?",
+            (self.WAITING_EVENT_LIMIT,),
+        ).fetchall()
+        return (
+            *(self._event(row) for row in rows),
+            *(self._waiting_event(row) for row in waiting),
+        )
+
+    @staticmethod
+    def _waiting_event(row) -> BackgroundEvent:
+        """A queued observation, marked as not yet raised with Friedl."""
+        return BackgroundEvent(
+            f"mail:{row[1]}:{row[2]}:waiting",
+            "mail.message_waiting",
+            datetime.fromisoformat(json.loads(row[3])["observed_at"]),
+            json.loads(row[3]),
+            provenance=provenance_from_storage(*row[4:]),
+        )
 
     def record_delivery(self, event_id: str) -> bool:
         """Mark a delivered observation `presented`. True when it moved.

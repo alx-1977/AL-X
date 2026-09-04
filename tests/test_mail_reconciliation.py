@@ -190,6 +190,90 @@ class MailReconciliationTest(unittest.TestCase):
         self.assertEqual(self.states()[1], "presented")
 
 
+class BurstContextTest(unittest.TestCase):
+    """A burst is answered in one turn, not one interruption per message.
+
+    Mail arrives in bursts that are mostly receipts and notifications. With
+    only the held item in context AL/X could not tell whether the next thing
+    mattered without announcing it first, so a burst of four became four
+    spoken interruptions and four reasoning calls. She is now shown what is
+    queued as well as what she holds, and judges the burst in one turn.
+
+    What she may not have is code deciding for her. Filtering the queue by
+    sender or subject would be the routing Law 1 forbids, so everything
+    waiting is shown and every judgement stays hers.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.state = SQLiteMailObservationState(
+            Path(self.directory.name) / "mail.sqlite3"
+        )
+        self.addCleanup(self.state.close)
+        self.state.new_identifiers("INBOX", VALIDITY, ())
+        self.state.discover(
+            "INBOX", VALIDITY, tuple(observed(uid) for uid in (1, 2, 3, 4)),
+            (1, 2, 3, 4),
+        )
+        event = self.state.current()
+        self.state.record_delivery(event.event_id)
+
+    def kinds(self) -> list[tuple[str, str]]:
+        return [(e.kind, e.data["uid"]) for e in self.state.contextual_events()]
+
+    def test_she_sees_what_is_waiting_behind_what_she_holds(self) -> None:
+        self.assertEqual(
+            self.kinds(),
+            [("mail.message_arrived", "1"), ("mail.message_waiting", "4"),
+             ("mail.message_waiting", "3"), ("mail.message_waiting", "2")],
+        )
+
+    def test_a_waiting_item_carries_its_subject_and_sender(self) -> None:
+        """Without them she cannot judge the burst, and code must not judge it."""
+        waiting = [
+            e for e in self.state.contextual_events()
+            if e.kind == "mail.message_waiting"
+        ]
+        self.assertTrue(all(e.data.get("subject") for e in waiting))
+
+    def test_seeing_a_waiting_item_does_not_announce_it(self) -> None:
+        self.state.contextual_events()
+        self.state.contextual_events()
+        states = dict(
+            self.state._connection.execute("SELECT uid, state FROM mail_observations")
+        )
+        self.assertEqual(states, {1: "presented", 2: "pending", 3: "pending",
+                                  4: "pending"})
+
+    def test_she_can_release_a_waiting_item_without_mentioning_it(self) -> None:
+        self.state.acknowledge(MailReference("INBOX", VALIDITY, "2"))
+        self.state.acknowledge(MailReference("INBOX", VALIDITY, "3"))
+        self.state.acknowledge(MailReference("INBOX", VALIDITY, "1"))
+        self.assertEqual(
+            self.state.current().data["uid"], "4",
+            "the queue skips what she already dealt with silently",
+        )
+
+    def test_waiting_context_is_bounded(self) -> None:
+        """A very large backlog must not become an unbounded context."""
+        extra = tuple(range(5, 40))
+        self.state.discover(
+            "INBOX", VALIDITY, tuple(observed(uid) for uid in extra), extra
+        )
+        waiting = [
+            e for e in self.state.contextual_events()
+            if e.kind == "mail.message_waiting"
+        ]
+        self.assertEqual(len(waiting), self.state.WAITING_EVENT_LIMIT)
+
+    def test_a_settled_observation_is_not_context(self) -> None:
+        self.state.acknowledge(MailReference("INBOX", VALIDITY, "2"))
+        self.assertNotIn(
+            ("mail.message_waiting", "2"), self.kinds(),
+        )
+
+
 class ScanReportsDisappearanceTest(unittest.TestCase):
     """The whole path: a message leaves the mailbox and `scan` reports it."""
 
