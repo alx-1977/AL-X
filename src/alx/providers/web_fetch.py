@@ -447,16 +447,46 @@ class HttpWebFetchProvider:
         this boundary would itself refuse — port 8080, say — would be a
         durable pointer at something AL/X could never open.
         """
-        if not declared or len(declared) > MAX_URL_CHARACTERS:
+        if not declared or not declared.strip():
+            return None
+        if len(declared) > MAX_URL_CHARACTERS:
             return None
         self._check_deadline(expires_at)
         try:
+            # Checked before joining. `urljoin` treats anything it cannot
+            # parse as a relative path, so `ht!tp://[[[/x` would silently
+            # become `http://example.com/ht!tp:/[[[/x` — a durable citation
+            # to a page that never existed. A canonical is either a usable
+            # URL or it is omitted; it is never repaired into a guess.
+            stated = urlsplit(declared)
+            if stated.scheme and stated.scheme.lower() not in ALLOWED_SCHEMES:
+                return None
+            if stated.scheme and not stated.netloc:
+                return None
+            if not stated.scheme and not stated.netloc:
+                if not stated.path:
+                    # Only a fragment or query: it names no page of its own,
+                    # and `PublicUrl` carries no fragment, so recording it
+                    # would drop the part the publisher actually stated.
+                    return None
+                # A relative canonical is a path. Anything holding a colon
+                # before its first slash, or a backslash, is a mangled
+                # absolute URL that `urljoin` would graft onto this host —
+                # `ht!tp://[[[/x` becoming `http://example.com/ht!tp:/[[[/x`,
+                # a citation to a page that never existed.
+                head = stated.path.split("/", 1)[0]
+                if ":" in head or "\\" in stated.path:
+                    return None
             resolved = urljoin(public.url, declared)
             if len(resolved) > MAX_URL_CHARACTERS:
                 return None
             parts = urlsplit(resolved)
             scheme = parts.scheme.lower()
             if scheme not in ALLOWED_SCHEMES:
+                return None
+            if parts.fragment:
+                # Nothing here can carry it, so a citation would silently
+                # differ from what the page declared.
                 return None
             if "@" in parts.netloc:
                 return None

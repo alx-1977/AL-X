@@ -17,6 +17,7 @@ code that builds it.
 from __future__ import annotations
 
 import gzip
+import re
 import socket
 import sys
 import threading
@@ -633,3 +634,205 @@ class ConcatenatedGzipTests(ComposedTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class CanonicalMatrixTests(ComposedTestCase):
+    """Cases A-J for canonical metadata, through the real provider.
+
+    Each case states the intended V1 behaviour. Canonical metadata is a
+    publisher's claim: useful to record, never authoritative. It cannot
+    become `final_url`, cannot move the transport, and carries no more
+    weight than any other external untrusted value. When it is unusable it
+    is omitted truthfully, and the page it came from is still returned.
+    """
+
+    V6 = "2606:2800:220:1:248:1893:25c8:1946"
+
+    def fetch_with(self, href: str, hop: str = "http://example.com/c", resolver=None):
+        ROUTES["/c"] = page(
+            f"<html><head><link rel='canonical' href='{href}'></head>"
+            "<body><p>ordinary article text</p></body></html>"
+        )
+        return self.provider(resolver=resolver).fetch(hop)
+
+    def assert_refetchable(self, url: str, resolver=None) -> None:
+        """A citation that cannot be reopened is not provenance."""
+        parse_public_url(url, resolver or resolving({}))
+
+    # A — an ordinary IPv4-hosted canonical is recorded as given.
+    def test_a_ipv4_canonical_is_recorded(self) -> None:
+        result = self.fetch_with("http://example.com/preferred")
+        self.assertEqual(result.canonical_url, "http://example.com/preferred")
+        self.assert_refetchable(result.canonical_url)
+
+    # B — an IPv6 canonical keeps its brackets, or it cannot be reopened.
+    def test_b_ipv6_canonical_keeps_brackets(self) -> None:
+        resolver = resolving({}, self.V6)
+        result = self.fetch_with(
+            f"https://[{self.V6}]/preferred",
+            hop=f"https://[{self.V6}]/c",
+            resolver=resolver,
+        )
+        self.assertEqual(result.canonical_url, f"https://[{self.V6}]/preferred")
+        self.assert_refetchable(result.canonical_url, resolver)
+
+    # C — an explicitly stated default port normalises away.
+    def test_c_explicit_default_port_is_normalised(self) -> None:
+        self.assertEqual(
+            self.fetch_with("http://example.com:80/x").canonical_url,
+            "http://example.com/x",
+        )
+
+    def test_c_explicit_default_https_port_is_normalised(self) -> None:
+        result = self.fetch_with(
+            "https://example.com:443/x", hop="https://example.com/c"
+        )
+        self.assertEqual(result.canonical_url, "https://example.com/x")
+
+    # D — a port this boundary would refuse is omitted, not recorded.
+    def test_d_a_disallowed_port_is_omitted(self) -> None:
+        result = self.fetch_with("http://example.com:8080/x")
+        self.assertIsNone(result.canonical_url)
+        self.assertIn("ordinary article", result.content)
+
+    # E — credentials are never recorded.
+    def test_e_a_credentialed_canonical_is_omitted(self) -> None:
+        for href in ("http://u:p@example.com/x", "http://example.com@evil.example/x"):
+            with self.subTest(href=href):
+                self.assertIsNone(self.fetch_with(href).canonical_url)
+
+    # F and G — the canonical's own scheme is kept, not the hop's.
+    def test_f_an_http_canonical_on_an_https_page_stays_http(self) -> None:
+        result = self.fetch_with("http://example.com/x", hop="https://example.com/c")
+        self.assertEqual(result.canonical_url, "http://example.com/x")
+        self.assertEqual(result.final_url, "https://example.com/c")
+
+    def test_g_an_https_canonical_on_an_http_page_stays_https(self) -> None:
+        result = self.fetch_with("https://example.com/x")
+        self.assertEqual(result.canonical_url, "https://example.com/x")
+        self.assertEqual(result.final_url, "http://example.com/c")
+
+    # H — a relative canonical resolves against the fetched hostname URL.
+    def test_h_a_relative_canonical_resolves_against_the_hop(self) -> None:
+        self.assertEqual(
+            self.fetch_with("/rel?a=1").canonical_url,
+            "http://example.com/rel?a=1",
+        )
+
+    def test_h_a_bare_relative_canonical_resolves(self) -> None:
+        self.assertEqual(
+            self.fetch_with("other.html").canonical_url,
+            "http://example.com/other.html",
+        )
+
+    def test_h_a_relative_canonical_on_ipv6_keeps_brackets(self) -> None:
+        resolver = resolving({}, self.V6)
+        result = self.fetch_with(
+            "/rel", hop=f"https://[{self.V6}]/c", resolver=resolver
+        )
+        self.assertEqual(result.canonical_url, f"https://[{self.V6}]/rel")
+        self.assert_refetchable(result.canonical_url, resolver)
+
+    # I — a malformed canonical is omitted, never repaired into a guess.
+    def test_i_malformed_canonicals_are_omitted_not_repaired(self) -> None:
+        """`urljoin` treats unparseable input as a relative path.
+
+        Without an explicit check, `ht!tp://[[[/x` becomes
+        `http://example.com/ht!tp:/[[[/x` — a durable citation to a page
+        that never existed on a host that never served it.
+        """
+        for href in (
+            "ht!tp://[[[/x",
+            "javascript:alert(1)",
+            "http:////evil",
+            "://evil.example/x",
+            "&#92;&#92;evil.example&#92;x",
+            "#fragment-only",
+        ):
+            with self.subTest(href=href):
+                result = self.fetch_with(href)
+                self.assertIsNone(result.canonical_url)
+                # The page itself is still perfectly good evidence.
+                self.assertIn("ordinary article", result.content)
+
+    # J — a canonical naming another host is discarded entirely.
+    def test_j_a_canonical_on_another_host_is_omitted(self) -> None:
+        for href in (
+            "http://evil.example/x",
+            "http://example.com.evil.example/x",
+            "http://127.0.0.1/admin",
+        ):
+            with self.subTest(href=href):
+                self.assertIsNone(self.fetch_with(href).canonical_url)
+
+    def test_a_canonical_never_becomes_the_final_url(self) -> None:
+        """The one rule that matters most, asserted across every shape."""
+        for href in ("http://example.com/preferred", "/rel", "http://evil.example/x",
+                     "ht!tp://[[[/x", "http://example.com:8080/x"):
+            with self.subTest(href=href):
+                result = self.fetch_with(href)
+                self.assertEqual(result.final_url, "http://example.com/c")
+                self.assertEqual(result.requested_url, "http://example.com/c")
+
+    def test_a_canonical_never_moves_the_transport(self) -> None:
+        self.fetch_with("http://evil.example/x")
+        self.assertEqual(len(self.transport.sent), 1)
+        self.assertEqual(str(self.last.url), f"http://{PUBLIC_IP}/c")
+        self.assertEqual(self.last.headers["Host"], "example.com")
+
+    def test_a_canonical_reaches_the_core_as_ordinary_untrusted_metadata(self) -> None:
+        """It is one bounded field beside the others, with no extra standing."""
+        ROUTES["/c"] = page(
+            "<html><head><link rel='canonical' href='http://example.com/pref'>"
+            "</head><body><p>ordinary article text</p></body></html>"
+        )
+        executors = build_web_executors(self.provider(), lambda: "call-1")
+        result = executors[ASK_WEB_PAGE](
+            {"page_id": "p1", "url": "http://example.com/c"}
+        )
+        self.assertEqual(result.values["canonical_url"], "http://example.com/pref")
+        self.assertEqual(result.values["final_url"], "http://example.com/c")
+        self.assertEqual(
+            result.durable_values["canonical_url"], "http://example.com/pref"
+        )
+        durable = "".join(f"{k}{v}" for k, v in result.durable_values.items())
+        self.assertLessEqual(len(durable), MAX_DURABLE_METADATA_CHARACTERS)
+
+
+class OneAuthorityFormatterTests(unittest.TestCase):
+    """Law 0 for URL spelling: one implementation, not one per call site.
+
+    A second hand-written authority is exactly how the IPv6 brackets were
+    lost, and a second URL builder is how the original hostname survived
+    into a pinned transport destination. Both were the same mistake.
+    """
+
+    SOURCES = ("contracts/web.py", "providers/web_url.py", "providers/web_fetch.py")
+
+    def sources(self):
+        root = Path(__file__).resolve().parents[1] / "src" / "alx"
+        return {name: (root / name).read_text() for name in self.SOURCES}
+
+    def test_only_one_place_brackets_an_ipv6_authority(self) -> None:
+        found = [
+            name for name, text in self.sources().items()
+            if 'f"[{' in text
+        ]
+        self.assertEqual(found, ["contracts/web.py"])
+
+    def test_only_one_place_joins_a_host_to_a_port(self) -> None:
+        pattern = re.compile(r'f"\{[a-z_.]+\}:\{[a-z_.]*port[a-z_.]*\}"')
+        found = [
+            name for name, text in self.sources().items() if pattern.search(text)
+        ]
+        self.assertEqual(found, ["contracts/web.py"])
+
+    def test_the_fetch_provider_builds_no_url_by_hand(self) -> None:
+        """It must ask PublicUrl for a URL rather than spelling one."""
+        text = self.sources()["providers/web_fetch.py"]
+        self.assertNotIn('f"{scheme}://', text)
+        self.assertNotIn('f"{public.scheme}://', text)
+
+    def test_the_authority_helper_has_exactly_one_definition(self) -> None:
+        joined = "".join(self.sources().values())
+        self.assertEqual(joined.count("def _authority"), 1)
