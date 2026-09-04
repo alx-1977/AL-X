@@ -26,12 +26,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from alx.contracts import MailReference  # noqa: E402
 from alx.providers.icloud_mail import (  # noqa: E402
     ICloudMailAdapter, SQLiteMailObservationState,
 )
-from tests.test_mail_vertical_slice import FakeImap, message  # noqa: E402
+from test_mail_vertical_slice import FakeImap, message  # noqa: E402
 
 VALIDITY = "777"
 
