@@ -18,6 +18,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
     LedgerSpendAuthority,
@@ -300,6 +301,20 @@ async def run(repository_root: Path) -> None:
         executors.update(research_runtime.executors)
         permissions.update(research_runtime.permissions)
 
+    # D-025 authorises reading the public web. It is a separate authority from
+    # research spending: this buys no model tokens, and research.spend reaches
+    # no network. Absent unless this runtime was told it may read.
+    web_runtime = build_web_runtime(
+        voice_settings.web_read_enabled,
+        lambda: current_call_id[0],
+    )
+    if web_runtime is not None:
+        for definition in web_runtime.definitions:
+            registry.register(definition)
+        policies.update(web_runtime.policies)
+        executors.update(web_runtime.executors)
+        permissions.update(web_runtime.permissions)
+
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
     xero_approval_ttl_seconds: int | None = None
@@ -551,6 +566,8 @@ async def run(repository_root: Path) -> None:
         conversation_store.close()
         memory_store.close()
         notebook_runtime.store.close()
+        if web_runtime is not None:
+            web_runtime.provider.close()
         goal_store.close()
 
 

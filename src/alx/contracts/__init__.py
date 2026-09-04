@@ -14,6 +14,20 @@ from alx.contracts.continuity import (
     FutureCognitionStatus,
     FutureCognitionTooSoon,
 )
+from alx.contracts.web import (
+    ALLOWED_CONTENT_TYPES,
+    ALLOWED_PORTS,
+    ALLOWED_SCHEMES,
+    MAX_DOWNLOAD_BYTES,
+    MAX_EXTRACTED_CHARACTERS,
+    MAX_REDIRECTS,
+    WEB_FETCH_FAILURES,
+    PublicAddress,
+    PublicUrl,
+    WebFetchProvider,
+    WebPage,
+    WebRetrievalError,
+)
 from alx.contracts.usage import (
     CANONICAL_FIELDS,
     is_measured,
@@ -117,6 +131,18 @@ from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
+    "ALLOWED_CONTENT_TYPES",
+    "ALLOWED_PORTS",
+    "ALLOWED_SCHEMES",
+    "MAX_DOWNLOAD_BYTES",
+    "MAX_EXTRACTED_CHARACTERS",
+    "MAX_REDIRECTS",
+    "WEB_FETCH_FAILURES",
+    "PublicAddress",
+    "PublicUrl",
+    "WebFetchProvider",
+    "WebPage",
+    "WebRetrievalError",
     "CANONICAL_FIELDS",
     "AutonomousResponseTransport", "run_core_worker", "AutonomousSpendAuthority", "ResponseDelivery",
     "Cognition", "CognitionOrigin", "CognitionOpportunity",

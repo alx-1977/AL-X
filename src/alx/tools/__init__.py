@@ -34,6 +34,11 @@ from alx.tools.continuity import (
     WITHDRAW_FUTURE_COGNITION,
     build_continuity_executors,
 )
+from alx.tools.web import (
+    ASK_WEB_PAGE,
+    DEFINITION as WEB_DEFINITION,
+    build_web_executors,
+)
 from alx.tools.notebook import (
     CORRECT_RESEARCH_ENTRY,
     DEFINITIONS as NOTEBOOK_DEFINITIONS,
@@ -58,6 +63,9 @@ from alx.tools.dhl import (
 )
 
 __all__ = [
+    "ASK_WEB_PAGE",
+    "WEB_DEFINITION",
+    "build_web_executors",
     "CONTINUITY_DEFINITIONS",
     "MINIMUM_HORIZON_SECONDS",
     "OPEN_THOUGHT_LIMIT",
