@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from alx.providers.gated_transcription import GatedTranscriber  # noqa: E402
 
 from alx.bootstrap import build_runtime_providers  # noqa: E402
 from alx.config import ConfigurationError, LiveVoiceSettings, RuntimeSettings  # noqa: E402
@@ -147,7 +148,14 @@ class RuntimeConfigurationTests(unittest.TestCase):
     def test_composition_root_returns_only_neutral_runtime_ports(self) -> None:
         providers = build_runtime_providers(RuntimeSettings.from_environment(environment()))
         self.assertIsInstance(providers.reasoning, XAIReasoningModel)
-        self.assertIsInstance(providers.speech_to_text, CartesiaTranscriber)
+        # Transcription reaches Cartesia through the gate that decides which
+        # audio is worth paying to transmit. Asserting the wrapper and its
+        # contents keeps the composition root honest about both: an unwrapped
+        # transcriber would silently restore per-second billing for silence.
+        self.assertIsInstance(providers.speech_to_text, GatedTranscriber)
+        self.assertIsInstance(
+            providers.speech_to_text._transcriber, CartesiaTranscriber
+        )
         self.assertIsInstance(providers.text_to_speech, ElevenLabsSynthesizer)
 
     def test_openai_provider_uses_openai_credential_and_default_endpoint(self) -> None:
