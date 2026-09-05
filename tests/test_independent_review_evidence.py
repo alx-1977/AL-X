@@ -13,10 +13,15 @@ coming from a reviewer nobody accepted, or carrying a verdict with no report.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
+import urllib.error
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -49,12 +54,17 @@ CLEAN_REPORT = (
 
 
 def review(
-    *, user_id: int = REVIEWER_ID, sha: str = HEAD, body: str = CLEAN_REPORT
+    *,
+    user_id: int = REVIEWER_ID,
+    sha: str = HEAD,
+    body: str = CLEAN_REPORT,
+    state: str = "COMMENTED",
 ) -> dict:
     return {
         "user": {"id": user_id, "login": f"reviewer-{user_id}"},
         "commit_id": sha,
         "body": body,
+        "state": state,
     }
 
 
@@ -95,6 +105,83 @@ class AcceptedReviewTests(unittest.TestCase):
             ACCEPTED,
         )
         self.assertIn("2 anchored finding", evidence)
+
+
+class ReviewStateTests(unittest.TestCase):
+    """A review that was withdrawn is not evidence that one stands."""
+
+    def test_a_dismissed_review_cannot_satisfy_verification(self) -> None:
+        """Dismissal is someone with write access retracting the review.
+
+        It keeps its commit id and its body, so every other check here would
+        pass it. Only the state says it no longer stands.
+        """
+        with self.assertRaises(ReviewEvidenceError) as caught:
+            verify(
+                [review(state="DISMISSED")],
+                [],
+                {IMPLEMENTER_ID},
+                HEAD,
+                ACCEPTED,
+            )
+        self.assertIn("dismissed", str(caught.exception))
+
+    def test_a_dismissed_review_with_anchored_findings_still_fails(self) -> None:
+        """Findings do not survive the review being withdrawn."""
+        with self.assertRaises(ReviewEvidenceError):
+            verify(
+                [review(state="DISMISSED", body="")],
+                [finding(), finding()],
+                {IMPLEMENTER_ID},
+                HEAD,
+                ACCEPTED,
+            )
+
+    def test_dismissal_is_matched_regardless_of_case(self) -> None:
+        for state in ("dismissed", "Dismissed", "DISMISSED"):
+            with self.subTest(state=state):
+                with self.assertRaises(ReviewEvidenceError):
+                    verify(
+                        [review(state=state)], [], {IMPLEMENTER_ID}, HEAD, ACCEPTED
+                    )
+
+    def test_a_standing_review_beside_a_dismissed_one_still_counts(self) -> None:
+        """Dismissing one review does not retract another that still stands."""
+        evidence = verify(
+            [review(state="DISMISSED"), review(state="COMMENTED")],
+            [],
+            {IMPLEMENTER_ID},
+            HEAD,
+            ACCEPTED,
+        )
+        self.assertIn("reviewed", evidence)
+
+    def test_changes_requested_is_still_a_review(self) -> None:
+        """A reviewer who found problems reviewed; that is the evidence.
+
+        Rejecting this state would mean a review only counts when it finds
+        nothing. The corrective commits that follow move the head, and the
+        staleness check already requires a fresh review of it.
+        """
+        evidence = verify(
+            [review(state="CHANGES_REQUESTED")],
+            [],
+            {IMPLEMENTER_ID},
+            HEAD,
+            ACCEPTED,
+        )
+        self.assertIn("reviewed", evidence)
+
+    def test_the_states_real_reviews_carry_are_accepted(self) -> None:
+        """Observed on this repository: Greptile submits COMMENTED."""
+        for state in ("COMMENTED", "APPROVED", "CHANGES_REQUESTED"):
+            with self.subTest(state=state):
+                self.assertIn(
+                    "reviewed",
+                    verify(
+                        [review(state=state)], [], {IMPLEMENTER_ID}, HEAD, ACCEPTED
+                    ),
+                )
 
 
 class RejectedReviewTests(unittest.TestCase):
@@ -257,3 +344,191 @@ class SubstanceThresholdTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class NetworkAndCommandLineTests(unittest.TestCase):
+    """The layer that decides whether a failure blocks a merge.
+
+    `verify` is pure and thoroughly exercised above, but it is `main` that
+    turns a verdict into an exit code, and `check_pull_request` that decides
+    what an unreachable GitHub means. That is where the fail-closed guarantee
+    lives, and until now nothing proved it: a refactor could have made a
+    network error look like a passing review and no test would have noticed.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        (self.root / "review").mkdir()
+        (self.root / "review/accepted_reviewers.json").write_text(
+            json.dumps({"reviewers": [{"id": REVIEWER_ID, "login": "reviewer"}]}),
+            encoding="utf-8",
+        )
+        (self.root / "governance").mkdir()
+        (self.root / "governance/EXCEPTIONS.md").write_text("", encoding="utf-8")
+
+    def run_main(self, *arguments: str, responses=None, token: str = "t"):
+        """Drive the command line with GitHub replaced, never called for real.
+
+        The gate's own reporting is captured rather than printed: it belongs
+        to the run under test, and letting it reach the suite's output would
+        bury a real failure among a dozen deliberate ones.
+        """
+        import check_independent_review as module
+
+        environment = dict(os.environ)
+        environment["GITHUB_TOKEN"] = token
+        self.output = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, environment, clear=True):
+            with contextlib.redirect_stdout(self.output):
+                if responses is None:
+                    return module.main(list(arguments))
+                with unittest.mock.patch.object(
+                    module, "_paged", side_effect=responses
+                ):
+                    return module.main(list(arguments))
+
+    def _arguments(self, *extra: str) -> tuple[str, ...]:
+        return (
+            "--root",
+            str(self.root),
+            "--repository",
+            "owner/repo",
+            "--pull-request",
+            "1",
+            "--head-sha",
+            HEAD,
+            *extra,
+        )
+
+    def test_a_network_failure_reports_but_does_not_block_in_warn_only_mode(
+        self,
+    ) -> None:
+        code = self.run_main(
+            *self._arguments(),
+            responses=urllib.error.URLError("unreachable"),
+        )
+        self.assertEqual(code, 0)
+        # It must say so rather than passing silently, or a warn-only run
+        # would be indistinguishable from a verified one.
+        self.assertIn("NOT VERIFIED", self.output.getvalue())
+
+    def test_a_network_failure_fails_closed_under_enforce(self) -> None:
+        """The property the whole promotion path depends on.
+
+        An unreachable GitHub must never be indistinguishable from a verified
+        review. Under enforcement it blocks.
+        """
+        code = self.run_main(
+            *self._arguments("--enforce"),
+            responses=urllib.error.URLError("unreachable"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("NOT VERIFIED", self.output.getvalue())
+
+    def test_an_http_error_also_fails_closed_under_enforce(self) -> None:
+        failure = urllib.error.HTTPError(
+            "https://api.github.com", 403, "Forbidden", {}, None
+        )
+        self.assertEqual(
+            self.run_main(*self._arguments("--enforce"), responses=failure), 1
+        )
+        self.assertEqual(self.run_main(*self._arguments(), responses=failure), 0)
+
+    def test_a_missing_review_reports_in_warn_only_and_blocks_under_enforce(
+        self,
+    ) -> None:
+        empty = ([], [], [])
+        self.assertEqual(
+            self.run_main(*self._arguments(), responses=lambda *a, **k: []), 0
+        )
+        self.assertEqual(
+            self.run_main(
+                *self._arguments("--enforce"), responses=lambda *a, **k: []
+            ),
+            1,
+        )
+        del empty
+
+    def test_a_qualifying_review_passes_under_enforce(self) -> None:
+        def responses(url, token):
+            if url.endswith("reviews") or "/reviews?" in url:
+                return [review()]
+            return []
+
+        self.assertEqual(
+            self.run_main(*self._arguments("--enforce"), responses=responses), 0
+        )
+
+    def test_a_self_review_blocks_under_enforce(self) -> None:
+        def responses(url, token):
+            if "/reviews?" in url:
+                return [review()]
+            if "/commits?" in url:
+                return [{"author": {"id": REVIEWER_ID}}]
+            return []
+
+        self.assertEqual(
+            self.run_main(*self._arguments("--enforce"), responses=responses), 1
+        )
+
+    def test_no_pull_request_context_exits_successfully(self) -> None:
+        """A push to an already-merged branch has no review to read."""
+        for arguments in (
+            ("--root", str(self.root)),
+            ("--root", str(self.root), "--enforce"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.run_main(*arguments), 0)
+
+    def test_a_short_head_sha_cannot_satisfy_enforcement(self) -> None:
+        """An abbreviation names a commit the gate cannot pin down."""
+        def refuse(*arguments, **keywords):
+            raise AssertionError(
+                "GitHub must not be consulted for a head the gate cannot pin down"
+            )
+
+        for sha in ("", HEAD[:12], HEAD[:39]):
+            with self.subTest(sha=sha):
+                arguments = (
+                    "--root",
+                    str(self.root),
+                    "--repository",
+                    "owner/repo",
+                    "--pull-request",
+                    "1",
+                    "--head-sha",
+                    sha,
+                )
+                # The refusal happens before any request, so a removed length
+                # guard shows up as a call rather than only as an exit code.
+                self.assertEqual(
+                    self.run_main(*arguments, "--enforce", responses=refuse), 1
+                )
+                self.assertEqual(self.run_main(*arguments, responses=refuse), 0)
+
+    def test_a_missing_token_cannot_satisfy_enforcement(self) -> None:
+        def refuse(*arguments, **keywords):
+            raise AssertionError("GitHub must not be consulted without a token")
+
+        self.assertEqual(
+            self.run_main(*self._arguments("--enforce"), responses=refuse, token=""),
+            1,
+        )
+        self.assertEqual(
+            self.run_main(*self._arguments(), responses=refuse, token=""), 0
+        )
+
+    def test_an_approved_exception_is_honoured_without_calling_github(self) -> None:
+        (self.root / "governance/EXCEPTIONS.md").write_text(
+            f"## EX-009\n\n- **Scope:** `{HEAD}`.\n- **Approval date:** 2026-09-05.\n",
+            encoding="utf-8",
+        )
+
+        def refuse(*arguments, **keywords):
+            raise AssertionError("GitHub must not be called once an exception covers the head")
+
+        self.assertEqual(
+            self.run_main(*self._arguments("--enforce"), responses=refuse), 0
+        )

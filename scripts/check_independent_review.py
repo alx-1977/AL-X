@@ -51,6 +51,14 @@ API_ROOT = "https://api.github.com"
 # account of what was examined.
 MINIMUM_SUBSTANTIVE_CHARACTERS = 200
 
+# A review whose state is DISMISSED has been explicitly retracted: someone
+# with write access said it no longer stands. It keeps its commit_id and its
+# body, so nothing else here would notice. CHANGES_REQUESTED is deliberately
+# not rejected -- a reviewer who found problems still reviewed, and the
+# corrective commits that follow move the head, which the staleness check
+# already catches.
+RETRACTED_REVIEW_STATE = "DISMISSED"
+
 # Bare verdicts. A body consisting only of one of these, with or without
 # punctuation, is a token rather than evidence -- including a clean one.
 BARE_VERDICTS = {
@@ -190,6 +198,7 @@ def verify(
                 )
 
     stale: list[str] = []
+    dismissed: list[str] = []
     unaccepted: list[str] = []
     self_review: list[str] = []
     insubstantial: list[str] = []
@@ -202,6 +211,9 @@ def verify(
             continue
         if review.get("commit_id") != head_sha:
             stale.append(f"{login} reviewed {str(review.get('commit_id'))[:12]}")
+            continue
+        if str(review.get("state") or "").upper() == RETRACTED_REVIEW_STATE:
+            dismissed.append(f"{login}'s review was dismissed")
             continue
         if identity not in accepted:
             unaccepted.append(f"{login} (id {identity})")
@@ -221,7 +233,7 @@ def verify(
             f"{findings_by_reviewer.get(identity, 0)} anchored finding(s)"
         )
 
-    for reason in (stale, unaccepted, self_review, insubstantial):
+    for reason in (stale, dismissed, unaccepted, self_review, insubstantial):
         if reason:
             raise ReviewEvidenceError("; ".join(reason))
     raise ReviewEvidenceError("no accepted independent review covers this head")
