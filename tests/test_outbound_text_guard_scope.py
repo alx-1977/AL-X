@@ -413,14 +413,18 @@ class RejectionReasonReachesCoreTests(GuardScopeTestCase):
         )
 
     def test_a_refusal_before_the_goal_commits_is_not_recorded(self) -> None:
-        """A known gap, pinned rather than asserted away.
+        """No durable record, and that is the desired behaviour.
 
-        When the refused call arrives in the same decision that proposes the
-        goal, there is no snapshot to append the refusal to and it is dropped
-        (`loop.py`, `if snapshot is not None`). Nothing is transmitted, so the
-        safety property holds — but she is told nothing, which is the shape of
-        the incident this file exists for. Recording it here so the behaviour
-        is visible and a later fix has something to flip.
+        A refused call arriving in the same decision that proposes the goal
+        has no committed snapshot to attach to. Nothing is created to hold it:
+        no goal is persisted, no attempt is stored, because nothing was
+        dispatched and no external effect occurred. GoalState stays the sole
+        owner of durable attempts.
+
+        She is still told. The refusal travels on the transient channel
+        instead, which `PreGoalRefusalIsVisibleTests` covers. This test guards
+        the other half — that visibility was not bought by writing durable
+        state for something that never happened.
         """
         call = CapabilityCall(
             "call-m1", SEND_MAIL_REPLY,
@@ -504,3 +508,183 @@ class EveryOutboundCapabilityDeclaresItselfTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
+    """A refusal before the goal commits still reaches her.
+
+    When one decision proposes a goal and an action together, the goal has not
+    committed when the action is refused, so there is no durable state to
+    append the refusal to and it used to be dropped. Nothing unsafe happened —
+    nothing was dispatched — but she reasoned on knowing only that something
+    had been rejected. Ten such refusals cost eleven reasoning calls and told
+    her nothing.
+
+    The refusal now travels on the transient channel the dispatch-blocked path
+    beside it already used. No goal is created to hold it, and nothing durable
+    is written, because nothing happened.
+    """
+
+    def refused_send(self, index: int = 1) -> CapabilityCall:
+        return CapabilityCall(
+            f"call-m{index}", SEND_MAIL_REPLY,
+            {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2",
+             "to": ["john@example.test"], "subject": "Re: parts",
+             "body": f"Wording he never heard {index}."},
+            approval_id=f"approve-m{index}",
+        )
+
+    def run_once(self, *decisions, capabilities=None, budget=4, identifiers=("goal-1",)):
+        reasoner = Queued(*decisions)
+        outcome = self.agent(
+            reasoner, capabilities or (SEND_REPLY_DEFINITION,),
+            identifiers=identifiers,
+        ).process(
+            conversation(spoken="Shall I reply?", asked="yes"), RETENTION, budget
+        )
+        return reasoner, outcome
+
+    def test_the_refusal_becomes_transient_feedback(self) -> None:
+        call = self.refused_send()
+        reasoner, _ = self.run_once(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="I could not send that."),
+        )
+        refused = list(reasoner.contexts[-1].refused_calls)
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(refused[0]["call_id"], "call-m1")
+        self.assertEqual(refused[0]["capability_id"], SEND_MAIL_REPLY)
+        self.assertEqual(refused[0]["reason"], "approval_covers_unheard_text")
+
+    def test_nothing_is_dispatched(self) -> None:
+        call = self.refused_send()
+        self.run_once(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="I could not send that."),
+        )
+        self.assertEqual(self.dispatched, [], "a refused action reached dispatch")
+
+    def test_the_refusal_reaches_the_payload_core_receives(self) -> None:
+        """Through the projection itself, not the context before it."""
+        from alx.core.model_reasoner import _context_payload
+
+        call = self.refused_send()
+        reasoner, _ = self.run_once(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="I could not send that."),
+        )
+        payload = json.loads(_context_payload(reasoner.contexts[-1]))
+        self.assertEqual(
+            payload["refused_calls"],
+            [{"call_id": "call-m1", "capability_id": SEND_MAIL_REPLY,
+              "reason": "approval_covers_unheard_text"}],
+        )
+
+    def test_no_goal_and_no_durable_attempt_are_created(self) -> None:
+        """Transient feedback, not execution history. Nothing happened."""
+        call = self.refused_send()
+        reasoner, _ = self.run_once(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="I could not send that."),
+        )
+        self.assertIsNone(reasoner.contexts[-1].active_goal)
+        self.assertEqual(
+            len(self.store.list_goals()), 0,
+            "a goal was persisted merely to hold a refusal",
+        )
+
+    def test_a_post_goal_refusal_is_still_durable(self) -> None:
+        """Where a goal exists, the attempt is recorded on it exactly as before."""
+        opening = Queued(
+            AgentDecision(response="Working on it.", goal_proposal=self.goal())
+        )
+        first = self.agent(opening, (SEND_REPLY_DEFINITION,)).process(
+            conversation(spoken="Shall I reply?", asked="yes"), RETENTION, 2
+        )
+        goal_id = first.snapshot.state.goal_id
+
+        call = self.refused_send()
+        reasoner = Queued(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_id=goal_id),
+            AgentDecision(response="I could not send that.", goal_id=goal_id),
+        )
+        self.agent(reasoner, (SEND_REPLY_DEFINITION,), identifiers=()).process(
+            conversation(spoken="Shall I reply?", asked="yes"), RETENTION, 3
+        )
+        goal = reasoner.contexts[-1].active_goal
+        self.assertIsNotNone(goal)
+        rejected = [
+            item for item in goal.attempts
+            if item.disposition is CapabilityAttemptDisposition.REJECTED
+        ]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0].reason_code, "approval_covers_unheard_text")
+
+    def test_repeated_refusals_no_longer_consume_the_budget(self) -> None:
+        """The incident shape: ten refusals used to buy eleven reasoning calls.
+
+        One refusal is explained; a second ends the turn with its reason. She
+        keeps a full step to choose something else, and loses only the steps
+        she would have spent against a wall that cannot move.
+        """
+        decisions = []
+        for index in range(1, 11):
+            call = self.refused_send(index)
+            decisions.append(
+                AgentDecision(call=call, approval_proposal=self.approved(call),
+                              goal_proposal=self.goal())
+            )
+        decisions.append(AgentDecision(response="giving up"))
+
+        reasoner, outcome = self.run_once(
+            *decisions, budget=12,
+            identifiers=tuple(f"goal-{index}" for index in range(30)),
+        )
+        self.assertLessEqual(
+            len(reasoner.contexts), 3,
+            f"the turn still spent {len(reasoner.contexts)} reasoning calls",
+        )
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.reason, "approval_covers_unheard_text")
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(len(self.store.list_goals()), 0)
+
+    def test_she_may_still_do_something_different_after_a_refusal(self) -> None:
+        """The stop prevents pointless repetition, never recovery."""
+        refused = self.refused_send()
+        alternative = CapabilityCall(
+            "call-s1", ASK_WEB_SEARCH,
+            {"search_id": "s1", "subject": "something else entirely"},
+        )
+        reasoner, outcome = self.run_once(
+            AgentDecision(call=refused, approval_proposal=self.approved(refused),
+                          goal_proposal=self.goal()),
+            AgentDecision(call=alternative, goal_proposal=self.goal()),
+            AgentDecision(response="I did the other thing instead."),
+            capabilities=(SEND_REPLY_DEFINITION, WEB_SEARCH_DEFINITION),
+            budget=5, identifiers=("goal-1", "goal-2", "goal-3"),
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.dispatched, [ASK_WEB_SEARCH],
+                         "a viable alternative was blocked")
+
+    def test_a_crash_before_the_next_step_loses_nothing_that_matters(self) -> None:
+        """The refusal is feedback, not history: nothing needs recovering."""
+        call = self.refused_send()
+        self.run_once(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="I could not send that."),
+        )
+        self.store.close()
+        reopened = SQLiteGoalStore(
+            Path(self.directory.name) / "goals.sqlite3"
+        )
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.list_goals(), ())
+        self.assertEqual(self.dispatched, [])

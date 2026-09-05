@@ -81,6 +81,8 @@ open_notebook_threads lists enquiries you have open, with how many entries each 
 nothing of what they say; read one through the capability when you want its content. If you
 want to return to an enquiry later, request_future_cognition is how you make that occasion
 for yourself. Nothing schedules it otherwise, and leaving a thread untouched is fine.
+refused_calls lists actions refused this turn before anything was dispatched,
+each with the mechanical reason. Nothing happened, so no goal records them.
 An attempt whose disposition is rejected carries reason_code: the mechanical
 reason deterministic governance refused it. Read it. Some reasons cannot change
 until Friedl says something new, so repeating the same action in this turn will
@@ -637,6 +639,11 @@ def _context_payload(context: ReasoningContext) -> str:
         # Identifiers she proposed that already name something else. The facts
         # only; what to do about each is her decision.
         "memory_identifier_conflicts": [dict(item) for item in context.memory_conflicts],
+        # Actions this turn refused before anything was dispatched, with the
+        # mechanical reason. Compact and transient: no goal owns them, because
+        # nothing happened. Without this she reasoned on blind, which is how
+        # one refusal became sixteen.
+        "refused_calls": [dict(item) for item in context.refused_calls],
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
