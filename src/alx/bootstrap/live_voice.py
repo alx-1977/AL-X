@@ -25,6 +25,7 @@ from alx.bootstrap.autonomous import (
     OccasionSpendRelay,
 )
 from alx.bootstrap.continuity import build_continuity_runtime
+from alx.contracts.notebook import OPEN_NOTEBOOK_THREAD_LIMIT
 from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
@@ -307,6 +308,8 @@ async def run(repository_root: Path) -> None:
     web_runtime = build_web_runtime(
         voice_settings.web_read_enabled,
         lambda: current_call_id[0],
+        voice_settings.web_search,
+        storage_root,
     )
     if web_runtime is not None:
         for definition in web_runtime.definitions:
@@ -478,6 +481,13 @@ async def run(repository_root: Path) -> None:
         open_thoughts=lambda: continuity_runtime.store.open_thoughts(
             OPEN_THOUGHT_LIMIT
         ),
+        # Her open enquiries, from the one notebook store. Context only: a
+        # thread never creates an occasion, and nothing here schedules a
+        # return to one. Continuity of interest; opportunity stays hers to
+        # ask for through request_future_cognition.
+        open_notebook_threads=lambda: notebook_runtime.store.open_threads(
+            OPEN_NOTEBOOK_THREAD_LIMIT
+        ),
         undelivered_responses=lambda: opportunity_ledger.undelivered(),
         # A refused goal proposal left no trace on 2026-09-04, so a live
         # rejection could not be diagnosed. Mechanical facts to the log only:
@@ -568,6 +578,8 @@ async def run(repository_root: Path) -> None:
         notebook_runtime.store.close()
         if web_runtime is not None:
             web_runtime.provider.close()
+            if web_runtime.searcher is not None:
+                web_runtime.searcher.close()
         goal_store.close()
 
 

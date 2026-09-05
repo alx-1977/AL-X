@@ -21,6 +21,7 @@ him nothing and is settled silently.
 from __future__ import annotations
 
 import sys
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -339,3 +340,159 @@ class ScanReportsDisappearanceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VanishedIsNeverAnArrivalTest(unittest.TestCase):
+    """A message found gone is never offered to AL/X as a new arrival.
+
+    On 2026-09-05 she told Friedl about mail that was not in his inbox, and
+    then could not delete it because it did not exist. Her reasoning was
+    right at every step; the provider had handed her two facts about one
+    message — that it was gone, and that it had arrived — and she met the
+    first with silence because she had never mentioned it.
+
+    The two facts are recorded independently on purpose, so a disappearance
+    found while nobody was connected still reaches her later. That leaves a
+    row satisfying both selectors at once, and only the vanished selector
+    checked. These tests hold the arrival selector to the same fact.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.state = SQLiteMailObservationState(
+            Path(self.directory.name) / "mail.sqlite3"
+        )
+        self.addCleanup(self.state.close)
+        self.imap = FakeImap()
+        self.adapter = ICloudMailAdapter(
+            "imap.example.test", 993, "friedl@example.test", "secret",
+            self.state, 1, connection_factory=lambda *a, **k: self.imap,
+        )
+
+    def test_a_message_that_vanishes_before_she_speaks_is_not_announced(self) -> None:
+        """The reported bug, end to end.
+
+        Promoted to `current` by the transport, then deleted from the mailbox
+        before the turn that would have raised it. She is told it is gone, and
+        must never afterwards be handed it as though it had just arrived.
+        """
+        self.adapter.scan()
+        self.imap.items[2] = message("Order received", "Thanks for your order")
+        self.adapter.scan()
+
+        arrival = self.state.current()               # promoted, not yet spoken
+        self.assertEqual(arrival.data["uid"], "2")
+
+        del self.imap.items[2]                       # Friedl deletes it
+        self.adapter.scan()
+
+        vanished = self.state.pending_vanished()
+        self.assertEqual(len(vanished), 1)
+        self.state.record_vanished_delivery(vanished[0].event_id)
+
+        self.assertIsNone(
+            self.state.current(),
+            "a message known to be gone was offered as a new arrival",
+        )
+
+    def test_the_disappearance_still_reaches_her(self) -> None:
+        """Excluded from arrivals, not erased: the vanished fact survives."""
+        self.adapter.scan()
+        self.imap.items[2] = message("Order received", "Thanks")
+        self.adapter.scan()
+        self.state.current()
+        del self.imap.items[2]
+        self.adapter.scan()
+
+        self.assertIsNone(self.state.current())
+        reported = self.state.pending_vanished()
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(reported[0].kind, "mail.message_vanished")
+
+    def test_a_vanished_pending_message_is_never_promoted(self) -> None:
+        """It disappears before the transport ever picks it up."""
+        self.adapter.scan()
+        self.imap.items[2] = message("Order received", "Thanks")
+        self.adapter.scan()
+        del self.imap.items[2]
+        self.adapter.scan()
+
+        self.assertIsNone(self.state.current())
+
+    def test_no_observation_satisfies_both_selectors(self) -> None:
+        """The invariant itself, whatever the state.
+
+        A row that is both 'an arrival to raise' and 'a disappearance to
+        report' is the shape of the bug, so it is asserted directly rather
+        than only through the sequence that produced it.
+        """
+        self.adapter.scan()
+        self.imap.items[2] = message("Order received", "Thanks")
+        self.adapter.scan()
+        self.state.current()
+        del self.imap.items[2]
+        self.adapter.scan()
+
+        vanished = {item.data["uid"] for item in self.state.pending_vanished()}
+        arrival = self.state.current()
+        if arrival is not None:
+            self.assertNotIn(arrival.data["uid"], vanished)
+
+    def test_an_ordinary_arrival_is_unaffected(self) -> None:
+        """The narrowing must not withhold mail that is genuinely there."""
+        self.adapter.scan()
+        self.imap.items[2] = message("Order received", "Thanks")
+        self.adapter.scan()
+
+        arrival = self.state.current()
+        self.assertIsNotNone(arrival, "a present message was withheld")
+        self.assertEqual(arrival.data["uid"], "2")
+        self.assertEqual(self.state.pending_vanished(), ())
+
+    def test_a_later_message_still_arrives_after_one_vanishes(self) -> None:
+        """One disappearance must not block the mail behind it."""
+        self.adapter.scan()
+        self.imap.items[2] = message("First", "gone soon")
+        self.adapter.scan()
+        self.state.current()
+        del self.imap.items[2]
+        self.adapter.scan()
+        self.state.record_vanished_delivery(
+            self.state.pending_vanished()[0].event_id
+        )
+
+        self.imap.items[3] = message("Second", "still here")
+        self.adapter.scan()
+        arrival = self.state.current()
+        self.assertIsNotNone(arrival, "the next message never arrived")
+        self.assertEqual(arrival.data["uid"], "3")
+
+    def test_a_pending_row_marked_vanished_is_never_promoted(self) -> None:
+        """The narrow race the second guard exists for.
+
+        `reconcile` settles a `pending` row straight to `done`, so this state
+        is not reachable through the ordinary sequence. It is reachable when a
+        message is found gone between the read that selects a pending row and
+        the write that promotes it. Constructed directly, because a guard that
+        only a race can reach is exactly the kind that rots unnoticed.
+        """
+        self.adapter.scan()
+        self.imap.items[2] = message("Order received", "Thanks")
+        self.adapter.scan()
+
+        connection = sqlite3.connect(
+            str(Path(self.directory.name) / "mail.sqlite3")
+        )
+        try:
+            connection.execute(
+                "UPDATE mail_observations SET reported_vanished = 1 WHERE uid = 2"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.assertIsNone(
+            self.state.current(),
+            "a pending row already known gone was promoted and offered",
+        )

@@ -110,8 +110,9 @@ _THREAD = StructuredSchema(
 
 OPEN_THREAD_DEFINITION = CapabilityDefinition(
     OPEN_RESEARCH_THREAD,
-    "Open a durable research thread recording the question and why it is of "
-    "interest. Storage only: it starts no work and schedules nothing.",
+    "Open a durable thread in your notebook recording a question you want to "
+    "understand and why it interests you. Storage only: it starts no work and "
+    "schedules nothing.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"thread_id": _STRING, "question": _STRING, "interest": _STRING},

@@ -711,6 +711,19 @@ class SQLiteMailObservationState:
         Core releases it through a structured acknowledgement or Trash action.
         While it is presented, later pending observations stay queued and do
         not enter the conversation behind Friedl's back.
+
+        A message found gone is never offered here, whatever its state. The
+        two facts are recorded independently on purpose — a disappearance is
+        queued without overwriting the state, so it still reaches her after a
+        reconnect — but that leaves a row which satisfies both selectors at
+        once. Without this, a message that vanished after being promoted and
+        before being spoken was reported gone, met with silence because she
+        had never mentioned it, and then announced as though it had just
+        arrived. She told Friedl about mail that was no longer there, and
+        could not act on it because it did not exist.
+
+        The row is excluded, not cleared: `pending_vanished` must still find
+        it until the disappearance itself has been carried.
         """
         with self._lock:
             presented = self._connection.execute(
@@ -721,13 +734,17 @@ class SQLiteMailObservationState:
             row = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-                "WHERE state = 'current' ORDER BY uid LIMIT 1"
+                "WHERE state = 'current' AND COALESCE(reported_vanished, 0) = ? "
+                "ORDER BY uid LIMIT 1",
+                (self._NOT_VANISHED,),
             ).fetchone()
             if row is None:
                 row = self._connection.execute(
                     "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                     "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-                    "WHERE state = 'pending' ORDER BY uid LIMIT 1"
+                    "WHERE state = 'pending' AND COALESCE(reported_vanished, 0) = ? "
+                    "ORDER BY uid LIMIT 1",
+                    (self._NOT_VANISHED,),
                 ).fetchone()
                 if row is None:
                     return None
@@ -735,8 +752,9 @@ class SQLiteMailObservationState:
                     promoted = self._connection.execute(
                         "UPDATE mail_observations SET state = 'current' "
                         "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ? "
-                        "AND state = 'pending'",
-                        row[:3],
+                        "AND state = 'pending' "
+                        "AND COALESCE(reported_vanished, 0) = ?",
+                        (*row[:3], self._NOT_VANISHED),
                     ).rowcount
                 if not promoted:
                     # Settled or promoted between the read and the write.

@@ -36,8 +36,11 @@ from alx.tools.continuity import (
 )
 from alx.tools.web import (
     ASK_WEB_PAGE,
+    ASK_WEB_SEARCH,
     DEFINITION as WEB_DEFINITION,
+    SEARCH_DEFINITION as WEB_SEARCH_DEFINITION,
     build_web_executors,
+    build_web_search_executors,
 )
 from alx.tools.notebook import (
     CORRECT_RESEARCH_ENTRY,
@@ -64,6 +67,9 @@ from alx.tools.dhl import (
 
 __all__ = [
     "ASK_WEB_PAGE",
+    "ASK_WEB_SEARCH",
+    "WEB_SEARCH_DEFINITION",
+    "build_web_search_executors",
     "WEB_DEFINITION",
     "build_web_executors",
     "CONTINUITY_DEFINITIONS",

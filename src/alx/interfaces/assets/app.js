@@ -22,9 +22,13 @@ const phaseLabels = {
 
 let socket;
 let sending = false;
+// True while the drainer holds the voice. Read as a guard, not just written.
 let playbackActive = false;
 let pendingListening = false;
 let audioParts = [];
+// Sealed utterances waiting their turn. One voice, so they queue rather than
+// competing; each is already the Core's own wording, in the order it decided.
+let playbackQueue = [];
 let microphone;
 let stageStartedAt = performance.now();
 let firstAudioSent = false;
@@ -139,54 +143,100 @@ async function releaseMicrophone() {
   microphone = undefined;
 }
 
-async function playResponse(mediaType) {
+// AL/X has one voice, so at most one utterance is ever audible. The server
+// already serialises generation: every source — speech, typed, mail and other
+// background events, autonomous turns — funnels through one queue and one
+// synthesis path there. But `audio.end` announces that a stream finished
+// *arriving*, not that it finished *playing*, so an event whose turn ran while
+// the previous blob was still audible used to start a second Audio element
+// over the top of it. Two elements, one output device, two AL/X voices.
+//
+// Sealed here instead: each utterance's chunks become a blob at `audio.end`,
+// the blob waits its turn, and one drainer plays them strictly in order. This
+// preserves the ordering the server already decided rather than inventing one,
+// and nothing is dropped — a queued utterance is delayed by exactly the length
+// of the one ahead of it.
+function enqueueUtterance(mediaType) {
+  // Sealed at arrival. Clearing the shared buffer inside playback let a second
+  // stream's chunks land in `audioParts` before the first had taken them,
+  // merging two utterances into one blob.
+  if (!audioParts.length) return;
+  playbackQueue.push(new Blob(audioParts, { type: mediaType }));
+  audioParts = [];
+  void drainPlaybackQueue();
+}
+
+async function drainPlaybackQueue() {
+  // The guard that makes this a queue rather than a race. `playbackActive` was
+  // already being set and cleared; it was simply never read, so every arrival
+  // started a new element regardless of what was already sounding.
+  if (playbackActive) return;
   playbackActive = true;
   sending = false;
-  setPhase("speaking");
-  const url = URL.createObjectURL(new Blob(audioParts, { type: mediaType }));
-  audioParts = [];
-  const audio = new Audio();
-  let playbackSettled = false;
-  const finishPlayback = (message, tone) => {
-    if (playbackSettled) return;
-    playbackSettled = true;
-    URL.revokeObjectURL(url);
+  try {
+    while (playbackQueue.length) {
+      // Shifted before playing, so a blob that fails is already out of the
+      // queue and cannot be retried forever.
+      await playOneUtterance(playbackQueue.shift());
+    }
+  } finally {
+    // Reached however the last utterance ended — completed, failed, refused or
+    // throwing — so playback can never be left permanently stuck.
     playbackActive = false;
     pendingListening = false;
     sending = true;
     setPhase("listening");
     beginDiagnosticStage("Listening");
-    diagnostic(message, tone);
     heardThisTurn = false;
-  };
-  audio.preload = "auto";
-  const ready = new Promise((resolve, reject) => {
-    audio.addEventListener("canplay", resolve, { once: true });
-    audio.addEventListener("error", reject, { once: true });
+  }
+}
+
+// Resolves when this utterance stops being audible, for any reason. It never
+// rejects: a failed utterance must not prevent the queue behind it from
+// playing, so the failure is reported and the drainer continues.
+function playOneUtterance(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio();
+    let settled = false;
+    const finish = (message, tone) => {
+      if (settled) return;
+      settled = true;
+      URL.revokeObjectURL(url);
+      diagnostic(message, tone);
+      resolve();
+    };
+    audio.onended = () => finish("Playback completed", "ok");
+    audio.onerror = () => finish("Browser playback failed; continuing", "error");
+    audio.preload = "auto";
+    audio.addEventListener(
+      "canplay",
+      () => {
+        diagnostic(`Browser audio buffer ready · ${ttsElapsed()}`, "ok");
+        beginDiagnosticStage("Playing synthesized response");
+        setPhase("speaking");
+        audio.play().then(
+          () => diagnostic(
+            `Playback started · ${ttsElapsed()} · ${audioChunkCount} chunks · ${audioByteCount} bytes`,
+            "active",
+          ),
+          () => finish("Browser refused synthesized audio; continuing", "error"),
+        );
+      },
+      { once: true },
+    );
+    audio.addEventListener(
+      "error",
+      () => finish("Browser could not prepare synthesized audio; continuing", "error"),
+      { once: true },
+    );
+    try {
+      audio.src = url;
+      audio.load();
+    } catch (error) {
+      finish("Browser could not load synthesized audio; continuing", "error");
+    }
   });
-  audio.src = url;
-  audio.load();
-  try {
-    await ready;
-  } catch (error) {
-    finishPlayback("Browser could not prepare synthesized audio; microphone resumed", "error");
-    return;
-  }
-  diagnostic(`Browser audio buffer ready · ${ttsElapsed()}`, "ok");
-  beginDiagnosticStage("Playing synthesized response");
-  audio.onended = () => {
-    finishPlayback("Playback completed; microphone resumed", "ok");
-  };
-  audio.onerror = () => {
-    finishPlayback("Browser playback failed; microphone resumed", "error");
-  };
-  try {
-    await audio.play();
-  } catch (error) {
-    finishPlayback("Browser refused synthesized audio; microphone resumed", "error");
-    return;
-  }
-  diagnostic(`Playback started · ${ttsElapsed()} · ${audioChunkCount} chunks · ${audioByteCount} bytes`, "active");
 }
 
 function handleControl(message) {
@@ -258,7 +308,7 @@ function handleControl(message) {
   }
   if (message.type === "audio.end") {
     diagnostic(`Speech synthesis stream completed · ${ttsElapsed()}`, "ok");
-    playResponse(message.media_type).catch(() => setPhase("error"));
+    enqueueUtterance(message.media_type);
     return;
   }
   if (message.type !== "phase") return;
@@ -285,7 +335,9 @@ function handleControl(message) {
     diagnostic(`Pipeline error · ${message.reason ?? "unknown_error"}`, "error");
   }
   if (message.value === "thinking" || message.value === "speaking") sending = false;
-  if (message.value === "speaking") audioParts = [];
+  // Not cleared here any more. The buffer is sealed and emptied at
+  // `audio.end`, so clearing on `speaking` would discard chunks of an
+  // utterance that is still arriving.
   if (message.value === "listening" && playbackActive) {
     pendingListening = true;
     return;

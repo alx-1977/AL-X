@@ -114,15 +114,63 @@ class OneProductionPathTests(unittest.TestCase):
         self.assertEqual(identifiers, [ASK_WEB_PAGE])
         runtime.provider.close()
 
-    def test_search_is_not_present_before_its_review(self) -> None:
-        """Step 4 is not authorised to run yet; nothing may anticipate it."""
+    def test_search_is_absent_until_it_is_configured(self) -> None:
+        """Reading is authorised on its own; searching costs money.
+
+        This replaces the guard that kept search out of the tree entirely
+        before its review. Search now exists, but a runtime given no search
+        configuration still has no search capability registered — absent
+        rather than merely failing.
+        """
         runtime = build_web_runtime(True, lambda: "call-1")
         self.assertNotIn(
             "ask_web_search", [item.capability_id for item in runtime.definitions]
         )
+        self.assertIsNone(runtime.searcher)
         runtime.provider.close()
-        for path in sorted(SOURCE_ROOT.rglob("*.py")):
-            self.assertNotIn("brave", path.read_text().lower(), f"in {path}")
+
+    def test_brave_stays_inside_the_provider_boundary(self) -> None:
+        """No Brave-specific knowledge in Core, contracts or generic tools."""
+        # The adapter owns Brave. Composition may name it because something has
+        # to say which provider is wired in, the provider package re-exports it,
+        # and configuration names its environment variables. Nothing else may
+        # know which search provider is in use — a capability or contract that
+        # did would make swapping providers a change to the wrong layer.
+        allowed = {
+            "providers/web_search.py",
+            "providers/__init__.py",
+            "bootstrap/web.py",
+            "config/settings.py",
+        }
+        found = {
+            path.relative_to(SOURCE_ROOT).as_posix()
+            for path in sorted(SOURCE_ROOT.rglob("*.py"))
+            if "brave" in path.read_text().lower()
+        }
+        self.assertTrue(
+            found <= allowed, f"Brave leaked outside its adapter: {found - allowed}"
+        )
+        for name in ("core", "contracts", "goals", "conversation", "memories",
+                     "tools", "capabilities", "safety", "specialists"):
+            for path in sorted((SOURCE_ROOT / name).rglob("*.py")):
+                self.assertNotIn("brave", path.read_text().lower(), f"in {path}")
+
+    def test_no_summarised_answer_endpoint_is_reachable(self) -> None:
+        """D-025 excludes Brave Answers: it returns a model's conclusion."""
+        source = (SOURCE_ROOT / "providers" / "web_search.py").read_text()
+        # Only executable lines: the module docstring names Brave Answers in
+        # order to record that it is excluded, which is the opposite of a leak.
+        code = "\n".join(
+            line for line in source.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ).lower()
+        code = code.split('"""')[0] + "".join(code.split('"""')[2:])
+        for forbidden in ("summarizer", "summariser", "summary_key",
+                          "extra_snippets", "goggles"):
+            self.assertNotIn(forbidden, code)
+        # And the only endpoint it can reach is the web search path.
+        self.assertIn('BRAVE_SEARCH_PATH = "/res/v1/web/search"', source)
+        self.assertEqual(source.count("BRAVE_SEARCH_PATH ="), 1)
 
 
 class MutationTests(unittest.TestCase):

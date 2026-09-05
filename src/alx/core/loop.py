@@ -114,6 +114,7 @@ class CoreAgent:
                  approval_ttl_seconds: int | None = None,
                  budget_check: Callable[[str], None] | None = None,
                  open_thoughts: Callable[[], tuple] | None = None,
+                 open_notebook_threads: Callable[[], tuple] | None = None,
                  undelivered_responses: Callable[[], tuple] | None = None,
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None) -> None:
         self._store = store
@@ -139,6 +140,11 @@ class CoreAgent:
         # Core asks for them; it never reaches the store itself, and the same
         # call is made for every turn whatever its origin.
         self._open_thoughts = open_thoughts or (lambda: ())
+        # Her open enquiries, from the one notebook store, bounded and
+        # content-free. Supplied identically on every turn: a context
+        # assembled differently when nobody is watching would be a second
+        # builder deciding what she is like unprompted.
+        self._open_notebook_threads = open_notebook_threads or (lambda: ())
         # Occasions whose response had nowhere to go. Supplied by the one
         # opportunity ledger; the Core is shown that it happened and nothing
         # deterministic decides whether it still matters.
@@ -229,6 +235,7 @@ class CoreAgent:
                     unfinished_goals=summaries,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
+                    open_notebook_threads=self._open_notebook_threads(),
                     undelivered_responses=self._undelivered_responses(),
                     memory_conflicts=memory_conflicts,
                     refused_calls=refused_calls,
@@ -359,6 +366,27 @@ class CoreAgent:
                             snapshot.revision,
                             decision_provenance,
                         )
+                    # A goal proposed in this same decision has not committed
+                    # yet, so there is nothing durable to append the refusal
+                    # to and it used to be discarded here. She then reasoned
+                    # again with no idea what had happened: sixteen refusals
+                    # in one turn told her only that something was rejected.
+                    # The transient channel carries it instead, exactly as the
+                    # dispatch-blocked path beside this one already does.
+                    # Nothing durable is created, because nothing was
+                    # dispatched and no external effect occurred.
+                    if refused_calls:
+                        # One explanation per turn, as above. She has been told
+                        # a reason and asked for something refused again; a
+                        # further step would spend the budget on the same wall.
+                        return CoreOutcome(
+                            CoreState.CHECKPOINTED, snapshot, reason=approval_error,
+                        )
+                    refused_calls = (*refused_calls, {
+                        "call_id": decision.call.call_id,
+                        "capability_id": decision.call.capability_id,
+                        "reason": approval_error,
+                    })
                     continue
                 assert candidate is not None
                 proposed = decision.approval_proposal
@@ -792,8 +820,7 @@ class CoreAgent:
             " ".join(item.split()) not in spoken for item in authored
         )
 
-    @staticmethod
-    def _approval_proposal_error(conversation, state, decision) -> str | None:
+    def _approval_proposal_error(self, conversation, state, decision) -> str | None:
         proposal = decision.approval_proposal
         call = decision.call
         if proposal is None:
@@ -814,8 +841,15 @@ class CoreAgent:
             or proposal.source_reference != f"turn:{source.turn_id}"
         ):
             return "approval_source_not_latest_person_turn"
-        if CoreAgent._unheard_authored_text(conversation, call):
-            return "approval_covers_unheard_text"
+        # Only a capability that actually carries her wording to someone else
+        # is held to what Friedl has already heard. Scoped by the capability's
+        # own declaration rather than by argument names: a search argument
+        # called `subject` once made every web search look like unsent mail,
+        # and sixteen refusals in one turn told her nothing about why.
+        definition = self._definition(call.capability_id)
+        if definition is not None and definition.transmits_authored_text:
+            if CoreAgent._unheard_authored_text(conversation, call):
+                return "approval_covers_unheard_text"
         return None
 
     @staticmethod

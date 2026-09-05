@@ -20,6 +20,7 @@ from typing import Any
 from alx.contracts.notebook import (
     MAX_ENTRY_REVISIONS,
     MAX_THREAD_ENTRIES,
+    OPEN_NOTEBOOK_THREAD_LIMIT,
     DeletionRecord,
     EntryKind,
     EntryProposal,
@@ -230,6 +231,47 @@ class SQLiteResearchStore:
         if not changed:
             raise ThreadNotFound(thread_id)
         return self.read_thread(thread_id)
+
+    def open_threads(
+        self, limit: int = OPEN_NOTEBOOK_THREAD_LIMIT
+    ) -> tuple[dict[str, object], object]:
+        """Her open enquiries, identity and framing only, newest first.
+
+        Deliberately not a `ThreadSnapshot`: no entries, no revisions, no
+        content. The Core is reminded that an enquiry exists and is told how
+        much is in it; reading what she wrote is a separate, explicit call.
+        Without that separation this would put the whole notebook into every
+        turn, which is the cost the paging in `read_thread` exists to avoid.
+
+        Only OPEN threads. Paused and archived enquiries were set aside by her
+        own decision, and resurfacing them would be the runtime overriding it.
+        Ordered by when each was opened, because that is the only ordering
+        there is; nothing here ranks an enquiry by how interesting it looks.
+        """
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        rows = self._connection.execute(
+            "SELECT t.thread_id, t.question, t.interest, t.status, t.opened_at, "
+            "(SELECT COUNT(*) FROM research_entries e "
+            " WHERE e.thread_id = t.thread_id) AS entry_count "
+            "FROM research_threads t WHERE t.status = ? "
+            "ORDER BY t.opened_at DESC LIMIT ?",
+            (ThreadStatus.OPEN.value, min(limit, OPEN_NOTEBOOK_THREAD_LIMIT)),
+        ).fetchall()
+        return tuple(
+            {
+                "thread_id": str(row["thread_id"]),
+                "question": str(row["question"]),
+                "interest": str(row["interest"]),
+                "status": str(row["status"]),
+                "opened_at": str(row["opened_at"]),
+                # How much is in the thread, never what. A continuation cue:
+                # she can tell an enquiry she has written in from one she only
+                # opened, without the entries themselves reaching context.
+                "entry_count": int(row["entry_count"]),
+            }
+            for row in rows
+        )
 
     def read_thread(self, thread_id: str, offset: int = 0) -> ThreadSnapshot:
         """One page of a thread. A thread is never returned whole.

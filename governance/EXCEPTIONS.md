@@ -284,3 +284,173 @@ This exception authorises removing the `Greptile Review` context from the requir
 This exception expires immediately once PR #14 is merged and `Greptile Review` is restored as a required status check on `main`. Restoration is part of the exception, not a follow-up task.
 
 **A retrospective Greptile review of `16bf2d9` remains outstanding** and must be obtained once review credits are available. If that review finds anything, it is fixed as ordinary work under the restored gate. This exception is not precedent: the next head requires the check like any other, and exhausted credits are a reason to stop, not a standing reason to merge unreviewed.
+
+---
+
+## EX-003 — Merging `feat/web-search-v1` at `b1470fc` with an independent review that is not Greptile
+
+### Register metadata
+
+- **Law:** Law 0 enforcement via `docs/LAW_ENFORCEMENT.md` gate policy — "A change fails if any applicable automated gate fails" and "Disabling a gate is not a workaround". `main` requires the status checks `law-gates` and `Greptile Review`; this suspends the second one for one merge.
+- **Scope:** The `feat/web-search-v1` branch only, at head `b1470fca49458c7cb7b5a779ff813c4eae0f4291`, comprising the ten commits listed below plus the single commit that adds this exception record. The `Greptile Review` required-status requirement on `main` is suspended for the duration of that one merge and restored immediately afterwards. Nothing else.
+- **Necessity:** The account's Greptile review quota is exhausted, so the required `Greptile Review` status cannot be produced for this head by any legitimate means. An independent review was obtained from a different reviewer instead, so the substantive requirement — that someone other than the author examined this code — is met; only the named provider cannot be.
+- **Alternatives:** wait for quota; merge nothing and continue on the branch; split the branch and merge only the parts already reviewed. All rejected below.
+- **Risks and safeguards:** a required review provider replaced by one with no recorded track record in this repository, and a precedent risk that any unavailable gate may be substituted; guarded by the full branch diff having been reviewed, both law gates, the full suite, `law-gates` in CI, and the retrospective-review obligation below. Set out in full below.
+- **Approved by Friedl:** yes, explicitly, for this exact wording and scope.
+- **Approval date:** 2026-09-05.
+- **Expiry or review condition:** expires immediately once the branch is merged and `Greptile Review` is restored as a required check. A retrospective Greptile review of `b1470fc` remains outstanding until quota allows it, alongside the one still outstanding for `16bf2d9` under EX-002.
+
+### Authorised target
+
+The implementation authorised here is the ten-commit branch `feat/web-search-v1`
+at `b1470fc`:
+
+| Commit | Subject |
+| --- | --- |
+| `0d5c07b` | Web Search V1: discovery through Brave, with its own spend ledger |
+| `81796e5` | One voice: serialise audible playback in the browser |
+| `98b4ef2` | Return the notebook to AL/X: research he asked for is not her Diary |
+| `a0f41e6` | Never offer a vanished message as a new arrival |
+| `e1897ca` | Scope the unheard-text guard to capabilities that actually send |
+| `ac33fc0` | Carry a pre-goal refusal to the next reasoning step |
+| `9f9d335` | Pay Cartesia only for audio around actual speech |
+| `2b6f5fd` | Require 200 ms of voicing before opening a paid stream |
+| `0d80c9f` | Run the voice-billing tests under the gate that enforces them |
+| `b1470fc` | Hold the two D-025 search prices to one figure |
+
+The commit actually merged is the one that adds this exception record on top of
+`b1470fc` and changes nothing else, so the governance record lands on `main`
+together with the merge it authorises rather than the merge arriving
+unexplained.
+
+Any commit other than these is outside this exception.
+
+### Why this is necessary
+
+`Greptile Review` is a required status check on `main`. It is produced by a paid
+external service whose quota for this account is exhausted, so the check cannot
+report on `b1470fc` at all. This is not a failing gate or a false positive; it
+is a gate that cannot run.
+
+This differs from EX-002 in the one respect that matters. There, the
+compensating evidence was that the *parent* commit had been reviewed and the
+unreviewed delta was small. Here, an independent review of the **entire** branch
+diff was actually performed — by Augment (Auggie) rather than Greptile. The
+requirement that this code be independently reviewed is therefore satisfied in
+substance. What cannot be satisfied is the requirement that the review come from
+one specific named provider.
+
+Friedl commissioned that review and accepted its verdict. Its findings are
+recorded below rather than summarised as an outcome, because a review's value is
+in what it found, not in its verdict line.
+
+### What the substitute review found
+
+Augment reviewed the full branch diff (26 source files, 12 test files), ran both
+law gates, and executed the suite. It raised **one material finding**:
+
+> `tests/test_speech_transmission_gate.py` — the suite guarding the Cartesia
+> billing defect — contained fifteen bare `def test_*` functions and no
+> `unittest.TestCase` class. CI runs `python -m unittest discover -s tests`,
+> which does not collect module-level functions, so none of the fifteen tests
+> executed in CI.
+
+That finding was verified independently and confirmed: `unittest discover`
+collected zero of them, the file was the only suite in the repository written in
+that style, and it also lacked the `sys.path` shim every other suite carries.
+Verification additionally established a fact the review had not: `pytest` is
+absent from `requirements.txt`, so CI could not have run those tests even had
+collection worked. The suite was converted to the repository's convention in
+`0d80c9f`, with no change to what any test asserts, and discovery went from
+1691 tests to 1706.
+
+Four further observations were raised and classified as non-blocking. One — that
+`APPROVED_SEARCH_USD_PER_REQUEST` and `BRAVE_USD_PER_REQUEST` both state the
+D-025 price with nothing asserting they agree — was judged worth acting on
+because it guards spending, and became `b1470fc`. The remaining three are
+recorded as outstanding housekeeping: a wrong return annotation on
+`research/store.py::open_threads`, two pre-existing suites that rely on
+discovery order for their import path, and unclosed sockets in the Brave fixture
+server. None affects behaviour.
+
+A review that found a real defect in the branch's own safety net is materially
+better evidence than a review that found nothing.
+
+### Alternatives considered and why they were rejected
+
+**Wait for quota.** Correct in principle and rejected on cost. The branch carries
+a fix for a live, measured billing defect — 7,272 seconds of audio billed against
+zero spoken words in a single day. The fix is already what runs locally, so
+delay does not expose Friedl to the defect again; what it does is leave the
+protected branch as the one place that reviewed fix is absent, while the branch
+carrying it diverges further from `main` with every subsequent change. The delay
+would buy a second independent review of code that has already had one, at the
+cost of a compounding merge.
+
+**Merge nothing and continue on the branch.** Rejected because it compounds the
+problem rather than deferring it. The branch is already ten commits and 39 files
+ahead of `main`; further work would widen a diff that must eventually be
+reviewed and merged as one piece, making the eventual review harder rather than
+easier.
+
+**Split the branch and merge only the already-reviewed parts.** Rejected because
+no part of this branch has a Greptile review. PR #14's 5/5 review covered
+`4cd1035`, which is already on `main`; everything here is above it. There is no
+reviewed subset to extract, so the split would produce two unreviewed merges
+instead of one.
+
+### Compensating safeguards
+
+- The full branch diff was independently reviewed, and its one material finding
+  was fixed in `0d80c9f` before this exception was drafted.
+- `scripts/check_governance.py` passes on the exact head.
+- `scripts/check_architecture.py` passes on the exact head.
+- The full suite passes: 1707 tests under `python -m unittest discover -s tests`,
+  the exact command CI runs, with no `PYTHONPATH` set.
+- The `law-gates` CI check is unaffected by this exception and must still pass on
+  the merge commit. `webrtcvad-wheels` publishes cp312 manylinux and musllinux
+  wheels, so the new dependency installs on CI's Python 3.12 Linux runner without
+  a compiler.
+- The only governed configuration file the branch touches is
+  `architecture/boundaries.toml`, and its single change restricts a new
+  third-party import to `providers`. It tightens the boundary rather than
+  relaxing it.
+- The economic boundaries the branch adds fail closed: search does not register
+  at all without an approved price, positive ceilings and a working ledger, and
+  the Cartesia gate transmits nothing when nobody is speaking.
+- Mutation coverage was re-verified under the CI runner after the test-wiring
+  fix, so the fifteen recovered tests are load-bearing rather than merely
+  collected.
+
+### Narrow scope
+
+This exception authorises removing the `Greptile Review` context from the
+required status checks on `main` for long enough to merge `feat/web-search-v1`
+at `b1470fc`, and nothing else. It does not authorise:
+
+- altering `law-gates`, `enforce_admins`, `required_linear_history`,
+  `required_conversation_resolution`, `allow_force_pushes`, `allow_deletions`,
+  or any other protection setting;
+- posting, forging or simulating any status check;
+- merging any other branch, or any other head of this branch;
+- treating Augment, or any other reviewer, as a standing substitute for the
+  required check on a future change;
+- skipping review on any future change.
+
+### Expiry and mandatory review
+
+This exception expires immediately once the branch is merged and
+`Greptile Review` is restored as a required status check on `main`. Restoration
+is part of the exception, not a follow-up task.
+
+**A retrospective Greptile review of `b1470fc` remains outstanding** and must be
+obtained once review quota is available. The retrospective review of `16bf2d9`
+owed under EX-002 remains outstanding as well; this exception does not discharge
+it. If either review finds anything, it is fixed as ordinary work under the
+restored gate.
+
+This exception is not precedent. A second unavailable-quota exception in
+consecutive merges is a signal that the review arrangement itself needs
+attention, not that the requirement has become optional. The next head requires
+the check like any other, and an exhausted quota remains a reason to stop rather
+than a standing reason to merge.

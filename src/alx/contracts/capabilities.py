@@ -108,6 +108,17 @@ class CapabilityDefinition:
     # A capability whose input contains content owned by another durable store
     # names only the identity fields needed for restart continuity.
     durable_input_fields: tuple[str, ...] | None = None
+    # Whether this capability can carry wording AL/X composed to someone else.
+    # It is what scopes the rule that she may not send Friedl text he has never
+    # heard: only a capability that actually transmits her words is checked
+    # against what she last said.
+    #
+    # Declared rather than inferred, and false by default. `side_effect` says
+    # whether there is an effect, never what kind, so a web search and a mail
+    # send are both EFFECTFUL. Argument names cannot say it either: naming a
+    # search argument `subject` once made every search look like unsent mail
+    # and be refused. A capability that sends must therefore say so.
+    transmits_authored_text: bool = False
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -116,6 +127,8 @@ class CapabilityDefinition:
             raise ValueError("capability input and output schemas must be object schemas")
         if not isinstance(self.side_effect, SideEffect):
             raise TypeError("side_effect must be a SideEffect")
+        if not isinstance(self.transmits_authored_text, bool):
+            raise TypeError("transmits_authored_text must be a bool")
         codes = tuple(self.possible_failure_codes)
         object.__setattr__(self, "possible_failure_codes", codes)
         if any(not isinstance(item, str) or not item.strip() for item in codes):

@@ -171,6 +171,11 @@ class ReasoningContext:
     # differently for an unprompted turn would be a second builder deciding
     # what she is like when nobody is watching.
     carried_thoughts: tuple[CarriedThought, ...] = ()
+    # Enquiries she has open in her notebook, most recently opened first and
+    # bounded by count. Identity and framing only -- no entry content -- so she
+    # is aware of her own unfinished interests without the notebook becoming
+    # context. Reading a thread is a separate, explicit capability call.
+    open_notebook_threads: tuple[Mapping[str, Any], ...] = ()
     # Autonomous occasions whose response never reached anyone. References and
     # timing only: the words are not kept, so she is told that it happened and
     # decides afresh whether anything still needs saying.

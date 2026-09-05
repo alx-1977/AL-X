@@ -16,6 +16,7 @@ from alx.providers import (
     OpenAIReasoningModel,
     XAIReasoningModel,
 )
+from alx.providers.gated_transcription import GatedTranscriber
 
 
 LOGGER = logging.getLogger(__name__)
@@ -143,17 +144,24 @@ def build_runtime_providers(
         reasoning=reasoning,
         specialist=specialist,
         autonomous=autonomous,
-        speech_to_text=CartesiaTranscriber(
-            settings.speech_to_text.model,
-            settings.speech_to_text.api_key,
-            settings.speech_to_text.base_url,
-            settings.speech_to_text.api_version,
-            settings.speech_to_text.encoding,
+        # Wrapped, not replaced. The gate decides which audio is worth
+        # paying to transmit; what the audio means is still Cartesia's answer
+        # and then AL/X's. Removing the wrapper restores the previous
+        # behaviour exactly, including its cost.
+        speech_to_text=GatedTranscriber(
+            CartesiaTranscriber(
+                settings.speech_to_text.model,
+                settings.speech_to_text.api_key,
+                settings.speech_to_text.base_url,
+                settings.speech_to_text.api_version,
+                settings.speech_to_text.encoding,
+                settings.speech_to_text.sample_rate_hz,
+                settings.speech_to_text.turn_start_threshold,
+                settings.speech_to_text.turn_eager_end_threshold,
+                settings.speech_to_text.turn_end_threshold,
+                settings.speech_to_text.turn_end_timeout_ms,
+            ),
             settings.speech_to_text.sample_rate_hz,
-            settings.speech_to_text.turn_start_threshold,
-            settings.speech_to_text.turn_eager_end_threshold,
-            settings.speech_to_text.turn_end_threshold,
-            settings.speech_to_text.turn_end_timeout_ms,
         ),
         text_to_speech=None if not speech_configured else ElevenLabsSynthesizer(
             settings.text_to_speech.model,

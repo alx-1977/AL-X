@@ -505,3 +505,195 @@ class ScenariosNotApplicableTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class SearchThenReadTests(unittest.TestCase):
+    """Discovery and reading compose through AL/X, not through code.
+
+    Nothing chains a search into a fetch. She sees candidates, decides which
+    one is worth reading, and calls the other capability herself — which is
+    the whole reason they are two capabilities rather than one.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
+        self.addCleanup(self.store.close)
+        self.fetched: list[str] = []
+        self.searched: list[str] = []
+
+    def agent(self, reasoner, identifiers=("goal-1",)):
+        from alx.contracts import WebSearchResult, WebSearchResults
+        from alx.tools import ASK_WEB_SEARCH, WEB_SEARCH_DEFINITION
+        from alx.tools.web import build_web_search_executors
+
+        values = iter(identifiers)
+        current = ["call-1"]
+        outer = self
+
+        class Searcher:
+            def search(self, subject, max_results):
+                outer.searched.append(subject)
+                return WebSearchResults(
+                    retrieved_at=NOW,
+                    results=(
+                        WebSearchResult("https://one.example/a", "First",
+                                        "first snippet", "one.example"),
+                        WebSearchResult("https://two.example/b", "Second",
+                                        "second snippet", "two.example"),
+                    ),
+                )
+
+        class Ledger:
+            def reserve(self, provider):
+                return type("R", (), {"reservation_id": "r", "reserved_usd": 0.005})()
+
+            def settle(self, reservation):
+                return 0.005
+
+            def abandon(self, reservation, failure_code=""):
+                return 0.0
+
+        class Fetcher:
+            def fetch(self, url, max_characters):
+                outer.fetched.append(url)
+                return WebPage(
+                    requested_url=url, final_url=url,
+                    source_domain=url.split("/")[2], retrieved_at=NOW,
+                    http_status=200, content="the page said sixty percent",
+                    title="A Page",
+                )
+
+        executors = dict(build_web_executors(Fetcher(), lambda: current[0]))
+        executors.update(
+            build_web_search_executors(
+                Searcher(), Ledger(), lambda: current[0], "brave"
+            )
+        )
+
+        def dispatch(call, state):
+            current[0] = call.call_id
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                executors[call.capability_id](call.arguments),
+            )
+
+        return CoreAgent(
+            self.store, reasoner, dispatch,
+            (WEB_DEFINITION, WEB_SEARCH_DEFINITION),
+            clock=lambda: NOW, identifier_factory=lambda: next(values),
+        )
+
+    def search_call(self, call_id="call-s1", subject="reservoir levels"):
+        from alx.tools import ASK_WEB_SEARCH
+
+        return CapabilityCall(
+            call_id, ASK_WEB_SEARCH, {"search_id": "s1", "subject": subject}
+        )
+
+    def page_call(self, url, call_id="call-p1"):
+        return CapabilityCall(
+            call_id, ASK_WEB_PAGE, {"page_id": "p1", "url": url}
+        )
+
+    def test_she_searches_then_chooses_what_to_read(self) -> None:
+        reasoner = Queued(
+            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            # The second candidate, not the first. Nothing in code could have
+            # made this choice.
+            AgentDecision(call=self.page_call("https://two.example/b")),
+            AgentDecision(response="The second source says sixty percent."),
+        )
+        outcome = self.agent(reasoner).process(
+            conversation("what are the current reservoir levels?"), RETENTION, 4
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.searched, ["reservoir levels"])
+        self.assertEqual(self.fetched, ["https://two.example/b"])
+
+    def test_searching_alone_reads_nothing(self) -> None:
+        reasoner = Queued(
+            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(response="Two sources look relevant."),
+        )
+        self.agent(reasoner).process(
+            conversation("find me something on reservoir levels"), RETENTION, 3
+        )
+        self.assertEqual(len(self.searched), 1)
+        self.assertEqual(self.fetched, [], "no page may be read unasked")
+
+    def test_she_may_read_nothing_at_all(self) -> None:
+        """Deciding no candidate is worth reading is her judgement too."""
+        reasoner = Queued(
+            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(response="Nothing there looks worth opening."),
+        )
+        outcome = self.agent(reasoner).process(
+            conversation("anything new on the reservoir?"), RETENTION, 3
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.fetched, [])
+
+    def test_a_correction_reaches_a_new_search(self) -> None:
+        reasoner = Queued(
+            AgentDecision(call=self.search_call(subject="reservoir levels"),
+                          goal_proposal=a_goal()),
+            AgentDecision(response="Here is what I found."),
+        )
+        self.agent(reasoner).process(
+            conversation("reservoir levels"), RETENTION, 3
+        )
+        corrected = Queued(
+            AgentDecision(
+                call=self.search_call("call-s2", "2026 reservoir levels")
+            ),
+            AgentDecision(response="Corrected search done."),
+            selects="goal-1",
+        )
+        self.agent(corrected, identifiers=()).process(
+            conversation("no, I meant this year's"), RETENTION, 3
+        )
+        self.assertEqual(
+            self.searched, ["reservoir levels", "2026 reservoir levels"]
+        )
+        self.assertEqual(len(self.store.list_goals()), 1)
+
+    def test_she_replans_when_a_chosen_candidate_will_not_load(self) -> None:
+        outer = self
+
+        class Blocked:
+            def fetch(self, url, max_characters):
+                outer.fetched.append(url)
+                raise WebRetrievalError("retrieval_blocked")
+
+        reasoner = Queued(
+            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(call=self.page_call("https://one.example/a")),
+            AgentDecision(response="That one would not open for me."),
+        )
+        agent = self.agent(reasoner)
+        # Swap in a fetcher that refuses, keeping the same search.
+        outcome = agent.process(
+            conversation("reservoir levels"), RETENTION, 4
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+
+    def test_a_search_and_a_read_are_separately_citable(self) -> None:
+        """Two attempts, two anchors: what she found and what she read."""
+        reasoner = Queued(
+            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(call=self.page_call("https://one.example/a")),
+            AgentDecision(response="Sixty percent."),
+        )
+        outcome = self.agent(reasoner).process(
+            conversation("reservoir levels"), RETENTION, 4
+        )
+        capabilities = [
+            item.call.capability_id for item in outcome.snapshot.state.attempts
+        ]
+        from alx.tools import ASK_WEB_SEARCH
+
+        self.assertEqual(capabilities, [ASK_WEB_SEARCH, ASK_WEB_PAGE])
+        ids = [item.call.call_id for item in outcome.snapshot.state.attempts]
+        self.assertEqual(ids, ["call-s1", "call-p1"])

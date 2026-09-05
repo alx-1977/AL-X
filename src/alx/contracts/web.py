@@ -52,6 +52,24 @@ MAX_DURABLE_METADATA_CHARACTERS = (
     + 512
 )
 
+# Search discovery bounds, D-025. Candidates are what AL/X reads to choose
+# where to look next, so they are deliberately small: a snippet is a hint,
+# not the page. Every field is provider-supplied text and therefore bounded
+# for the same reason a page title is.
+DEFAULT_SEARCH_RESULTS = 5
+MAX_SEARCH_RESULTS = 10
+MAX_SNIPPET_CHARACTERS = 300
+MAX_SUBJECT_CHARACTERS = 400
+MAX_AGE_CHARACTERS = 64
+
+# The most one search may put in front of the Core. Proved by test rather than
+# assumed, because a provider that returned ten oversized candidates would
+# otherwise cost more context than the page AL/X eventually reads.
+MAX_SEARCH_PAYLOAD_CHARACTERS = MAX_SEARCH_RESULTS * (
+    MAX_URL_CHARACTERS + MAX_TITLE_CHARACTERS + MAX_SNIPPET_CHARACTERS
+    + MAX_AGE_CHARACTERS + 256
+) + 512
+
 # D-025 declares only textual content types readable in V1.
 ALLOWED_CONTENT_TYPES = frozenset(
     {"text/html", "application/xhtml+xml", "text/plain"}
@@ -230,6 +248,118 @@ class WebPage:
                     f"{name} exceeds its D-025 bound; it must be cut before "
                     "it reaches the Core or durable state, never returned whole"
                 )
+
+
+# Search refusals. Each names a distinct fact about the world, so AL/X can
+# tell "nothing was found" from "I was not allowed to look" from "the day's
+# allowance is spent". Code returns the fact and draws no conclusion from it.
+SEARCH_UNAVAILABLE = "search_unavailable"
+SEARCH_BUDGET_EXHAUSTED = "search_budget_exhausted"
+SEARCH_TIMEOUT = "search_timeout"
+SEARCH_PROVIDER_FAILED = "search_provider_failed"
+SEARCH_AUTH_FAILED = "search_auth_failed"
+SEARCH_RATE_LIMITED = "search_rate_limited"
+SEARCH_NO_RESULTS = "search_no_results"
+
+WEB_SEARCH_FAILURES = (
+    SEARCH_UNAVAILABLE,
+    SEARCH_BUDGET_EXHAUSTED,
+    SEARCH_TIMEOUT,
+    SEARCH_PROVIDER_FAILED,
+    SEARCH_AUTH_FAILED,
+    SEARCH_RATE_LIMITED,
+    SEARCH_NO_RESULTS,
+)
+
+
+class WebSearchError(Exception):
+    """A search refusal carrying one declared code and no provider content."""
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        if code not in WEB_SEARCH_FAILURES:
+            raise ValueError(f"undeclared search failure code: {code}")
+        self.code = code
+        self.detail = detail
+        super().__init__(code)
+
+
+def _bounded(value: str | None, ceiling: int, name: str) -> str | None:
+    if value is None:
+        return None
+    if len(value) > ceiling:
+        raise ValueError(
+            f"{name} exceeds its D-025 bound; it must be cut before it reaches "
+            "the Core or durable state, never returned whole"
+        )
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class WebSearchResult:
+    """One candidate page the provider returned, in the order it returned it.
+
+    Everything here is provider-supplied text about a page nobody has read
+    yet. It carries no score, no rank of ours, no quality label and no
+    preference: those would be judgements, and D-025 keeps them in the Core.
+    """
+
+    url: str
+    title: str
+    snippet: str
+    source_domain: str
+    # Whatever freshness the provider stated, verbatim. Recorded because when
+    # a page is from matters to AL/X; not parsed, because interpreting it
+    # would make code decide how current is current enough.
+    age: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.url.strip():
+            raise ValueError("a search result requires a url")
+        _bounded(self.url, MAX_URL_CHARACTERS, "result url")
+        _bounded(self.title, MAX_TITLE_CHARACTERS, "result title")
+        _bounded(self.snippet, MAX_SNIPPET_CHARACTERS, "result snippet")
+        _bounded(self.source_domain, MAX_URL_CHARACTERS, "result source_domain")
+        _bounded(self.age, MAX_AGE_CHARACTERS, "result age")
+
+
+@dataclass(frozen=True, slots=True)
+class WebSearchResults:
+    """One search, and the ordered candidates it produced.
+
+    Deliberately carries no `search_id`. The identifier belongs to the call
+    AL/X made, not to the provider's answer, and a provider forced to invent
+    one would be naming something it knows nothing about. The capability pairs
+    the two.
+    """
+
+    retrieved_at: datetime
+    results: tuple[WebSearchResult, ...]
+
+    def __post_init__(self) -> None:
+        if self.retrieved_at.tzinfo is None or self.retrieved_at.utcoffset() is None:
+            raise ValueError("retrieved_at must be timezone aware")
+        if any(not isinstance(item, WebSearchResult) for item in self.results):
+            raise TypeError("results must contain only WebSearchResult values")
+        if len(self.results) > MAX_SEARCH_RESULTS:
+            raise ValueError(
+                f"a search may return at most {MAX_SEARCH_RESULTS} candidates"
+            )
+
+    @property
+    def result_count(self) -> int:
+        return len(self.results)
+
+
+class WebSearchProvider(Protocol):
+    """Runs exactly one search, or raises a declared refusal.
+
+    `subject` is language AL/X composed. It is passed to the provider exactly
+    as she wrote it: no expansion, no rewriting, no classification, no
+    "improvement". Deterministic code that edited her wording would be
+    deciding what she meant.
+    """
+
+    def search(self, subject: str, max_results: int) -> WebSearchResults: ...
 
 
 class WebFetchProvider(Protocol):
