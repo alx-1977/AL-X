@@ -79,6 +79,26 @@ def typing(milliseconds: int, seed: int = 9) -> bytes:
     return _pcm(lambda index: samples[index], milliseconds)
 
 
+def detected_run(payload: bytes) -> int:
+    """The longest continuous voiced stretch the detector reports, in ms.
+
+    Tests state transient durations in these terms because it is what the
+    gate rules on. WebRTC reports voicing for some time after a sound stops,
+    so the tone length alone would understate what the gate sees.
+    """
+    import webrtcvad
+
+    from alx.providers.speech_activity import SpeechActivityDetector
+
+    detector = SpeechActivityDetector(SAMPLE_RATE)
+    vad = webrtcvad.Vad(2)
+    longest = current = 0
+    for frame in detector.frames(payload):
+        current = current + 1 if vad.is_speech(frame, SAMPLE_RATE) else 0
+        longest = max(longest, current)
+    return longest * 20
+
+
 class RecordingTranscriber:
     """Stands in for Cartesia and records exactly what it was paid to receive."""
 
@@ -292,3 +312,109 @@ def test_cartesia_ending_the_turn_stops_paid_transmission_early():
     # been sent had the local timer alone governed the utterance.
     assert gate.totals.transmitted_seconds < 2.0
     assert gate.totals.listening_seconds > gate.totals.transmitted_seconds
+
+
+def test_a_short_transients_never_open_a_paid_stream():
+    """A — the live defect: a brief real-world transient opened Cartesia.
+
+    On 2026-09-05 roughly 0.1 s of voiced frames at Friedl's desk opened a
+    connection, transmitted 2.3 s and produced no transcript. Anything shorter
+    than the onset requirement must stay local and cost nothing.
+    """
+    # Stated as the durations the detector actually reports, not the length
+    # of the tone that caused them: WebRTC's own hangover extends a detection
+    # past the sound, so a 20 ms blip already reads as 100 ms of voicing.
+    # These are measured, not assumed -- `detected_run` recomputes each one.
+    for milliseconds, expected in ((20, 100), (40, 120), (80, 160), (100, 180)):
+        assert detected_run(silence(400) + speech(milliseconds) + silence(1000)) == (
+            expected
+        ), f"a {milliseconds} ms transient no longer reads as {expected} ms"
+        provider = RecordingTranscriber()
+        events, gate = asyncio.run(
+            _run(provider, silence(400), speech(milliseconds), silence(3_000))
+        )
+        assert gate.totals.connections_opened == 0, (
+            f"{expected} ms of detected voicing opened a paid stream"
+        )
+        assert provider.seconds_received == 0.0
+        assert events == []
+
+
+def test_b_sustained_speech_still_opens_a_stream():
+    """B — the threshold must not deafen her to real speech."""
+    provider = RecordingTranscriber()
+    events, gate = asyncio.run(
+        _run(provider, room_tone(400), speech(1000), silence(2400))
+    )
+    assert gate.totals.connections_opened == 1
+    assert [event.content for event in events] == ["hello"]
+
+
+def test_c_the_raised_onset_does_not_clip_the_first_word():
+    """C — detection now takes 200 ms, so 200 ms of speech is already past.
+
+    The pre-roll is what puts it back. This asserts the actual bytes: the
+    audio Cartesia receives must begin with the frames that preceded
+    detection, not with the moment detection completed.
+    """
+    provider = RecordingTranscriber()
+    leading = room_tone(400)
+    asyncio.run(_run(provider, leading, speech(1000), silence(2400)))
+    opening = provider.first_utterance_prefix(len(room_tone(20)))
+    # The stream opens on room tone captured before anyone spoke, which can
+    # only be true if the pre-roll outlived the onset requirement.
+    assert opening == leading[-len(opening) :] or opening in leading, (
+        "the utterance did not open with audio captured before detection"
+    )
+    # And enough of it: the speech that triggered detection is still there.
+    frames_before_detection = 10
+    assert provider.utterances[0] > (frames_before_detection * 20) / 1000.0
+
+
+def test_a_silent_stream_yields_no_transcription_event_at_all():
+    """A paid stream that transcribed nothing must reach Core with nothing.
+
+    On 2026-09-05 a false-positive stream transmitted 2.3 s and returned no
+    transcript. The cost was real; the risk would have been worse if an empty
+    transcript could still start a person turn, because AL/X would have been
+    asked to interpret silence.
+
+    Two independent layers already prevent it, and this holds both in place:
+    the Cartesia adapter refuses an event whose transcript is blank, and
+    `TranscriptionEvent` refuses blank content outright. A turn cannot be
+    built without an event, so no event means no turn.
+    """
+    provider = SilentTranscriber()
+    events, gate = asyncio.run(_run(provider, speech(1000), silence(2400)))
+    # The stream was opened and paid for -- that part is the tuning defect.
+    assert gate.totals.connections_opened == 1
+    # But nothing crossed into the conversation.
+    assert events == []
+    assert gate.totals.final_transcripts == 0
+
+
+def test_an_empty_transcript_cannot_be_represented_at_all():
+    """The contract itself is the guard, so no interface can bypass it."""
+    with pytest.raises(ValueError):
+        TranscriptionEvent(
+            "stream",
+            "event",
+            TranscriptionState.FINAL,
+            "   ",
+            datetime.now(UTC),
+        )
+
+
+class SilentTranscriber:
+    """A provider that receives audio and finds no speech in it."""
+
+    def __init__(self) -> None:
+        self.seconds_received = 0.0
+
+    async def transcribe(self, chunks):
+        received = 0
+        async for chunk in chunks:
+            received += len(chunk.payload)
+        self.seconds_received = received / (SAMPLE_RATE * 2)
+        return
+        yield  # pragma: no cover - makes this an async generator

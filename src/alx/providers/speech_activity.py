@@ -28,11 +28,19 @@ from alx.providers.errors import ProviderError
 FRAME_MILLISECONDS = 20
 BYTES_PER_SAMPLE = 2
 
-# Measured against synthesised room tone and keyboard impulses at 16 kHz:
-# fan noise and typing never produced more than four consecutive positive
-# frames, while voiced speech produced an unbroken run. Six consecutive
-# frames is 120 ms -- above the noise ceiling, below a syllable.
-ONSET_FRAMES = 6
+# How much continuous voicing it takes to be worth opening a paid stream.
+#
+# This was first set to six frames (120 ms) from synthesised room tone and
+# keyboard impulses, neither of which exceeded four consecutive positive
+# frames. Live use disproved that ceiling: on 2026-09-05 a real transient at
+# Friedl's desk produced 0.1 s of voiced frames, opened a Cartesia connection,
+# transmitted 2.3 s and returned no transcript at all.
+#
+# Ten frames is 200 ms -- longer than the transient that got through, and
+# still well inside the first syllable of a word. Raising it costs nothing at
+# the start of real speech because the pre-roll already replays the audio that
+# preceded detection, including the frames that triggered it.
+ONSET_FRAMES = 10
 
 # One positive frame is enough to keep a turn alive once it has started.
 # Ending is governed by the grace period below, not by a single frame.
