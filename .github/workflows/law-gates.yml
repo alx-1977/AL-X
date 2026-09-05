@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: read
+  # Only to read the review evidence GitHub already holds for this pull
+  # request. The gate reads reviews; it never requests, writes or pays for one.
+  pull-requests: read
 
 jobs:
   law-gates:
@@ -33,6 +36,18 @@ jobs:
 
       - name: Verify architecture boundaries
         run: python scripts/check_architecture.py
+
+      - name: Verify an accepted independent review covers this head
+        # Reporting only. D-026 makes this blocking once it has accumulated
+        # evidence on real merges and Friedl approves the promotion; until
+        # then `Greptile Review` remains the enforcing check.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/check_independent_review.py \
+            --repository "${{ github.repository }}" \
+            --pull-request "${{ github.event.pull_request.number || 0 }}" \
+            --head-sha "${{ github.event.pull_request.head.sha || '' }}"
 
       - name: Test the enforcement gates
         run: python -m unittest discover -s tests -v

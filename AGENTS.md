@@ -46,21 +46,38 @@ Before declaring completion, run the law gates and the test suite, and say plain
 what could not be verified. Never silently treat an unverified requirement as
 passed.
 
-## Requesting a Greptile review
+## Requesting an independent review
 
-Greptile re-reviews are requested through the GitHub Issues API; neither `gh`
-nor browser access is required. The repository `.env` contains `GITHUB_TOKEN`
-(never print or record its value). For the relevant pull-request number, POST
-the JSON body `{"body":"@greptileai"}` to:
+Production changes require an independent, evidence-based review of the actual
+proposed merge diff. D-026 records what that review must be: independent of the
+agent that wrote the change, against the exact head being merged, evidence-backed
+rather than a bare verdict, covering correctness, regressions, architecture and
+governance, applicable safety and economic boundaries, and whether the tests
+enforce what they claim. A reviewer does not modify production code while
+reviewing it.
+
+**Your own review does not satisfy this.** An implementing agent cannot be the
+independent check on its own work, however carefully it has checked itself.
+
+Who may satisfy it is recorded in `review/accepted_reviewers.json`, which is
+governed by CODEOWNERS. The review brief those reviewers work from lives in
+`review/` and is checksummed in `governance/REVIEW_BRIEF.sha256`.
+
+Requesting a paid review is an external, chargeable action. Do it only when
+Friedl has asked for the review or explicitly approved the post, and never
+carry one approval forward to another review.
+
+For Greptile specifically, re-reviews are requested through the GitHub Issues
+API; neither `gh` nor browser access is required. The repository `.env` contains
+`GITHUB_TOKEN` (never print or record its value). For the relevant pull-request
+number, POST the JSON body `{"body":"@greptileai"}` to:
 
 `https://api.github.com/repos/alx-1977/AL-X/issues/<PR_NUMBER>/comments`
 
 Use the `Authorization: Bearer $GITHUB_TOKEN`,
 `Accept: application/vnd.github+json`, and
 `X-GitHub-Api-Version: 2022-11-28` headers. Confirm the returned comment URL.
-The established trigger is exactly `@greptileai`, not `@greptile`. Posting a
-review request is an external action, so do it only when Friedl has asked for
-the review or explicitly approved the post.
+The established trigger is exactly `@greptileai`, not `@greptile`.
 
 ## Prohibited shortcuts
 

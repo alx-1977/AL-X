@@ -13,9 +13,9 @@ from pathlib import Path
 
 
 REQUIRED_FILES = (
-    ".greptile/config.json",
-    ".greptile/files.json",
-    ".greptile/rules.md",
+    "review/brief.json",
+    "review/context.json",
+    "review/mandate.md",
     ".github/CODEOWNERS",
     ".github/copilot-instructions.md",
     ".github/pull_request_template.md",
@@ -31,12 +31,12 @@ REQUIRED_FILES = (
     "docs/TECHNICAL_PLAN.md",
     "governance/DECISIONS.md",
     "governance/EXCEPTIONS.md",
-    "governance/GREPTILE.sha256",
+    "governance/REVIEW_BRIEF.sha256",
     "governance/IDENTITY_AND_MEMORY.sha256",
     "governance/LAWS_OF_ALX.sha256",
 )
 
-GREPTILE_RULE_IDS = {
+REVIEW_RULE_IDS = {
     "alx-one-production-path",
     "alx-single-reasoning-authority",
     "alx-dynamic-reasoning",
@@ -48,7 +48,7 @@ GREPTILE_RULE_IDS = {
     "alx-governed-capability-invention",
 }
 
-GREPTILE_CONTEXT_FILES = {
+REVIEW_CONTEXT_FILES = {
     "LAWS_OF_ALX.md",
     "docs/LAW_ENFORCEMENT.md",
     "docs/ARCHITECTURE_BLUEPRINT.md",
@@ -183,31 +183,31 @@ def _load_json(path: Path, relative_path: str, violations: list[str]) -> dict:
     return value
 
 
-def _check_greptile(root: Path, violations: list[str]) -> None:
-    config_path = root / ".greptile/config.json"
-    files_path = root / ".greptile/files.json"
-    rules_path = root / ".greptile/rules.md"
+def _check_review_brief(root: Path, violations: list[str]) -> None:
+    config_path = root / "review/brief.json"
+    files_path = root / "review/context.json"
+    rules_path = root / "review/mandate.md"
     if not all(path.is_file() for path in (config_path, files_path, rules_path)):
         return
 
-    config = _load_json(config_path, ".greptile/config.json", violations)
+    config = _load_json(config_path, "review/brief.json", violations)
     if config.get("strictness") != 1:
-        violations.append(".greptile/config.json: strictness must remain 1")
+        violations.append("review/brief.json: strictness must remain 1")
     if config.get("skipReview") != "AUTOMATIC":
         violations.append(
-            ".greptile/config.json: automatic reviews must remain disabled"
+            "review/brief.json: automatic reviews must remain disabled"
         )
     if config.get("triggerOnUpdates") is not False:
         violations.append(
-            ".greptile/config.json: automatic commit re-reviews must remain disabled"
+            "review/brief.json: automatic commit re-reviews must remain disabled"
         )
     if config.get("triggerOnDrafts") is not False:
         violations.append(
-            ".greptile/config.json: automatic draft reviews must remain disabled"
+            "review/brief.json: automatic draft reviews must remain disabled"
         )
     if config.get("statusCheck") is not True:
         violations.append(
-            ".greptile/config.json: manual reviews must publish the required status check"
+            "review/brief.json: manual reviews must publish the required status check"
         )
     instructions = config.get("instructions", "")
     for marker in (
@@ -217,29 +217,29 @@ def _check_greptile(root: Path, violations: list[str]) -> None:
     ):
         if marker not in instructions:
             violations.append(
-                f".greptile/config.json: instructions missing required marker: {marker}"
+                f"review/brief.json: instructions missing required marker: {marker}"
             )
 
     rules = config.get("rules", [])
     if not isinstance(rules, list):
-        violations.append(".greptile/config.json: rules must be an array")
+        violations.append("review/brief.json: rules must be an array")
         rules = []
     rules_by_id = {
         rule.get("id"): rule
         for rule in rules
         if isinstance(rule, dict) and isinstance(rule.get("id"), str)
     }
-    missing_rules = GREPTILE_RULE_IDS - rules_by_id.keys()
+    missing_rules = REVIEW_RULE_IDS - rules_by_id.keys()
     if missing_rules:
         violations.append(
-            ".greptile/config.json: missing constitutional rules: "
+            "review/brief.json: missing constitutional rules: "
             + ", ".join(sorted(missing_rules))
         )
-    for rule_id in GREPTILE_RULE_IDS & rules_by_id.keys():
+    for rule_id in REVIEW_RULE_IDS & rules_by_id.keys():
         rule = rules_by_id[rule_id]
         if rule.get("severity") != "high" or rule.get("enabled") is False:
             violations.append(
-                f".greptile/config.json: {rule_id} must remain enabled at high severity"
+                f"review/brief.json: {rule_id} must remain enabled at high severity"
             )
     one_path = rules_by_id.get("alx-one-production-path", {})
     one_path_text = one_path.get("rule", "") if isinstance(one_path, dict) else ""
@@ -250,28 +250,28 @@ def _check_greptile(root: Path, violations: list[str]) -> None:
     ):
         if marker not in one_path_text:
             violations.append(
-                ".greptile/config.json: alx-one-production-path missing required "
+                "review/brief.json: alx-one-production-path missing required "
                 f"marker: {marker}"
             )
 
-    context = _load_json(files_path, ".greptile/files.json", violations)
+    context = _load_json(files_path, "review/context.json", violations)
     context_entries = context.get("files", [])
     context_paths = {
         entry.get("path")
         for entry in context_entries
         if isinstance(entry, dict) and isinstance(entry.get("path"), str)
     }
-    missing_context = GREPTILE_CONTEXT_FILES - context_paths
+    missing_context = REVIEW_CONTEXT_FILES - context_paths
     if missing_context:
         violations.append(
-            ".greptile/files.json: missing canonical context: "
+            "review/context.json: missing canonical context: "
             + ", ".join(sorted(missing_context))
         )
 
     rules_text = rules_path.read_text(encoding="utf-8")
     _require_markers(
         rules_text,
-        ".greptile/rules.md",
+        "review/mandate.md",
         (
             "`LAWS_OF_ALX.md` is the sole canonical law text.",
             "exactly one authoritative implementation path",
@@ -283,24 +283,24 @@ def _check_greptile(root: Path, violations: list[str]) -> None:
         violations,
     )
 
-    checksum_path = root / "governance/GREPTILE.sha256"
+    checksum_path = root / "governance/REVIEW_BRIEF.sha256"
     if not checksum_path.is_file():
         return
     expected_paths = {
-        ".greptile/config.json",
-        ".greptile/files.json",
-        ".greptile/rules.md",
+        "review/brief.json",
+        "review/context.json",
+        "review/mandate.md",
     }
     recorded: dict[str, str] = {}
     for line in checksum_path.read_text(encoding="utf-8").splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (\.greptile/(?:config\.json|files\.json|rules\.md))", line)
+        match = re.fullmatch(r"([0-9a-f]{64})  (review/(?:brief\.json|context\.json|mandate\.md))", line)
         if not match:
-            violations.append("governance/GREPTILE.sha256: invalid checksum record")
+            violations.append("governance/REVIEW_BRIEF.sha256: invalid checksum record")
             continue
         recorded[match.group(2)] = match.group(1)
     if recorded.keys() != expected_paths:
         violations.append(
-            "governance/GREPTILE.sha256: expected checksums for all three Greptile files"
+            "governance/REVIEW_BRIEF.sha256: expected checksums for all three review-brief files"
         )
         return
     for relative_path, expected_digest in recorded.items():
@@ -369,15 +369,16 @@ def check_repository(root: Path) -> list[str]:
                 "carry that law's title"
             )
 
-    # Greptile reviews against the laws this file names. Instructing it to
-    # review "all 19 Laws" after the rewrite would have produced an invalid
-    # constitutional review, and no gate noticed. Any live document that names
-    # a law must name one that exists; governance/DECISIONS.md is excluded
-    # because it records decisions as they were approved at the time.
+    # An independent reviewer reviews against the laws these files name.
+    # Instructing one to review "all 19 Laws" after the rewrite would have
+    # produced an invalid constitutional review, and no gate noticed. Any live
+    # document that names a law must name one that exists;
+    # governance/DECISIONS.md is excluded because it records decisions as they
+    # were approved at the time.
     for relative_path in (
-        ".greptile/rules.md",
-        ".greptile/config.json",
-        ".greptile/files.json",
+        "review/mandate.md",
+        "review/brief.json",
+        "review/context.json",
         "AGENTS.md",
         "CLAUDE.md",
         "README.md",
@@ -510,7 +511,7 @@ def check_repository(root: Path) -> list[str]:
 
     exceptions = _read(root, "governance/EXCEPTIONS.md", violations)
     _check_exceptions(exceptions, violations)
-    _check_greptile(root, violations)
+    _check_review_brief(root, violations)
     _check_law_checksum(root, violations)
     _check_identity_checksum(root, violations)
     _check_env_is_ignored(root, violations)

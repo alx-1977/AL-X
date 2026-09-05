@@ -454,3 +454,124 @@ consecutive merges is a signal that the review arrangement itself needs
 attention, not that the requirement has become optional. The next head requires
 the check like any other, and an exhausted quota remains a reason to stop rather
 than a standing reason to merge.
+
+---
+
+## EX-004 — Merging PR #16 at `30b1dd9` to bootstrap provider-independent review
+
+### Register metadata
+
+- **Law:** Law 0 enforcement via `docs/LAW_ENFORCEMENT.md` gate policy — "A change fails if any applicable automated gate fails" and "Disabling a gate is not a workaround". `main` requires the status checks `law-gates` and `Greptile Review`; this suspends the second one for one merge.
+- **Scope:** Pull request #16 only, at head `30b1dd9b38e7901662fcfe5bf114a863e1902dec`, plus the single commit that adds this exception record on top of it. The `Greptile Review` required-status requirement on `main` is suspended for the duration of that one squash merge and restored immediately afterwards. Nothing else.
+- **Necessity:** Greptile's quota for this account is exhausted, so the required `Greptile Review` status cannot be produced for this head by any legitimate means. The change being merged is the mechanism that removes this dependency; it cannot satisfy a requirement it exists to replace, and it is not yet on `main` to enforce anything itself.
+- **Alternatives:** wait for quota; merge without the exception; enable pull-request reviews so Friedl approves as CODEOWNER. All rejected below.
+- **Risks and safeguards:** a third consecutive quota-driven exception, and a governance mechanism arriving without the review it will later require; guarded by a completed independent Augment review and its remediation, both law gates, the full suite, `law-gates` in CI, and the fact that the merged mechanism changes no enforcement. Set out in full below.
+- **Approved by Friedl:** yes, explicitly, for this exact PR, this exact head and this exact mechanism.
+- **Approval date:** 2026-09-05.
+- **Expiry or review condition:** expires immediately once PR #16 is merged and `Greptile Review` is restored as a required check. The retrospective Greptile reviews owed under EX-002 and EX-003 remain outstanding and are not affected.
+
+### Authorised target
+
+The implementation authorised here is PR #16 at `30b1dd9`. The commit actually
+merged is the one that adds this exception record on top of it and changes
+nothing else, so the governance record lands on `main` together with the merge
+it authorises rather than the merge arriving unexplained.
+
+Any commit other than these two is outside this exception.
+
+### Why this is necessary
+
+`Greptile Review` is a required status check on `main`, produced by a paid
+external service whose quota for this account is exhausted. It cannot report on
+`30b1dd9` at all. This is not a failing gate or a false positive; it is a gate
+that cannot run, for the third consecutive merge.
+
+What distinguishes this from EX-002 and EX-003 is what is being merged. PR #16
+is D-026: the mechanism that makes independent review a property rather than a
+provider, so that an unavailable vendor stops being an unmergeable branch. It
+cannot satisfy the provider-specific check it exists to replace, and it cannot
+enforce the provider-independent requirement either, because it is not yet on
+`main`. A mechanism intended to end a recurring exception cannot be installed
+without one.
+
+The change has had an independent review. Augment reviewed the full branch
+diff, raised two material findings — that a dismissed GitHub review would still
+have satisfied the verifier, and that the fail-closed behaviour under
+`--enforce` was implemented but untested — and both were fixed in `30b1dd9`
+before this exception was drafted. That review is not published to GitHub and
+therefore cannot be machine-verified; it is recorded here as the human evidence
+`docs/LAW_ENFORCEMENT.md` contemplates, not as a substitute for the check.
+
+### Alternatives considered and why they were rejected
+
+**Wait for quota.** Correct in principle and rejected on cost. Waiting to merge
+the fix for a recurring blockage, because of that same blockage, prolongs
+exactly the condition the change removes. The delay would buy a Greptile review
+of a change whose purpose is to stop depending on Greptile's availability.
+
+**Merge without an exception.** Refused. It would require either fabricating a
+status check or an administrative override that suspends `law-gates`, linear
+history and conversation resolution along with the one check that is actually
+obstructed. Both are worse than the merge they would unblock.
+
+**Enable required pull-request reviews and approve as CODEOWNER.** The cleanest
+alternative, and genuinely arguable: it needs no exception and constitutes a
+real review by the owner. Rejected for this merge because enabling
+`required_pull_request_reviews` is a broader and more permanent change to
+branch protection than suspending one check and restoring it, and this
+exception is meant to be narrow and reversible. It remains available as a
+deliberate decision later.
+
+### Compensating safeguards
+
+- The full branch diff was independently reviewed by Augment, and both material
+  findings were fixed before this exception was drafted.
+- The merged mechanism changes no enforcement. The verifier runs in reporting
+  mode, cannot fail `law-gates`, and `Greptile Review` remains required.
+- `scripts/check_governance.py` passes on the exact head.
+- `scripts/check_architecture.py` passes on the exact head.
+- The full suite passes: 1746 tests under `python -m unittest discover -s tests`.
+- `law-gates` passed in CI on `30b1dd9`, including the new verifier, which
+  reported honestly that no accepted review covers this head without blocking.
+- Six mutation checks prove the verifier's guards are load-bearing.
+- The review brief moved to `review/` byte-identically, verified by sha256, so
+  the nine constitutional rules and six canonical context sources are unchanged.
+- `LAWS_OF_ALX.md`, `docs/LAW_ENFORCEMENT.md` and the EX-002 and EX-003 records
+  are untouched by the merged change.
+
+### Narrow scope
+
+This exception authorises removing the `Greptile Review` context from the
+required status checks on `main` for long enough to merge PR #16 at `30b1dd9`,
+and nothing else. It does not authorise:
+
+- altering `law-gates`, `enforce_admins`, `required_linear_history`,
+  `required_conversation_resolution`, `allow_force_pushes`, `allow_deletions`,
+  or any other protection setting;
+- posting, forging or simulating any status check;
+- merging any other pull request, or any other head of this one;
+- promoting the D-026 verifier to blocking, or removing `Greptile Review` from
+  branch protection permanently. Both remain separate decisions;
+- treating Augment, or any reviewer, as a standing substitute for a required
+  check.
+
+### Expiry and mandatory review
+
+This exception expires immediately once PR #16 is merged and `Greptile Review`
+is restored as a required status check on `main`. Restoration is part of the
+exception, not a follow-up task.
+
+**The retrospective Greptile reviews owed for `16bf2d9` under EX-002 and for
+`b1470fc` under EX-003 remain outstanding, and remain specifically Greptile
+reviews.** This exception neither discharges nor reinterprets them, and adds no
+retrospective obligation of its own: the change it covers has been
+independently reviewed, and what it lacks is the provider-specific status, not
+the review.
+
+This is the third consecutive merge blocked by exhausted quota. EX-003 recorded
+that such a pattern is a reason to revisit the review arrangement deliberately
+rather than to keep spending exceptions on it. D-026, which this merge
+installs, is that revision. If a fourth such exception is ever needed, the
+correct response is to complete the cutover — an accepted reviewer that can
+publish GitHub-native evidence, and the verifier promoted to blocking — not to
+approve another one.
