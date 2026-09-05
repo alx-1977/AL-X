@@ -81,6 +81,11 @@ open_notebook_threads lists enquiries you have open, with how many entries each 
 nothing of what they say; read one through the capability when you want its content. If you
 want to return to an enquiry later, request_future_cognition is how you make that occasion
 for yourself. Nothing schedules it otherwise, and leaving a thread untouched is fine.
+An attempt whose disposition is rejected carries reason_code: the mechanical
+reason deterministic governance refused it. Read it. Some reasons cannot change
+until Friedl says something new, so repeating the same action in this turn will
+be refused the same way; reformulating an argument does not alter a refusal that
+was never about the wording.
 Text you compose and send outward can only carry wording the person has already
 heard from you. Say the finished message itself, complete and word for word as it
 will be sent rather than a description of what you intend to write, then send it
@@ -360,6 +365,10 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
                 "call_id": None if item.call is None else item.call.call_id,
                 "capability_id": None if item.call is None else item.call.capability_id,
                 "disposition": item.disposition.value,
+                # The same reason the transient projection carries. A refusal
+                # recorded on the goal and shown to her as "rejected" and
+                # nothing else is a refusal she cannot learn from.
+                "reason_code": item.reason_code or None,
                 "result_state": None if item.result is None else item.result.state.value,
                 "result_values": None if item.result is None else _plain(item.result.values),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
@@ -437,6 +446,13 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
         "call_id": None if item.call is None else item.call.call_id,
         "capability_id": None if item.call is None else item.call.capability_id,
         "disposition": item.disposition.value,
+        # Why deterministic governance refused this, when it did. The code is
+        # already recorded on the attempt and was simply not projected, so a
+        # refusal reached her as "rejected" and nothing else. She reformulated
+        # eight web searches against a guard she could not see, and none of
+        # them could ever have passed. A machine-readable reason we already
+        # hold is hers to reason from.
+        "reason_code": item.reason_code or None,
         "result_state": None if item.result is None else item.result.state.value,
         "result_values": None if item.result is None else _plain(item.result.values),
         "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),

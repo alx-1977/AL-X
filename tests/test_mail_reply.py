@@ -789,8 +789,12 @@ class UnheardTextTests(unittest.TestCase):
 
         now = datetime(2026, 8, 30, tzinfo=UTC)
         schema = StructuredSchema(ValueKind.OBJECT)
+        # Declares that it carries her wording outward, exactly as the real
+        # send capability does. That declaration is what scopes the unheard-
+        # text rule; a stand-in without it is not a sending capability.
         definition = CapabilityDefinition(
-            SEND_MAIL_REPLY, "reply", schema, schema, SideEffect.EFFECTFUL
+            SEND_MAIL_REPLY, "reply", schema, schema, SideEffect.EFFECTFUL,
+            transmits_authored_text=True,
         )
         arguments = {"to": ("john@example.test",), "subject": "Re: Part",
                      "body": "Hi John, the part arrives tomorrow."}
@@ -1002,8 +1006,12 @@ class ApprovalSlipDoesNotEndTheSessionTests(unittest.TestCase):
 
         now = datetime(2026, 8, 30, tzinfo=UTC)
         schema = StructuredSchema(ValueKind.OBJECT)
+        # Declares that it carries her wording outward, exactly as the real
+        # send capability does. That declaration is what scopes the unheard-
+        # text rule; a stand-in without it is not a sending capability.
         definition = CapabilityDefinition(
-            SEND_MAIL_REPLY, "reply", schema, schema, SideEffect.EFFECTFUL
+            SEND_MAIL_REPLY, "reply", schema, schema, SideEffect.EFFECTFUL,
+            transmits_authored_text=True,
         )
         arguments = {"to": ("john@example.test",), "body": "Heard wording."}
         turns = (

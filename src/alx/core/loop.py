@@ -799,8 +799,7 @@ class CoreAgent:
             " ".join(item.split()) not in spoken for item in authored
         )
 
-    @staticmethod
-    def _approval_proposal_error(conversation, state, decision) -> str | None:
+    def _approval_proposal_error(self, conversation, state, decision) -> str | None:
         proposal = decision.approval_proposal
         call = decision.call
         if proposal is None:
@@ -821,8 +820,15 @@ class CoreAgent:
             or proposal.source_reference != f"turn:{source.turn_id}"
         ):
             return "approval_source_not_latest_person_turn"
-        if CoreAgent._unheard_authored_text(conversation, call):
-            return "approval_covers_unheard_text"
+        # Only a capability that actually carries her wording to someone else
+        # is held to what Friedl has already heard. Scoped by the capability's
+        # own declaration rather than by argument names: a search argument
+        # called `subject` once made every web search look like unsent mail,
+        # and sixteen refusals in one turn told her nothing about why.
+        definition = self._definition(call.capability_id)
+        if definition is not None and definition.transmits_authored_text:
+            if CoreAgent._unheard_authored_text(conversation, call):
+                return "approval_covers_unheard_text"
         return None
 
     @staticmethod

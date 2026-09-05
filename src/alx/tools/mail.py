@@ -309,6 +309,11 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     _FAILURES,
+    # This one carries her wording to someone else, so the rule that she may
+    # not send Friedl text he has never heard applies to it. Declared here
+    # rather than inferred: a capability that transmits says so, and nothing
+    # else is checked against what she last said.
+    transmits_authored_text=True,
 )
 
 DEFINITIONS = (
