@@ -42,19 +42,19 @@ class ConsistencyGateTests(unittest.TestCase):
         self.assertIn(old, text, f"{relative_path} no longer contains the anchor")
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
-    def checksum_greptile(self) -> None:
-        """Re-sign the Greptile files so the checksum does not mask the test."""
+    def checksum_review_brief(self) -> None:
+        """Re-sign the review brief so the checksum does not mask the test."""
         import hashlib
 
         lines = []
         for relative_path in (
-            ".greptile/config.json",
-            ".greptile/files.json",
-            ".greptile/rules.md",
+            "review/brief.json",
+            "review/context.json",
+            "review/mandate.md",
         ):
             digest = hashlib.sha256((self.root / relative_path).read_bytes()).hexdigest()
             lines.append(f"{digest}  {relative_path}")
-        (self.root / "governance/GREPTILE.sha256").write_text(
+        (self.root / "governance/REVIEW_BRIEF.sha256").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )
 
@@ -122,8 +122,8 @@ class ConsistencyGateTests(unittest.TestCase):
             "the superseded blueprint example must fail the check",
         )
 
-    def test_greptiles_mandate_cannot_name_a_law_count_that_is_wrong(self) -> None:
-        """Review finding: Greptile was still told to review "all 19 Laws".
+    def test_the_review_mandate_cannot_name_a_law_count_that_is_wrong(self) -> None:
+        """Review finding: the reviewer was still told to review "all 19 Laws".
 
         It reviews against the laws its mandate names, so an invalid mandate
         would have produced an invalid constitutional review, and no gate
@@ -131,53 +131,53 @@ class ConsistencyGateTests(unittest.TestCase):
         not changed, not that what it says is true.
         """
         self.rewrite(
-            ".greptile/rules.md",
+            "review/mandate.md",
             "Review the whole change against every law in that file",
             "Review the whole change against all 19 Laws",
         )
-        self.checksum_greptile()
+        self.checksum_review_brief()
         self.assertTrue(
             any("claims 19 laws exist" in item for item in self.violations()),
             "a mandate naming a law count that does not exist must fail",
         )
 
-    def test_greptile_config_cannot_name_a_law_count_that_is_wrong(self) -> None:
+    def test_the_review_brief_cannot_name_a_law_count_that_is_wrong(self) -> None:
         self.rewrite(
-            ".greptile/config.json",
+            "review/brief.json",
             "currently holds four laws",
             "currently holds all 19 Laws",
         )
-        self.checksum_greptile()
+        self.checksum_review_brief()
         self.assertTrue(
             any("claims 19 laws exist" in item for item in self.violations()),
-            "Greptile's structured configuration must reject an obsolete count",
+            "The structured review brief must reject an obsolete count",
         )
 
-    def test_greptile_context_cannot_name_a_law_count_that_is_wrong(self) -> None:
+    def test_the_review_context_cannot_name_a_law_count_that_is_wrong(self) -> None:
         self.rewrite(
-            ".greptile/files.json",
+            "review/context.json",
             "Sole canonical statement of the approved Laws of AL/X.",
             "Sole canonical statement of all 19 approved Laws of AL/X.",
         )
-        self.checksum_greptile()
+        self.checksum_review_brief()
         self.assertTrue(
             any("claims 19 laws exist" in item for item in self.violations()),
-            "Greptile's context descriptions must reject an obsolete count",
+            "The review context descriptions must reject an obsolete count",
         )
 
-    def test_greptile_cannot_soften_deletion_into_preference(self) -> None:
+    def test_the_review_brief_cannot_soften_deletion_into_preference(self) -> None:
         self.rewrite(
-            ".greptile/config.json",
+            "review/brief.json",
             "Tests must prove the competing path is absent",
             "Tests may prefer the new path while retaining the old one",
         )
-        self.checksum_greptile()
+        self.checksum_review_brief()
         self.assertTrue(
             any(
                 "alx-one-production-path missing required marker" in item
                 for item in self.violations()
             ),
-            "Greptile must require deletion rather than preferred-path usage",
+            "The review brief must require deletion rather than preferred-path usage",
         )
 
     def test_entry_instructions_cannot_retain_replaced_code(self) -> None:

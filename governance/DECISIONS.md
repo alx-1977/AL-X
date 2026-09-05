@@ -508,3 +508,104 @@ HTML extraction is stdlib-only in V1. No parsing or extraction dependency is add
 ### Review condition
 
 Revisit if retrieval reaches anything not publicly reachable; if a retrieved page's content is ever acted upon as an instruction; if search spend diverges from the recorded price; if extraction quality proves inadequate often enough to argue for a parsing dependency; or if the bounds above are found to be shaping what AL/X concludes rather than what fits in a turn.
+
+---
+
+## D-026 — Independent review is a property, not a provider
+
+**Status:** Approved by Friedl on 2026-09-05
+**Owner:** Friedl
+
+### Decision
+
+Production changes require an independent, evidence-based review of the actual
+proposed merge diff. Governance specifies the properties and evidence that
+review must have. It does not name a commercial review provider.
+
+The requirement itself is not new. `docs/LAW_ENFORCEMENT.md` already states
+that "a change fails if required review evidence is absent" and that the author
+and reviewing model must both assess technical compliance, without naming a
+provider. Neither that document nor `LAWS_OF_ALX.md` mentions any vendor, and
+neither is amended by this decision. What was provider-bound was the
+implementation: a required GitHub status check tied to one application's
+identity, and a review brief stored in a vendor-named directory.
+
+### What an acceptable independent review must be
+
+- **Independent of the implementing agent.** The agent that wrote a change
+  cannot be the independent check on it. This holds however capable that agent
+  is and however honest its self-assessment: a reviewer who authored the work
+  reviews their own reasoning along with their own code.
+- **Against the complete proposed diff**, at the exact head being merged. A
+  review of an earlier head is evidence about a different change.
+- **Evidence-backed.** Findings anchored to the code, or an explicit report of
+  the scope actually examined. A clean review is a valid outcome; a bare
+  verdict is not a review. Governance must never create an incentive to invent
+  a defect in order to satisfy a gate.
+- **In scope:** correctness, regressions, architecture and governance
+  compliance, applicable safety and economic boundaries, and whether tests
+  actually enforce what they claim.
+- **Non-mutating.** A reviewer does not modify production code while reviewing
+  it. Fixes are ordinary work under the gate afterwards.
+
+### What is verified, and what is asserted
+
+`scripts/check_independent_review.py` verifies, against GitHub's own record
+rather than any claim made in the repository: that a review covers the exact
+head, that its author is on the governed accepted list, that the reviewer
+authored no commit in the change, and that the review carries substantive
+content rather than a verdict. Reviewer identity is matched on GitHub's
+immutable numeric account id; a login can be renamed or re-registered, and the
+human-readable name is carried only for diagnostics.
+
+What cannot be verified is that the reviewer genuinely read the diff and
+exercised judgement across the scope above. No mechanism establishes that. The
+gate makes a false claim a recorded false statement rather than an absence,
+which is the standard `docs/LAW_ENFORCEMENT.md` already sets when it says "the
+reviewer will notice" is not evidence.
+
+### Accepted reviewers
+
+`review/accepted_reviewers.json` is the governed list. It is covered by
+CODEOWNERS, so adding a reviewer requires Friedl's approval. Being technically
+capable of posting a review does not make an actor an accepted reviewer.
+
+Paid review invocation remains under Friedl's explicit authority. This gate
+reads review evidence GitHub already holds; it never requests, triggers or pays
+for a review.
+
+### Rollout
+
+The verifier runs in the existing `law-gates` check in reporting mode. It
+becomes blocking only after it has accumulated evidence on real merges and
+Friedl explicitly approves the promotion. The `Greptile Review` branch
+protection check is unchanged and remains required until that promotion is
+approved separately.
+
+Where no accepted reviewer can run, the existing approved-exception mechanism
+in `governance/EXCEPTIONS.md` carries the merge, naming the exact head. That is
+the mechanism EX-002 and EX-003 already used; this decision reuses it rather
+than inventing a second way through.
+
+### This decision is forward-looking
+
+It does not reinterpret, discharge or weaken any existing obligation.
+
+**The retrospective Greptile reviews owed for `16bf2d9` under EX-002 and for
+`b1470fc` under EX-003 remain outstanding, and remain specifically Greptile
+reviews.** They were approved with that provider named, and a later
+provider-independent rule does not retroactively satisfy them. EX-002 and
+EX-003 are unchanged.
+
+EX-003 recorded that a second consecutive quota-blocked merge is a reason to
+revisit the review arrangement deliberately rather than to keep spending
+exceptions on it. This decision is that deliberate revision. It must not become
+a way to retroactively bless the two merges that prompted it.
+
+### Review condition
+
+Revisit before promoting the verifier to blocking; if an accepted reviewer is
+added or removed; if a review is ever accepted that should not have been, or
+refused that should have been; if the exception path is used more than
+occasionally; or if the substantive-evidence threshold proves to reward padding
+rather than reporting.
