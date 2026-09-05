@@ -42,14 +42,17 @@ from alx.contracts import (
     WebSearchResults,
 )
 from alx.bootstrap.web import WEB_READ_PERMISSION, build_web_runtime
-from alx.config.settings import WebSearchSettings
+from alx.config.settings import (
+    APPROVED_SEARCH_USD_PER_REQUEST,
+    WebSearchSettings,
+)
 from alx.core.model_reasoner import _attempt_payload
 from alx.observability.search_budget import (
     SQLiteSearchLedger,
     SearchBudget,
     SearchBudgetExceeded,
 )
-from alx.providers.web_search import BraveWebSearchProvider
+from alx.providers.web_search import BRAVE_USD_PER_REQUEST, BraveWebSearchProvider
 from alx.safety import AuthorityContext, SafetyGate
 from alx.tools import ASK_WEB_PAGE, ASK_WEB_SEARCH
 from alx.tools.web import build_web_search_executors
@@ -618,6 +621,25 @@ class RegistrationTests(unittest.TestCase):
         (self.root / "search-spend.sqlite3").write_bytes(b"not a database")
         runtime = self.runtime(WebSearchSettings(True, "key", PRICE, 30, 0.15))
         self.assertIsNone(runtime.searcher)
+
+    def test_the_approved_price_and_the_provider_price_stay_equal(self) -> None:
+        """D-025 records one price, and two modules must not disagree on it.
+
+        Configuration refuses to register search unless the configured rate
+        equals `APPROVED_SEARCH_USD_PER_REQUEST`; the Brave adapter states the
+        same figure as `BRAVE_USD_PER_REQUEST`. The duplication is structural
+        rather than careless -- `config` may not import `providers` -- so
+        nothing but this assertion stops the two from drifting apart.
+
+        Drift would not fail loudly. Search would keep running, charging one
+        rate against a ceiling sized for another, which is precisely the
+        unmeasured spending D-025 requires to fail closed instead.
+        """
+        self.assertEqual(
+            APPROVED_SEARCH_USD_PER_REQUEST,
+            BRAVE_USD_PER_REQUEST,
+            "the approved search price and the Brave adapter's price differ",
+        )
 
 
 class LiveLedgerTests(unittest.TestCase):
