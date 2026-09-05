@@ -480,6 +480,13 @@ async def run(repository_root: Path) -> None:
         open_thoughts=lambda: continuity_runtime.store.open_thoughts(
             OPEN_THOUGHT_LIMIT
         ),
+        # Her open enquiries, from the one notebook store. Context only: a
+        # thread never creates an occasion, and nothing here schedules a
+        # return to one. Continuity of interest; opportunity stays hers to
+        # ask for through request_future_cognition.
+        open_notebook_threads=lambda: notebook_runtime.store.open_threads(
+            OPEN_NOTEBOOK_THREAD_LIMIT
+        ),
         undelivered_responses=lambda: opportunity_ledger.undelivered(),
         # A refused goal proposal left no trace on 2026-09-04, so a live
         # rejection could not be diagnosed. Mechanical facts to the log only:

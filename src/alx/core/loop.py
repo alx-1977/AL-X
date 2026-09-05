@@ -114,6 +114,7 @@ class CoreAgent:
                  approval_ttl_seconds: int | None = None,
                  budget_check: Callable[[str], None] | None = None,
                  open_thoughts: Callable[[], tuple] | None = None,
+                 open_notebook_threads: Callable[[], tuple] | None = None,
                  undelivered_responses: Callable[[], tuple] | None = None,
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None) -> None:
         self._store = store
@@ -139,6 +140,11 @@ class CoreAgent:
         # Core asks for them; it never reaches the store itself, and the same
         # call is made for every turn whatever its origin.
         self._open_thoughts = open_thoughts or (lambda: ())
+        # Her open enquiries, from the one notebook store, bounded and
+        # content-free. Supplied identically on every turn: a context
+        # assembled differently when nobody is watching would be a second
+        # builder deciding what she is like unprompted.
+        self._open_notebook_threads = open_notebook_threads or (lambda: ())
         # Occasions whose response had nowhere to go. Supplied by the one
         # opportunity ledger; the Core is shown that it happened and nothing
         # deterministic decides whether it still matters.
@@ -229,6 +235,7 @@ class CoreAgent:
                     unfinished_goals=summaries,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
+                    open_notebook_threads=self._open_notebook_threads(),
                     undelivered_responses=self._undelivered_responses(),
                     memory_conflicts=memory_conflicts,
                     refused_calls=refused_calls,

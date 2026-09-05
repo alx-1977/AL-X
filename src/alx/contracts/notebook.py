@@ -212,6 +212,11 @@ MAX_WINDOW_DAYS = 90
 # revisions of each, with continuation information when more exist.
 MAX_THREAD_ENTRIES = 25
 MAX_ENTRY_REVISIONS = 10
+# Open enquiries surfaced to the Core each turn, so she stays aware of what she
+# is already thinking about without having to go looking for it. Deliberately
+# small and content-free: this is a reminder that a thread exists, not the
+# thread. Reading one is a separate, explicit act.
+OPEN_NOTEBOOK_THREAD_LIMIT = 10
 
 
 @dataclass(frozen=True, slots=True)
