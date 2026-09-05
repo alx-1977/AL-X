@@ -25,6 +25,7 @@ from alx.bootstrap.autonomous import (
     OccasionSpendRelay,
 )
 from alx.bootstrap.continuity import build_continuity_runtime
+from alx.contracts.notebook import OPEN_NOTEBOOK_THREAD_LIMIT
 from alx.tools import OPEN_THOUGHT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner

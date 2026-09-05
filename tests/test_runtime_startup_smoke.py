@@ -264,8 +264,18 @@ class StartupSmokeTest(unittest.TestCase):
 
         original = CoreAgent.__init__
 
+        results: dict = {}
+
         def capture(self, *args, **kwargs):
             captured.update(kwargs)
+            # Called here, while the runtime is still up. After teardown its
+            # stores are closed, and a supplier that reads one would raise for
+            # that reason rather than the one under test.
+            for name, value in kwargs.items():
+                if callable(value) and name.endswith(
+                    ("_thoughts", "_responses", "_threads")
+                ):
+                    results[name] = tuple(value())
             original(self, *args, **kwargs)
 
         CoreAgent.__init__ = capture
@@ -274,12 +284,22 @@ class StartupSmokeTest(unittest.TestCase):
         finally:
             CoreAgent.__init__ = original
 
-        for name in ("open_thoughts", "undelivered_responses"):
+        # Every callable composition handed the Core, discovered rather than
+        # listed. Naming them individually is how this test passed while
+        # `open_notebook_threads` closed over an unimported constant and every
+        # live turn died with a NameError: the supplier existed, and nothing
+        # called it.
+        self.assertGreaterEqual(
+            len(results), 3, f"expected the context suppliers, got {results}"
+        )
+        for name in ("open_thoughts", "undelivered_responses",
+                     "open_notebook_threads"):
+            self.assertIn(name, results, f"{name} must be supplied")
+        for name, value in sorted(results.items()):
             with self.subTest(supplier=name):
-                supplier = captured.get(name)
-                self.assertIsNotNone(supplier, f"{name} must be supplied")
-                # Calling it is what proves the names it closes over exist.
-                self.assertEqual(tuple(supplier()), ())
+                # It ran without raising, which is what proves the names it
+                # closes over exist.
+                self.assertEqual(value, ())
 
     def test_the_runtime_starts_without_a_speech_transport(self) -> None:
         """Quiet evening testing: no audio, everything else identical."""
