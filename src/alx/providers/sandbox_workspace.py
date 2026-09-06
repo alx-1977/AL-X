@@ -132,6 +132,11 @@ class SandboxWorkspace:
         return results
 
     @staticmethod
+    def total_bytes(walked: dict[str, tuple[str, int]]) -> int:
+        """How much a session's state occupies, from a walk already taken."""
+        return sum(size for _, size in walked.values())
+
+    @staticmethod
     def _digest(path: Path) -> str:
         digest = hashlib.sha256()
         with path.open("rb") as handle:
@@ -157,6 +162,22 @@ class SandboxWorkspace:
         for name in sorted(set(before) - set(after)):
             artifacts.append(ArtifactMetadata(name, FileChange.DELETED, 0, ""))
         return tuple(artifacts)
+
+    def purge_state(self, session_state: Path) -> None:
+        """Empty a session's working directory, keeping the directory itself.
+
+        Used when a run overflows the workspace ceiling: the run's evidence is
+        already written, and leaving the overflow in place would let one run
+        deny the disk to every later one.
+        """
+        resolved = Path(session_state).resolve()
+        if self._root not in resolved.parents:
+            raise SandboxError("workspace_unavailable")
+        for entry in sorted(resolved.iterdir()):
+            if entry.is_dir() and not entry.is_symlink():
+                self._remove_tree(entry)
+            else:
+                entry.unlink()
 
     def purge_transient(self, session_root: Path) -> int:
         """Delete every experiment-authored byte, keeping each run manifest.

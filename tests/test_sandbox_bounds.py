@@ -148,7 +148,7 @@ class SandboxBoundsTest(unittest.TestCase):
 
         resource.setrlimit = record  # type: ignore[assignment]
         try:
-            SeatbeltSandboxRunner._limits()
+            SeatbeltSandboxRunner._limits(35)
         finally:
             resource.setrlimit = original  # type: ignore[assignment]
 

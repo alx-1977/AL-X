@@ -99,6 +99,8 @@ DEFINITION = CapabilityDefinition(
             "stderr": _STRING,
             "stdout_omitted_characters": _INTEGER,
             "stderr_omitted_characters": _INTEGER,
+            "stdout_capped": _BOOLEAN,
+            "stderr_capped": _BOOLEAN,
             "stdout_digest": _STRING,
             "stderr_digest": _STRING,
             "stdout_byte_size": _INTEGER,

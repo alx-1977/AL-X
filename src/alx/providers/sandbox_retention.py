@@ -103,31 +103,40 @@ class SandboxRetention:
             return []
 
     def _age(self, session: Path, moment: float) -> float:
-        """Seconds since anything in this session last changed.
+        """Seconds since this session last had a run, from a trusted clock.
 
-        Symbolic links are never followed: an experiment that linked to a file
-        with a future timestamp could otherwise keep its own workspace alive
-        indefinitely.
+        Age is deliberately **not** taken from the session's file timestamps.
+        Everything inside `state/` is written by the experiment, so its mtimes
+        are attacker-controlled: a program that set one far into the future
+        kept its own workspace alive indefinitely. Clamping the future value to
+        "now" was not enough either — it merely pinned the age at zero on every
+        later sweep, which is the same bypass more slowly.
+
+        The trusted signal is the run directory, which the confined process
+        cannot write to: the profile grants it write access to `state/` only.
+        A session's age is therefore the age of its most recent run, and a
+        session being actively iterated on keeps producing runs.
         """
         newest = 0.0
-        for current, directory_names, file_names in os.walk(session, followlinks=False):
-            directory_names[:] = [
-                name for name in directory_names
-                if not Path(current, name).is_symlink()
-            ]
-            for name in (*directory_names, *file_names):
-                path = Path(current, name)
-                if path.is_symlink():
+        runs = session / "runs"
+        if runs.is_dir():
+            for run in runs.iterdir():
+                if run.is_symlink() or not run.is_dir():
                     continue
-                try:
-                    newest = max(newest, path.stat().st_mtime)
-                except OSError:
-                    continue
-        try:
-            newest = max(newest, session.stat().st_mtime)
-        except OSError:
-            return 0.0
-        return moment - newest
+                for candidate in (run / MANIFEST_NAME, run):
+                    try:
+                        newest = max(newest, candidate.stat().st_mtime)
+                    except OSError:
+                        continue
+        if newest == 0.0:
+            # No run has completed here. Fall back to the session directory
+            # itself, which the sandbox also cannot write to.
+            try:
+                newest = session.stat().st_mtime
+            except OSError:
+                return 0.0
+        # A clock that moved backwards must not produce a negative age.
+        return max(0.0, moment - newest)
 
     def manifests(self, experiment_id: str, session_id: str) -> tuple[Path, ...]:
         """Every surviving run manifest for one session, in run order."""

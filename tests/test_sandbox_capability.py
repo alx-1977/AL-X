@@ -334,6 +334,15 @@ class SingleExecutionSiteTest(unittest.TestCase):
         "spawnve",
     }
 
+    # asyncio creates processes too. Omitting these let a second execution site
+    # using the already-common asyncio import pass both absence tests, so the
+    # suite did not enforce the single-site claim it reported. Kept separate
+    # because asyncio.run() is the event loop, not an execution site.
+    ASYNCIO_EXECUTION_NAMES = {
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+    }
+
     def _production_modules(self) -> list[Path]:
         return [
             path
@@ -357,6 +366,10 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 if any(
                     name in ("subprocess", "multiprocessing", "pty")
                     for name in names
+                ) or any(
+                    name.endswith("create_subprocess_exec")
+                    or name.endswith("create_subprocess_shell")
+                    for name in names
                 ):
                     offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}")
         self.assertEqual(offenders, [], f"a second execution path appeared: {offenders}")
@@ -377,7 +390,17 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     )
                     # Only a call on subprocess or os counts, so an ordinary
                     # method named `run` is not mistaken for an execution site.
-                    if owner in ("subprocess", "os") and target.attr in self.EXECUTION_NAMES:
+                    # `asyncio` is scoped to its own process-creation calls:
+                    # asyncio.run() is the event loop, not an execution site,
+                    # and treating it as one flagged the runtime entry point.
+                    creates_process = (
+                        owner in ("subprocess", "os")
+                        and target.attr in self.EXECUTION_NAMES
+                    ) or (
+                        owner == "asyncio"
+                        and target.attr in self.ASYNCIO_EXECUTION_NAMES
+                    )
+                    if creates_process:
                         offenders.append(
                             f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}"
                         )

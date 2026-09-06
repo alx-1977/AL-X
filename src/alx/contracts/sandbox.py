@@ -77,6 +77,10 @@ SANDBOX_FAILURES = (
     "execution_timeout",
     "output_unreadable",
     "ledger_corrupt",
+    # The session filled beyond its permitted size. Distinct from a per-file
+    # limit: many small files can exhaust a workspace while every write stays
+    # legal.
+    "workspace_exhausted",
 )
 
 
@@ -138,14 +142,18 @@ class ArtifactMetadata:
             raise TypeError("byte_size must be an integer")
         if self.byte_size < 0:
             raise ValueError("byte_size must not be negative")
-        # A deleted file has no surviving content to hash; everything else must
-        # carry one, because the digest is what makes the durable record
-        # verifiable after the bytes themselves are gone.
-        if self.change is FileChange.DELETED:
-            if self.digest:
-                raise ValueError("a deleted artifact has no digest")
-        elif len(self.digest) != 64:
+        # A digest is required wherever there is content to hash, because it is
+        # what makes the durable record verifiable after the bytes are gone.
+        #
+        # Two cases legitimately have none: a deleted file, and a symbolic
+        # link, whose target is never opened. An earlier version required a
+        # digest for every non-deleted entry, which made any run that created a
+        # symlink raise after execution and lose both its result and its
+        # manifest. A link is ordinary evidence, not a failure.
+        if self.digest and len(self.digest) != 64:
             raise ValueError("artifact digest must be a sha256 hex digest")
+        if self.change is FileChange.DELETED and self.digest:
+            raise ValueError("a deleted artifact has no digest")
 
     def as_values(self) -> dict[str, object]:
         return {
@@ -211,6 +219,11 @@ class SandboxOutcome:
     wall_seconds_used: float
     started_at: datetime
     finished_at: datetime
+    # Whether the captured stream was larger than the runner could read, in
+    # which case the digest and byte size describe a prefix. Recorded rather
+    # than assumed false, so evidence is never silently partial.
+    stdout_capped: bool = False
+    stderr_capped: bool = False
 
     def __post_init__(self) -> None:
         _identifier(self.experiment_id, "experiment_id")
@@ -276,6 +289,8 @@ class SandboxOutcome:
             "stderr_byte_size": self.stderr_byte_size,
             "stdout_omitted_characters": self.stdout_omitted_characters,
             "stderr_omitted_characters": self.stderr_omitted_characters,
+            "stdout_capped": self.stdout_capped,
+            "stderr_capped": self.stderr_capped,
             "artifact_count": len(self.artifacts),
             "artifacts_omitted": self.artifacts_omitted,
             "wall_seconds_used": round(self.wall_seconds_used, 3),

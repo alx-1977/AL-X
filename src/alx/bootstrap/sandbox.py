@@ -17,6 +17,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -99,10 +100,16 @@ def build_sandbox_runtime(
         return None
 
     retention = SandboxRetention(workspace)
-    # Reap what a crash left behind before anything new is run.
+    # Reap what a crash left behind before anything new is run. A further sweep
+    # runs before each experiment, so retention does not depend on restarting.
     retention.sweep()
 
     def run_experiment(request: SandboxRequest) -> Any:
+        # Retention runs before every run rather than only at construction. A
+        # long-lived runtime would otherwise never sweep again, and experiment
+        # bytes would outlive the TTL until the next restart.
+        retention.sweep()
+
         try:
             reservation = ledger.reserve(request.wall_seconds)
         except SandboxBudgetExceeded as error:
@@ -111,13 +118,25 @@ def build_sandbox_runtime(
         except SandboxLedgerCorrupt as error:
             raise SandboxError("ledger_corrupt") from error
 
+        # A reservation is released only when nothing was executed. Once the
+        # process has run it has consumed wall time on this machine, so a
+        # failure afterwards — reading output, hashing state, writing the
+        # manifest — settles rather than abandons. Abandoning those would let
+        # repeated post-execution failures spend the day's time without ever
+        # appearing in either fuse.
+        executed = False
         try:
             paths = workspace.prepare(
                 request.experiment_id, request.session_id, request.run_id
             )
+            started = monotonic()
+            executed = True
             outcome = selected.run(request, paths)
         except BaseException:
-            ledger.abandon(reservation, "run_failed")
+            if executed:
+                ledger.settle(reservation, monotonic() - started)
+            else:
+                ledger.abandon(reservation, "run_failed")
             raise
         ledger.settle(reservation, outcome.wall_seconds_used)
         return outcome

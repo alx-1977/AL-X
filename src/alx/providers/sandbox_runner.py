@@ -44,6 +44,7 @@ from pathlib import Path
 
 from alx.contracts.sandbox import (
     MAX_FILE_BYTES,
+    MAX_WORKSPACE_BYTES,
     MAX_PROCESSES,
     MAX_REPORTED_ARTIFACTS,
     MAX_STDERR_CHARACTERS,
@@ -58,13 +59,20 @@ from alx.providers.sandbox_workspace import SandboxWorkspace, SessionPaths
 
 LOGGER = logging.getLogger(__name__)
 
-# Read caps on the captured streams. Ten times what is returned to the Core, so
-# the recorded digest and byte length describe a real bound rather than an
-# unbounded file, while truncation of the returned text stays visible.
-_MAX_CAPTURED_BYTES = 10 * 1024 * 1024
+# Read cap on the captured streams. It must not be smaller than what
+# RLIMIT_FSIZE permits a stream file to reach, or the recorded digest and byte
+# length would describe a prefix while claiming to describe the output, making
+# the durable audit inaccurate. A truncated read is reported explicitly rather
+# than silently, so evidence is never quietly partial.
+_MAX_CAPTURED_BYTES = MAX_FILE_BYTES
 
 # Grace between asking a process group to stop and insisting.
 _TERM_GRACE_SECONDS = 2.0
+
+# How much CPU time a run may use beyond its wall clock. Small: an ordinary run
+# is bounded by the wall timeout, and RLIMIT_CPU is the backstop for a process
+# that would otherwise burn a core for the whole window.
+CPU_GRACE_SECONDS = 5
 
 
 class SandboxRunner(ABC):
@@ -92,12 +100,22 @@ def _digest(data: bytes) -> str:
 class SeatbeltSandboxRunner(SandboxRunner):
     """macOS confinement through `sandbox-exec`, plus rlimits and a timeout.
 
-    The profile denies everything by default, then allows reads broadly while
-    denying the paths that matter and granting writes only inside the session's
-    own state directory. Reads are broad because a restricted read profile
-    cannot start the interpreter at all: CPython aborts before it can report
-    why. Denying the repository, the runtime storage and the user's private
-    keys explicitly is what makes that acceptable, and each denial is tested.
+    The profile denies everything by default, allows the system paths CPython
+    needs, then denies the whole home directory and re-allows only the session
+    workspace inside it. Later rules win, so a workspace under the home
+    directory stays writable while everything else beneath it is refused.
+
+    An earlier version allowed reads everywhere and denied three explicit
+    paths. That was too weak, and an independent review was right about it: an
+    experiment could still read the keychain directory, `.config`, Documents
+    and shell history, which D-027 prohibits. Reads must be denied by default
+    over the user's own data, not merely at named paths, because a deny-list
+    only covers the secrets somebody remembered.
+
+    System reads stay broad because a restricted read profile cannot start the
+    interpreter at all: CPython aborts before it can report why. That is
+    acceptable where the repository, the runtime storage and the home
+    directory are refused, and each denial is tested.
     """
 
     def __init__(
@@ -106,11 +124,13 @@ class SeatbeltSandboxRunner(SandboxRunner):
         denied_read_paths: tuple[Path, ...] = (),
         interpreter: str | None = None,
         sandbox_exec: str = "/usr/bin/sandbox-exec",
+        home_directory: Path | None = None,
     ) -> None:
         self._workspace = workspace
         self._denied = tuple(Path(item).resolve() for item in denied_read_paths)
         self._interpreter = interpreter or sys.executable
         self._sandbox_exec = sandbox_exec
+        self._home = (home_directory or Path.home()).resolve()
 
     def available(self) -> bool:
         return (
@@ -125,6 +145,9 @@ class SeatbeltSandboxRunner(SandboxRunner):
         Written as a method so a test can assert the exact rules rather than
         infer them from behaviour alone.
         """
+        # Order matters: Seatbelt applies the last matching rule, so the home
+        # denial must precede the workspace re-allow, and every explicit denial
+        # must precede it too.
         denials = "\n".join(
             f'(deny file-read* (subpath "{path}"))' for path in self._denied
         )
@@ -137,20 +160,35 @@ class SeatbeltSandboxRunner(SandboxRunner):
             "(allow mach-lookup)\n"
             "(allow signal (target self))\n"
             "(allow file-read*)\n"
+            # The user's own data is refused wholesale rather than by naming
+            # individual secrets: a deny-list only covers what was remembered.
+            f'(deny file-read* (subpath "{self._home}"))\n'
             f"{denials}\n"
+            # The session workspace is re-allowed after the denials so a
+            # workspace living under the home directory still works.
+            f'(allow file-read* (subpath "{state}"))\n'
             f'(allow file-write* (subpath "{state}"))\n'
             '(allow file-write-data (literal "/dev/null"))\n'
             "(deny network*)\n"
         )
 
     @staticmethod
-    def _limits() -> None:
+    def _limits(cpu_seconds: int) -> None:
         """Applied in the child between fork and exec.
+
+        RLIMIT_CPU bounds CPU time inside the run, which the parent's wall
+        clock cannot: a process burning a core is stopped by the kernel rather
+        than waiting for the wall timeout. D-027 records this limit as applied,
+        and an earlier version of this file did not apply it at all.
+
+        The CPU allowance exceeds the wall clock by a small margin so an
+        ordinary run is bounded by the wall timeout, and CPU is the backstop.
 
         RLIMIT_AS is deliberately absent. It does not work on macOS arm64, and
         setting it would create the appearance of a memory bound that the
         kernel ignores.
         """
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
         resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_FILE_BYTES, MAX_FILE_BYTES))
         resource.setrlimit(resource.RLIMIT_NPROC, (MAX_PROCESSES, MAX_PROCESSES))
 
@@ -200,7 +238,9 @@ class SeatbeltSandboxRunner(SandboxRunner):
                 cwd=str(paths.session_state),
                 # Nothing is inherited. Not os.environ, not the .env mapping.
                 env={},
-                preexec_fn=self._limits,
+                preexec_fn=lambda: self._limits(
+                    request.wall_seconds + CPU_GRACE_SECONDS
+                ),
                 # Its own process group, so a child that spawned helpers dies
                 # with it rather than surviving the call.
                 start_new_session=True,
@@ -215,11 +255,23 @@ class SeatbeltSandboxRunner(SandboxRunner):
 
         status = process.returncode if process.returncode is not None else -signal.SIGKILL
         after = self._workspace.walk(paths.session_state)
+
+        # D-027 bounds the session workspace, and RLIMIT_FSIZE only bounds one
+        # file: without this a run could fill the disk with many small files
+        # and stay inside every per-file limit. The run has already finished,
+        # so the ceiling is enforced by refusing to leave the overflow behind
+        # rather than by pretending the run did not happen.
+        occupied = self._workspace.total_bytes(after)
+        if occupied > MAX_WORKSPACE_BYTES:
+            LOGGER.warning("A sandbox session exceeded its workspace ceiling")
+            self._workspace.purge_state(paths.session_state)
+            raise SandboxError("workspace_exhausted")
+
         artifacts = self._workspace.changes(before, after)
         reported = artifacts[:MAX_REPORTED_ARTIFACTS]
 
-        stdout_bytes = self._read(stdout_path)
-        stderr_bytes = self._read(stderr_path)
+        stdout_bytes, stdout_capped = self._read(stdout_path)
+        stderr_bytes, stderr_capped = self._read(stderr_path)
         stdout, stdout_omitted = _truncate(
             stdout_bytes.decode("utf-8", "replace"), MAX_STDOUT_CHARACTERS
         )
@@ -247,31 +299,65 @@ class SeatbeltSandboxRunner(SandboxRunner):
             wall_seconds_used=elapsed,
             started_at=started_at,
             finished_at=finished_at,
+            stdout_capped=stdout_capped,
+            stderr_capped=stderr_capped,
         )
         self._write_manifest(request, paths, outcome, before, after, argv)
         return outcome
 
     @staticmethod
     def _terminate(process: subprocess.Popen) -> None:
-        """Stop the whole process group, insisting if asked politely fails."""
+        """Stop the whole process group, and prove the group is actually gone.
+
+        Waiting for the leader is not enough. A child that ignores SIGTERM can
+        outlive a parent that exits promptly, which would leave a background
+        process D-027 does not permit. So after the leader is reaped the group
+        is signalled again with SIGKILL and polled until no member remains.
+        """
+        try:
+            group = os.getpgid(process.pid)
+        except (ProcessLookupError, PermissionError):
+            return
+
         for sender in (signal.SIGTERM, signal.SIGKILL):
             try:
-                os.killpg(os.getpgid(process.pid), sender)
+                os.killpg(group, sender)
             except (ProcessLookupError, PermissionError):
-                return
+                break
             try:
                 process.wait(timeout=_TERM_GRACE_SECONDS)
-                return
+                break
             except subprocess.TimeoutExpired:
                 continue
 
+        # The leader is done; the rest of the group may not be.
+        deadline = time.monotonic() + _TERM_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(group, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.05)
+        LOGGER.warning("A sandbox process group did not terminate")
+
     @staticmethod
-    def _read(path: Path) -> bytes:
+    def _read(path: Path) -> tuple[bytes, bool]:
+        """Return the captured stream and whether the file exceeded the cap.
+
+        The flag matters: a digest over a prefix is not a digest of the output,
+        and a durable record that could not say so would be a false record.
+        """
         try:
+            size = path.stat().st_size
             with path.open("rb") as handle:
-                return handle.read(_MAX_CAPTURED_BYTES)
+                data = handle.read(_MAX_CAPTURED_BYTES)
         except OSError as error:
             raise SandboxError("output_unreadable") from error
+        return data, size > len(data)
 
     def _write_manifest(
         self,
@@ -299,8 +385,10 @@ class SeatbeltSandboxRunner(SandboxRunner):
             "argv": argv,
             "limits": {
                 "wall_seconds": request.wall_seconds,
+                "cpu_seconds": request.wall_seconds + CPU_GRACE_SECONDS,
                 "max_file_bytes": MAX_FILE_BYTES,
                 "max_processes": MAX_PROCESSES,
+                "max_workspace_bytes": MAX_WORKSPACE_BYTES,
                 # Recorded as absent rather than omitted, so the manifest never
                 # implies a memory ceiling that does not exist.
                 "memory_ceiling": None,
@@ -316,6 +404,8 @@ class SeatbeltSandboxRunner(SandboxRunner):
             "stderr_digest": outcome.stderr_digest,
             "stdout_byte_size": outcome.stdout_byte_size,
             "stderr_byte_size": outcome.stderr_byte_size,
+            "stdout_capped": outcome.stdout_capped,
+            "stderr_capped": outcome.stderr_capped,
             "state_before": {name: list(value) for name, value in before.items()},
             "state_after": {name: list(value) for name, value in after.items()},
             "artifacts": [item.as_values() for item in outcome.artifacts],
