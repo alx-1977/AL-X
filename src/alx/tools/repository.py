@@ -75,6 +75,11 @@ DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     MERGE_FAILURES,
+    # The optional title and message are published as commit metadata, so they
+    # are wording AL/X composed for somewhere other than this conversation.
+    # Declared rather than left at the default, so the Core's check on text
+    # Friedl has not heard applies here as it does to mail.
+    transmits_authored_text=True,
 )
 
 

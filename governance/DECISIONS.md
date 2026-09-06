@@ -549,6 +549,20 @@ Merging without an external review of the current revision; overriding branch pr
 
 `law-gates` remains a required status check. This decision does not enable required pull-request reviews: an approval gate would either put Friedl back into each merge or be satisfied by AL/X approving her own work, and neither is the arrangement recorded here.
 
+### Two earlier obligations, and what became of them
+
+EX-002 and EX-003 recorded two merges that went ahead without the Greptile
+review then required, each owing a retrospective review. Those exception
+records were removed with the rest of that system, so the obligations are
+restated here rather than disappearing with the machinery that held them.
+
+They were owed to a provider-specific requirement this decision replaces. The
+revisions concerned, `16bf2d9` and `b1470fc`, are long since merged and
+superseded, and there is no longer a required Greptile status for them to
+satisfy. Friedl discharges both: no retrospective review of those two
+revisions is owed. This is a disposition, not an omission, and it closes them
+explicitly so nobody has to reconstruct the history to find out.
+
 ### Review condition
 
 Revisit if a merge happens that a reviewer's findings should have stopped; if the delegation is used for anything but routine merges; if AL/X merges a revision no reviewer examined; or if the recorded authority proves broader than the routine decision Friedl intended to delegate.

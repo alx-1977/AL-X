@@ -187,11 +187,17 @@ class MergeAuthorityTest(unittest.TestCase):
         self.assertFalse(policy.approval_required)
         self.assertFalse(policy.standing_scope_allowed)
 
-    def test_the_capability_is_effectful_and_carries_no_authored_text(self) -> None:
+    def test_the_capability_declares_that_it_publishes_authored_text(self) -> None:
+        """The optional title and message become commit metadata.
+
+        They are wording AL/X composed for somewhere other than this
+        conversation, so the Core's check on text Friedl has not heard must
+        apply. An external review caught this test asserting the opposite.
+        """
         runtime = self._runtime(RecordingProvider())
         definition = runtime.definitions[0]
         self.assertIs(definition.side_effect, SideEffect.EFFECTFUL)
-        self.assertFalse(definition.transmits_authored_text)
+        self.assertTrue(definition.transmits_authored_text)
 
     def test_an_unconfigured_runtime_registers_nothing(self) -> None:
         """Honestly absent rather than registered and always failing."""
