@@ -49,8 +49,16 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Check out repository
+      # The trusted checkout, and the only thing this job runs. It is the base
+      # revision GitHub attests, never the proposed merge tree, so a pull
+      # request cannot supply the verifier, the reviewer roster or the
+      # exception register used to judge it. On a push there is no pull
+      # request, so the pushed commit is itself the trusted revision.
+      - name: Check out the trusted base revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -58,11 +66,14 @@ jobs:
           python-version: "3.12"
 
       - name: Verify an accepted independent review covers this head
-        # Blocking. D-026's rollout reserved this promotion to Friedl, who
-        # approved it on 2026-09-06; `Greptile Review` is removed as a required
-        # check in the same change. Any reviewer in review/accepted_reviewers.json
+        # Blocking. Any reviewer in the *trusted* review/accepted_reviewers.json
         # can satisfy it, which is what makes the requirement a property rather
         # than a provider.
+        #
+        # Every path here points into `trusted/`: the script executed, and the
+        # `--root` it reads its policy from. Pointing either at the workspace
+        # would let a change judge itself, which is the defect this job exists
+        # to prevent.
         #
         # `--event-name` is passed explicitly so that a pull_request event
         # arriving without its number fails closed instead of passing with
@@ -70,8 +81,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python scripts/check_independent_review.py \
+          python trusted/scripts/check_independent_review.py \
             --enforce \
+            --root trusted \
             --event-name "${{ github.event_name }}" \
             --repository "${{ github.repository }}" \
             --pull-request "${{ github.event.pull_request.number || 0 }}" \

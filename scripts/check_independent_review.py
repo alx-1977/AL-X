@@ -156,95 +156,6 @@ def is_substantive(body: str, inline_findings: int) -> bool:
     return len(text) >= MINIMUM_SUBSTANTIVE_CHARACTERS
 
 
-# The only file a record-only commit may touch. An exception documents itself
-# in the register and nowhere else; anything more is implementation arriving
-# above an approved SHA.
-EXCEPTION_RECORD_PATHS = frozenset({"governance/EXCEPTIONS.md"})
-
-
-def exception_names_pull_request(exceptions_text: str, sha: str, number: int) -> bool:
-    """Whether the exception naming `sha` also names this exact pull request.
-
-    An approved SHA is not a licence for whatever pull request happens to
-    contain it. The register must name both, so an exception approved for one
-    migration cannot silently authorise a different branch that rebased onto
-    the same commit.
-    """
-    section = _exception_section(exceptions_text, sha)
-    if section is None:
-        return False
-    return re.search(rf"(?:pull request|PR)\s*#?{number}\b", section, re.IGNORECASE) is not None
-
-
-def _exception_section(exceptions_text: str, sha: str) -> str | None:
-    """The whole register entry containing `sha`, from its heading.
-
-    Taken from the heading rather than from the SHA, because the pull-request
-    number usually precedes the commit in the same sentence — "pull request #20
-    at `abc…`" — and a section starting at the SHA would miss it.
-    """
-    if len(sha) != 40 or sha not in exceptions_text:
-        return None
-    position = exceptions_text.index(sha)
-    start = exceptions_text.rfind("\n## ", 0, position)
-    section = exceptions_text[start if start != -1 else 0 :]
-    boundary = section.find("\n## ", 1)
-    return section if boundary == -1 else section[:boundary]
-
-
-def approved_ancestor(
-    exceptions_text: str, commits: list[dict], head_sha: str
-) -> str | None:
-    """The approved exception SHA below this head, if there is exactly one.
-
-    Only a commit in this pull request qualifies, and it must not be the head
-    itself: naming the head is the ordinary path handled above. An unrelated
-    approved SHA that is not an ancestor of this head returns nothing.
-    """
-    shas = [commit.get("sha") for commit in commits if isinstance(commit.get("sha"), str)]
-    if head_sha not in shas:
-        return None
-    ancestors = shas[: shas.index(head_sha)]
-    covered = [sha for sha in ancestors if exception_covers(exceptions_text, sha)]
-    # More than one approved ancestor is ambiguous, and ambiguity must not
-    # resolve itself into permission.
-    return covered[0] if len(covered) == 1 else None
-
-
-def record_only_above(
-    commits: list[dict], approved_sha: str, files_for: "Callable[[str], list[str]]"
-) -> bool:
-    """Whether every commit above `approved_sha` only records the exception.
-
-    This exists for one situation and must not grow past it: an exception that
-    documents itself inside the pull request it covers cannot name its own
-    head, because a commit cannot contain its own SHA. So the approved SHA sits
-    below the tip, and the commits above it are required to be nothing but the
-    register entry.
-
-    "Nothing but" is checked against the files each commit actually changed,
-    not against its message. A commit that touches the verifier, the workflow,
-    configuration or any source file above the approved SHA makes the exception
-    inapplicable, however it describes itself.
-    """
-    shas = [commit.get("sha") for commit in commits]
-    if approved_sha not in shas:
-        return False
-    above = shas[shas.index(approved_sha) + 1 :]
-    if not above:
-        # The approved SHA is the head itself; the ancestor path is unnecessary.
-        return True
-    for sha in above:
-        if not isinstance(sha, str):
-            return False
-        changed = files_for(sha)
-        if not changed:
-            return False
-        if not set(changed) <= EXCEPTION_RECORD_PATHS:
-            return False
-    return True
-
-
 def exception_covers(exceptions_text: str, head_sha: str) -> bool:
     """Whether an approved exception names this exact head.
 
@@ -350,16 +261,75 @@ def _paged(url: str, token: str) -> list[dict]:
     return items
 
 
+# GitHub records one author per commit, but a change can be written by more
+# than one party, and the convention for saying so is a Co-authored-by trailer.
+# Matching on the numeric id inside a GitHub noreply address is what makes this
+# reliable: a display name can be anything, while `<id>+login@users.noreply.
+# github.com` carries the same immutable id the roster is keyed on.
+_CO_AUTHOR = re.compile(
+    r"^co-authored-by:.*?<(?:(\d+)\+)?[^>@]*@?[^>]*>\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def co_authored_ids(message: str) -> set[int]:
+    """Numeric GitHub ids credited as co-authors in one commit message."""
+    return {
+        int(match)
+        for match in _CO_AUTHOR.findall(message or "")
+        if match
+    }
+
+
+def change_authors(commits: list[dict], accepted: dict[int, str]) -> set[int]:
+    """Everyone who wrote any part of this change, not only its primary author.
+
+    D-026 requires the reviewer to be independent of the agent that wrote the
+    change. Reading only `author.id` missed co-authorship entirely: an accepted
+    reviewer credited in a Co-authored-by trailer, under a human primary
+    author, could review its own work and pass. Qodo found that reviewing the
+    change that added it to the roster.
+
+    Trailers are attacker-controllable text, so they can only ever *add* to the
+    author set. Nothing here lets a trailer remove someone, and a malformed one
+    is ignored rather than trusted.
+    """
+    authors: set[int] = set()
+    for commit in commits:
+        identity = (commit.get("author") or {}).get("id")
+        if isinstance(identity, int):
+            authors.add(identity)
+        message = ((commit.get("commit") or {}).get("message")) or ""
+        authors.update(co_authored_ids(message))
+    return authors
+
+
 def check_pull_request(
     root: Path, repository: str, number: int, head_sha: str, token: str
 ) -> str:
+    """Judge one pull request using trust data the pull request cannot supply.
+
+    `root` is the trusted checkout, not the proposed one. The workflow points
+    it at the base revision GitHub attests, so a change cannot add its own
+    reviewer, exempt itself, or rewrite the judge that evaluates it. Qodo found
+    the roster half of that reviewing the change that added it to the roster.
+    """
     accepted = load_accepted_reviewers(root)
     exceptions_path = root / "governance/EXCEPTIONS.md"
-    exceptions_text = (
-        exceptions_path.read_text(encoding="utf-8")
-        if exceptions_path.is_file()
-        else ""
-    )
+    if not exceptions_path.is_file():
+        # Absent trusted material is unverifiable, not empty. Treating a
+        # missing register as "no exceptions" would be harmless; treating a
+        # missing *roster* that way would not, and the two must fail alike so
+        # neither becomes the safe-looking default.
+        raise ReviewEvidenceError(
+            "the trusted exception register could not be read"
+        )
+    try:
+        exceptions_text = exceptions_path.read_text(encoding="utf-8")
+    except OSError:
+        raise ReviewEvidenceError(
+            "the trusted exception register could not be read"
+        ) from None
     if exception_covers(exceptions_text, head_sha):
         return f"an approved exception names {head_sha[:12]}"
 
@@ -373,42 +343,13 @@ def check_pull_request(
             f"could not read review evidence from GitHub: {type(error).__name__}"
         ) from None
 
-    # The self-referential case, and only that case. An exception recorded
-    # inside the pull request it covers cannot name its own head, so it names
-    # the implementation below the tip and the commits above must be the
-    # register entry and nothing else. Every condition is required: the
-    # exception names this pull request, the approved SHA is an ancestor of
-    # this head, and no substantive file changed above it.
-    approved = approved_ancestor(exceptions_text, commits, head_sha)
-    if approved is not None:
-        def files_for(sha: str) -> list[str]:
-            try:
-                commit = _request(f"{API_ROOT}/repos/{repository}/commits/{sha}", token)
-            except (urllib.error.URLError, urllib.error.HTTPError):
-                # Unreadable means unverifiable, and unverifiable must not pass.
-                return []
-            if not isinstance(commit, dict):
-                return []
-            return [
-                entry.get("filename")
-                for entry in commit.get("files") or ()
-                if isinstance(entry, dict) and isinstance(entry.get("filename"), str)
-            ]
-
-        if exception_names_pull_request(
-            exceptions_text, approved, number
-        ) and record_only_above(commits, approved, files_for):
-            return (
-                f"an approved exception names {approved[:12]} for pull request "
-                f"{number}, and only its own record sits above it"
-            )
-
-    commit_authors = {
-        (commit.get("author") or {}).get("id")
-        for commit in commits
-        if isinstance((commit.get("author") or {}).get("id"), int)
-    }
-    return verify(reviews, inline_comments, commit_authors, head_sha, accepted)
+    return verify(
+        reviews,
+        inline_comments,
+        change_authors(commits, accepted),
+        head_sha,
+        accepted,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

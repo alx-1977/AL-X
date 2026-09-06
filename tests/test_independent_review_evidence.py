@@ -628,205 +628,232 @@ class NetworkAndCommandLineTests(unittest.TestCase):
         )
 
 
-IMPLEMENTATION = "b" * 40
-UNRELATED = "c" * 40
+INTRUDER_ID = 424242
 
 
-class SelfReferentialExceptionTests(unittest.TestCase):
-    """The narrow B-prime path, and the seven ways it must refuse.
+class BaseTrustedPolicyTests(unittest.TestCase):
+    """The pull request supplies the candidate; the base supplies the judge.
 
-    An exception recorded inside the pull request it covers cannot name its own
-    head: a commit cannot contain its own SHA. So the approved SHA sits below
-    the tip and the commits above it must be the register entry and nothing
-    else.
+    Every test here points `--root` at a *trusted* directory that is not the
+    proposed change, which is what the workflow does by checking out
+    `base.sha`. The defects these cover were both found in review: a pull
+    request could add its own reviewer, and an accepted reviewer credited as a
+    co-author could review its own work.
 
-    This is deliberately not "any approved ancestor makes the head valid". Each
-    test below removes exactly one condition and proves the path closes.
+    The self-referential exception path that used to live here is gone. It
+    existed only because an exception recorded inside a pull request could not
+    name its own head; once the register is read from the base, an exception
+    always names a commit that already exists and the special case has no
+    remaining purpose.
     """
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
-        (self.root / "review").mkdir()
-        (self.root / "review/accepted_reviewers.json").write_text(
-            json.dumps({"reviewers": [{"id": REVIEWER_ID, "login": "reviewer"}]}),
+        base = Path(self.directory.name)
+        self.trusted = base / "trusted"
+        self.proposed = base / "proposed"
+        for root in (self.trusted, self.proposed):
+            (root / "review").mkdir(parents=True)
+            (root / "governance").mkdir(parents=True)
+            (root / "governance/EXCEPTIONS.md").write_text("", encoding="utf-8")
+        self._roster(self.trusted, [{"id": REVIEWER_ID, "login": "reviewer"}])
+        # The proposed tree adds a reviewer of its own and exempts itself.
+        self._roster(
+            self.proposed,
+            [
+                {"id": REVIEWER_ID, "login": "reviewer"},
+                {"id": INTRUDER_ID, "login": "intruder[bot]"},
+            ],
+        )
+        (self.proposed / "governance/EXCEPTIONS.md").write_text(
+            f"## EX-999\n\n- **Scope:** `{HEAD}`.\n- **Approval date:** 2026-09-06.\n",
             encoding="utf-8",
         )
-        (self.root / "governance").mkdir()
-        self._write_exception(IMPLEMENTATION, pull_request=1)
 
-    def _write_exception(
-        self, sha: str, pull_request: int, approval: str = "2026-09-06."
-    ) -> None:
-        (self.root / "governance/EXCEPTIONS.md").write_text(
-            f"## EX-005 — bootstrap\n\n"
-            f"- **Scope:** pull request #{pull_request} at `{sha}`, plus the "
-            f"single commit adding this record.\n"
-            f"- **Approval date:** {approval}\n"
-            f"- **Necessity:** it exists to stop depending on one provider.\n",
-            encoding="utf-8",
+    @staticmethod
+    def _roster(root: Path, reviewers: list) -> None:
+        (root / "review/accepted_reviewers.json").write_text(
+            json.dumps({"reviewers": reviewers}), encoding="utf-8"
         )
 
-    def _run(self, commits, files_by_sha, head=HEAD, pull_request="1"):
-        """Drive main() with both GitHub accessors replaced."""
+    def _run(self, root: Path, reviews, inline, commits):
         import check_independent_review as module
 
         def paged(url, token):
-            if url.endswith("/commits"):
-                return commits
-            return []
-
-        def request(url, token):
-            sha = url.rsplit("/", 1)[-1]
-            if sha not in files_by_sha:
-                raise urllib.error.URLError("no such commit")
-            return {"files": [{"filename": name} for name in files_by_sha[sha]]}
+            if url.endswith("/reviews"):
+                return reviews
+            if url.endswith("/comments"):
+                return inline
+            return commits
 
         environment = dict(os.environ)
         environment["GITHUB_TOKEN"] = "t"
         with unittest.mock.patch.dict(os.environ, environment, clear=True):
             with contextlib.redirect_stdout(io.StringIO()) as captured:
                 with unittest.mock.patch.object(module, "_paged", side_effect=paged):
-                    with unittest.mock.patch.object(
-                        module, "_request", side_effect=request
-                    ):
-                        code = module.main(
-                            [
-                                "--root", str(self.root),
-                                "--repository", "owner/repo",
-                                "--pull-request", pull_request,
-                                "--head-sha", head,
-                                "--enforce",
-                            ]
-                        )
+                    code = module.main(
+                        [
+                            "--root", str(root),
+                            "--repository", "owner/repo",
+                            "--pull-request", "1",
+                            "--head-sha", HEAD,
+                            "--enforce",
+                        ]
+                    )
         self.output = captured.getvalue()
         return code
 
-    # 1. The case this exists for.
-    def test_implementation_plus_record_only_commit_passes(self) -> None:
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
-        )
-        self.assertEqual(code, 0)
-        self.assertIn("only its own record sits above it", self.output)
+    @staticmethod
+    def _review(identity: str | int, login: str = "x"):
+        return [
+            {
+                "user": {"id": identity, "login": login},
+                "commit_id": HEAD,
+                "state": "COMMENTED",
+                "body": "A substantive account of what was examined. " + "x" * 220,
+            }
+        ]
 
-    # 2. Source code above the approved SHA.
-    def test_a_code_change_above_the_approved_sha_fails(self) -> None:
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-            files_by_sha={
-                HEAD: ["governance/EXCEPTIONS.md", "src/alx/tools/sandbox.py"]
-            },
-        )
-        self.assertEqual(code, 1)
+    def test_a_reviewer_the_change_adds_cannot_satisfy_its_own_gate(self) -> None:
+        """The defect Qodo found reviewing the change that added it."""
+        reviews = self._review(INTRUDER_ID, "intruder[bot]")
+        inline = [{"user": {"id": INTRUDER_ID}, "commit_id": HEAD, "path": "f.py"}]
+        commits = [{"sha": HEAD, "author": {"id": 12345}, "commit": {"message": "x"}}]
 
-    # 3. The verifier or the workflow above the approved SHA.
-    def test_a_workflow_or_verifier_change_above_the_approved_sha_fails(self) -> None:
-        for smuggled in (
-            ".github/workflows/law-gates.yml",
-            "scripts/check_independent_review.py",
-            "review/accepted_reviewers.json",
-            "governance/DECISIONS.md",
+        # Trusted base: the intruder is not on the roster, so it cannot qualify.
+        self.assertEqual(self._run(self.trusted, reviews, inline, commits), 1)
+        # And the proposed tree would have accepted it, which is the defect.
+        self.assertEqual(self._run(self.proposed, reviews, inline, commits), 0)
+
+    def test_an_exception_the_change_writes_cannot_exempt_it(self) -> None:
+        commits = [{"sha": HEAD, "author": {"id": 12345}, "commit": {"message": "x"}}]
+        self.assertEqual(self._run(self.trusted, [], [], commits), 1)
+        # The proposed tree exempts itself; the trusted base does not.
+        self.assertEqual(self._run(self.proposed, [], [], commits), 0)
+
+    def test_a_base_roster_reviewer_with_exact_head_evidence_qualifies(self) -> None:
+        reviews = self._review(REVIEWER_ID, "reviewer")
+        inline = [{"user": {"id": REVIEWER_ID}, "commit_id": HEAD, "path": "f.py"}]
+        commits = [{"sha": HEAD, "author": {"id": 12345}, "commit": {"message": "x"}}]
+        self.assertEqual(self._run(self.trusted, reviews, inline, commits), 0)
+
+    def test_a_missing_trusted_roster_fails_closed(self) -> None:
+        (self.trusted / "review/accepted_reviewers.json").unlink()
+        reviews = self._review(REVIEWER_ID, "reviewer")
+        commits = [{"sha": HEAD, "author": {"id": 12345}, "commit": {"message": "x"}}]
+        self.assertEqual(self._run(self.trusted, reviews, [], commits), 1)
+
+    def test_a_missing_trusted_exception_register_fails_closed(self) -> None:
+        """Unverifiable is not the same as empty, and must not pass for free."""
+        (self.trusted / "governance/EXCEPTIONS.md").unlink()
+        reviews = self._review(REVIEWER_ID, "reviewer")
+        inline = [{"user": {"id": REVIEWER_ID}, "commit_id": HEAD, "path": "f.py"}]
+        commits = [{"sha": HEAD, "author": {"id": 12345}, "commit": {"message": "x"}}]
+        self.assertEqual(self._run(self.trusted, reviews, inline, commits), 1)
+
+    def test_an_unreadable_trusted_roster_fails_closed(self) -> None:
+        (self.trusted / "review/accepted_reviewers.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+        commits = [{"sha": HEAD, "author": {"id": 12345}, "commit": {"message": "x"}}]
+        self.assertEqual(self._run(self.trusted, self._review(REVIEWER_ID), [], commits), 1)
+
+    def test_the_workflow_runs_the_verifier_from_the_trusted_base(self) -> None:
+        """The guard is worthless if the workflow runs the proposed copy."""
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github/workflows/law-gates.yml"
+        ).read_text(encoding="utf-8")
+        job = workflow.split("independent-review:", 1)[1]
+        self.assertIn("pull_request.base.sha", job)
+        self.assertIn("path: trusted", job)
+        # Both the script executed and the policy root must be the trusted copy.
+        self.assertIn("python trusted/scripts/check_independent_review.py", job)
+        self.assertIn("--root trusted", job)
+
+
+class CoAuthorIndependenceTests(unittest.TestCase):
+    """An accepted reviewer that helped write the change is not independent."""
+
+    def test_a_co_author_trailer_is_recognised(self) -> None:
+        from check_independent_review import co_authored_ids
+
+        message = (
+            "Do a thing\n\n"
+            "Co-Authored-By: Bot <151058649+qodo-code-review[bot]@users.noreply.github.com>\n"
+        )
+        self.assertEqual(co_authored_ids(message), {151058649})
+
+    def test_change_authors_includes_primary_and_co_authors(self) -> None:
+        from check_independent_review import change_authors
+
+        commits = [
+            {
+                "author": {"id": 111},
+                "commit": {
+                    "message": "x\n\nCo-authored-by: B <222+b@users.noreply.github.com>\n"
+                },
+            }
+        ]
+        self.assertEqual(change_authors(commits, {}), {111, 222})
+
+    def test_a_reviewer_credited_as_co_author_cannot_review_its_own_change(self) -> None:
+        """The exact bypass reported in review, reproduced then closed."""
+        from check_independent_review import verify, ReviewEvidenceError, change_authors
+
+        commits = [
+            {
+                "author": {"id": 111},
+                "commit": {
+                    "message": "work\n\nCo-Authored-By: R "
+                    f"<{REVIEWER_ID}+reviewer@users.noreply.github.com>\n"
+                },
+            }
+        ]
+        reviews = [
+            {
+                "user": {"id": REVIEWER_ID, "login": "reviewer"},
+                "commit_id": HEAD,
+                "state": "COMMENTED",
+                "body": "substantive " + "x" * 250,
+            }
+        ]
+        inline = [{"user": {"id": REVIEWER_ID}, "commit_id": HEAD, "path": "f.py"}]
+        with self.assertRaises(ReviewEvidenceError) as caught:
+            verify(
+                reviews, inline, change_authors(commits, {}), HEAD,
+                {REVIEWER_ID: "reviewer"},
+            )
+        self.assertIn("authored commits", str(caught.exception))
+
+    def test_a_reviewer_who_did_not_write_anything_still_qualifies(self) -> None:
+        from check_independent_review import verify, change_authors
+
+        commits = [{"author": {"id": 111}, "commit": {"message": "no trailers here"}}]
+        reviews = [
+            {
+                "user": {"id": REVIEWER_ID, "login": "reviewer"},
+                "commit_id": HEAD,
+                "state": "COMMENTED",
+                "body": "substantive " + "x" * 250,
+            }
+        ]
+        inline = [{"user": {"id": REVIEWER_ID}, "commit_id": HEAD, "path": "f.py"}]
+        self.assertIn(
+            "reviewer",
+            verify(
+                reviews, inline, change_authors(commits, {}), HEAD,
+                {REVIEWER_ID: "reviewer"},
+            ),
+        )
+
+    def test_a_malformed_trailer_is_ignored_rather_than_trusted(self) -> None:
+        from check_independent_review import co_authored_ids
+
+        for message in (
+            "Co-authored-by: nobody\n",
+            "Co-authored-by: X <not-an-id@example.com>\n",
+            "co authored by: X <1+x@users.noreply.github.com>\n",
         ):
-            with self.subTest(file=smuggled):
-                code = self._run(
-                    commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-                    files_by_sha={HEAD: ["governance/EXCEPTIONS.md", smuggled]},
-                )
-                self.assertEqual(code, 1)
-
-    # 4. An exception approved for another pull request.
-    def test_an_exception_for_a_different_pull_request_fails(self) -> None:
-        self._write_exception(IMPLEMENTATION, pull_request=99)
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
-        )
-        self.assertEqual(code, 1)
-
-    # 5. An approved SHA that is not in this pull request at all.
-    def test_an_unrelated_approved_sha_fails(self) -> None:
-        self._write_exception(UNRELATED, pull_request=1)
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
-        )
-        self.assertEqual(code, 1)
-
-    # 6. Approval still pending.
-    def test_a_pending_exception_fails(self) -> None:
-        self._write_exception(IMPLEMENTATION, pull_request=1, approval="pending")
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
-        )
-        self.assertEqual(code, 1)
-
-    # 7. No exception at all, and a head that is not a descendant.
-    def test_an_absent_or_non_ancestor_exception_fails(self) -> None:
-        (self.root / "governance/EXCEPTIONS.md").write_text("", encoding="utf-8")
-        self.assertEqual(
-            self._run(
-                commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-                files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
-            ),
-            1,
-        )
-        # And an approved SHA that sits *above* the head is not an ancestor.
-        self._write_exception(IMPLEMENTATION, pull_request=1)
-        self.assertEqual(
-            self._run(
-                commits=[{"sha": HEAD}, {"sha": IMPLEMENTATION}],
-                files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
-            ),
-            1,
-        )
-
-    def test_two_approved_ancestors_are_ambiguous_and_refuse(self) -> None:
-        """Ambiguity must not resolve itself into permission.
-
-        If two commits in the pull request each carry an approved exception,
-        there is no single approved implementation and the narrow path does not
-        apply. Picking the first would let an unrelated approved commit
-        authorise a head nobody assessed.
-        """
-        second = "e" * 40
-        (self.root / "governance/EXCEPTIONS.md").write_text(
-            f"## EX-005 — bootstrap\n\n"
-            f"- **Scope:** pull request #1 at `{IMPLEMENTATION}`.\n"
-            f"- **Approval date:** 2026-09-06.\n\n"
-            f"## EX-006 — another\n\n"
-            f"- **Scope:** pull request #1 at `{second}`.\n"
-            f"- **Approval date:** 2026-09-06.\n",
-            encoding="utf-8",
-        )
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": second}, {"sha": HEAD}],
-            files_by_sha={
-                second: ["governance/EXCEPTIONS.md"],
-                HEAD: ["governance/EXCEPTIONS.md"],
-            },
-        )
-        self.assertEqual(code, 1)
-
-    # Extra: an unreadable commit must not pass.
-    def test_an_unreadable_commit_above_the_approved_sha_fails(self) -> None:
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
-            files_by_sha={},  # /commits/<sha> raises
-        )
-        self.assertEqual(code, 1)
-
-    # Extra: two record commits are fine; three files in one are not.
-    def test_several_record_only_commits_are_allowed(self) -> None:
-        middle = "d" * 40
-        code = self._run(
-            commits=[{"sha": IMPLEMENTATION}, {"sha": middle}, {"sha": HEAD}],
-            files_by_sha={
-                middle: ["governance/EXCEPTIONS.md"],
-                HEAD: ["governance/EXCEPTIONS.md"],
-            },
-        )
-        self.assertEqual(code, 0)
+            with self.subTest(message=message):
+                self.assertEqual(co_authored_ids(message), set())
