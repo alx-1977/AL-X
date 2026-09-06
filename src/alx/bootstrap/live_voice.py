@@ -569,10 +569,26 @@ async def run(repository_root: Path) -> None:
         # approval grounded in Friedl's turn is bound to one action per turn
         # without anything naming it here. Adding such a capability later
         # inherits the rule; nothing has to remember to list it.
+        #
+        # A policy that allows a standing scope is excluded. Those are
+        # authorised by a scope that stays valid across turns rather than by
+        # what Friedl just said, so one instruction does not spend them:
+        # binding them stopped mail cleanup after a single message, refusing
+        # the second trash or mark-seen of a turn whose authority was never
+        # the turn in the first place.
         turn_bound_capabilities=frozenset(
             capability_id
             for capability_id, policy in policies.items()
-            if policy.approval_required
+            if policy.approval_required and not policy.standing_scope_allowed
+        ),
+        # The other half of the same reading: capabilities that reach outside
+        # but need only permission. Without it the Core cannot tell that an
+        # approval was never required, so a volunteered one is validated
+        # against Friedl's latest turn and a background read is refused.
+        approval_free_capabilities=frozenset(
+            capability_id
+            for capability_id, policy in policies.items()
+            if not policy.approval_required
         ),
         # One bounded, recency-ordered list, from the one continuity store,
         # for every turn. There is deliberately no separate assembly for an

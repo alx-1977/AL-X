@@ -151,12 +151,45 @@ class FindingsWithoutEmailTests(ProviderTestCase):
         self.assertEqual(content.unavailable_reason, "")
 
     def test_a_review_with_only_a_summary_still_reads(self) -> None:
-        """A comments endpoint that answers nothing must not lose the summary."""
+        """An empty comment list is a real answer: this review has none."""
         content = self.provider([_review(HEAD, "Looks fine.")], {}).read(
             ReviewContentRequest(21, HEAD)
         )
         self.assertTrue(content.available)
         self.assertEqual(content.summary, "Looks fine.")
+        self.assertEqual(content.comments, ())
+
+    def test_unreadable_comments_are_never_a_comment_free_review(self) -> None:
+        """The findings live in the comments, so losing them cannot read clean.
+
+        Qodo's review of 8a3eac6 had an empty summary and four findings, all
+        of them comments. Turning a failed comments listing into an empty list
+        would have reported that review as available with nothing found, which
+        is silence reading as approval.
+        """
+        reviews = [_review(HEAD, "")]
+
+        def get(url, **_kwargs):
+            if "/reviews/" in url.split("?")[0] and "comments" in url:
+                # The endpoint answers, but not with a list.
+                return _Response(None)
+            return _Response(reviews if "page=1" in url else [])
+
+        original = qodo_review_content.httpx.get
+        qodo_review_content.httpx.get = get
+        self.addCleanup(setattr, qodo_review_content.httpx, "get", original)
+        provider = QodoReviewContentProvider("owner/repo", "token")
+
+        with self.assertRaises(ReviewReadError) as raised:
+            provider.read(ReviewContentRequest(21, HEAD))
+        self.assertEqual(raised.exception.code, "review_unavailable")
+
+    def test_a_review_whose_id_cannot_be_read_is_unavailable(self) -> None:
+        """Without an id the comments cannot be fetched, so findings are unknown."""
+        review = _review(HEAD, "")
+        review["id"] = None
+        with self.assertRaises(ReviewReadError):
+            self.provider([review]).read(ReviewContentRequest(21, HEAD))
 
 
 class ExactRevisionTests(ProviderTestCase):

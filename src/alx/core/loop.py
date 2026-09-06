@@ -114,6 +114,7 @@ class CoreAgent:
                  approval_ttl_seconds: int | None = None,
                  budget_check: Callable[[str], None] | None = None,
                  turn_bound_capabilities: frozenset[str] = frozenset(),
+                 approval_free_capabilities: frozenset[str] = frozenset(),
                  open_thoughts: Callable[[], tuple] | None = None,
                  open_notebook_threads: Callable[[], tuple] | None = None,
                  undelivered_responses: Callable[[], tuple] | None = None,
@@ -147,6 +148,12 @@ class CoreAgent:
         # because for them a repeat is ordinary work rather than a second
         # authorised action.
         self._turn_bound_capabilities = frozenset(turn_bound_capabilities)
+        # Capabilities that reach outside but whose policy requires no
+        # approval. Supplied from the same policies as the turn-bound set, so
+        # the Core can tell "needs Friedl's word" from "needs only permission"
+        # instead of assuming every effectful call needs an approval. Empty
+        # means the composition did not say, and nothing is assumed.
+        self._approval_free_capabilities = frozenset(approval_free_capabilities)
         # Thoughts AL/X still holds, supplied by the one continuity store. The
         # Core asks for them; it never reaches the store itself, and the same
         # call is made for every turn whatever its origin.
@@ -1301,7 +1308,27 @@ class CoreAgent:
         if call is None:
             return decision
         definition = self._definition(call.capability_id)
-        if definition is None or definition.side_effect is SideEffect.EFFECTFUL:
+        if definition is None:
+            return decision
+        # An approval is redundant when nothing asks for one. That is true of
+        # every capability without an outside effect, and equally true of an
+        # effectful capability whose policy requires no approval: reading an
+        # external review reaches the network but needs only permission.
+        #
+        # Redundant metadata was not harmless. A volunteered approval is still
+        # validated against Friedl's latest turn, and in a background turn the
+        # latest turn is AL/X's own response, so the call was refused with
+        # approval_source_not_latest_person_turn - and she told him she needed
+        # authorisation for a read that never needed any.
+        # Only when the composition told this Core which capabilities need an
+        # approval can it know that a particular one does not. Without that set
+        # nothing is stripped from an effectful call, so a Core built without
+        # it behaves exactly as before.
+        needs_approval = (
+            not self._approval_free_capabilities
+            or call.capability_id not in self._approval_free_capabilities
+        )
+        if definition.side_effect is SideEffect.EFFECTFUL and needs_approval:
             return decision
         if decision.approval_proposal is None and call.approval_id is None:
             return decision

@@ -51,6 +51,10 @@ from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.tools import ASK_WEB_SEARCH, WEB_SEARCH_DEFINITION
 from alx.tools.review import DEFINITION as REVIEW_DEFINITION, REQUEST_EXTERNAL_REVIEW
+from alx.tools.review_content import (
+    DEFINITION as REVIEW_CONTENT_DEFINITION,
+    READ_EXTERNAL_REVIEW,
+)
 
 
 NOW = datetime(2026, 9, 6, 20, 8, tzinfo=UTC)
@@ -342,6 +346,181 @@ class OneTurnOneReviewTests(unittest.TestCase):
         )
 
         self.assertEqual(self.dispatched, [ASK_WEB_SEARCH] * 3)
+
+
+class StandingScopeTests(unittest.TestCase):
+    """A standing scope is not the current turn, and is not spent by one.
+
+    Mail cleanup declares approval_required with standing_scope_allowed: the
+    authority is a scope that stays valid across turns, not what Friedl just
+    said. Binding those to one action per turn stopped mail cleanup after a
+    single message - the second trash or mark-seen of a turn was refused even
+    though its standing scope was still good.
+    """
+
+    @staticmethod
+    def _bound(policies) -> frozenset[str]:
+        """Exactly the rule the composition root applies."""
+        return frozenset(
+            capability_id
+            for capability_id, policy in policies.items()
+            if policy.approval_required and not policy.standing_scope_allowed
+        )
+
+    def test_standing_scope_capabilities_are_not_turn_bound(self) -> None:
+        from alx.safety import AuthorityPolicy
+
+        policies = {
+            "mark_mail_message_seen": AuthorityPolicy(
+                frozenset({"mail.seen"}),
+                approval_required=True,
+                standing_scope_allowed=True,
+            ),
+            REQUEST_EXTERNAL_REVIEW: AuthorityPolicy(
+                frozenset({"review.request"}), approval_required=True
+            ),
+        }
+        self.assertEqual(self._bound(policies), {REQUEST_EXTERNAL_REVIEW})
+
+    def test_the_real_mail_cleanup_policies_stay_repeatable(self) -> None:
+        """The actual policies the mail runtime declares, not a restatement."""
+        from alx.bootstrap.mail import mail_authority_policies
+        from alx.tools.mail import (
+            FILE_PROCESSED_MAIL_MESSAGE,
+            MARK_MAIL_MESSAGE_SEEN,
+            MOVE_MAIL_MESSAGE_TO_TRASH,
+        )
+
+        policies = mail_authority_policies()
+        bound = self._bound(policies)
+        for capability_id in (
+            MARK_MAIL_MESSAGE_SEEN,
+            MOVE_MAIL_MESSAGE_TO_TRASH,
+            FILE_PROCESSED_MAIL_MESSAGE,
+        ):
+            with self.subTest(capability=capability_id):
+                # Authorised by a standing scope, so one turn does not spend it.
+                self.assertTrue(policies[capability_id].approval_required)
+                self.assertTrue(policies[capability_id].standing_scope_allowed)
+                self.assertNotIn(capability_id, bound)
+
+
+class BackgroundReadTests(unittest.TestCase):
+    """A read that needs no approval must work in a background turn.
+
+    On 2026-09-06 a scheduled follow-up woke AL/X to check for a review. She
+    volunteered an approval for `read_external_review`, which requires none.
+    The proposal was still validated against Friedl's latest turn, and in a
+    background turn the latest turn is her own response - so the read was
+    refused with approval_source_not_latest_person_turn, and she told him she
+    needed authorisation for something that never needed any.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        self.addCleanup(self.store.close)
+        self.dispatched: list[str] = []
+
+    @staticmethod
+    def _background() -> ConversationSnapshot:
+        """Friedl asked, AL/X answered, and the follow-up fires later."""
+        return ConversationSnapshot(
+            "conversation-1",
+            (
+                _turn("turn-1", ConversationOrigin.TYPED,
+                      "Please review PR 21 again.", "friedl"),
+                _turn("turn-2", ConversationOrigin.ALX_RESPONSE,
+                      "Requested; waiting for findings.", None),
+            ),
+            2,
+            RETENTION,
+        )
+
+    def _executed(self, call, state):
+        self.dispatched.append(call.capability_id)
+        return CapabilityAttempt(
+            call,
+            CapabilityAttemptDisposition.EXECUTED,
+            True,
+            CapabilityResult(
+                call.call_id,
+                call.capability_id,
+                CapabilityResultState.SUCCEEDED,
+                {"available": False},
+            ),
+        )
+
+    def test_a_volunteered_approval_does_not_refuse_a_background_read(self) -> None:
+        call = CapabilityCall(
+            "call-read-1",
+            READ_EXTERNAL_REVIEW,
+            {"pull_request_number": 21, "head_sha": "c" * 40},
+            approval_id="approve-read-1",
+        )
+        reasoner = Queued(
+            AgentDecision(
+                call=call,
+                # Grounded in a turn that is not Friedl's latest, exactly as
+                # the live run proposed it.
+                approval_proposal=approved(call, "turn:turn-1"),
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.CREATE,
+                    "Check for the review",
+                    (SuccessCriterion("criterion-1", "checked"),),
+                ),
+            ),
+            AgentDecision(response="No review yet."),
+        )
+
+        outcome = CoreAgent(
+            self.store,
+            reasoner,
+            self._executed,
+            (REVIEW_CONTENT_DEFINITION,),
+            clock=lambda: NOW,
+            identifier_factory=lambda: "goal-1",
+            turn_bound_capabilities=TURN_BOUND,
+            # Reading needs permission only, and the composition says so.
+            approval_free_capabilities=frozenset({READ_EXTERNAL_REVIEW}),
+        ).process(self._background(), RETENTION, 4)
+
+        self.assertEqual(self.dispatched, [READ_EXTERNAL_REVIEW])
+        reasons = [
+            item.reason_code
+            for item in outcome.snapshot.state.attempts
+            if item.disposition is CapabilityAttemptDisposition.REJECTED
+        ]
+        self.assertNotIn("approval_source_not_latest_person_turn", reasons)
+
+    def test_requesting_a_review_is_still_refused_in_the_background(self) -> None:
+        """Spending is not made easier by this: only reading is freed."""
+        call = review_call("call-1", "approve-1")
+        reasoner = Queued(
+            AgentDecision(
+                call=call,
+                approval_proposal=approved(call, "turn:turn-1"),
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.CREATE,
+                    "Ask for a review",
+                    (SuccessCriterion("criterion-1", "requested"),),
+                ),
+            ),
+            AgentDecision(response="Cannot."),
+        )
+        CoreAgent(
+            self.store,
+            reasoner,
+            self._executed,
+            (REVIEW_DEFINITION,),
+            clock=lambda: NOW,
+            identifier_factory=lambda: "goal-1",
+            turn_bound_capabilities=TURN_BOUND,
+            approval_free_capabilities=frozenset({READ_EXTERNAL_REVIEW}),
+        ).process(self._background(), RETENTION, 4)
+
+        self.assertEqual(self.dispatched, [])
 
 
 class PolicyDerivationTests(unittest.TestCase):

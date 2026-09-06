@@ -160,30 +160,40 @@ class QodoReviewContentProvider:
         review = matching[-1]
         review_id = review.get("id")
 
-        # The line comments belonging to that review, where they can be read.
-        # Their absence is not an error: a review may have only a summary, and
-        # failing the whole read because the comments call did not answer would
-        # discard findings that were already retrieved.
+        # The line comments belonging to that review. Qodo puts its findings
+        # here and often leaves the summary empty, so a listing that cannot be
+        # read is not a review without findings: it is a review whose findings
+        # are unknown. Treating the two alike returned "available, nothing
+        # found" for a review carrying four, which is silence reading as
+        # approval - exactly what this capability exists to prevent.
+        if not isinstance(review_id, int) or isinstance(review_id, bool):
+            # Without an id the comments cannot be fetched at all, so whether
+            # this review has findings is unknown. Same rule as an unreadable
+            # listing: unknown is reported, never assumed empty.
+            raise ReviewReadError("review_unavailable")
+
+        listed = self._pages(
+            f"{self._api_root}/repos/{self._repository}"
+            f"/pulls/{number}/reviews/{review_id}/comments"
+        )
+        if listed is None:
+            raise ReviewReadError("review_unavailable")
+
         comments: list[ReviewComment] = []
-        if isinstance(review_id, int):
-            listed = self._pages(
-                f"{self._api_root}/repos/{self._repository}"
-                f"/pulls/{number}/reviews/{review_id}/comments"
-            )
-            for item in listed or ():
-                if not isinstance(item, dict):
-                    continue
-                body = item.get("body")
-                if not isinstance(body, str) or not body.strip():
-                    continue
-                line = item.get("line")
-                comments.append(
-                    ReviewComment(
-                        body=body,
-                        path=item.get("path") if isinstance(item.get("path"), str) else "",
-                        line=line if isinstance(line, int) and not isinstance(line, bool) else None,
-                    )
+        for item in listed:
+            if not isinstance(item, dict):
+                continue
+            body = item.get("body")
+            if not isinstance(body, str) or not body.strip():
+                continue
+            line = item.get("line")
+            comments.append(
+                ReviewComment(
+                    body=body,
+                    path=item.get("path") if isinstance(item.get("path"), str) else "",
+                    line=line if isinstance(line, int) and not isinstance(line, bool) else None,
                 )
+            )
 
         body = review.get("body")
         submitted = _moment(review.get("submitted_at"))

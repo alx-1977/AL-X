@@ -198,9 +198,14 @@ class VoiceSession:
                         return
                     continue
                 if kind == "autonomous_response":
-                    # Straight to the existing synthesis, unaltered. The Core
-                    # already decided both that this was worth saying and how
-                    # to say it; nothing here rewords or withholds it.
+                    # The console mirrors this exactly as it mirrors an
+                    # answer to Friedl. Going straight to synthesis left her
+                    # unprompted speech audible with no transcript line: the
+                    # words were spoken, and the terminal showed nothing.
+                    yield VoiceEvent(VoiceEventKind.TEXT, text=item)
+                    # Then the existing synthesis, unaltered. The Core already
+                    # decided both that this was worth saying and how to say
+                    # it; nothing here rewords or withholds it.
                     async for speech_event in self._speak(conversation_id, item):
                         yield speech_event
                     continue
