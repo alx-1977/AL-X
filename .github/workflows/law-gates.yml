@@ -66,7 +66,12 @@ jobs:
           python-version: "3.12"
 
       - name: Verify an accepted independent review covers this head
-        # Blocking. Any reviewer in the *trusted* review/accepted_reviewers.json
+        # Blocking, promoted from reporting-only by Friedl on 2026-09-06 under
+        # D-026 ("Rollout"), which also removed `Greptile Review` as a required
+        # check. Recorded here as well as in the decision, so the authorisation
+        # for this enforcement is visible where the enforcement is defined.
+        #
+        # Any reviewer in the *trusted* review/accepted_reviewers.json
         # can satisfy it, which is what makes the requirement a property rather
         # than a provider.
         #

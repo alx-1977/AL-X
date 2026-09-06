@@ -263,22 +263,57 @@ def _paged(url: str, token: str) -> list[dict]:
 
 # GitHub records one author per commit, but a change can be written by more
 # than one party, and the convention for saying so is a Co-authored-by trailer.
-# Matching on the numeric id inside a GitHub noreply address is what makes this
-# reliable: a display name can be anything, while `<id>+login@users.noreply.
-# github.com` carries the same immutable id the roster is keyed on.
-_CO_AUTHOR = re.compile(
-    r"^co-authored-by:.*?<(?:(\d+)\+)?[^>@]*@?[^>]*>\s*$",
-    re.IGNORECASE | re.MULTILINE,
+#
+# Only GitHub's own numeric noreply form is recognised: `<id>+login@users.
+# noreply.github.com`. The id there is the immutable one the roster is keyed
+# on, and the domain is what makes it GitHub's claim rather than the commit
+# author's. An earlier version matched the numeric prefix on any domain, so a
+# trailer reading `<151058649+x@evil.example.com>` injected a real reviewer's
+# id from a domain nobody controls but the attacker. Qodo reported that.
+#
+# Two forms are deliberately not resolved: a legacy username-only noreply
+# address, and an ordinary public email. Both would require asking GitHub to
+# map a name or address to an account id, which is a rename- and reuse-
+# ambiguous lookup and a new trust assumption. They are ignored rather than
+# guessed at, and `unresolved_co_authors` reports that they were seen so the
+# caller can decide rather than silently treating the commit as unattributed.
+_CO_AUTHOR_LINE = re.compile(r"^co-authored-by:\s*(?P<rest>.+)$", re.IGNORECASE | re.MULTILINE)
+_GITHUB_NUMERIC_NOREPLY = re.compile(
+    r"<\s*(?P<id>\d+)\+[^@>\s]*@users\.noreply\.github\.com\s*>", re.IGNORECASE
 )
+_ANY_ADDRESS = re.compile(r"<\s*[^>]+\s*>")
 
 
 def co_authored_ids(message: str) -> set[int]:
-    """Numeric GitHub ids credited as co-authors in one commit message."""
-    return {
-        int(match)
-        for match in _CO_AUTHOR.findall(message or "")
-        if match
-    }
+    """Numeric GitHub ids credited as co-authors in one commit message.
+
+    Only GitHub's numeric noreply form yields an id. Anything else is left to
+    `unresolved_co_authors`, because guessing an account from a display name or
+    an arbitrary address is exactly the ambiguity the roster's numeric key
+    exists to avoid.
+    """
+    identities: set[int] = set()
+    for match in _CO_AUTHOR_LINE.finditer(message or ""):
+        found = _GITHUB_NUMERIC_NOREPLY.search(match.group("rest"))
+        if found:
+            identities.add(int(found.group("id")))
+    return identities
+
+
+def unresolved_co_authors(message: str) -> int:
+    """How many co-author trailers named someone we cannot pin to an id.
+
+    Reported rather than ignored: a trailer we could not resolve is a party who
+    may have written the change and whom the independence check cannot see.
+    """
+    unresolved = 0
+    for match in _CO_AUTHOR_LINE.finditer(message or ""):
+        rest = match.group("rest")
+        if _GITHUB_NUMERIC_NOREPLY.search(rest):
+            continue
+        if _ANY_ADDRESS.search(rest) or rest.strip():
+            unresolved += 1
+    return unresolved
 
 
 def change_authors(commits: list[dict], accepted: dict[int, str]) -> set[int]:

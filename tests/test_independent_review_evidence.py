@@ -857,3 +857,50 @@ class CoAuthorIndependenceTests(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 self.assertEqual(co_authored_ids(message), set())
+
+    def test_an_id_is_only_trusted_on_github_s_own_noreply_domain(self) -> None:
+        """A numeric prefix on any other domain is the attacker's claim.
+
+        Matching the number without anchoring the domain let a trailer reading
+        `<151058649+x@evil.example.com>` inject a real reviewer's id from a
+        domain nobody controls but whoever wrote the commit. Reported in review.
+        """
+        from check_independent_review import co_authored_ids, unresolved_co_authors
+
+        hostile = "Co-authored-by: X <151058649+evil@evil.example.com>\n"
+        self.assertEqual(co_authored_ids(hostile), set())
+        # Seen but unresolvable, rather than silently absent.
+        self.assertEqual(unresolved_co_authors(hostile), 1)
+
+        genuine = (
+            "Co-authored-by: X <151058649+qodo@users.noreply.github.com>\n"
+        )
+        self.assertEqual(co_authored_ids(genuine), {151058649})
+        self.assertEqual(unresolved_co_authors(genuine), 0)
+
+    def test_address_forms_we_cannot_resolve_are_reported_not_guessed(self) -> None:
+        """Resolving a name or address to an id is ambiguous, so it is refused."""
+        from check_independent_review import co_authored_ids, unresolved_co_authors
+
+        for message in (
+            "Co-authored-by: X <legacy@users.noreply.github.com>\n",
+            "Co-authored-by: X <someone@example.com>\n",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(co_authored_ids(message), set())
+                self.assertEqual(unresolved_co_authors(message), 1)
+
+    def test_the_workflow_definition_is_owned(self) -> None:
+        """Pinning the verifier does not pin the instruction that runs it.
+
+        A change to the workflow can keep the required job's name and replace
+        its command, so enforcement disappears while the check still reports
+        success. CODEOWNERS is the control that puts that change in front of
+        Friedl; it is recorded here so removing the entry is visible.
+        """
+        owners = (
+            Path(__file__).resolve().parents[1] / ".github/CODEOWNERS"
+        ).read_text(encoding="utf-8")
+        self.assertIn("/.github/workflows/", owners)
+        self.assertIn("/scripts/check_independent_review.py", owners)
+        self.assertIn("/review/", owners)

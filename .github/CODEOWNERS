@@ -8,4 +8,9 @@
 /governance/ @alx-1977
 /review/ @alx-1977
 /scripts/check_independent_review.py @alx-1977
+# The workflow that decides whether the trusted verifier runs at all. Pinning
+# the verifier to the base revision does not pin the instruction that invokes
+# it, so a change here can disable enforcement while the check still reports
+# success.
+/.github/workflows/ @alx-1977
 
