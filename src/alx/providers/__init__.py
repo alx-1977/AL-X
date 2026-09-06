@@ -14,8 +14,10 @@ from alx.providers.xero import SQLiteXeroOAuth, XeroAccountingAdapter
 from alx.providers.dhl import DhlImportAnalyzerAdapter
 
 from alx.providers.github_merge import GitHubMergeProvider
+from alx.providers.qodo_review import QodoReviewProvider
 
 __all__ = [
+    "QodoReviewProvider",
     "GitHubMergeProvider",
     "BraveWebSearchProvider",
     "HttpWebFetchProvider",

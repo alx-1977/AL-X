@@ -1,6 +1,12 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
 from alx.contracts.cognition import Cognition, CognitionOrigin
+from alx.contracts.review import (
+    REVIEW_FAILURES,
+    ReviewError,
+    ReviewOutcome,
+    ReviewRequest,
+)
 from alx.contracts.repository import (
     MERGE_FAILURES,
     MergeError,
@@ -154,6 +160,10 @@ from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
+    "REVIEW_FAILURES",
+    "ReviewError",
+    "ReviewOutcome",
+    "ReviewRequest",
     "MERGE_FAILURES",
     "MergeError",
     "MergeOutcome",

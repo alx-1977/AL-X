@@ -23,7 +23,11 @@ from alx.config.settings import (
 
 from alx.config.settings import MergeSettings, merge_settings
 
+from alx.config.settings import ReviewSettings, review_settings
+
 __all__ = [
+    "ReviewSettings",
+    "review_settings",
     "MergeSettings",
     "merge_settings",
     "WebSearchSettings",

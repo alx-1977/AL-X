@@ -19,6 +19,7 @@ from alx.bootstrap.mail import (
 )
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.repository import build_repository_runtime
+from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
@@ -39,6 +40,7 @@ from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     merge_settings,
+    review_settings,
     AUTONOMOUS_MAX_INPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
     autonomous_commissioning_limit,
@@ -128,6 +130,7 @@ async def run(repository_root: Path) -> None:
     provider_settings = RuntimeSettings.from_environment(environment)
     voice_settings = LiveVoiceSettings.from_environment(environment)
     merge_configuration = merge_settings(environment)
+    review_configuration = review_settings(environment)
     storage_root = voice_settings.storage_root
     if not storage_root.is_absolute():
         storage_root = repository_root / storage_root
@@ -320,6 +323,21 @@ async def run(repository_root: Path) -> None:
         policies.update(web_runtime.policies)
         executors.update(web_runtime.executors)
         permissions.update(web_runtime.permissions)
+
+    # Requesting an external review is effectful and may spend review credits,
+    # so its policy requires an approval grounded in Friedl's own turn.
+    review_runtime = build_review_runtime(
+        review_configuration.is_usable,
+        review_configuration.repository,
+        review_configuration.token,
+        lambda: current_call_id[0],
+    )
+    if review_runtime is not None:
+        for definition in review_runtime.definitions:
+            registry.register(definition)
+        policies.update(review_runtime.policies)
+        executors.update(review_runtime.executors)
+        permissions.update(review_runtime.permissions)
 
     # Friedl delegated routine merge authorisation to AL/X. She reads an
     # external review of the current head and decides; this executes that

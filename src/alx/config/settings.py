@@ -872,3 +872,25 @@ def merge_settings(environment: Mapping[str, str]) -> MergeSettings:
         repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
         token=environment.get("GITHUB_TOKEN", "").strip(),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewSettings:
+    """Requesting an external review, off until it is configured."""
+
+    enabled: bool
+    repository: str
+    token: str
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.enabled and self.repository.strip() and self.token.strip())
+
+
+def review_settings(environment: Mapping[str, str]) -> ReviewSettings:
+    """Read review-request configuration, defaulting to off."""
+    return ReviewSettings(
+        enabled=_boolean(environment, "ALX_REVIEW_REQUEST_ENABLED", False),
+        repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
+        token=environment.get("GITHUB_TOKEN", "").strip(),
+    )
