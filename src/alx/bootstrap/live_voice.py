@@ -18,6 +18,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
@@ -61,7 +62,7 @@ from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteCo
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
-from alx.observability import BudgetExceeded, XERO_BILL_BUDGET, SQLiteUsageRecorder
+from alx.observability import BudgetExceeded, SandboxBudget, XERO_BILL_BUDGET, SQLiteUsageRecorder
 from alx.specialists import ModelSpecialist, extract_invoice
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
@@ -317,6 +318,32 @@ async def run(repository_root: Path) -> None:
         policies.update(web_runtime.policies)
         executors.update(web_runtime.executors)
         permissions.update(web_runtime.permissions)
+
+    # D-027 authorises isolated experimentation. The sandbox root is kept
+    # apart from the runtime storage root, which holds goals, memories and a
+    # private key. The repository, that storage root and the user's private
+    # keys are denied to the confined process explicitly.
+    sandbox_runtime = build_sandbox_runtime(
+        voice_settings.sandbox.is_usable,
+        voice_settings.sandbox.workspace_root,
+        voice_settings.sandbox.ledger_path,
+        lambda: current_call_id[0],
+        denied_read_paths=(
+            repository_root,
+            storage_root,
+            Path.home() / ".ssh",
+        ),
+        budget=SandboxBudget(
+            voice_settings.sandbox.daily_runs,
+            voice_settings.sandbox.daily_wall_seconds,
+        ),
+    )
+    if sandbox_runtime is not None:
+        for definition in sandbox_runtime.definitions:
+            registry.register(definition)
+        policies.update(sandbox_runtime.policies)
+        executors.update(sandbox_runtime.executors)
+        permissions.update(sandbox_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.

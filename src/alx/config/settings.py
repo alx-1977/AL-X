@@ -828,6 +828,7 @@ class LiveVoiceSettings:
     # URL costs nothing, searching costs money, so a runtime may be authorised
     # to read without being authorised to spend on discovery.
     web_search: "WebSearchSettings"
+    sandbox: "SandboxSettings"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> LiveVoiceSettings:
@@ -844,4 +845,57 @@ class LiveVoiceSettings:
             core_step_budget=_positive_integer(environment, "ALX_CORE_STEP_BUDGET", 8),
             web_read_enabled=_boolean(environment, "ALX_WEB_READ_ENABLED", False),
             web_search=_web_search_settings(environment),
+            sandbox=sandbox_settings(environment),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSettings:
+    """Isolated experimentation, off until it is configured.
+
+    The storage root is deliberately separate from the runtime storage root.
+    That directory holds goals, memories, continuity and a private key; a
+    sandbox workspace has no business sharing a parent with any of them.
+    """
+
+    enabled: bool
+    storage_root: Path | None
+    daily_runs: int
+    daily_wall_seconds: int
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(
+            self.enabled
+            and self.storage_root is not None
+            and self.daily_runs > 0
+            and self.daily_wall_seconds > 0
+        )
+
+    @property
+    def workspace_root(self) -> Path | None:
+        return None if self.storage_root is None else self.storage_root / "workspaces"
+
+    @property
+    def ledger_path(self) -> Path | None:
+        return None if self.storage_root is None else self.storage_root / "sandbox-runs.sqlite3"
+
+
+# Mirrors the D-027 ceilings. Duplicated as literals because `config` is a
+# leaf boundary that imports nothing internal; a test asserts the two stay
+# equal so a drift cannot pass unnoticed.
+_SANDBOX_DAILY_RUNS = 20
+_SANDBOX_DAILY_WALL_SECONDS = 300
+
+
+def sandbox_settings(environment: Mapping[str, str]) -> SandboxSettings:
+    """Read sandbox configuration, defaulting to off."""
+    root = environment.get("ALX_SANDBOX_ROOT", "").strip()
+    return SandboxSettings(
+        enabled=_boolean(environment, "ALX_SANDBOX_ENABLED", False),
+        storage_root=Path(root).expanduser() if root else None,
+        daily_runs=_positive_integer(environment, "ALX_SANDBOX_DAILY_RUNS", _SANDBOX_DAILY_RUNS),
+        daily_wall_seconds=_positive_integer(
+            environment, "ALX_SANDBOX_DAILY_WALL_SECONDS", _SANDBOX_DAILY_WALL_SECONDS
+        ),
+    )
