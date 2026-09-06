@@ -62,6 +62,24 @@ class SQLiteTaskStore:
                     ON external_tasks(state);
                 """
             )
+            # A store created before this column existed keeps its rows.
+            # `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so
+            # without this the handover query fails on every older database
+            # and a completed task is never given to the Core - the same
+            # silent gap the handover exists to close.
+            #
+            # Existing rows default to 0: nothing recorded before this column
+            # existed had been handed over, because there was nothing to hand
+            # it to.
+            columns = {
+                item[1]
+                for item in database.execute("PRAGMA table_info(external_tasks)")
+            }
+            if "handed_over" not in columns:
+                database.execute(
+                    "ALTER TABLE external_tasks "
+                    "ADD COLUMN handed_over INTEGER NOT NULL DEFAULT 0"
+                )
             database.commit()
             database.close()
         except sqlite3.Error as error:

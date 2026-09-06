@@ -580,6 +580,109 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class StoreUpgradeTest(unittest.TestCase):
+    """A store written before the handover column keeps working.
+
+    `CREATE TABLE IF NOT EXISTS` leaves an existing table untouched, so the
+    column was missing on every database created before it was added. The
+    handover query then raised on each tick, and a completed task was never
+    given to the Core - the same silence the handover exists to end, arriving
+    by a different route. Found on the real runtime store rather than here,
+    because every test until now built a fresh one.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.sqlite3"
+
+    def _write_old_schema(self) -> None:
+        """The table exactly as it was before the column existed."""
+        import sqlite3
+
+        database = sqlite3.connect(self.path)
+        database.executescript(
+            """
+            CREATE TABLE external_tasks (
+                task_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                service TEXT NOT NULL,
+                subject_reference TEXT NOT NULL,
+                state TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                last_checked_at TEXT,
+                completed_at TEXT,
+                conversation_id TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        finished = datetime.now(UTC)
+        database.execute(
+            "INSERT INTO external_tasks (task_id, kind, service, "
+            "subject_reference, state, requested_at, completed_at, "
+            "conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                f"review:21:{HEAD}",
+                "external_review",
+                "qodo",
+                subject_reference(21, HEAD),
+                TaskState.COMPLETED.value,
+                (finished - timedelta(seconds=60)).isoformat(),
+                finished.isoformat(),
+                "conversation-1",
+            ),
+        )
+        database.commit()
+        database.close()
+
+    def _columns(self) -> set[str]:
+        import sqlite3
+
+        database = sqlite3.connect(self.path)
+        try:
+            return {
+                item[1]
+                for item in database.execute("PRAGMA table_info(external_tasks)")
+            }
+        finally:
+            database.close()
+
+    def test_an_older_store_gains_the_column_and_keeps_its_rows(self) -> None:
+        self._write_old_schema()
+        self.assertNotIn("handed_over", self._columns())
+
+        store = SQLiteTaskStore(self.path)
+
+        # The column is there now.
+        self.assertIn("handed_over", self._columns())
+
+        # And the row that was already there survived the upgrade intact.
+        outstanding_and_done = store.completed_unhandled()
+        self.assertEqual(len(outstanding_and_done), 1)
+        task = outstanding_and_done[0]
+        self.assertEqual(task.task_id, f"review:21:{HEAD}")
+        self.assertEqual(task.conversation_id, "conversation-1")
+        self.assertIs(task.state, TaskState.COMPLETED)
+        self.assertIsNotNone(task.completed_at)
+
+    def test_the_handover_works_after_the_upgrade(self) -> None:
+        """The query that used to raise now answers, and can be closed."""
+        self._write_old_schema()
+        store = SQLiteTaskStore(self.path)
+
+        self.assertEqual(len(store.completed_unhandled()), 1)
+        store.mark_handed_over(f"review:21:{HEAD}")
+        self.assertEqual(store.completed_unhandled(), ())
+
+    def test_opening_an_upgraded_store_again_changes_nothing(self) -> None:
+        """The migration runs once and is harmless afterwards."""
+        self._write_old_schema()
+        SQLiteTaskStore(self.path)
+        store = SQLiteTaskStore(self.path)
+        self.assertIn("handed_over", self._columns())
+        self.assertEqual(len(store.completed_unhandled()), 1)
+
+
 class CompletionReachesCoreTest(unittest.TestCase):
     """The handoff the watcher exists for, end to end.
 
