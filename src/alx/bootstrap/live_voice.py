@@ -565,6 +565,15 @@ async def run(repository_root: Path) -> None:
         memory_store,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
+        # Read from the policies themselves, so a capability that requires an
+        # approval grounded in Friedl's turn is bound to one action per turn
+        # without anything naming it here. Adding such a capability later
+        # inherits the rule; nothing has to remember to list it.
+        turn_bound_capabilities=frozenset(
+            capability_id
+            for capability_id, policy in policies.items()
+            if policy.approval_required
+        ),
         # One bounded, recency-ordered list, from the one continuity store,
         # for every turn. There is deliberately no separate assembly for an
         # unprompted turn: a second builder would decide what she is like when

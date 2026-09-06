@@ -113,6 +113,7 @@ class CoreAgent:
                  identifier_factory: Callable[[], str] | None = None,
                  approval_ttl_seconds: int | None = None,
                  budget_check: Callable[[str], None] | None = None,
+                 turn_bound_capabilities: frozenset[str] = frozenset(),
                  open_thoughts: Callable[[], tuple] | None = None,
                  open_notebook_threads: Callable[[], tuple] | None = None,
                  undelivered_responses: Callable[[], tuple] | None = None,
@@ -136,6 +137,16 @@ class CoreAgent:
         # Raises before another reasoning call when a routine task has run
         # away, so the ceiling prevents spend rather than reporting it.
         self._budget_check = budget_check or (lambda _task_id: None)
+        # Capabilities whose authority policy requires an approval grounded in
+        # Friedl's latest turn. One such instruction authorises one such
+        # action, so these are dispatched at most once per turn. Supplied from
+        # the policies already built at composition rather than named here: the
+        # rule belongs to the authority the policy declares, and a list of
+        # capability identifiers in the Core would be a second place to keep it
+        # right. Capabilities that merely accept an approval are not bound,
+        # because for them a repeat is ordinary work rather than a second
+        # authorised action.
+        self._turn_bound_capabilities = frozenset(turn_bound_capabilities)
         # Thoughts AL/X still holds, supplied by the one continuity store. The
         # Core asks for them; it never reaches the store itself, and the same
         # call is made for every turn whatever its origin.
@@ -184,6 +195,16 @@ class CoreAgent:
         memory_conflicts: tuple[Mapping[str, Any], ...] = ()
         # Calls refused before approval this turn, each reported to her once.
         refused_calls: tuple[Mapping[str, Any], ...] = ()
+        # Capabilities this turn has already dispatched under an approval.
+        # One instruction from Friedl authorises one such action, and the
+        # single-use approval identifier does not enforce that on its own: the
+        # Core can propose a *fresh* approval in a later step of the same turn,
+        # citing the same turn again, and one instruction became two /review
+        # comments eleven seconds apart. What is spent is the turn, not the
+        # identifier, so it is recorded for the turn rather than in the goal.
+        # It is deliberately local: durable state outlives the instruction, and
+        # a check against it would refuse the next turn's legitimate request.
+        approved_dispatches: set[str] = set()
         # An answer she had already finished when a memory identifier clashed.
         # Held so that running out of steps mid-resolution delivers her words
         # instead of discarding them; memory_state stays truthful that the
@@ -342,7 +363,7 @@ class CoreAgent:
                     continue
             if proposal_error is None and decision.approval_proposal is not None:
                 approval_error = self._approval_proposal_error(
-                    conversation, candidate, decision
+                    conversation, candidate, decision, approved_dispatches
                 )
                 if approval_error is not None:
                     # A malformed approval authorises nothing, so the action is
@@ -505,6 +526,38 @@ class CoreAgent:
                 continue
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
+            if (
+                decision.call.capability_id in self._turn_bound_capabilities
+                and decision.call.capability_id in approved_dispatches
+            ):
+                # The same invariant as the approval check above, enforced on
+                # the other route to a dispatch. A call may carry an approval
+                # granted in an earlier step instead of proposing a new one,
+                # and that path never reaches the proposal check at all.
+                LOGGER.info(
+                    "Second approved dispatch refused this turn: %s",
+                    decision.call.capability_id,
+                )
+                refusal = CapabilityAttempt(
+                    decision.call,
+                    CapabilityAttemptDisposition.REJECTED,
+                    False,
+                    reason_code="approval_capability_already_dispatched",
+                )
+                snapshot = self._store.replace(
+                    replace(
+                        snapshot.state,
+                        attempts=(*snapshot.state.attempts, refusal),
+                    ),
+                    snapshot.retention_until,
+                    snapshot.revision,
+                    decision_provenance,
+                )
+                return CoreOutcome(
+                    CoreState.CHECKPOINTED,
+                    snapshot,
+                    reason="approval_capability_already_dispatched",
+                )
             if self._repeats_rejected_call(snapshot.state, decision.call):
                 return CoreOutcome(
                     CoreState.ERROR,
@@ -529,6 +582,12 @@ class CoreAgent:
             if conflicts:
                 memory_conflicts = conflicts
                 continue
+            if decision.call.capability_id in self._turn_bound_capabilities:
+                # Recorded before the provider is reached, so a dispatch that
+                # fails, hangs or is interrupted still spends the instruction.
+                # The harm this prevents is a second external action, and by
+                # the time an outcome is known the first has already happened.
+                approved_dispatches.add(decision.call.capability_id)
             checkpoint = replace(snapshot.state,
                                  attempts=(*snapshot.state.attempts, pending),
                                  approvals=approvals)
@@ -820,7 +879,9 @@ class CoreAgent:
             " ".join(item.split()) not in spoken for item in authored
         )
 
-    def _approval_proposal_error(self, conversation, state, decision) -> str | None:
+    def _approval_proposal_error(
+        self, conversation, state, decision, already_dispatched=frozenset()
+    ) -> str | None:
         proposal = decision.approval_proposal
         call = decision.call
         if proposal is None:
@@ -841,6 +902,13 @@ class CoreAgent:
             or proposal.source_reference != f"turn:{source.turn_id}"
         ):
             return "approval_source_not_latest_person_turn"
+        if (
+            call.capability_id in self._turn_bound_capabilities
+            and call.capability_id in already_dispatched
+        ):
+            # Already done once on this instruction. A second needs a second
+            # instruction, which is what Friedl is asked for.
+            return "approval_capability_already_dispatched"
         # Only a capability that actually carries her wording to someone else
         # is held to what Friedl has already heard. Scoped by the capability's
         # own declaration rather than by argument names: a search argument
