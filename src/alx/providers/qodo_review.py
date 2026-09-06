@@ -4,9 +4,10 @@ Qodo is installed on the repository and watches pull requests, so a review is
 requested by leaving its trigger comment on the pull request. Nothing here
 retrieves, packages or uploads a diff: the reviewer already has the code.
 
-The head is verified first. If the pull request no longer points at the
-revision AL/X named, the request is refused before Qodo is contacted, so a
-review is never spent on a revision nobody asked about.
+The pull request is fetched first, to learn which commit it currently points
+at. That revision is what gets reviewed and what the outcome reports, so the
+record names the code that was actually sent rather than a revision someone
+had to supply by hand.
 
 This provider requests a review and reports that it did. It never reads a
 review, waits for one, or asks again.
@@ -16,7 +17,12 @@ from __future__ import annotations
 
 import httpx
 
-from alx.contracts.review import ReviewError, ReviewOutcome, ReviewRequest
+from alx.contracts.review import (
+    ReviewError,
+    ReviewOutcome,
+    ReviewRequest,
+    valid_sha,
+)
 
 
 API_ROOT = "https://api.github.com"
@@ -58,7 +64,9 @@ class QodoReviewProvider:
         }
 
     def request(self, review: ReviewRequest) -> ReviewOutcome:
-        # Check the revision before spending a review on it.
+        # Read the revision the pull request currently points at. Friedl asks
+        # for a pull request to be reviewed; which commit that is now is a fact
+        # to look up, not something he should have to carry.
         pull_request = (
             f"{self._api_root}/repos/{self._repository}"
             f"/pulls/{review.pull_request_number}"
@@ -77,13 +85,11 @@ class QodoReviewProvider:
         except ValueError:
             raise ReviewError("review_unavailable") from None
         head = ((body or {}).get("head") or {}).get("sha")
-        if not isinstance(head, str):
+        if not isinstance(head, str) or not valid_sha(head):
+            # Without a revision there is nothing to record about what was
+            # reviewed, and a request whose subject cannot be named is not
+            # worth spending.
             raise ReviewError("review_unavailable") from None
-        if head != review.head_sha:
-            # The branch moved after Friedl asked. Refusing here is the point:
-            # a review of a revision nobody named costs the same as one of the
-            # revision they did.
-            raise ReviewError("head_changed") from None
 
         comments = (
             f"{self._api_root}/repos/{self._repository}"
@@ -103,7 +109,8 @@ class QodoReviewProvider:
 
         return ReviewOutcome(
             pull_request_number=review.pull_request_number,
-            head_sha=review.head_sha,
+            # The revision read a moment ago, which is what Qodo will review.
+            head_sha=head,
             requested=True,
             reviewer=REVIEWER,
         )

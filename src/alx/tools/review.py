@@ -12,6 +12,11 @@ to one turn, so one instruction produces one request. A review that found
 issues, a fix, a changed head or a failed request cannot cause another; each
 needs Friedl to ask again.
 
+The approval authorises one paid review of one pull request. It does not name a
+revision, because Friedl asks for a pull request to be reviewed rather than for
+a particular commit; which commit that is now is read when the request is made
+and reported back with the outcome.
+
 Nothing here reads a review, waits for one, judges findings, or decides whether
 anything may merge.
 """
@@ -44,17 +49,14 @@ _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
 
 DEFINITION = CapabilityDefinition(
     REQUEST_EXTERNAL_REVIEW,
-    "Ask the configured external reviewer to review one pull request at one "
-    "exact revision. Requests a review and reports that it was requested; it "
-    "does not wait for the review, read it, or judge what it finds. Refuses "
-    "if the pull request no longer points at the named revision.",
+    "Ask the configured external reviewer to review one pull request. "
+    "Requests a review of whatever revision the pull request currently points "
+    "at, and reports that revision; it does not wait for the review, read it, "
+    "or judge what it finds.",
     StructuredSchema(
         ValueKind.OBJECT,
-        {
-            "pull_request_number": _INTEGER,
-            "head_sha": _STRING,
-        },
-        ("pull_request_number", "head_sha"),
+        {"pull_request_number": _INTEGER},
+        ("pull_request_number",),
         extra_properties=False,
     ),
     StructuredSchema(
@@ -84,7 +86,6 @@ def build_review_executors(
         try:
             review = ReviewRequest(
                 pull_request_number=int(arguments["pull_request_number"]),
-                head_sha=str(arguments["head_sha"]),
             )
         except (KeyError, TypeError, ValueError):
             return _failed(call_id, "arguments_unusable")

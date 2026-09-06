@@ -52,17 +52,19 @@ class RecordingReviewer:
 
     reviewer = "qodo"
 
-    def __init__(self, error: str | None = None) -> None:
+    def __init__(self, error: str | None = None, head: str = HEAD) -> None:
         self.requests: list[ReviewRequest] = []
         self._error = error
+        self._head = head
 
     def request(self, review: ReviewRequest) -> ReviewOutcome:
         self.requests.append(review)
         if self._error is not None:
             raise ReviewError(self._error)
+        # The revision is read by the provider, not supplied by the caller.
         return ReviewOutcome(
             pull_request_number=review.pull_request_number,
-            head_sha=review.head_sha,
+            head_sha=self._head,
             requested=True,
             reviewer=self.reviewer,
         )
@@ -82,11 +84,11 @@ class ReviewRequestTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _call(head: str = HEAD, number: int = 21, approval: str | None = APPROVAL):
+    def _call(number: int = 21, approval: str | None = APPROVAL):
         return CapabilityCall(
             "call-1",
             REQUEST_EXTERNAL_REVIEW,
-            {"pull_request_number": number, "head_sha": head},
+            {"pull_request_number": number},
             approval,
         )
 
@@ -102,12 +104,12 @@ class ReviewRequestTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _approval(head: str = HEAD, number: int = 21) -> Approval:
+    def _approval(number: int = 21) -> Approval:
+        """One paid review of one pull request, not of one commit."""
         return Approval(
             APPROVAL,
             ApprovalScope(
-                REQUEST_EXTERNAL_REVIEW,
-                {"pull_request_number": number, "head_sha": head},
+                REQUEST_EXTERNAL_REVIEW, {"pull_request_number": number}
             ),
             ApprovalLifecycle.GRANTED,
         )
@@ -125,7 +127,9 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertTrue(attempt.result.values["requested"])
         self.assertEqual(attempt.result.values["reviewer"], "qodo")
         self.assertEqual(len(provider.requests), 1)
-        self.assertEqual(provider.requests[0].head_sha, HEAD)
+        self.assertEqual(provider.requests[0].pull_request_number, 21)
+        # The revision comes back from the provider, not from the caller.
+        self.assertEqual(attempt.result.values["head_sha"], HEAD)
 
     def test_without_the_permission_the_reviewer_is_never_contacted(self) -> None:
         provider = RecordingReviewer()
@@ -149,29 +153,37 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertEqual(attempt.reason_code, "approval_required")
         self.assertEqual(provider.requests, [])
 
-    def test_an_approval_for_a_different_revision_does_not_carry_over(self) -> None:
-        """One approval buys a review of one revision, not of whatever is current."""
+    def test_an_approval_for_one_pull_request_does_not_cover_another(self) -> None:
+        """One instruction buys a review of the pull request he named."""
         provider = RecordingReviewer()
         attempt = self._broker(self._runtime(provider)).dispatch(
-            self._call(head=MOVED),
+            self._call(number=99),
             self._authority(
-                frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(head=HEAD),)
+                frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(number=21),)
             ),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
         self.assertEqual(attempt.reason_code, "approval_invalid")
         self.assertEqual(provider.requests, [])
 
-    def test_a_head_that_moved_is_refused_by_the_provider(self) -> None:
-        provider = RecordingReviewer(error="head_changed")
+    def test_the_revision_reviewed_is_read_and_reported_back(self) -> None:
+        """Friedl names a pull request; AL/X reports which commit was sent.
+
+        He should not have to carry a SHA, and the result must still say
+        exactly what was reviewed, so the revision is read at request time
+        rather than supplied.
+        """
+        provider = RecordingReviewer(head=MOVED)
         attempt = self._broker(self._runtime(provider)).dispatch(
             self._call(),
             self._authority(
                 frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(),)
             ),
         )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["code"], "head_changed")
+        self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(attempt.result.values["head_sha"], MOVED)
+        # The caller supplied no revision at all.
+        self.assertNotIn("head_sha", attempt.call.arguments)
 
     def test_a_provider_failure_is_reported_and_not_retried(self) -> None:
         provider = RecordingReviewer(error="review_unavailable")
@@ -202,7 +214,7 @@ class ReviewRequestTest(unittest.TestCase):
 
         # The same instruction cannot authorise a different call: a new head,
         # or a different pull request, does not match the approved scope.
-        for call in (self._call(head=MOVED), self._call(number=99)):
+        for call in (self._call(number=99), self._call(number=7)):
             with self.subTest(call=call.arguments):
                 self.assertIs(
                     gate.evaluate(call, authority).state, SafetyState.DENIED
@@ -238,7 +250,7 @@ class ReviewRequestTest(unittest.TestCase):
             CapabilityCall(
                 "call-1",
                 REQUEST_EXTERNAL_REVIEW,
-                {"pull_request_number": 21, "head_sha": "short"},
+                {"pull_request_number": 0},
                 APPROVAL,
             ),
             self._authority(
@@ -247,8 +259,7 @@ class ReviewRequestTest(unittest.TestCase):
                     Approval(
                         APPROVAL,
                         ApprovalScope(
-                            REQUEST_EXTERNAL_REVIEW,
-                            {"pull_request_number": 21, "head_sha": "short"},
+                            REQUEST_EXTERNAL_REVIEW, {"pull_request_number": 0}
                         ),
                         ApprovalLifecycle.GRANTED,
                     ),
@@ -312,9 +323,7 @@ class QodoProviderTest(unittest.TestCase):
 
     def test_the_trigger_is_posted_to_the_pull_request(self) -> None:
         provider, calls = self._provider(head=HEAD)
-        outcome = provider.request(
-            ReviewRequest(pull_request_number=21, head_sha=HEAD)
-        )
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertTrue(outcome.requested)
         self.assertEqual(outcome.reviewer, "qodo")
         self.assertEqual(len(calls["post"]), 1)
@@ -322,19 +331,27 @@ class QodoProviderTest(unittest.TestCase):
         self.assertIn("/issues/21/comments", url)
         self.assertEqual(body, {"body": "/review"})
 
-    def test_a_moved_head_refuses_before_the_reviewer_is_contacted(self) -> None:
-        """The check that stops a review being spent on the wrong revision."""
+    def test_the_head_is_read_from_the_pull_request(self) -> None:
+        """One fetch serves both purposes: learn the revision, then trigger."""
         provider, calls = self._provider(head=MOVED)
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        self.assertEqual(outcome.head_sha, MOVED)
+        self.assertEqual(len(calls["get"]), 1)
+        self.assertIn("/pulls/21", calls["get"][0])
+        self.assertEqual(len(calls["post"]), 1)
+
+    def test_a_pull_request_without_a_usable_head_is_not_reviewed(self) -> None:
+        """Nothing to record about what was reviewed means nothing to spend on."""
+        provider, calls = self._provider(head="not-a-sha")
         with self.assertRaises(ReviewError) as caught:
-            provider.request(ReviewRequest(pull_request_number=21, head_sha=HEAD))
-        self.assertEqual(caught.exception.code, "head_changed")
-        # The decisive assertion: nothing was posted.
+            provider.request(ReviewRequest(pull_request_number=21))
+        self.assertEqual(caught.exception.code, "review_unavailable")
         self.assertEqual(calls["post"], [])
 
     def test_a_rejected_comment_is_reported_as_a_refusal(self) -> None:
         provider, _ = self._provider(head=HEAD, post_status=403)
         with self.assertRaises(ReviewError) as caught:
-            provider.request(ReviewRequest(pull_request_number=21, head_sha=HEAD))
+            provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(caught.exception.code, "review_refused")
 
     def test_a_malformed_repository_is_refused_at_construction(self) -> None:
