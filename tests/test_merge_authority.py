@@ -177,6 +177,29 @@ class MergeAuthorityTest(unittest.TestCase):
         # One attempt. Nothing retries a refusal.
         self.assertEqual(len(provider.requests), 1)
 
+    def test_an_undeclared_failure_logs_its_type_but_not_its_wording(self) -> None:
+        """An operator needs a cause; the log must not carry the request.
+
+        A provider exception's message can hold the token and the commit text
+        AL/X composed, so the class is named and the wording is not.
+        """
+        import logging
+
+        class Exploding:
+            def merge(self, request):
+                raise RuntimeError("token=SECRET-abc123 body=unheard wording")
+
+        runtime = self._runtime(Exploding())
+        with self.assertLogs("alx.tools.repository", level=logging.WARNING) as logs:
+            attempt = self._broker(runtime).dispatch(
+                self._call(), self._authority(frozenset({REPOSITORY_MERGE_PERMISSION}))
+            )
+        self.assertEqual(attempt.result.failure["code"], "merge_unavailable")
+        recorded = "\n".join(logs.output)
+        self.assertIn("RuntimeError", recorded)
+        self.assertNotIn("SECRET-abc123", recorded)
+        self.assertNotIn("unheard wording", recorded)
+
     def test_the_policy_requires_no_person_approval(self) -> None:
         """Friedl delegated the authority rather than approving each merge."""
         runtime = self._runtime(RecordingProvider())

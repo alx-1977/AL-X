@@ -105,8 +105,16 @@ def build_repository_executors(
             outcome = merge(request)
         except MergeError as error:
             return _failed(call_id, error.code)
-        except Exception:  # noqa: BLE001 - an unclassified failure is still a fact
-            LOGGER.warning("Merge failed for one pull request")
+        except Exception as error:  # noqa: BLE001 - unclassified is still a fact
+            # The type, never the message. An undeclared failure leaves an
+            # operator with nothing to go on if only a fixed sentence is
+            # logged, but a provider exception's wording can carry the request
+            # that caused it, and this one carries a token and the commit text
+            # AL/X composed. Naming the class distinguishes a provider
+            # regression from an integration fault without repeating either.
+            LOGGER.warning(
+                "Merge failed for one pull request: %s", type(error).__name__
+            )
             return _failed(call_id, "merge_unavailable")
 
         return CapabilityResult(
