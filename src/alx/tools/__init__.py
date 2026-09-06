@@ -70,6 +70,11 @@ from alx.tools.review import (
     REQUEST_EXTERNAL_REVIEW,
     build_review_executors,
 )
+from alx.tools.review_content import (
+    DEFINITION as REVIEW_CONTENT_DEFINITION,
+    READ_EXTERNAL_REVIEW,
+    build_review_content_executors,
+)
 from alx.tools.repository import (
     DEFINITION as MERGE_DEFINITION,
     MERGE_PULL_REQUEST,
@@ -80,6 +85,9 @@ __all__ = [
     "REQUEST_EXTERNAL_REVIEW",
     "REVIEW_DEFINITION",
     "build_review_executors",
+    "READ_EXTERNAL_REVIEW",
+    "REVIEW_CONTENT_DEFINITION",
+    "build_review_content_executors",
     "MERGE_DEFINITION",
     "MERGE_PULL_REQUEST",
     "build_repository_executors",

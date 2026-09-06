@@ -21,11 +21,17 @@ from typing import Any
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.contracts.review import ReviewRequest
 from alx.providers.qodo_review import QodoReviewProvider
+from alx.providers.qodo_review_content import QodoReviewContentProvider
 from alx.safety import AuthorityPolicy
 from alx.tools.review import (
     DEFINITION as REVIEW_DEFINITION,
     REQUEST_EXTERNAL_REVIEW,
     build_review_executors,
+)
+from alx.tools.review_content import (
+    DEFINITION as REVIEW_CONTENT_DEFINITION,
+    READ_EXTERNAL_REVIEW,
+    build_review_content_executors,
 )
 
 
@@ -34,6 +40,11 @@ LOGGER = logging.getLogger(__name__)
 # Requesting a review is its own authority. It grants no merge authority, and
 # merge authority grants no ability to request a review.
 REVIEW_REQUEST_PERMISSION = "review.request"
+
+# Reading a review is a different authority from asking for one. Holding it
+# grants no ability to request a review and none to merge: it permits reading
+# something that already exists, and nothing else.
+REVIEW_READ_PERMISSION = "review.read"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +64,9 @@ def build_review_runtime(
     token: str,
     call_id_source: Callable[[], str],
     provider: Any = None,
+    # Reads what a reviewer published. Injected like the requesting provider,
+    # so another reviewer can replace it without changing the capability.
+    content_provider: Any = None,
     # Called when a review has been requested, so something can watch for the
     # result. Optional: without it the request still works and simply is not
     # watched, which is honest rather than broken.
@@ -68,6 +82,7 @@ def build_review_runtime(
 
     try:
         selected = provider or QodoReviewProvider(repository, token)
+        reader = content_provider or QodoReviewContentProvider(repository, token)
     except ValueError:
         LOGGER.warning("External review requesting is misconfigured: no capability")
         return None
@@ -94,7 +109,7 @@ def build_review_runtime(
     )
     return ReviewRuntime(
         provider=selected,
-        definitions=(REVIEW_DEFINITION,),
+        definitions=(REVIEW_DEFINITION, REVIEW_CONTENT_DEFINITION),
         policies={
             # Approval required, and deliberately not a standing scope. The
             # approval must be grounded in Friedl's latest turn, which is
@@ -107,7 +122,21 @@ def build_review_runtime(
                 frozenset({REVIEW_REQUEST_PERMISSION}),
                 approval_required=True,
             ),
+            # Plain permission, deliberately. Reading spends nothing and
+            # changes nothing outside, so requiring Friedl's word each time
+            # would ask him a question with one answer - and would leave AL/X
+            # unable to read a review she was woken to evaluate. It is a
+            # separate permission from requesting, so holding one grants
+            # nothing of the other.
+            READ_EXTERNAL_REVIEW: AuthorityPolicy(
+                frozenset({REVIEW_READ_PERMISSION}),
+            ),
         },
-        executors=build_review_executors(request_review, call_id_source),
-        permissions=frozenset({REVIEW_REQUEST_PERMISSION}),
+        executors={
+            **build_review_executors(request_review, call_id_source),
+            **build_review_content_executors(reader.read, call_id_source),
+        },
+        permissions=frozenset(
+            {REVIEW_REQUEST_PERMISSION, REVIEW_READ_PERMISSION}
+        ),
     )

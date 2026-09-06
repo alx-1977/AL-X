@@ -266,12 +266,20 @@ class ReviewRequestTest(unittest.TestCase):
     def test_requesting_a_review_invokes_no_merge(self) -> None:
         """A review request must not become a merge by any path."""
         runtime = self._runtime(RecordingReviewer())
+        # The review runtime composes requesting and reading. Neither is a
+        # merge, and nothing here may register one: the set is asserted exactly
+        # so a merge capability cannot arrive unnoticed.
+        from alx.tools.review_content import READ_EXTERNAL_REVIEW
+
+        expected = {REQUEST_EXTERNAL_REVIEW, READ_EXTERNAL_REVIEW}
         self.assertEqual(
-            [d.capability_id for d in runtime.definitions], [REQUEST_EXTERNAL_REVIEW]
+            {d.capability_id for d in runtime.definitions}, expected
         )
-        self.assertEqual(set(runtime.executors), {REQUEST_EXTERNAL_REVIEW})
-        self.assertEqual(set(runtime.policies), {REQUEST_EXTERNAL_REVIEW})
+        self.assertEqual(set(runtime.executors), expected)
+        self.assertEqual(set(runtime.policies), expected)
         self.assertNotIn("repository.merge", runtime.permissions)
+        for permission in runtime.permissions:
+            self.assertNotIn("merge", permission)
         # The module cannot reach the merge capability: it imports nothing
         # from it and never names its identifier. Checked structurally rather
         # than by searching for the word, which appears in prose explaining
