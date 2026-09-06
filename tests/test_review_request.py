@@ -293,7 +293,8 @@ class ReviewRequestTest(unittest.TestCase):
 class QodoProviderTest(unittest.TestCase):
     """The Qodo trigger itself, without contacting GitHub."""
 
-    def _provider(self, head: str, post_status: int = 201):
+    def _provider(self, head: str, post_status: int = 201, after: str | None = None):
+        """`after` is the head on the second read, when it differs."""
         from alx.providers import qodo_review
 
         calls: dict = {"get": [], "post": []}
@@ -308,7 +309,9 @@ class QodoProviderTest(unittest.TestCase):
 
         def get(url, headers, timeout):
             calls["get"].append(url)
-            return Response(200, {"head": {"sha": head}})
+            # The second read happens after the trigger is posted.
+            current = head if not calls["post"] else (after if after else head)
+            return Response(200, {"head": {"sha": current}})
 
         def post(url, json, headers, timeout):  # noqa: A002
             calls["post"].append((url, json))
@@ -332,11 +335,10 @@ class QodoProviderTest(unittest.TestCase):
         self.assertEqual(body, {"body": "/review"})
 
     def test_the_head_is_read_from_the_pull_request(self) -> None:
-        """One fetch serves both purposes: learn the revision, then trigger."""
+        """Friedl names a pull request; the revision is looked up, not supplied."""
         provider, calls = self._provider(head=MOVED)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(outcome.head_sha, MOVED)
-        self.assertEqual(len(calls["get"]), 1)
         self.assertIn("/pulls/21", calls["get"][0])
         self.assertEqual(len(calls["post"]), 1)
 
@@ -348,6 +350,27 @@ class QodoProviderTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "review_unavailable")
         self.assertEqual(calls["post"], [])
 
+    def test_a_head_that_moves_during_the_request_is_not_claimed(self) -> None:
+        """The trigger is not pinned to a commit, so the revision is confirmed.
+
+        Qodo reviews whatever the pull request points at when it reaches the
+        request. If the head moved in between, naming the commit read
+        beforehand would assert something that was never checked.
+        """
+        provider, calls = self._provider(head=HEAD, after=MOVED)
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        self.assertTrue(outcome.requested)
+        # The review was requested; which revision it covers is not established.
+        self.assertEqual(outcome.head_sha, "")
+        self.assertEqual(len(calls["get"]), 2)
+        self.assertEqual(len(calls["post"]), 1)
+
+    def test_a_stable_head_is_reported_after_confirmation(self) -> None:
+        provider, calls = self._provider(head=HEAD)
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        self.assertEqual(outcome.head_sha, HEAD)
+        self.assertEqual(len(calls["get"]), 2)
+
     def test_a_rejected_comment_is_reported_as_a_refusal(self) -> None:
         provider, _ = self._provider(head=HEAD, post_status=403)
         with self.assertRaises(ReviewError) as caught:
@@ -357,7 +380,10 @@ class QodoProviderTest(unittest.TestCase):
     def test_a_malformed_repository_is_refused_at_construction(self) -> None:
         from alx.providers.qodo_review import QodoReviewProvider
 
-        for repository in ("/repo", "owner/", "owner/repo/extra", "ownerrepo", ""):
+        for repository in (
+            "/repo", "owner/", "owner/repo/extra", "ownerrepo", "",
+            "own er/repo", "owner/re?po", "owner/repo#x",
+        ):
             with self.subTest(repository=repository):
                 with self.assertRaises(ValueError):
                     QodoReviewProvider(repository, "token")

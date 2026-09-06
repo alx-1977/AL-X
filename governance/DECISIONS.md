@@ -549,6 +549,39 @@ Merging without an external review of the current revision; overriding branch pr
 
 `law-gates` remains a required status check. This decision does not enable required pull-request reviews: an approval gate would either put Friedl back into each merge or be satisfied by AL/X approving her own work, and neither is the arrangement recorded here.
 
+### Requesting the review
+
+This decision assumed a review would exist without saying who may ask for one.
+A review is a paid external service, so asking for one is spending, and an
+unrecorded spending path is exactly what the register exists to prevent.
+
+AL/X may ask the configured external reviewer to review one pull request,
+through a `review.request` permission separate from every other authority. It
+grants no merge authority, and merge authority grants no ability to request a
+review.
+
+Unlike merging, this is not delegated. Each request needs Friedl's approval
+grounded in his own turn, so one instruction buys one review of one pull
+request. A review that found issues, a fix, a moved head or a failed request
+cannot produce another: he asks again, or nothing happens. The approval carries
+no standing scope, because a standing scope here would be durable autonomous
+spending, which he has not granted.
+
+The reviewer is contacted through the integration it already has with this
+repository: the request is a trigger on the pull request, and no code, diff or
+private material is uploaded. Qodo is the reviewer configured today. Naming it
+here records what is actually installed rather than creating a roster, and
+replacing it needs no decision because nothing in the authority depends on
+which reviewer answers.
+
+**Which revision was reviewed is confirmed, not assumed.** The trigger is not
+pinned to a commit, so the reviewer works from whatever the pull request points
+at when it reaches the request. The revision is therefore read before the
+trigger and again after it, and reported only when the two agree. Where they do
+not, the result says the revision is unknown rather than naming a commit the
+reviewer may not have examined, and AL/X decides what to do with that. A merge
+still requires her judgement that a review covers the revision being merged.
+
 ### Two earlier obligations, and what became of them
 
 EX-002 and EX-003 recorded two merges that went ahead without the Greptile

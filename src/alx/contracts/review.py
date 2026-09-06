@@ -68,6 +68,12 @@ class ReviewOutcome:
     `head_sha` is read rather than supplied: it is the commit the pull request
     pointed at when the review was requested, so the record is a fact about
     what was sent rather than a claim about what someone intended.
+
+    It is empty when the revision could not be confirmed after the request went
+    out. The reviewer works from whatever the pull request points at when it
+    reaches the work, so a head that moved in between means the revision it
+    examined is not established. Empty says that plainly; naming the commit
+    that happened to be current a moment earlier would be a false record.
     """
 
     pull_request_number: int
@@ -76,7 +82,7 @@ class ReviewOutcome:
     reviewer: str
 
     def __post_init__(self) -> None:
-        if not valid_sha(self.head_sha):
+        if self.head_sha and not valid_sha(self.head_sha):
             raise ValueError("head_sha must be a full 40-character commit id")
         if not self.reviewer.strip():
             raise ValueError("the reviewer must be named")

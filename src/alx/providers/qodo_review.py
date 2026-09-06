@@ -4,16 +4,25 @@ Qodo is installed on the repository and watches pull requests, so a review is
 requested by leaving its trigger comment on the pull request. Nothing here
 retrieves, packages or uploads a diff: the reviewer already has the code.
 
-The pull request is fetched first, to learn which commit it currently points
-at. That revision is what gets reviewed and what the outcome reports, so the
-record names the code that was actually sent rather than a revision someone
-had to supply by hand.
+The pull request is fetched to learn which commit it points at, and fetched
+again after the trigger is posted. The trigger is a comment on the pull
+request rather than a request pinned to a commit, so the reviewer examines
+whatever is current when it gets to the work. Reporting the revision read
+beforehand would name a commit the reviewer may not have looked at.
+
+So the revision is confirmed rather than assumed: if the head moved between
+the two reads, the outcome says the revision is unknown instead of naming one.
+AL/X can then see that the request went out but that what was reviewed is not
+established, which is a true and useful thing to know, and act on it. Claiming
+a revision that was merely current a moment earlier would be a false record.
 
 This provider requests a review and reports that it did. It never reads a
 review, waits for one, or asks again.
 """
 
 from __future__ import annotations
+
+import re
 
 import httpx
 
@@ -37,13 +46,20 @@ TRIGGER = "/review"
 
 REVIEWER = "qodo"
 
+# One path segment: no slashes, spaces, traversal or query characters.
+_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 class QodoReviewProvider:
     """Requests one Qodo review of one pull request at one exact revision."""
 
     def __init__(self, repository: str, token: str, api_root: str = API_ROOT) -> None:
+        # Exactly one owner and one name, each a legal path segment. A value
+        # with an embedded space or a query character passes a non-blank check,
+        # registers the capability, and then makes every URL malformed. Same
+        # rule as the merge provider, for the same reason.
         parts = repository.strip().split("/")
-        if len(parts) != 2 or not all(part.strip() for part in parts):
+        if len(parts) != 2 or not all(_SEGMENT.match(part) for part in parts):
             raise ValueError("repository must be owner/name")
         if not token.strip():
             raise ValueError("a GitHub token is required")
@@ -63,33 +79,45 @@ class QodoReviewProvider:
             "User-Agent": "alx-review",
         }
 
+    def _head(self, number: int, strict: bool) -> str:
+        """The commit the pull request points at, or "" when unknowable.
+
+        `strict` distinguishes the two reads. Before the trigger, a head that
+        cannot be read means there is nothing to spend a review on, so it
+        raises. Afterwards the review has already been requested, and failing
+        to confirm is a fact to report rather than a reason to fail: the caller
+        records the revision as unknown instead.
+        """
+        url = (
+            f"{self._api_root}/repos/{self._repository}/pulls/{number}"
+        )
+        try:
+            response = httpx.get(
+                url, headers=self._headers(), timeout=TIMEOUT_SECONDS
+            )
+            # Severed from the original so the token cannot travel on it.
+            if response.status_code != 200:
+                raise ValueError
+            body = response.json()
+        except (httpx.HTTPError, ValueError):
+            if strict:
+                raise ReviewError("review_unavailable") from None
+            return ""
+        head = ((body or {}).get("head") or {}).get("sha")
+        if not isinstance(head, str) or not valid_sha(head):
+            if strict:
+                # Without a revision there is nothing to record about what was
+                # reviewed, and a request whose subject cannot be named is not
+                # worth spending.
+                raise ReviewError("review_unavailable") from None
+            return ""
+        return head
+
     def request(self, review: ReviewRequest) -> ReviewOutcome:
         # Read the revision the pull request currently points at. Friedl asks
         # for a pull request to be reviewed; which commit that is now is a fact
         # to look up, not something he should have to carry.
-        pull_request = (
-            f"{self._api_root}/repos/{self._repository}"
-            f"/pulls/{review.pull_request_number}"
-        )
-        try:
-            response = httpx.get(
-                pull_request, headers=self._headers(), timeout=TIMEOUT_SECONDS
-            )
-        except httpx.HTTPError:
-            # Severed from the original so the token cannot travel on it.
-            raise ReviewError("review_unavailable") from None
-        if response.status_code != 200:
-            raise ReviewError("review_unavailable") from None
-        try:
-            body = response.json()
-        except ValueError:
-            raise ReviewError("review_unavailable") from None
-        head = ((body or {}).get("head") or {}).get("sha")
-        if not isinstance(head, str) or not valid_sha(head):
-            # Without a revision there is nothing to record about what was
-            # reviewed, and a request whose subject cannot be named is not
-            # worth spending.
-            raise ReviewError("review_unavailable") from None
+        head = self._head(review.pull_request_number, strict=True)
 
         comments = (
             f"{self._api_root}/repos/{self._repository}"
@@ -107,10 +135,14 @@ class QodoReviewProvider:
         if posted.status_code != 201:
             raise ReviewError("review_refused") from None
 
+        # Confirm the revision after the trigger. The reviewer works from
+        # whatever the pull request points at when it reaches the request, so
+        # a head that moved in between means the revision reviewed is not the
+        # one read beforehand, and must not be reported as though it were.
+        confirmed = self._head(review.pull_request_number, strict=False)
         return ReviewOutcome(
             pull_request_number=review.pull_request_number,
-            # The revision read a moment ago, which is what Qodo will review.
-            head_sha=head,
+            head_sha=head if confirmed == head else "",
             requested=True,
             reviewer=REVIEWER,
         )
