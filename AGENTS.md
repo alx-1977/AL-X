@@ -46,6 +46,26 @@ Before declaring completion, run the law gates and the test suite, and say plain
 what could not be verified. Never silently treat an unverified requirement as
 passed.
 
+## External review before merge
+
+Review the current code before merging. If the reviewer reports issues, fix
+them and have the changed code reviewed again. If it reports none, the change
+may merge. Any commit after a review invalidates that review.
+
+Branch protection enforces this rather than a script: an approving review is
+required to merge, and GitHub dismisses that approval automatically when a new
+commit arrives, so a stale approval cannot carry over. Unresolved review
+conversations also block the merge.
+
+Any external reviewer satisfies this. Nothing here names a provider, keeps a
+roster, or judges the reviewer, and no gate parses a reviewer's output: reading
+the review and deciding whether it found anything is a judgement, and the
+approval records that judgement.
+
+Requesting a paid review is an external, chargeable action. Do it only when
+Friedl has asked for it or explicitly approved it, and never carry one approval
+forward to another review.
+
 ## Prohibited shortcuts
 
 Do not introduce phrase or keyword routing, intent menus, regex-based meaning, workflow-specific conversational handlers, feature-owned dialogue, frontend business orchestration, one-action agent loops, process-only goal state, or copied orchestration code from the previous system.

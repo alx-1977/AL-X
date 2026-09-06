@@ -9,9 +9,6 @@ on:
 
 permissions:
   contents: read
-  # Only to read the review evidence GitHub already holds for this pull
-  # request. The gate reads reviews; it never requests, writes or pays for one.
-  pull-requests: read
 
 jobs:
   law-gates:
