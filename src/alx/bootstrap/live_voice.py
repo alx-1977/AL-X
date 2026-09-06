@@ -18,6 +18,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.repository import build_repository_runtime
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
@@ -37,6 +38,7 @@ from alx.bootstrap.xero import (
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
+    merge_settings,
     AUTONOMOUS_MAX_INPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
     autonomous_commissioning_limit,
@@ -125,6 +127,7 @@ async def run(repository_root: Path) -> None:
     environment = load_environment(repository_root / ".env")
     provider_settings = RuntimeSettings.from_environment(environment)
     voice_settings = LiveVoiceSettings.from_environment(environment)
+    merge_configuration = merge_settings(environment)
     storage_root = voice_settings.storage_root
     if not storage_root.is_absolute():
         storage_root = repository_root / storage_root
@@ -317,6 +320,22 @@ async def run(repository_root: Path) -> None:
         policies.update(web_runtime.policies)
         executors.update(web_runtime.executors)
         permissions.update(web_runtime.permissions)
+
+    # Friedl delegated routine merge authorisation to AL/X. She reads an
+    # external review of the current head and decides; this executes that
+    # decision against the exact revision she judged.
+    merge_runtime = build_repository_runtime(
+        merge_configuration.is_usable,
+        merge_configuration.repository,
+        merge_configuration.token,
+        lambda: current_call_id[0],
+    )
+    if merge_runtime is not None:
+        for definition in merge_runtime.definitions:
+            registry.register(definition)
+        policies.update(merge_runtime.policies)
+        executors.update(merge_runtime.executors)
+        permissions.update(merge_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.

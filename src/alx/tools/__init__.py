@@ -65,7 +65,16 @@ from alx.tools.dhl import (
     build_dhl_executors,
 )
 
+from alx.tools.repository import (
+    DEFINITION as MERGE_DEFINITION,
+    MERGE_PULL_REQUEST,
+    build_repository_executors,
+)
+
 __all__ = [
+    "MERGE_DEFINITION",
+    "MERGE_PULL_REQUEST",
+    "build_repository_executors",
     "ASK_WEB_PAGE",
     "ASK_WEB_SEARCH",
     "WEB_SEARCH_DEFINITION",

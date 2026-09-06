@@ -21,7 +21,11 @@ from alx.config.settings import (
     XeroSettings,
 )
 
+from alx.config.settings import MergeSettings, merge_settings
+
 __all__ = [
+    "MergeSettings",
+    "merge_settings",
     "WebSearchSettings",
     "AUTONOMOUS_MAX_INPUT_TOKENS",
     "AUTONOMOUS_MAX_OUTPUT_TOKENS",

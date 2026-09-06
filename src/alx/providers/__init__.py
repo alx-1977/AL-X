@@ -13,7 +13,10 @@ from alx.providers.icloud_mail_send import ICloudMailSender
 from alx.providers.xero import SQLiteXeroOAuth, XeroAccountingAdapter
 from alx.providers.dhl import DhlImportAnalyzerAdapter
 
+from alx.providers.github_merge import GitHubMergeProvider
+
 __all__ = [
+    "GitHubMergeProvider",
     "BraveWebSearchProvider",
     "HttpWebFetchProvider",
     "is_public_address",

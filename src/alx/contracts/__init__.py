@@ -1,6 +1,12 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
 from alx.contracts.cognition import Cognition, CognitionOrigin
+from alx.contracts.repository import (
+    MERGE_FAILURES,
+    MergeError,
+    MergeOutcome,
+    MergeRequest,
+)
 from alx.contracts.continuity import (
     AutonomousResponseTransport,
     run_core_worker,
@@ -148,6 +154,10 @@ from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
+    "MERGE_FAILURES",
+    "MergeError",
+    "MergeOutcome",
+    "MergeRequest",
     "CONNECT_TIMEOUT_SECONDS",
     "TOTAL_DEADLINE_SECONDS",
     "MAX_DURABLE_METADATA_CHARACTERS",

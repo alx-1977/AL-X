@@ -508,3 +508,47 @@ HTML extraction is stdlib-only in V1. No parsing or extraction dependency is add
 ### Review condition
 
 Revisit if retrieval reaches anything not publicly reachable; if a retrieved page's content is ever acted upon as an instruction; if search spend diverges from the recorded price; if extraction quality proves inadequate often enough to argue for a parsing dependency; or if the bounds above are found to be shaping what AL/X concludes rather than what fits in a turn.
+
+---
+
+## D-026 — Routine merge authorisation is delegated to AL/X
+
+- **Date:** 2026-09-06
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-06.**
+
+**Decision.** Friedl delegates routine merge authorisation to AL/X. An external reviewer examines the code and reports what it found; AL/X reads that, judges whether anything needs correcting, and decides whether the current revision may merge. The reviewer advises. The decision is hers.
+
+**Why this is a delegation rather than an automation.** Reading a review and deciding whether a finding matters is interpretation, and Law 1 puts interpretation in the single authoritative reasoning path. The alternative that was tried — having a gate parse a reviewer's output and rule on it — put that judgement into deterministic code, where it did not belong and where no provider supplied evidence reliable enough to carry it. This records the authority instead of simulating it.
+
+### What AL/X decides
+
+Whether the code is ready for review; whether to use an external review at all; what the findings mean; whether they require correction; whether to withhold the merge; whether the review covers the current revision; and whether to merge.
+
+### What deterministic code does
+
+It performs the merge she has decided, against the exact revision she named, and reports what happened. It never reads a review, scores a finding, judges readiness, or retries a refusal.
+
+### The authority
+
+Merging is granted through a `repository.merge` permission, separate from every other authority. It carries no per-merge approval: Friedl delegated the routine decision rather than participating in it, so requiring him to approve each merge would restore exactly what this removes.
+
+He grants the authority by configuring it and revokes it by removing the configuration or the permission. A runtime without it cannot propose a merge at all.
+
+### The reviewed revision
+
+`merge_pull_request` requires the pull request number and the head commit that was reviewed. That commit travels to GitHub as `sha`, and GitHub merges only if the branch still points at it.
+
+So an authorisation is about one revision and cannot move a different one. If the branch advances after AL/X judges it, the merge is refused and the new revision must be reviewed again. GitHub enforces that as plumbing; the judgement remains hers.
+
+### Not authorised by this decision
+
+Merging without an external review of the current revision; overriding branch protection; force-pushing; merging on behalf of anyone else; and any authority for the coding agent or the external reviewer. This is AL/X's authority, held by the single reasoning path, and it is not transitive.
+
+### Branch protection
+
+`law-gates` remains a required status check. This decision does not enable required pull-request reviews: an approval gate would either put Friedl back into each merge or be satisfied by AL/X approving her own work, and neither is the arrangement recorded here.
+
+### Review condition
+
+Revisit if a merge happens that a reviewer's findings should have stopped; if the delegation is used for anything but routine merges; if AL/X merges a revision no reviewer examined; or if the recorded authority proves broader than the routine decision Friedl intended to delegate.
