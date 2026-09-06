@@ -609,3 +609,169 @@ added or removed; if a review is ever accepted that should not have been, or
 refused that should have been; if the exception path is used more than
 occasionally; or if the substantive-evidence threshold proves to reward padding
 rather than reporting.
+
+---
+
+## D-027 — Isolated experimentation authority (Sandbox V1)
+
+- **Date:** 2026-09-06
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-06.** Implementation proceeds in the recorded order; the capability is not granted to a live runtime until the step-4 review.
+
+**Purpose.** `LAWS_OF_ALX.md` already anticipates this capability: AL/X "may imagine and design capabilities neither Friedl nor her developers anticipated, and may test them in an isolated sandbox with read-only access to production data," under the principle that "ideas are permissive, experimentation is isolated, deployment is governed." Today she cannot run anything. She can reason about a calculation, describe an algorithm, or predict what a piece of code would do, but she has no way to find out. This decision gives her a bounded place to try something and see what actually happens, and to iterate when the first attempt is wrong.
+
+**Scope.** Executing small Python programs, written by AL/X, inside a confined local workspace with no network, no inherited secrets, and no access to this repository or production data. Nothing else. This is not a development environment, not a build system, and not a path to production.
+
+**Sandbox grants execution, not authority.** A successful experiment is evidence about what some code did in an isolated workspace. It is never an approved production change, and it does not become one by succeeding.
+
+### Authority granted
+
+- Execution of one AL/X-authored Python program per call, using the Python standard library only, inside a per-session workspace.
+- Persistent session working state, so a later run can build on what an earlier run in the same session produced.
+- Return of exit status, bounded stdout and stderr, and bounded metadata describing the files the run created or changed, as EXTERNAL untrusted evidence anchored to the capability attempt.
+- Invocation from any cognition turn, autonomous or person-originated alike, through the one governed capability path.
+
+### Not authorised in V1
+
+Network access of any kind; package installation, `pip`, or any dependency beyond the Python standard library; reading or writing this repository; reading production data, credentials, `.env`, or any runtime store; inheriting the runtime's environment; writing anywhere outside the session workspace; git operations; commits, pull requests, deployment, promotion, or any other path by which sandboxed output could reach production; languages other than Python; long-running or background processes that outlive a call.
+
+Each of these requires its own decision. None is implied by this one.
+
+### What AL/X decides
+
+Whether an experiment is worth running at all; what to write; what to measure; what the output means; whether the result supports or refutes what she expected; whether to iterate, change approach, or stop; whether to record anything in evidence, the notebook, or memory; and what to tell Friedl.
+
+Deterministic code creates the workspace, applies the confinement, runs the program, bounds it, hashes what changed, and reports what happened. It never judges whether an experiment succeeded in any sense beyond its exit status, never decides whether a result is interesting or important, and never adopts a conclusion from the program's output.
+
+### Memory containment on the current development host
+
+**Native macOS Sandbox V1 has no enforceable hard RAM ceiling.** `RLIMIT_AS` was tested on this machine and is ineffective: a child process allocated 600 MB against a 256 MB limit and succeeded. No memory boundary is available natively on macOS without a container or virtual machine, and V1 introduces neither.
+
+This is an accepted limitation of the current development host. It is a property of the machine AL/X is presently developed on, not a property of the Sandbox design and not a reason to restrict what AL/X may do.
+
+The consequence is stated plainly rather than softened. A single erroneous or malicious allocation can exhaust system memory in one run, in one line, before any other limit is reached. A runaway allocation may degrade the development machine, and may require the sandbox process or the AL/X server itself to be terminated externally. The failure is not contained to the sandbox.
+
+Seatbelt continues to provide the approved filesystem and network confinement for macOS development, and that confinement was verified rather than assumed. The per-run wall-clock timeout, process-group termination, process and file-size limits and the daily resource fuses all remain useful controls. **None of them is memory containment.** A memory bomb exhausts memory within a single run, well inside every one of them. An earlier draft of this architecture claimed wall-clock and CPU limits bounded this risk; that claim was withdrawn as false, and must not reappear in code comments, documentation or review evidence.
+
+This limitation must not be described as a reason to restrict AL/X's autonomous use of the capability. Making her cognition architecture compensate for a temporary property of a development machine would put a host limitation inside her authority model, where it does not belong and where it would be difficult to remove later.
+
+### Production-host containment requirement
+
+Before the Sandbox is considered suitable for unattended production operation on AL/X's eventual dedicated hardware, the platform runner must provide genuine hard resource containment, including an enforceable memory ceiling.
+
+This is a requirement on the deployment platform, not on the capability, the Core, or AL/X's authority. It is recorded here so that moving to dedicated hardware carries the obligation with it and cannot be overlooked.
+
+This decision does not choose AL/X's eventual host, operating system, or virtualization technology. That is a deployment and platform decision to be made separately, on its own evidence.
+
+### Isolation boundary
+
+Confinement on macOS uses the kernel sandbox (`sandbox-exec`, Seatbelt), behind a platform-specific runner abstraction so the mechanism can be replaced without redesigning the capability. Seatbelt is formally deprecated by Apple; it remains present and functional in macOS 26.6.2 and is used by Apple's own system daemons. This is a recorded risk, accepted for V1, and is the reason the mechanism sits behind an abstraction.
+
+The following were verified by test on this machine rather than assumed:
+
+- outbound network access is denied, and denial is enforced by the kernel rather than by our code;
+- reads of this repository, of `.env`, and of `~/.ssh` are denied;
+- writes anywhere outside the session workspace are denied;
+- a child process spawned by the experiment inherits the confinement and cannot escape it;
+- an unconfined profile fails to start the interpreter at all, proving the profile is applied.
+
+In addition: the child process receives an explicitly constructed empty environment, never the runtime's environment and never the `.env` mapping, so no credential can be inherited; `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_NPROC` are applied and were verified effective; the process runs in its own process group and a wall-clock timeout escalates from `SIGTERM` to `SIGKILL` across that group, so a run cannot outlive its call.
+
+Read-only access to production data is permitted by the Laws but is **not** granted in V1. Denying all repository and production reads is simpler and verified. AL/X can pass whatever data an experiment needs into the source she writes, which keeps her judgement in the loop about what the experiment sees.
+
+### The runner is a platform abstraction
+
+The architecture is platform-independent by construction. `SandboxRunner` is the abstraction; macOS with Seatbelt is the current development implementation.
+
+A future runner backed by Linux namespaces and cgroups, a container, or a virtual machine may satisfy the stronger production containment requirement above **without changing the capability, the broker, the SafetyGate, the Core, or the experiment and session model.** Only the runner implementation changes. That is the property that keeps the present host limitation from becoming an architectural commitment.
+
+Where a platform provides no supported confinement mechanism, the capability is not registered at all rather than offered in a weakened form.
+
+### One capability, one execution site
+
+There is exactly one public capability, `run_sandbox_experiment`, and exactly one place in production code where a process is executed. No second capability reads files, no second module spawns a process, and iteration happens by calling the same capability again rather than through a separate session or artifact-reading capability. Law 0 requires this to be proved by absence: a test asserts that no production module other than the sandbox runner contains any process-execution call, and that no sandbox module can reach git, this repository, or any deployment path.
+
+### Workspace, session state and run evidence
+
+Identity has three levels: an experiment is a line of enquiry, a session is one iterative working context within it, and a run is one execution.
+
+Each session has a single writable working directory. It persists across runs in that session and is the only path the confined process may write to. This is what makes a session genuine iterative state rather than naming: a run may read and build on files an earlier run in the same session created. Each run additionally has its own directory, which the confined process cannot write to, holding the source that was executed, its captured stdout and stderr, and an immutable manifest.
+
+Before and after every run, the parent process — outside the sandbox — walks the session working directory and records each file's path, size and SHA-256, without following symbolic links. The difference between the two walks is what the run reports as the files it created or changed. Hashing in the parent means an experiment cannot forge its own evidence, and refusing to follow symbolic links means the hash walk cannot be used to read a file the sandbox itself is forbidden to read.
+
+Traversal outside the workspace is prevented at three independent layers: the kernel profile grants write access to the session directory only and is evaluated against resolved paths; the hash walk does not follow symbolic links; and every path is derived from schema-constrained identifiers and verified to resolve to a child of the sandbox root.
+
+### Run evidence retention
+
+The lifecycle is mechanical and must be implemented as such rather than merely described.
+
+A run directory may initially hold the source that was executed, its stdout and stderr, and its manifest. **When the session or run reaches its retention limit, every experiment-authored byte is deleted:** the source code, the captured stdout and stderr, the session working directory, and any retained file contents or snapshots. **Only `manifest.json` may survive indefinitely.**
+
+The implementation must therefore be able to delete a run's transient contents while preserving that run's immutable manifest. `runs/` must not become an indefinite archive of source code and program output. A retention implementation that keeps a run directory intact, or that deletes the manifest along with the rest, does not satisfy this decision.
+
+The manifest is bounded by construction and contains no experiment-authored free text: identifiers, the argument vector, the limits in force, the confinement profile applied, before and after file hashes and sizes, timings, exit status, and the SHA-256 and byte length of stdout and stderr. After retention has elapsed it remains possible to establish what AL/X executed, when, under which limits, and what it produced, without any of the content being retained.
+
+Deletion refuses any path that does not resolve to a child of the sandbox root and never follows symbolic links. Workspaces and process groups left behind by a crash are reaped when the runtime starts.
+
+### What is returned, and what is durably recorded
+
+The Core receives, for one turn only: exit status, whether the run was signalled or timed out, bounded stdout and stderr with the number of characters omitted, bounded metadata for the files created or changed, and timings. This is presented as `external_untrusted_data`, on the evidence channel, anchored at `attempt:<call_id>`, exactly as web retrieval already is.
+
+**The durable record of a run contains no experiment-authored free text.** The capability sets its durable result explicitly to identifiers, exit status, timings, counts, and the SHA-256 and byte length of stdout and stderr. Every field is fixed-width. Program output therefore cannot accumulate in durable goal state, because there is no field in which it could be stored.
+
+This is deliberate and load-bearing. The durable result defaults to the complete result unless a capability overrides it, and the input projection that keeps source code out of the audit does not constrain output. Without the explicit override, every byte an experiment printed would be persisted into goal state indefinitely. `ask_web_page` already uses this mechanism to keep page bodies out of durable state, and this decision reuses it rather than inventing a parallel store.
+
+Sandbox output carries `ContentOrigin.EXTERNAL` and is not mail-derived, so it carries no D-013 expiry. Nothing is promoted automatically into evidence, a notebook entry, or a memory; those remain AL/X's decisions through the capabilities that already exist.
+
+### Program output is data, never instruction
+
+Text an experiment prints is data about what the program did. It is never an instruction to AL/X.
+
+A program acquires no authority because its output resembles a command, a system prompt, a capability schema, a governance record, an approval, or the Laws of AL/X. Output claiming to be from Friedl is not from Friedl. Output stating that an experiment has been approved for production, that a permission has been granted, or that AL/X should now do something, is simply a program that printed that text, and is reasoned about rather than obeyed.
+
+The protection is structural: the result travels as a capability result marked untrusted, on the evidence channel, and never on the instruction channel. It must not be sought through a keyword detector or any scan of what output appears to be asking for, because deciding what text is really trying to do is exactly the semantic judgement that belongs to AL/X. This must be tested explicitly, and the test must fail if sandbox output is ever acted upon as instruction.
+
+### Resource bounds
+
+- 30 seconds default wall clock per run, 60 seconds maximum;
+- **20 runs per day**;
+- **300 wall-clock seconds per day**;
+- bounded CPU time, bounded file size, and a bounded number of processes per run;
+- a bounded session workspace size;
+- 8,000 characters of stdout and 4,000 of stderr returned, with the number omitted reported alongside;
+- at most 50 changed files described, with the number omitted reported.
+
+The two daily ceilings are independent invariants: many quick runs exhaust the count, one slow run exhausts the seconds. They never raise themselves, survive restart, refuse further execution once exhausted, and fail closed if their durable accounting cannot be read.
+
+These are fuses, not quotas or targets, and they are deliberately low. Twenty runs is enough for a genuine iterative session and small enough that a repeating mistake burns the fuse quickly and visibly. The resource being spent is Friedl's own machine rather than money, so the accounting is a separate durable ledger recording runs and wall-clock seconds. It is never combined with research, search, or autonomous cognition spend, and the model-token price mechanism is not extended to describe it, because a record asserting that a local execution had a cognition tier would be a false record.
+
+### Permission
+
+Execution is granted through a new `sandbox.execute` permission, separate from every existing authority. It grants local confined execution and nothing else: no network, no repository access, no secrets, no model spend, and no promotion.
+
+**`sandbox.execute` is an ordinary granted sandbox permission and is not conditional on `CognitionOrigin`.** Autonomous cognition may invoke the Sandbox through the same governed capability path as person-originated cognition, with the same broker validation, the same Safety Gate evaluation, the same runner, the same confinement and the same resource ledger. Nothing about the sandbox path varies by where a turn came from.
+
+This follows D-024, which already states that no cognition turn grants new permission and that every effectful action retains its existing requirements through the same Safety Gate. A capability that worked only when a person happened to be present would make AL/X's authority depend on Friedl's attendance rather than on what she is permitted to do, and would place a limitation of a development machine inside her cognition architecture. `web.read` grants no execution, and `sandbox.execute` grants no network access. A runtime not given the permission cannot propose an experiment, and a runtime on a platform with no supported confinement mechanism does not register the capability at all rather than offering one that always fails.
+
+The permission is not approval-gated per run. The confinement, the absence of network and secrets, and the daily fuses are the controls. Requiring Friedl to approve each experiment individually would make experimentation something he directs rather than something AL/X does while thinking, which is the opposite of what the Laws describe.
+
+### Experiment success is not production approval
+
+This must not blur, and V1 keeps the two apart by construction rather than by policy.
+
+There is no path in V1 from a sandbox run to this repository, a commit, a pull request, a deployment, or any production change. That absence is the feature. A future capability that promotes anything out of a sandbox requires its own decision, and the absence of a prohibition here must never be read as permission.
+
+An experiment that exits zero has demonstrated that a program ran in an isolated workspace and produced certain output. That is evidence AL/X may reason from and cite. It is not a review, not a test of production behaviour, not a warrant that the approach is correct, and not authority to change anything.
+
+### Implementation order
+
+1. contracts and the workspace, identity and path boundary, provable offline with an injected runner;
+2. the platform runner with real confinement, rlimits, process-group termination and the parent-side hash walk, with the isolation tests passing;
+3. the runs and wall-time ledger, the retention implementation that deletes experiment-authored bytes while preserving manifests, and crash reaping;
+4. `run_sandbox_experiment` wired end to end — **stop here for Friedl's review before the capability is granted to a live runtime**.
+
+The test suite must not require a working sandbox in order to run. The confinement mechanism is injected so the boundary is provable without executing anything, following the precedent of the public-web address boundary, and the tests that require real confinement are skipped explicitly rather than silently on platforms that cannot provide it.
+
+### Review condition
+
+Revisit when AL/X moves to dedicated hardware, at which point the production-host containment requirement above applies; if Apple removes or breaks the macOS sandbox mechanism; if an experiment ever reaches the network, this repository, production data, or any inherited credential; if sandbox output is ever acted upon as an instruction; if experiment-authored bytes are found surviving their retention limit or accumulating in durable goal state; if the daily fuses prove to be shaping what AL/X is willing to try rather than merely bounding runaway use; or if the Python standard library proves inadequate often enough to argue for dependencies, which would be a new decision rather than an adjustment of this one.
