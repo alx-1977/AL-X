@@ -576,11 +576,28 @@ for a review.
 
 ### Rollout
 
-The verifier runs in the existing `law-gates` check in reporting mode. It
-becomes blocking only after it has accumulated evidence on real merges and
-Friedl explicitly approves the promotion. The `Greptile Review` branch
-protection check is unchanged and remains required until that promotion is
-approved separately.
+The verifier first ran in the existing `law-gates` check in reporting mode,
+becoming blocking only once it had accumulated evidence on real merges and
+Friedl explicitly approved the promotion.
+
+**Promoted by Friedl on 2026-09-06.** The verifier now runs with `--enforce` as
+its own required status check, `independent-review`, and `Greptile Review` is
+**permanently removed** as a required branch-protection check rather than
+suspended. `law-gates` remains required and is unchanged.
+
+The property this establishes: a qualifying exact-head review from any reviewer
+in `review/accepted_reviewers.json` satisfies branch protection. No single
+provider can block a merge by being unavailable, which is what made this
+decision necessary. Greptile and Qodo are alternatives under one requirement,
+not a primary and a fallback.
+
+The promotion required one correctness fix first. Under `--enforce` the
+verifier returned success whenever no pull-request number was supplied,
+because a push to an already-merged branch legitimately has none. As a
+reporting gate that was correct; as a required check it was the one failure
+mode that matters, since a workflow edit could then satisfy protection while
+verifying nothing. The event name is now supplied explicitly, so a
+`pull_request` event without its number fails closed while a push still passes.
 
 Where no accepted reviewer can run, the existing approved-exception mechanism
 in `governance/EXCEPTIONS.md` carries the merge, naming the exact head. That is

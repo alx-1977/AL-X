@@ -32,6 +32,7 @@ import re
 import ssl
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 try:  # The runner has system roots; a developer machine may not.
@@ -155,6 +156,95 @@ def is_substantive(body: str, inline_findings: int) -> bool:
     return len(text) >= MINIMUM_SUBSTANTIVE_CHARACTERS
 
 
+# The only file a record-only commit may touch. An exception documents itself
+# in the register and nowhere else; anything more is implementation arriving
+# above an approved SHA.
+EXCEPTION_RECORD_PATHS = frozenset({"governance/EXCEPTIONS.md"})
+
+
+def exception_names_pull_request(exceptions_text: str, sha: str, number: int) -> bool:
+    """Whether the exception naming `sha` also names this exact pull request.
+
+    An approved SHA is not a licence for whatever pull request happens to
+    contain it. The register must name both, so an exception approved for one
+    migration cannot silently authorise a different branch that rebased onto
+    the same commit.
+    """
+    section = _exception_section(exceptions_text, sha)
+    if section is None:
+        return False
+    return re.search(rf"(?:pull request|PR)\s*#?{number}\b", section, re.IGNORECASE) is not None
+
+
+def _exception_section(exceptions_text: str, sha: str) -> str | None:
+    """The whole register entry containing `sha`, from its heading.
+
+    Taken from the heading rather than from the SHA, because the pull-request
+    number usually precedes the commit in the same sentence — "pull request #20
+    at `abc…`" — and a section starting at the SHA would miss it.
+    """
+    if len(sha) != 40 or sha not in exceptions_text:
+        return None
+    position = exceptions_text.index(sha)
+    start = exceptions_text.rfind("\n## ", 0, position)
+    section = exceptions_text[start if start != -1 else 0 :]
+    boundary = section.find("\n## ", 1)
+    return section if boundary == -1 else section[:boundary]
+
+
+def approved_ancestor(
+    exceptions_text: str, commits: list[dict], head_sha: str
+) -> str | None:
+    """The approved exception SHA below this head, if there is exactly one.
+
+    Only a commit in this pull request qualifies, and it must not be the head
+    itself: naming the head is the ordinary path handled above. An unrelated
+    approved SHA that is not an ancestor of this head returns nothing.
+    """
+    shas = [commit.get("sha") for commit in commits if isinstance(commit.get("sha"), str)]
+    if head_sha not in shas:
+        return None
+    ancestors = shas[: shas.index(head_sha)]
+    covered = [sha for sha in ancestors if exception_covers(exceptions_text, sha)]
+    # More than one approved ancestor is ambiguous, and ambiguity must not
+    # resolve itself into permission.
+    return covered[0] if len(covered) == 1 else None
+
+
+def record_only_above(
+    commits: list[dict], approved_sha: str, files_for: "Callable[[str], list[str]]"
+) -> bool:
+    """Whether every commit above `approved_sha` only records the exception.
+
+    This exists for one situation and must not grow past it: an exception that
+    documents itself inside the pull request it covers cannot name its own
+    head, because a commit cannot contain its own SHA. So the approved SHA sits
+    below the tip, and the commits above it are required to be nothing but the
+    register entry.
+
+    "Nothing but" is checked against the files each commit actually changed,
+    not against its message. A commit that touches the verifier, the workflow,
+    configuration or any source file above the approved SHA makes the exception
+    inapplicable, however it describes itself.
+    """
+    shas = [commit.get("sha") for commit in commits]
+    if approved_sha not in shas:
+        return False
+    above = shas[shas.index(approved_sha) + 1 :]
+    if not above:
+        # The approved SHA is the head itself; the ancestor path is unnecessary.
+        return True
+    for sha in above:
+        if not isinstance(sha, str):
+            return False
+        changed = files_for(sha)
+        if not changed:
+            return False
+        if not set(changed) <= EXCEPTION_RECORD_PATHS:
+            return False
+    return True
+
+
 def exception_covers(exceptions_text: str, head_sha: str) -> bool:
     """Whether an approved exception names this exact head.
 
@@ -170,7 +260,14 @@ def exception_covers(exceptions_text: str, head_sha: str) -> bool:
     section = exceptions_text[exceptions_text.index(head_sha) :]
     boundary = section.find("\n## ")
     section = section if boundary == -1 else section[:boundary]
-    return "**Approval date:**" in section and "pending" not in section.lower()
+    # A whole word, not a substring. "pending" marks an unapproved entry, but
+    # matching it anywhere silently voided any exception whose prose contained
+    # "depending", "appending", "impending" or "spending" — EX-004 and EX-005
+    # both do. An exception that reads as approved and is quietly ignored is
+    # the worst failure this function can have, because nothing reports it.
+    return "**Approval date:**" in section and not re.search(
+        r"\bpending\b", section, re.IGNORECASE
+    )
 
 
 def verify(
@@ -276,6 +373,36 @@ def check_pull_request(
             f"could not read review evidence from GitHub: {type(error).__name__}"
         ) from None
 
+    # The self-referential case, and only that case. An exception recorded
+    # inside the pull request it covers cannot name its own head, so it names
+    # the implementation below the tip and the commits above must be the
+    # register entry and nothing else. Every condition is required: the
+    # exception names this pull request, the approved SHA is an ancestor of
+    # this head, and no substantive file changed above it.
+    approved = approved_ancestor(exceptions_text, commits, head_sha)
+    if approved is not None:
+        def files_for(sha: str) -> list[str]:
+            try:
+                commit = _request(f"{API_ROOT}/repos/{repository}/commits/{sha}", token)
+            except (urllib.error.URLError, urllib.error.HTTPError):
+                # Unreadable means unverifiable, and unverifiable must not pass.
+                return []
+            if not isinstance(commit, dict):
+                return []
+            return [
+                entry.get("filename")
+                for entry in commit.get("files") or ()
+                if isinstance(entry, dict) and isinstance(entry.get("filename"), str)
+            ]
+
+        if exception_names_pull_request(
+            exceptions_text, approved, number
+        ) and record_only_above(commits, approved, files_for):
+            return (
+                f"an approved exception names {approved[:12]} for pull request "
+                f"{number}, and only its own record sits above it"
+            )
+
     commit_authors = {
         (commit.get("author") or {}).get("id")
         for commit in commits
@@ -295,11 +422,37 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="fail on missing evidence; otherwise report and pass",
     )
+    parser.add_argument(
+        "--event-name",
+        default="",
+        help=(
+            "the GitHub event being handled. When it is a pull_request event "
+            "the pull request number is mandatory under --enforce."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not args.pull_request:
-        # A push to an already-merged branch has no pull request to read, and
-        # the merge it came from was gated on its own evidence.
+        # Two different situations reach here, and as a required check they
+        # must not share an answer.
+        #
+        # A push to an already-merged branch genuinely has no pull request to
+        # read, and the merge it came from was gated on its own evidence. That
+        # passes.
+        #
+        # A pull_request event that arrived without its number is a broken
+        # invocation, not an absent obligation. Passing there would satisfy a
+        # required check while verifying nothing, which is the one failure a
+        # blocking gate must not have. The event name is supplied by the
+        # workflow rather than inferred from the missing number, because
+        # inferring it from the absent value is what made the two cases
+        # indistinguishable in the first place.
+        if args.enforce and args.event_name.startswith("pull_request"):
+            print(
+                "AL/X independent review NOT VERIFIED: a pull_request event "
+                "supplied no pull request number"
+            )
+            return 1
         print("AL/X independent review: no pull request in context; nothing to verify")
         return 0
 
