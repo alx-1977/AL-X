@@ -103,7 +103,12 @@ class QodoReviewProvider:
             if strict:
                 raise ReviewError("review_unavailable") from None
             return ""
-        head = ((body or {}).get("head") or {}).get("sha")
+        if not isinstance(body, dict):
+            if strict:
+                raise ReviewError("review_unavailable") from None
+            return ""
+        head = (body.get("head") or {})
+        head = head.get("sha") if isinstance(head, dict) else None
         if not isinstance(head, str) or not valid_sha(head):
             if strict:
                 # Without a revision there is nothing to record about what was
@@ -131,6 +136,10 @@ class QodoReviewProvider:
                 timeout=TIMEOUT_SECONDS,
             )
         except httpx.HTTPError:
+            raise ReviewError("review_unavailable") from None
+        if posted.status_code in (429, 500, 502, 503, 504):
+            # Throttling and server errors are availability, not refusal. The
+            # right response to "try later" is not the response to "no".
             raise ReviewError("review_unavailable") from None
         if posted.status_code != 201:
             raise ReviewError("review_refused") from None

@@ -38,7 +38,10 @@ MERGE_METHOD = "squash"
 MAX_TITLE_CHARACTERS = 200
 MAX_MESSAGE_CHARACTERS = 8_000
 
-_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+# \Z rather than $: $ also matches before a terminal newline, so a value
+# with one appended passed validation and reached GitHub as an
+# authorisation nobody could act on.
+_FULL_SHA = re.compile(r"\A[0-9a-f]{40}\Z")
 
 
 MERGE_FAILURES = (

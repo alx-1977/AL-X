@@ -142,14 +142,19 @@ def _watch_review(
     if task_runtime is None:
         return
     try:
+        requested_at = datetime.now(UTC)
         task_runtime.store.record(
             ExternalTask(
-                task_id=f"review:{number}:{head_sha}",
+                # The moment is part of the identity. Two requests for the same
+                # revision are two occasions, and sharing an id let the second
+                # reopen the first and be completed instantly by the first
+                # one's result.
+                task_id=f"review:{number}:{head_sha}:{int(requested_at.timestamp())}",
                 kind="external_review",
                 service="qodo",
                 subject_reference=subject_reference(number, head_sha),
                 state=TaskState.REQUESTED,
-                requested_at=datetime.now(UTC),
+                requested_at=requested_at,
                 conversation_id=conversation_id,
             )
         )

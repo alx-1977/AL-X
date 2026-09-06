@@ -56,7 +56,7 @@ class RecordingObserver:
         self._states = list(states)
         self.looks = 0
 
-    def observe(self, subject: str) -> TaskObservation:
+    def observe(self, subject: str, since=None) -> TaskObservation:
         self.looks += 1
         state = self._states.pop(0) if self._states else TaskState.WAITING_FOR_RESULT
         return TaskObservation(state, datetime.now(UTC))
@@ -267,6 +267,9 @@ class QodoObserverTests(unittest.TestCase):
                 return self._body
 
         def get(url, headers, timeout):
+            # Page 2 onwards is empty, which ends the paged read.
+            if "page=" in url and url.rsplit("page=", 1)[-1] != "1":
+                return Response([])
             return Response(reviews if "/reviews" in url else comments)
 
         original = qodo_status.httpx.get
@@ -361,6 +364,129 @@ class QodoObserverTests(unittest.TestCase):
                 self.assertIs(
                     observer.observe(subject).state, TaskState.STATUS_UNKNOWN
                 )
+
+
+class ReviewFindingRegressions(unittest.TestCase):
+    """The defects an external review found in the watcher, kept closed."""
+
+    def _observer(self, reviews, comments):
+        from alx.providers import qodo_status
+
+        class Response:
+            def __init__(self, body):
+                self.status_code = 200
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        def get(url, headers, timeout):
+            if "page=1" not in url and "page=" in url:
+                return Response([])
+            return Response(reviews if "/reviews" in url else comments)
+
+        original = qodo_status.httpx.get
+        qodo_status.httpx.get = get
+        self.addCleanup(setattr, qodo_status.httpx, "get", original)
+        return QodoStatusObserver("owner/repo", "token")
+
+    def test_a_result_older_than_the_request_does_not_complete_it(self) -> None:
+        """Asking again for an unchanged revision is a new occasion.
+
+        Without this the previous answer completes the new request the moment
+        it is made, and the terminal reports a review that never ran.
+        """
+        asked = datetime.now(UTC)
+        observer = self._observer(
+            [
+                {
+                    "user": {"id": QODO},
+                    "commit_id": HEAD,
+                    "submitted_at": (asked - timedelta(hours=1)).isoformat(),
+                }
+            ],
+            [],
+        )
+        self.assertIs(
+            observer.observe(subject_reference(21, HEAD), asked).state,
+            TaskState.WAITING_FOR_RESULT,
+        )
+
+    def test_a_result_after_the_request_completes_it(self) -> None:
+        asked = datetime.now(UTC)
+        observer = self._observer(
+            [
+                {
+                    "user": {"id": QODO},
+                    "commit_id": HEAD,
+                    "submitted_at": (asked + timedelta(minutes=1)).isoformat(),
+                }
+            ],
+            [],
+        )
+        self.assertIs(
+            observer.observe(subject_reference(21, HEAD), asked).state,
+            TaskState.COMPLETED,
+        )
+
+    def test_a_result_on_a_later_page_is_still_found(self) -> None:
+        """A busy pull request outgrows one page of history."""
+        from alx.providers import qodo_status
+
+        class Response:
+            def __init__(self, body):
+                self.status_code = 200
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        def get(url, headers, timeout):
+            if "/reviews" not in url:
+                return Response([])
+            page = url.rsplit("page=", 1)[-1]
+            if page == "1":
+                # A full page, so the reader continues to the next.
+                return Response([{"user": {"id": 1}, "commit_id": OTHER}] * 100)
+            if page == "2":
+                return Response([{"user": {"id": QODO}, "commit_id": HEAD}])
+            return Response([])
+
+        original = qodo_status.httpx.get
+        qodo_status.httpx.get = get
+        self.addCleanup(setattr, qodo_status.httpx, "get", original)
+        observer = QodoStatusObserver("owner/repo", "token")
+        self.assertIs(
+            observer.observe(subject_reference(21, HEAD)).state, TaskState.COMPLETED
+        )
+
+
+class PollerFailureRegressions(PollerHarness):
+    def test_a_failed_wake_leaves_the_task_outstanding(self) -> None:
+        """A result must not be lost because reporting it failed.
+
+        Recording completion before announcing meant a callback failure
+        settled the task in the store and never reported it, so no later tick
+        and no restart would try again.
+        """
+        self.store.record(_task())
+
+        def explode(task):
+            raise RuntimeError("wake failed")
+
+        poller = TaskPoller(
+            self.store,
+            {"qodo": RecordingObserver(TaskState.COMPLETED)},
+            interval_seconds=1.0,
+            announce=lambda conversation, line: self.lines.append(
+                (conversation, line)
+            ),
+            completed=explode,
+        )
+        with self.assertRaises(RuntimeError):
+            poller.tick()
+        # Still outstanding, so the next tick tries again.
+        self.assertEqual(len(self.store.outstanding()), 1)
 
 
 if __name__ == "__main__":

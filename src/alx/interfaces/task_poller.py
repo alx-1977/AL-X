@@ -88,7 +88,7 @@ class TaskPoller:
             )
             return
 
-        observation = observer.observe(task.subject_reference)
+        observation = observer.observe(task.subject_reference, task.requested_at)
         if observation.state is TaskState.COMPLETED:
             settled = replace(
                 task,
@@ -96,13 +96,17 @@ class TaskPoller:
                 last_checked_at=observation.observed_at,
                 completed_at=observation.observed_at,
             )
-            self._store.record(settled)
+            # Announce and wake first, and only then record completion. A
+            # callback that fails after the write would leave a task settled
+            # in the store and never reported, so the result would be lost
+            # rather than retried on the next tick.
             self._announce(
                 task.conversation_id,
                 f"Review received · {_subject(task)}",
             )
             # The Core evaluates the result. This does not read it.
             self._completed(settled)
+            self._store.record(settled)
             return
 
         waiting = replace(

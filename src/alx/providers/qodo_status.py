@@ -33,6 +33,9 @@ from alx.contracts.task import TaskObservation, TaskState
 API_ROOT = "https://api.github.com"
 TIMEOUT_SECONDS = 30.0
 
+# Enough for any realistic pull request; a bound so one tick cannot run on.
+_MAX_PAGES = 10
+
 # Qodo's account, which is what makes a comment or review its output rather
 # than someone else's.
 REVIEWER_ID = 151058649
@@ -43,6 +46,23 @@ _SUBJECT = re.compile(r"^pull/(?P<number>\d+)@(?P<sha>[0-9a-f]{40})$")
 def subject_reference(pull_request_number: int, head_sha: str) -> str:
     """How a review task names what it is about."""
     return f"pull/{pull_request_number}@{head_sha}"
+
+
+def _after(moment: object, since: datetime | None) -> bool:
+    """Whether a published result is newer than the request that awaits it.
+
+    An unreadable timestamp counts as new. A result that exists and cannot be
+    dated is better reported than left outstanding forever.
+    """
+    if since is None:
+        return True
+    if not isinstance(moment, str):
+        return True
+    try:
+        published = datetime.fromisoformat(moment.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return published >= since
 
 
 class QodoStatusObserver:
@@ -79,8 +99,30 @@ class QodoStatusObserver:
             # Severed from the original so the token cannot travel on it.
             return None
 
-    def observe(self, subject: str) -> TaskObservation:
-        """Whether a Qodo result now covers the revision this task names."""
+    def _pages(self, url: str) -> list | None:
+        """Every page of a listing, or None when it cannot be read.
+
+        A busy pull request outgrows one page, and a result on a later page
+        would otherwise leave the task outstanding forever. Bounded so an
+        unexpectedly long history cannot make a tick run without end.
+        """
+        items: list = []
+        for page in range(1, _MAX_PAGES + 1):
+            batch = self._get(f"{url}?per_page=100&page={page}")
+            if not isinstance(batch, list):
+                return None
+            items.extend(batch)
+            if len(batch) < 100:
+                break
+        return items
+
+    def observe(self, subject: str, since: datetime | None = None) -> TaskObservation:
+        """Whether a Qodo result now covers the revision this task names.
+
+        `since` excludes results that already existed when the review was
+        asked for. Without it, asking again for an unchanged revision would be
+        completed instantly by the previous answer.
+        """
         now = datetime.now(UTC)
         match = _SUBJECT.match(subject)
         if match is None:
@@ -89,25 +131,25 @@ class QodoStatusObserver:
         number = int(match.group("number"))
         sha = match.group("sha")
 
-        reviews = self._get(
-            f"{self._api_root}/repos/{self._repository}/pulls/{number}"
-            "/reviews?per_page=100"
+        reviews = self._pages(
+            f"{self._api_root}/repos/{self._repository}/pulls/{number}/reviews"
         )
-        if not isinstance(reviews, list):
+        if reviews is None:
             return TaskObservation(TaskState.STATUS_UNKNOWN, now)
         for review in reviews:
             if not isinstance(review, dict):
                 continue
             if (review.get("user") or {}).get("id") != REVIEWER_ID:
                 continue
-            if review.get("commit_id") == sha:
+            if review.get("commit_id") == sha and _after(
+                review.get("submitted_at"), since
+            ):
                 return TaskObservation(TaskState.COMPLETED, now)
 
-        comments = self._get(
-            f"{self._api_root}/repos/{self._repository}/issues/{number}"
-            "/comments?per_page=100"
+        comments = self._pages(
+            f"{self._api_root}/repos/{self._repository}/issues/{number}/comments"
         )
-        if not isinstance(comments, list):
+        if comments is None:
             return TaskObservation(TaskState.STATUS_UNKNOWN, now)
         for comment in comments:
             if not isinstance(comment, dict):
@@ -117,7 +159,11 @@ class QodoStatusObserver:
             body = comment.get("body")
             # Completion observation only. The marker says a result now covers
             # this revision; it is never read as evidence of what was reviewed.
-            if isinstance(body, str) and f"/commit/{sha}" in body:
+            if (
+                isinstance(body, str)
+                and f"/commit/{sha}" in body
+                and _after(comment.get("updated_at"), since)
+            ):
                 return TaskObservation(TaskState.COMPLETED, now)
 
         return TaskObservation(TaskState.WAITING_FOR_RESULT, now)
