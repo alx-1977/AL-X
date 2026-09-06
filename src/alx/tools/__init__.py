@@ -65,7 +65,18 @@ from alx.tools.dhl import (
     build_dhl_executors,
 )
 
+from alx.tools.sandbox import (
+    DEFINITION as SANDBOX_DEFINITION,
+    RUN_SANDBOX_EXPERIMENT,
+    build_sandbox_executors,
+)
+
+
 __all__ = [
+    "RUN_SANDBOX_EXPERIMENT",
+    "SANDBOX_DEFINITION",
+    "build_sandbox_executors",
+
     "ASK_WEB_PAGE",
     "ASK_WEB_SEARCH",
     "WEB_SEARCH_DEFINITION",

@@ -21,6 +21,8 @@ from alx.config.settings import (
     XeroSettings,
 )
 
+from alx.config.settings import SandboxSettings, sandbox_settings
+
 __all__ = [
     "WebSearchSettings",
     "AUTONOMOUS_MAX_INPUT_TOKENS",
@@ -37,6 +39,8 @@ __all__ = [
     "ResearchLimits",
     "ResearchSettings",
     "RuntimeSettings",
+    "SandboxSettings",
+    "sandbox_settings",
     "SpeechToTextSettings",
     "TextToSpeechSettings",
     "XeroSettings",
