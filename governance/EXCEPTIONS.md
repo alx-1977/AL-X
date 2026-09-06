@@ -575,3 +575,83 @@ installs, is that revision. If a fourth such exception is ever needed, the
 correct response is to complete the cutover — an accepted reviewer that can
 publish GitHub-native evidence, and the verifier promoted to blocking — not to
 approve another one.
+
+---
+
+## EX-005 — Merging the D-026 enforcement promotion at `5fd1ca8` without its `Greptile Review` status
+
+### Register metadata
+
+- **Law:** Law 0 enforcement via `docs/LAW_ENFORCEMENT.md` gate policy — "A change fails if any applicable automated gate fails" and "Disabling a gate is not a workaround". `main` requires the status checks `law-gates` and `Greptile Review`; this suspends the second one for one merge, after which it is removed permanently rather than restored.
+- **Scope:** pull request #20 only, and within it the implementation commit `5fd1ca801c5b08c138993778df7488c7a5fee01f`. That commit is the approved implementation. The pull request head is the single commit that adds this exception record on top of it and changes `governance/EXCEPTIONS.md` and nothing else. The record commit cannot be named here, because a commit cannot contain its own SHA; the verifier instead requires that the approved SHA is an ancestor of the head, that exactly one approved ancestor exists, that this exception names this exact pull request, and that every commit above the approved SHA touches only this register. Pull request #19 is explicitly outside this scope and merges afterwards under the new check. Nothing else.
+- **Necessity:** `Greptile Review` is the provider-specific required check this change exists to replace. The change cannot satisfy it — Greptile is not being invoked, and paying for a review of the change that ends the dependency on that provider is the cost this decision removes — and it cannot satisfy `independent-review` either, because that check is not required until this merge lands and no accepted reviewer has reviewed this head. A mechanism that replaces a required check cannot be installed while that check is required.
+- **Alternatives:** invoke and pay for one final Greptile review; weaken branch protection without a recorded exception; wait for a qualifying review of the migration itself; allow any approved ancestor commit to validate a head. All rejected below.
+- **Risks and safeguards:** a fourth consecutive exception to the same check, and an enforcement change arriving without the independent review it will itself require; guarded by both law gates, the full suite, three correctness fixes each carrying a mutation test, the narrow ancestor semantics described above, and the fact that `law-gates` remains required throughout. Set out in full below.
+- **Approved by Friedl:** yes, explicitly, for this exact purpose, this exact implementation commit and this exact mechanism, including the narrow ancestor semantics.
+- **Approval date:** 2026-09-06.
+- **Expiry or review condition:** expires immediately once pull request #20 merges and `independent-review` is required in place of `Greptile Review`. This is the last exception of its kind: the condition that produced EX-002, EX-003, EX-004 and this record is removed by the change it authorises. The retrospective Greptile reviews owed under EX-002 and EX-003 remain outstanding, remain specifically Greptile reviews, and are not affected.
+
+### Authorised target
+
+The implementation authorised here is `5fd1ca801c5b08c138993778df7488c7a5fee01f` on
+`governance/promote-independent-review`. The commit actually merged is the one
+that adds this exception record on top of it and changes nothing else, so the
+governance record lands on `main` together with the merge it authorises.
+
+Any commit other than these two is outside this exception. Pull request #19,
+which adds Qodo to the reviewer roster, is deliberately excluded: it merges
+after this migration, under the provider-neutral check, as the first real
+demonstration that the new arrangement works.
+
+### Why the approved commit is not the pull request head
+
+An exception recorded inside the pull request it covers cannot name its own
+head. The register lives in the commit that CI evaluates, and a commit cannot
+contain its own SHA — five amend iterations were run and confirmed it never
+converges. EX-004 never met this because `independent-review` was reporting
+only at the time; this is the first change whose own check judges the commit
+that installs it.
+
+The resolution is deliberately narrow and must not be read as "any approved
+ancestor makes a head valid". All of the following are required together:
+
+1. the exception names this exact pull request and one exact implementation SHA;
+2. that SHA is an ancestor of the current head within this pull request;
+3. exactly one approved ancestor exists, so ambiguity refuses rather than resolves;
+4. every commit above the approved SHA changes `governance/EXCEPTIONS.md` and nothing else;
+5. the exception carries a recorded approval date rather than awaiting one.
+
+A commit above the approved SHA that touches source, the workflow, the
+verifier, the reviewer roster or any configuration closes the path, as does a
+commit whose contents cannot be read. Nine adversarial tests cover these
+refusals, and three mutations — removing the record-only file check, removing
+the pull-request check, and allowing any approved ancestor — each fail the
+suite.
+
+### Alternatives considered and why they were rejected
+
+**Invoke and pay for one final Greptile review.** Legitimate, and rejected on
+its own terms: it spends money on a provider-specific review of the change
+whose purpose is to end provider-specific gating. Friedl explicitly directed
+that no paid reviewer be triggered for this migration.
+
+**Weaken branch protection without a recorded exception.**
+`docs/LAW_ENFORCEMENT.md` is explicit that disabling a gate is not a
+workaround. An unrecorded protection change is the silent exception the
+register exists to prevent.
+
+**Wait for a qualifying review of the migration itself.** Qodo becomes an
+accepted reviewer only when pull request #19 merges, and #19 is blocked by the
+check this change removes. The two would block each other.
+
+**Allow any approved ancestor to validate a head.** Rejected by Friedl as too
+broad. It would let an exception approved for one commit authorise arbitrary
+later work in the same branch, which is the opposite of exact-head pinning.
+
+### Safeguards actually in place
+
+`law-gates` remains a required check throughout and is unchanged: governance,
+architecture and the full test suite still gate this merge. The change adds no
+capability, no authority and no runtime behaviour; it moves one required check
+from a provider to a property, and fixes three ways the verifier could have
+passed or failed wrongly while doing so.
