@@ -78,6 +78,10 @@ class SandboxRetention:
             for session in sorted(self._directories(experiment)):
                 if self._age(session, moment) < self._ttl:
                     continue
+                # Never purge a session another runtime is executing in: its
+                # state, source and output are still being read.
+                if self._workspace.is_leased(session):
+                    continue
                 try:
                     removed = self._workspace.purge_transient(session)
                 except SandboxError:

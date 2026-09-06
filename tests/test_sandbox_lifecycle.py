@@ -150,7 +150,13 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(manifest["run_id"], "run-1")
         self.assertEqual(manifest["exit_status"], 0)
         self.assertEqual(manifest["stdout_digest"], self.outcome.stdout_digest)
-        self.assertIn("artifact.txt", [item["name"] for item in manifest["artifacts"]])
+        # Names are digested in the manifest: it outlives the files, and an
+        # experiment-chosen filename kept here would survive retention as
+        # authored text.
+        import hashlib
+
+        expected = hashlib.sha256(b"artifact.txt").hexdigest()
+        self.assertIn(expected, [item["name_digest"] for item in manifest["artifacts"]])
         self.assertEqual(manifest["confinement"], "seatbelt")
 
     def test_the_manifest_holds_no_experiment_authored_free_text(self) -> None:

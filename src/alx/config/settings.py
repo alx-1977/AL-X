@@ -891,11 +891,21 @@ _SANDBOX_DAILY_WALL_SECONDS = 300
 def sandbox_settings(environment: Mapping[str, str]) -> SandboxSettings:
     """Read sandbox configuration, defaulting to off."""
     root = environment.get("ALX_SANDBOX_ROOT", "").strip()
+    # Configuration may lower a ceiling but never raise it. D-027 records 20
+    # runs and 300 wall seconds as approved maxima, so an environment value
+    # above them is clamped rather than honoured: a governed limit that an
+    # operator could raise by setting a variable is not a limit.
     return SandboxSettings(
         enabled=_boolean(environment, "ALX_SANDBOX_ENABLED", False),
         storage_root=Path(root).expanduser() if root else None,
-        daily_runs=_positive_integer(environment, "ALX_SANDBOX_DAILY_RUNS", _SANDBOX_DAILY_RUNS),
-        daily_wall_seconds=_positive_integer(
-            environment, "ALX_SANDBOX_DAILY_WALL_SECONDS", _SANDBOX_DAILY_WALL_SECONDS
+        daily_runs=min(
+            _positive_integer(environment, "ALX_SANDBOX_DAILY_RUNS", _SANDBOX_DAILY_RUNS),
+            _SANDBOX_DAILY_RUNS,
+        ),
+        daily_wall_seconds=min(
+            _positive_integer(
+                environment, "ALX_SANDBOX_DAILY_WALL_SECONDS", _SANDBOX_DAILY_WALL_SECONDS
+            ),
+            _SANDBOX_DAILY_WALL_SECONDS,
         ),
     )

@@ -119,7 +119,11 @@ class SQLiteSandboxLedger:
             raise SandboxLedgerCorrupt(str(error)) from error
 
     def _db(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
+        # `timeout` makes a competing writer wait for the lock rather than
+        # failing immediately; the ledger is tiny and contention is brief.
+        return sqlite3.connect(
+            self._path, isolation_level=None, check_same_thread=False, timeout=10.0
+        )
 
     @property
     def budget(self) -> SandboxBudget:
@@ -157,19 +161,35 @@ class SQLiteSandboxLedger:
         return seconds, runs
 
     def reserve(self, wall_seconds: int) -> SandboxReservation:
-        """Withdraw one run's permitted time, or refuse the day."""
+        """Withdraw one run's permitted time, or refuse the day.
+
+        The check and the insert are one immediate transaction. A thread lock
+        alone bounds nothing across processes: two runtimes sharing this file
+        could each read the same remaining budget and each insert a
+        reservation, so the day's ceilings would hold in neither. BEGIN
+        IMMEDIATE takes the write lock before the totals are read, so a second
+        reserver waits and then sees the first reservation.
+        """
         with self._lock:
             database = self._db()
             try:
+                try:
+                    database.execute("BEGIN IMMEDIATE")
+                except sqlite3.Error as error:
+                    # A ledger that cannot be locked cannot be measured, and an
+                    # unmeasured ceiling is not a ceiling.
+                    raise SandboxLedgerCorrupt(str(error)) from error
                 day = self._today()
                 seconds, runs = self._totals(database, day)
                 if runs + 1 > self._budget.daily_runs:
+                    database.rollback()
                     raise SandboxBudgetExceeded(
                         "daily run ceiling reached",
                         max(0.0, self._budget.daily_seconds - seconds),
                         max(0, self._budget.daily_runs - runs),
                     )
                 if seconds + wall_seconds > self._budget.daily_seconds:
+                    database.rollback()
                     raise SandboxBudgetExceeded(
                         "daily wall-time ceiling reached",
                         max(0.0, self._budget.daily_seconds - seconds),
@@ -183,7 +203,9 @@ class SQLiteSandboxLedger:
                         (reservation_id, day, datetime.now(UTC).isoformat(), float(wall_seconds)),
                     )
                 except sqlite3.Error as error:
+                    database.rollback()
                     raise SandboxLedgerCorrupt(str(error)) from error
+                database.commit()
                 return SandboxReservation(reservation_id, float(wall_seconds))
             finally:
                 database.close()

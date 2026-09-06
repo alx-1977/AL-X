@@ -216,7 +216,7 @@ class SandboxTraversalTest(unittest.TestCase):
         secret.write_text("a value the sandbox may not read")
         (paths.session_state / "link.txt").symlink_to(secret)
 
-        walked = self.workspace.walk(paths.session_state)
+        walked = self.workspace.walk(paths.session_state).entries
         self.assertIn("link.txt", walked)
         digest, size = walked["link.txt"]
         self.assertEqual(digest, "")
@@ -234,7 +234,7 @@ class SandboxTraversalTest(unittest.TestCase):
         (outside / "secret.txt").write_text("private")
         (paths.session_state / "linked").symlink_to(outside, target_is_directory=True)
 
-        walked = self.workspace.walk(paths.session_state)
+        walked = self.workspace.walk(paths.session_state).entries
         self.assertNotIn("linked/secret.txt", walked)
 
     def test_purging_refuses_a_path_outside_the_sandbox_root(self) -> None:

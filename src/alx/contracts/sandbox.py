@@ -81,6 +81,9 @@ SANDBOX_FAILURES = (
     # limit: many small files can exhaust a workspace while every write stays
     # legal.
     "workspace_exhausted",
+    # Another run holds this session. Sessions are iterative state, so two
+    # concurrent runs in one would race over the same files.
+    "session_busy",
 )
 
 

@@ -19,9 +19,11 @@ A link is recorded as a link, and its target is never opened.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +41,22 @@ from alx.contracts.sandbox import (
 MANIFEST_NAME = "manifest.json"
 
 _READ_CHUNK = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class WalkResult:
+    """One snapshot of a session's state, and whether it is complete.
+
+    `truncated` is carried rather than inferred: comparing two partial
+    snapshots yields artifact counts that look authoritative and are not.
+    """
+
+    entries: dict[str, tuple[str, int]]
+    truncated: bool
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(size for _, size in self.entries.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,16 +117,72 @@ class SandboxWorkspace:
             raise SandboxError("workspace_unavailable")
         return resolved
 
-    def walk(self, directory: Path) -> dict[str, tuple[str, int]]:
+    @contextmanager
+    def lease(self, experiment_id: str, session_id: str):
+        """Hold one session exclusively for the length of a run.
+
+        Two protections in one lock. Overlapping runs in a session would share
+        the working-copy filename, so one could overwrite the other's program
+        between the copy and the exec and attribute a manifest to the wrong
+        source. And retention in another process could delete a session's state
+        while that session was mid-run.
+
+        The lock is a file, so it holds across processes rather than only
+        across threads.
+        """
+        session = self._child(experiment_id, session_id)
+        session.mkdir(parents=True, exist_ok=True, mode=0o700)
+        handle = (session / ".lease").open("a+")
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise SandboxError("session_busy") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def is_leased(self, session: Path) -> bool:
+        """Whether another process is currently running in this session."""
+        marker = session / ".lease"
+        if not marker.is_file():
+            return False
+        try:
+            handle = marker.open("a+")
+        except OSError:
+            return True
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+        finally:
+            handle.close()
+
+    def walk(self, directory: Path) -> "WalkResult":
         """Hash every regular file under `directory`, never following links.
 
-        Returns `{relative path: (sha256, size)}`. Symbolic links are recorded
-        by name with an empty digest so that creating one is visible evidence,
-        while its target is never opened.
+        Returns the entries plus whether the snapshot is complete. Symbolic
+        links are recorded by name with an empty digest so that creating one is
+        visible evidence, while its target is never opened.
+
+        Every entry counts against the bound, links included. Counting only
+        regular files let a program create tens of thousands of small links and
+        force the privileged parent to enumerate all of them after the run had
+        already been stopped.
+
+        Truncation is reported rather than silent: a partial snapshot compared
+        against another partial snapshot produces artifact counts that are
+        quietly wrong, which is worse than an explicit "incomplete".
         """
         results: dict[str, tuple[str, int]] = {}
         if not directory.exists():
-            return results
+            return WalkResult(results, False)
         for current, directory_names, file_names in os.walk(directory, followlinks=False):
             # Do not descend into linked directories either.
             directory_names[:] = [
@@ -116,6 +190,10 @@ class SandboxWorkspace:
                 if not Path(current, name).is_symlink()
             ]
             for name in sorted(file_names):
+                if name == ".lease":
+                    continue
+                if len(results) >= MAX_WALKED_FILES:
+                    return WalkResult(results, True)
                 path = Path(current, name)
                 relative = str(path.relative_to(directory))
                 if path.is_symlink():
@@ -127,14 +205,7 @@ class SandboxWorkspace:
                     results[relative] = (self._digest(path), path.stat().st_size)
                 except OSError as error:
                     raise SandboxError("output_unreadable") from error
-                if len(results) > MAX_WALKED_FILES:
-                    return results
-        return results
-
-    @staticmethod
-    def total_bytes(walked: dict[str, tuple[str, int]]) -> int:
-        """How much a session's state occupies, from a walk already taken."""
-        return sum(size for _, size in walked.values())
+        return WalkResult(results, False)
 
     @staticmethod
     def _digest(path: Path) -> str:

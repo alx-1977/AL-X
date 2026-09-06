@@ -54,17 +54,19 @@ from alx.contracts.sandbox import (
     SandboxOutcome,
     SandboxRequest,
 )
-from alx.providers.sandbox_workspace import SandboxWorkspace, SessionPaths
+from alx.providers.sandbox_workspace import SandboxWorkspace, SessionPaths, WalkResult
 
 
 LOGGER = logging.getLogger(__name__)
 
-# Read cap on the captured streams. It must not be smaller than what
-# RLIMIT_FSIZE permits a stream file to reach, or the recorded digest and byte
-# length would describe a prefix while claiming to describe the output, making
-# the durable audit inaccurate. A truncated read is reported explicitly rather
-# than silently, so evidence is never quietly partial.
+# How much of a captured stream is held in memory. The digest and byte size
+# always cover the whole file, streamed, so this bounds memory rather than
+# evidence; a stream longer than this is still hashed in full and reported as
+# capped.
 _MAX_CAPTURED_BYTES = MAX_FILE_BYTES
+
+# Streaming read size for hashing a captured stream without holding it all.
+_READ_CHUNK = 1024 * 1024
 
 # Grace between asking a process group to stop and insisting.
 _TERM_GRACE_SECONDS = 2.0
@@ -95,6 +97,18 @@ def _truncate(value: str, limit: int) -> tuple[str, int]:
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _named_digests(entries: dict[str, tuple[str, int]]) -> dict[str, list[object]]:
+    """State keyed by the digest of each name, never the name itself.
+
+    The manifest outlives the files it describes, so an experiment-chosen name
+    kept here would survive retention as authored text.
+    """
+    return {
+        _digest(name.encode("utf-8")): [digest, size]
+        for name, (digest, size) in entries.items()
+    }
 
 
 class SeatbeltSandboxRunner(SandboxRunner):
@@ -195,7 +209,13 @@ class SeatbeltSandboxRunner(SandboxRunner):
     def run(self, request: SandboxRequest, paths: SessionPaths) -> SandboxOutcome:
         if not self.available():
             raise SandboxError("sandbox_unavailable")
+        # Held across preparation, execution, evidence collection and the
+        # manifest, so a concurrent run in this session cannot overwrite the
+        # working copy and retention cannot purge state mid-run.
+        with self._workspace.lease(request.experiment_id, request.session_id):
+            return self._run_leased(request, paths)
 
+    def _run_leased(self, request: SandboxRequest, paths: SessionPaths) -> SandboxOutcome:
         entry = paths.source_directory / request.entry_filename
         profile_path = paths.run_directory / "profile.sb"
         stdout_path = paths.run_directory / "stdout.log"
@@ -261,17 +281,17 @@ class SeatbeltSandboxRunner(SandboxRunner):
         # and stay inside every per-file limit. The run has already finished,
         # so the ceiling is enforced by refusing to leave the overflow behind
         # rather than by pretending the run did not happen.
-        occupied = self._workspace.total_bytes(after)
-        if occupied > MAX_WORKSPACE_BYTES:
+        if after.total_bytes > MAX_WORKSPACE_BYTES:
             LOGGER.warning("A sandbox session exceeded its workspace ceiling")
             self._workspace.purge_state(paths.session_state)
             raise SandboxError("workspace_exhausted")
 
-        artifacts = self._workspace.changes(before, after)
+        artifacts = self._workspace.changes(before.entries, after.entries)
+        state_truncated = before.truncated or after.truncated
         reported = artifacts[:MAX_REPORTED_ARTIFACTS]
 
-        stdout_bytes, stdout_capped = self._read(stdout_path)
-        stderr_bytes, stderr_capped = self._read(stderr_path)
+        stdout_bytes, stdout_digest, stdout_total, stdout_capped = self._read(stdout_path)
+        stderr_bytes, stderr_digest, stderr_total, stderr_capped = self._read(stderr_path)
         stdout, stdout_omitted = _truncate(
             stdout_bytes.decode("utf-8", "replace"), MAX_STDOUT_CHARACTERS
         )
@@ -290,10 +310,10 @@ class SeatbeltSandboxRunner(SandboxRunner):
             stderr=stderr,
             stdout_omitted_characters=stdout_omitted,
             stderr_omitted_characters=stderr_omitted,
-            stdout_digest=_digest(stdout_bytes),
-            stderr_digest=_digest(stderr_bytes),
-            stdout_byte_size=len(stdout_bytes),
-            stderr_byte_size=len(stderr_bytes),
+            stdout_digest=stdout_digest,
+            stderr_digest=stderr_digest,
+            stdout_byte_size=stdout_total,
+            stderr_byte_size=stderr_total,
             artifacts=reported,
             artifacts_omitted=len(artifacts) - len(reported),
             wall_seconds_used=elapsed,
@@ -302,7 +322,9 @@ class SeatbeltSandboxRunner(SandboxRunner):
             stdout_capped=stdout_capped,
             stderr_capped=stderr_capped,
         )
-        self._write_manifest(request, paths, outcome, before, after, argv)
+        self._write_manifest(
+            request, paths, outcome, before, after, argv, state_truncated
+        )
         return outcome
 
     @staticmethod
@@ -345,28 +367,37 @@ class SeatbeltSandboxRunner(SandboxRunner):
         LOGGER.warning("A sandbox process group did not terminate")
 
     @staticmethod
-    def _read(path: Path) -> tuple[bytes, bool]:
-        """Return the captured stream and whether the file exceeded the cap.
+    def _read(path: Path) -> tuple[bytes, str, int, bool]:
+        """Return a bounded prefix plus the digest and size of the whole file.
 
-        The flag matters: a digest over a prefix is not a digest of the output,
-        and a durable record that could not say so would be a false record.
+        The digest and size describe everything the child wrote, streamed so a
+        large file is never held in memory. Hashing only the prefix would make
+        the durable record describe something other than the output while
+        appearing to describe it.
         """
+        digest = hashlib.sha256()
+        total = 0
+        prefix = b""
         try:
-            size = path.stat().st_size
             with path.open("rb") as handle:
-                data = handle.read(_MAX_CAPTURED_BYTES)
+                while chunk := handle.read(_READ_CHUNK):
+                    digest.update(chunk)
+                    total += len(chunk)
+                    if len(prefix) < _MAX_CAPTURED_BYTES:
+                        prefix += chunk[: _MAX_CAPTURED_BYTES - len(prefix)]
         except OSError as error:
             raise SandboxError("output_unreadable") from error
-        return data, size > len(data)
+        return prefix, digest.hexdigest(), total, total > len(prefix)
 
     def _write_manifest(
         self,
         request: SandboxRequest,
         paths: SessionPaths,
         outcome: SandboxOutcome,
-        before: dict[str, tuple[str, int]],
-        after: dict[str, tuple[str, int]],
+        before: "WalkResult",
+        after: "WalkResult",
         argv: list[str],
+        state_truncated: bool,
     ) -> None:
         """The bounded record that outlives the bytes it describes.
 
@@ -406,9 +437,25 @@ class SeatbeltSandboxRunner(SandboxRunner):
             "stderr_byte_size": outcome.stderr_byte_size,
             "stdout_capped": outcome.stdout_capped,
             "stderr_capped": outcome.stderr_capped,
-            "state_before": {name: list(value) for name, value in before.items()},
-            "state_after": {name: list(value) for name, value in after.items()},
-            "artifacts": [item.as_values() for item in outcome.artifacts],
+            # Filenames are chosen by the experiment, so they are authored
+            # text. D-027 requires that retention remove every experiment
+            # authored byte while the manifest survives, and a manifest that
+            # kept names would let a program smuggle arbitrary text — or
+            # exfiltrated output — past retention by encoding it in a filename.
+            # Names are therefore recorded as digests here; the readable names
+            # reach the Core in the transient result, which is never persisted.
+            "state_before": _named_digests(before.entries),
+            "state_after": _named_digests(after.entries),
+            "state_truncated": state_truncated,
+            "artifacts": [
+                {
+                    "name_digest": _digest(item.name.encode("utf-8")),
+                    "change": item.change.value,
+                    "byte_size": item.byte_size,
+                    "digest": item.digest,
+                }
+                for item in outcome.artifacts
+            ],
             "artifacts_omitted": outcome.artifacts_omitted,
             "wall_seconds_used": round(outcome.wall_seconds_used, 3),
             "started_at": outcome.started_at.isoformat(),
