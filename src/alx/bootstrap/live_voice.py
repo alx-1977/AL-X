@@ -58,6 +58,8 @@ from alx.config import (
     RuntimeSettings,
     XeroSettings,
 )
+from alx.continuity.completed_work_source import CompletedWorkSource
+from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity import (
     DueCognitionSource,
     FutureCognitionSource,
@@ -608,27 +610,6 @@ async def run(repository_root: Path) -> None:
     # The due-cognition tick lives for the life of the process, beside the
     # transport rather than inside it. Voice is how she is heard, not what
     # decides whether she exists.
-    autonomous_runner = AutonomousCognitionRunner(
-        cognition_source,
-        opportunity_ledger,
-        gateway,
-        voice_settings.core_step_budget,
-        voice_settings.goal_retention_days,
-        response_transport=server,
-        commissioning_limit=autonomous_commissioning_limit(environment),
-    )
-    due_cognition = DueCognitionSource(
-        cognition_source,
-        autonomous_runner,
-        core_turn_lock,
-        autonomous_due_check_seconds(environment),
-    )
-    # Watching the mailbox is not a property of whether Friedl has a browser
-    # open, so the scan lives here beside the transport rather than inside a
-    # voice exchange. It is purely mechanical: it discovers, advances the
-    # cursor and reconciles into durable state, and makes no Core call. What
-    # it finds reaches AL/X through the one delivery path a session already
-    # owns.
     # Work handed to an external service does not stop when a browser closes,
     # so what watches it lives here beside the transport, as the mail scan and
     # the due-cognition tick do. It only looks: it cannot request a review,
@@ -641,20 +622,50 @@ async def run(repository_root: Path) -> None:
         lambda conversation_id, line: diagnostics.publish(
             conversation_id, {"stream": "TASK", "message": line, "tone": "info"}
         ),
-        lambda task: opportunity_ledger.record_created(
-            CognitionOpportunity(
-                opportunity_id=f"task:{task.task_id}",
-                origin=CognitionOrigin.WORK_COMPLETED,
-                arose_at=task.completed_at or datetime.now(UTC),
-                conversation_id=task.conversation_id,
-                # The task, never the result. What the review says is hers to
-                # read from the source rather than something carried here.
-                references=(task.subject_reference,),
-            )
-        ),
+        # Completion is recorded durably by the watcher. Turning it into a
+        # Core turn is the completed-work source's job, through the same
+        # runner, ledger and lock as every other occasion. Writing an
+        # opportunity here instead left a ledger row nothing consumed, so the
+        # Core was never woken.
+        lambda task: None,
     )
 
     task_holder[0] = task_runtime
+
+    # Every kind of occasion reaches the Core through one producer, one
+    # runner and one tick. A finished external task joins the matured requests
+    # here rather than bringing a second tick, which would be a competing
+    # production path to the same outcome.
+    occasion_source = CombinedOccasionSource(
+        cognition_source,
+        CompletedWorkSource(
+            task_runtime.store,
+            opportunity_ledger,
+            enabled=providers.autonomous is not None,
+        ),
+    ) if task_runtime is not None else cognition_source
+
+    autonomous_runner = AutonomousCognitionRunner(
+        occasion_source,
+        opportunity_ledger,
+        gateway,
+        voice_settings.core_step_budget,
+        voice_settings.goal_retention_days,
+        response_transport=server,
+        commissioning_limit=autonomous_commissioning_limit(environment),
+    )
+    due_cognition = DueCognitionSource(
+        occasion_source,
+        autonomous_runner,
+        core_turn_lock,
+        autonomous_due_check_seconds(environment),
+    )
+    # Watching the mailbox is not a property of whether Friedl has a browser
+    # open, so the scan lives here beside the transport rather than inside a
+    # voice exchange. It is purely mechanical: it discovers, advances the
+    # cursor and reconciles into durable state, and makes no Core call. What
+    # it finds reaches AL/X through the one delivery path a session already
+    # owns.
 
     mail_store_lock = asyncio.Lock()
     mail_poller = MailPoller(

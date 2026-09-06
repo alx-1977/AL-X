@@ -24,6 +24,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.continuity.tasks import SQLiteTaskStore  # noqa: E402
+from alx.contracts.cognition import CognitionOrigin  # noqa: E402
 from alx.contracts.task import ExternalTask, TaskObservation, TaskState  # noqa: E402
 from alx.interfaces.task_poller import TaskPoller  # noqa: E402
 from alx.providers.qodo_status import (  # noqa: E402
@@ -489,5 +490,231 @@ class PollerFailureRegressions(PollerHarness):
         self.assertEqual(len(self.store.outstanding()), 1)
 
 
+class OneProducerForEveryOccasionTest(unittest.TestCase):
+    """Both kinds of occasion reach the Core through one tick and one runner."""
+
+    class Ledger:
+        def __init__(self) -> None:
+            self.created: list[str] = []
+
+        def exists(self, opportunity_id: str) -> bool:
+            return opportunity_id in self.created
+
+        def record_created(self, opportunity) -> bool:
+            if opportunity.opportunity_id in self.created:
+                return False
+            self.created.append(opportunity.opportunity_id)
+            return True
+
+        def release(self, opportunity_id: str) -> None:
+            self.created.remove(opportunity_id)
+
+    def test_each_occasion_is_claimed_by_the_producer_that_made_it(self) -> None:
+        """A combined producer must not blur which source owns what.
+
+        Claiming through the wrong producer would mark the wrong thing
+        honoured, and the real one would be offered again as a second paid
+        turn.
+        """
+        from alx.continuity import CompletedWorkSource
+        from alx.continuity.occasions import CombinedOccasionSource
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = SQLiteTaskStore(Path(directory.name) / "tasks.sqlite3")
+        store.record(_task())
+        store.record(
+            _task(state=TaskState.COMPLETED, completed_at=datetime.now(UTC))
+        )
+
+        class Matured:
+            enabled = True
+            honoured: list = []
+
+            def due_opportunities(self):
+                return ()
+
+            def owns(self, opportunity) -> bool:
+                return any(
+                    r.startswith("future_cognition:") for r in opportunity.references
+                )
+
+            def claim(self, opportunity) -> bool:
+                return True
+
+            def release(self, opportunity) -> None:
+                pass
+
+            def mark_honoured(self, opportunity) -> None:
+                Matured.honoured.append(opportunity)
+
+        work = CompletedWorkSource(store, self.Ledger(), enabled=True)
+        combined = CombinedOccasionSource(Matured(), work)
+
+        occasions = combined.due_opportunities()
+        self.assertEqual(len(occasions), 1)
+        self.assertTrue(combined.claim(occasions[0]))
+        combined.mark_honoured(occasions[0])
+
+        # The task producer closed its own work; the other was never touched.
+        self.assertEqual(store.completed_unhandled(), ())
+        self.assertEqual(Matured.honoured, [])
+
+    def test_an_unowned_occasion_is_never_claimed(self) -> None:
+        """Nothing is spent on an occasion no producer recognises."""
+        from alx.continuity.occasions import CombinedOccasionSource
+        from alx.contracts.continuity import CognitionOpportunity
+
+        combined = CombinedOccasionSource()
+        stray = CognitionOpportunity(
+            opportunity_id="stray",
+            origin=CognitionOrigin.WORK_COMPLETED,
+            arose_at=datetime.now(UTC),
+            conversation_id="c",
+            references=("something_else:1",),
+        )
+        self.assertFalse(combined.claim(stray))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompletionReachesCoreTest(unittest.TestCase):
+    """The handoff the watcher exists for, end to end.
+
+    The watcher noticed completion and wrote an opportunity straight to the
+    ledger, where nothing consumed it: the row said `created` forever and the
+    Core was never invoked. The completion now goes through the same producer
+    protocol a matured request uses, so the existing tick picks it up.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.store = SQLiteTaskStore(Path(self.directory.name) / "tasks.sqlite3")
+
+    class Ledger:
+        """The occasion ledger, reduced to what the protocol touches."""
+
+        def __init__(self) -> None:
+            self.created: list[str] = []
+
+        def exists(self, opportunity_id: str) -> bool:
+            return opportunity_id in self.created
+
+        def record_created(self, opportunity) -> bool:
+            if opportunity.opportunity_id in self.created:
+                return False
+            self.created.append(opportunity.opportunity_id)
+            return True
+
+        def release(self, opportunity_id: str) -> None:
+            self.created.remove(opportunity_id)
+
+    def _complete_one(self) -> None:
+        """Drive the watcher until it observes completion."""
+        self.store.record(_task())
+        poller = TaskPoller(
+            self.store,
+            {"qodo": RecordingObserver(TaskState.COMPLETED)},
+            interval_seconds=1.0,
+            announce=lambda conversation, line: None,
+            # Completion is durable in the store; nothing is written to the
+            # ledger here, which is the defect this test exists to prove fixed.
+            completed=lambda task: None,
+        )
+        poller.tick()
+
+    def test_an_observed_completion_becomes_a_consumable_occasion(self) -> None:
+        from alx.continuity import CompletedWorkSource
+
+        self._complete_one()
+        source = CompletedWorkSource(self.store, self.Ledger(), enabled=True)
+        opportunities = source.due_opportunities()
+
+        self.assertEqual(len(opportunities), 1)
+        occasion = opportunities[0]
+        self.assertIs(occasion.origin, CognitionOrigin.WORK_COMPLETED)
+        self.assertEqual(occasion.conversation_id, "conversation-1")
+        self.assertIsNotNone(occasion.arose_at)
+        # The task, never the result.
+        self.assertEqual(
+            occasion.references, (f"external_task:review:21:{HEAD}",)
+        )
+        self.assertIsNone(occasion.note)
+
+    def test_the_existing_tick_schedules_a_core_turn_for_it(self) -> None:
+        """The whole point: the runtime that already exists runs the turn."""
+        import asyncio
+
+        from alx.continuity import CompletedWorkSource
+        from alx.continuity.due_source import DueCognitionSource
+
+        self._complete_one()
+        source = CompletedWorkSource(self.store, self.Ledger(), enabled=True)
+        ran: list = []
+
+        class Runner:
+            def run_one(self, opportunity) -> bool:
+                # What the real runner does first, so the claim is exercised.
+                if not source.claim(opportunity):
+                    return False
+                ran.append(opportunity)
+                source.mark_honoured(opportunity)
+                return True
+
+        tick = DueCognitionSource(source, Runner(), asyncio.Lock(), 30.0)
+        self.assertEqual(asyncio.run(tick.tick()), 1)
+        self.assertEqual(len(ran), 1)
+        self.assertIs(ran[0].origin, CognitionOrigin.WORK_COMPLETED)
+
+    def test_a_handled_completion_is_not_run_twice(self) -> None:
+        """A replayed occasion is a second paid turn for one result."""
+        import asyncio
+
+        from alx.continuity import CompletedWorkSource
+        from alx.continuity.due_source import DueCognitionSource
+
+        self._complete_one()
+        ledger = self.Ledger()
+        source = CompletedWorkSource(self.store, ledger, enabled=True)
+
+        class Runner:
+            def run_one(self, opportunity) -> bool:
+                if not source.claim(opportunity):
+                    return False
+                source.mark_honoured(opportunity)
+                return True
+
+        tick = DueCognitionSource(source, Runner(), asyncio.Lock(), 30.0)
+        self.assertEqual(asyncio.run(tick.tick()), 1)
+        # The store itself must stop offering it. Checking only the source
+        # would pass on the ledger's refusal alone, leaving the completion
+        # unhandled forever in a fresh process whose ledger is empty.
+        self.assertEqual(self.store.completed_unhandled(), ())
+        self.assertEqual(source.due_opportunities(), ())
+        self.assertEqual(asyncio.run(tick.tick()), 0)
+
+        # And a restart, whose ledger has forgotten the claim, must not run it
+        # again either.
+        self.assertEqual(
+            CompletedWorkSource(
+                self.store, self.Ledger(), enabled=True
+            ).due_opportunities(),
+            (),
+        )
+
+    def test_nothing_is_offered_while_the_switch_is_off(self) -> None:
+        from alx.continuity import CompletedWorkSource
+
+        self._complete_one()
+        source = CompletedWorkSource(self.store, self.Ledger(), enabled=False)
+        self.assertEqual(source.due_opportunities(), ())
+
+    def test_an_incomplete_task_is_not_offered(self) -> None:
+        from alx.continuity import CompletedWorkSource
+
+        self.store.record(_task())
+        source = CompletedWorkSource(self.store, self.Ledger(), enabled=True)
+        self.assertEqual(source.due_opportunities(), ())

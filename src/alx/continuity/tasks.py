@@ -55,7 +55,8 @@ class SQLiteTaskStore:
                     requested_at TEXT NOT NULL,
                     last_checked_at TEXT,
                     completed_at TEXT,
-                    conversation_id TEXT NOT NULL DEFAULT ''
+                    conversation_id TEXT NOT NULL DEFAULT '',
+                    handed_over INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS external_tasks_state
                     ON external_tasks(state);
@@ -100,6 +101,47 @@ class SQLiteTaskStore:
                         else task.completed_at.isoformat(),
                         task.conversation_id,
                     ),
+                )
+            except sqlite3.Error as error:
+                raise TaskStoreCorrupt(str(error)) from error
+            finally:
+                database.close()
+
+    def completed_unhandled(self) -> tuple[ExternalTask, ...]:
+        """Completed tasks whose completion the Core has not yet been given.
+
+        Completion is durable, so the handover survives a restart: a process
+        that stopped between noticing a result and running the turn finds the
+        completion still waiting rather than losing it.
+        """
+        with self._lock:
+            database = self._db()
+            try:
+                rows = database.execute(
+                    """
+                    SELECT task_id, kind, service, subject_reference, state,
+                           requested_at, last_checked_at, completed_at,
+                           conversation_id
+                    FROM external_tasks
+                    WHERE state = ? AND handed_over = 0
+                    ORDER BY completed_at
+                    """,
+                    (TaskState.COMPLETED.value,),
+                ).fetchall()
+            except sqlite3.Error as error:
+                raise TaskStoreCorrupt(str(error)) from error
+            finally:
+                database.close()
+        return tuple(self._task(row) for row in rows)
+
+    def mark_handed_over(self, task_id: str) -> None:
+        """Record that the Core has been given this completion."""
+        with self._lock:
+            database = self._db()
+            try:
+                database.execute(
+                    "UPDATE external_tasks SET handed_over = 1 WHERE task_id = ?",
+                    (task_id,),
                 )
             except sqlite3.Error as error:
                 raise TaskStoreCorrupt(str(error)) from error
