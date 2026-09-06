@@ -211,11 +211,16 @@ class MergeAuthorityTest(unittest.TestCase):
 class MergeProviderTest(unittest.TestCase):
     """The GitHub call itself, without contacting GitHub."""
 
-    def _provider(self, status: int, body: object):
+    def _provider(self, status: int, body: object, headers: dict | None = None):
         from alx.providers import github_merge
+
+        supplied = dict(headers or {})
 
         class Response:
             status_code = status
+
+            def __init__(self) -> None:
+                self.headers = supplied
 
             @staticmethod
             def json():
@@ -256,6 +261,41 @@ class MergeProviderTest(unittest.TestCase):
                 with self.assertRaises(MergeError) as caught:
                     provider.merge(MergeRequest(pull_request_number=21, head_sha=HEAD))
                 self.assertEqual(caught.exception.code, "merge_refused")
+
+    def test_throttling_is_not_reported_as_a_refusal(self) -> None:
+        """A rate limit means try later; a refusal means the merge was rejected.
+
+        GitHub answers 403 for both, so the headers decide. Reporting a limit
+        as a refusal would tell AL/X the change was rejected when it was only
+        delayed.
+        """
+        for headers in (
+            {"retry-after": "60"},
+            {"x-ratelimit-remaining": "0", "x-ratelimit-limit": "5000"},
+        ):
+            with self.subTest(headers=headers):
+                provider, _ = self._provider(403, {"message": "rate limited"}, headers)
+                with self.assertRaises(MergeError) as caught:
+                    provider.merge(MergeRequest(pull_request_number=21, head_sha=HEAD))
+                self.assertEqual(caught.exception.code, "merge_unavailable")
+
+    def test_a_genuine_refusal_is_still_a_refusal(self) -> None:
+        provider, _ = self._provider(
+            403, {"message": "protected branch"}, {"x-ratelimit-remaining": "4999"}
+        )
+        with self.assertRaises(MergeError) as caught:
+            provider.merge(MergeRequest(pull_request_number=21, head_sha=HEAD))
+        self.assertEqual(caught.exception.code, "merge_refused")
+
+    def test_a_malformed_repository_is_refused_at_construction(self) -> None:
+        """A wrong endpoint would surface only as a generic failure at merge."""
+        from alx.providers.github_merge import GitHubMergeProvider
+
+        for repository in ("/repo", "owner/", "owner/repo/extra", "ownerrepo", ""):
+            with self.subTest(repository=repository):
+                with self.assertRaises(ValueError):
+                    GitHubMergeProvider(repository, "token")
+        GitHubMergeProvider("alx-1977/AL-X", "token")
 
     def test_a_response_that_did_not_merge_is_never_reported_as_merged(self) -> None:
         provider, _ = self._provider(200, {"merged": False})

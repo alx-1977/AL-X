@@ -22,8 +22,15 @@ import re
 from dataclasses import dataclass
 
 
-# GitHub merge methods. Squash keeps one commit per pull request, which is how
-# this repository's history is shaped.
+# One merge method, fixed deliberately rather than configured.
+#
+# `main` requires linear history, and every merge in this repository so far has
+# been a squash, so this is the established shape rather than a preference
+# expressed in code. Making it configurable would add a policy surface nobody
+# has asked for, and making it an AL/X decision would put a choice with one
+# correct answer into a reasoning call, which Law 2 says belongs in code.
+#
+# If the repository's merge policy ever changes, this changes with it.
 MERGE_METHOD = "squash"
 
 # Bounded because they are transported and recorded, not because length says

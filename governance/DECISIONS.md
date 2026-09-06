@@ -523,7 +523,7 @@ Revisit if retrieval reaches anything not publicly reachable; if a retrieved pag
 
 ### What AL/X decides
 
-Whether the code is ready for review; whether to use an external review at all; what the findings mean; whether they require correction; whether to withhold the merge; whether the review covers the current revision; and whether to merge.
+Whether the code is ready for review; what the findings mean; whether they require correction; whether to withhold the merge; whether the review covers the current revision; and whether to merge.
 
 ### What deterministic code does
 
