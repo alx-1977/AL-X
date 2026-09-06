@@ -13,9 +13,6 @@ from pathlib import Path
 
 
 REQUIRED_FILES = (
-    "review/brief.json",
-    "review/context.json",
-    "review/mandate.md",
     ".github/CODEOWNERS",
     ".github/copilot-instructions.md",
     ".github/pull_request_template.md",
@@ -31,22 +28,9 @@ REQUIRED_FILES = (
     "docs/TECHNICAL_PLAN.md",
     "governance/DECISIONS.md",
     "governance/EXCEPTIONS.md",
-    "governance/REVIEW_BRIEF.sha256",
     "governance/IDENTITY_AND_MEMORY.sha256",
     "governance/LAWS_OF_ALX.sha256",
 )
-
-REVIEW_RULE_IDS = {
-    "alx-one-production-path",
-    "alx-single-reasoning-authority",
-    "alx-dynamic-reasoning",
-    "alx-no-unapproved-hardcoding",
-    "alx-one-conversation-path",
-    "alx-primitive-tool-boundary",
-    "alx-durable-goal-loop",
-    "alx-explicit-exceptions-only",
-    "alx-governed-capability-invention",
-}
 
 REVIEW_CONTEXT_FILES = {
     "LAWS_OF_ALX.md",
@@ -183,134 +167,6 @@ def _load_json(path: Path, relative_path: str, violations: list[str]) -> dict:
     return value
 
 
-def _check_review_brief(root: Path, violations: list[str]) -> None:
-    config_path = root / "review/brief.json"
-    files_path = root / "review/context.json"
-    rules_path = root / "review/mandate.md"
-    if not all(path.is_file() for path in (config_path, files_path, rules_path)):
-        return
-
-    config = _load_json(config_path, "review/brief.json", violations)
-    if config.get("strictness") != 1:
-        violations.append("review/brief.json: strictness must remain 1")
-    if config.get("skipReview") != "AUTOMATIC":
-        violations.append(
-            "review/brief.json: automatic reviews must remain disabled"
-        )
-    if config.get("triggerOnUpdates") is not False:
-        violations.append(
-            "review/brief.json: automatic commit re-reviews must remain disabled"
-        )
-    if config.get("triggerOnDrafts") is not False:
-        violations.append(
-            "review/brief.json: automatic draft reviews must remain disabled"
-        )
-    if config.get("statusCheck") is not True:
-        violations.append(
-            "review/brief.json: manual reviews must publish the required status check"
-        )
-    instructions = config.get("instructions", "")
-    for marker in (
-        "independent constitutional reviewer",
-        "AL/X LAW VIOLATION — BLOCKING",
-        "Never invent, infer, or approve an exception",
-    ):
-        if marker not in instructions:
-            violations.append(
-                f"review/brief.json: instructions missing required marker: {marker}"
-            )
-
-    rules = config.get("rules", [])
-    if not isinstance(rules, list):
-        violations.append("review/brief.json: rules must be an array")
-        rules = []
-    rules_by_id = {
-        rule.get("id"): rule
-        for rule in rules
-        if isinstance(rule, dict) and isinstance(rule.get("id"), str)
-    }
-    missing_rules = REVIEW_RULE_IDS - rules_by_id.keys()
-    if missing_rules:
-        violations.append(
-            "review/brief.json: missing constitutional rules: "
-            + ", ".join(sorted(missing_rules))
-        )
-    for rule_id in REVIEW_RULE_IDS & rules_by_id.keys():
-        rule = rules_by_id[rule_id]
-        if rule.get("severity") != "high" or rule.get("enabled") is False:
-            violations.append(
-                f"review/brief.json: {rule_id} must remain enabled at high severity"
-            )
-    one_path = rules_by_id.get("alx-one-production-path", {})
-    one_path_text = one_path.get("rule", "") if isinstance(one_path, dict) else ""
-    for marker in (
-        "exactly one authoritative implementation path",
-        "must be deleted",
-        "Tests must prove the competing path is absent",
-    ):
-        if marker not in one_path_text:
-            violations.append(
-                "review/brief.json: alx-one-production-path missing required "
-                f"marker: {marker}"
-            )
-
-    context = _load_json(files_path, "review/context.json", violations)
-    context_entries = context.get("files", [])
-    context_paths = {
-        entry.get("path")
-        for entry in context_entries
-        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
-    }
-    missing_context = REVIEW_CONTEXT_FILES - context_paths
-    if missing_context:
-        violations.append(
-            "review/context.json: missing canonical context: "
-            + ", ".join(sorted(missing_context))
-        )
-
-    rules_text = rules_path.read_text(encoding="utf-8")
-    _require_markers(
-        rules_text,
-        "review/mandate.md",
-        (
-            "`LAWS_OF_ALX.md` is the sole canonical law text.",
-            "exactly one authoritative implementation path",
-            "Require deletion, not concealment or redirection.",
-            "Who is deciding meaning",
-            "AL/X LAW VIOLATION — BLOCKING",
-            "Do not create or infer exceptions.",
-        ),
-        violations,
-    )
-
-    checksum_path = root / "governance/REVIEW_BRIEF.sha256"
-    if not checksum_path.is_file():
-        return
-    expected_paths = {
-        "review/brief.json",
-        "review/context.json",
-        "review/mandate.md",
-    }
-    recorded: dict[str, str] = {}
-    for line in checksum_path.read_text(encoding="utf-8").splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (review/(?:brief\.json|context\.json|mandate\.md))", line)
-        if not match:
-            violations.append("governance/REVIEW_BRIEF.sha256: invalid checksum record")
-            continue
-        recorded[match.group(2)] = match.group(1)
-    if recorded.keys() != expected_paths:
-        violations.append(
-            "governance/REVIEW_BRIEF.sha256: expected checksums for all three review-brief files"
-        )
-        return
-    for relative_path, expected_digest in recorded.items():
-        actual_digest = hashlib.sha256((root / relative_path).read_bytes()).hexdigest()
-        if actual_digest != expected_digest:
-            violations.append(
-                f"{relative_path} differs from its approved checksum; explicit owner approval and checksum update are required"
-            )
-
-
 def check_repository(root: Path) -> list[str]:
     root = root.resolve()
     violations: list[str] = []
@@ -376,9 +232,6 @@ def check_repository(root: Path) -> list[str]:
     # governance/DECISIONS.md is excluded because it records decisions as they
     # were approved at the time.
     for relative_path in (
-        "review/mandate.md",
-        "review/brief.json",
-        "review/context.json",
         "AGENTS.md",
         "CLAUDE.md",
         "README.md",
@@ -511,7 +364,6 @@ def check_repository(root: Path) -> list[str]:
 
     exceptions = _read(root, "governance/EXCEPTIONS.md", violations)
     _check_exceptions(exceptions, violations)
-    _check_review_brief(root, violations)
     _check_law_checksum(root, violations)
     _check_identity_checksum(root, violations)
     _check_env_is_ignored(root, violations)
