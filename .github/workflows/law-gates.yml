@@ -37,17 +37,42 @@ jobs:
       - name: Verify architecture boundaries
         run: python scripts/check_architecture.py
 
+      - name: Test the enforcement gates
+        run: python -m unittest discover -s tests -v
+
+  # A separate job so branch protection can require it by name. Folding it into
+  # law-gates would make "no qualifying review" indistinguishable from "a law
+  # gate broke", and the two need different responses.
+  independent-review:
+    name: independent-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Verify an accepted independent review covers this head
-        # Reporting only. D-026 makes this blocking once it has accumulated
-        # evidence on real merges and Friedl approves the promotion; until
-        # then `Greptile Review` remains the enforcing check.
+        # Blocking. D-026's rollout reserved this promotion to Friedl, who
+        # approved it on 2026-09-06; `Greptile Review` is removed as a required
+        # check in the same change. Any reviewer in review/accepted_reviewers.json
+        # can satisfy it, which is what makes the requirement a property rather
+        # than a provider.
+        #
+        # `--event-name` is passed explicitly so that a pull_request event
+        # arriving without its number fails closed instead of passing with
+        # nothing verified.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/check_independent_review.py \
+            --enforce \
+            --event-name "${{ github.event_name }}" \
             --repository "${{ github.repository }}" \
             --pull-request "${{ github.event.pull_request.number || 0 }}" \
             --head-sha "${{ github.event.pull_request.head.sha || '' }}"
-
-      - name: Test the enforcement gates
-        run: python -m unittest discover -s tests -v

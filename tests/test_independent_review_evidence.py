@@ -478,9 +478,60 @@ class NetworkAndCommandLineTests(unittest.TestCase):
         for arguments in (
             ("--root", str(self.root)),
             ("--root", str(self.root), "--enforce"),
+            ("--root", str(self.root), "--enforce", "--event-name", "push"),
+            ("--root", str(self.root), "--enforce", "--event-name", "schedule"),
         ):
             with self.subTest(arguments=arguments):
                 self.assertEqual(self.run_main(*arguments), 0)
+
+    def test_a_pull_request_event_without_its_number_fails_closed(self) -> None:
+        """The one way a required check could pass while verifying nothing.
+
+        A push has no pull request and legitimately passes. A pull_request
+        event that arrived without its number is a broken invocation, and
+        treating the two alike would let a workflow edit satisfy branch
+        protection with no review at all.
+        """
+        def refuse(*arguments, **keywords):
+            raise AssertionError("GitHub must not be consulted without a pull request")
+
+        for event in ("pull_request", "pull_request_target"):
+            with self.subTest(event=event):
+                self.assertEqual(
+                    self.run_main(
+                        "--root", str(self.root),
+                        "--enforce", "--event-name", event,
+                        responses=refuse,
+                    ),
+                    1,
+                )
+                # Reporting mode still passes: it blocks nothing by design.
+                self.assertEqual(
+                    self.run_main(
+                        "--root", str(self.root),
+                        "--event-name", event,
+                        responses=refuse,
+                    ),
+                    0,
+                )
+
+    def test_the_workflow_enforces_and_supplies_the_event_name(self) -> None:
+        """The guard is worthless if the workflow never passes the event.
+
+        `--event-name` is what separates "no pull request here" from "a pull
+        request whose number went missing", so a workflow that enforced without
+        it would reinstate the vacuous pass this test exists to prevent.
+        """
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github/workflows/law-gates.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("independent-review", workflow)
+        self.assertIn("--enforce", workflow)
+        self.assertIn("--event-name", workflow)
+        self.assertIn("github.event_name", workflow)
+        # The enforcing invocation must carry both, not one of them.
+        step = workflow.split("--enforce", 1)[1]
+        self.assertIn("--event-name", step.split("--head-sha", 1)[0])
 
     def test_a_short_head_sha_cannot_satisfy_enforcement(self) -> None:
         """An abbreviation names a commit the gate cannot pin down."""
@@ -520,6 +571,49 @@ class NetworkAndCommandLineTests(unittest.TestCase):
             self.run_main(*self._arguments(), responses=refuse, token=""), 0
         )
 
+    def test_a_word_containing_pending_does_not_void_an_exception(self) -> None:
+        """"depending" is not "pending", and the difference is load-bearing.
+
+        The unapproved marker was matched as a substring, so any exception
+        whose prose contained "depending", "appending", "impending" or
+        "spending" was silently ignored while reading as approved. EX-004 and
+        EX-005 both contain such a word. Nothing reports this: the exception
+        simply stops working.
+        """
+        for word in ("depending", "appending", "impending", "spending"):
+            with self.subTest(word=word):
+                (self.root / "governance/EXCEPTIONS.md").write_text(
+                    f"## EX-009\n\n- **Scope:** `{HEAD}`.\n"
+                    f"- **Approval date:** 2026-09-05.\n"
+                    f"- **Necessity:** it exists to stop {word} on one provider.\n",
+                    encoding="utf-8",
+                )
+
+                def refuse(*arguments, **keywords):
+                    raise AssertionError(
+                        "GitHub must not be called once an exception covers the head"
+                    )
+
+                self.assertEqual(
+                    self.run_main(*self._arguments("--enforce"), responses=refuse), 0
+                )
+
+    def test_a_standalone_pending_still_voids_an_exception(self) -> None:
+        """The guard must keep doing the job it was added for."""
+        for marker in ("pending", "Pending", "PENDING", "approval pending."):
+            with self.subTest(marker=marker):
+                (self.root / "governance/EXCEPTIONS.md").write_text(
+                    f"## EX-009\n\n- **Scope:** `{HEAD}`.\n"
+                    f"- **Approval date:** {marker}\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    self.run_main(
+                        *self._arguments("--enforce"), responses=lambda *a, **k: []
+                    ),
+                    1,
+                )
+
     def test_an_approved_exception_is_honoured_without_calling_github(self) -> None:
         (self.root / "governance/EXCEPTIONS.md").write_text(
             f"## EX-009\n\n- **Scope:** `{HEAD}`.\n- **Approval date:** 2026-09-05.\n",
@@ -532,3 +626,207 @@ class NetworkAndCommandLineTests(unittest.TestCase):
         self.assertEqual(
             self.run_main(*self._arguments("--enforce"), responses=refuse), 0
         )
+
+
+IMPLEMENTATION = "b" * 40
+UNRELATED = "c" * 40
+
+
+class SelfReferentialExceptionTests(unittest.TestCase):
+    """The narrow B-prime path, and the seven ways it must refuse.
+
+    An exception recorded inside the pull request it covers cannot name its own
+    head: a commit cannot contain its own SHA. So the approved SHA sits below
+    the tip and the commits above it must be the register entry and nothing
+    else.
+
+    This is deliberately not "any approved ancestor makes the head valid". Each
+    test below removes exactly one condition and proves the path closes.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        (self.root / "review").mkdir()
+        (self.root / "review/accepted_reviewers.json").write_text(
+            json.dumps({"reviewers": [{"id": REVIEWER_ID, "login": "reviewer"}]}),
+            encoding="utf-8",
+        )
+        (self.root / "governance").mkdir()
+        self._write_exception(IMPLEMENTATION, pull_request=1)
+
+    def _write_exception(
+        self, sha: str, pull_request: int, approval: str = "2026-09-06."
+    ) -> None:
+        (self.root / "governance/EXCEPTIONS.md").write_text(
+            f"## EX-005 — bootstrap\n\n"
+            f"- **Scope:** pull request #{pull_request} at `{sha}`, plus the "
+            f"single commit adding this record.\n"
+            f"- **Approval date:** {approval}\n"
+            f"- **Necessity:** it exists to stop depending on one provider.\n",
+            encoding="utf-8",
+        )
+
+    def _run(self, commits, files_by_sha, head=HEAD, pull_request="1"):
+        """Drive main() with both GitHub accessors replaced."""
+        import check_independent_review as module
+
+        def paged(url, token):
+            if url.endswith("/commits"):
+                return commits
+            return []
+
+        def request(url, token):
+            sha = url.rsplit("/", 1)[-1]
+            if sha not in files_by_sha:
+                raise urllib.error.URLError("no such commit")
+            return {"files": [{"filename": name} for name in files_by_sha[sha]]}
+
+        environment = dict(os.environ)
+        environment["GITHUB_TOKEN"] = "t"
+        with unittest.mock.patch.dict(os.environ, environment, clear=True):
+            with contextlib.redirect_stdout(io.StringIO()) as captured:
+                with unittest.mock.patch.object(module, "_paged", side_effect=paged):
+                    with unittest.mock.patch.object(
+                        module, "_request", side_effect=request
+                    ):
+                        code = module.main(
+                            [
+                                "--root", str(self.root),
+                                "--repository", "owner/repo",
+                                "--pull-request", pull_request,
+                                "--head-sha", head,
+                                "--enforce",
+                            ]
+                        )
+        self.output = captured.getvalue()
+        return code
+
+    # 1. The case this exists for.
+    def test_implementation_plus_record_only_commit_passes(self) -> None:
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("only its own record sits above it", self.output)
+
+    # 2. Source code above the approved SHA.
+    def test_a_code_change_above_the_approved_sha_fails(self) -> None:
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+            files_by_sha={
+                HEAD: ["governance/EXCEPTIONS.md", "src/alx/tools/sandbox.py"]
+            },
+        )
+        self.assertEqual(code, 1)
+
+    # 3. The verifier or the workflow above the approved SHA.
+    def test_a_workflow_or_verifier_change_above_the_approved_sha_fails(self) -> None:
+        for smuggled in (
+            ".github/workflows/law-gates.yml",
+            "scripts/check_independent_review.py",
+            "review/accepted_reviewers.json",
+            "governance/DECISIONS.md",
+        ):
+            with self.subTest(file=smuggled):
+                code = self._run(
+                    commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+                    files_by_sha={HEAD: ["governance/EXCEPTIONS.md", smuggled]},
+                )
+                self.assertEqual(code, 1)
+
+    # 4. An exception approved for another pull request.
+    def test_an_exception_for_a_different_pull_request_fails(self) -> None:
+        self._write_exception(IMPLEMENTATION, pull_request=99)
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
+        )
+        self.assertEqual(code, 1)
+
+    # 5. An approved SHA that is not in this pull request at all.
+    def test_an_unrelated_approved_sha_fails(self) -> None:
+        self._write_exception(UNRELATED, pull_request=1)
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
+        )
+        self.assertEqual(code, 1)
+
+    # 6. Approval still pending.
+    def test_a_pending_exception_fails(self) -> None:
+        self._write_exception(IMPLEMENTATION, pull_request=1, approval="pending")
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+            files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
+        )
+        self.assertEqual(code, 1)
+
+    # 7. No exception at all, and a head that is not a descendant.
+    def test_an_absent_or_non_ancestor_exception_fails(self) -> None:
+        (self.root / "governance/EXCEPTIONS.md").write_text("", encoding="utf-8")
+        self.assertEqual(
+            self._run(
+                commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+                files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
+            ),
+            1,
+        )
+        # And an approved SHA that sits *above* the head is not an ancestor.
+        self._write_exception(IMPLEMENTATION, pull_request=1)
+        self.assertEqual(
+            self._run(
+                commits=[{"sha": HEAD}, {"sha": IMPLEMENTATION}],
+                files_by_sha={HEAD: ["governance/EXCEPTIONS.md"]},
+            ),
+            1,
+        )
+
+    def test_two_approved_ancestors_are_ambiguous_and_refuse(self) -> None:
+        """Ambiguity must not resolve itself into permission.
+
+        If two commits in the pull request each carry an approved exception,
+        there is no single approved implementation and the narrow path does not
+        apply. Picking the first would let an unrelated approved commit
+        authorise a head nobody assessed.
+        """
+        second = "e" * 40
+        (self.root / "governance/EXCEPTIONS.md").write_text(
+            f"## EX-005 — bootstrap\n\n"
+            f"- **Scope:** pull request #1 at `{IMPLEMENTATION}`.\n"
+            f"- **Approval date:** 2026-09-06.\n\n"
+            f"## EX-006 — another\n\n"
+            f"- **Scope:** pull request #1 at `{second}`.\n"
+            f"- **Approval date:** 2026-09-06.\n",
+            encoding="utf-8",
+        )
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": second}, {"sha": HEAD}],
+            files_by_sha={
+                second: ["governance/EXCEPTIONS.md"],
+                HEAD: ["governance/EXCEPTIONS.md"],
+            },
+        )
+        self.assertEqual(code, 1)
+
+    # Extra: an unreadable commit must not pass.
+    def test_an_unreadable_commit_above_the_approved_sha_fails(self) -> None:
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": HEAD}],
+            files_by_sha={},  # /commits/<sha> raises
+        )
+        self.assertEqual(code, 1)
+
+    # Extra: two record commits are fine; three files in one are not.
+    def test_several_record_only_commits_are_allowed(self) -> None:
+        middle = "d" * 40
+        code = self._run(
+            commits=[{"sha": IMPLEMENTATION}, {"sha": middle}, {"sha": HEAD}],
+            files_by_sha={
+                middle: ["governance/EXCEPTIONS.md"],
+                HEAD: ["governance/EXCEPTIONS.md"],
+            },
+        )
+        self.assertEqual(code, 0)
