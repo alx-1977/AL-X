@@ -52,6 +52,10 @@ def build_review_runtime(
     token: str,
     call_id_source: Callable[[], str],
     provider: Any = None,
+    # Called when a review has been requested, so something can watch for the
+    # result. Optional: without it the request still works and simply is not
+    # watched, which is honest rather than broken.
+    started: Callable[[int, str], None] | None = None,
 ) -> ReviewRuntime | None:
     """Compose review requesting, or leave it unregistered."""
     if not enabled:
@@ -68,7 +72,13 @@ def build_review_runtime(
         return None
 
     def request_review(review: ReviewRequest) -> Any:
-        return selected.request(review)
+        outcome = selected.request(review)
+        if started is not None and outcome.head_sha:
+            # Only a confirmed revision is worth watching: without one there is
+            # nothing to recognise a result against, and a task that could
+            # never complete would sit in the terminal forever.
+            started(outcome.pull_request_number, outcome.head_sha)
+        return outcome
 
     LOGGER.info(
         "External review requesting enabled: %s (%s)",

@@ -15,8 +15,11 @@ from alx.providers.dhl import DhlImportAnalyzerAdapter
 
 from alx.providers.github_merge import GitHubMergeProvider
 from alx.providers.qodo_review import QodoReviewProvider
+from alx.providers.qodo_status import QodoStatusObserver, subject_reference
 
 __all__ = [
+    "QodoStatusObserver",
+    "subject_reference",
     "QodoReviewProvider",
     "GitHubMergeProvider",
     "BraveWebSearchProvider",

@@ -20,6 +20,11 @@ from alx.bootstrap.mail import (
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.repository import build_repository_runtime
 from alx.bootstrap.review import build_review_runtime
+from alx.bootstrap.tasks import build_task_runtime
+from alx.contracts.cognition import CognitionOrigin
+from alx.contracts.continuity import CognitionOpportunity
+from alx.contracts.task import ExternalTask, TaskState
+from alx.providers.qodo_status import subject_reference
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
@@ -123,6 +128,35 @@ def migrate_legacy_conversations(
         snapshot = conversation_store.create(conversation_id, retention)
         for turn in turns:
             snapshot = conversation_store.append(turn, retention, snapshot.revision)
+
+
+
+def _watch_review(
+    task_runtime: Any, conversation_id: str, number: int, head_sha: str
+) -> None:
+    """Record a requested review so the watcher can report on it.
+
+    Failing to record must not fail the request: the review has already been
+    asked for, and losing visibility of it is worse reported than raised.
+    """
+    if task_runtime is None:
+        return
+    try:
+        task_runtime.store.record(
+            ExternalTask(
+                task_id=f"review:{number}:{head_sha}",
+                kind="external_review",
+                service="qodo",
+                subject_reference=subject_reference(number, head_sha),
+                state=TaskState.REQUESTED,
+                requested_at=datetime.now(UTC),
+                conversation_id=conversation_id,
+            )
+        )
+    except Exception as error:  # noqa: BLE001 - visibility, not correctness
+        LOGGER.warning(
+            "A requested review could not be watched: %s", type(error).__name__
+        )
 
 
 async def run(repository_root: Path) -> None:
@@ -326,11 +360,17 @@ async def run(repository_root: Path) -> None:
 
     # Requesting an external review is effectful and may spend review credits,
     # so its policy requires an approval grounded in Friedl's own turn.
+    # The watcher is composed later, beside the transport, so the review path
+    # reaches it through a holder rather than being reordered around it.
+    task_holder: list[Any] = [None]
     review_runtime = build_review_runtime(
         review_configuration.is_usable,
         review_configuration.repository,
         review_configuration.token,
         lambda: current_call_id[0],
+        started=lambda number, sha: _watch_review(
+            task_holder[0], current_conversation_id[0], number, sha
+        ),
     )
     if review_runtime is not None:
         for definition in review_runtime.definitions:
@@ -584,6 +624,33 @@ async def run(repository_root: Path) -> None:
     # cursor and reconciles into durable state, and makes no Core call. What
     # it finds reaches AL/X through the one delivery path a session already
     # owns.
+    # Work handed to an external service does not stop when a browser closes,
+    # so what watches it lives here beside the transport, as the mail scan and
+    # the due-cognition tick do. It only looks: it cannot request a review,
+    # retry one, spend anything, or merge. When a result appears it raises one
+    # opportunity, and AL/X reads the review herself.
+    task_runtime = build_task_runtime(
+        storage_root,
+        review_configuration.repository,
+        review_configuration.token,
+        lambda conversation_id, line: diagnostics.publish(
+            conversation_id, {"stream": "TASK", "message": line, "tone": "info"}
+        ),
+        lambda task: opportunity_ledger.record_created(
+            CognitionOpportunity(
+                opportunity_id=f"task:{task.task_id}",
+                origin=CognitionOrigin.WORK_COMPLETED,
+                arose_at=task.completed_at or datetime.now(UTC),
+                conversation_id=task.conversation_id,
+                # The task, never the result. What the review says is hers to
+                # read from the source rather than something carried here.
+                references=(task.subject_reference,),
+            )
+        ),
+    )
+
+    task_holder[0] = task_runtime
+
     mail_store_lock = asyncio.Lock()
     mail_poller = MailPoller(
         mail_runtime.source,
@@ -595,6 +662,8 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(server.serve_forever())
             runtime_tasks.create_task(due_cognition.run())
             runtime_tasks.create_task(mail_poller.run())
+            if task_runtime is not None:
+                runtime_tasks.create_task(task_runtime.poller.run())
     finally:
         # Cancelling the producer does not stop work already running inside
         # asyncio.to_thread: the coroutine unwinds while the worker keeps going.

@@ -691,18 +691,29 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "create_task"
         ]
-        # Exactly three: the voice server, the due-cognition tick, and the
-        # mechanical mail poll. Each is named, so a fourth scheduled activity
-        # fails here rather than passing on a count.
+        # Exactly four: the voice server, the due-cognition tick, the
+        # mechanical mail poll, and the external-task watcher. Each is named,
+        # so a fifth scheduled activity fails here rather than passing on a
+        # count.
+        #
+        # The watcher belongs on this list for the same reason the mail poll
+        # does: it observes something outside the process and decides nothing.
+        # It cannot request a review, retry, spend or merge, which is asserted
+        # structurally in tests/test_task_status.py.
         rendered = [ast.dump(call) for call in scheduled]
-        self.assertEqual(len(scheduled), 3, rendered)
+        self.assertEqual(len(scheduled), 4, rendered)
         self.assertEqual(
             sorted(
                 name
-                for name in ("serve_forever", "due_cognition", "mail_poller")
+                for name in (
+                    "serve_forever",
+                    "due_cognition",
+                    "mail_poller",
+                    "task_runtime",
+                )
                 if any(name in item for item in rendered)
             ),
-            ["due_cognition", "mail_poller", "serve_forever"],
+            ["due_cognition", "mail_poller", "serve_forever", "task_runtime"],
         )
         for item in rendered:
             with self.subTest(task=item[:60]):
