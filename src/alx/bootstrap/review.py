@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
@@ -55,7 +56,7 @@ def build_review_runtime(
     # Called when a review has been requested, so something can watch for the
     # result. Optional: without it the request still works and simply is not
     # watched, which is honest rather than broken.
-    started: Callable[[int, str], None] | None = None,
+    started: Callable[[int, str, datetime], None] | None = None,
 ) -> ReviewRuntime | None:
     """Compose review requesting, or leave it unregistered."""
     if not enabled:
@@ -72,12 +73,18 @@ def build_review_runtime(
         return None
 
     def request_review(review: ReviewRequest) -> Any:
+        # Read before the trigger is posted, and used as the watched task's
+        # requested_at. The observer only considers results later than that
+        # moment, so a timestamp taken after the request excluded reviews that
+        # finished quickly: the result was already there before the watcher
+        # was willing to look at anything, and the task waited forever.
+        requested_at = datetime.now(UTC)
         outcome = selected.request(review)
         if started is not None and outcome.head_sha:
             # Only a confirmed revision is worth watching: without one there is
             # nothing to recognise a result against, and a task that could
             # never complete would sit in the terminal forever.
-            started(outcome.pull_request_number, outcome.head_sha)
+            started(outcome.pull_request_number, outcome.head_sha, requested_at)
         return outcome
 
     LOGGER.info(

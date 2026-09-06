@@ -28,12 +28,6 @@ from alx.contracts.task import ExternalTask, TaskState
 LOGGER = logging.getLogger(__name__)
 
 
-def _clock(seconds: float) -> str:
-    """mm:ss, for a line someone reads rather than parses."""
-    whole = int(max(0.0, seconds))
-    return f"{whole // 60:02d}:{whole % 60:02d}"
-
-
 class TaskPoller:
     """The external-task tick. It observes and reports, and nothing else."""
 
@@ -42,7 +36,9 @@ class TaskPoller:
         store: Any,
         observers: dict[str, Any],
         interval_seconds: float,
-        announce: Callable[[str, str], None],
+        # Given structured values rather than a rendered line: the terminal
+        # decides how a running task looks, and this decides nothing.
+        announce: Callable[[str, dict], None],
         completed: Callable[[ExternalTask], None],
     ) -> None:
         if interval_seconds <= 0:
@@ -102,7 +98,14 @@ class TaskPoller:
             # rather than retried on the next tick.
             self._announce(
                 task.conversation_id,
-                f"Review received · {_subject(task)}",
+                {
+                    "state": TaskState.COMPLETED.value,
+                    "subject": _subject(task),
+                    "service": task.service,
+                    "elapsed_seconds": int(
+                        task.elapsed_seconds(observation.observed_at)
+                    ),
+                },
             )
             # The Core evaluates the result. This does not read it.
             self._completed(settled)
@@ -115,13 +118,17 @@ class TaskPoller:
             last_checked_at=observation.observed_at,
         )
         self._store.record(waiting)
-        elapsed = _clock(task.elapsed_seconds(observation.observed_at))
-        if observation.state is TaskState.STATUS_UNKNOWN:
-            self._announce(
-                task.conversation_id, f"Status unknown · {_subject(task)} · {elapsed}"
-            )
-        else:
-            self._announce(task.conversation_id, f"Still waiting · {elapsed}")
+        self._announce(
+            task.conversation_id,
+            {
+                "state": observation.state.value,
+                "subject": _subject(task),
+                "service": task.service,
+                "elapsed_seconds": int(
+                    task.elapsed_seconds(observation.observed_at)
+                ),
+            },
+        )
 
 
 def _subject(task: ExternalTask) -> str:

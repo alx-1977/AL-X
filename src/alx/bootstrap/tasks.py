@@ -42,7 +42,7 @@ def build_task_runtime(
     storage_root: Path | None,
     repository: str,
     token: str,
-    announce: Callable[[str, str], None],
+    announce: Callable[[str, dict], None],
     completed: Callable[[ExternalTask], None],
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
     observers: dict[str, Any] | None = None,

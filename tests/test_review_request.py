@@ -70,6 +70,49 @@ class RecordingReviewer:
         )
 
 
+class WatchWindowTest(unittest.TestCase):
+    """When the watcher starts looking, relative to when the trigger goes out.
+
+    The observer only considers results later than the task's requested_at. A
+    timestamp taken after the provider returned therefore excluded a review
+    that finished quickly: the result already existed before the watcher was
+    willing to look at anything, so the task never completed and the terminal
+    showed it outstanding forever.
+    """
+
+    def test_the_watch_starts_before_the_trigger_is_posted(self) -> None:
+        posted_at: list[datetime] = []
+
+        class SlowProvider:
+            reviewer = "qodo"
+
+            def request(self, review: ReviewRequest) -> ReviewOutcome:
+                posted_at.append(datetime.now(UTC))
+                return ReviewOutcome(
+                    pull_request_number=review.pull_request_number,
+                    head_sha="a" * 40,
+                    requested=True,
+                    reviewer="qodo",
+                )
+
+        watched: list[datetime] = []
+        runtime = build_review_runtime(
+            True,
+            "owner/repo",
+            "token",
+            lambda: "call-1",
+            provider=SlowProvider(),
+            started=lambda number, sha, requested_at: watched.append(requested_at),
+        )
+        runtime.executors[REQUEST_EXTERNAL_REVIEW]({"pull_request_number": 21})
+
+        self.assertEqual(len(watched), 1)
+        self.assertEqual(len(posted_at), 1)
+        # Not merely close: strictly before, so no result can land in a gap
+        # the watcher refuses to look at.
+        self.assertLessEqual(watched[0], posted_at[0])
+
+
 class ReviewRequestTest(unittest.TestCase):
     def _runtime(self, provider):
         return build_review_runtime(

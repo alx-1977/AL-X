@@ -77,6 +77,39 @@ class CompletedWorkSource:
             )
         return tuple(opportunities)
 
+    def recover(self, spend: Any = None) -> tuple[str, ...]:
+        """Reclaim completions that a stopped process left claimed.
+
+        Without this, a run that stopped between claiming an occasion and
+        marking the task handed over left a durable claim behind: the task
+        stayed un-handed-over, and every later scan skipped it because the
+        ledger row existed. The result was watched, completed, and then never
+        looked at — the exact failure the watcher exists to prevent.
+
+        The rule is the sibling's, for the sibling's reason. A spend row is
+        marked dispatched before a provider is called, so an occasion with no
+        dispatched reservation cannot have reached one and is safely offered
+        again. One that did reach dispatch may already have been billed and
+        answered, so it is retained rather than replayed.
+
+        Only this producer's rows are touched. The ledger is shared, and
+        reclaiming another producer's occasion would release a claim whose
+        idempotence is kept somewhere else entirely.
+        """
+        reclaimed: list[str] = []
+        for row in self._ledger.unfinished():
+            opportunity_id = row["opportunity_id"]
+            if not opportunity_id.startswith("task:"):
+                continue
+            if spend is not None and spend.dispatch_started(opportunity_id):
+                # Provable dispatch. Retain for inspection; never replay.
+                self._ledger.mark_unreconciled(opportunity_id)
+                continue
+            # No dispatch is recorded, so the provider was never reached.
+            self._ledger.release(opportunity_id)
+            reclaimed.append(opportunity_id)
+        return tuple(reclaimed)
+
     def owns(self, opportunity: CognitionOpportunity) -> bool:
         """Whether this producer made the occasion."""
         return any(

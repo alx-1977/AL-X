@@ -7,6 +7,9 @@ const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
+const taskRow = document.querySelector("#task-row");
+const taskLabel = document.querySelector("#task-label");
+const taskElapsed = document.querySelector("#task-elapsed");
 // Law 1: these name a system state and nothing more. First-person or
 // user-directed wording here reads as AL/X speaking when she has not reasoned,
 // so the gate whitelists exactly these labels.
@@ -37,6 +40,10 @@ let heardThisTurn = false;
 let audioByteCount = 0;
 let audioChunkCount = 0;
 let ttsStartedAt;
+// The running external task, or null. The server ticks slowly and Core may be
+// idle for the whole wait, so the row keeps its own clock from the elapsed
+// figure the last tick reported: `at` is when that figure was true locally.
+let runningTask = null;
 
 function clockTime() {
   return new Intl.DateTimeFormat(undefined, {
@@ -82,7 +89,56 @@ function ttsElapsed() {
 
 setInterval(() => {
   diagnosticElapsed.textContent = elapsedText(performance.now() - stageStartedAt);
+  paintTask();
 }, 100);
+
+function taskClock(seconds) {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(whole / 60).toString().padStart(2, "0")}:${(whole % 60)
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+// Identifiers, a state and a duration. Nothing a reviewer said reaches here,
+// because nothing a reviewer said reaches the browser.
+const taskStates = {
+  requested: "Requested",
+  waiting_for_result: "Running",
+  status_unknown: "Status unknown",
+  completed: "Completed",
+  failed: "Failed",
+};
+
+function paintTask() {
+  if (runningTask === null) {
+    taskRow.hidden = true;
+    return;
+  }
+  const drift = (performance.now() - runningTask.at) / 1000;
+  // A settled task stops counting: its elapsed time is a fact about how long
+  // it took, not a clock that keeps running.
+  const seconds = runningTask.settled
+    ? runningTask.seconds
+    : runningTask.seconds + drift;
+  const state = taskStates[runningTask.state] ?? runningTask.state;
+  taskRow.dataset.state = runningTask.state;
+  taskLabel.textContent = `${state} · ${runningTask.service} · ${runningTask.subject}`;
+  taskElapsed.textContent = taskClock(seconds);
+  taskRow.hidden = false;
+}
+
+function showTask(message) {
+  const state = String(message.state ?? "");
+  runningTask = {
+    state,
+    service: String(message.service ?? ""),
+    subject: String(message.subject ?? ""),
+    seconds: Number(message.elapsed_seconds ?? 0),
+    at: performance.now(),
+    settled: state === "completed" || state === "failed",
+  };
+  paintTask();
+}
 
 diagnosticClear.addEventListener("click", () => {
   diagnosticLog.replaceChildren();
@@ -301,6 +357,10 @@ function handleControl(message) {
       diagnostic(`TTS ${transport} connected · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "ok");
     } else if (message.code === "tts.first_audio_byte") {
       diagnostic(`First audio byte received from ElevenLabs · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "ok");
+    } else if (message.code === "task.status") {
+      // A live row rather than a log line: an outstanding task is a state the
+      // console should show, not an event that scrolls away.
+      showTask(message);
     } else {
       diagnostic(`Server diagnostic · ${message.code ?? "unknown"}`);
     }

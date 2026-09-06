@@ -42,6 +42,12 @@ REVIEWER_ID = 151058649
 
 _SUBJECT = re.compile(r"^pull/(?P<number>\d+)@(?P<sha>[0-9a-f]{40})$")
 
+# One path segment: no slashes, spaces, traversal or query characters. The
+# same rule as the review and merge providers, because the same value builds
+# the same kind of URL. A weaker check here accepted "owner/re?po" and
+# "own er/repo", which registered fine and then made every read malformed.
+_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 def subject_reference(pull_request_number: int, head_sha: str) -> str:
     """How a review task names what it is about."""
@@ -72,7 +78,7 @@ class QodoStatusObserver:
 
     def __init__(self, repository: str, token: str, api_root: str = API_ROOT) -> None:
         parts = repository.strip().split("/")
-        if len(parts) != 2 or not all(part.strip() for part in parts):
+        if len(parts) != 2 or not all(_SEGMENT.match(part) for part in parts):
             raise ValueError("repository must be owner/name")
         if not token.strip():
             raise ValueError("a GitHub token is required")

@@ -134,7 +134,11 @@ def migrate_legacy_conversations(
 
 
 def _watch_review(
-    task_runtime: Any, conversation_id: str, number: int, head_sha: str
+    task_runtime: Any,
+    conversation_id: str,
+    number: int,
+    head_sha: str,
+    requested_at: datetime,
 ) -> None:
     """Record a requested review so the watcher can report on it.
 
@@ -144,7 +148,6 @@ def _watch_review(
     if task_runtime is None:
         return
     try:
-        requested_at = datetime.now(UTC)
         task_runtime.store.record(
             ExternalTask(
                 # The moment is part of the identity. Two requests for the same
@@ -375,8 +378,12 @@ async def run(repository_root: Path) -> None:
         review_configuration.repository,
         review_configuration.token,
         lambda: current_call_id[0],
-        started=lambda number, sha: _watch_review(
-            task_holder[0], current_conversation_id[0], number, sha
+        started=lambda number, sha, requested_at: _watch_review(
+            task_holder[0],
+            current_conversation_id[0],
+            number,
+            sha,
+            requested_at,
         ),
     )
     if review_runtime is not None:
@@ -619,8 +626,12 @@ async def run(repository_root: Path) -> None:
         storage_root,
         review_configuration.repository,
         review_configuration.token,
-        lambda conversation_id, line: diagnostics.publish(
-            conversation_id, {"stream": "TASK", "message": line, "tone": "info"}
+        # The frontend dispatches on `code`; a diagnostic without one renders
+        # as "Server diagnostic · unknown", which is what the watcher's lines
+        # became. The code names the event and the payload carries only
+        # identifiers, a state and a duration, as D-012 requires.
+        lambda conversation_id, values: diagnostics.publish(
+            conversation_id, {"code": "task.status", **values}
         ),
         # Completion is recorded durably by the watcher. Turning it into a
         # Core turn is the completed-work source's job, through the same
@@ -636,14 +647,28 @@ async def run(repository_root: Path) -> None:
     # runner and one tick. A finished external task joins the matured requests
     # here rather than bringing a second tick, which would be a competing
     # production path to the same outcome.
-    occasion_source = CombinedOccasionSource(
-        cognition_source,
-        CompletedWorkSource(
+    occasion_source: Any = cognition_source
+    if task_runtime is not None:
+        completed_work_source = CompletedWorkSource(
             task_runtime.store,
             opportunity_ledger,
             enabled=providers.autonomous is not None,
-        ),
-    ) if task_runtime is not None else cognition_source
+        )
+        # Finished external work needs the same restart-safe recovery the
+        # matured requests get, and for a sharper reason: a claim left behind
+        # by a stopped run would hide a result that had already arrived, and
+        # nothing would ever raise it again. Done before the runner starts, so
+        # no occasion is offered from a half-recovered ledger.
+        reclaimed_work = completed_work_source.recover(autonomous_budget)
+        if reclaimed_work:
+            LOGGER.info(
+                "Reclaimed %d completed-work occasion(s) left claimed"
+                " by a stopped run",
+                len(reclaimed_work),
+            )
+        occasion_source = CombinedOccasionSource(
+            cognition_source, completed_work_source
+        )
 
     autonomous_runner = AutonomousCognitionRunner(
         occasion_source,

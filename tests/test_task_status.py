@@ -68,7 +68,7 @@ class PollerHarness(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.store = SQLiteTaskStore(Path(self.directory.name) / "tasks.sqlite3")
-        self.lines: list[tuple[str, str]] = []
+        self.lines: list[tuple[str, dict]] = []
         self.woken: list[ExternalTask] = []
 
     def _poller(self, observer, service: str = "qodo") -> TaskPoller:
@@ -76,8 +76,8 @@ class PollerHarness(unittest.TestCase):
             self.store,
             {service: observer},
             interval_seconds=1.0,
-            announce=lambda conversation, line: self.lines.append(
-                (conversation, line)
+            announce=lambda conversation, values: self.lines.append(
+                (conversation, values)
             ),
             completed=self.woken.append,
         )
@@ -153,11 +153,15 @@ class PollerTests(PollerHarness):
 
         self.assertEqual(len(self.store.outstanding()), 1)
         self.assertEqual(self.woken, [])
-        conversation, line = self.lines[0]
+        conversation, values = self.lines[0]
         self.assertEqual(conversation, "conversation-1")
-        self.assertTrue(line.startswith("Still waiting · "))
-        # mm:ss, not a finding, not a claim about progress.
-        self.assertRegex(line, r"Still waiting · \d\d:\d\d$")
+        # A state and a duration, so the terminal can show a live row rather
+        # than a line that scrolls away. Not a claim about progress.
+        self.assertEqual(values["state"], "waiting_for_result")
+        self.assertEqual(values["subject"], f"PR #21 @ {HEAD[:7]}")
+        self.assertEqual(values["service"], "qodo")
+        self.assertIsInstance(values["elapsed_seconds"], int)
+        self.assertGreaterEqual(values["elapsed_seconds"], 90)
 
     def test_a_result_completes_the_task_and_wakes_the_core(self) -> None:
         self.store.record(_task())
@@ -167,7 +171,8 @@ class PollerTests(PollerHarness):
         self.assertEqual(len(self.woken), 1)
         self.assertIs(self.woken[0].state, TaskState.COMPLETED)
         self.assertIsNotNone(self.woken[0].completed_at)
-        self.assertEqual(self.lines[0][1], f"Review received · PR #21 @ {HEAD[:7]}")
+        self.assertEqual(self.lines[0][1]["subject"], f"PR #21 @ {HEAD[:7]}")
+        self.assertEqual(self.lines[0][1]["state"], "completed")
 
     def test_the_core_is_woken_with_the_task_and_never_the_result(self) -> None:
         """What the review says is hers to read from the source."""
@@ -191,7 +196,7 @@ class PollerTests(PollerHarness):
         self._poller(RecordingObserver(TaskState.STATUS_UNKNOWN)).tick()
         outstanding = self.store.outstanding()
         self.assertIs(outstanding[0].state, TaskState.STATUS_UNKNOWN)
-        self.assertIn("Status unknown", self.lines[0][1])
+        self.assertEqual(self.lines[0][1]["state"], "status_unknown")
         self.assertEqual(self.woken, [])
 
     def test_a_service_nobody_watches_is_unknown_rather_than_outstanding(self) -> None:
@@ -205,10 +210,17 @@ class PollerTests(PollerHarness):
         """D-012: identifiers, states and durations only."""
         self.store.record(_task())
         self._poller(RecordingObserver(TaskState.COMPLETED)).tick()
-        for _, line in self.lines:
-            self.assertNotIn("bug", line.lower())
-            self.assertNotIn("severity", line.lower())
-            self.assertLess(len(line), 80)
+        for _, values in self.lines:
+            # Exactly the permitted fields, so nothing a reviewer wrote can
+            # ride along in a payload that quietly grew a field.
+            self.assertEqual(
+                set(values),
+                {"state", "subject", "service", "elapsed_seconds"},
+            )
+            rendered = " ".join(str(value) for value in values.values()).lower()
+            self.assertNotIn("bug", rendered)
+            self.assertNotIn("severity", rendered)
+            self.assertLess(len(rendered), 80)
 
 
 class WatcherCannotActTests(unittest.TestCase):
@@ -277,6 +289,28 @@ class QodoObserverTests(unittest.TestCase):
         qodo_status.httpx.get = get
         self.addCleanup(setattr, qodo_status.httpx, "get", original)
         return QodoStatusObserver("owner/repo", "token")
+
+    def test_a_repository_that_cannot_build_a_url_is_refused(self) -> None:
+        """The same rule as the review and merge providers, for one reason.
+
+        A value that passes a non-blank check registers the observer and then
+        makes every read malformed, which surfaces only as a task that never
+        resolves. Refusing at construction makes the misconfiguration visible
+        where it can be fixed.
+        """
+        for repository in (
+            "own er/repo",
+            "owner/re?po",
+            "owner/repo#x",
+            "owner/",
+            "owner/repo/extra",
+            "../../etc",
+        ):
+            with self.subTest(repository=repository):
+                with self.assertRaises(ValueError):
+                    QodoStatusObserver(repository, "token")
+
+        self.assertIsNotNone(QodoStatusObserver("owner/repo", "token"))
 
     def test_a_review_object_at_the_exact_revision_completes(self) -> None:
         observer = self._observer(
@@ -479,8 +513,8 @@ class PollerFailureRegressions(PollerHarness):
             self.store,
             {"qodo": RecordingObserver(TaskState.COMPLETED)},
             interval_seconds=1.0,
-            announce=lambda conversation, line: self.lines.append(
-                (conversation, line)
+            announce=lambda conversation, values: self.lines.append(
+                (conversation, values)
             ),
             completed=explode,
         )
@@ -702,6 +736,7 @@ class CompletionReachesCoreTest(unittest.TestCase):
 
         def __init__(self) -> None:
             self.created: list[str] = []
+            self.retained: list[str] = []
 
         def exists(self, opportunity_id: str) -> bool:
             return opportunity_id in self.created
@@ -715,6 +750,20 @@ class CompletionReachesCoreTest(unittest.TestCase):
         def release(self, opportunity_id: str) -> None:
             self.created.remove(opportunity_id)
 
+        def unfinished(self):
+            # Only rows that never reached a terminal outcome, as the real
+            # ledger does. A retained row is terminal and never offered again.
+            return tuple(
+                {"opportunity_id": identifier}
+                for identifier in self.created
+                if identifier not in self.retained
+            )
+
+        def mark_unreconciled(self, opportunity_id: str) -> None:
+            # Terminal, and the row stays: the real ledger only changes the
+            # outcome, so the occasion still exists and is never re-offered.
+            self.retained.append(opportunity_id)
+
     def _complete_one(self) -> None:
         """Drive the watcher until it observes completion."""
         self.store.record(_task())
@@ -722,7 +771,7 @@ class CompletionReachesCoreTest(unittest.TestCase):
             self.store,
             {"qodo": RecordingObserver(TaskState.COMPLETED)},
             interval_seconds=1.0,
-            announce=lambda conversation, line: None,
+            announce=lambda conversation, values: None,
             # Completion is durable in the store; nothing is written to the
             # ledger here, which is the defect this test exists to prove fixed.
             completed=lambda task: None,
@@ -807,6 +856,55 @@ class CompletionReachesCoreTest(unittest.TestCase):
             ).due_opportunities(),
             (),
         )
+
+    def test_a_claim_left_by_a_stopped_run_is_reclaimed(self) -> None:
+        """Otherwise a result that arrived is hidden by its own claim.
+
+        The claim is written before the turn runs. A process that stopped in
+        between left the row behind, and every later scan skipped the task
+        because the ledger said the occasion existed - so a completed review
+        was watched, recorded, and then never looked at.
+        """
+        from alx.continuity import CompletedWorkSource
+
+        self._complete_one()
+        source = CompletedWorkSource(self.store, self.Ledger(), enabled=True)
+        occasion = source.due_opportunities()[0]
+        self.assertTrue(source.claim(occasion))
+        # The stopped run: claimed, never handed over.
+        self.assertEqual(source.due_opportunities(), ())
+
+        self.assertEqual(source.recover(), (occasion.opportunity_id,))
+        self.assertEqual(len(source.due_opportunities()), 1)
+
+    def test_a_completion_that_reached_a_provider_is_never_replayed(self) -> None:
+        """A duplicate paid turn is worse than one missed and visible."""
+        from alx.continuity import CompletedWorkSource
+
+        self._complete_one()
+        ledger = self.Ledger()
+        source = CompletedWorkSource(self.store, ledger, enabled=True)
+        occasion = source.due_opportunities()[0]
+        source.claim(occasion)
+
+        class Spend:
+            def dispatch_started(self, opportunity_id: str) -> bool:
+                return True
+
+        self.assertEqual(source.recover(Spend()), ())
+        self.assertEqual(ledger.retained, [occasion.opportunity_id])
+        self.assertEqual(source.due_opportunities(), ())
+
+    def test_recovery_leaves_another_producers_occasions_alone(self) -> None:
+        """The ledger is shared; the idempotence of each producer is not."""
+        from alx.continuity import CompletedWorkSource
+
+        ledger = self.Ledger()
+        ledger.created.append("self:r1")
+        source = CompletedWorkSource(self.store, ledger, enabled=True)
+
+        self.assertEqual(source.recover(), ())
+        self.assertEqual(ledger.created, ["self:r1"])
 
     def test_nothing_is_offered_while_the_switch_is_off(self) -> None:
         from alx.continuity import CompletedWorkSource
