@@ -10,12 +10,51 @@
     "This list is what makes a reviewer acceptable. Adding an entry is a",
     "governance change requiring Friedl's approval through CODEOWNERS."
   ],
+  "bootstrap": [
+    "How Qodo came to be on this list, recorded because the circumstances were",
+    "unusual and should not be repeated silently.",
+    "",
+    "Friedl approved Qodo independently, on the evidence of pull request #18: an",
+    "unaided review at head 425581b that produced fourteen anchored findings, six",
+    "of which no other reviewer reported. That approval was a governance decision",
+    "made before this entry existed. Qodo was never asked to decide whether Qodo",
+    "should be trusted.",
+    "",
+    "This change was nevertheless evaluated while the blocking check still read",
+    "its reviewer roster from the pull request's own merge tree rather than from",
+    "the trusted base. Qodo therefore counted as accepted, during the very change",
+    "that accepts it, because the change says so. That is a self-authorisation",
+    "flaw in the verifier, not evidence about Qodo, and it is recorded here",
+    "rather than left for someone to discover later.",
+    "",
+    "Reviewing this change, Qodo also found a second independence defect: the",
+    "verifier builds its author set from each commit's GitHub author.id alone and",
+    "ignores Co-authored-by attribution, so an accepted reviewer credited as a",
+    "co-author could still satisfy the independence requirement D-026 states. The",
+    "finding is valid and was reproduced. It is deliberately not fixed here,",
+    "because this entry is a governance record rather than a verifier change.",
+    "",
+    "Both defects must be closed in the hardening change that follows this merge",
+    "immediately, in which the verifier, this roster and the exception register",
+    "are all loaded from the GitHub-attested base revision, and independence",
+    "detection recognises commit co-authors.",
+    "",
+    "Friedl authorised this bootstrap once, for this entry only. It is not a",
+    "precedent: no future reviewer may be added by a change that relies on its",
+    "own contents to be trusted."
+  ],
   "reviewers": [
     {
       "id": 165735046,
       "login": "greptile-apps[bot]",
       "kind": "Bot",
       "note": "Greptile. The provider named in EX-002 and EX-003, whose two retrospective reviews remain outstanding."
+    },
+    {
+      "id": 151058649,
+      "login": "qodo-code-review[bot]",
+      "kind": "Bot",
+      "note": "Qodo. Approved by Friedl on 2026-09-06 as an accepted independent reviewer under D-026. The approval event is pull request #18 at head 425581b12528205bf82ad4b69151a671909251de, where an unaided Qodo review returned fourteen anchored findings; Friedl recorded his approval in pull request #19, which added this entry. See the bootstrap note above for the circumstances."
     }
   ]
 }
