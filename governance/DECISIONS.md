@@ -596,6 +596,27 @@ satisfy. Friedl discharges both: no retrospective review of those two
 revisions is owed. This is a disposition, not an omission, and it closes them
 explicitly so nobody has to reconstruct the history to find out.
 
+### Removing the enforcement machinery this replaced
+
+Friedl explicitly authorised removing the obsolete independent-review
+machinery on this branch before the simpler model recorded above was designed:
+the `independent-review` workflow job and its trusted verifier, the
+`review/` policy files (`mandate.md`, `brief.json`, `context.json`,
+`accepted_reviewers.json`), and the Greptile-era enforcement those files and
+that job carried.
+
+That authorisation is recorded here because the deletions removed operative
+policy, and an approval that has to be inferred from a commit is not an
+approval anyone can audit. The scope was the machinery itself, not the
+requirement it tried to enforce: a merge still needs AL/X's judgement that a
+review covers the revision being merged, which is what this decision records.
+
+Branch protection keeps `law-gates` as a required status check and requires
+conversation resolution. Required pull-request reviews stay off, for the
+reason already given above: an approval gate would either put Friedl back into
+each merge or be satisfied by AL/X approving her own work. The review
+judgement lives with her under `repository.merge`, not with branch protection.
+
 ### Review condition
 
 Revisit if a merge happens that a reviewer's findings should have stopped; if the delegation is used for anything but routine merges; if AL/X merges a revision no reviewer examined; or if the recorded authority proves broader than the routine decision Friedl intended to delegate.
