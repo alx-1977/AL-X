@@ -214,6 +214,9 @@ class SandboxWorkspace:
         # but they are traversal work, so they are counted against the same
         # bound. Kept separately so the entry map stays a map of files.
         walked = 0
+        # Names that cost work but produce no entry, counted against the same
+        # bound for the same reason directories are.
+        skipped = 0
         for current, directory_names, file_names in os.walk(directory, followlinks=False):
             # Do not descend into linked directories either.
             directory_names[:] = [
@@ -221,7 +224,7 @@ class SandboxWorkspace:
                 if not Path(current, name).is_symlink()
             ]
             walked += len(directory_names)
-            if walked + len(results) >= MAX_WALKED_FILES:
+            if walked + skipped + len(results) >= MAX_WALKED_FILES:
                 # Stop before descending further. The bound is on work done by
                 # the privileged parent, and an unbounded tree of directories
                 # is exactly as expensive to enumerate as one of files.
@@ -229,7 +232,7 @@ class SandboxWorkspace:
             for name in sorted(file_names):
                 if name == ".lease":
                     continue
-                if walked + len(results) >= MAX_WALKED_FILES:
+                if walked + skipped + len(results) >= MAX_WALKED_FILES:
                     return WalkResult(results, True)
                 path = Path(current, name)
                 relative = str(path.relative_to(directory))
@@ -240,6 +243,12 @@ class SandboxWorkspace:
                 # host file - or blocked forever on something like /dev/zero.
                 measured = self._measure(path)
                 if measured is None:
+                    # Counted even though it becomes no entry. A fifo, socket
+                    # or device is skipped for hashing but is still a name the
+                    # parent had to open and inspect, and skipping without
+                    # counting made those names free: thousands of fifos, which
+                    # a confined program can create, passed the bound entirely.
+                    skipped += 1
                     continue
                 results[relative] = measured
         return WalkResult(results, False)
@@ -266,9 +275,15 @@ class SandboxWorkspace:
             # ELOOP means it is a link, which is recorded rather than followed.
             if error.errno in (errno.ELOOP, errno.EMLINK):
                 return ("", 0)
-            if error.errno in (errno.ENOENT, errno.EACCES):
-                # Vanished or unreadable between listing and opening: not
-                # evidence of anything, and not worth failing the whole walk.
+            if error.errno in (errno.ENOENT, errno.EACCES, errno.ENXIO):
+                # Vanished, unreadable, or a fifo with no writer: not evidence
+                # of anything, and not worth failing the whole walk.
+                return None
+            if error.errno in (errno.EOPNOTSUPP, errno.ENODEV):
+                # A socket cannot be opened this way at all. Treated as one
+                # more thing that is not a regular file rather than as a failed
+                # walk: failing here would let one socket in session state
+                # break evidence collection for every later run in the session.
                 return None
             raise SandboxError("output_unreadable") from error
         try:
@@ -392,4 +407,39 @@ class SandboxWorkspace:
         if Path(path).is_symlink():
             Path(path).unlink()
             return
-        shutil.rmtree(path, ignore_errors=False)
+        try:
+            shutil.rmtree(path, ignore_errors=False)
+        except OSError:
+            # The experiment can make its own files undeletable - chmod 0o500
+            # on a directory, or chflags UF_IMMUTABLE on a file - and D-027
+            # requires every experiment-authored byte to go at the retention
+            # limit. The parent owns these files, so it clears the condition it
+            # is allowed to clear and tries once more. If it still fails the
+            # caller skips the session rather than aborting the sweep.
+            self._clear_deletion_barriers(path)
+            shutil.rmtree(path, ignore_errors=False)
+
+    @staticmethod
+    def _clear_deletion_barriers(path: Path) -> None:
+        """Restore owner permissions and clear file flags beneath `path`.
+
+        Only ever applied inside the sandbox root, to bytes an experiment
+        wrote. It grants nothing: the parent already owns these files, and
+        this restores the access the experiment removed so retention can do
+        what the decision requires.
+        """
+        for current, directory_names, file_names in os.walk(
+            path, topdown=False, followlinks=False
+        ):
+            for name in list(directory_names) + list(file_names) + [""]:
+                target = Path(current, name) if name else Path(current)
+                for action in (
+                    lambda item: os.chflags(item, 0),
+                    lambda item: os.chmod(item, 0o700),
+                ):
+                    try:
+                        action(target)
+                    except (OSError, AttributeError):
+                        # Not every platform has chflags, and a link or a
+                        # vanished entry is not worth failing over.
+                        continue

@@ -786,6 +786,28 @@ An experiment that exits zero has demonstrated that a program ran in an isolated
 
 The test suite must not require a working sandbox in order to run. The confinement mechanism is injected so the boundary is provable without executing anything, following the precedent of the public-web address boundary, and the tests that require real confinement are skipped explicitly rather than silently on platforms that cannot provide it.
 
+### A latent gap: a helper that leaves its process group
+
+An independent review noted that the process-group sweep kills one POSIX
+group, so a helper calling `setsid()` or `setpgid()` leaves that group and
+outlives the call, which this decision forbids.
+
+It is not reachable on the current development host: `RLIMIT_NPROC` is already
+exhausted by the confined process itself, so the first `fork` is refused. That
+is the sixth accepted limitation recorded below, and it is masking this. On
+hardware where the intended 32-process limit actually permits a fork, the gap
+becomes real - and a surviving helper reopens the parent-side races that the
+symlink and evidence-walk fixes closed, because a concurrent writer is what
+those races need.
+
+Recorded rather than fixed because the fix belongs with the move to dedicated
+hardware, where process behaviour is the thing being reconsidered anyway. Two
+options are open then: deny `process-fork` outright for V1, or track
+descendants as a session and terminate that set. Whichever is chosen must come
+with a confined test proving `os.fork(); os.setsid(); sleep` does not survive a
+run - the current regression is staged against the sweep directly, precisely
+because this host cannot fork.
+
 ### A third finding declined: durable output
 
 A later review asked for a "bounded substantive outcome field" in the durable

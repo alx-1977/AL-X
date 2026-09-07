@@ -34,6 +34,7 @@ import logging
 import os
 import resource
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -189,6 +190,15 @@ class SeatbeltSandboxRunner(SandboxRunner):
             # The user's own data is refused wholesale rather than by naming
             # individual secrets: a deny-list only covers what was remembered.
             f'(deny file-read* (subpath "{self._home}"))\n'
+            # And the sandbox root itself, so one session cannot read another.
+            # Session isolation was previously only incidental: it held when
+            # the root happened to sit under the home directory, and not
+            # otherwise. A root at /var/lib/alx - the layout D-027 pushes
+            # toward by keeping the sandbox apart from runtime storage - left
+            # every session readable by every other, reachable as
+            # ../../<other>/state from the working directory. The re-allow
+            # below restores exactly this run's own state.
+            f'(deny file-read* (subpath "{self._workspace.root}"))\n'
             f"{denials}\n"
             # The session workspace is re-allowed after the denials so a
             # workspace living under the home directory still works.
@@ -454,19 +464,37 @@ class SeatbeltSandboxRunner(SandboxRunner):
         write.
         """
         try:
+            # O_NOFOLLOW refuses a symlink, but a FIFO is not a symlink: an
+            # experiment can leave its entry file as one, and opening a FIFO
+            # for writing blocks until a reader arrives - forever, holding the
+            # session lease and the day's reservation, with the capability call
+            # never returning. O_NONBLOCK opens it instead, so the kind can be
+            # checked, and O_TRUNC is applied only once it is known to be a
+            # regular file: truncating is meaningless on a FIFO and harmful on
+            # anything else.
             handle = os.open(
                 destination,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
                 0o600,
             )
         except OSError as error:
-            # ELOOP is a symlink at the destination: refused, not followed.
+            # ELOOP is a symlink; ENXIO is a FIFO with no reader. Both are
+            # refused rather than followed or waited on.
             raise SandboxError("workspace_unavailable") from error
         try:
+            status = os.fstat(handle)
+            if not stat.S_ISREG(status.st_mode):
+                raise SandboxError("workspace_unavailable")
+            os.set_blocking(handle, True)
+            os.ftruncate(handle, 0)
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                handle = -1
                 stream.write(source)
         except OSError as error:
             raise SandboxError("workspace_unavailable") from error
+        finally:
+            if handle >= 0:
+                os.close(handle)
 
     @staticmethod
     def _terminate(process: subprocess.Popen) -> None:

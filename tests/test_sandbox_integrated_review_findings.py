@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -659,14 +660,27 @@ class ResilienceAndAccountingTest(unittest.TestCase):
         sweep did not catch. One stuck session therefore aborted composition
         and every later run.
         """
+        # A barrier the parent cannot clear, so the skip-and-continue path is
+        # the one under test. The directory is made unreadable *and* its parent
+        # is left owned by another concept of the run: on this host the closest
+        # reliable stand-in is a permission the sweep's repair also fails on,
+        # so the deletion is forced to fail rather than merely be awkward.
         stuck = self.workspace.prepare("exp-s1", "ses-s1", "run-1")
         (stuck.session_state / "held").mkdir()
         (stuck.session_state / "held" / "f.txt").write_text("x")
-        os.chmod(stuck.session_state / "held", 0o500)
-        self.addCleanup(os.chmod, stuck.session_state / "held", 0o700)
 
         ordinary = self.workspace.prepare("exp-s2", "ses-s2", "run-1")
         (ordinary.session_state / "ok.txt").write_text("should be purged")
+
+        original = SandboxWorkspace.purge_transient
+
+        def explode(inner_self, session):
+            if session.name == "ses-s1":
+                raise PermissionError("cannot delete this session")
+            return original(inner_self, session)
+
+        SandboxWorkspace.purge_transient = explode
+        self.addCleanup(setattr, SandboxWorkspace, "purge_transient", original)
 
         report = SandboxRetention(self.workspace, ttl_seconds=1).sweep(
             now=time.time() + 10_000
@@ -758,6 +772,196 @@ class ResilienceAndAccountingTest(unittest.TestCase):
             "a relative sandbox root is no longer anchored to the repository",
         )
         self.assertIn("repository_root / sandbox_ledger_path", source)
+
+
+class IndependentReviewFindingsTest(unittest.TestCase):
+    """Four defects a second reviewer found in the fixes above.
+
+    Three are the same lesson in new places: a fix that named one shape of a
+    problem, and stopped there. The symlink working copy was fixed but not the
+    fifo; the walk counted directories but not special files; the sweep stopped
+    aborting but stopped deleting too.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root / "ws")
+        self.runner = SeatbeltSandboxRunner(self.workspace)
+
+    def test_one_session_cannot_read_another(self) -> None:
+        """G1: session isolation was incidental, not enforced.
+
+        The profile denied the home directory and whatever the composition
+        passed in, but never the sandbox root. Isolation therefore held only
+        when the root happened to sit beneath the home directory. A root
+        elsewhere - which is the layout D-027 pushes toward, and the layout
+        these tests use - left every session readable by every other, reachable
+        as ../../<other>/state from the working directory.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        first = self.workspace.prepare("exp-x", "ses-one", "run-1")
+        self.runner.run(
+            SandboxRequest(
+                "exp-x",
+                "ses-one",
+                "run-1",
+                "open('secret.txt', 'w').write('SESSION-ONE-SECRET')\n",
+            ),
+            first,
+        )
+
+        second = self.workspace.prepare("exp-x", "ses-two", "run-1")
+        source = (
+            "import os\n"
+            "target = os.path.join(os.getcwd(), '..', '..', 'ses-one',"
+            " 'state', 'secret.txt')\n"
+            "try:\n"
+            "    print('CROSS', open(target).read())\n"
+            "except Exception as error:\n"
+            "    print('BLOCKED', type(error).__name__)\n"
+        )
+        outcome = self.runner.run(
+            SandboxRequest("exp-x", "ses-two", "run-1", source), second
+        )
+
+        self.assertIn("BLOCKED", outcome.stdout)
+        self.assertNotIn(
+            "SESSION-ONE-SECRET",
+            outcome.stdout,
+            "one session read another session's state",
+        )
+
+    def test_a_session_can_still_read_its_own_state(self) -> None:
+        """Denying the root must not deny the run its own workspace."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-y", "ses-y", "run-1")
+        self.runner.run(
+            SandboxRequest(
+                "exp-y", "ses-y", "run-1", "open('kept.txt','w').write('mine')\n"
+            ),
+            paths,
+        )
+        outcome = self.runner.run(
+            SandboxRequest(
+                "exp-y",
+                "ses-y",
+                "run-2",
+                "print('OWN', open('kept.txt').read())\n",
+            ),
+            self.workspace.prepare("exp-y", "ses-y", "run-2"),
+        )
+        self.assertIn("OWN mine", outcome.stdout)
+
+    def test_a_fifo_entry_file_does_not_hang_the_parent(self) -> None:
+        """G2: O_NOFOLLOW refuses a symlink; a fifo is not a symlink.
+
+        Opening a fifo for writing blocks until a reader arrives. The parent
+        held the session lease and the day's reservation while it waited, and
+        the capability call never returned - in the live runtime, the agent
+        loop. The walk was given O_NONBLOCK for this reason; this open was not.
+        """
+        paths = self.workspace.prepare("exp-f2", "ses-f2", "run-1")
+        os.mkfifo(paths.session_state / "experiment.py")
+
+        outcome: list[str] = []
+
+        def attempt() -> None:
+            try:
+                self.runner._write_working_copy(
+                    paths.session_state / "experiment.py", "source"
+                )
+                outcome.append("wrote")
+            except SandboxError as error:
+                outcome.append(error.code)
+
+        thread = threading.Thread(target=attempt, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+
+        self.assertFalse(thread.is_alive(), "the parent blocked on a fifo")
+        self.assertEqual(outcome, ["workspace_unavailable"])
+
+    def test_an_ordinary_working_copy_is_replaced_completely(self) -> None:
+        """Truncation still happens, so no bytes of the old source survive."""
+        paths = self.workspace.prepare("exp-f3", "ses-f3", "run-1")
+        working = paths.session_state / "experiment.py"
+        working.write_text("a much longer previous program body")
+
+        self.runner._write_working_copy(working, "short")
+        self.assertEqual(working.read_text(), "short")
+
+    def test_special_files_count_against_the_walk_bound(self) -> None:
+        """G3: names that produce no entry were free.
+
+        A fifo is skipped for hashing, but it is still a name the parent opened
+        and inspected. Skipping without counting let thousands of them - which
+        a confined program can create - pass the bound entirely.
+        """
+        paths = self.workspace.prepare("exp-n", "ses-n", "run-1")
+        for index in range(MAX_WALKED_FILES + 50):
+            os.mkfifo(paths.session_state / f"p{index}")
+        (paths.session_state / "ok.txt").write_text("x")
+
+        self.assertTrue(
+            self.workspace.walk(paths.session_state).truncated,
+            "a flood of special files passed the walk bound",
+        )
+
+    def test_an_ordinary_session_is_not_reported_truncated(self) -> None:
+        paths = self.workspace.prepare("exp-n2", "ses-n2", "run-1")
+        (paths.session_state / "a.txt").write_text("x")
+        self.assertFalse(self.workspace.walk(paths.session_state).truncated)
+
+    def test_retention_deletes_bytes_the_experiment_protected(self) -> None:
+        """G4: the previous fix stopped the sweep aborting, and stopped it
+        deleting.
+
+        D-027 requires every experiment-authored byte to go at the retention
+        limit. An experiment can set UF_IMMUTABLE on its own file, or chmod a
+        directory unreadable, and the sweep simply skipped it - so the bytes
+        became permanent. The parent owns them, so it clears the barrier it is
+        entitled to clear and deletes.
+        """
+        paths = self.workspace.prepare("exp-i", "ses-i", "run-1")
+        immutable = paths.session_state / "keep-me.txt"
+        immutable.write_text("must-not-survive-ttl")
+        os.chflags(immutable, stat.UF_IMMUTABLE)
+        self.addCleanup(
+            lambda: os.chflags(immutable, 0) if immutable.exists() else None
+        )
+
+        locked = paths.session_state / "held"
+        locked.mkdir()
+        (locked / "f.txt").write_text("also must not survive")
+        os.chmod(locked, 0o500)
+
+        report = SandboxRetention(self.workspace, ttl_seconds=1).sweep(
+            now=time.time() + 10_000
+        )
+
+        self.assertEqual(report.sessions_purged, 1)
+        self.assertFalse(immutable.exists(), "an immutable file outlived its TTL")
+        self.assertFalse(locked.exists(), "a locked directory outlived its TTL")
+
+    def test_the_manifest_still_survives_retention(self) -> None:
+        """Clearing barriers must not start deleting what D-027 keeps."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-m", "ses-m", "run-1")
+        self.runner.run(
+            SandboxRequest(
+                "exp-m", "ses-m", "run-1", "open('out.txt','w').write('bytes')\n"
+            ),
+            paths,
+        )
+        SandboxRetention(self.workspace, ttl_seconds=1).sweep(
+            now=time.time() + 10_000
+        )
+        self.assertTrue(paths.manifest_path.is_file())
 
 
 if __name__ == "__main__":
