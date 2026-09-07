@@ -981,6 +981,11 @@ class ModelReasoner:
         never make: the turn does not happen, and the refusal is evidence.
         """
         assert self._max_input_tokens is not None
+        preflight = getattr(self._model, "ensure_available", None)
+        if callable(preflight):
+            # A provider that has already established a terminal account
+            # failure must stop before this occasion reserves or dispatches.
+            preflight()
         measured = input_token_upper_bound(request)
         if measured > self._max_input_tokens:
             # Before any reservation, so an oversized request never consumes

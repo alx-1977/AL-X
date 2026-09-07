@@ -120,6 +120,39 @@ async def incoming_audio():
     yield AudioChunk("mic", 0, b"pcm", "audio/pcm", 16000)
 
 
+class VoiceDiagnosticBufferTests(unittest.TestCase):
+    def test_task_status_keeps_only_the_latest_event_per_task(self) -> None:
+        diagnostics = VoiceDiagnosticBuffer()
+        diagnostics.publish(
+            "conversation-1",
+            {"code": "task.status", "task_id": "review-1", "state": "requested"},
+        )
+        diagnostics.publish(
+            "conversation-1",
+            {"code": "task.status", "task_id": "review-2", "state": "requested"},
+        )
+        diagnostics.publish(
+            "conversation-1",
+            {"code": "task.status", "task_id": "review-1", "state": "completed"},
+        )
+
+        events = diagnostics.drain("conversation-1")
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1]["task_id"], "review-1")
+        self.assertEqual(events[-1]["state"], "completed")
+
+    def test_each_dormant_conversation_has_a_hard_event_limit(self) -> None:
+        diagnostics = VoiceDiagnosticBuffer(max_events_per_conversation=2)
+        diagnostics.publish("conversation-1", {"code": "first"})
+        diagnostics.publish("conversation-1", {"code": "second"})
+        diagnostics.publish("conversation-1", {"code": "third"})
+
+        self.assertEqual(
+            [event["code"] for event in diagnostics.drain("conversation-1")],
+            ["second", "third"],
+        )
+
+
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_background_event_enters_same_gateway_and_only_core_response_is_spoken(self) -> None:
         event = BackgroundEvent(

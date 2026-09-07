@@ -1,6 +1,19 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
 from alx.contracts.cognition import Cognition, CognitionOrigin
+from alx.contracts.task import ExternalTask, TaskObservation, TaskState
+from alx.contracts.review import (
+    REVIEW_FAILURES,
+    ReviewError,
+    ReviewOutcome,
+    ReviewRequest,
+)
+from alx.contracts.repository import (
+    MERGE_FAILURES,
+    MergeError,
+    MergeOutcome,
+    MergeRequest,
+)
 from alx.contracts.continuity import (
     AutonomousResponseTransport,
     run_core_worker,
@@ -176,6 +189,17 @@ __all__ = [
     "MAX_REPORTED_ARTIFACTS",
     "MAX_STDOUT_CHARACTERS",
     "MAX_STDERR_CHARACTERS",
+    "ExternalTask",
+    "TaskObservation",
+    "TaskState",
+    "REVIEW_FAILURES",
+    "ReviewError",
+    "ReviewOutcome",
+    "ReviewRequest",
+    "MERGE_FAILURES",
+    "MergeError",
+    "MergeOutcome",
+    "MergeRequest",
     "CONNECT_TIMEOUT_SECONDS",
     "TOTAL_DEADLINE_SECONDS",
     "MAX_DURABLE_METADATA_CHARACTERS",

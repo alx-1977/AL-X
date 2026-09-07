@@ -230,6 +230,29 @@ class InputBoundTests(unittest.TestCase):
             self.calls += 1
             raise AssertionError("an oversized request must not dispatch")
 
+    def test_a_known_terminal_provider_reserves_nothing(self) -> None:
+        from alx.providers.errors import ProviderError
+
+        class Terminal:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def ensure_available(self) -> None:
+                raise ProviderError("openai", "credit_balance_exhausted")
+
+            def complete(self, request):
+                self.calls += 1
+                raise AssertionError("a terminal provider must not dispatch")
+
+        model = Terminal()
+        authority = RecordingAuthority()
+        reasoner = _bounded_reasoner(model, authority=authority)
+        with self.assertRaises(ProviderError):
+            reasoner.decide(ReasoningContext(None, (), (), conversation_id="c1"))
+        self.assertEqual(model.calls, 0)
+        self.assertEqual(authority.reservations, [])
+        self.assertEqual(authority.dispatched, [])
+
     def test_an_oversized_autonomous_request_cannot_dispatch(self) -> None:
         from alx.core.model_reasoner import ModelReasoner
 
@@ -700,6 +723,17 @@ class OccasionCostIsRecordedTests(unittest.TestCase):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         ]
         self.assertEqual(constructed.count("OccasionSpendRelay"), 1)
+        runners = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "AutonomousCognitionRunner"
+        ]
+        self.assertEqual(len(runners), 1)
+        arguments = {item.arg: item.value for item in runners[0].keywords}
+        self.assertIsInstance(arguments.get("spend_observer"), ast.Name)
+        self.assertEqual(arguments["spend_observer"].id, "occasion_spend")
 
 
 class UndeliveredReachesCoreTests(unittest.TestCase):

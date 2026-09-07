@@ -117,6 +117,17 @@ class FutureCognitionSource:
             )
         return tuple(opportunities)
 
+    def owns(self, opportunity: CognitionOpportunity) -> bool:
+        """Whether this producer made the occasion.
+
+        Asked rather than inferred elsewhere, so the knowledge of what this
+        source produces stays in the source that produces it.
+        """
+        return any(
+            reference.startswith("future_cognition:")
+            for reference in opportunity.references
+        )
+
     def claim(self, opportunity: CognitionOpportunity) -> bool:
         """Take an occasion exactly once, before anything is spent on it.
 

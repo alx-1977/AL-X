@@ -511,104 +511,118 @@ Revisit if retrieval reaches anything not publicly reachable; if a retrieved pag
 
 ---
 
-## D-026 — Independent review is a property, not a provider
+## D-026 — Routine merge authorisation is delegated to AL/X
 
-**Status:** Approved by Friedl on 2026-09-05
-**Owner:** Friedl
+- **Date:** 2026-09-06
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-06.**
+- **Approval source:** [Dashboard Service Idea](chatgpt-conversation://6a9b0226-eb38-83ea-b3cc-32bc0370dbaa), Friedl's 2026-09-06 instruction.
 
-### Decision
+**Decision.** Friedl delegates routine merge authorisation to AL/X. An external reviewer examines the code and reports what it found; AL/X reads that, judges whether anything needs correcting, and decides whether the current revision may merge. The reviewer advises. The decision is hers.
 
-Production changes require an independent, evidence-based review of the actual
-proposed merge diff. Governance specifies the properties and evidence that
-review must have. It does not name a commercial review provider.
+**Why this is a delegation rather than an automation.** Reading a review and deciding whether a finding matters is interpretation, and Law 1 puts interpretation in the single authoritative reasoning path. The alternative that was tried — having a gate parse a reviewer's output and rule on it — put that judgement into deterministic code, where it did not belong and where no provider supplied evidence reliable enough to carry it. This records the authority instead of simulating it.
 
-The requirement itself is not new. `docs/LAW_ENFORCEMENT.md` already states
-that "a change fails if required review evidence is absent" and that the author
-and reviewing model must both assess technical compliance, without naming a
-provider. Neither that document nor `LAWS_OF_ALX.md` mentions any vendor, and
-neither is amended by this decision. What was provider-bound was the
-implementation: a required GitHub status check tied to one application's
-identity, and a review brief stored in a vendor-named directory.
+### What AL/X decides
 
-### What an acceptable independent review must be
+Whether the code is ready for review; what the findings mean; whether they require correction; whether to withhold the merge; whether the review covers the current revision; and whether to merge.
 
-- **Independent of the implementing agent.** The agent that wrote a change
-  cannot be the independent check on it. This holds however capable that agent
-  is and however honest its self-assessment: a reviewer who authored the work
-  reviews their own reasoning along with their own code.
-- **Against the complete proposed diff**, at the exact head being merged. A
-  review of an earlier head is evidence about a different change.
-- **Evidence-backed.** Findings anchored to the code, or an explicit report of
-  the scope actually examined. A clean review is a valid outcome; a bare
-  verdict is not a review. Governance must never create an incentive to invent
-  a defect in order to satisfy a gate.
-- **In scope:** correctness, regressions, architecture and governance
-  compliance, applicable safety and economic boundaries, and whether tests
-  actually enforce what they claim.
-- **Non-mutating.** A reviewer does not modify production code while reviewing
-  it. Fixes are ordinary work under the gate afterwards.
+### What deterministic code does
 
-### What is verified, and what is asserted
+It performs the merge she has decided, against the exact revision she named, and reports what happened. It never reads a review, scores a finding, judges readiness, or retries a refusal.
 
-`scripts/check_independent_review.py` verifies, against GitHub's own record
-rather than any claim made in the repository: that a review covers the exact
-head, that its author is on the governed accepted list, that the reviewer
-authored no commit in the change, and that the review carries substantive
-content rather than a verdict. Reviewer identity is matched on GitHub's
-immutable numeric account id; a login can be renamed or re-registered, and the
-human-readable name is carried only for diagnostics.
+### The authority
 
-What cannot be verified is that the reviewer genuinely read the diff and
-exercised judgement across the scope above. No mechanism establishes that. The
-gate makes a false claim a recorded false statement rather than an absence,
-which is the standard `docs/LAW_ENFORCEMENT.md` already sets when it says "the
-reviewer will notice" is not evidence.
+Merging is granted through a `repository.merge` permission, separate from every other authority. It carries no per-merge approval: Friedl delegated the routine decision rather than participating in it, so requiring him to approve each merge would restore exactly what this removes.
 
-### Accepted reviewers
+He grants the authority by configuring it and revokes it by removing the configuration or the permission. A runtime without it cannot propose a merge at all.
 
-`review/accepted_reviewers.json` is the governed list. It is covered by
-CODEOWNERS, so adding a reviewer requires Friedl's approval. Being technically
-capable of posting a review does not make an actor an accepted reviewer.
+### The reviewed revision
 
-Paid review invocation remains under Friedl's explicit authority. This gate
-reads review evidence GitHub already holds; it never requests, triggers or pays
-for a review.
+`merge_pull_request` requires the pull request number and the head commit that was reviewed. That commit travels to GitHub as `sha`, and GitHub merges only if the branch still points at it.
 
-### Rollout
+So an authorisation is about one revision and cannot move a different one. If the branch advances after AL/X judges it, the merge is refused and the new revision must be reviewed again. GitHub enforces that as plumbing; the judgement remains hers.
 
-The verifier runs in the existing `law-gates` check in reporting mode. It
-becomes blocking only after it has accumulated evidence on real merges and
-Friedl explicitly approves the promotion. The `Greptile Review` branch
-protection check is unchanged and remains required until that promotion is
-approved separately.
+### Not authorised by this decision
 
-Where no accepted reviewer can run, the existing approved-exception mechanism
-in `governance/EXCEPTIONS.md` carries the merge, naming the exact head. That is
-the mechanism EX-002 and EX-003 already used; this decision reuses it rather
-than inventing a second way through.
+Merging without an external review of the current revision; overriding branch protection; force-pushing; merging on behalf of anyone else; and any authority for the coding agent or the external reviewer. This is AL/X's authority, held by the single reasoning path, and it is not transitive.
 
-### This decision is forward-looking
+### Branch protection
 
-It does not reinterpret, discharge or weaken any existing obligation.
+`law-gates` remains a required status check. This decision does not enable required pull-request reviews: an approval gate would either put Friedl back into each merge or be satisfied by AL/X approving her own work, and neither is the arrangement recorded here.
 
-**The retrospective Greptile reviews owed for `16bf2d9` under EX-002 and for
-`b1470fc` under EX-003 remain outstanding, and remain specifically Greptile
-reviews.** They were approved with that provider named, and a later
-provider-independent rule does not retroactively satisfy them. EX-002 and
-EX-003 are unchanged.
+### Requesting the review
 
-EX-003 recorded that a second consecutive quota-blocked merge is a reason to
-revisit the review arrangement deliberately rather than to keep spending
-exceptions on it. This decision is that deliberate revision. It must not become
-a way to retroactively bless the two merges that prompted it.
+This decision assumed a review would exist without saying who may ask for one.
+A review is a paid external service, so asking for one is spending, and an
+unrecorded spending path is exactly what the register exists to prevent.
+
+AL/X may ask the configured external reviewer to review one pull request,
+through a `review.request` permission separate from every other authority. It
+grants no merge authority, and merge authority grants no ability to request a
+review.
+
+Unlike merging, this is not delegated. Each request needs Friedl's approval
+grounded in his own turn, so one instruction buys one review of one pull
+request. A review that found issues, a fix, a moved head or a failed request
+cannot produce another: he asks again, or nothing happens. The approval carries
+no standing scope, because a standing scope here would be durable autonomous
+spending, which he has not granted.
+
+The reviewer is contacted through the integration it already has with this
+repository: the request is a trigger on the pull request, and no code, diff or
+private material is uploaded. Qodo is the reviewer configured today. Naming it
+here records what is actually installed rather than creating a roster, and
+replacing it needs no decision because nothing in the authority depends on
+which reviewer answers.
+
+**Which revision was reviewed is confirmed, not assumed.** The trigger is not
+pinned to a commit, so the reviewer works from whatever the pull request points
+at when it reaches the request. The revision is therefore read before the
+trigger and again after it, and reported only when the two agree. Where they do
+not, the result says the revision is unknown rather than naming a commit the
+reviewer may not have examined, and AL/X decides what to do with that. A merge
+still requires her judgement that a review covers the revision being merged.
+
+### Two earlier obligations, and what became of them
+
+EX-002 and EX-003 recorded two merges that went ahead without the Greptile
+review then required, each owing a retrospective review. Those exception
+records were removed with the rest of that system, so the obligations are
+restated here rather than disappearing with the machinery that held them.
+
+They were owed to a provider-specific requirement this decision replaces. The
+revisions concerned, `16bf2d9` and `b1470fc`, are long since merged and
+superseded, and there is no longer a required Greptile status for them to
+satisfy. Friedl discharges both: no retrospective review of those two
+revisions is owed. This is a disposition, not an omission, and it closes them
+explicitly so nobody has to reconstruct the history to find out.
+The approval source is [Dashboard Service Idea](chatgpt-conversation://6a9b0226-eb38-83ea-b3cc-32bc0370dbaa),
+Friedl's 2026-09-06 instruction.
+
+### Removing the enforcement machinery this replaced
+
+Friedl explicitly authorised removing the obsolete independent-review
+machinery on this branch before the simpler model recorded above was designed:
+the `independent-review` workflow job and its trusted verifier, the
+`review/` policy files (`mandate.md`, `brief.json`, `context.json`,
+`accepted_reviewers.json`), and the Greptile-era enforcement those files and
+that job carried.
+
+That authorisation is recorded here because the deletions removed operative
+policy, and an approval that has to be inferred from a commit is not an
+approval anyone can audit. The scope was the machinery itself, not the
+requirement it tried to enforce: a merge still needs AL/X's judgement that a
+review covers the revision being merged, which is what this decision records.
+
+Branch protection keeps `law-gates` as a required status check and requires
+conversation resolution. Required pull-request reviews stay off, for the
+reason already given above: an approval gate would either put Friedl back into
+each merge or be satisfied by AL/X approving her own work. The review
+judgement lives with her under `repository.merge`, not with branch protection.
 
 ### Review condition
 
-Revisit before promoting the verifier to blocking; if an accepted reviewer is
-added or removed; if a review is ever accepted that should not have been, or
-refused that should have been; if the exception path is used more than
-occasionally; or if the substantive-evidence threshold proves to reward padding
-rather than reporting.
+Revisit if a merge happens that a reviewer's findings should have stopped; if the delegation is used for anything but routine merges; if AL/X merges a revision no reviewer examined; or if the recorded authority proves broader than the routine decision Friedl intended to delegate.
 
 ---
 

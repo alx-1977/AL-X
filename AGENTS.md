@@ -46,38 +46,26 @@ Before declaring completion, run the law gates and the test suite, and say plain
 what could not be verified. Never silently treat an unverified requirement as
 passed.
 
-## Requesting an independent review
+## External review before merge
 
-Production changes require an independent, evidence-based review of the actual
-proposed merge diff. D-026 records what that review must be: independent of the
-agent that wrote the change, against the exact head being merged, evidence-backed
-rather than a bare verdict, covering correctness, regressions, architecture and
-governance, applicable safety and economic boundaries, and whether the tests
-enforce what they claim. A reviewer does not modify production code while
-reviewing it.
+Review the current code before merging. If the reviewer reports issues, fix
+them and have the changed code reviewed again. If it reports none, the change
+may merge. Any commit after a review invalidates that review.
 
-**Your own review does not satisfy this.** An implementing agent cannot be the
-independent check on its own work, however carefully it has checked itself.
+AL/X holds this responsibility under D-026, not branch protection. No gate
+counts reviews or parses a reviewer's output: reading a review, deciding
+whether a finding matters, and knowing whether the review still covers the
+current revision are judgements, and they belong to her. `law-gates` and
+unresolved-conversation blocking remain, but neither checks that a review
+happened.
 
-Who may satisfy it is recorded in `review/accepted_reviewers.json`, which is
-governed by CODEOWNERS. The review brief those reviewers work from lives in
-`review/` and is checksummed in `governance/REVIEW_BRIEF.sha256`.
+Any external reviewer satisfies this. Nothing here names a provider, keeps a
+roster, or judges the reviewer. When she merges, she names the exact commit
+that was reviewed, and GitHub refuses if the branch has moved since.
 
 Requesting a paid review is an external, chargeable action. Do it only when
-Friedl has asked for the review or explicitly approved the post, and never
-carry one approval forward to another review.
-
-For Greptile specifically, re-reviews are requested through the GitHub Issues
-API; neither `gh` nor browser access is required. The repository `.env` contains
-`GITHUB_TOKEN` (never print or record its value). For the relevant pull-request
-number, POST the JSON body `{"body":"@greptileai"}` to:
-
-`https://api.github.com/repos/alx-1977/AL-X/issues/<PR_NUMBER>/comments`
-
-Use the `Authorization: Bearer $GITHUB_TOKEN`,
-`Accept: application/vnd.github+json`, and
-`X-GitHub-Api-Version: 2022-11-28` headers. Confirm the returned comment URL.
-The established trigger is exactly `@greptileai`, not `@greptile`.
+Friedl has asked for it or explicitly approved it, and never carry one approval
+forward to another review.
 
 ## Prohibited shortcuts
 
@@ -91,4 +79,4 @@ Do not reinterpret a workflow as a "tool" to bypass the laws. A tool must repres
 
 ## Current project phase
 
-The initial executable gates and protected-branch law check are active. Friedl authorised the first permanent local voice-to-Core runtime and its narrowly scoped provider integrations in `governance/DECISIONS.md` decision D-007. That approval does not authorise domain integrations, production writes, autonomous deployment, or migration of logic from the previous system. Further implementation phases still require their recorded gates and Friedl's approval.
+The initial executable gates and protected-branch law check are active. Friedl authorised the first permanent local voice-to-Core runtime and its narrowly scoped provider integrations in `governance/DECISIONS.md` decision D-007. That approval does not authorise domain integrations, production writes, or migration of logic from the previous system. Routine merge authorisation is delegated to AL/X under D-026: an external reviewer advises, and she decides whether the reviewed revision may merge. That delegation covers merging reviewed changes and nothing else — it grants no deployment, release or promotion authority beyond it. Further implementation phases still require their recorded gates and Friedl's approval.

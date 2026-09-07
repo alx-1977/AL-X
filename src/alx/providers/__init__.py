@@ -16,6 +16,10 @@ from alx.providers.dhl import DhlImportAnalyzerAdapter
 from alx.providers.sandbox_runner import SandboxRunner, SeatbeltSandboxRunner
 from alx.providers.sandbox_workspace import SandboxWorkspace
 from alx.providers.sandbox_retention import SandboxRetention
+from alx.providers.github_merge import GitHubMergeProvider
+from alx.providers.qodo_review import QodoReviewProvider
+from alx.providers.qodo_review_content import QodoReviewContentProvider
+from alx.providers.qodo_status import QodoStatusObserver, subject_reference
 
 
 __all__ = [
@@ -23,7 +27,11 @@ __all__ = [
     "SandboxRunner",
     "SandboxWorkspace",
     "SeatbeltSandboxRunner",
-
+    "QodoStatusObserver",
+    "subject_reference",
+    "QodoReviewProvider",
+    "QodoReviewContentProvider",
+    "GitHubMergeProvider",
     "BraveWebSearchProvider",
     "HttpWebFetchProvider",
     "is_public_address",

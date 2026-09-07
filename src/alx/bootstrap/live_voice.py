@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 import logging
+from uuid import uuid4
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,13 @@ from alx.bootstrap.mail import (
 )
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
+from alx.bootstrap.repository import build_repository_runtime
+from alx.bootstrap.review import build_review_runtime
+from alx.bootstrap.tasks import build_task_runtime
+from alx.contracts.cognition import CognitionOrigin
+from alx.contracts.continuity import CognitionOpportunity
+from alx.contracts.task import ExternalTask, TaskState
+from alx.providers.qodo_status import subject_reference
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
@@ -38,6 +46,8 @@ from alx.bootstrap.xero import (
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
+    merge_settings,
+    review_settings,
     AUTONOMOUS_MAX_INPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
     autonomous_commissioning_limit,
@@ -50,6 +60,8 @@ from alx.config import (
     RuntimeSettings,
     XeroSettings,
 )
+from alx.continuity.completed_work_source import CompletedWorkSource
+from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity import (
     DueCognitionSource,
     FutureCognitionSource,
@@ -122,10 +134,48 @@ def migrate_legacy_conversations(
             snapshot = conversation_store.append(turn, retention, snapshot.revision)
 
 
+
+def _watch_review(
+    task_runtime: Any,
+    conversation_id: str,
+    number: int,
+    head_sha: str,
+    requested_at: datetime,
+) -> None:
+    """Record a requested review so the watcher can report on it.
+
+    Failing to record must not fail the request: the review has already been
+    asked for, and losing visibility of it is worse reported than raised.
+    """
+    if task_runtime is None:
+        return
+    try:
+        task_runtime.poller.record(
+            ExternalTask(
+                # Two same-second requests are still distinct occasions. A
+                # timestamp identifier collided and silently inherited the
+                # earlier row's handoff state, so identity is now collision-safe.
+                task_id=f"review:{number}:{uuid4().hex}",
+                kind="external_review",
+                service="qodo",
+                subject_reference=subject_reference(number, head_sha),
+                state=TaskState.REQUESTED,
+                requested_at=requested_at,
+                conversation_id=conversation_id,
+            )
+        )
+    except Exception as error:  # noqa: BLE001 - visibility, not correctness
+        LOGGER.warning(
+            "A requested review could not be watched: %s", type(error).__name__
+        )
+
+
 async def run(repository_root: Path) -> None:
     environment = load_environment(repository_root / ".env")
     provider_settings = RuntimeSettings.from_environment(environment)
     voice_settings = LiveVoiceSettings.from_environment(environment)
+    merge_configuration = merge_settings(environment)
+    review_configuration = review_settings(environment)
     storage_root = voice_settings.storage_root
     if not storage_root.is_absolute():
         storage_root = repository_root / storage_root
@@ -345,6 +395,47 @@ async def run(repository_root: Path) -> None:
         executors.update(sandbox_runtime.executors)
         permissions.update(sandbox_runtime.permissions)
 
+    # Requesting an external review is effectful and may spend review credits,
+    # so its policy requires an approval grounded in Friedl's own turn.
+    # The watcher is composed later, beside the transport, so the review path
+    # reaches it through a holder rather than being reordered around it.
+    task_holder: list[Any] = [None]
+    review_runtime = build_review_runtime(
+        review_configuration.is_usable,
+        review_configuration.repository,
+        review_configuration.token,
+        lambda: current_call_id[0],
+        started=lambda number, sha, requested_at: _watch_review(
+            task_holder[0],
+            current_conversation_id[0],
+            number,
+            sha,
+            requested_at,
+        ),
+    )
+    if review_runtime is not None:
+        for definition in review_runtime.definitions:
+            registry.register(definition)
+        policies.update(review_runtime.policies)
+        executors.update(review_runtime.executors)
+        permissions.update(review_runtime.permissions)
+
+    # Friedl delegated routine merge authorisation to AL/X. She reads an
+    # external review of the current head and decides; this executes that
+    # decision against the exact revision she judged.
+    merge_runtime = build_repository_runtime(
+        merge_configuration.is_usable,
+        merge_configuration.repository,
+        merge_configuration.token,
+        lambda: current_call_id[0],
+    )
+    if merge_runtime is not None:
+        for definition in merge_runtime.definitions:
+            registry.register(definition)
+        policies.update(merge_runtime.policies)
+        executors.update(merge_runtime.executors)
+        permissions.update(merge_runtime.permissions)
+
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
     xero_approval_ttl_seconds: int | None = None
@@ -501,6 +592,31 @@ async def run(repository_root: Path) -> None:
         memory_store,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
+        # Read from the policies themselves, so a capability that requires an
+        # approval grounded in Friedl's turn is bound to one action per turn
+        # without anything naming it here. Adding such a capability later
+        # inherits the rule; nothing has to remember to list it.
+        #
+        # A policy that allows a standing scope is excluded. Those are
+        # authorised by a scope that stays valid across turns rather than by
+        # what Friedl just said, so one instruction does not spend them:
+        # binding them stopped mail cleanup after a single message, refusing
+        # the second trash or mark-seen of a turn whose authority was never
+        # the turn in the first place.
+        turn_bound_capabilities=frozenset(
+            capability_id
+            for capability_id, policy in policies.items()
+            if policy.approval_required and not policy.standing_scope_allowed
+        ),
+        # The other half of the same reading: capabilities that reach outside
+        # but need only permission. Without it the Core cannot tell that an
+        # approval was never required, so a volunteered one is validated
+        # against Friedl's latest turn and a background read is refused.
+        approval_free_capabilities=frozenset(
+            capability_id
+            for capability_id, policy in policies.items()
+            if not policy.approval_required
+        ),
         # One bounded, recency-ordered list, from the one continuity store,
         # for every turn. There is deliberately no separate assembly for an
         # unprompted turn: a second builder would decide what she is like when
@@ -553,17 +669,71 @@ async def run(repository_root: Path) -> None:
     # The due-cognition tick lives for the life of the process, beside the
     # transport rather than inside it. Voice is how she is heard, not what
     # decides whether she exists.
+    # Work handed to an external service does not stop when a browser closes,
+    # so what watches it lives here beside the transport, as the mail scan and
+    # the due-cognition tick do. It only looks: it cannot request a review,
+    # retry one, spend anything, or merge. When a result appears it raises one
+    # opportunity, and AL/X reads the review herself.
+    task_runtime = build_task_runtime(
+        storage_root,
+        review_configuration.repository,
+        review_configuration.token,
+        # The frontend dispatches on `code`; a diagnostic without one renders
+        # as "Server diagnostic · unknown", which is what the watcher's lines
+        # became. The code names the event and the payload carries only
+        # identifiers, a state and a duration, as D-012 requires.
+        lambda conversation_id, values: diagnostics.publish(
+            conversation_id, {"code": "task.status", **values}
+        ),
+        # Completion is recorded durably by the watcher. Turning it into a
+        # Core turn is the completed-work source's job, through the same
+        # runner, ledger and lock as every other occasion. Writing an
+        # opportunity here instead left a ledger row nothing consumed, so the
+        # Core was never woken.
+        lambda task: None,
+    )
+
+    task_holder[0] = task_runtime
+
+    # Every kind of occasion reaches the Core through one producer, one
+    # runner and one tick. A finished external task joins the matured requests
+    # here rather than bringing a second tick, which would be a competing
+    # production path to the same outcome.
+    occasion_source: Any = cognition_source
+    if task_runtime is not None:
+        completed_work_source = CompletedWorkSource(
+            task_runtime.store,
+            opportunity_ledger,
+            enabled=providers.autonomous is not None,
+        )
+        # Finished external work needs the same restart-safe recovery the
+        # matured requests get, and for a sharper reason: a claim left behind
+        # by a stopped run would hide a result that had already arrived, and
+        # nothing would ever raise it again. Done before the runner starts, so
+        # no occasion is offered from a half-recovered ledger.
+        reclaimed_work = completed_work_source.recover(autonomous_budget)
+        if reclaimed_work:
+            LOGGER.info(
+                "Reclaimed %d completed-work occasion(s) left claimed"
+                " by a stopped run",
+                len(reclaimed_work),
+            )
+        occasion_source = CombinedOccasionSource(
+            cognition_source, completed_work_source
+        )
+
     autonomous_runner = AutonomousCognitionRunner(
-        cognition_source,
+        occasion_source,
         opportunity_ledger,
         gateway,
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
         response_transport=server,
+        spend_observer=occasion_spend,
         commissioning_limit=autonomous_commissioning_limit(environment),
     )
     due_cognition = DueCognitionSource(
-        cognition_source,
+        occasion_source,
         autonomous_runner,
         core_turn_lock,
         autonomous_due_check_seconds(environment),
@@ -574,6 +744,7 @@ async def run(repository_root: Path) -> None:
     # cursor and reconciles into durable state, and makes no Core call. What
     # it finds reaches AL/X through the one delivery path a session already
     # owns.
+
     mail_store_lock = asyncio.Lock()
     mail_poller = MailPoller(
         mail_runtime.source,
@@ -585,6 +756,8 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(server.serve_forever())
             runtime_tasks.create_task(due_cognition.run())
             runtime_tasks.create_task(mail_poller.run())
+            if task_runtime is not None:
+                runtime_tasks.create_task(task_runtime.poller.run())
     finally:
         # Cancelling the producer does not stop work already running inside
         # asyncio.to_thread: the coroutine unwinds while the worker keeps going.

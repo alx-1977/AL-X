@@ -8,7 +8,6 @@ from pathlib import Path
 
 from scripts.check_architecture import Rules, check_source, load_rules
 from scripts.check_governance import (
-    _check_review_brief,
     _check_identity_checksum,
     _check_law_checksum,
     check_repository,
@@ -129,53 +128,6 @@ class ArchitectureGateTests(unittest.TestCase):
 class GovernanceGateTests(unittest.TestCase):
     def test_repository_governance_passes(self) -> None:
         self.assertEqual([], check_repository(REPOSITORY_ROOT))
-
-    def test_review_brief_configuration_passes(self) -> None:
-        violations: list[str] = []
-        _check_review_brief(REPOSITORY_ROOT, violations)
-        self.assertEqual([], violations)
-
-    def test_missing_review_rule_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            shutil.copytree(REPOSITORY_ROOT / "review", root / "review")
-            config_path = root / "review/brief.json"
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["rules"] = [
-                rule
-                for rule in config["rules"]
-                if rule["id"] != "alx-dynamic-reasoning"
-            ]
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            violations: list[str] = []
-            _check_review_brief(root, violations)
-            self.assertTrue(
-                any("alx-dynamic-reasoning" in violation for violation in violations),
-                violations,
-            )
-
-    def test_automatic_reviews_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            shutil.copytree(REPOSITORY_ROOT / "review", root / "review")
-            (root / "governance").mkdir()
-            shutil.copy(
-                REPOSITORY_ROOT / "governance/REVIEW_BRIEF.sha256",
-                root / "governance/REVIEW_BRIEF.sha256",
-            )
-            config_path = root / "review/brief.json"
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["triggerOnUpdates"] = True
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            violations: list[str] = []
-            _check_review_brief(root, violations)
-            self.assertTrue(
-                any(
-                    "automatic commit re-reviews must remain disabled" in violation
-                    for violation in violations
-                ),
-                violations,
-            )
 
     def test_silent_identity_rewrite_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

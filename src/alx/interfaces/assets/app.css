@@ -150,6 +150,27 @@ html, body {
 
 #diagnostic-elapsed { color: rgba(185, 238, 251, .66); }
 
+/* One row per outstanding external task. Present only while something is
+   actually running, so an empty console still reads as idle. */
+.diagnostics__task {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .5rem 1rem;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+  background: rgba(255, 196, 105, .08);
+  color: #ffe0b3;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: .72rem;
+}
+
+.diagnostics__task[data-state="completed"] {
+  background: rgba(126, 245, 178, .09);
+  color: #c7f7dc;
+}
+
+.diagnostics__task time { color: rgba(255, 255, 255, .6); }
+
 .diagnostics__log {
   position: relative;
   height: 10.5rem;
