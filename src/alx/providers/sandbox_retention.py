@@ -80,16 +80,28 @@ class SandboxRetention:
                     continue
                 # Never purge a session another runtime is executing in: its
                 # state, source and output are still being read.
-                if self._workspace.is_leased(session):
-                    continue
-                try:
-                    removed = self._workspace.purge_transient(session)
-                except SandboxError:
-                    LOGGER.warning("Sandbox session could not be purged")
-                    continue
-                if removed:
-                    sessions += 1
-                    entries += removed
+                #
+                # The lease is held across both the decision and the purge.
+                # Asking whether a session was leased and then deleting it let
+                # a runner acquire the session in between, so retention removed
+                # the state of a run that had already started.
+                with self._workspace.idle_lease(session) as idle:
+                    if not idle:
+                        continue
+                    # Re-read the age under the lease. A run that finished
+                    # while this sweep walked the directory tree may have
+                    # touched the session since, and the earlier reading is
+                    # then stale in the one direction that matters.
+                    if self._age(session, moment) < self._ttl:
+                        continue
+                    try:
+                        removed = self._workspace.purge_transient(session)
+                    except SandboxError:
+                        LOGGER.warning("Sandbox session could not be purged")
+                        continue
+                    if removed:
+                        sessions += 1
+                        entries += removed
         if sessions:
             LOGGER.info(
                 "Sandbox retention purged %d session(s), %d entries", sessions, entries

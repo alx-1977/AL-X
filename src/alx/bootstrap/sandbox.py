@@ -124,14 +124,25 @@ def build_sandbox_runtime(
         # manifest — settles rather than abandons. Abandoning those would let
         # repeated post-execution failures spend the day's time without ever
         # appearing in either fuse.
+        #
+        # "Executed" means a child process actually exists, which the runner
+        # reports. Setting it before the call charged a daily run for failures
+        # that never started anything: writing the profile, copying the source
+        # and the baseline walk all happen first, and a disk error in any of
+        # them spent a run on an experiment that never ran.
         executed = False
+        started = 0.0
+
+        def launched() -> None:
+            nonlocal executed, started
+            started = monotonic()
+            executed = True
+
         try:
             paths = workspace.prepare(
                 request.experiment_id, request.session_id, request.run_id
             )
-            started = monotonic()
-            executed = True
-            outcome = selected.run(request, paths)
+            outcome = selected.run(request, paths, launched)
         except BaseException:
             if executed:
                 ledger.settle(reservation, monotonic() - started)

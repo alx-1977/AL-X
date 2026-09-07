@@ -196,7 +196,12 @@ class Finding4ReservationAccountingTest(unittest.TestCase):
             def available(self) -> bool:
                 return True
 
-            def run(self, request, paths):
+            def run(self, request, paths, launched=None):
+                # The process started, so wall time was really spent. The
+                # runner reports that before failing, exactly as the real one
+                # does when reading output or writing the manifest fails.
+                if launched is not None:
+                    launched()
                 raise RuntimeError("manifest write failed after execution")
 
         runtime = self._runtime(ExplodingAfterRun())

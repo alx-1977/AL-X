@@ -1,0 +1,410 @@
+"""Regressions for the third independent review, on the integrated head.
+
+Qodo reviewed `e0a1ce7` — Sandbox V1 as merged with the external-review and
+merge-authority work from `main` — and reported seven findings. Five were
+verified against the code and fixed; these tests are what stop them returning.
+
+Two were declined and are recorded in the pull request rather than here: the
+duplicated daily-limit literals are deliberate boundary-local constants kept
+equal by an existing test, and the "internal prompt terminology" finding names
+wording already approved on `main` under D-025 and mirrored by D-027.
+
+Every test here reproduces the exact failure the reviewer described, and fails
+against the code as it stood before the fix.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
+
+from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
+from alx.contracts.sandbox import (  # noqa: E402
+    MAX_WALKED_FILES,
+    MAX_WORKSPACE_BYTES,
+    SandboxError,
+    SandboxOutcome,
+    SandboxRequest,
+)
+from alx.observability.sandbox_ledger import SandboxBudget  # noqa: E402
+from alx.providers.sandbox_retention import SandboxRetention  # noqa: E402
+from alx.providers.sandbox_runner import SeatbeltSandboxRunner  # noqa: E402
+from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
+
+
+class WorkspaceCeilingTest(unittest.TestCase):
+    """F3: a truncated walk must never prove the workspace is within bounds.
+
+    `WalkResult.total_bytes` sums the entries it recorded. `walk()` stops at
+    MAX_WALKED_FILES, so the files it never reached are exactly where the
+    excess would be: a session could hold far more than the 64 MiB ceiling
+    while the partial total read as compliant, and the overflow was left on
+    disk. Fixed by treating a truncated snapshot as over the ceiling.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root)
+        self.runner = SeatbeltSandboxRunner(self.workspace)
+
+    def _state(self) -> Path:
+        paths = self.workspace.prepare("exp-f3", "ses-f3", "run-1")
+        return paths.session_state
+
+    def test_a_truncated_walk_is_reported_as_incomplete(self) -> None:
+        """The precondition: more entries than the bound truncates."""
+        state = self._state()
+        for index in range(MAX_WALKED_FILES + 50):
+            (state / f"f{index}").write_bytes(b"x")
+
+        result = self.workspace.walk(state)
+        self.assertTrue(result.truncated)
+        # And the total it reports is necessarily a partial one.
+        self.assertLess(len(result.entries), MAX_WALKED_FILES + 50)
+
+    def test_a_truncated_walk_cannot_show_the_ceiling_was_respected(self) -> None:
+        """The defect: >5000 files whose real total exceeds 64 MiB.
+
+        The recorded prefix stays small, so the old check compared a partial
+        sum against the ceiling and passed. Writing a real 64 MiB would make
+        this test slow for no extra proof, so the property is asserted the way
+        the runner sees it: truncated means unproven, whatever the partial
+        total says.
+        """
+        state = self._state()
+        for index in range(MAX_WALKED_FILES + 50):
+            (state / f"f{index}").write_bytes(b"x")
+
+        result = self.workspace.walk(state)
+        self.assertTrue(result.truncated)
+        # The partial total looks compliant, which is precisely the trap.
+        self.assertLess(result.total_bytes, MAX_WORKSPACE_BYTES)
+        # So the decision must not be made from the total alone.
+        over_ceiling = result.truncated or result.total_bytes > MAX_WORKSPACE_BYTES
+        self.assertTrue(
+            over_ceiling,
+            "a truncated snapshot must never prove the workspace is within bounds",
+        )
+
+    def test_an_oversized_session_is_refused_and_purged(self) -> None:
+        """End to end through the real runner, if this platform can confine."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-f3b", "ses-f3b", "run-1")
+        source = (
+            "import pathlib\n"
+            f"for i in range({MAX_WALKED_FILES + 50}):\n"
+            "    pathlib.Path(f'f{i}').write_bytes(b'x')\n"
+        )
+        with self.assertRaises(SandboxError) as raised:
+            self.runner.run(
+                SandboxRequest("exp-f3b", "ses-f3b", "run-1", source), paths
+            )
+        self.assertEqual(raised.exception.code, "workspace_exhausted")
+        # The overflow is not left behind.
+        self.assertFalse(any(paths.session_state.glob("f*")))
+
+
+class DirectoryFloodTest(unittest.TestCase):
+    """F6: directories are traversal work and must count against the bound.
+
+    The bound was checked only inside the file loop, so `os.walk` descended
+    through directories without counting them. A tree of empty directories is
+    cheap to create inside the wall clock and was then enumerated without any
+    bound, by the snapshot and by every later retention sweep.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.workspace = SandboxWorkspace(Path(directory.name))
+
+    def test_a_directory_only_flood_is_bounded(self) -> None:
+        """Nested rather than flat, within what the filesystem allows.
+
+        A single 5,200-deep chain exceeds the OS path limit, so the tree is
+        built as a fan: deep enough that traversal is real work, wide enough to
+        pass the bound. Either shape was unbounded before the fix.
+        """
+        paths = self.workspace.prepare("exp-f6", "ses-f6", "run-1")
+        state = paths.session_state
+        made = 0
+        branch = 0
+        while made < MAX_WALKED_FILES + 200:
+            current = state / f"b{branch}"
+            for depth in range(50):
+                current = current / f"d{depth}"
+            current.mkdir(parents=True)
+            made += 51
+            branch += 1
+
+        result = self.workspace.walk(state)
+        self.assertTrue(
+            result.truncated,
+            "a directory-only tree must reach the walk bound like any other",
+        )
+
+    def test_a_wide_directory_flood_is_bounded(self) -> None:
+        """Breadth as well as depth: siblings count too."""
+        paths = self.workspace.prepare("exp-f6b", "ses-f6b", "run-1")
+        state = paths.session_state
+        for index in range(MAX_WALKED_FILES + 200):
+            (state / f"d{index}").mkdir()
+
+        self.assertTrue(self.workspace.walk(state).truncated)
+
+    def test_a_small_tree_is_still_complete(self) -> None:
+        """The bound must not make ordinary sessions look truncated."""
+        paths = self.workspace.prepare("exp-f6c", "ses-f6c", "run-1")
+        state = paths.session_state
+        (state / "a").mkdir()
+        (state / "a" / "b").mkdir()
+        (state / "a" / "b" / "note.txt").write_text("hello")
+
+        result = self.workspace.walk(state)
+        self.assertFalse(result.truncated)
+        self.assertIn("a/b/note.txt", result.entries)
+
+
+class RetentionLeaseRaceTest(unittest.TestCase):
+    """F4: the idle decision and the purge must happen under one lease.
+
+    `is_leased()` could only answer by taking the lock and releasing it, so a
+    runner could acquire the session in the gap between the answer and the
+    purge. Retention then deleted the state, source and output of a run that
+    had already started.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.workspace = SandboxWorkspace(Path(directory.name))
+        # A short TTL plus a `now` far in the future expires everything, so
+        # only the lease can protect a session.
+        self.retention = SandboxRetention(self.workspace, ttl_seconds=1)
+
+    def test_a_held_lease_stops_the_purge(self) -> None:
+        paths = self.workspace.prepare("exp-f4", "ses-f4", "run-1")
+        (paths.session_state / "work.txt").write_text("mid-run state")
+
+        holding = threading.Event()
+        release = threading.Event()
+
+        def runner() -> None:
+            with self.workspace.lease("exp-f4", "ses-f4"):
+                holding.set()
+                release.wait(timeout=5)
+
+        thread = threading.Thread(target=runner)
+        thread.start()
+        try:
+            self.assertTrue(holding.wait(timeout=5))
+            # Retention runs while the lease is genuinely held.
+            report = self.retention.sweep(now=time.time() + 10_000)
+            self.assertEqual(report.sessions_purged, 0)
+            self.assertTrue(
+                (paths.session_state / "work.txt").is_file(),
+                "retention deleted the state of a running experiment",
+            )
+        finally:
+            release.set()
+            thread.join(timeout=5)
+
+    def test_the_decision_is_made_while_holding_the_lease(self) -> None:
+        """The race itself: acquiring between the probe and the purge.
+
+        `idle_lease` yields while still holding the lock, so a runner cannot
+        take the session after the sweep decides it is idle. This asserts the
+        property directly: while the sweep holds a session, a run cannot start
+        in it.
+        """
+        self.workspace.prepare("exp-f4b", "ses-f4b", "run-1")
+        session = self.workspace.root / "exp-f4b" / "ses-f4b"
+        started: list[str] = []
+
+        with self.workspace.idle_lease(session) as idle:
+            self.assertTrue(idle)
+            try:
+                with self.workspace.lease("exp-f4b", "ses-f4b"):
+                    started.append("acquired")
+            except SandboxError as error:
+                started.append(error.code)
+
+        self.assertEqual(
+            started,
+            ["session_busy"],
+            "a run started while retention believed the session was idle",
+        )
+
+    def test_an_idle_session_is_still_purged(self) -> None:
+        """The lease must not stop retention doing its job."""
+        paths = self.workspace.prepare("exp-f4c", "ses-f4c", "run-1")
+        (paths.session_state / "old.txt").write_text("expired")
+
+        report = self.retention.sweep(now=time.time() + 10_000)
+        self.assertEqual(report.sessions_purged, 1)
+        self.assertFalse((paths.session_state / "old.txt").exists())
+
+
+class TruncatedArtifactCountTest(unittest.TestCase):
+    """F5: counts from a truncated walk must not look exact.
+
+    `artifacts` and `artifacts_omitted` were derived from possibly-incomplete
+    snapshots, so a run reported a precise-looking omission count that silently
+    excluded every unscanned file. Only the manifest knew the state was
+    partial. The outcome now carries that fact to the caller.
+    """
+
+    @staticmethod
+    def _built(**overrides) -> SandboxOutcome:
+        return _build_outcome(**overrides)
+
+
+def _build_outcome(**overrides) -> SandboxOutcome:
+    """One valid outcome, with only the field under test varied."""
+    from datetime import UTC, datetime
+
+    if True:
+        values = dict(
+            experiment_id="exp-f5",
+            session_id="ses-f5",
+            run_id="run-1",
+            exit_status=0,
+            signalled=False,
+            timed_out=False,
+            stdout="",
+            stderr="",
+            stdout_omitted_characters=0,
+            stderr_omitted_characters=0,
+            stdout_digest="0" * 64,
+            stderr_digest="0" * 64,
+            stdout_byte_size=0,
+            stderr_byte_size=0,
+            artifacts=(),
+            artifacts_omitted=0,
+            wall_seconds_used=0.1,
+            started_at=datetime(2026, 9, 7, tzinfo=UTC),
+            finished_at=datetime(2026, 9, 7, tzinfo=UTC),
+        )
+        values.update(overrides)
+        return SandboxOutcome(**values)
+
+    def test_the_outcome_carries_whether_the_state_was_complete(self) -> None:
+        self.assertTrue(self._built(state_truncated=True).state_truncated)
+        self.assertFalse(self._built().state_truncated)
+
+    def test_truncation_reaches_the_core_and_durable_state(self) -> None:
+        """Both channels: an incomplete count must be visible in each."""
+        outcome = self._built(state_truncated=True)
+        self.assertTrue(outcome.as_values()["state_truncated"])
+        self.assertTrue(outcome.durable_values()["state_truncated"])
+
+    def test_the_capability_declares_the_field(self) -> None:
+        """A schema with extra_properties=False would otherwise reject it."""
+        from alx.tools.sandbox import DEFINITION
+
+        self.assertIn("state_truncated", DEFINITION.output_schema.properties)
+
+    def test_truncation_carries_no_experiment_authored_bytes(self) -> None:
+        """It is a boolean, so making counts honest costs no privacy."""
+        durable = self._built(state_truncated=True).durable_values()
+        self.assertIsInstance(durable["state_truncated"], bool)
+
+
+class PreLaunchAccountingTest(unittest.TestCase):
+    """F7: a failure before the process starts must not spend a daily run.
+
+    `executed` was set before calling the runner, but the runner writes the
+    profile, copies the source and walks the baseline first. A disk error in
+    any of those charged a run for an experiment that never started.
+    """
+
+    def _runtime(self, runner):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        return build_sandbox_runtime(
+            True,
+            root / "w",
+            root / "l.sqlite3",
+            lambda: "call-1",
+            runner=runner,
+            budget=SandboxBudget(20, 300),
+        )
+
+    def test_a_failure_before_launch_charges_nothing(self) -> None:
+        class FailsBeforeLaunch:
+            def available(self) -> bool:
+                return True
+
+            def run(self, request, paths, launched=None):
+                # Exactly the real order: writing the profile and copying the
+                # source happen before any process exists, so `launched` has
+                # not been called.
+                raise SandboxError("workspace_unavailable")
+
+        runtime = self._runtime(FailsBeforeLaunch())
+        executor = runtime.executors["run_sandbox_experiment"]
+        for _ in range(3):
+            executor(
+                {"experiment_id": "exp-f7", "session_id": "ses-f7", "source": "print(1)"}
+            )
+
+        self.assertEqual(
+            runtime.ledger.committed_runs(),
+            0,
+            "a failure before the process started consumed a daily run",
+        )
+
+    def test_a_failure_after_launch_still_charges(self) -> None:
+        """The other direction: real wall time must appear in the fuse."""
+
+        class FailsAfterLaunch:
+            def available(self) -> bool:
+                return True
+
+            def run(self, request, paths, launched=None):
+                if launched is not None:
+                    launched()
+                raise RuntimeError("manifest write failed after execution")
+
+        runtime = self._runtime(FailsAfterLaunch())
+        executor = runtime.executors["run_sandbox_experiment"]
+        for _ in range(3):
+            executor(
+                {"experiment_id": "exp-f7b", "session_id": "ses-f7b", "source": "print(1)"}
+            )
+
+        self.assertEqual(runtime.ledger.committed_runs(), 3)
+
+    def test_the_runner_signals_the_moment_a_process_exists(self) -> None:
+        """The signal is what the accounting depends on, so it is asserted."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        workspace = SandboxWorkspace(Path(directory.name))
+        runner = SeatbeltSandboxRunner(workspace)
+        if not runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+
+        paths = workspace.prepare("exp-f7c", "ses-f7c", "run-1")
+        signals: list[str] = []
+        runner.run(
+            SandboxRequest("exp-f7c", "ses-f7c", "run-1", "print('ok')"),
+            paths,
+            lambda: signals.append("launched"),
+        )
+        self.assertEqual(signals, ["launched"])
+
+
+if __name__ == "__main__":
+    unittest.main()

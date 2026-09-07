@@ -227,6 +227,13 @@ class SandboxOutcome:
     # than assumed false, so evidence is never silently partial.
     stdout_capped: bool = False
     stderr_capped: bool = False
+    # Whether the session state was too large to audit completely, in which
+    # case `artifacts` and `artifacts_omitted` describe only the part that was
+    # scanned. Without this the counts read as exact totals: a run that created
+    # more files than the walk bound reported a precise-looking omission count
+    # that silently excluded every unscanned file. An incomplete count that
+    # says so is worth more than a wrong one that does not.
+    state_truncated: bool = False
 
     def __post_init__(self) -> None:
         _identifier(self.experiment_id, "experiment_id")
@@ -296,6 +303,7 @@ class SandboxOutcome:
             "stderr_capped": self.stderr_capped,
             "artifact_count": len(self.artifacts),
             "artifacts_omitted": self.artifacts_omitted,
+            "state_truncated": self.state_truncated,
             "wall_seconds_used": round(self.wall_seconds_used, 3),
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),

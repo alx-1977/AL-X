@@ -108,6 +108,11 @@ DEFINITION = CapabilityDefinition(
             "artifacts": StructuredSchema(ValueKind.ARRAY, items=_ARTIFACT),
             "artifact_count": _INTEGER,
             "artifacts_omitted": _INTEGER,
+            # True when the session state was too large to scan completely, so
+            # the two counts above describe the scanned part rather than the
+            # whole. Declared so an incomplete audit is visible to AL/X rather
+            # than being a precise-looking number that is quietly wrong.
+            "state_truncated": _BOOLEAN,
             "wall_seconds_used": StructuredSchema(ValueKind.NUMBER),
             "started_at": _STRING,
             "finished_at": _STRING,

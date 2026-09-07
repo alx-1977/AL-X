@@ -39,6 +39,7 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -85,8 +86,20 @@ class SandboxRunner(ABC):
         """Whether this platform can actually confine a process."""
 
     @abstractmethod
-    def run(self, request: SandboxRequest, paths: SessionPaths) -> SandboxOutcome:
-        """Execute one program and return what it did."""
+    def run(
+        self,
+        request: SandboxRequest,
+        paths: SessionPaths,
+        launched: "Callable[[], None] | None" = None,
+    ) -> SandboxOutcome:
+        """Execute one program and return what it did.
+
+        `launched` is called once, the moment a child process actually exists.
+        Everything before that point - writing the profile, copying the source,
+        the baseline walk - can fail without any experiment having run, and the
+        caller needs to tell those apart: charging a daily run for a failure
+        that never started a process spends a fuse on nothing.
+        """
 
 
 def _truncate(value: str, limit: int) -> tuple[str, int]:
@@ -206,16 +219,26 @@ class SeatbeltSandboxRunner(SandboxRunner):
         resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_FILE_BYTES, MAX_FILE_BYTES))
         resource.setrlimit(resource.RLIMIT_NPROC, (MAX_PROCESSES, MAX_PROCESSES))
 
-    def run(self, request: SandboxRequest, paths: SessionPaths) -> SandboxOutcome:
+    def run(
+        self,
+        request: SandboxRequest,
+        paths: SessionPaths,
+        launched: "Callable[[], None] | None" = None,
+    ) -> SandboxOutcome:
         if not self.available():
             raise SandboxError("sandbox_unavailable")
         # Held across preparation, execution, evidence collection and the
         # manifest, so a concurrent run in this session cannot overwrite the
         # working copy and retention cannot purge state mid-run.
         with self._workspace.lease(request.experiment_id, request.session_id):
-            return self._run_leased(request, paths)
+            return self._run_leased(request, paths, launched)
 
-    def _run_leased(self, request: SandboxRequest, paths: SessionPaths) -> SandboxOutcome:
+    def _run_leased(
+        self,
+        request: SandboxRequest,
+        paths: SessionPaths,
+        launched: "Callable[[], None] | None" = None,
+    ) -> SandboxOutcome:
         entry = paths.source_directory / request.entry_filename
         profile_path = paths.run_directory / "profile.sb"
         stdout_path = paths.run_directory / "stdout.log"
@@ -265,6 +288,10 @@ class SeatbeltSandboxRunner(SandboxRunner):
                 # with it rather than surviving the call.
                 start_new_session=True,
             )
+            # A process now exists and has begun consuming wall time on this
+            # machine, so from here a failure settles rather than abandons.
+            if launched is not None:
+                launched()
             try:
                 process.wait(timeout=request.wall_seconds)
             except subprocess.TimeoutExpired:
@@ -281,8 +308,16 @@ class SeatbeltSandboxRunner(SandboxRunner):
         # and stay inside every per-file limit. The run has already finished,
         # so the ceiling is enforced by refusing to leave the overflow behind
         # rather than by pretending the run did not happen.
-        if after.total_bytes > MAX_WORKSPACE_BYTES:
-            LOGGER.warning("A sandbox session exceeded its workspace ceiling")
+        # A truncated walk cannot show the workspace is within the ceiling:
+        # `total_bytes` sums the entries it recorded, and the ones it stopped
+        # before are exactly where the excess would be. Treated as over the
+        # ceiling rather than as compliant, so the fail-closed direction is the
+        # one that costs a run rather than the one that leaves the overflow.
+        if after.truncated or after.total_bytes > MAX_WORKSPACE_BYTES:
+            LOGGER.warning(
+                "A sandbox session exceeded its workspace ceiling%s",
+                " (state too large to audit)" if after.truncated else "",
+            )
             self._workspace.purge_state(paths.session_state)
             raise SandboxError("workspace_exhausted")
 
@@ -321,6 +356,10 @@ class SeatbeltSandboxRunner(SandboxRunner):
             finished_at=finished_at,
             stdout_capped=stdout_capped,
             stderr_capped=stderr_capped,
+            # `after.truncated` is refused above, so in practice this carries a
+            # truncated *before* snapshot: the counts are still derived from an
+            # incomplete baseline and must not read as exact.
+            state_truncated=state_truncated,
         )
         self._write_manifest(
             request, paths, outcome, before, after, argv, state_truncated

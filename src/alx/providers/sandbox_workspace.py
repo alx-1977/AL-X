@@ -145,22 +145,44 @@ class SandboxWorkspace:
         finally:
             handle.close()
 
-    def is_leased(self, session: Path) -> bool:
-        """Whether another process is currently running in this session."""
+    @contextmanager
+    def idle_lease(self, session: Path):
+        """Hold a session that is not running, or yield False without holding.
+
+        This replaces asking whether a session is leased and then acting on the
+        answer. That question could only be answered by taking the lock and
+        letting it go, and a runner could acquire the session in the gap: the
+        answer was true when given and false when used, so retention could
+        delete the state, source and output of a run that had just started.
+
+        The decision and whatever depends on it therefore happen inside one
+        hold. Yields True while the lease is held exclusively, or False when
+        another process owns it, in which case nothing is held and the caller
+        must not touch the session.
+        """
         marker = session / ".lease"
-        if not marker.is_file():
-            return False
         try:
+            # Created if absent rather than treated as "nothing to race with".
+            # `prepare()` does not write the marker - only `lease()` does - so
+            # a session that has been prepared but never run had no marker, and
+            # skipping the lock there left the race open for exactly the
+            # sessions most likely to be mid-preparation.
             handle = marker.open("a+")
         except OSError:
-            return True
+            # Unreadable is treated as busy: the safe direction is to leave a
+            # session alone, not to delete one whose state cannot be checked.
+            yield False
+            return
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        else:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            return False
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
 
@@ -171,10 +193,13 @@ class SandboxWorkspace:
         links are recorded by name with an empty digest so that creating one is
         visible evidence, while its target is never opened.
 
-        Every entry counts against the bound, links included. Counting only
-        regular files let a program create tens of thousands of small links and
-        force the privileged parent to enumerate all of them after the run had
-        already been stopped.
+        Every entry counts against the bound, links and directories included.
+        Counting only regular files let a program create tens of thousands of
+        small links and force the privileged parent to enumerate all of them
+        after the run had already been stopped. Counting only files and links
+        left the same hole one level up: a tree of empty directories costs
+        nothing to create inside the wall clock and was then walked without any
+        bound at all, by this snapshot and by every later retention sweep.
 
         Truncation is reported rather than silent: a partial snapshot compared
         against another partial snapshot produces artifact counts that are
@@ -183,16 +208,26 @@ class SandboxWorkspace:
         results: dict[str, tuple[str, int]] = {}
         if not directory.exists():
             return WalkResult(results, False)
+        # Directories are not snapshot entries - nothing is hashed for them -
+        # but they are traversal work, so they are counted against the same
+        # bound. Kept separately so the entry map stays a map of files.
+        walked = 0
         for current, directory_names, file_names in os.walk(directory, followlinks=False):
             # Do not descend into linked directories either.
             directory_names[:] = [
                 name for name in directory_names
                 if not Path(current, name).is_symlink()
             ]
+            walked += len(directory_names)
+            if walked + len(results) >= MAX_WALKED_FILES:
+                # Stop before descending further. The bound is on work done by
+                # the privileged parent, and an unbounded tree of directories
+                # is exactly as expensive to enumerate as one of files.
+                return WalkResult(results, True)
             for name in sorted(file_names):
                 if name == ".lease":
                     continue
-                if len(results) >= MAX_WALKED_FILES:
+                if walked + len(results) >= MAX_WALKED_FILES:
                     return WalkResult(results, True)
                 path = Path(current, name)
                 relative = str(path.relative_to(directory))

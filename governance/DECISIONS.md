@@ -786,6 +786,33 @@ An experiment that exits zero has demonstrated that a program ran in an isolated
 
 The test suite must not require a working sandbox in order to run. The confinement mechanism is injected so the boundary is provable without executing anything, following the precedent of the public-web address boundary, and the tests that require real confinement are skipped explicitly rather than silently on platforms that cannot provide it.
 
+### Two review findings declined
+
+A third independent review of the integrated head reported seven findings. Five
+were verified and fixed. Two were declined, recorded here because a finding
+that is neither fixed nor explained looks like one that was missed.
+
+**The duplicated daily limits stay duplicated.** `DAILY_RUNS` and
+`DAILY_WALL_SECONDS` appear as literals in `contracts/sandbox.py`,
+`config/settings.py` and `observability/sandbox_ledger.py`. The reviewer read
+that as three policy sources that can drift, and asked for the ceilings to be
+obtained through AL/X or a managed decision interface instead. They are
+duplicated because `config` and `observability` are leaf boundaries that import
+nothing internal, and a test asserts all three stay equal. Routing an approved
+maximum through a reasoning call would put a value with one correct answer into
+AL/X's judgement, which Law 2 places in code, and would make a governed ceiling
+depend on a paid call. The duplication is the cost of the boundary, and the
+test is what keeps it honest.
+
+**The governance wording stays as written.** The reviewer read "system prompt"
+and "instruction channel" in D-027 as internal terminology that should not
+appear in repository content. That wording is D-025's, approved and already on
+`main`, and D-027 mirrors it deliberately because it describes the same
+structural protection: retrieved or produced content travels as untrusted
+evidence and never as instruction. Changing it here would leave two
+descriptions of one boundary, and editing approved decision text needs Friedl's
+approval rather than a reviewer's suggestion.
+
 ### Review condition
 
 Revisit when AL/X moves to dedicated hardware, at which point the production-host containment requirement above applies; if Apple removes or breaks the macOS sandbox mechanism; if an experiment ever reaches the network, this repository, production data, or any inherited credential; if sandbox output is ever acted upon as an instruction; if experiment-authored bytes are found surviving their retention limit or accumulating in durable goal state; if the daily fuses prove to be shaping what AL/X is willing to try rather than merely bounding runaway use; or if the Python standard library proves inadequate often enough to argue for dependencies, which would be a new decision rather than an adjustment of this one.
