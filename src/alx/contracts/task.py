@@ -46,11 +46,16 @@ class TaskState(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     STATUS_UNKNOWN = "status_unknown"
+    OBSERVER_UNAVAILABLE = "observer_unavailable"
 
     @property
     def is_settled(self) -> bool:
         """Whether this task needs watching any longer."""
-        return self in (TaskState.COMPLETED, TaskState.FAILED)
+        return self in (
+            TaskState.COMPLETED,
+            TaskState.FAILED,
+            TaskState.OBSERVER_UNAVAILABLE,
+        )
 
 
 @dataclass(frozen=True, slots=True)

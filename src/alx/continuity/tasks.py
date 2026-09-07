@@ -188,16 +188,42 @@ class SQLiteTaskStore:
                            requested_at, last_checked_at, completed_at,
                            conversation_id
                     FROM external_tasks
-                    WHERE state NOT IN (?, ?)
+                    WHERE state NOT IN (?, ?, ?)
                     ORDER BY requested_at
                     """,
-                    (TaskState.COMPLETED.value, TaskState.FAILED.value),
+                    (
+                        TaskState.COMPLETED.value,
+                        TaskState.FAILED.value,
+                        TaskState.OBSERVER_UNAVAILABLE.value,
+                    ),
                 ).fetchall()
             except sqlite3.Error as error:
                 raise TaskStoreCorrupt(str(error)) from error
             finally:
                 database.close()
         return self._valid_tasks(rows)
+
+    def restore_observers(self, services: frozenset[str]) -> None:
+        """Resume retained tasks when their observer is configured again."""
+        if not services:
+            return
+        placeholders = ", ".join("?" for _ in services)
+        with self._lock:
+            database = self._connect()
+            try:
+                database.execute(
+                    "UPDATE external_tasks SET state = ?, last_checked_at = NULL "
+                    f"WHERE state = ? AND service IN ({placeholders})",
+                    (
+                        TaskState.REQUESTED.value,
+                        TaskState.OBSERVER_UNAVAILABLE.value,
+                        *sorted(services),
+                    ),
+                )
+            except sqlite3.Error as error:
+                raise TaskStoreCorrupt(str(error)) from error
+            finally:
+                database.close()
 
     @classmethod
     def _valid_tasks(cls, rows: list[tuple]) -> tuple[ExternalTask, ...]:

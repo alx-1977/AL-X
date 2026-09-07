@@ -68,6 +68,12 @@ def build_task_runtime(
             LOGGER.warning("Task observer is misconfigured: work is not watched")
             return None
 
+    try:
+        store.restore_observers(frozenset(observers))
+    except TaskStoreCorrupt:
+        LOGGER.warning("External task store is unusable: work is not watched")
+        return None
+
     LOGGER.info(
         "External task watching enabled: %s", ", ".join(sorted(observers))
     )

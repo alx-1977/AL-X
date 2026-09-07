@@ -23,6 +23,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+from alx.bootstrap.tasks import build_task_runtime  # noqa: E402
 from alx.continuity.tasks import SQLiteTaskStore, TaskStoreCorrupt  # noqa: E402
 from alx.contracts.cognition import CognitionOrigin  # noqa: E402
 from alx.contracts.task import ExternalTask, TaskObservation, TaskState  # noqa: E402
@@ -120,12 +121,14 @@ class TaskStateTests(unittest.TestCase):
                 "completed",
                 "failed",
                 "status_unknown",
+                "observer_unavailable",
             },
         )
 
-    def test_only_completion_and_failure_settle_a_task(self) -> None:
+    def test_terminal_states_stop_watching_a_task(self) -> None:
         self.assertTrue(TaskState.COMPLETED.is_settled)
         self.assertTrue(TaskState.FAILED.is_settled)
+        self.assertTrue(TaskState.OBSERVER_UNAVAILABLE.is_settled)
         for state in (
             TaskState.REQUESTED,
             TaskState.WAITING_FOR_RESULT,
@@ -331,12 +334,61 @@ class PollerTests(PollerHarness):
         self.assertEqual(self.lines[0][1]["state"], "status_unknown")
         self.assertEqual(self.woken, [])
 
-    def test_a_service_nobody_watches_is_unknown_rather_than_outstanding(self) -> None:
+    def test_a_removed_observer_retires_the_task_without_repeated_writes(self) -> None:
         self.store.record(_task(service="unwatched"))
         observer = RecordingObserver(TaskState.COMPLETED)
-        self._poller(observer).tick()
+        poller = self._poller(observer)
+        poller.tick()
+        first_lines = tuple(self.lines)
+        poller.tick()
         self.assertEqual(observer.looks, 0)
-        self.assertIs(self.store.outstanding()[0].state, TaskState.STATUS_UNKNOWN)
+        self.assertEqual(self.store.outstanding(), ())
+        self.assertEqual(first_lines, tuple(self.lines))
+        self.assertEqual(first_lines[0][1]["state"], "observer_unavailable")
+
+    def test_a_returning_observer_restores_its_retained_tasks(self) -> None:
+        self.store.record(_task(service="qodo"))
+        TaskPoller(
+            self.store,
+            {},
+            interval_seconds=1.0,
+            announce=lambda conversation, values: None,
+            completed=lambda task: None,
+        ).tick()
+        self.assertEqual(self.store.outstanding(), ())
+
+        self.store.restore_observers(frozenset({"qodo"}))
+        restored = self.store.outstanding()
+        self.assertEqual(len(restored), 1)
+        self.assertIs(restored[0].state, TaskState.REQUESTED)
+        self.assertIsNone(restored[0].last_checked_at)
+
+    def test_startup_restores_tasks_for_observers_that_returned(self) -> None:
+        startup_store = SQLiteTaskStore(
+            Path(self.directory.name) / "external-tasks.sqlite3"
+        )
+        startup_store.record(_task(service="qodo"))
+        TaskPoller(
+            startup_store,
+            {},
+            interval_seconds=1.0,
+            announce=lambda conversation, values: None,
+            completed=lambda task: None,
+        ).tick()
+
+        runtime = build_task_runtime(
+            Path(self.directory.name),
+            "",
+            "",
+            announce=lambda conversation, values: None,
+            completed=lambda task: None,
+            observers={"qodo": RecordingObserver(TaskState.COMPLETED)},
+        )
+
+        self.assertIsNotNone(runtime)
+        restored = runtime.store.outstanding()
+        self.assertEqual(len(restored), 1)
+        self.assertIs(restored[0].state, TaskState.REQUESTED)
 
     def test_the_terminal_line_carries_no_finding_text(self) -> None:
         """D-012: identifiers, states and durations only."""

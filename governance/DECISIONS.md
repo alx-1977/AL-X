@@ -516,6 +516,7 @@ Revisit if retrieval reaches anything not publicly reachable; if a retrieved pag
 - **Date:** 2026-09-06
 - **Decision owner:** Friedl
 - **Status: APPROVED by Friedl, 2026-09-06.**
+- **Approval source:** [Dashboard Service Idea](chatgpt-conversation://6a9b0226-eb38-83ea-b3cc-32bc0370dbaa), Friedl's 2026-09-06 instruction.
 
 **Decision.** Friedl delegates routine merge authorisation to AL/X. An external reviewer examines the code and reports what it found; AL/X reads that, judges whether anything needs correcting, and decides whether the current revision may merge. The reviewer advises. The decision is hers.
 
@@ -595,6 +596,8 @@ superseded, and there is no longer a required Greptile status for them to
 satisfy. Friedl discharges both: no retrospective review of those two
 revisions is owed. This is a disposition, not an omission, and it closes them
 explicitly so nobody has to reconstruct the history to find out.
+The approval source is [Dashboard Service Idea](chatgpt-conversation://6a9b0226-eb38-83ea-b3cc-32bc0370dbaa),
+Friedl's 2026-09-06 instruction.
 
 ### Removing the enforcement machinery this replaced
 

@@ -13,6 +13,15 @@ An exception is valid only when Friedl explicitly approves it before implementat
 
 Silence, prior implementation, model recommendation, technical convenience, and approval of a broader feature do not constitute approval of an exception.
 
+## Historical retirement record
+
+This section records retired entries only. It creates no exception and grants
+no authority. EX-002 and EX-003 were discharged by Friedl on 2026-09-06 under
+D-026; no retrospective review of revisions `16bf2d9` or `b1470fc` remains
+owed. The approval source is [Dashboard Service Idea](chatgpt-conversation://6a9b0226-eb38-83ea-b3cc-32bc0370dbaa),
+Friedl's 2026-09-06 instruction. The disposition and rationale remain in D-026
+in `governance/DECISIONS.md`.
+
 ---
 
 ## EX-001 — Origin-selected Core for the D-024a Luna evaluation

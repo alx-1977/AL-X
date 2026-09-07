@@ -216,6 +216,21 @@ class PlaybackSerialisationTests(unittest.TestCase):
         self.assertEqual(result["size"], 0)
         self.assertEqual(result["removals"], 1)
 
+    def test_an_unavailable_observer_is_a_bounded_terminal_status(self) -> None:
+        result = run_js(textwrap.dedent("""
+            showTask({task_id: "review-1", state: "observer_unavailable",
+                      service: "qodo", subject: "PR #21", elapsed_seconds: 12});
+            const task = runningTasks.get("review-1");
+            console.log(JSON.stringify({
+              settled: task.settled,
+              label: task.label.textContent,
+              expires: task.expiresAt,
+            }));
+        """))
+        self.assertTrue(result["settled"])
+        self.assertIn("Observer unavailable", result["label"])
+        self.assertEqual(result["expires"], 10_000)
+
     def test_blocked_browser_storage_does_not_break_session_control(self) -> None:
         result = run_js(textwrap.dedent("""
             localStorage.getItem = () => { throw new Error("blocked"); };

@@ -97,10 +97,15 @@ class TaskPoller:
         observer = self._observers.get(task.service)
         now = datetime.now(UTC)
         if observer is None:
-            # Nothing can see this task's service, so nothing can say where it
-            # stands. Recorded as unknown rather than left looking outstanding.
-            self._store.record(
-                replace(task, state=TaskState.STATUS_UNKNOWN, last_checked_at=now)
+            unavailable = replace(
+                task,
+                state=TaskState.OBSERVER_UNAVAILABLE,
+                last_checked_at=now,
+            )
+            self._store.record(unavailable)
+            self._announce(
+                task.conversation_id,
+                self._payload(unavailable, now),
             )
             return
 

@@ -105,6 +105,7 @@ const taskStates = {
   status_unknown: "Status unknown",
   completed: "Completed",
   failed: "Failed",
+  observer_unavailable: "Observer unavailable",
 };
 
 function paintTasks() {
@@ -140,7 +141,7 @@ function showTask(message) {
     runningTasks.set(taskId, task);
   }
   const now = performance.now();
-  const settled = state === "completed" || state === "failed";
+  const settled = ["completed", "failed", "observer_unavailable"].includes(state);
   Object.assign(task, {
     state,
     service: String(message.service ?? ""),
