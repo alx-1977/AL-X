@@ -137,7 +137,7 @@ class SQLiteTaskStore:
                 database.close()
 
     def completed_unhandled(self) -> tuple[ExternalTask, ...]:
-        """Completed tasks whose completion the Core has not yet been given.
+        """Finished tasks whose terminal outcome the Core has not yet been given.
 
         Completion is durable, so the handover survives a restart: a process
         that stopped between noticing a result and running the turn finds the
@@ -152,10 +152,10 @@ class SQLiteTaskStore:
                            requested_at, last_checked_at, completed_at,
                            conversation_id
                     FROM external_tasks
-                    WHERE state = ? AND handed_over = 0
+                    WHERE state IN (?, ?) AND handed_over = 0
                     ORDER BY completed_at
                     """,
-                    (TaskState.COMPLETED.value,),
+                    (TaskState.COMPLETED.value, TaskState.FAILED.value),
                 ).fetchall()
             except sqlite3.Error as error:
                 raise TaskStoreCorrupt(str(error)) from error

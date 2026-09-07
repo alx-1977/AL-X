@@ -110,16 +110,16 @@ class TaskPoller:
             return
 
         observation = observer.observe(task.subject_reference, task.requested_at)
-        if observation.state is TaskState.COMPLETED:
+        if observation.state in (TaskState.COMPLETED, TaskState.FAILED):
             resolved_subject = observation.subject_reference or task.subject_reference
             settled = replace(
                 task,
                 subject_reference=resolved_subject,
-                state=TaskState.COMPLETED,
+                state=observation.state,
                 last_checked_at=observation.observed_at,
                 completed_at=observation.observed_at,
             )
-            # Announce and wake first, and only then record completion. A
+            # Announce and wake first, and only then record the outcome. A
             # callback that fails after the write would leave a task settled
             # in the store and never reported, so the result would be lost
             # rather than retried on the next tick.

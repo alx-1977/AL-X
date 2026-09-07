@@ -140,6 +140,10 @@ class TaskStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _task(state=TaskState.COMPLETED)
 
+    def test_a_failed_task_records_when_it_finished(self) -> None:
+        with self.assertRaises(ValueError):
+            _task(state=TaskState.FAILED)
+
     def test_elapsed_stops_at_completion(self) -> None:
         finished = datetime.now(UTC)
         task = _task(
@@ -292,6 +296,17 @@ class PollerTests(PollerHarness):
         self.assertIsNotNone(self.woken[0].completed_at)
         self.assertEqual(self.lines[0][1]["subject"], f"PR #21 @ {HEAD[:7]}")
         self.assertEqual(self.lines[0][1]["state"], "completed")
+
+    def test_a_failure_finishes_the_task_and_wakes_the_core(self) -> None:
+        self.store.record(_task())
+        self._poller(RecordingObserver(TaskState.FAILED)).tick()
+
+        self.assertEqual(self.store.outstanding(), ())
+        self.assertEqual(len(self.woken), 1)
+        self.assertIs(self.woken[0].state, TaskState.FAILED)
+        self.assertIsNotNone(self.woken[0].completed_at)
+        self.assertEqual(self.lines[0][1]["state"], "failed")
+        self.assertEqual(len(self.store.completed_unhandled()), 1)
 
     def test_completion_replaces_a_pr_level_subject_with_the_reviewed_sha(self) -> None:
         task = _task(subject_reference=subject_reference(21))
@@ -985,12 +1000,12 @@ class CompletionReachesCoreTest(unittest.TestCase):
             # outcome, so the occasion still exists and is never re-offered.
             self.retained.append(opportunity_id)
 
-    def _complete_one(self) -> None:
-        """Drive the watcher until it observes completion."""
+    def _complete_one(self, state: TaskState = TaskState.COMPLETED) -> None:
+        """Drive the watcher until it observes a terminal outcome."""
         self.store.record(_task())
         poller = TaskPoller(
             self.store,
-            {"qodo": RecordingObserver(TaskState.COMPLETED)},
+            {"qodo": RecordingObserver(state)},
             interval_seconds=1.0,
             announce=lambda conversation, values: None,
             # Completion is durable in the store; nothing is written to the
@@ -1016,6 +1031,17 @@ class CompletionReachesCoreTest(unittest.TestCase):
             occasion.references, (f"external_task:review:21:{HEAD}",)
         )
         self.assertIsNone(occasion.note)
+
+    def test_an_observed_failure_becomes_a_consumable_occasion(self) -> None:
+        from alx.continuity import CompletedWorkSource
+
+        self._complete_one(TaskState.FAILED)
+        source = CompletedWorkSource(self.store, self.Ledger(), enabled=True)
+        opportunities = source.due_opportunities()
+
+        self.assertEqual(len(opportunities), 1)
+        self.assertIs(opportunities[0].origin, CognitionOrigin.WORK_COMPLETED)
+        self.assertEqual(opportunities[0].conversation_id, "conversation-1")
 
     def test_the_existing_tick_schedules_a_core_turn_for_it(self) -> None:
         """The whole point: the runtime that already exists runs the turn."""

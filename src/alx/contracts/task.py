@@ -76,8 +76,8 @@ class ExternalTask:
     requested_at: datetime
     last_checked_at: datetime | None = None
     conversation_id: str = ""
-    # Set once, when a result is first seen. Kept so a completed task can be
-    # handed to the Core without re-deriving what completed it.
+    # Set once, when a terminal result is first seen. The persisted column
+    # keeps its original name, but failed work also needs a durable handoff.
     completed_at: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -92,10 +92,11 @@ class ExternalTask:
             _aware(self.last_checked_at, "last_checked_at")
         if self.completed_at is not None:
             _aware(self.completed_at, "completed_at")
-        if self.state is TaskState.COMPLETED and self.completed_at is None:
-            raise ValueError("a completed task records when it completed")
-        if self.state is not TaskState.COMPLETED and self.completed_at is not None:
-            raise ValueError("only a completed task records a completion time")
+        finished = self.state in (TaskState.COMPLETED, TaskState.FAILED)
+        if finished and self.completed_at is None:
+            raise ValueError("a finished task records when it finished")
+        if not finished and self.completed_at is not None:
+            raise ValueError("only a finished task records a completion time")
 
     def elapsed_seconds(self, at: datetime) -> float:
         """How long this has been outstanding, for display."""
