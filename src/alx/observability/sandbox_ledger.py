@@ -119,11 +119,28 @@ class SQLiteSandboxLedger:
             raise SandboxLedgerCorrupt(str(error)) from error
 
     def _db(self) -> sqlite3.Connection:
-        # `timeout` makes a competing writer wait for the lock rather than
-        # failing immediately; the ledger is tiny and contention is brief.
-        return sqlite3.connect(
-            self._path, isolation_level=None, check_same_thread=False, timeout=10.0
-        )
+        """Open the ledger, or say plainly that the ledger is unusable.
+
+        Classified here rather than at each call site. Every caller opened the
+        connection outside its own `except sqlite3.Error`, so a path that
+        became unreadable after composition raised a raw database error that
+        reached the executor's catch-all and was reported as
+        `sandbox_unavailable`. That names the wrong thing: the sandbox was
+        available and the accounting was not, and a ceiling nobody can measure
+        is the one failure that must never look like an ordinary outage.
+
+        `timeout` makes a competing writer wait for the lock rather than
+        failing immediately; the ledger is tiny and contention is brief.
+        """
+        try:
+            return sqlite3.connect(
+                self._path,
+                isolation_level=None,
+                check_same_thread=False,
+                timeout=10.0,
+            )
+        except (sqlite3.Error, OSError) as error:
+            raise SandboxLedgerCorrupt(str(error)) from error
 
     @property
     def budget(self) -> SandboxBudget:

@@ -100,8 +100,18 @@ def build_sandbox_runtime(
         return None
 
     retention = SandboxRetention(workspace)
-    # Reap what a crash left behind before anything new is run. A further sweep
-    # runs before each experiment, so retention does not depend on restarting.
+    # Reap what a crash left behind before anything new is run: first the
+    # processes, then the bytes. D-027 promises both, and only the second was
+    # ever implemented - an experiment's process identity lived in the memory
+    # of the runtime that died, so a program left running was never ended by
+    # anything. A periodic sweep runs for the life of the process as well, so
+    # the retention deadline does not depend on a restart or on another
+    # experiment being started.
+    reaped = retention.reap_orphans()
+    if reaped:
+        LOGGER.warning(
+            "Reaped %d sandbox process group(s) left by a previous run", reaped
+        )
     retention.sweep()
 
     def run_experiment(request: SandboxRequest) -> Any:

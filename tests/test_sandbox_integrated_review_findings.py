@@ -15,8 +15,11 @@ against the code as it stood before the fix.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
+import subprocess
+import json
 import stat
 import sys
 import tempfile
@@ -31,6 +34,8 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.contracts.sandbox import (  # noqa: E402
+    MAX_FILE_BYTES,
+    MAX_PROCESSES,
     MAX_WALKED_FILES,
     MAX_WORKSPACE_BYTES,
     SandboxError,
@@ -38,7 +43,10 @@ from alx.contracts.sandbox import (  # noqa: E402
     SandboxRequest,
 )
 from alx.observability.sandbox_ledger import SandboxBudget  # noqa: E402
-from alx.providers.sandbox_retention import SandboxRetention  # noqa: E402
+from alx.providers.sandbox_retention import (  # noqa: E402
+    LIVE_RUN_NAME,
+    SandboxRetention,
+)
 from alx.providers.sandbox_runner import SeatbeltSandboxRunner  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
 
@@ -1327,3 +1335,213 @@ class FixesOfFixesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrustedLauncherTest(unittest.TestCase):
+    """The launcher: limits applied safely, and nothing outliving the runtime.
+
+    Two defects made it necessary. `preexec_fn` runs between fork and exec in
+    a child holding copies of every lock the other threads had, and the AL/X
+    runtime dispatches Core turns through asyncio.to_thread, so a launch could
+    deadlock before exec with the lease, the reservation and the turn held. And
+    an experiment's process identity lived only in the memory of the process
+    that started it, so a crash left a sleeping program that no wall clock,
+    CPU limit or cleanup would ever end.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root / "ws")
+        self.runner = SeatbeltSandboxRunner(self.workspace)
+
+    def test_the_runtime_never_uses_preexec_fn(self) -> None:
+        """The launch path must not depend on it, however convenient it is.
+
+        Asserted against the source rather than behaviour: a deadlock between
+        fork and exec is timing-dependent and would make a flaky test, while
+        its absence is a property that can simply be checked.
+        """
+        tree = ast.parse(
+            (REPOSITORY_ROOT / "src/alx/providers/sandbox_runner.py").read_text()
+        )
+        # The keyword, not the word: the comment explaining why it is gone
+        # mentions it, and a prose match would fail on the explanation.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.keyword):
+                self.assertNotEqual(
+                    node.arg,
+                    "preexec_fn",
+                    "the multi-threaded runtime forks with a Python callback again",
+                )
+
+    def test_limits_are_applied_by_the_launcher(self) -> None:
+        """They still have to be applied, just from a single-threaded process."""
+        import resource
+
+        from alx.providers import sandbox_launcher
+
+        applied: list[int] = []
+        original = resource.setrlimit
+        resource.setrlimit = lambda which, limits: applied.append(which)
+        try:
+            sandbox_launcher._apply_limits(35, MAX_FILE_BYTES, MAX_PROCESSES)
+        finally:
+            resource.setrlimit = original
+
+        self.assertIn(resource.RLIMIT_CPU, applied)
+        self.assertIn(resource.RLIMIT_FSIZE, applied)
+        self.assertIn(resource.RLIMIT_NPROC, applied)
+        # And never an address-space limit, which is ineffective on this host
+        # and would record a ceiling the kernel ignores.
+        self.assertNotIn(resource.RLIMIT_AS, applied)
+
+    def test_a_running_experiment_is_recorded_for_recovery(self) -> None:
+        """Recovery needs something to verify, written where it cannot be forged."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-rec", "ses-rec", "run-1")
+        note = paths.run_directory / LIVE_RUN_NAME
+
+        self.runner.run(
+            SandboxRequest("exp-rec", "ses-rec", "run-1", "print('done')"), paths
+        )
+        # Cleared once the run is over: nothing to recover.
+        self.assertFalse(note.exists())
+
+    def test_a_genuine_orphan_is_reaped_at_startup(self) -> None:
+        """D-027 promises this, and nothing performed it before."""
+        paths = self.workspace.prepare("exp-orp", "ses-orp", "run-1")
+        victim = subprocess.Popen(  # noqa: S603 - a stand-in for a stranded run
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: victim.poll() is None and victim.kill())
+        group = os.getpgid(victim.pid)
+        (paths.run_directory / LIVE_RUN_NAME).write_text(
+            json.dumps(
+                {
+                    "identity": "exp-orp/ses-orp/run-1",
+                    "pid": victim.pid,
+                    "process_group": group,
+                    "started_at": "2026-09-07T00:00:00+00:00",
+                    # A different runtime: this one did not start it.
+                    "parent_pid": os.getpid() + 1_000_000,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        reaped = SandboxRetention(self.workspace).reap_orphans()
+
+        self.assertEqual(reaped, 1)
+        victim.wait(timeout=10)
+        self.assertIsNotNone(victim.returncode)
+        self.assertFalse((paths.run_directory / LIVE_RUN_NAME).exists())
+
+    def test_a_reused_identifier_never_kills_an_unrelated_process(self) -> None:
+        """A pid is not proof. Numbers are reused, and this one is innocent."""
+        paths = self.workspace.prepare("exp-inn", "ses-inn", "run-1")
+        bystander = subprocess.Popen(  # noqa: S603 - an unrelated process
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: bystander.poll() is None and bystander.kill())
+
+        # The recorded group is not the one this pid actually belongs to, which
+        # is exactly what a recycled number looks like.
+        (paths.run_directory / LIVE_RUN_NAME).write_text(
+            json.dumps(
+                {
+                    "identity": "exp-inn/ses-inn/run-1",
+                    "pid": bystander.pid,
+                    "process_group": os.getpgid(bystander.pid) + 4_242,
+                    "started_at": "2026-09-07T00:00:00+00:00",
+                    "parent_pid": os.getpid() + 1_000_000,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        reaped = SandboxRetention(self.workspace).reap_orphans()
+
+        self.assertEqual(reaped, 0)
+        time.sleep(0.3)
+        self.assertIsNone(
+            bystander.poll(), "recovery killed a process that was not its own"
+        )
+        # The stale note is still cleared, so it cannot mislead a later run.
+        self.assertFalse((paths.run_directory / LIVE_RUN_NAME).exists())
+
+    def test_this_runtimes_own_run_is_not_treated_as_an_orphan(self) -> None:
+        """A live run must survive a sweep by the process that started it."""
+        paths = self.workspace.prepare("exp-own", "ses-own", "run-1")
+        (paths.run_directory / LIVE_RUN_NAME).write_text(
+            json.dumps(
+                {
+                    "identity": "exp-own/ses-own/run-1",
+                    "pid": os.getpid(),
+                    "process_group": os.getpgid(0),
+                    "started_at": "2026-09-07T00:00:00+00:00",
+                    "parent_pid": os.getpid(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(SandboxRetention(self.workspace).reap_orphans(), 0)
+        self.assertTrue((paths.run_directory / LIVE_RUN_NAME).exists())
+
+    def test_the_launcher_ends_the_run_when_its_parent_disappears(self) -> None:
+        """The whole point: an experiment must not outlive the runtime.
+
+        A sleeping program consumes no CPU allowance, so neither the wall timer
+        nor RLIMIT_CPU would ever end it. The launcher watches its parent and
+        kills the group when that parent is gone.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+
+        # A parent that starts a long experiment and then dies, exactly as a
+        # crashing runtime would.
+        script = (
+            "import sys, time\n"
+            f"sys.path.insert(0, {str(REPOSITORY_ROOT / 'src')!r})\n"
+            "from pathlib import Path\n"
+            "from alx.providers.sandbox_runner import SeatbeltSandboxRunner\n"
+            "from alx.providers.sandbox_workspace import SandboxWorkspace\n"
+            "from alx.contracts.sandbox import SandboxRequest\n"
+            f"w = SandboxWorkspace(Path({str(self.root / 'ws')!r}))\n"
+            "r = SeatbeltSandboxRunner(w)\n"
+            "p = w.prepare('exp-par','ses-par','run-1')\n"
+            "import threading\n"
+            "threading.Thread(target=lambda: r.run(SandboxRequest("
+            "'exp-par','ses-par','run-1','import time; time.sleep(45)',"
+            "wall_seconds=45), p), daemon=True).start()\n"
+            "time.sleep(3)\n"
+            "import os; os._exit(0)\n"
+        )
+        parent = subprocess.Popen(  # noqa: S603 - a stand-in runtime
+            [sys.executable, "-c", script], start_new_session=True
+        )
+        parent.wait(timeout=30)
+
+        # The launcher polls its parent; give it a moment to notice and reap.
+        deadline = time.monotonic() + 20
+        survivors = 1
+        while time.monotonic() < deadline:
+            listing = subprocess.run(  # noqa: S603 - reading process state
+                ["/bin/ps", "-eo", "command"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout
+            survivors = listing.count("time.sleep(45)")
+            if survivors == 0:
+                break
+            time.sleep(0.5)
+
+        self.assertEqual(
+            survivors, 0, "an experiment outlived the runtime that started it"
+        )

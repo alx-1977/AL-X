@@ -725,7 +725,47 @@ The implementation must therefore be able to delete a run's transient contents w
 
 The manifest is bounded by construction and contains no experiment-authored free text: identifiers, the argument vector, the limits in force, the confinement profile applied, before and after file hashes and sizes, timings, exit status, and the SHA-256 and byte length of stdout and stderr. After retention has elapsed it remains possible to establish what AL/X executed, when, under which limits, and what it produced, without any of the content being retained.
 
-Deletion refuses any path that does not resolve to a child of the sandbox root and never follows symbolic links. Workspaces and process groups left behind by a crash are reaped when the runtime starts.
+Deletion refuses any path that does not resolve to a child of the sandbox root and never follows symbolic links.
+
+### The trusted launcher, and what reaping actually means
+
+An experiment is not started directly by the runtime. A small launcher sits
+between them: it applies the resource limits, establishes the process group,
+starts the one program, and supervises it. It is run as a script and never
+imported, so there is still exactly one route from AL/X to a running program —
+it simply passes through two files rather than one, and a test asserts nothing
+imports the launcher.
+
+Two reasons, both discovered in review rather than anticipated. Applying limits
+between fork and exec runs Python in a child that holds copies of every lock
+the other threads were holding, and the runtime is genuinely multi-threaded
+because Core turns are dispatched through a worker thread; a child that
+inherits a held lock deadlocks before it can exec, and the call that started it
+never returns, holding the session lease and the day's reservation with it. The
+launcher is single-threaded, so the same work is safe there.
+
+And an experiment must not outlive the runtime. Its process identity used to
+exist only in the memory of the process that started it, so a crash left a
+program running that nothing would ever end — a sleeping process consumes no
+CPU allowance, so neither the wall clock nor RLIMIT_CPU applies. The launcher
+watches the parent that asked for the run and kills the whole group when that
+parent disappears, immediately, rather than waiting for a restart that may
+never come.
+
+The launcher holds no authority. It cannot reach the Core, a capability, a goal
+or a store; it imports nothing from `alx`, has no configuration, no network and
+no interface beyond a fixed set of arguments naming one program to run. It runs
+inside the same confinement profile as the experiment it supervises.
+
+Startup recovery is the second half. Each running experiment leaves a record of
+its process identity beside its evidence, written by the parent into a
+directory the confined process cannot write to, so it cannot be forged. A later
+runtime reads those records and reaps what a crash left behind — but never on
+the strength of a stored number alone. Process identifiers are reused, and
+signalling a recorded one because it happens to exist would eventually kill
+something unrelated. A group is signalled only when the surviving process still
+identifies as that run; anything else has its stale record removed and is left
+alone.
 
 ### What is returned, and what is durably recorded
 
@@ -783,6 +823,11 @@ An experiment that exits zero has demonstrated that a program ran in an isolated
 2. the platform runner with real confinement, rlimits, process-group termination and the parent-side hash walk, with the isolation tests passing;
 3. the runs and wall-time ledger, the retention implementation that deletes experiment-authored bytes while preserving manifests, and crash reaping;
 4. `run_sandbox_experiment` wired end to end — **stop here for Friedl's review before the capability is granted to a live runtime**.
+
+Retention also runs on a timer for the life of the process, not only at
+startup and before each experiment. A deadline measured in hours that arrives
+only when something else happens is not a deadline: an idle runtime used to
+keep the last session's bytes indefinitely.
 
 The test suite must not require a working sandbox in order to run. The confinement mechanism is injected so the boundary is provable without executing anything, following the precedent of the public-web address boundary, and the tests that require real confinement are skipped explicitly rather than silently on platforms that cannot provide it.
 

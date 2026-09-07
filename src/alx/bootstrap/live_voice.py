@@ -771,6 +771,12 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(mail_poller.run())
             if task_runtime is not None:
                 runtime_tasks.create_task(task_runtime.poller.run())
+            if sandbox_runtime is not None:
+                # D-027's retention deadline is a property of time passing, not
+                # of anything happening. Swept only at composition and before
+                # each experiment, an idle runtime kept the last session's
+                # bytes indefinitely.
+                runtime_tasks.create_task(sandbox_runtime.retention.run())
     finally:
         # Cancelling the producer does not stop work already running inside
         # asyncio.to_thread: the coroutine unwinds while the worker keeps going.

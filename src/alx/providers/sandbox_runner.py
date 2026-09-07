@@ -55,6 +55,7 @@ from alx.contracts.sandbox import (
     SandboxOutcome,
     SandboxRequest,
 )
+from alx.providers.sandbox_retention import LIVE_RUN_NAME as _LIVE_RUN_NAME
 from alx.providers.sandbox_workspace import SandboxWorkspace, SessionPaths, WalkResult
 
 
@@ -157,6 +158,22 @@ def _sbpl(path: "Path | str") -> str:
         raise SandboxError("workspace_unavailable")
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+# The trusted launcher, run as a script rather than imported. Keeping it a
+# separate program is what lets it apply limits in a single-threaded process
+# and outlive nothing: it is not part of the runtime, and the runtime never
+# calls into it.
+_LAUNCHER = Path(__file__).with_name("sandbox_launcher.py")
+
+# The launcher's own exit codes, distinct from anything a program can return.
+_LAUNCHER_TIMED_OUT = 124
+_LAUNCHER_ORPHANED = 125
+
+# How long the parent waits beyond the run's own wall clock before deciding the
+# launcher itself is stuck. The launcher enforces the deadline; this only
+# catches a supervisor that has stopped supervising.
+_LAUNCH_GRACE = 5.0
 
 
 _DATA_ROOT_DENIALS = "".join(
@@ -276,6 +293,13 @@ class SeatbeltSandboxRunner(SandboxRunner):
             # below restores exactly this run's own state.
             f"(deny file-read* (subpath {_sbpl(self._workspace.root)}))\n"
             f"{denials}\n"
+            # The launcher itself, which lives in the repository the profile
+            # otherwise denies. One file, by literal path, read-only: the
+            # supervisor runs inside the same confinement as the thing it
+            # supervises, so it has to be readable from in here. Naming the
+            # file rather than the directory keeps the rest of the repository
+            # exactly as denied as it was.
+            f"(allow file-read* (literal {_sbpl(_LAUNCHER)}))\n"
             # The session workspace is re-allowed after the denials so a
             # workspace living under the home directory still works.
             f"(allow file-read* (subpath {_sbpl(state)}))\n"
@@ -343,26 +367,6 @@ class SeatbeltSandboxRunner(SandboxRunner):
             return version if version in resolved.parents else None
         return None
 
-    @staticmethod
-    def _limits(cpu_seconds: int) -> None:
-        """Applied in the child between fork and exec.
-
-        RLIMIT_CPU bounds CPU time inside the run, which the parent's wall
-        clock cannot: a process burning a core is stopped by the kernel rather
-        than waiting for the wall timeout. D-027 records this limit as applied,
-        and an earlier version of this file did not apply it at all.
-
-        The CPU allowance exceeds the wall clock by a small margin so an
-        ordinary run is bounded by the wall timeout, and CPU is the backstop.
-
-        RLIMIT_AS is deliberately absent. It does not work on macOS arm64, and
-        setting it would create the appearance of a memory bound that the
-        kernel ignores.
-        """
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_FILE_BYTES, MAX_FILE_BYTES))
-        resource.setrlimit(resource.RLIMIT_NPROC, (MAX_PROCESSES, MAX_PROCESSES))
-
     def run(
         self,
         request: SandboxRequest,
@@ -413,6 +417,17 @@ class SeatbeltSandboxRunner(SandboxRunner):
         # deliberately not used: it also strips the script's own directory from
         # sys.path, which would stop a run importing a helper an earlier run in
         # the same session wrote, and that iteration is the point of a session.
+        # The launcher is what actually starts the program. It applies the
+        # resource limits in a single-threaded process, establishes the group,
+        # and supervises both the experiment and this parent. `preexec_fn` used
+        # to do the first of those from inside a runtime that dispatches Core
+        # turns through asyncio.to_thread: a fork from a multi-threaded process
+        # inherits held locks, and a child that deadlocks before exec makes
+        # Popen never return, holding the lease, the reservation and the turn.
+        #
+        # It runs inside the same profile as the experiment, so the supervisor
+        # is confined exactly as the thing it supervises is.
+        identity = f"{request.experiment_id}/{request.session_id}/{request.run_id}"
         argv = [
             self._sandbox_exec,
             "-f",
@@ -420,26 +435,42 @@ class SeatbeltSandboxRunner(SandboxRunner):
             self._interpreter,
             "-E",
             "-S",
-            str(working_copy),
+            str(_LAUNCHER),
+            "--interpreter", self._interpreter,
+            "--program", str(working_copy),
+            "--directory", str(paths.session_state),
+            "--identity", identity,
+            "--cpu-seconds", str(request.wall_seconds + CPU_GRACE_SECONDS),
+            "--file-bytes", str(MAX_FILE_BYTES),
+            "--processes", str(MAX_PROCESSES),
+            "--wall-seconds", str(request.wall_seconds),
+            "--parent-pid", str(os.getpid()),
         ]
         started_at = datetime.now(UTC)
         started = time.monotonic()
         timed_out = False
+        # The parent opens the evidence files and hands the descriptors down.
+        # The run directory is not writable from inside the sandbox - that is
+        # what stops a program editing its own evidence - so the launcher
+        # cannot open them, and inheriting the descriptors keeps that boundary
+        # intact while still capturing the output.
         with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+            argv += [
+                "--stdout-fd", str(out.fileno()),
+                "--stderr-fd", str(err.fileno()),
+            ]
             process = subprocess.Popen(  # noqa: S603 - the one execution site
                 argv,
                 stdin=subprocess.DEVNULL,
-                stdout=out,
-                stderr=err,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 cwd=str(paths.session_state),
                 # Nothing is inherited. Not os.environ, not the .env mapping.
                 env={},
-                preexec_fn=lambda: self._limits(
-                    request.wall_seconds + CPU_GRACE_SECONDS
-                ),
-                # Its own process group, so a child that spawned helpers dies
-                # with it rather than surviving the call.
+                # Its own session, so the launcher and everything under it can
+                # be signalled as one group.
                 start_new_session=True,
+                pass_fds=(out.fileno(), err.fileno()),
             )
             # A process now exists and has begun consuming wall time on this
             # machine, so from here a failure settles rather than abandons.
@@ -449,19 +480,30 @@ class SeatbeltSandboxRunner(SandboxRunner):
             # reaped the pid can be recycled, and signalling a recycled group
             # would be signalling someone else's processes.
             group = self._group_of(process)
+            # Recorded before waiting, so a crash between here and the end
+            # leaves something a later runtime can verify and reap. Written by
+            # the parent rather than the launcher: a file the confined process
+            # could write is a file it could forge.
+            self._record_live_run(paths, identity, process.pid, group, started_at)
             try:
-                process.wait(timeout=request.wall_seconds)
+                # The launcher enforces the wall clock itself; this bound is
+                # the backstop for a launcher that has itself become stuck.
+                self._read_identity(process)
+                process.wait(timeout=request.wall_seconds + _LAUNCH_GRACE)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 self._terminate(process)
-            # Sweep the group after every exit, not only after a timeout. A
-            # program that spawns a background helper and then returns cleanly
-            # left that helper running: outside the wall-time accounting, still
-            # able to write to session state while the evidence walk read it,
-            # and still alive after the lease was released. The leader's own
-            # status is already recorded, so this changes what is left running
-            # rather than what is reported.
-            self._reap_group(group)
+            if process.returncode == _LAUNCHER_TIMED_OUT:
+                timed_out = True
+        # Sweep the group after every exit, not only after a timeout. A
+        # program that spawns a background helper and then returns cleanly
+        # left that helper running: outside the wall-time accounting, still
+        # able to write to session state while the evidence walk read it,
+        # and still alive after the lease was released. The leader's own
+        # status is already recorded, so this changes what is left running
+        # rather than what is reported.
+        self._reap_group(group)
+        self._clear_live_run(paths)
         elapsed = time.monotonic() - started
         finished_at = datetime.now(UTC)
 
@@ -471,11 +513,7 @@ class SeatbeltSandboxRunner(SandboxRunner):
         # exit status says the same thing rather than naming a signal nobody
         # saw delivered. In practice the reap above succeeds and the real
         # status is used.
-        status = (
-            process.returncode
-            if process.returncode is not None
-            else -signal.SIGKILL
-        )
+        status = self._program_status(process.returncode, timed_out)
         if process.returncode is None:
             LOGGER.warning(
                 "A sandbox run reports an unobserved exit status: the leader "
@@ -551,6 +589,88 @@ class SeatbeltSandboxRunner(SandboxRunner):
             request, paths, outcome, before, after, argv, state_truncated
         )
         return outcome
+
+    @staticmethod
+    def _program_status(launcher_status: int | None, timed_out: bool) -> int:
+        """The program's own exit status, from what the launcher reported.
+
+        The launcher is a supervisor, so its exit code is about the run rather
+        than about the program: 124 for a deadline it enforced, 125 for a
+        parent that disappeared, and `128 - signal` for a program a signal
+        ended. Reporting the supervisor's number as the program's would say a
+        timed-out run exited 124, when what actually happened is that it was
+        killed.
+        """
+        if launcher_status is None:
+            return -signal.SIGKILL
+        if launcher_status in (_LAUNCHER_TIMED_OUT, _LAUNCHER_ORPHANED):
+            # Ended by this sandbox rather than by itself.
+            return -signal.SIGKILL
+        if launcher_status > 128:
+            return 128 - launcher_status
+        return launcher_status
+
+    @staticmethod
+    def _read_identity(process: subprocess.Popen) -> None:
+        """Drain the launcher's identity line so its stdout pipe cannot fill.
+
+        The launcher prints one JSON line and then never writes again. Left
+        unread, a full pipe would block it; read here, the pipe stays empty for
+        the life of the run. The content is not used - the parent already knows
+        the pid and group it started, and a value the confined side supplied
+        would be a value it could choose.
+        """
+        stream = process.stdout
+        if stream is None:
+            return
+        try:
+            stream.readline()
+        except (OSError, ValueError):
+            return
+
+    def _record_live_run(
+        self,
+        paths: SessionPaths,
+        identity: str,
+        pid: int,
+        group: int | None,
+        started_at: datetime,
+    ) -> None:
+        """Note a running experiment where a later runtime can find it.
+
+        D-027 says a process group left behind by a crash is reaped when the
+        runtime starts. Nothing recorded what to reap: the pid lived only in
+        the memory of the process that died. This is the record that makes the
+        promise true.
+
+        Written by the parent, into the run directory the confined process
+        cannot write to. A file the experiment could author would be a file it
+        could forge, and forging this one would aim a kill at another process.
+        """
+        if group is None:
+            return
+        record = {
+            "identity": identity,
+            "pid": pid,
+            "process_group": group,
+            "started_at": started_at.isoformat(),
+            "parent_pid": os.getpid(),
+        }
+        try:
+            (paths.run_directory / _LIVE_RUN_NAME).write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+        except OSError:
+            # Losing the note costs recovery, not the run.
+            LOGGER.warning("A sandbox run could not record its process identity")
+
+    @staticmethod
+    def _clear_live_run(paths: SessionPaths) -> None:
+        """Forget a run that has ended, so recovery has nothing to consider."""
+        try:
+            (paths.run_directory / _LIVE_RUN_NAME).unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("A finished sandbox run could not clear its note")
 
     @staticmethod
     def _group_of(process: subprocess.Popen) -> int | None:

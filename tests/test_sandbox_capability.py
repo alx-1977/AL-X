@@ -42,7 +42,22 @@ from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT  # noqa: E402
 
 
 PRODUCTION_ROOT = REPOSITORY_ROOT / "src" / "alx"
+
+# Two files may start a process, and they are one path rather than two.
+#
+# `sandbox_runner.py` starts the launcher. The launcher starts the experiment.
+# Nothing else in production starts anything, and nothing - including the
+# runtime - imports the launcher: it is run as a script, by that one runner,
+# and a separate test asserts no module imports it. So there is still exactly
+# one route from AL/X to a running program, and it passes through both.
+#
+# The split is not a convenience. Applying resource limits between fork and
+# exec is unsafe from a multi-threaded process, which the AL/X runtime is; the
+# launcher is single-threaded and does it safely. It also supervises the run
+# after the parent is gone, which a function inside the parent cannot do.
 EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "sandbox_runner.py"
+LAUNCHER_SITE = PRODUCTION_ROOT / "providers" / "sandbox_launcher.py"
+EXECUTION_SITES = {EXECUTION_SITE, LAUNCHER_SITE}
 
 
 class SandboxCapabilityTest(unittest.TestCase):
@@ -353,7 +368,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path == EXECUTION_SITE:
+            if path in EXECUTION_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -377,7 +392,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path == EXECUTION_SITE:
+            if path in EXECUTION_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -413,6 +428,46 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 }:
                     offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}")
         self.assertEqual(offenders, [], f"a second execution path appeared: {offenders}")
+
+    def test_no_production_module_imports_the_launcher(self) -> None:
+        """The launcher is run, never called.
+
+        This is what keeps two execution files one execution path. If any
+        module imported it, its process-starting code would become reachable
+        from inside the runtime, and there would genuinely be a second route.
+        """
+        offenders = []
+        for path in self._production_modules():
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""]
+                else:
+                    continue
+                if any("sandbox_launcher" in name for name in names):
+                    offenders.append(
+                        f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}"
+                    )
+        self.assertEqual(
+            offenders, [], f"the launcher became importable: {offenders}"
+        )
+
+    def test_the_launcher_holds_no_alx_authority(self) -> None:
+        """It starts one program. It cannot reach anything of AL/X's."""
+        tree = ast.parse(LAUNCHER_SITE.read_text())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            for name in names:
+                self.assertFalse(
+                    name == "alx" or name.startswith("alx."),
+                    f"the launcher imported {name}",
+                )
 
     def test_the_execution_site_itself_still_executes(self) -> None:
         """Guards the two tests above against passing for the wrong reason."""

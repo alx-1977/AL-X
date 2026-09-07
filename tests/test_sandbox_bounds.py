@@ -20,12 +20,15 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
-from alx.contracts.sandbox import (  # noqa: E402
+from alx.contracts.sandbox import (
+    MAX_FILE_BYTES,
+    MAX_PROCESSES,  # noqa: E402
     MAX_REPORTED_ARTIFACTS,
     MAX_STDOUT_CHARACTERS,
     SandboxError,
     SandboxRequest,
 )
+from alx.providers import sandbox_launcher  # noqa: E402
 from alx.providers.sandbox_runner import SeatbeltSandboxRunner  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
 
@@ -148,7 +151,10 @@ class SandboxBoundsTest(unittest.TestCase):
 
         resource.setrlimit = record  # type: ignore[assignment]
         try:
-            SeatbeltSandboxRunner._limits(35)
+            # The launcher owns this now: applying limits between fork and exec is
+            # unsafe from the multi-threaded runtime, so it moved to a
+            # single-threaded process that does it safely.
+            sandbox_launcher._apply_limits(35, MAX_FILE_BYTES, MAX_PROCESSES)
         finally:
             resource.setrlimit = original  # type: ignore[assignment]
 

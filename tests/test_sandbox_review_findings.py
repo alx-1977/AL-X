@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
 from alx.contracts.sandbox import (  # noqa: E402
     MAX_FILE_BYTES,
+    MAX_PROCESSES,
     MAX_WORKSPACE_BYTES,
     ArtifactMetadata,
     FileChange,
@@ -33,6 +34,7 @@ from alx.contracts.sandbox import (  # noqa: E402
 )
 from alx.observability.sandbox_ledger import SandboxBudget  # noqa: E402
 from alx.providers.sandbox_retention import SandboxRetention  # noqa: E402
+from alx.providers import sandbox_launcher  # noqa: E402
 from alx.providers.sandbox_runner import (  # noqa: E402
     CPU_GRACE_SECONDS,
     SeatbeltSandboxRunner,
@@ -319,7 +321,10 @@ class Finding8CpuLimitTest(ConfinedRunTest):
         original = resource.setrlimit
         resource.setrlimit = lambda which, limits: applied.append(which)  # type: ignore[assignment]
         try:
-            SeatbeltSandboxRunner._limits(35)
+            # The launcher owns this now: applying limits between fork and exec is
+            # unsafe from the multi-threaded runtime, so it moved to a
+            # single-threaded process that does it safely.
+            sandbox_launcher._apply_limits(35, MAX_FILE_BYTES, MAX_PROCESSES)
         finally:
             resource.setrlimit = original  # type: ignore[assignment]
 
