@@ -442,6 +442,36 @@ class ExternalEvidenceTests(unittest.TestCase):
         self.assertEqual(result.failure["code"], "arguments_unusable")
         self.assertEqual(reads, [])
 
+    def test_malformed_provider_content_is_review_unavailable(self) -> None:
+        class MalformedContent:
+            retrieved_at = datetime(2026, 9, 6, 20, 12, tzinfo=UTC)
+
+            @staticmethod
+            def as_values():
+                raise ValueError("malformed provider content")
+
+        executors = build_review_content_executors(
+            lambda request: MalformedContent(), lambda: "call-1"
+        )
+        result = executors[READ_EXTERNAL_REVIEW](
+            {"pull_request_number": 21, "head_sha": HEAD}
+        )
+
+        self.assertIs(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "review_unavailable")
+
+    def test_invalid_provider_provenance_time_is_review_unavailable(self) -> None:
+        executors = build_review_content_executors(
+            lambda request: self._content(retrieved_at="not-a-time"),
+            lambda: "call-1",
+        )
+        result = executors[READ_EXTERNAL_REVIEW](
+            {"pull_request_number": 21, "head_sha": HEAD}
+        )
+
+        self.assertIs(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "review_unavailable")
+
 
 class AuthorityTests(unittest.TestCase):
     """Reading is its own authority, and grants nothing else."""

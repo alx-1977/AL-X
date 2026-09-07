@@ -38,6 +38,7 @@ from alx.contracts import (
 )
 from alx.contracts.review_content import (
     REVIEW_READ_FAILURES,
+    ReviewContent,
     ReviewContentRequest,
     ReviewReadError,
 )
@@ -118,6 +119,13 @@ def build_review_content_executors(
 
         try:
             content = read_review(request)
+            if not isinstance(content, ReviewContent):
+                raise TypeError("provider returned malformed review content")
+            values = content.as_values()
+            provenance = RetentionPolicy().non_mail(
+                ContentOrigin.EXTERNAL,
+                content.retrieved_at,
+            )
         except ReviewReadError as error:
             return _failed(call_id, error.code)
         except Exception as error:  # noqa: BLE001 - unclassified is still a fact
@@ -128,7 +136,6 @@ def build_review_content_executors(
             )
             return _failed(call_id, "review_unavailable")
 
-        values = content.as_values()
         return CapabilityResult(
             call_id,
             READ_EXTERNAL_REVIEW,
@@ -153,10 +160,7 @@ def build_review_content_executors(
             # this tool's conclusion. Marked so nothing downstream can mistake
             # a finding for something she reasoned or something code decided.
             # Not mail-derived, so no D-013 expiry.
-            provenance=RetentionPolicy().non_mail(
-                ContentOrigin.EXTERNAL,
-                content.retrieved_at,
-            ),
+            provenance=provenance,
         )
 
     return {READ_EXTERNAL_REVIEW: read_external_review}

@@ -589,12 +589,6 @@ class CoreAgent:
             if conflicts:
                 memory_conflicts = conflicts
                 continue
-            if decision.call.capability_id in self._turn_bound_capabilities:
-                # Recorded before the provider is reached, so a dispatch that
-                # fails, hangs or is interrupted still spends the instruction.
-                # The harm this prevents is a second external action, and by
-                # the time an outcome is known the first has already happened.
-                approved_dispatches.add(decision.call.capability_id)
             checkpoint = replace(snapshot.state,
                                  attempts=(*snapshot.state.attempts, pending),
                                  approvals=approvals)
@@ -620,6 +614,14 @@ class CoreAgent:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_error")
             if attempt.call != decision.call:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
+            if (
+                decision.call.capability_id in self._turn_bound_capabilities
+                and attempt.implementation_invoked
+            ):
+                # The instruction is spent only once an implementation may
+                # have acted. Broker and safety rejections happen before that
+                # boundary, so a corrected call may still use the same turn.
+                approved_dispatches.add(decision.call.capability_id)
             snapshot = self._finalize_dispatch(snapshot, attempt, now)
         if conflict_response is not None or conflict_silent:
             # She finished what she wanted to say, then ran out of steps while

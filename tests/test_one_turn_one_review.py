@@ -254,6 +254,106 @@ class OneTurnOneReviewTests(unittest.TestCase):
         # A different pull request is still a second review on one instruction.
         self.assertEqual(seen, [21])
 
+    def test_a_pre_invocation_rejection_does_not_spend_the_turn(self) -> None:
+        first = review_call("call-1", "approve-1", number=0)
+        corrected = review_call("call-2", "approve-2")
+        calls = 0
+
+        def dispatch(call, state):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return CapabilityAttempt(
+                    call,
+                    CapabilityAttemptDisposition.REJECTED,
+                    False,
+                    reason_code="input_invalid",
+                )
+            return CapabilityAttempt(
+                call,
+                CapabilityAttemptDisposition.EXECUTED,
+                True,
+                CapabilityResult(
+                    call.call_id,
+                    call.capability_id,
+                    CapabilityResultState.SUCCEEDED,
+                    {"requested": True},
+                ),
+            )
+
+        reasoner = Queued(
+            AgentDecision(
+                call=first,
+                approval_proposal=approved(first, "turn:turn-2"),
+                goal_proposal=self.goal(),
+            ),
+            AgentDecision(
+                call=corrected,
+                approval_proposal=approved(corrected, "turn:turn-2"),
+            ),
+            AgentDecision(response="Requested."),
+        )
+        outcome = CoreAgent(
+            self.store,
+            reasoner,
+            dispatch,
+            (REVIEW_DEFINITION,),
+            clock=lambda: NOW,
+            identifier_factory=lambda: "goal-1",
+            turn_bound_capabilities=TURN_BOUND,
+        ).process(one_instruction(), RETENTION, 6)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(outcome.response, "Requested.")
+
+    def test_an_invoked_failure_still_spends_the_turn(self) -> None:
+        first = review_call("call-1", "approve-1")
+        second = review_call("call-2", "approve-2")
+        calls = 0
+
+        def dispatch(call, state):
+            nonlocal calls
+            calls += 1
+            return CapabilityAttempt(
+                call,
+                CapabilityAttemptDisposition.BROKER_FAILURE,
+                True,
+                CapabilityResult(
+                    call.call_id,
+                    call.capability_id,
+                    CapabilityResultState.FAILED,
+                    failure={"code": "executor_error"},
+                ),
+                "executor_error",
+            )
+
+        reasoner = Queued(
+            AgentDecision(
+                call=first,
+                approval_proposal=approved(first, "turn:turn-2"),
+                goal_proposal=self.goal(),
+            ),
+            AgentDecision(
+                call=second,
+                approval_proposal=approved(second, "turn:turn-2"),
+            ),
+            AgentDecision(response="The request already reached the provider."),
+        )
+        outcome = CoreAgent(
+            self.store,
+            reasoner,
+            dispatch,
+            (REVIEW_DEFINITION,),
+            clock=lambda: NOW,
+            identifier_factory=lambda: "goal-1",
+            turn_bound_capabilities=TURN_BOUND,
+        ).process(one_instruction(), RETENTION, 5)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(outcome.response, "The request already reached the provider.")
+        reasons = [item.reason_code for item in outcome.snapshot.state.attempts]
+        self.assertIn("approval_capability_already_dispatched", reasons)
+
     def test_a_new_instruction_authorises_the_next_review(self) -> None:
         """The rule spends the turn, so a new turn restores the authority."""
         first = review_call("call-1", "approve-1")
