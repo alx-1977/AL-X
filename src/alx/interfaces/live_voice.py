@@ -71,15 +71,37 @@ class VoiceEvent:
 class VoiceDiagnosticBuffer:
     """Thread-safe, content-free development telemetry grouped by conversation."""
 
-    def __init__(self) -> None:
-        self._events: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
+    def __init__(self, max_events_per_conversation: int = 256) -> None:
+        if max_events_per_conversation <= 0:
+            raise ValueError("max_events_per_conversation must be positive")
+        self._events: dict[str, deque[dict[str, Any]]] = defaultdict(
+            lambda: deque(maxlen=max_events_per_conversation)
+        )
         self._lock = Lock()
 
     def publish(self, conversation_id: str, values: Mapping[str, Any]) -> None:
         if not conversation_id.strip():
             return
+        event = dict(values)
         with self._lock:
-            self._events[conversation_id].append(dict(values))
+            events = self._events[conversation_id]
+            task_id = event.get("task_id")
+            if (
+                event.get("code") == "task.status"
+                and isinstance(task_id, str)
+                and task_id.strip()
+            ):
+                events = deque(
+                    (
+                        current
+                        for current in events
+                        if current.get("code") != "task.status"
+                        or current.get("task_id") != task_id
+                    ),
+                    maxlen=events.maxlen,
+                )
+                self._events[conversation_id] = events
+            events.append(event)
 
     def drain(self, conversation_id: str) -> tuple[dict[str, Any], ...]:
         with self._lock:
