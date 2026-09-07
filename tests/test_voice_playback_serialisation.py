@@ -200,6 +200,22 @@ class PlaybackSerialisationTests(unittest.TestCase):
         self.assertIn("Completed", result["firstLabel"])
         self.assertFalse(result["secondSettled"])
 
+    def test_terminal_task_is_removed_after_bounded_retention(self) -> None:
+        result = run_js(textwrap.dedent("""
+            let now = 0;
+            performance.now = () => now;
+            showTask({task_id: "review-1", state: "completed",
+                      service: "qodo", subject: "PR #21", elapsed_seconds: 12});
+            const row = runningTasks.get("review-1").row;
+            let removals = 0;
+            row.remove = () => { removals += 1; };
+            now = terminalTaskRetentionMilliseconds + 1;
+            paintTasks();
+            console.log(JSON.stringify({size: runningTasks.size, removals}));
+        """))
+        self.assertEqual(result["size"], 0)
+        self.assertEqual(result["removals"], 1)
+
     def test_blocked_browser_storage_does_not_break_session_control(self) -> None:
         result = run_js(textwrap.dedent("""
             localStorage.getItem = () => { throw new Error("blocked"); };

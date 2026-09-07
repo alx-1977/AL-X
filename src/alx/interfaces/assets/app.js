@@ -41,6 +41,7 @@ let ttsStartedAt;
 // Each external task keeps its own clock. A single global row caused one
 // concurrent review to overwrite another and made the display untrue.
 const runningTasks = new Map();
+const terminalTaskRetentionMilliseconds = 10_000;
 
 function clockTime() {
   return new Intl.DateTimeFormat(undefined, {
@@ -107,8 +108,14 @@ const taskStates = {
 };
 
 function paintTasks() {
-  for (const task of runningTasks.values()) {
-    const drift = (performance.now() - task.at) / 1000;
+  const now = performance.now();
+  for (const [taskId, task] of runningTasks.entries()) {
+    if (task.settled && now >= task.expiresAt) {
+      task.row.remove();
+      runningTasks.delete(taskId);
+      continue;
+    }
+    const drift = (now - task.at) / 1000;
     const seconds = task.settled ? task.seconds : task.seconds + drift;
     task.row.dataset.state = task.state;
     task.label.textContent = `${taskStates[task.state] ?? task.state} · ${task.service} · ${task.subject}`;
@@ -132,13 +139,16 @@ function showTask(message) {
     task = { row, label, elapsed };
     runningTasks.set(taskId, task);
   }
+  const now = performance.now();
+  const settled = state === "completed" || state === "failed";
   Object.assign(task, {
     state,
     service: String(message.service ?? ""),
     subject: String(message.subject ?? ""),
     seconds: Number(message.elapsed_seconds ?? 0),
-    at: performance.now(),
-    settled: state === "completed" || state === "failed",
+    at: now,
+    settled,
+    expiresAt: settled ? now + terminalTaskRetentionMilliseconds : undefined,
   });
   paintTasks();
 }
