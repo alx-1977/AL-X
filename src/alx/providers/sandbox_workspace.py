@@ -433,13 +433,21 @@ class SandboxWorkspace:
         ):
             for name in list(directory_names) + list(file_names) + [""]:
                 target = Path(current, name) if name else Path(current)
+                # Never through a link. `os.chmod` and `os.chflags` follow by
+                # default, so clearing a barrier on a symlink an experiment
+                # planted changed the mode of whatever it pointed at: a host
+                # file outside the workspace, written by the privileged parent
+                # on an attacker-chosen path. The link's own flags are cleared
+                # instead, which is what lets it be unlinked.
                 for action in (
-                    lambda item: os.chflags(item, 0),
-                    lambda item: os.chmod(item, 0o700),
+                    lambda item: os.chflags(item, 0, follow_symlinks=False),
+                    lambda item: os.chmod(item, 0o700, follow_symlinks=False),
                 ):
                     try:
                         action(target)
-                    except (OSError, AttributeError):
-                        # Not every platform has chflags, and a link or a
-                        # vanished entry is not worth failing over.
+                    except (OSError, AttributeError, NotImplementedError):
+                        # Not every platform supports these without following,
+                        # and a vanished entry is not worth failing over. A
+                        # barrier that cannot be cleared safely is left, and
+                        # the caller skips the session.
                         continue

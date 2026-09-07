@@ -1095,5 +1095,187 @@ class ProfileCompletenessTest(unittest.TestCase):
             _sbpl("/tmp/two\nlines")
 
 
+class FixesOfFixesTest(unittest.TestCase):
+    """Three defects in the three newest fixes, from a second review pass.
+
+    Every one is a fix that named a shape of a problem and left an adjacent
+    shape open, and every one had a regression test that passed anyway because
+    it probed only what the fix had just added. That pattern is the reason
+    these tests are written to fail against the *remaining* behaviour rather
+    than against some earlier state.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root / "ws")
+        self.runner = SeatbeltSandboxRunner(self.workspace)
+
+    def test_clearing_barriers_never_follows_a_link_to_a_host_file(self) -> None:
+        """The retention fix wrote outside the workspace.
+
+        `os.chmod` and `os.chflags` follow symlinks by default, so clearing a
+        barrier on a link an experiment planted changed the mode of whatever it
+        pointed at - a privileged write to an attacker-chosen host path. It
+        also left the session undeleted, because the link's own flags were
+        never cleared.
+        """
+        victim = self.root / "HOST_FILE"
+        victim.write_text("host content")
+        os.chmod(victim, 0o600)
+
+        paths = self.workspace.prepare("exp-l", "ses-l", "run-1")
+        link = paths.session_state / "link"
+        os.symlink(victim, link)
+        os.chflags(link, stat.UF_IMMUTABLE, follow_symlinks=False)
+        self.addCleanup(
+            lambda: os.chflags(link, 0, follow_symlinks=False)
+            if link.is_symlink()
+            else None
+        )
+
+        report = SandboxRetention(self.workspace, ttl_seconds=1).sweep(
+            now=time.time() + 10_000
+        )
+
+        self.assertEqual(
+            oct(victim.stat().st_mode & 0o777),
+            "0o600",
+            "retention changed the mode of a file outside the workspace",
+        )
+        self.assertEqual(victim.read_text(), "host content")
+        # And the deletion guarantee the fix exists for still holds.
+        self.assertEqual(report.sessions_purged, 1)
+        self.assertFalse(link.is_symlink() or link.exists())
+
+    def test_temporary_roots_are_denied(self) -> None:
+        """The data-root list forgot where temp files live.
+
+        /tmp and the per-user directories under /private/var/folders hold every
+        process's temp and cache for this uid. The previous regression test
+        probed /private/var/db - a root the fix had just added - so it passed
+        while these stayed readable.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        probe = Path("/tmp/alx-regression-probe.txt")
+        probe.write_text("TMP-SECRET")
+        self.addCleanup(lambda: probe.unlink(missing_ok=True))
+
+        paths = self.workspace.prepare("exp-t", "ses-t", "run-1")
+        source = (
+            "import os\n"
+            "for target in ('/tmp/alx-regression-probe.txt',"
+            " '/private/tmp/alx-regression-probe.txt'):\n"
+            "    try:\n"
+            "        print('READ', open(target).read())\n"
+            "    except Exception as error:\n"
+            "        print('BLOCKED', type(error).__name__)\n"
+            "try:\n"
+            "    os.listdir('/private/var/folders')\n"
+            "    print('LISTED')\n"
+            "except Exception as error:\n"
+            "    print('LIST-BLOCKED', type(error).__name__)\n"
+        )
+        outcome = self.runner.run(
+            SandboxRequest("exp-t", "ses-t", "run-1", source), paths
+        )
+        self.assertNotIn("TMP-SECRET", outcome.stdout)
+        self.assertNotIn("LISTED", outcome.stdout)
+
+    def test_the_credential_store_is_denied(self) -> None:
+        """A keychain is the reason a read boundary exists at all."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        keychain = Path("/Library/Keychains/System.keychain")
+        if not keychain.is_file():
+            self.skipTest("no system keychain on this host")
+
+        paths = self.workspace.prepare("exp-k", "ses-k", "run-1")
+        source = (
+            "try:\n"
+            "    data = open('/Library/Keychains/System.keychain', 'rb').read(8)\n"
+            "    print('READ', data)\n"
+            "except Exception as error:\n"
+            "    print('BLOCKED', type(error).__name__)\n"
+        )
+        outcome = self.runner.run(
+            SandboxRequest("exp-k", "ses-k", "run-1", source), paths
+        )
+        self.assertIn("BLOCKED", outcome.stdout)
+        self.assertNotIn("READ", outcome.stdout)
+
+    def test_the_workspace_still_works_under_a_denied_temp_root(self) -> None:
+        """Denying /private/var/folders must not refuse a workspace living there.
+
+        This is the reasoning the earlier omission rested on, and it is wrong:
+        the session re-allow comes last and later rules win.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-w", "ses-w", "run-1")
+        outcome = self.runner.run(
+            SandboxRequest(
+                "exp-w",
+                "ses-w",
+                "run-1",
+                "open('own.txt','w').write('mine')\nprint('OWN', open('own.txt').read())\n",
+            ),
+            paths,
+        )
+        self.assertIn("OWN mine", outcome.stdout)
+
+    def test_a_shared_prefix_is_never_granted_for_execution(self) -> None:
+        """The exec fix walked up to the first ancestor named `bin`.
+
+        Right for a framework build, catastrophic for /usr/bin/python3: it
+        produced (allow process-exec (subpath "/usr")), authorising osascript,
+        ssh, curl and every other tool in /usr. The previous test used
+        /bin/echo, which a /usr grant blocks anyway, so it passed.
+        """
+        for interpreter in (
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+            "/opt/homebrew/bin/python3",
+            "/bin/python3",
+        ):
+            with self.subTest(interpreter=interpreter):
+                self.assertIsNone(
+                    SeatbeltSandboxRunner._interpreter_prefix(Path(interpreter)),
+                    f"{interpreter} named a prefix shared with the system",
+                )
+
+    def test_no_shared_prefix_reaches_the_generated_profile(self) -> None:
+        runner = SeatbeltSandboxRunner(
+            self.workspace, interpreter="/usr/bin/python3"
+        )
+        paths = self.workspace.prepare("exp-u", "ses-u", "run-1")
+        profile = runner.profile(paths.session_state)
+
+        self.assertIn('(allow process-exec (literal "/usr/bin/python3"))', profile)
+        for shared in ('subpath "/usr"', 'subpath "/opt"', 'subpath "/"'):
+            self.assertNotIn(
+                f"(allow process-exec ({shared}))",
+                profile,
+                "execution was granted over a shared system prefix",
+            )
+
+    def test_an_installation_prefix_is_still_named(self) -> None:
+        """Narrowing must not refuse the framework re-exec it exists to allow."""
+        framework = Path(
+            "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
+        )
+        self.assertEqual(
+            SeatbeltSandboxRunner._interpreter_prefix(framework),
+            Path("/Library/Frameworks/Python.framework/Versions/3.13"),
+        )
+        venv = Path("/Users/someone/project/.venv/bin/python")
+        self.assertEqual(
+            SeatbeltSandboxRunner._interpreter_prefix(venv),
+            Path("/Users/someone/project/.venv"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

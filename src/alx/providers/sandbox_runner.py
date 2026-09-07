@@ -105,9 +105,17 @@ class SandboxRunner(ABC):
 # Where data lives on a macOS or Unix host, denied as a class rather than by
 # naming individual stores. D-027 withholds production reads entirely; a
 # deny-list only ever covers what somebody remembered, so these are roots
-# rather than files. `/private/var/folders` is deliberately absent: it is where
-# a temporary sandbox root legitimately lives, and denying it would refuse the
-# workspace itself before the re-allow could restore it.
+# rather than files.
+#
+# The temporary roots are here because they were forgotten once and are not
+# obviously "data": /tmp and the per-user directories under
+# /private/var/folders hold every process's temp and cache for this uid -
+# editors, browsers, package tools, other agents - which is user data that
+# does not live under the home directory. An earlier version omitted
+# /private/var/folders on the reasoning that a temporary sandbox root lives
+# there and denying it would refuse the workspace. That reasoning was wrong:
+# the sandbox root is already denied and the session state re-allowed after
+# it, and later rules win, so the same pattern covers this.
 _DATA_ROOTS = (
     "/Users",
     "/Volumes",
@@ -119,6 +127,15 @@ _DATA_ROOTS = (
     "/data",
     "/usr/local/var",
     "/Library/Application Support",
+    # Credential stores, which are the reason a read boundary exists at all.
+    "/Library/Keychains",
+    "/private/var/db/KeychainSync",
+    # Temporary and cache roots. /tmp is a symlink to /private/tmp; both are
+    # named so neither spelling is a way round.
+    "/tmp",
+    "/private/tmp",
+    "/private/var/tmp",
+    "/private/var/folders",
 )
 
 
@@ -292,18 +309,39 @@ class SeatbeltSandboxRunner(SandboxRunner):
             rules.add(f"(allow process-exec (subpath {_sbpl(prefix)}))")
         return "".join(f"{rule}\n" for rule in sorted(rules))
 
-    @staticmethod
-    def _interpreter_prefix(resolved: Path) -> Path | None:
-        """The installation root of a framework or prefixed interpreter.
+    # Prefixes that are not one interpreter installation. Granting exec over
+    # any of these reaches a shell, osascript, ssh, curl or another
+    # interpreter, which is the authority this rule exists to withhold.
+    _SHARED_PREFIXES = frozenset(
+        {"/", "/usr", "/usr/local", "/opt", "/opt/homebrew", "/Library", "/System"}
+    )
 
-        `.../Versions/3.13/bin/python3.13` gives `.../Versions/3.13`, which is
-        where the bundled re-exec target lives. Returns None when the layout is
-        not recognised, in which case only the two literals above apply.
+    @classmethod
+    def _interpreter_prefix(cls, resolved: Path) -> Path | None:
+        """The directory holding the interpreter, when it is safe to name.
+
+        Only the directory the binary actually sits in - a framework build
+        re-execs a further binary inside its own bundle, and that bundle is
+        under this prefix. An earlier version walked up to the first ancestor
+        named `bin` and returned its parent, which is right for
+        `.../Versions/3.13/bin/python3.13` and catastrophic for
+        `/usr/bin/python3`: it produced `(allow process-exec (subpath "/usr"))`,
+        authorising every tool in /usr.
+
+        Returns None for a prefix shared with the rest of the system, in which
+        case the two literals stand alone. Refusing to name a prefix is always
+        safe: at worst a framework re-exec is denied and the misconfiguration
+        is visible immediately, rather than an escape being invisible.
         """
-        for parent in resolved.parents:
-            if parent.name == "bin":
-                return parent.parent
-        return None
+        directory = resolved.parent
+        candidate = directory.parent if directory.name == "bin" else directory
+        if str(candidate) in cls._SHARED_PREFIXES:
+            return None
+        # A prefix must still contain the interpreter it was derived from, and
+        # must not be a system root reached by another spelling.
+        if str(directory) in cls._SHARED_PREFIXES:
+            return None
+        return candidate
 
     @staticmethod
     def _limits(cpu_seconds: int) -> None:
