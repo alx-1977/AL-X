@@ -272,9 +272,11 @@ class SandboxWorkspace:
     def purge_state(self, session_state: Path) -> None:
         """Empty a session's working directory, keeping the directory itself.
 
-        Used when a run overflows the workspace ceiling: the run's evidence is
-        already written, and leaving the overflow in place would let one run
-        deny the disk to every later one.
+        Used when a run overflows the workspace ceiling: leaving the overflow
+        in place would let one run deny the disk to every later one. That run
+        returns no outcome, so `purge_run` removes its evidence directory too -
+        an earlier version of this comment claimed the evidence was already
+        written, which is true of every other path but not of this one.
         """
         resolved = Path(session_state).resolve()
         if self._root not in resolved.parents:
@@ -284,6 +286,20 @@ class SandboxWorkspace:
                 self._remove_tree(entry)
             else:
                 entry.unlink()
+
+    def purge_run(self, run_directory: Path) -> None:
+        """Remove one run's evidence directory in full.
+
+        Only for a run that produced no outcome, and therefore no manifest. A
+        run that completed keeps its directory: the manifest there is the
+        bounded record that outlives the bytes, and deleting it would leave the
+        run unaccounted rather than merely undescribed.
+        """
+        resolved = Path(run_directory).resolve()
+        if self._root not in resolved.parents:
+            raise SandboxError("workspace_unavailable")
+        if resolved.is_dir() and not resolved.is_symlink():
+            self._remove_tree(resolved)
 
     def purge_transient(self, session_root: Path) -> int:
         """Delete every experiment-authored byte, keeping each run manifest.
@@ -302,6 +318,14 @@ class SandboxWorkspace:
         if state.exists():
             self._remove_tree(state)
             removed += 1
+        # The lease marker is this module's own bookkeeping, not experiment
+        # bytes, and it is zero-length - so it is not counted as something
+        # removed. It goes anyway: a purged session that keeps a lock file
+        # leaves a marker behind for a run that will never come back. Safe
+        # here because the caller holds the lease while purging.
+        marker = resolved / ".lease"
+        if marker.is_file() and not marker.is_symlink():
+            marker.unlink()
         runs = resolved / "runs"
         if runs.is_dir():
             for run in sorted(runs.iterdir()):

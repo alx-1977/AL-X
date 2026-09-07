@@ -406,5 +406,104 @@ class PreLaunchAccountingTest(unittest.TestCase):
         self.assertEqual(signals, ["launched"])
 
 
+class SelfReviewFindingsTest(unittest.TestCase):
+    """Three further defects found reviewing the fixes above.
+
+    Two of them were made more likely by those fixes rather than introduced by
+    them: refusing a truncated walk sends far more runs down the overflow path,
+    and creating the lease marker unconditionally gave more sessions one to
+    leave behind.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root)
+        self.runner = SeatbeltSandboxRunner(self.workspace)
+
+    def test_an_overflowing_run_leaves_no_unaudited_bytes(self) -> None:
+        """The overflow path writes no manifest, so it may keep nothing.
+
+        stdout, stderr and the source were left in the run directory with
+        nothing describing them: not covered by a manifest, and reachable only
+        by retention at the TTL.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-r1", "ses-r1", "run-1")
+        source = (
+            "import pathlib\n"
+            "print('noise')\n"
+            f"for i in range({MAX_WALKED_FILES + 50}):\n"
+            "    pathlib.Path(f'f{i}').write_bytes(b'x')\n"
+        )
+        with self.assertRaises(SandboxError) as raised:
+            self.runner.run(
+                SandboxRequest("exp-r1", "ses-r1", "run-1", source), paths
+            )
+        self.assertEqual(raised.exception.code, "workspace_exhausted")
+
+        self.assertFalse(
+            paths.run_directory.exists(),
+            "an unaudited run directory survived a refused run",
+        )
+        self.assertFalse(any(paths.session_state.iterdir()))
+
+    def test_a_completed_run_keeps_its_evidence(self) -> None:
+        """The other direction: purge_run must not touch an audited run."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-r1b", "ses-r1b", "run-1")
+        self.runner.run(
+            SandboxRequest("exp-r1b", "ses-r1b", "run-1", "print('kept')"), paths
+        )
+        self.assertTrue(paths.manifest_path.is_file())
+
+    def test_purge_run_refuses_a_path_outside_the_root(self) -> None:
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: outside.rmdir())
+        with self.assertRaises(SandboxError):
+            self.workspace.purge_run(outside)
+
+    def test_retention_leaves_no_lease_marker_behind(self) -> None:
+        """A purged session should not keep a lock file for a run that is gone."""
+        paths = self.workspace.prepare("exp-r3", "ses-r3", "run-1")
+        (paths.session_state / "secret.txt").write_text("experiment bytes")
+
+        report = SandboxRetention(self.workspace, ttl_seconds=1).sweep(
+            now=time.time() + 10_000
+        )
+        self.assertEqual(report.sessions_purged, 1)
+
+        session = self.root / "exp-r3" / "ses-r3"
+        self.assertFalse(
+            (session / ".lease").exists(), "a stale lease marker survived retention"
+        )
+        # And the experiment's own bytes are still gone.
+        self.assertFalse((paths.session_state / "secret.txt").exists())
+
+    def test_the_lease_marker_is_not_counted_as_experiment_bytes(self) -> None:
+        """It is this module's bookkeeping, so it must not inflate the count."""
+        paths = self.workspace.prepare("exp-r3b", "ses-r3b", "run-1")
+        (paths.session_state / "one.txt").write_text("x")
+        # Give the session a marker exactly as a run would.
+        with self.workspace.lease("exp-r3b", "ses-r3b"):
+            pass
+
+        session = self.root / "exp-r3b" / "ses-r3b"
+        removed = self.workspace.purge_transient(session)
+
+        # Compared against an identical session that never took a lease, so the
+        # assertion is about the marker rather than about how many other
+        # entries `prepare` happens to create.
+        control = self.workspace.prepare("exp-r3c", "ses-r3c", "run-1")
+        (control.session_state / "one.txt").write_text("x")
+        expected = self.workspace.purge_transient(self.root / "exp-r3c" / "ses-r3c")
+
+        self.assertEqual(removed, expected)
+        self.assertFalse((session / ".lease").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

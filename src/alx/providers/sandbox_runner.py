@@ -300,7 +300,22 @@ class SeatbeltSandboxRunner(SandboxRunner):
         elapsed = time.monotonic() - started
         finished_at = datetime.now(UTC)
 
-        status = process.returncode if process.returncode is not None else -signal.SIGKILL
+        # A leader that could not be reaped has no observed status. Reporting
+        # -SIGKILL for it would be inventing evidence: the run is recorded as
+        # signalled and timed out, which is what is actually known, and the
+        # exit status says the same thing rather than naming a signal nobody
+        # saw delivered. In practice the reap above succeeds and the real
+        # status is used.
+        status = (
+            process.returncode
+            if process.returncode is not None
+            else -signal.SIGKILL
+        )
+        if process.returncode is None:
+            LOGGER.warning(
+                "A sandbox run reports an unobserved exit status: the leader "
+                "could not be reaped"
+            )
         after = self._workspace.walk(paths.session_state)
 
         # D-027 bounds the session workspace, and RLIMIT_FSIZE only bounds one
@@ -319,6 +334,12 @@ class SeatbeltSandboxRunner(SandboxRunner):
                 " (state too large to audit)" if after.truncated else "",
             )
             self._workspace.purge_state(paths.session_state)
+            # The run directory goes with it. This path returns no outcome, so
+            # no manifest can be written for it, and leaving stdout, stderr and
+            # the source behind would keep experiment-authored bytes that
+            # nothing describes and retention would only reach at the TTL.
+            # Refusing the run means keeping none of it.
+            self._workspace.purge_run(paths.run_directory)
             raise SandboxError("workspace_exhausted")
 
         artifacts = self._workspace.changes(before.entries, after.entries)
@@ -404,6 +425,17 @@ class SeatbeltSandboxRunner(SandboxRunner):
                 return
             time.sleep(0.05)
         LOGGER.warning("A sandbox process group did not terminate")
+        # One last attempt to reap the leader. Both grace windows above can
+        # expire without `wait` returning - an uninterruptible sleep survives
+        # SIGKILL until its syscall completes - and the leader would then still
+        # be unreaped, leaving a zombie and a returncode of None. The caller
+        # substitutes -SIGKILL for None, which would be a status nobody
+        # observed, so it is worth one non-blocking poll to record the real one
+        # where it exists.
+        try:
+            process.wait(timeout=_TERM_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            LOGGER.warning("A sandbox process leader could not be reaped")
 
     @staticmethod
     def _read(path: Path) -> tuple[bytes, str, int, bool]:
