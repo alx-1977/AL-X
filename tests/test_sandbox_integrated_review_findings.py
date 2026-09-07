@@ -964,5 +964,136 @@ class IndependentReviewFindingsTest(unittest.TestCase):
         self.assertTrue(paths.manifest_path.is_file())
 
 
+class ProfileCompletenessTest(unittest.TestCase):
+    """Three defects in the Seatbelt profile itself.
+
+    Two are authority the profile granted and D-027 does not: reads of data
+    outside a short deny-list, and execution of every binary on the host. The
+    third is the profile failing to parse at all when a path contains a quote.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root / "ws")
+        self.runner = SeatbeltSandboxRunner(self.workspace)
+
+    def test_a_data_store_outside_the_denied_paths_is_refused(self) -> None:
+        """Q1: the deny-list named four paths; data lives in more than four.
+
+        A production store outside the home directory, the repository, the
+        runtime root and the sandbox root was readable by any experiment that
+        knew its path, which D-027 withholds entirely.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+
+        # Deliberately outside the home directory, the repository, the runtime
+        # root and the sandbox root - the four paths the profile already
+        # denied. A probe inside any of those would pass with or without this
+        # fix, which is exactly the mistake the earlier isolation test made.
+        probe = None
+        for root in ("/private/var/db", "/Library/Application Support"):
+            directory = Path(root)
+            if not directory.is_dir():
+                continue
+            for candidate in sorted(directory.glob("*")):
+                if candidate.is_file() and os.access(candidate, os.R_OK):
+                    probe = candidate
+                    break
+            if probe is not None:
+                break
+        if probe is None:
+            self.skipTest("no readable file outside the previously denied paths")
+
+        paths = self.workspace.prepare("exp-d", "ses-d", "run-1")
+        source = (
+            f"try:\n"
+            f"    open({str(probe)!r}, 'rb').read(16)\n"
+            f"    print('READ-OK')\n"
+            f"except Exception as error:\n"
+            f"    print('BLOCKED', type(error).__name__)\n"
+        )
+        outcome = self.runner.run(
+            SandboxRequest("exp-d", "ses-d", "run-1", source), paths
+        )
+        self.assertIn("BLOCKED", outcome.stdout)
+        self.assertNotIn("READ-OK", outcome.stdout)
+
+    def test_a_host_binary_cannot_be_executed(self) -> None:
+        """Q2: process-exec was unrestricted.
+
+        D-027 authorises Python programs using the standard library. An
+        unrestricted exec authorised every binary on the host, and os.execv
+        needs no fork, so the RLIMIT_NPROC exhaustion that refuses subprocess
+        did not mask it: /bin/echo ran inside the sandbox.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-x2", "ses-x2", "run-1")
+        source = (
+            "import os\n"
+            "try:\n"
+            "    os.execv('/bin/echo', ['echo', 'HOST-BINARY-RAN'])\n"
+            "except Exception as error:\n"
+            "    print('EXEC-BLOCKED', type(error).__name__)\n"
+        )
+        outcome = self.runner.run(
+            SandboxRequest("exp-x2", "ses-x2", "run-1", source), paths
+        )
+        self.assertIn("EXEC-BLOCKED", outcome.stdout)
+        self.assertNotIn("HOST-BINARY-RAN", outcome.stdout)
+
+    def test_the_interpreter_itself_still_starts(self) -> None:
+        """Narrowing exec must not refuse the launch it exists to permit.
+
+        Starting CPython is not one exec: the configured name is a symlink and
+        a framework build re-execs a further binary inside its own bundle.
+        """
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-x3", "ses-x3", "run-1")
+        outcome = self.runner.run(
+            SandboxRequest("exp-x3", "ses-x3", "run-1", "print('ORDINARY OK')"),
+            paths,
+        )
+        self.assertEqual(outcome.exit_status, 0)
+        self.assertIn("ORDINARY OK", outcome.stdout)
+
+    def test_a_quote_in_a_path_does_not_corrupt_the_profile(self) -> None:
+        """Q3: paths were interpolated into SBPL strings unescaped.
+
+        The checkout location, home directory, runtime storage and an
+        operator-set sandbox root may all legally contain a quote. One ends the
+        string early, the profile stops parsing, and sandbox-exec refuses every
+        experiment before Python starts.
+        """
+        awkward = self.root / 'we"ird'
+        awkward.mkdir()
+        workspace = SandboxWorkspace(awkward / "ws")
+        runner = SeatbeltSandboxRunner(workspace)
+        paths = workspace.prepare("exp-q", "ses-q", "run-1")
+
+        profile = runner.profile(paths.session_state)
+        self.assertIn('we\\"ird', profile)
+
+        if not runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        outcome = runner.run(
+            SandboxRequest("exp-q", "ses-q", "run-1", "print('QUOTED PATH OK')"),
+            paths,
+        )
+        self.assertEqual(outcome.exit_status, 0)
+        self.assertIn("QUOTED PATH OK", outcome.stdout)
+
+    def test_a_newline_in_a_path_is_refused_rather_than_encoded(self) -> None:
+        """A newline inside a security profile is not worth accommodating."""
+        from alx.providers.sandbox_runner import _sbpl
+
+        with self.assertRaises(SandboxError):
+            _sbpl("/tmp/two\nlines")
+
+
 if __name__ == "__main__":
     unittest.main()

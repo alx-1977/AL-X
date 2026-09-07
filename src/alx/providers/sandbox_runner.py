@@ -102,6 +102,51 @@ class SandboxRunner(ABC):
         """
 
 
+# Where data lives on a macOS or Unix host, denied as a class rather than by
+# naming individual stores. D-027 withholds production reads entirely; a
+# deny-list only ever covers what somebody remembered, so these are roots
+# rather than files. `/private/var/folders` is deliberately absent: it is where
+# a temporary sandbox root legitimately lives, and denying it would refuse the
+# workspace itself before the re-allow could restore it.
+_DATA_ROOTS = (
+    "/Users",
+    "/Volumes",
+    "/private/var/root",
+    "/private/var/db",
+    "/private/etc",
+    "/opt",
+    "/srv",
+    "/data",
+    "/usr/local/var",
+    "/Library/Application Support",
+)
+
+
+def _sbpl(path: "Path | str") -> str:
+    """One filesystem path as a Seatbelt string literal.
+
+    Paths reach the profile from the checkout location, the home directory,
+    runtime storage and an operator-set sandbox root, and every one of those
+    may legally contain a quote or a backslash. Interpolated raw, such a
+    character ends the string early and the profile becomes syntactically
+    invalid, so `sandbox-exec` refuses every experiment before Python starts.
+
+    Only the two characters SBPL strings treat specially are escaped, and a
+    control character is refused outright rather than encoded: a newline in a
+    path is not something to accommodate quietly inside a security profile.
+    """
+    text = str(path)
+    if any(character in text for character in ("\n", "\r", "\x00")):
+        raise SandboxError("workspace_unavailable")
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+_DATA_ROOT_DENIALS = "".join(
+    f"(deny file-read* (subpath \"{item}\"))\n" for item in _DATA_ROOTS
+)
+
+
 def _truncate(value: str, limit: int) -> tuple[str, int]:
     if len(value) <= limit:
         return value, 0
@@ -176,20 +221,34 @@ class SeatbeltSandboxRunner(SandboxRunner):
         # denial must precede the workspace re-allow, and every explicit denial
         # must precede it too.
         denials = "\n".join(
-            f'(deny file-read* (subpath "{path}"))' for path in self._denied
+            f"(deny file-read* (subpath {_sbpl(path)}))" for path in self._denied
         )
         return (
             "(version 1)\n"
             "(deny default)\n"
             "(allow process-fork)\n"
-            "(allow process-exec)\n"
+            # Execution is narrowed to the interpreter this runner launches.
+            # D-027 authorises Python programs using the standard library, and
+            # an unrestricted process-exec authorised every binary on the host:
+            # `os.execv('/bin/echo', ...)` ran, needing no fork, so the
+            # RLIMIT_NPROC exhaustion that refuses subprocess did not mask it.
+            f"{self._interpreter_exec()}"
             "(allow sysctl-read)\n"
             "(allow mach-lookup)\n"
             "(allow signal (target self))\n"
             "(allow file-read*)\n"
             # The user's own data is refused wholesale rather than by naming
             # individual secrets: a deny-list only covers what was remembered.
-            f'(deny file-read* (subpath "{self._home}"))\n'
+            f"(deny file-read* (subpath {_sbpl(self._home)}))\n"
+            # The conventional places data lives, refused wholesale. An
+            # allow-list of what CPython needs would be stronger still, and was
+            # tried: a framework interpreter aborts with SIGABRT and no
+            # diagnostic before it can report what it was denied, so it cannot
+            # be built by observation. Denying the data roots is what is
+            # actually achievable here, and it closes the case the review
+            # named - a production store outside the home directory, the
+            # repository and the runtime root was readable.
+            f"{_DATA_ROOT_DENIALS}"
             # And the sandbox root itself, so one session cannot read another.
             # Session isolation was previously only incidental: it held when
             # the root happened to sit under the home directory, and not
@@ -198,15 +257,53 @@ class SeatbeltSandboxRunner(SandboxRunner):
             # every session readable by every other, reachable as
             # ../../<other>/state from the working directory. The re-allow
             # below restores exactly this run's own state.
-            f'(deny file-read* (subpath "{self._workspace.root}"))\n'
+            f"(deny file-read* (subpath {_sbpl(self._workspace.root)}))\n"
             f"{denials}\n"
             # The session workspace is re-allowed after the denials so a
             # workspace living under the home directory still works.
-            f'(allow file-read* (subpath "{state}"))\n'
-            f'(allow file-write* (subpath "{state}"))\n'
+            f"(allow file-read* (subpath {_sbpl(state)}))\n"
+            f"(allow file-write* (subpath {_sbpl(state)}))\n"
             '(allow file-write-data (literal "/dev/null"))\n'
             "(deny network*)\n"
         )
+
+    def _interpreter_exec(self) -> str:
+        """The exec rules for the interpreter this runner launches.
+
+        Narrower than "any binary on the host" and wider than one literal
+        path, because starting CPython is not one exec. The configured name is
+        usually a symlink, and a framework build then re-execs a further binary
+        inside its own bundle - naming only the first refused the launch, and
+        naming only the resolved one refused it a step later.
+
+        So execution is confined to the interpreter's own installation prefix.
+        An experiment still cannot reach a shell, a compiler or another
+        interpreter, which is what D-027 is protecting; what it can reach is
+        the Python it was already running.
+        """
+        configured = Path(self._interpreter)
+        resolved = configured.resolve()
+        rules = {
+            f"(allow process-exec (literal {_sbpl(configured)}))",
+            f"(allow process-exec (literal {_sbpl(resolved)}))",
+        }
+        prefix = self._interpreter_prefix(resolved)
+        if prefix is not None:
+            rules.add(f"(allow process-exec (subpath {_sbpl(prefix)}))")
+        return "".join(f"{rule}\n" for rule in sorted(rules))
+
+    @staticmethod
+    def _interpreter_prefix(resolved: Path) -> Path | None:
+        """The installation root of a framework or prefixed interpreter.
+
+        `.../Versions/3.13/bin/python3.13` gives `.../Versions/3.13`, which is
+        where the bundled re-exec target lives. Returns None when the layout is
+        not recognised, in which case only the two literals above apply.
+        """
+        for parent in resolved.parents:
+            if parent.name == "bin":
+                return parent.parent
+        return None
 
     @staticmethod
     def _limits(cpu_seconds: int) -> None:
