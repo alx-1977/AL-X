@@ -145,8 +145,14 @@ def build_sandbox_executors(
                 run_id=run_id_source(),
                 source=str(arguments["source"]),
                 entry_filename=str(arguments.get("entry_filename") or "experiment.py"),
+                # An omitted value takes the default; a supplied one is passed
+                # through for SandboxRequest to validate. `or` conflated the
+                # two, so an explicit zero became 30 seconds and ran, when the
+                # contract already rejects zero as unusable.
                 wall_seconds=int(
-                    arguments.get("wall_seconds") or DEFAULT_WALL_SECONDS
+                    DEFAULT_WALL_SECONDS
+                    if arguments.get("wall_seconds") is None
+                    else arguments["wall_seconds"]
                 ),
             )
         except (KeyError, TypeError, ValueError):

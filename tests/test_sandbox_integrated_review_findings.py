@@ -28,6 +28,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
+from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.contracts.sandbox import (  # noqa: E402
     MAX_WALKED_FILES,
     MAX_WORKSPACE_BYTES,
@@ -634,6 +635,129 @@ class PrivilegedParentTest(unittest.TestCase):
 
         with self.assertRaises((ProcessLookupError, PermissionError)):
             os.killpg(group, 0)
+
+
+class ResilienceAndAccountingTest(unittest.TestCase):
+    """Four defects from the review of the escape fixes.
+
+    Two of them are about the capability staying usable and honest rather than
+    about confinement: a sweep that could brick the runtime, and a fuse that
+    under-counted the machine time actually spent.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root / "ws")
+
+    def test_one_undeletable_session_does_not_stop_the_sweep(self) -> None:
+        """R2: the sweep runs before every experiment, so it must not abort.
+
+        purge_transient does filesystem work on directories an experiment can
+        make undeletable, and rmtree and unlink raise plain OSError, which the
+        sweep did not catch. One stuck session therefore aborted composition
+        and every later run.
+        """
+        stuck = self.workspace.prepare("exp-s1", "ses-s1", "run-1")
+        (stuck.session_state / "held").mkdir()
+        (stuck.session_state / "held" / "f.txt").write_text("x")
+        os.chmod(stuck.session_state / "held", 0o500)
+        self.addCleanup(os.chmod, stuck.session_state / "held", 0o700)
+
+        ordinary = self.workspace.prepare("exp-s2", "ses-s2", "run-1")
+        (ordinary.session_state / "ok.txt").write_text("should be purged")
+
+        report = SandboxRetention(self.workspace, ttl_seconds=1).sweep(
+            now=time.time() + 10_000
+        )
+
+        self.assertEqual(report.sessions_purged, 1)
+        self.assertFalse(
+            (ordinary.session_state / "ok.txt").exists(),
+            "one stuck session stopped every other session being purged",
+        )
+
+    def test_a_zero_wall_time_is_refused_before_anything_runs(self) -> None:
+        """R4: `or` turned an explicit zero into the 30-second default."""
+        from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT, build_sandbox_executors
+
+        reached: list[object] = []
+
+        def never(request):
+            reached.append(request)
+            raise AssertionError("a zero-second request must not run")
+
+        executor = build_sandbox_executors(
+            never, lambda: "call-1", lambda: "run-1"
+        )[RUN_SANDBOX_EXPERIMENT]
+
+        for value in (0, -1):
+            with self.subTest(wall_seconds=value):
+                result = executor(
+                    {
+                        "experiment_id": "exp-z",
+                        "session_id": "ses-z",
+                        "source": "print(1)",
+                        "wall_seconds": value,
+                    }
+                )
+                self.assertIs(result.state, CapabilityResultState.FAILED)
+                self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertEqual(reached, [], "an invalid request reached the runner")
+
+    def test_an_omitted_wall_time_still_takes_the_default(self) -> None:
+        """The fix must not turn a missing value into a refusal."""
+        from alx.contracts.sandbox import DEFAULT_WALL_SECONDS
+        from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT, build_sandbox_executors
+
+        seen: list[int] = []
+
+        def capture(request):
+            seen.append(request.wall_seconds)
+            raise SandboxError("sandbox_unavailable")
+
+        executor = build_sandbox_executors(
+            capture, lambda: "call-1", lambda: "run-1"
+        )[RUN_SANDBOX_EXPERIMENT]
+        executor(
+            {"experiment_id": "exp-d", "session_id": "ses-d", "source": "print(1)"}
+        )
+        self.assertEqual(seen, [DEFAULT_WALL_SECONDS])
+
+    def test_a_relative_sandbox_root_is_anchored_not_launch_dependent(self) -> None:
+        """R5: workspace and ledger identity must not follow the launch folder.
+
+        The runtime storage root is resolved against the repository; the
+        sandbox root was passed through as configured, so starting the service
+        from another directory created a different workspace and a different
+        ledger - a session lost its history and the day's spend restarted.
+        """
+        from alx.config import sandbox_settings
+
+        settings = sandbox_settings(
+            {"ALX_SANDBOX_ENABLED": "true", "ALX_SANDBOX_ROOT": ".alx/sandbox"}
+        )
+        self.assertFalse(settings.workspace_root.is_absolute())
+
+        # The composition applies the same anchoring the storage root gets.
+        repository_root = Path("/somewhere/repo")
+        anchored = repository_root / settings.workspace_root
+        self.assertTrue(anchored.is_absolute())
+        self.assertTrue(str(anchored).startswith("/somewhere/repo"))
+
+    def test_the_composition_anchors_a_relative_root(self) -> None:
+        """Asserted against the composition source, not a restatement of it."""
+        source = (
+            REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py"
+        ).read_text()
+        self.assertIn("sandbox_workspace_root = ", source)
+        self.assertIn(
+            "repository_root / sandbox_workspace_root",
+            source,
+            "a relative sandbox root is no longer anchored to the repository",
+        )
+        self.assertIn("repository_root / sandbox_ledger_path", source)
 
 
 if __name__ == "__main__":

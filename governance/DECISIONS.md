@@ -786,6 +786,27 @@ An experiment that exits zero has demonstrated that a program ran in an isolated
 
 The test suite must not require a working sandbox in order to run. The confinement mechanism is injected so the boundary is provable without executing anything, following the precedent of the public-web address boundary, and the tests that require real confinement are skipped explicitly rather than silently on platforms that cannot provide it.
 
+### A third finding declined: durable output
+
+A later review asked for a "bounded substantive outcome field" in the durable
+record, so that a goal resumed after a restart could recover what an experiment
+established rather than only that it ran.
+
+Declined, because it asks for the opposite of what this decision records above:
+the durable record contains no experiment-authored free text, and there is
+deliberately no field in which output could be stored. That is not an oversight
+to be corrected by adding one. A run's output reaches AL/X on the turn it
+happens, as untrusted evidence anchored at `attempt:<call_id>`; if she judges
+something worth keeping she records it herself, through the notebook and memory
+capabilities that already exist, in her own words and under her own judgement.
+A field that persisted program output automatically would make the goal store a
+second evidence store and would put experiment-authored bytes beyond the
+retention limit this decision sets.
+
+The gap the finding names is real and is answered elsewhere: the manifest
+survives retention, so what ran, when, under which limits and what it produced
+remains establishable without keeping the content.
+
 ### Two review findings declined
 
 A third independent review of the integrated head reported seven findings. Five

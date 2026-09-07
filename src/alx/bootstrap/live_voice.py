@@ -373,10 +373,23 @@ async def run(repository_root: Path) -> None:
     # apart from the runtime storage root, which holds goals, memories and a
     # private key. The repository, that storage root and the user's private
     # keys are denied to the confined process explicitly.
+    #
+    # A relative sandbox root is resolved against the repository, exactly as
+    # the runtime storage root above is. Passed through as configured, it was
+    # interpreted against the process working directory: launching the service
+    # from elsewhere silently created a different workspace and a different
+    # ledger, so a session lost its history and the day's spend started again
+    # from zero.
+    sandbox_workspace_root = voice_settings.sandbox.workspace_root
+    sandbox_ledger_path = voice_settings.sandbox.ledger_path
+    if sandbox_workspace_root is not None and not sandbox_workspace_root.is_absolute():
+        sandbox_workspace_root = repository_root / sandbox_workspace_root
+    if sandbox_ledger_path is not None and not sandbox_ledger_path.is_absolute():
+        sandbox_ledger_path = repository_root / sandbox_ledger_path
     sandbox_runtime = build_sandbox_runtime(
         voice_settings.sandbox.is_usable,
-        voice_settings.sandbox.workspace_root,
-        voice_settings.sandbox.ledger_path,
+        sandbox_workspace_root,
+        sandbox_ledger_path,
         lambda: current_call_id[0],
         denied_read_paths=(
             repository_root,

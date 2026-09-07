@@ -64,11 +64,38 @@ class SandboxLedgerTest(unittest.TestCase):
         self.assertEqual(ledger.committed_seconds(), 2.5)
         self.assertEqual(ledger.committed_runs(), 1)
 
-    def test_settling_can_never_record_more_than_was_reserved(self) -> None:
+    def test_settling_records_real_overrun_rather_than_hiding_it(self) -> None:
+        """The fuse counts machine occupation, not what was intended.
+
+        This used to clamp the settled time to the reservation, on the reasoning
+        that a run must not charge more than it was allowed. That reads the
+        wrong way round: elapsed time is measured from before the process is
+        created until after timeout handling and process-group cleanup, so it
+        can legitimately exceed the request, and discarding the excess left it
+        available to the next experiment. The real daily total could then pass
+        the ceiling while the ledger reported it had not.
+
+        The reservation still guarantees a run is affordable before it starts.
+        This makes the total honest once it has.
+        """
         ledger = self._ledger()
         reservation = ledger.reserve(5)
-        recorded = ledger.settle(reservation, 900.0)
-        self.assertEqual(recorded, 5.0)
+        recorded = ledger.settle(reservation, 7.5)
+        self.assertEqual(recorded, 7.5)
+        self.assertEqual(ledger.committed_seconds(), 7.5)
+
+    def test_an_overrun_still_counts_against_the_daily_fuse(self) -> None:
+        """The point of recording it: the next run sees the real total."""
+        ledger = self._ledger(runs=20, seconds=10)
+        first = ledger.reserve(5)
+        ledger.settle(first, 9.0)
+        with self.assertRaises(SandboxBudgetExceeded):
+            ledger.reserve(5)
+
+    def test_a_negative_measurement_records_zero(self) -> None:
+        ledger = self._ledger()
+        reservation = ledger.reserve(5)
+        self.assertEqual(ledger.settle(reservation, -3.0), 0.0)
 
     def test_an_abandoned_reservation_is_released(self) -> None:
         ledger = self._ledger()

@@ -96,7 +96,15 @@ class SandboxRetention:
                         continue
                     try:
                         removed = self._workspace.purge_transient(session)
-                    except SandboxError:
+                    except (SandboxError, OSError):
+                        # OSError as well as SandboxError. Deletion is
+                        # filesystem work on directories an experiment could
+                        # make undeletable, and rmtree and unlink raise plain
+                        # OSError. One such session used to abort the whole
+                        # sweep, and the sweep runs at composition and before
+                        # every experiment, so a single stuck directory stopped
+                        # the capability entirely and left every other expired
+                        # session unpurged behind it.
                         LOGGER.warning("Sandbox session could not be purged")
                         continue
                     if removed:

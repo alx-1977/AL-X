@@ -211,8 +211,21 @@ class SQLiteSandboxLedger:
                 database.close()
 
     def settle(self, reservation: SandboxReservation, actual_seconds: float) -> float:
-        """Record what the run actually took, never more than was reserved."""
-        recorded = max(0.0, min(float(actual_seconds), reservation.reserved_seconds))
+        """Record what the run actually took, however long that was.
+
+        The measurement is not clamped to the reservation. A run's elapsed time
+        is taken from before the process is created until after timeout
+        handling and process-group cleanup, so it can legitimately exceed the
+        wall time requested. Clamping it discarded that excess, and the fuse
+        counts machine occupation rather than intentions: an overrun that was
+        not recorded stayed available to the next experiment, and the real
+        daily total could pass the ceiling while the ledger said otherwise.
+
+        Recording more than was reserved cannot under-charge the day. The
+        reservation is what guarantees a run is affordable before it starts;
+        this is what makes the total honest afterwards.
+        """
+        recorded = max(0.0, float(actual_seconds))
         self._close(reservation, "settled", recorded, "")
         return recorded
 
