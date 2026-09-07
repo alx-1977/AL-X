@@ -74,6 +74,11 @@ def build_task_runtime(
     return TaskRuntime(
         store=store,
         poller=TaskPoller(
-            store, observers, interval_seconds, announce, completed
+            store,
+            observers,
+            interval_seconds,
+            announce,
+            completed,
+            fatal_exceptions=(TaskStoreCorrupt,),
         ),
     )

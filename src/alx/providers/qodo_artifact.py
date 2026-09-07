@@ -33,6 +33,7 @@ class QodoArtifact:
     summary: str
     comments: tuple[ReviewComment, ...]
     submitted_at: datetime
+    source: str
 
 
 def moment(value: object) -> datetime | None:
@@ -178,6 +179,8 @@ class QodoArtifactReader:
             if since is not None and published < since:
                 continue
             comment_id, sha = completion
+            if comment_id == marker_id:
+                continue
             candidates.append((published, marker_id, comment_id, sha))
         if not candidates:
             return []
@@ -194,7 +197,7 @@ class QodoArtifactReader:
         summary = source.get("body") if isinstance(source, dict) else None
         if not isinstance(summary, str) or not summary.strip():
             return []
-        return [QodoArtifact(sha, summary, (), published)]
+        return [QodoArtifact(sha, summary, (), published, "comment")]
 
     def _formal_artifacts(
         self, number: int, expected_sha: str | None, since: datetime | None
@@ -220,9 +223,7 @@ class QodoArtifactReader:
             comments = self._comments(listed)
             body = review.get("body")
             summary = body if isinstance(body, str) else ""
-            if not summary.strip() and not comments:
-                continue
-            artifacts.append(QodoArtifact(sha, summary, comments, submitted))
+            artifacts.append(QodoArtifact(sha, summary, comments, submitted, "formal"))
         return artifacts
 
     def read(
@@ -238,9 +239,45 @@ class QodoArtifactReader:
                 artifacts.extend(load(number, expected_sha, since))
             except QodoArtifactUnavailable:
                 failures += 1
-        if artifacts:
-            artifacts.sort(key=lambda item: item.submitted_at)
-            return artifacts[-1]
         if failures:
             raise QodoArtifactUnavailable
+        if artifacts:
+            latest = max(
+                artifacts,
+                key=lambda item: (item.submitted_at, item.source == "comment"),
+            )
+            matching = [
+                max(
+                    (
+                        item
+                        for item in artifacts
+                        if item.head_sha == latest.head_sha and item.source == source
+                    ),
+                    key=lambda item: item.submitted_at,
+                )
+                for source in ("comment", "formal")
+                if any(
+                    item.head_sha == latest.head_sha and item.source == source
+                    for item in artifacts
+                )
+            ]
+            summary = max(
+                (item for item in matching if item.summary.strip()),
+                key=lambda item: (item.submitted_at, item.source == "comment"),
+                default=latest,
+            ).summary
+            comments: list[ReviewComment] = []
+            for item in matching:
+                for comment in item.comments:
+                    if comment not in comments:
+                        comments.append(comment)
+            if not summary.strip() and not comments:
+                return None
+            return QodoArtifact(
+                latest.head_sha,
+                summary,
+                tuple(comments),
+                max(item.submitted_at for item in matching),
+                latest.source,
+            )
         return None

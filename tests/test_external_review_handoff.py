@@ -83,7 +83,20 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
-        transcript = GitHubTranscript()
+        transcript = GitHubTranscript(
+            reviews=[
+                {
+                    "id": 99,
+                    "user": {"id": qodo_artifact.REVIEWER_ID},
+                    "commit_id": HEAD,
+                    "body": "Formal review body",
+                    "submitted_at": "2026-09-07T06:14:59Z",
+                }
+            ],
+            review_comments={
+                99: [{"body": "Inline finding", "path": "x.py", "line": 4}]
+            },
+        )
         original = qodo_artifact.httpx.get
         qodo_artifact.httpx.get = transcript.get
         self.addCleanup(setattr, qodo_artifact.httpx, "get", original)
@@ -163,4 +176,5 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         self.assertTrue(result.values["available"])
         self.assertEqual(result.values["head_sha"], HEAD)
         self.assertEqual(result.values["summary"], SUMMARY)
+        self.assertEqual(result.values["comments"][0]["body"], "Inline finding")
         self.assertEqual(task_store.completed_unhandled(), ())

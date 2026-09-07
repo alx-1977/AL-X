@@ -88,6 +88,25 @@ class PollerHarness(unittest.TestCase):
         )
 
 
+class FatalWatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_durable_corruption_stops_the_watcher(self) -> None:
+        class CorruptStore:
+            @staticmethod
+            def outstanding():
+                raise TaskStoreCorrupt("unreadable")
+
+        poller = TaskPoller(
+            CorruptStore(),
+            {},
+            interval_seconds=1.0,
+            announce=lambda conversation, values: None,
+            completed=lambda task: None,
+            fatal_exceptions=(TaskStoreCorrupt,),
+        )
+        with self.assertRaises(TaskStoreCorrupt):
+            await poller.run()
+
+
 class TaskStateTests(unittest.TestCase):
     """The states say only what can be observed."""
 
@@ -200,6 +219,18 @@ class TaskStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskStoreCorrupt, "corrupt-completed-task"):
             store.completed_unhandled()
+
+    def test_a_database_that_becomes_unreadable_uses_the_store_contract(self) -> None:
+        import sqlite3
+
+        store = SQLiteTaskStore(self.path)
+
+        def unavailable():
+            raise sqlite3.DatabaseError("unreadable")
+
+        store._db = unavailable
+        with self.assertRaises(TaskStoreCorrupt):
+            store.outstanding()
 
     def test_reusing_an_identifier_reopens_the_handoff_honestly(self) -> None:
         store = SQLiteTaskStore(self.path)

@@ -446,6 +446,14 @@ class QodoProviderTest(unittest.TestCase):
             provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(caught.exception.code, "review_unavailable")
 
+    def test_transient_http_statuses_are_unavailable_not_refused(self) -> None:
+        for status in (408, 429, 500, 501, 503, 511):
+            with self.subTest(status=status):
+                provider, _ = self._provider(head=HEAD, post_status=status)
+                with self.assertRaises(ReviewError) as caught:
+                    provider.request(ReviewRequest(pull_request_number=21))
+                self.assertEqual(caught.exception.code, "review_unavailable")
+
     def test_githubs_request_timestamp_defines_the_watch_boundary(self) -> None:
         provider, _ = self._provider(
             head=HEAD,

@@ -89,10 +89,16 @@ class SQLiteTaskStore:
             self._path, isolation_level=None, check_same_thread=False, timeout=10.0
         )
 
+    def _connect(self) -> sqlite3.Connection:
+        try:
+            return self._db()
+        except sqlite3.Error as error:
+            raise TaskStoreCorrupt(str(error)) from error
+
     def record(self, task: ExternalTask) -> None:
         """Write one task, replacing any earlier state for the same id."""
         with self._lock:
-            database = self._db()
+            database = self._connect()
             try:
                 database.execute(
                     """
@@ -138,7 +144,7 @@ class SQLiteTaskStore:
         completion still waiting rather than losing it.
         """
         with self._lock:
-            database = self._db()
+            database = self._connect()
             try:
                 rows = database.execute(
                     """
@@ -160,7 +166,7 @@ class SQLiteTaskStore:
     def mark_handed_over(self, task_id: str) -> None:
         """Record that the Core has been given this completion."""
         with self._lock:
-            database = self._db()
+            database = self._connect()
             try:
                 database.execute(
                     "UPDATE external_tasks SET handed_over = 1 WHERE task_id = ?",
@@ -174,7 +180,7 @@ class SQLiteTaskStore:
     def outstanding(self) -> tuple[ExternalTask, ...]:
         """Every task still worth watching, oldest first."""
         with self._lock:
-            database = self._db()
+            database = self._connect()
             try:
                 rows = database.execute(
                     """

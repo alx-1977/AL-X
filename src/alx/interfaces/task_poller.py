@@ -40,6 +40,7 @@ class TaskPoller:
         # decides how a running task looks, and this decides nothing.
         announce: Callable[[str, dict], None],
         completed: Callable[[ExternalTask], None],
+        fatal_exceptions: tuple[type[Exception], ...] = (),
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -52,6 +53,7 @@ class TaskPoller:
         # Raises the opportunity that wakes the Core. Given the task, never a
         # result: what the result says is read by her from the source.
         self._completed = completed
+        self._fatal_exceptions = fatal_exceptions
 
     async def run(self) -> None:
         """Tick for the life of the process."""
@@ -61,6 +63,8 @@ class TaskPoller:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if isinstance(error, self._fatal_exceptions):
+                    raise
                 # A failed look is not a failed runtime. The task is still
                 # outstanding, and the next tick looks again.
                 LOGGER.warning(

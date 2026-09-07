@@ -148,7 +148,11 @@ class QodoReviewProvider:
                 or headers.get("X-RateLimit-Remaining") == "0"
             )
         )
-        if throttled or posted.status_code in (429, 500, 502, 503, 504):
+        if (
+            throttled
+            or posted.status_code in (408, 429)
+            or 500 <= posted.status_code < 600
+        ):
             # Throttling and server errors are availability, not refusal. The
             # right response to "try later" is not the response to "no".
             raise ReviewError("review_unavailable") from None

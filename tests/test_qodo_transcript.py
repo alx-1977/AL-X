@@ -19,6 +19,7 @@ from tests.qodo_transcript import (
     HEAD,
     PERSISTENT_COMMENT_ID,
     PUBLISHED_AT,
+    Response,
     SUMMARY,
     realistic_issue_comments,
 )
@@ -108,6 +109,25 @@ class SharedTranscriptTests(unittest.TestCase):
                 ReviewContentRequest(21, HEAD)
             )
 
+    def test_one_unreadable_channel_cannot_yield_a_partial_review(self) -> None:
+        class PartialTranscript(GitHubTranscript):
+            def get(self, url: str, **kwargs) -> Response:
+                if url.split("?", 1)[0].endswith("/pulls/21/reviews"):
+                    return Response([], 503)
+                return super().get(url, **kwargs)
+
+        self.use(PartialTranscript())
+        self.assertIs(
+            QodoStatusObserver("owner/repo", "token").observe(
+                subject_reference(21, HEAD)
+            ).state,
+            TaskState.STATUS_UNKNOWN,
+        )
+        with self.assertRaises(ReviewReadError):
+            QodoReviewContentProvider("owner/repo", "token").read(
+                ReviewContentRequest(21, HEAD)
+            )
+
     def test_formal_empty_review_is_not_available_empty(self) -> None:
         review = {
             "id": 99,
@@ -151,6 +171,70 @@ class SharedTranscriptTests(unittest.TestCase):
             ReviewContentRequest(21, HEAD)
         )
         self.assertEqual(content.comments[0].body, "Inline finding")
+
+    def test_summary_and_formal_review_are_one_complete_artifact(self) -> None:
+        review = {
+            "id": 99,
+            "user": {"id": qodo_artifact.REVIEWER_ID},
+            "commit_id": HEAD,
+            "body": "Formal review body",
+            "submitted_at": "2026-09-07T06:14:59Z",
+        }
+        transcript = GitHubTranscript(
+            reviews=[review],
+            review_comments={
+                99: [{"body": "Inline finding", "path": "x.py", "line": 4}]
+            },
+        )
+        self.use(transcript)
+        content = QodoReviewContentProvider("owner/repo", "token").read(
+            ReviewContentRequest(21, HEAD)
+        )
+        self.assertEqual(content.summary, SUMMARY)
+        self.assertEqual(content.comments[0].body, "Inline finding")
+
+    def test_an_older_formal_review_cannot_restore_old_inline_findings(self) -> None:
+        reviews = [
+            {
+                "id": 98,
+                "user": {"id": qodo_artifact.REVIEWER_ID},
+                "commit_id": HEAD,
+                "body": "Old review",
+                "submitted_at": "2026-09-07T06:14:58Z",
+            },
+            {
+                "id": 99,
+                "user": {"id": qodo_artifact.REVIEWER_ID},
+                "commit_id": HEAD,
+                "body": "",
+                "submitted_at": "2026-09-07T06:14:59Z",
+            },
+        ]
+        transcript = GitHubTranscript(
+            reviews=reviews,
+            review_comments={
+                98: [{"body": "Obsolete finding", "path": "old.py", "line": 1}]
+            },
+        )
+        self.use(transcript)
+        content = QodoReviewContentProvider("owner/repo", "token").read(
+            ReviewContentRequest(21, HEAD)
+        )
+        self.assertEqual(content.summary, SUMMARY)
+        self.assertEqual(content.comments, ())
+
+    def test_a_completion_marker_cannot_use_itself_as_review_content(self) -> None:
+        comments = realistic_issue_comments()
+        comments[1]["body"] = comments[1]["body"].replace(
+            str(PERSISTENT_COMMENT_ID), str(comments[1]["id"])
+        )
+        self.use(GitHubTranscript(issue_comments=[comments[1]]))
+        self.assertIs(
+            QodoStatusObserver("owner/repo", "token").observe(
+                subject_reference(21, HEAD)
+            ).state,
+            TaskState.WAITING_FOR_RESULT,
+        )
 
     def test_marker_must_link_the_existing_qodo_summary(self) -> None:
         comments = realistic_issue_comments()
