@@ -8,7 +8,10 @@ from alx.interfaces.live_voice import (
 )
 from alx.interfaces.server import LiveVoiceServer
 
+from alx.interfaces.task_poller import TaskPoller
+
 __all__ = [
+    "TaskPoller",
     "LiveVoiceServer",
     "VoiceEvent",
     "VoiceEventKind",

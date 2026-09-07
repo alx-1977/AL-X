@@ -845,3 +845,52 @@ class LiveVoiceSettings:
             web_read_enabled=_boolean(environment, "ALX_WEB_READ_ENABLED", False),
             web_search=_web_search_settings(environment),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class MergeSettings:
+    """Delegated merge authority, off until it is configured.
+
+    Friedl grants this authority by configuring it and revokes it by removing
+    the configuration. There is no per-merge approval: the delegation is the
+    decision, and each merge is AL/X exercising it.
+    """
+
+    enabled: bool
+    repository: str
+    token: str
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.enabled and self.repository.strip() and self.token.strip())
+
+
+def merge_settings(environment: Mapping[str, str]) -> MergeSettings:
+    """Read merge configuration, defaulting to off."""
+    return MergeSettings(
+        enabled=_boolean(environment, "ALX_MERGE_ENABLED", False),
+        repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
+        token=environment.get("GITHUB_TOKEN", "").strip(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewSettings:
+    """Requesting an external review, off until it is configured."""
+
+    enabled: bool
+    repository: str
+    token: str
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.enabled and self.repository.strip() and self.token.strip())
+
+
+def review_settings(environment: Mapping[str, str]) -> ReviewSettings:
+    """Read review-request configuration, defaulting to off."""
+    return ReviewSettings(
+        enabled=_boolean(environment, "ALX_REVIEW_REQUEST_ENABLED", False),
+        repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
+        token=environment.get("GITHUB_TOKEN", "").strip(),
+    )

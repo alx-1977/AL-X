@@ -176,21 +176,18 @@ def build_mail_send_runtime(
     )
 
 
-def build_mail_runtime(
-    settings: MailSettings,
-    storage_root: Path,
-    call_id_source: Callable[[], str],
-) -> MailRuntime:
-    observations = SQLiteMailObservationState(storage_root / "mail-observations.sqlite3")
-    source = ICloudMailAdapter(
-        settings.imap_host,
-        settings.imap_port,
-        settings.address,
-        settings.secret,
-        observations,
-        settings.poll_seconds,
-    )
-    policies = {
+def mail_authority_policies() -> dict[str, AuthorityPolicy]:
+    """The authority every mail capability runs under.
+
+    Named rather than inline so the declarations can be read without building
+    a runtime, and so a test binds to the real policies instead of a copy.
+
+    The cleanup capabilities require an approval and allow a standing scope:
+    their authority is a scope that stays valid across turns, not what Friedl
+    said a moment ago. That distinction matters beyond this module - a rule
+    that treated them as turn-grounded stopped mail cleanup after one message.
+    """
+    return {
         SEARCH_MAIL_MESSAGES: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
         READ_MAIL_MESSAGE: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
         LIST_MAIL_ATTACHMENTS: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
@@ -217,6 +214,23 @@ def build_mail_runtime(
             standing_scope_allowed=True,
         ),
     }
+
+
+def build_mail_runtime(
+    settings: MailSettings,
+    storage_root: Path,
+    call_id_source: Callable[[], str],
+) -> MailRuntime:
+    observations = SQLiteMailObservationState(storage_root / "mail-observations.sqlite3")
+    source = ICloudMailAdapter(
+        settings.imap_host,
+        settings.imap_port,
+        settings.address,
+        settings.secret,
+        observations,
+        settings.poll_seconds,
+    )
+    policies = mail_authority_policies()
     return MailRuntime(
         source,
         observations,

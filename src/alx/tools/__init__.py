@@ -65,7 +65,32 @@ from alx.tools.dhl import (
     build_dhl_executors,
 )
 
+from alx.tools.review import (
+    DEFINITION as REVIEW_DEFINITION,
+    REQUEST_EXTERNAL_REVIEW,
+    build_review_executors,
+)
+from alx.tools.review_content import (
+    DEFINITION as REVIEW_CONTENT_DEFINITION,
+    READ_EXTERNAL_REVIEW,
+    build_review_content_executors,
+)
+from alx.tools.repository import (
+    DEFINITION as MERGE_DEFINITION,
+    MERGE_PULL_REQUEST,
+    build_repository_executors,
+)
+
 __all__ = [
+    "REQUEST_EXTERNAL_REVIEW",
+    "REVIEW_DEFINITION",
+    "build_review_executors",
+    "READ_EXTERNAL_REVIEW",
+    "REVIEW_CONTENT_DEFINITION",
+    "build_review_content_executors",
+    "MERGE_DEFINITION",
+    "MERGE_PULL_REQUEST",
+    "build_repository_executors",
     "ASK_WEB_PAGE",
     "ASK_WEB_SEARCH",
     "WEB_SEARCH_DEFINITION",

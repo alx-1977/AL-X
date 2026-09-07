@@ -7,6 +7,7 @@ const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
+const taskRows = document.querySelector("#task-rows");
 // Law 1: these name a system state and nothing more. First-person or
 // user-directed wording here reads as AL/X speaking when she has not reasoned,
 // so the gate whitelists exactly these labels.
@@ -37,6 +38,10 @@ let heardThisTurn = false;
 let audioByteCount = 0;
 let audioChunkCount = 0;
 let ttsStartedAt;
+// Each external task keeps its own clock. A single global row caused one
+// concurrent review to overwrite another and made the display untrue.
+const runningTasks = new Map();
+const terminalTaskRetentionMilliseconds = 10_000;
 
 function clockTime() {
   return new Intl.DateTimeFormat(undefined, {
@@ -82,7 +87,72 @@ function ttsElapsed() {
 
 setInterval(() => {
   diagnosticElapsed.textContent = elapsedText(performance.now() - stageStartedAt);
+  paintTasks();
 }, 100);
+
+function taskClock(seconds) {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(whole / 60).toString().padStart(2, "0")}:${(whole % 60)
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+// Identifiers, a state and a duration. Nothing a reviewer said reaches here,
+// because nothing a reviewer said reaches the browser.
+const taskStates = {
+  requested: "Requested",
+  waiting_for_result: "Waiting for result",
+  status_unknown: "Status unknown",
+  completed: "Completed",
+  failed: "Failed",
+  observer_unavailable: "Observer unavailable",
+};
+
+function paintTasks() {
+  const now = performance.now();
+  for (const [taskId, task] of runningTasks.entries()) {
+    if (task.settled && now >= task.expiresAt) {
+      task.row.remove();
+      runningTasks.delete(taskId);
+      continue;
+    }
+    const drift = (now - task.at) / 1000;
+    const seconds = task.settled ? task.seconds : task.seconds + drift;
+    task.row.dataset.state = task.state;
+    task.label.textContent = `${taskStates[task.state] ?? task.state} · ${task.service} · ${task.subject}`;
+    task.elapsed.textContent = taskClock(seconds);
+  }
+  taskRows.hidden = runningTasks.size === 0;
+}
+
+function showTask(message) {
+  const taskId = String(message.task_id ?? "");
+  if (!taskId) return;
+  const state = String(message.state ?? "");
+  let task = runningTasks.get(taskId);
+  if (!task) {
+    const row = document.createElement("div");
+    row.className = "diagnostics__task";
+    const label = document.createElement("span");
+    const elapsed = document.createElement("time");
+    row.append(label, elapsed);
+    taskRows.append(row);
+    task = { row, label, elapsed };
+    runningTasks.set(taskId, task);
+  }
+  const now = performance.now();
+  const settled = ["completed", "failed", "observer_unavailable"].includes(state);
+  Object.assign(task, {
+    state,
+    service: String(message.service ?? ""),
+    subject: String(message.subject ?? ""),
+    seconds: Number(message.elapsed_seconds ?? 0),
+    at: now,
+    settled,
+    expiresAt: settled ? now + terminalTaskRetentionMilliseconds : undefined,
+  });
+  paintTasks();
+}
 
 diagnosticClear.addEventListener("click", () => {
   diagnosticLog.replaceChildren();
@@ -97,8 +167,11 @@ function setPhase(phase) {
 }
 
 function conversationId() {
-  const stored = localStorage.getItem("alx.conversation_id");
-  return stored ?? "";
+  try {
+    return localStorage.getItem("alx.conversation_id") ?? "";
+  } catch (error) {
+    return "";
+  }
 }
 
 async function acquireMicrophone() {
@@ -242,7 +315,11 @@ function playOneUtterance(blob) {
 function handleControl(message) {
   if (message.type === "session.ready") {
     diagnostic("Voice transport connected; session accepted", "ok");
-    localStorage.setItem("alx.conversation_id", message.conversation_id);
+    try {
+      localStorage.setItem("alx.conversation_id", message.conversation_id);
+    } catch (error) {
+      diagnostic("Conversation continuity is unavailable in this browser", "error");
+    }
     connectMicrophone(message.sample_rate_hz)
       .then(() => {
         sending = true;
@@ -301,6 +378,10 @@ function handleControl(message) {
       diagnostic(`TTS ${transport} connected · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "ok");
     } else if (message.code === "tts.first_audio_byte") {
       diagnostic(`First audio byte received from ElevenLabs · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "ok");
+    } else if (message.code === "task.status") {
+      // A live row rather than a log line: an outstanding task is a state the
+      // console should show, not an event that scrolls away.
+      showTask(message);
     } else {
       diagnostic(`Server diagnostic · ${message.code ?? "unknown"}`);
     }
