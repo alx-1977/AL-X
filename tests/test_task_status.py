@@ -23,7 +23,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
-from alx.continuity.tasks import SQLiteTaskStore  # noqa: E402
+from alx.continuity.tasks import SQLiteTaskStore, TaskStoreCorrupt  # noqa: E402
 from alx.contracts.cognition import CognitionOrigin  # noqa: E402
 from alx.contracts.task import ExternalTask, TaskObservation, TaskState  # noqa: E402
 from alx.interfaces.task_poller import TaskPoller  # noqa: E402
@@ -149,7 +149,7 @@ class TaskStoreTests(unittest.TestCase):
         )
         self.assertEqual(store.outstanding(), ())
 
-    def test_one_corrupt_row_does_not_hide_valid_tasks(self) -> None:
+    def test_a_corrupt_outstanding_row_fails_closed(self) -> None:
         import sqlite3
 
         store = SQLiteTaskStore(self.path)
@@ -172,10 +172,34 @@ class TaskStoreTests(unittest.TestCase):
         database.commit()
         database.close()
 
-        with self.assertLogs("alx.continuity.tasks", level="WARNING") as captured:
-            outstanding = store.outstanding()
-        self.assertEqual([task.task_id for task in outstanding], ["valid-task"])
-        self.assertIn("corrupt-task", " ".join(captured.output))
+        with self.assertRaisesRegex(TaskStoreCorrupt, "corrupt-task"):
+            store.outstanding()
+
+    def test_a_corrupt_completed_row_cannot_vanish_from_recovery(self) -> None:
+        import sqlite3
+
+        store = SQLiteTaskStore(self.path)
+        database = sqlite3.connect(self.path)
+        database.execute(
+            "INSERT INTO external_tasks (task_id, kind, service, "
+            "subject_reference, state, requested_at, completed_at, "
+            "conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "corrupt-completed-task",
+                "external_review",
+                "qodo",
+                subject_reference(21, HEAD),
+                TaskState.COMPLETED.value,
+                "not-a-timestamp",
+                datetime.now(UTC).isoformat(),
+                "conversation-1",
+            ),
+        )
+        database.commit()
+        database.close()
+
+        with self.assertRaisesRegex(TaskStoreCorrupt, "corrupt-completed-task"):
+            store.completed_unhandled()
 
     def test_reusing_an_identifier_reopens_the_handoff_honestly(self) -> None:
         store = SQLiteTaskStore(self.path)
@@ -620,6 +644,21 @@ class WatchIdentityTests(unittest.TestCase):
             _watch_review(Runtime(), "conversation-1", 21, HEAD, requested_at)
         self.assertEqual(len(captured), 2)
         self.assertNotEqual(captured[0].task_id, captured[1].task_id)
+        self.assertEqual(captured[0].subject_reference, subject_reference(21, HEAD))
+
+    def test_unknown_head_keeps_the_review_reference_unpinned(self) -> None:
+        from alx.bootstrap.live_voice import _watch_review
+
+        captured: list[ExternalTask] = []
+
+        class Poller:
+            def record(self, task):
+                captured.append(task)
+
+        class Runtime:
+            poller = Poller()
+
+        _watch_review(Runtime(), "conversation-1", 21, "", datetime.now(UTC))
         self.assertEqual(captured[0].subject_reference, subject_reference(21))
 
 

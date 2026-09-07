@@ -157,7 +157,7 @@ def _watch_review(
                 task_id=f"review:{number}:{uuid4().hex}",
                 kind="external_review",
                 service="qodo",
-                subject_reference=subject_reference(number),
+                subject_reference=subject_reference(number, head_sha),
                 state=TaskState.REQUESTED,
                 requested_at=requested_at,
                 conversation_id=conversation_id,

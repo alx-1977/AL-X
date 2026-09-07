@@ -12,16 +12,12 @@ carried through here.
 
 from __future__ import annotations
 
-import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
 from alx.contracts.task import ExternalTask, TaskState
-
-LOGGER = logging.getLogger(__name__)
-
 
 class TaskStoreCorrupt(Exception):
     """Durable task state could not be read or written.
@@ -203,8 +199,11 @@ class SQLiteTaskStore:
         for row in rows:
             try:
                 tasks.append(cls._task(row))
-            except (TypeError, ValueError):
-                LOGGER.warning("Skipping corrupt external task row: %s", row[0])
+            except (TypeError, ValueError) as error:
+                task_id = row[0] if row else "<missing>"
+                raise TaskStoreCorrupt(
+                    f"corrupt external task row {task_id!r}: {type(error).__name__}"
+                ) from error
         return tuple(tasks)
 
     @staticmethod

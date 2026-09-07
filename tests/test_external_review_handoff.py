@@ -95,7 +95,7 @@ class ExternalReviewHandoffTests(unittest.TestCase):
                 task_id="review-task-1",
                 kind="external_review",
                 service="qodo",
-                subject_reference=subject_reference(21),
+                subject_reference=subject_reference(21, HEAD),
                 state=TaskState.REQUESTED,
                 requested_at=requested_at,
                 conversation_id="conversation-1",
