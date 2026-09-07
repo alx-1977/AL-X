@@ -309,39 +309,39 @@ class SeatbeltSandboxRunner(SandboxRunner):
             rules.add(f"(allow process-exec (subpath {_sbpl(prefix)}))")
         return "".join(f"{rule}\n" for rule in sorted(rules))
 
-    # Prefixes that are not one interpreter installation. Granting exec over
-    # any of these reaches a shell, osascript, ssh, curl or another
-    # interpreter, which is the authority this rule exists to withhold.
-    _SHARED_PREFIXES = frozenset(
-        {"/", "/usr", "/usr/local", "/opt", "/opt/homebrew", "/Library", "/System"}
-    )
+    @staticmethod
+    def _interpreter_prefix(resolved: Path) -> Path | None:
+        """The framework version directory, when the interpreter is in one.
 
-    @classmethod
-    def _interpreter_prefix(cls, resolved: Path) -> Path | None:
-        """The directory holding the interpreter, when it is safe to name.
+        A prefix grant exists for exactly one reason: a macOS framework build
+        does not run the binary it was given, it re-execs a further binary
+        inside its own bundle, and that target lives under the version
+        directory. No other layout needs one - a MacPorts, Homebrew, conda or
+        system interpreter starts from the literals alone.
 
-        Only the directory the binary actually sits in - a framework build
-        re-execs a further binary inside its own bundle, and that bundle is
-        under this prefix. An earlier version walked up to the first ancestor
-        named `bin` and returned its parent, which is right for
-        `.../Versions/3.13/bin/python3.13` and catastrophic for
-        `/usr/bin/python3`: it produced `(allow process-exec (subpath "/usr"))`,
-        authorising every tool in /usr.
+        So this recognises the one layout that needs the grant rather than
+        listing the ones that must not have it. Two previous versions were
+        such lists: the first returned the parent of any ancestor named `bin`,
+        which gave `/usr` for `/usr/bin/python3`; the second refused a fixed
+        set of shared prefixes, which still handed out all of `/opt/local` for
+        MacPorts and a whole conda prefix, both of which carry compilers,
+        `curl`, `openssl` and sometimes a shell. A deny-list only ever covers
+        what somebody remembered, and this one had already been wrong twice.
 
-        Returns None for a prefix shared with the rest of the system, in which
-        case the two literals stand alone. Refusing to name a prefix is always
-        safe: at worst a framework re-exec is denied and the misconfiguration
-        is visible immediately, rather than an escape being invisible.
+        Returning None is always safe. At worst a framework re-exec is refused
+        and the misconfiguration is immediately visible, which is the failure
+        anyone would rather have than an invisible grant over a toolchain.
         """
-        directory = resolved.parent
-        candidate = directory.parent if directory.name == "bin" else directory
-        if str(candidate) in cls._SHARED_PREFIXES:
-            return None
-        # A prefix must still contain the interpreter it was derived from, and
-        # must not be a system root reached by another spelling.
-        if str(directory) in cls._SHARED_PREFIXES:
-            return None
-        return candidate
+        for index, part in enumerate(resolved.parts):
+            if part != "Versions":
+                continue
+            parent = Path(*resolved.parts[:index])
+            if parent.suffix != ".framework":
+                continue
+            # `.../Python.framework/Versions/3.13`, and nothing above it.
+            version = Path(*resolved.parts[: index + 2])
+            return version if version in resolved.parents else None
+        return None
 
     @staticmethod
     def _limits(cpu_seconds: int) -> None:

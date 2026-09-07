@@ -1183,6 +1183,17 @@ class FixesOfFixesTest(unittest.TestCase):
         )
         self.assertNotIn("TMP-SECRET", outcome.stdout)
         self.assertNotIn("LISTED", outcome.stdout)
+        # Asserted positively as well: empty output would satisfy the two
+        # checks above whether or not the program ran at all.
+        # "LIST-BLOCKED" contains "BLOCKED", so the refusals are counted by
+        # whole word rather than by substring.
+        refusals = [word for word in outcome.stdout.split() if word == "BLOCKED"]
+        self.assertEqual(
+            len(refusals),
+            2,
+            "both temp-path reads must be refused, not merely absent",
+        )
+        self.assertIn("LIST-BLOCKED", outcome.stdout)
 
     def test_the_credential_store_is_denied(self) -> None:
         """A keychain is the reason a read boundary exists at all."""
@@ -1261,8 +1272,13 @@ class FixesOfFixesTest(unittest.TestCase):
                 "execution was granted over a shared system prefix",
             )
 
-    def test_an_installation_prefix_is_still_named(self) -> None:
-        """Narrowing must not refuse the framework re-exec it exists to allow."""
+    def test_only_a_framework_layout_is_granted_a_prefix(self) -> None:
+        """The one layout that needs a prefix gets one; nothing else does.
+
+        A framework build re-execs a binary inside its own bundle, which is
+        why the grant exists at all. Every other layout starts from the
+        literals, so naming a prefix for them only widens what can be executed.
+        """
         framework = Path(
             "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
         )
@@ -1270,10 +1286,42 @@ class FixesOfFixesTest(unittest.TestCase):
             SeatbeltSandboxRunner._interpreter_prefix(framework),
             Path("/Library/Frameworks/Python.framework/Versions/3.13"),
         )
-        venv = Path("/Users/someone/project/.venv/bin/python")
+
+        # Each of these once produced a prefix carrying a toolchain: MacPorts
+        # and conda ship compilers, curl and openssl, and Xcode's usr is a
+        # developer tree. A venv needs no grant either - it is listed here so
+        # a later change that starts naming prefixes again is caught.
+        for interpreter in (
+            "/opt/local/bin/python3",
+            "/Users/someone/miniconda3/bin/python",
+            "/Users/someone/miniconda3/envs/ml/bin/python",
+            "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+            "/nix/store/abc123-python-3.13/bin/python",
+            "/Users/someone/project/.venv/bin/python",
+            "/snap/bin/python3",
+        ):
+            with self.subTest(interpreter=interpreter):
+                self.assertIsNone(
+                    SeatbeltSandboxRunner._interpreter_prefix(Path(interpreter)),
+                    f"{interpreter} was granted an execution prefix",
+                )
+
+    def test_a_framework_prefix_never_climbs_above_its_version(self) -> None:
+        """The grant stops at the version directory, not the framework."""
+        prefix = SeatbeltSandboxRunner._interpreter_prefix(
+            Path(
+                "/Library/Frameworks/Python.framework/Versions/3.13"
+                "/Resources/Python.app/Contents/MacOS/Python"
+            )
+        )
         self.assertEqual(
-            SeatbeltSandboxRunner._interpreter_prefix(venv),
-            Path("/Users/someone/project/.venv"),
+            prefix, Path("/Library/Frameworks/Python.framework/Versions/3.13")
+        )
+        # A bare "Versions" component that is not a framework grants nothing.
+        self.assertIsNone(
+            SeatbeltSandboxRunner._interpreter_prefix(
+                Path("/opt/Versions/3.13/bin/python3")
+            )
         )
 
 
