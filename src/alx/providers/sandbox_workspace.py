@@ -19,10 +19,12 @@ A link is recorded as a link, and its target is never opened.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import os
 import shutil
+import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -231,24 +233,63 @@ class SandboxWorkspace:
                     return WalkResult(results, True)
                 path = Path(current, name)
                 relative = str(path.relative_to(directory))
-                if path.is_symlink():
-                    results[relative] = ("", 0)
+                # Opened once, without following links, and both the digest and
+                # the size come from that one descriptor. Checking the name and
+                # then reopening it let a surviving helper swap a checked file
+                # for a symlink in between, so the privileged parent hashed a
+                # host file - or blocked forever on something like /dev/zero.
+                measured = self._measure(path)
+                if measured is None:
                     continue
-                if not path.is_file():
-                    continue
-                try:
-                    results[relative] = (self._digest(path), path.stat().st_size)
-                except OSError as error:
-                    raise SandboxError("output_unreadable") from error
+                results[relative] = measured
         return WalkResult(results, False)
 
     @staticmethod
-    def _digest(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(_READ_CHUNK):
-                digest.update(chunk)
-        return digest.hexdigest()
+    def _measure(path: Path) -> tuple[str, int] | None:
+        """Hash and size one entry from a single no-follow descriptor.
+
+        Returns the empty digest for a symbolic link, so creating one stays
+        visible evidence while its target is never opened, and None for
+        anything that is not a regular file. There is no separate check: the
+        kind is read from the descriptor that is about to be hashed, which is
+        what removes the race between deciding and reading.
+        """
+        try:
+            # O_NONBLOCK so a fifo opens instead of blocking until a writer
+            # arrives, which hung the privileged parent indefinitely. The kind
+            # is rejected immediately below; it is cleared for regular files so
+            # the read itself behaves normally.
+            handle = os.open(
+                path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            )
+        except OSError as error:
+            # ELOOP means it is a link, which is recorded rather than followed.
+            if error.errno in (errno.ELOOP, errno.EMLINK):
+                return ("", 0)
+            if error.errno in (errno.ENOENT, errno.EACCES):
+                # Vanished or unreadable between listing and opening: not
+                # evidence of anything, and not worth failing the whole walk.
+                return None
+            raise SandboxError("output_unreadable") from error
+        try:
+            status = os.fstat(handle)
+            if not stat.S_ISREG(status.st_mode):
+                # A fifo or device would block or never end; only regular
+                # files are hashed.
+                return None
+            # Regular file: drop O_NONBLOCK so the read behaves as usual.
+            os.set_blocking(handle, True)
+            digest = hashlib.sha256()
+            with os.fdopen(handle, "rb", closefd=True) as stream:
+                handle = -1
+                while chunk := stream.read(_READ_CHUNK):
+                    digest.update(chunk)
+            return (digest.hexdigest(), status.st_size)
+        except OSError as error:
+            raise SandboxError("output_unreadable") from error
+        finally:
+            if handle >= 0:
+                os.close(handle)
 
     @staticmethod
     def changes(

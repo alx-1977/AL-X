@@ -15,6 +15,7 @@ against the code as it stood before the fix.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -503,6 +504,136 @@ class SelfReviewFindingsTest(unittest.TestCase):
 
         self.assertEqual(removed, expected)
         self.assertFalse((session / ".lease").exists())
+
+
+class PrivilegedParentTest(unittest.TestCase):
+    """Four defects from the review of the fixed head, three of them escapes.
+
+    All three High findings turn on the same mistake in different places: the
+    privileged parent treated a name under session state as trustworthy, when
+    session state is writable by the experiment and persists between runs.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace = SandboxWorkspace(self.root / "ws")
+        self.runner = SeatbeltSandboxRunner(self.workspace)
+
+    def test_a_linked_entry_file_cannot_overwrite_a_host_file(self) -> None:
+        """Q2: shutil.copyfile followed a symlink at the destination.
+
+        An experiment leaves its entry file as a link to any host path. The
+        next run's privileged preparation then writes the new source through
+        it, outside the sandbox entirely.
+        """
+        victim = self.root / "HOST_FILE"
+        victim.write_text("original host content")
+        paths = self.workspace.prepare("exp-q2", "ses-q2", "run-1")
+        (paths.session_state / "experiment.py").symlink_to(victim)
+
+        with self.assertRaises(SandboxError):
+            self.runner._write_working_copy(
+                paths.session_state / "experiment.py", "NEW SOURCE"
+            )
+        self.assertEqual(
+            victim.read_text(),
+            "original host content",
+            "the privileged parent wrote through a symlink to a host file",
+        )
+
+    def test_an_ordinary_entry_file_is_still_replaced(self) -> None:
+        """The fix must not break iterating in a session."""
+        paths = self.workspace.prepare("exp-q2b", "ses-q2b", "run-1")
+        working = paths.session_state / "experiment.py"
+        working.write_text("old source")
+
+        self.runner._write_working_copy(working, "new source")
+        self.assertEqual(working.read_text(), "new source")
+
+    def test_a_linked_output_is_evidence_not_a_host_read(self) -> None:
+        """Q4: the walk checked a name, then reopened it.
+
+        A helper that survives the run can swap a checked file for a symlink
+        between the check and the open, so the parent hashes a host file.
+        Opening once with O_NOFOLLOW removes the gap.
+        """
+        secret = self.root / "HOST_SECRET"
+        secret.write_text("host contents nobody may hash")
+        paths = self.workspace.prepare("exp-q4", "ses-q4", "run-1")
+        (paths.session_state / "link.txt").symlink_to(secret)
+        (paths.session_state / "real.txt").write_text("mine")
+
+        entries = self.workspace.walk(paths.session_state).entries
+        # A link is recorded, so creating one stays visible.
+        self.assertEqual(entries["link.txt"], ("", 0))
+        host_digest = hashlib.sha256(secret.read_bytes()).hexdigest()
+        self.assertNotIn(
+            host_digest,
+            [digest for digest, _ in entries.values()],
+            "the privileged parent hashed a file outside the workspace",
+        )
+        # And an ordinary output is still measured.
+        self.assertEqual(entries["real.txt"][1], 4)
+
+    def test_the_walk_does_not_block_on_a_fifo_or_device(self) -> None:
+        """Opening a fifo blocks until a writer arrives; a device never ends.
+
+        Both would hang the privileged parent forever, which is a denial of
+        service that outlives the run's wall clock.
+        """
+        paths = self.workspace.prepare("exp-q4b", "ses-q4b", "run-1")
+        os.mkfifo(paths.session_state / "pipe")
+        (paths.session_state / "devlink").symlink_to("/dev/zero")
+        (paths.session_state / "ok.txt").write_text("hi")
+
+        finished: list[bool] = []
+
+        def walk() -> None:
+            self.workspace.walk(paths.session_state)
+            finished.append(True)
+
+        thread = threading.Thread(target=walk, daemon=True)
+        thread.start()
+        thread.join(timeout=15)
+        self.assertTrue(finished, "the evidence walk blocked on a fifo or device")
+
+    def test_a_helper_does_not_outlive_a_clean_exit(self) -> None:
+        """Q3: the group was killed only when the run timed out.
+
+        A program that spawns a background helper and returns cleanly left it
+        running - outside wall-time accounting, still able to write to session
+        state while the evidence walk read it.
+
+        Staged directly against the group sweep rather than through a confined
+        run: RLIMIT_NPROC on this host refuses the child's own spawn, so a real
+        experiment cannot set the trap here. What is asserted is the property
+        the runner now relies on - after a leader exits, no member of its group
+        is left alive.
+        """
+        import subprocess
+
+        leader = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, sys, time;"
+                " subprocess.Popen([sys.executable, '-c',"
+                " 'import time; time.sleep(60)']);"
+                " time.sleep(0.2)",
+            ],
+            start_new_session=True,
+        )
+        group = SeatbeltSandboxRunner._group_of(leader)
+        self.assertIsNotNone(group)
+        leader.wait(timeout=10)
+
+        # The leader is gone; without the sweep the helper is still running.
+        SeatbeltSandboxRunner._reap_group(group)
+
+        with self.assertRaises((ProcessLookupError, PermissionError)):
+            os.killpg(group, 0)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,6 @@ import json
 import logging
 import os
 import resource
-import shutil
 import signal
 import subprocess
 import sys
@@ -248,8 +247,17 @@ class SeatbeltSandboxRunner(SandboxRunner):
             profile_path.write_text(self.profile(paths.session_state), encoding="utf-8")
             # The program runs from a copy inside the session state, so an
             # experiment can import what an earlier run left beside it.
+            #
+            # Session state is writable by the experiment and persists between
+            # runs, so every destination under it is attacker-controlled. A
+            # previous run can leave its entry file as a symlink to any host
+            # path, and shutil.copyfile follows a link at the destination: the
+            # privileged parent would then write the new source through it and
+            # overwrite a file outside the sandbox. Opening with O_NOFOLLOW
+            # refuses the link instead of following it, and O_TRUNC keeps the
+            # ordinary case - a real file left by an earlier run - working.
             working_copy = paths.session_state / request.entry_filename
-            shutil.copyfile(entry, working_copy)
+            self._write_working_copy(working_copy, request.source)
         except OSError as error:
             raise SandboxError("workspace_unavailable") from error
 
@@ -292,11 +300,23 @@ class SeatbeltSandboxRunner(SandboxRunner):
             # machine, so from here a failure settles rather than abandons.
             if launched is not None:
                 launched()
+            # The group id is read while the leader still exists. After it is
+            # reaped the pid can be recycled, and signalling a recycled group
+            # would be signalling someone else's processes.
+            group = self._group_of(process)
             try:
                 process.wait(timeout=request.wall_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 self._terminate(process)
+            # Sweep the group after every exit, not only after a timeout. A
+            # program that spawns a background helper and then returns cleanly
+            # left that helper running: outside the wall-time accounting, still
+            # able to write to session state while the evidence walk read it,
+            # and still alive after the lease was released. The leader's own
+            # status is already recorded, so this changes what is left running
+            # rather than what is reported.
+            self._reap_group(group)
         elapsed = time.monotonic() - started
         finished_at = datetime.now(UTC)
 
@@ -386,6 +406,67 @@ class SeatbeltSandboxRunner(SandboxRunner):
             request, paths, outcome, before, after, argv, state_truncated
         )
         return outcome
+
+    @staticmethod
+    def _group_of(process: subprocess.Popen) -> int | None:
+        """The process group, read while the leader is certainly alive."""
+        try:
+            return os.getpgid(process.pid)
+        except (ProcessLookupError, PermissionError):
+            return None
+
+    @staticmethod
+    def _reap_group(group: int | None) -> None:
+        """Ensure no member of a finished run's group is still running.
+
+        D-027 does not permit a background process to outlive the call that
+        started it. The leader exiting says nothing about its children: they
+        were given their own group precisely so they could be signalled
+        together, and that only happened on the timeout path.
+        """
+        if group is None:
+            return
+        try:
+            os.killpg(group, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + _TERM_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(group, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.05)
+        LOGGER.warning("A sandbox process group outlived its run")
+
+    @staticmethod
+    def _write_working_copy(destination: Path, source: str) -> None:
+        """Write the program into session state without following a link.
+
+        O_NOFOLLOW fails on a symlink at the final path component rather than
+        resolving it, so an entry file an experiment turned into a link is
+        refused instead of being written through. The descriptor is then used
+        directly, so nothing re-resolves the name between the check and the
+        write.
+        """
+        try:
+            handle = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                0o600,
+            )
+        except OSError as error:
+            # ELOOP is a symlink at the destination: refused, not followed.
+            raise SandboxError("workspace_unavailable") from error
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(source)
+        except OSError as error:
+            raise SandboxError("workspace_unavailable") from error
 
     @staticmethod
     def _terminate(process: subprocess.Popen) -> None:
