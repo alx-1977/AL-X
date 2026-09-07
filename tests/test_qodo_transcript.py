@@ -182,3 +182,22 @@ class SharedTranscriptTests(unittest.TestCase):
             ReviewContentRequest(21, HEAD)
         )
         self.assertEqual(current.summary, SUMMARY)
+
+    def test_comment_id_breaks_same_second_marker_ties(self) -> None:
+        old_sha = "b" * 40
+        comments = realistic_issue_comments(HEAD)
+        old_marker = dict(comments[1])
+        old_marker["id"] = comments[1]["id"] - 1
+        old_marker["body"] = old_marker["body"].replace(HEAD, old_sha)
+        comments.insert(1, old_marker)
+        self.use(GitHubTranscript(issue_comments=comments))
+
+        observer = QodoStatusObserver("owner/repo", "token")
+        self.assertIs(
+            observer.observe(subject_reference(21, HEAD)).state,
+            TaskState.COMPLETED,
+        )
+        self.assertIs(
+            observer.observe(subject_reference(21, old_sha)).state,
+            TaskState.WAITING_FOR_RESULT,
+        )

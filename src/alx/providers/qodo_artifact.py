@@ -128,27 +128,28 @@ class QodoArtifactReader:
             for item in issue_comments
             if self._qodo(item) and isinstance(item.get("id"), int)
         }
-        candidates: list[tuple[datetime, re.Match[str]]] = []
+        candidates: list[tuple[datetime, int, re.Match[str]]] = []
         for marker in issue_comments:
             if not self._qodo(marker):
                 continue
             body = marker.get("body")
             match = self._marker.fullmatch(body.strip()) if isinstance(body, str) else None
             published = moment(marker.get("created_at"))
-            if match is None or published is None:
+            marker_id = marker.get("id")
+            if match is None or published is None or not isinstance(marker_id, int):
                 continue
             if int(match.group("number")) != number:
                 continue
             if since is not None and published < since:
                 continue
-            candidates.append((published, match))
+            candidates.append((published, marker_id, match))
         if not candidates:
             return []
         # Qodo edits one persistent review comment in place. Only its newest
         # completion marker can describe that comment's current content; an
         # older marker paired with the now-updated body would misattribute a
         # newer review to an older SHA.
-        published, match = max(candidates, key=lambda item: item[0])
+        published, _, match = max(candidates, key=lambda item: (item[0], item[1]))
         sha = match.group("sha")
         if expected_sha is not None and sha != expected_sha:
             return []
