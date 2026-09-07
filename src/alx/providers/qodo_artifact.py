@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -17,6 +18,7 @@ MAX_PAGES = 10
 PAGE_SIZE = 100
 REVIEWER_ID = 151058649
 _SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 class QodoArtifactUnavailable(Exception):
@@ -55,13 +57,7 @@ class QodoArtifactReader:
         self._repository = repository.strip()
         self._token = token
         self._api_root = api_root.rstrip("/")
-        owner, name = (re.escape(item) for item in self._repository.split("/"))
-        self._marker = re.compile(
-            rf"\A\[Code review\]\(https://github\.com/{owner}/{name}/pull/"
-            rf"(?P<number>\d+)#issuecomment-(?P<comment_id>\d+)\) by qodo was "
-            rf"updated up to the latest commit https://github\.com/{owner}/{name}/"
-            rf"commit/(?P<sha>[0-9a-f]{{40}})\Z"
-        )
+        self._owner, self._name = self._repository.split("/")
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -118,6 +114,45 @@ class QodoArtifactReader:
             )
         return tuple(comments)
 
+    @staticmethod
+    def _urls(body: str) -> tuple[str, ...]:
+        prefix = "https://github.com/"
+        urls: list[str] = []
+        cursor = 0
+        while True:
+            start = body.find(prefix, cursor)
+            if start < 0:
+                return tuple(urls)
+            end = start
+            while end < len(body) and not body[end].isspace() and body[end] not in ")]<>\"'":
+                end += 1
+            urls.append(body[start:end].rstrip(".,;:"))
+            cursor = max(end, start + len(prefix))
+
+    def _completion_marker(self, body: str, number: int) -> tuple[int, str] | None:
+        comment_ids: set[int] = set()
+        revisions: set[str] = set()
+        for value in self._urls(body):
+            parsed = urlparse(value)
+            if parsed.scheme != "https" or parsed.netloc != "github.com":
+                continue
+            parts = parsed.path.strip("/").split("/")
+            if parts[:2] != [self._owner, self._name]:
+                continue
+            if (
+                len(parts) == 4
+                and parts[2] == "pull"
+                and parts[3] == str(number)
+                and parsed.fragment.startswith("issuecomment-")
+                and parsed.fragment.removeprefix("issuecomment-").isdigit()
+            ):
+                comment_ids.add(int(parsed.fragment.removeprefix("issuecomment-")))
+            if len(parts) == 4 and parts[2] == "commit" and _SHA.fullmatch(parts[3]):
+                revisions.add(parts[3])
+        if len(comment_ids) != 1 or len(revisions) != 1:
+            return None
+        return next(iter(comment_ids)), next(iter(revisions))
+
     def _comment_artifacts(
         self, number: int, expected_sha: str | None, since: datetime | None
     ) -> list[QodoArtifact]:
@@ -128,32 +163,34 @@ class QodoArtifactReader:
             for item in issue_comments
             if self._qodo(item) and isinstance(item.get("id"), int)
         }
-        candidates: list[tuple[datetime, int, re.Match[str]]] = []
+        candidates: list[tuple[datetime, int, int, str]] = []
         for marker in issue_comments:
             if not self._qodo(marker):
                 continue
             body = marker.get("body")
-            match = self._marker.fullmatch(body.strip()) if isinstance(body, str) else None
+            completion = (
+                self._completion_marker(body, number) if isinstance(body, str) else None
+            )
             published = moment(marker.get("created_at"))
             marker_id = marker.get("id")
-            if match is None or published is None or not isinstance(marker_id, int):
-                continue
-            if int(match.group("number")) != number:
+            if completion is None or published is None or not isinstance(marker_id, int):
                 continue
             if since is not None and published < since:
                 continue
-            candidates.append((published, marker_id, match))
+            comment_id, sha = completion
+            candidates.append((published, marker_id, comment_id, sha))
         if not candidates:
             return []
         # Qodo edits one persistent review comment in place. Only its newest
         # completion marker can describe that comment's current content; an
         # older marker paired with the now-updated body would misattribute a
         # newer review to an older SHA.
-        published, _, match = max(candidates, key=lambda item: (item[0], item[1]))
-        sha = match.group("sha")
+        published, _, comment_id, sha = max(
+            candidates, key=lambda item: (item[0], item[1])
+        )
         if expected_sha is not None and sha != expected_sha:
             return []
-        source = by_id.get(int(match.group("comment_id")))
+        source = by_id.get(comment_id)
         summary = source.get("body") if isinstance(source, dict) else None
         if not isinstance(summary, str) or not summary.strip():
             return []

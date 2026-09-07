@@ -201,3 +201,18 @@ class SharedTranscriptTests(unittest.TestCase):
             observer.observe(subject_reference(21, old_sha)).state,
             TaskState.WAITING_FOR_RESULT,
         )
+
+    def test_completion_marker_does_not_depend_on_reviewer_wording(self) -> None:
+        comments = realistic_issue_comments(HEAD)
+        comments[1]["body"] = (
+            "Finished. Revision: "
+            f"https://github.com/owner/repo/commit/{HEAD}. Result: "
+            "<https://github.com/owner/repo/pull/21#issuecomment-7001>"
+        )
+        self.use(GitHubTranscript(issue_comments=comments))
+        self.assertIs(
+            QodoStatusObserver("owner/repo", "token").observe(
+                subject_reference(21, HEAD)
+            ).state,
+            TaskState.COMPLETED,
+        )

@@ -27,6 +27,10 @@ _TERMINAL_CODES = frozenset(
         "invalid_api_key",
     }
 )
+_COOLDOWN_CODES = frozenset(
+    {"billing_hard_limit_reached", "credit_balance_exhausted", "insufficient_quota"}
+)
+TERMINAL_FAILURE_COOLDOWN_SECONDS = 300.0
 
 
 class _OpenAIProtocolError(ValueError):
@@ -69,11 +73,15 @@ class OpenAIReasoningModel:
         service_tier: str = "default",
         reasoning_effort: str = "medium",
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
+        terminal_failure_cooldown_seconds: float = TERMINAL_FAILURE_COOLDOWN_SECONDS,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         if service_tier not in ("default", "priority"):
             raise ValueError("service_tier must be default or priority")
         if reasoning_effort not in ("none", "low", "medium", "high", "xhigh", "max"):
             raise ValueError("unsupported OpenAI reasoning effort")
+        if terminal_failure_cooldown_seconds <= 0:
+            raise ValueError("terminal failure cooldown must be positive")
         self._model = model
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -82,15 +90,20 @@ class OpenAIReasoningModel:
         self._service_tier = service_tier
         self._reasoning_effort = reasoning_effort
         self._telemetry_sink = telemetry_sink
+        self._terminal_failure_cooldown_seconds = terminal_failure_cooldown_seconds
+        self._clock = clock
         self._availability_lock = Lock()
-        self._terminal_failure = ""
+        self._terminal_failure: tuple[str, float | None] | None = None
 
     def ensure_available(self) -> None:
         """Refuse a known-terminal provider before any new budget reservation."""
         with self._availability_lock:
             failure = self._terminal_failure
+            if failure is not None and failure[1] is not None and self._clock() >= failure[1]:
+                self._terminal_failure = None
+                failure = None
         if failure:
-            raise_provider_failure("openai", failure)
+            raise_provider_failure("openai", failure[0])
 
     def complete(self, request: ModelRequest) -> ModelCompletion:
         self.ensure_available()
@@ -169,9 +182,15 @@ class OpenAIReasoningModel:
             return completion
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             error_code = self._safe_error_code(error)
-            if self._terminal(error_code):
+            terminal_code = self._terminal_code(error_code)
+            if terminal_code is not None:
+                expires_at = (
+                    self._clock() + self._terminal_failure_cooldown_seconds
+                    if terminal_code in _COOLDOWN_CODES
+                    else None
+                )
                 with self._availability_lock:
-                    self._terminal_failure = error_code
+                    self._terminal_failure = (error_code, expires_at)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -319,11 +338,15 @@ class OpenAIReasoningModel:
         return "response_value_invalid"
 
     @staticmethod
-    def _terminal(code: str) -> bool:
+    def _terminal_code(code: str) -> str | None:
         normalised = code.lower()
-        return any(
-            normalised == terminal or normalised.endswith(f"_{terminal}")
-            for terminal in _TERMINAL_CODES
+        return next(
+            (
+                terminal
+                for terminal in _TERMINAL_CODES
+                if normalised == terminal or normalised.endswith(f"_{terminal}")
+            ),
+            None,
         )
 
     @staticmethod

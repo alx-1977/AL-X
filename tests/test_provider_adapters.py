@@ -358,10 +358,30 @@ class OpenAIAdapterTests(unittest.TestCase):
 
     def test_credit_exhaustion_opens_a_terminal_circuit(self) -> None:
         calls = 0
+        now = 0.0
 
         def exhausted(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
+            nonlocal calls, now
             calls += 1
+            if now > 300:
+                return httpx.Response(
+                    200,
+                    json={
+                        "model": "model",
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": json.dumps({"response": "recovered"}),
+                                    }
+                                ],
+                            }
+                        ],
+                        "usage": {},
+                    },
+                )
             return httpx.Response(
                 429,
                 json={
@@ -379,6 +399,7 @@ class OpenAIAdapterTests(unittest.TestCase):
             10,
             httpx.Client(transport=httpx.MockTransport(exhausted)),
             streaming=False,
+            clock=lambda: now,
         )
         for _ in range(2):
             with self.assertRaises(ProviderError) as caught:
@@ -389,6 +410,10 @@ class OpenAIAdapterTests(unittest.TestCase):
             )
             self.assertNotIn("private account detail", str(caught.exception))
         self.assertEqual(calls, 1)
+        now = 301.0
+        completion = adapter.complete(self._request())
+        self.assertEqual(completion.output["response"], "recovered")
+        self.assertEqual(calls, 2)
 
     def test_retryable_rate_limit_does_not_open_the_terminal_circuit(self) -> None:
         calls = 0
