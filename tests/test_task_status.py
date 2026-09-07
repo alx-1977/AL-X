@@ -31,6 +31,11 @@ from alx.providers.qodo_status import (  # noqa: E402
     QodoStatusObserver,
     subject_reference,
 )
+from tests.qodo_transcript import (  # noqa: E402
+    GitHubTranscript,
+    PUBLISHED_AT,
+    realistic_issue_comments,
+)
 
 
 HEAD = "a" * 40
@@ -144,8 +149,64 @@ class TaskStoreTests(unittest.TestCase):
         )
         self.assertEqual(store.outstanding(), ())
 
+    def test_one_corrupt_row_does_not_hide_valid_tasks(self) -> None:
+        import sqlite3
+
+        store = SQLiteTaskStore(self.path)
+        store.record(_task(task_id="valid-task"))
+        database = sqlite3.connect(self.path)
+        database.execute(
+            "INSERT INTO external_tasks (task_id, kind, service, "
+            "subject_reference, state, requested_at, conversation_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "corrupt-task",
+                "external_review",
+                "qodo",
+                subject_reference(21),
+                "invented_state",
+                datetime.now(UTC).isoformat(),
+                "conversation-1",
+            ),
+        )
+        database.commit()
+        database.close()
+
+        with self.assertLogs("alx.continuity.tasks", level="WARNING") as captured:
+            outstanding = store.outstanding()
+        self.assertEqual([task.task_id for task in outstanding], ["valid-task"])
+        self.assertIn("corrupt-task", " ".join(captured.output))
+
+    def test_reusing_an_identifier_reopens_the_handoff_honestly(self) -> None:
+        store = SQLiteTaskStore(self.path)
+        finished = datetime.now(UTC)
+        store.record(
+            _task(
+                task_id="same-id",
+                state=TaskState.COMPLETED,
+                completed_at=finished,
+            )
+        )
+        store.mark_handed_over("same-id")
+        store.record(
+            _task(
+                task_id="same-id",
+                subject_reference=subject_reference(22),
+                conversation_id="conversation-2",
+            )
+        )
+        reopened = store.outstanding()[0]
+        self.assertEqual(reopened.subject_reference, subject_reference(22))
+        self.assertEqual(reopened.conversation_id, "conversation-2")
+
 
 class PollerTests(PollerHarness):
+    def test_record_announces_the_requested_state_immediately(self) -> None:
+        task = _task()
+        self._poller(RecordingObserver()).record(task)
+        self.assertEqual(self.lines[0][1]["task_id"], task.task_id)
+        self.assertEqual(self.lines[0][1]["state"], "requested")
+
     def test_waiting_reports_elapsed_time_and_keeps_watching(self) -> None:
         self.store.record(_task())
         observer = RecordingObserver(TaskState.WAITING_FOR_RESULT)
@@ -173,6 +234,22 @@ class PollerTests(PollerHarness):
         self.assertIsNotNone(self.woken[0].completed_at)
         self.assertEqual(self.lines[0][1]["subject"], f"PR #21 @ {HEAD[:7]}")
         self.assertEqual(self.lines[0][1]["state"], "completed")
+
+    def test_completion_replaces_a_pr_level_subject_with_the_reviewed_sha(self) -> None:
+        task = _task(subject_reference=subject_reference(21))
+        self.store.record(task)
+
+        class ResolvingObserver:
+            def observe(self, subject, since=None):
+                return TaskObservation(
+                    TaskState.COMPLETED,
+                    datetime.now(UTC),
+                    subject_reference(21, HEAD),
+                )
+
+        self._poller(ResolvingObserver()).tick()
+        self.assertEqual(self.woken[0].subject_reference, subject_reference(21, HEAD))
+        self.assertEqual(self.lines[0][1]["subject"], f"PR #21 @ {HEAD[:7]}")
 
     def test_the_core_is_woken_with_the_task_and_never_the_result(self) -> None:
         """What the review says is hers to read from the source."""
@@ -215,12 +292,12 @@ class PollerTests(PollerHarness):
             # ride along in a payload that quietly grew a field.
             self.assertEqual(
                 set(values),
-                {"state", "subject", "service", "elapsed_seconds"},
+                {"task_id", "state", "subject", "service", "elapsed_seconds"},
             )
             rendered = " ".join(str(value) for value in values.values()).lower()
             self.assertNotIn("bug", rendered)
             self.assertNotIn("severity", rendered)
-            self.assertLess(len(rendered), 80)
+            self.assertLess(len(rendered), 100)
 
 
 class WatcherCannotActTests(unittest.TestCase):
@@ -229,6 +306,7 @@ class WatcherCannotActTests(unittest.TestCase):
     MODULES = (
         "src/alx/interfaces/task_poller.py",
         "src/alx/providers/qodo_status.py",
+        "src/alx/providers/qodo_artifact.py",
         "src/alx/continuity/tasks.py",
     )
 
@@ -251,43 +329,40 @@ class WatcherCannotActTests(unittest.TestCase):
 
     def test_the_observer_only_reads(self) -> None:
         """No write verb reaches GitHub from the status path."""
-        tree = ast.parse(
-            (REPOSITORY_ROOT / "src/alx/providers/qodo_status.py").read_text()
-        )
-        for node in ast.walk(tree):
-            # Only calls: `httpx.HTTPError` in an except clause is an
-            # attribute too, and catching an error is not making a request.
-            if not isinstance(node, ast.Call):
-                continue
-            target = node.func
-            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-                if target.value.id == "httpx":
-                    self.assertEqual(target.attr, "get")
+        calls = []
+        for relative in (
+            "src/alx/providers/qodo_status.py",
+            "src/alx/providers/qodo_artifact.py",
+        ):
+            tree = ast.parse((REPOSITORY_ROOT / relative).read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                target = node.func
+                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                    if target.value.id == "httpx":
+                        calls.append(target.attr)
+                        self.assertEqual(target.attr, "get")
+        self.assertEqual(calls, ["get"])
 
 
 class QodoObserverTests(unittest.TestCase):
     """The completion rule Friedl approved, and nothing beyond it."""
 
     def _observer(self, reviews, comments):
-        from alx.providers import qodo_status
+        from alx.providers import qodo_artifact
 
-        class Response:
-            def __init__(self, body):
-                self.status_code = 200
-                self._body = body
-
-            def json(self):
-                return self._body
-
-        def get(url, headers, timeout):
-            # Page 2 onwards is empty, which ends the paged read.
-            if "page=" in url and url.rsplit("page=", 1)[-1] != "1":
-                return Response([])
-            return Response(reviews if "/reviews" in url else comments)
-
-        original = qodo_status.httpx.get
-        qodo_status.httpx.get = get
-        self.addCleanup(setattr, qodo_status.httpx, "get", original)
+        normalised = []
+        for index, review in enumerate(reviews, 1):
+            item = dict(review)
+            item.setdefault("id", index)
+            item.setdefault("body", "Review complete.")
+            item.setdefault("submitted_at", PUBLISHED_AT)
+            normalised.append(item)
+        transcript = GitHubTranscript(issue_comments=comments, reviews=normalised)
+        original = qodo_artifact.httpx.get
+        qodo_artifact.httpx.get = transcript.get
+        self.addCleanup(setattr, qodo_artifact.httpx, "get", original)
         return QodoStatusObserver("owner/repo", "token")
 
     def test_a_repository_that_cannot_build_a_url_is_refused(self) -> None:
@@ -333,12 +408,7 @@ class QodoObserverTests(unittest.TestCase):
         """A clean review publishes no review object, so this is the only signal."""
         observer = self._observer(
             [],
-            [
-                {
-                    "user": {"id": QODO},
-                    "body": f"review was updated up to https://github.com/o/r/commit/{HEAD}",
-                }
-            ],
+            realistic_issue_comments(HEAD),
         )
         self.assertIs(
             observer.observe(subject_reference(21, HEAD)).state, TaskState.COMPLETED
@@ -394,7 +464,7 @@ class QodoObserverTests(unittest.TestCase):
 
     def test_a_subject_that_cannot_be_read_is_unknown(self) -> None:
         observer = self._observer([], [])
-        for subject in ("", "pull/21", f"pull/21@{HEAD[:12]}", "nonsense"):
+        for subject in ("", f"pull/21@{HEAD[:12]}", "nonsense"):
             with self.subTest(subject=subject):
                 self.assertIs(
                     observer.observe(subject).state, TaskState.STATUS_UNKNOWN
@@ -405,25 +475,7 @@ class ReviewFindingRegressions(unittest.TestCase):
     """The defects an external review found in the watcher, kept closed."""
 
     def _observer(self, reviews, comments):
-        from alx.providers import qodo_status
-
-        class Response:
-            def __init__(self, body):
-                self.status_code = 200
-                self._body = body
-
-            def json(self):
-                return self._body
-
-        def get(url, headers, timeout):
-            if "page=1" not in url and "page=" in url:
-                return Response([])
-            return Response(reviews if "/reviews" in url else comments)
-
-        original = qodo_status.httpx.get
-        qodo_status.httpx.get = get
-        self.addCleanup(setattr, qodo_status.httpx, "get", original)
-        return QodoStatusObserver("owner/repo", "token")
+        return QodoObserverTests._observer(self, reviews, comments)
 
     def test_a_result_older_than_the_request_does_not_complete_it(self) -> None:
         """Asking again for an unchanged revision is a new occasion.
@@ -466,7 +518,7 @@ class ReviewFindingRegressions(unittest.TestCase):
 
     def test_a_result_on_a_later_page_is_still_found(self) -> None:
         """A busy pull request outgrows one page of history."""
-        from alx.providers import qodo_status
+        from alx.providers import qodo_artifact
 
         class Response:
             def __init__(self, body):
@@ -477,19 +529,25 @@ class ReviewFindingRegressions(unittest.TestCase):
                 return self._body
 
         def get(url, headers, timeout):
-            if "/reviews" not in url:
+            if "/pulls/21/reviews" not in url or "/comments" in url:
                 return Response([])
             page = url.rsplit("page=", 1)[-1]
             if page == "1":
                 # A full page, so the reader continues to the next.
                 return Response([{"user": {"id": 1}, "commit_id": OTHER}] * 100)
             if page == "2":
-                return Response([{"user": {"id": QODO}, "commit_id": HEAD}])
+                return Response([{
+                    "id": 101,
+                    "user": {"id": QODO},
+                    "commit_id": HEAD,
+                    "body": "Review complete.",
+                    "submitted_at": PUBLISHED_AT,
+                }])
             return Response([])
 
-        original = qodo_status.httpx.get
-        qodo_status.httpx.get = get
-        self.addCleanup(setattr, qodo_status.httpx, "get", original)
+        original = qodo_artifact.httpx.get
+        qodo_artifact.httpx.get = get
+        self.addCleanup(setattr, qodo_artifact.httpx, "get", original)
         observer = QodoStatusObserver("owner/repo", "token")
         self.assertIs(
             observer.observe(subject_reference(21, HEAD)).state, TaskState.COMPLETED
@@ -522,6 +580,47 @@ class PollerFailureRegressions(PollerHarness):
             poller.tick()
         # Still outstanding, so the next tick tries again.
         self.assertEqual(len(self.store.outstanding()), 1)
+
+    def test_one_failed_task_does_not_prevent_another_completing(self) -> None:
+        first = _task(task_id="first")
+        second = _task(task_id="second")
+        self.store.record(first)
+        self.store.record(second)
+
+        class MixedObserver:
+            def observe(self, subject, since=None):
+                if subject == first.subject_reference:
+                    raise RuntimeError("unreadable")
+                return TaskObservation(TaskState.COMPLETED, datetime.now(UTC))
+
+        # Give the tasks distinct subjects so the observer can distinguish them.
+        self.store.record(
+            _task(task_id="second", subject_reference=subject_reference(22, HEAD))
+        )
+        with self.assertRaises(RuntimeError):
+            self._poller(MixedObserver()).tick()
+        self.assertEqual([task.task_id for task in self.woken], ["second"])
+
+
+class WatchIdentityTests(unittest.TestCase):
+    def test_same_second_requests_receive_distinct_task_identifiers(self) -> None:
+        from alx.bootstrap.live_voice import _watch_review
+
+        captured: list[ExternalTask] = []
+
+        class Poller:
+            def record(self, task):
+                captured.append(task)
+
+        class Runtime:
+            poller = Poller()
+
+        requested_at = datetime.now(UTC)
+        for _ in range(2):
+            _watch_review(Runtime(), "conversation-1", 21, HEAD, requested_at)
+        self.assertEqual(len(captured), 2)
+        self.assertNotEqual(captured[0].task_id, captured[1].task_id)
+        self.assertEqual(captured[0].subject_reference, subject_reference(21))
 
 
 class OneProducerForEveryOccasionTest(unittest.TestCase):

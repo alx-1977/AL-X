@@ -56,7 +56,6 @@ class TaskPoller:
     async def run(self) -> None:
         """Tick for the life of the process."""
         while True:
-            await asyncio.sleep(self._interval_seconds)
             try:
                 await asyncio.to_thread(self.tick)
             except asyncio.CancelledError:
@@ -67,11 +66,28 @@ class TaskPoller:
                 LOGGER.warning(
                     "External task check failed: %s", type(error).__name__
                 )
+            await asyncio.sleep(self._interval_seconds)
+
+    def record(self, task: ExternalTask) -> None:
+        """Persist and announce a task immediately on first paint."""
+        self._store.record(task)
+        self._announce(task.conversation_id, self._payload(task, task.requested_at))
 
     def tick(self) -> None:
         """One look at every outstanding task."""
+        failures: list[Exception] = []
         for task in self._store.outstanding():
-            self._check(task)
+            try:
+                self._check(task)
+            except Exception as error:  # noqa: BLE001 - isolate unrelated tasks
+                LOGGER.warning(
+                    "External task check failed for %s: %s",
+                    task.task_id,
+                    type(error).__name__,
+                )
+                failures.append(error)
+        if failures:
+            raise failures[0]
 
     def _check(self, task: ExternalTask) -> None:
         observer = self._observers.get(task.service)
@@ -86,8 +102,10 @@ class TaskPoller:
 
         observation = observer.observe(task.subject_reference, task.requested_at)
         if observation.state is TaskState.COMPLETED:
+            resolved_subject = observation.subject_reference or task.subject_reference
             settled = replace(
                 task,
+                subject_reference=resolved_subject,
                 state=TaskState.COMPLETED,
                 last_checked_at=observation.observed_at,
                 completed_at=observation.observed_at,
@@ -98,14 +116,7 @@ class TaskPoller:
             # rather than retried on the next tick.
             self._announce(
                 task.conversation_id,
-                {
-                    "state": TaskState.COMPLETED.value,
-                    "subject": _subject(task),
-                    "service": task.service,
-                    "elapsed_seconds": int(
-                        task.elapsed_seconds(observation.observed_at)
-                    ),
-                },
+                self._payload(settled, observation.observed_at),
             )
             # The Core evaluates the result. This does not read it.
             self._completed(settled)
@@ -120,15 +131,18 @@ class TaskPoller:
         self._store.record(waiting)
         self._announce(
             task.conversation_id,
-            {
-                "state": observation.state.value,
-                "subject": _subject(task),
-                "service": task.service,
-                "elapsed_seconds": int(
-                    task.elapsed_seconds(observation.observed_at)
-                ),
-            },
+            self._payload(waiting, observation.observed_at),
         )
+
+    @staticmethod
+    def _payload(task: ExternalTask, at: datetime) -> dict[str, object]:
+        return {
+            "task_id": task.task_id,
+            "state": task.state.value,
+            "subject": _subject(task),
+            "service": task.service,
+            "elapsed_seconds": int(task.elapsed_seconds(at)),
+        }
 
 
 def _subject(task: ExternalTask) -> str:

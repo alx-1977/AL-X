@@ -7,9 +7,7 @@ const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
-const taskRow = document.querySelector("#task-row");
-const taskLabel = document.querySelector("#task-label");
-const taskElapsed = document.querySelector("#task-elapsed");
+const taskRows = document.querySelector("#task-rows");
 // Law 1: these name a system state and nothing more. First-person or
 // user-directed wording here reads as AL/X speaking when she has not reasoned,
 // so the gate whitelists exactly these labels.
@@ -40,10 +38,9 @@ let heardThisTurn = false;
 let audioByteCount = 0;
 let audioChunkCount = 0;
 let ttsStartedAt;
-// The running external task, or null. The server ticks slowly and Core may be
-// idle for the whole wait, so the row keeps its own clock from the elapsed
-// figure the last tick reported: `at` is when that figure was true locally.
-let runningTask = null;
+// Each external task keeps its own clock. A single global row caused one
+// concurrent review to overwrite another and made the display untrue.
+const runningTasks = new Map();
 
 function clockTime() {
   return new Intl.DateTimeFormat(undefined, {
@@ -89,7 +86,7 @@ function ttsElapsed() {
 
 setInterval(() => {
   diagnosticElapsed.textContent = elapsedText(performance.now() - stageStartedAt);
-  paintTask();
+  paintTasks();
 }, 100);
 
 function taskClock(seconds) {
@@ -103,41 +100,47 @@ function taskClock(seconds) {
 // because nothing a reviewer said reaches the browser.
 const taskStates = {
   requested: "Requested",
-  waiting_for_result: "Running",
+  waiting_for_result: "Waiting for result",
   status_unknown: "Status unknown",
   completed: "Completed",
   failed: "Failed",
 };
 
-function paintTask() {
-  if (runningTask === null) {
-    taskRow.hidden = true;
-    return;
+function paintTasks() {
+  for (const task of runningTasks.values()) {
+    const drift = (performance.now() - task.at) / 1000;
+    const seconds = task.settled ? task.seconds : task.seconds + drift;
+    task.row.dataset.state = task.state;
+    task.label.textContent = `${taskStates[task.state] ?? task.state} · ${task.service} · ${task.subject}`;
+    task.elapsed.textContent = taskClock(seconds);
   }
-  const drift = (performance.now() - runningTask.at) / 1000;
-  // A settled task stops counting: its elapsed time is a fact about how long
-  // it took, not a clock that keeps running.
-  const seconds = runningTask.settled
-    ? runningTask.seconds
-    : runningTask.seconds + drift;
-  const state = taskStates[runningTask.state] ?? runningTask.state;
-  taskRow.dataset.state = runningTask.state;
-  taskLabel.textContent = `${state} · ${runningTask.service} · ${runningTask.subject}`;
-  taskElapsed.textContent = taskClock(seconds);
-  taskRow.hidden = false;
+  taskRows.hidden = runningTasks.size === 0;
 }
 
 function showTask(message) {
+  const taskId = String(message.task_id ?? "");
+  if (!taskId) return;
   const state = String(message.state ?? "");
-  runningTask = {
+  let task = runningTasks.get(taskId);
+  if (!task) {
+    const row = document.createElement("div");
+    row.className = "diagnostics__task";
+    const label = document.createElement("span");
+    const elapsed = document.createElement("time");
+    row.append(label, elapsed);
+    taskRows.append(row);
+    task = { row, label, elapsed };
+    runningTasks.set(taskId, task);
+  }
+  Object.assign(task, {
     state,
     service: String(message.service ?? ""),
     subject: String(message.subject ?? ""),
     seconds: Number(message.elapsed_seconds ?? 0),
     at: performance.now(),
     settled: state === "completed" || state === "failed",
-  };
-  paintTask();
+  });
+  paintTasks();
 }
 
 diagnosticClear.addEventListener("click", () => {
@@ -153,8 +156,11 @@ function setPhase(phase) {
 }
 
 function conversationId() {
-  const stored = localStorage.getItem("alx.conversation_id");
-  return stored ?? "";
+  try {
+    return localStorage.getItem("alx.conversation_id") ?? "";
+  } catch (error) {
+    return "";
+  }
 }
 
 async function acquireMicrophone() {
@@ -298,7 +304,11 @@ function playOneUtterance(blob) {
 function handleControl(message) {
   if (message.type === "session.ready") {
     diagnostic("Voice transport connected; session accepted", "ok");
-    localStorage.setItem("alx.conversation_id", message.conversation_id);
+    try {
+      localStorage.setItem("alx.conversation_id", message.conversation_id);
+    } catch (error) {
+      diagnostic("Conversation continuity is unavailable in this browser", "error");
+    }
     connectMicrophone(message.sample_rate_hz)
       .then(() => {
         sending = true;

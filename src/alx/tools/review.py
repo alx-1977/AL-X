@@ -66,6 +66,7 @@ DEFINITION = CapabilityDefinition(
             "head_sha": _STRING,
             "requested": _BOOLEAN,
             "reviewer": _STRING,
+            "requested_at": _STRING,
         },
         ("pull_request_number", "head_sha", "requested", "reviewer"),
         extra_properties=False,

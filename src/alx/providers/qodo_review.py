@@ -23,6 +23,8 @@ review, waits for one, or asks again.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -123,6 +125,7 @@ class QodoReviewProvider:
         # for a pull request to be reviewed; which commit that is now is a fact
         # to look up, not something he should have to carry.
         head = self._head(review.pull_request_number, strict=True)
+        local_requested_at = datetime.now(UTC)
 
         comments = (
             f"{self._api_root}/repos/{self._repository}"
@@ -137,12 +140,40 @@ class QodoReviewProvider:
             )
         except httpx.HTTPError:
             raise ReviewError("review_unavailable") from None
-        if posted.status_code in (429, 500, 502, 503, 504):
+        headers = getattr(posted, "headers", {})
+        throttled = (
+            posted.status_code == 403
+            and (
+                "Retry-After" in headers
+                or headers.get("X-RateLimit-Remaining") == "0"
+            )
+        )
+        if throttled or posted.status_code in (429, 500, 502, 503, 504):
             # Throttling and server errors are availability, not refusal. The
             # right response to "try later" is not the response to "no".
             raise ReviewError("review_unavailable") from None
         if posted.status_code != 201:
             raise ReviewError("review_refused") from None
+
+        try:
+            posted_body = posted.json()
+        except ValueError:
+            posted_body = {}
+        requested_at = None
+        if isinstance(posted_body, dict):
+            value = posted_body.get("created_at")
+            if isinstance(value, str):
+                try:
+                    requested_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    requested_at = None
+        if requested_at is None:
+            try:
+                requested_at = parsedate_to_datetime(headers.get("Date", ""))
+            except (TypeError, ValueError):
+                requested_at = local_requested_at
+        if requested_at.tzinfo is None or requested_at.utcoffset() is None:
+            requested_at = local_requested_at
 
         # Confirm the revision after the trigger. The reviewer works from
         # whatever the pull request points at when it reaches the request, so
@@ -154,4 +185,5 @@ class QodoReviewProvider:
             head_sha=head if confirmed == head else "",
             requested=True,
             reviewer=REVIEWER,
+            requested_at=requested_at,
         )

@@ -165,6 +165,79 @@ class PlaybackSerialisationTests(unittest.TestCase):
         self.assertEqual(result["queued"], 1, "the second utterance was not queued")
         self.assertTrue(result["active"])
 
+    def test_concurrent_external_tasks_keep_independent_rows(self) -> None:
+        result = run_js(textwrap.dedent("""
+            showTask({task_id: "review-1", state: "waiting_for_result",
+                      service: "qodo", subject: "PR #21", elapsed_seconds: 10});
+            showTask({task_id: "review-2", state: "requested",
+                      service: "qodo", subject: "PR #22", elapsed_seconds: 2});
+            const labels = [...runningTasks.values()].map(task => task.label.textContent);
+            console.log(JSON.stringify({size: runningTasks.size, labels}));
+        """))
+        self.assertEqual(result["size"], 2)
+        self.assertIn("Waiting for result · qodo · PR #21", result["labels"])
+        self.assertIn("Requested · qodo · PR #22", result["labels"])
+
+    def test_completed_task_stops_its_clock_without_replacing_another(self) -> None:
+        result = run_js(textwrap.dedent("""
+            showTask({task_id: "review-1", state: "waiting_for_result",
+                      service: "qodo", subject: "PR #21", elapsed_seconds: 10});
+            showTask({task_id: "review-2", state: "waiting_for_result",
+                      service: "qodo", subject: "PR #22", elapsed_seconds: 5});
+            showTask({task_id: "review-1", state: "completed",
+                      service: "qodo", subject: "PR #21 @ aaaaaaa", elapsed_seconds: 12});
+            const first = runningTasks.get("review-1");
+            const second = runningTasks.get("review-2");
+            console.log(JSON.stringify({
+              size: runningTasks.size,
+              firstSettled: first.settled,
+              firstLabel: first.label.textContent,
+              secondSettled: second.settled,
+            }));
+        """))
+        self.assertEqual(result["size"], 2)
+        self.assertTrue(result["firstSettled"])
+        self.assertIn("Completed", result["firstLabel"])
+        self.assertFalse(result["secondSettled"])
+
+    def test_blocked_browser_storage_does_not_break_session_control(self) -> None:
+        result = run_js(textwrap.dedent("""
+            localStorage.getItem = () => { throw new Error("blocked"); };
+            localStorage.setItem = () => { throw new Error("blocked"); };
+            const restored = conversationId();
+            handleControl({type: "session.ready", conversation_id: "c1", sample_rate_hz: 16000});
+            await settle();
+            console.log(JSON.stringify({restored, phase: document.body.dataset.phase ?? ""}));
+        """))
+        self.assertEqual(result["restored"], "")
+
+    def test_task_state_is_never_written_to_browser_storage(self) -> None:
+        result = run_js(textwrap.dedent("""
+            let writes = 0;
+            localStorage.setItem = () => { writes += 1; };
+            showTask({task_id: "review-1", state: "waiting_for_result",
+                      service: "qodo", subject: "PR #21", elapsed_seconds: 10});
+            showTask({task_id: "review-1", state: "completed",
+                      service: "qodo", subject: "PR #21 @ aaaaaaa", elapsed_seconds: 12});
+            console.log(JSON.stringify({writes, tasks: runningTasks.size}));
+        """))
+        self.assertEqual(result["tasks"], 1)
+        self.assertEqual(result["writes"], 0)
+
+    def test_task_renderer_has_no_persistent_browser_state_api(self) -> None:
+        source = APP.read_text()
+        start = source.index("function showTask(message)")
+        end = source.index("\ndiagnosticClear.addEventListener", start)
+        task_renderer = source[start:end]
+        for persistent_api in (
+            "localStorage",
+            "sessionStorage",
+            "indexedDB",
+            "document.cookie",
+        ):
+            with self.subTest(api=persistent_api):
+                self.assertNotIn(persistent_api, task_renderer)
+
     def test_the_queued_utterance_is_not_lost(self) -> None:
         """Deferred, never dropped: it plays once the first finishes."""
         result = run_js(textwrap.dedent("""

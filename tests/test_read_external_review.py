@@ -135,7 +135,10 @@ class FindingsWithoutEmailTests(ProviderTestCase):
         )
         # Every request was a read of the pull request's own review data.
         for url in self.github.requested:
-            self.assertIn("/pulls/21/reviews", url)
+            self.assertIn("/repos/owner/repo/", url)
+            self.assertTrue(
+                "/pulls/21/reviews" in url or "/issues/21/comments" in url
+            )
 
     def test_a_clean_review_is_retrieved_the_same_way(self) -> None:
         """Silence and approval must be distinguishable, so both are read."""
@@ -252,9 +255,15 @@ class ReadOnlyTests(unittest.TestCase):
     """The capability that reads must be incapable of anything else."""
 
     def _source(self) -> str:
-        return (
-            REPOSITORY_ROOT / "src/alx/providers/qodo_review_content.py"
-        ).read_text()
+        return "\n".join(
+            (
+                REPOSITORY_ROOT / relative
+            ).read_text()
+            for relative in (
+                "src/alx/providers/qodo_review_content.py",
+                "src/alx/providers/qodo_artifact.py",
+            )
+        )
 
     def test_the_provider_never_writes_to_github(self) -> None:
         """Structural, not trusted: no verb but GET appears at all."""
@@ -266,7 +275,7 @@ class ReadOnlyTests(unittest.TestCase):
         }
         for verb in ("post", "put", "patch", "delete"):
             self.assertNotIn(verb, called, f"the reader must not {verb}")
-        self.assertIn("get", called)
+        self.assertIn("read", called)
 
     def _literals(self) -> set[str]:
         """Every string constant in the code, comments and docstrings aside.
@@ -304,7 +313,6 @@ class ReadOnlyTests(unittest.TestCase):
         """Qodo's trigger is a comment body posted to the issues endpoint."""
         for literal in self._literals():
             self.assertNotEqual(literal.strip(), "/review")
-            self.assertNotIn("issues/", literal)
 
     def test_it_cannot_merge(self) -> None:
         for literal in self._literals():
@@ -353,6 +361,10 @@ class ExternalEvidenceTests(unittest.TestCase):
         )
         values.update(overrides)
         return ReviewContent(**values)
+
+    def test_available_without_readable_content_is_invalid(self) -> None:
+        with self.assertRaises(ValueError):
+            self._content(summary="", comments=())
 
     def test_the_review_enters_as_external_content(self) -> None:
         result = self._result(self._content())

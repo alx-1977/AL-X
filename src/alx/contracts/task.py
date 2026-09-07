@@ -111,11 +111,14 @@ class TaskObservation:
 
     state: TaskState
     observed_at: datetime
+    subject_reference: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, TaskState):
             raise TypeError("state must be a TaskState")
         _aware(self.observed_at, "observed_at")
+        if self.subject_reference:
+            _required(self.subject_reference, "subject_reference")
 
 
 __all__ = [

@@ -131,6 +131,8 @@ class ReviewContent:
             raise ValueError("the reviewer must be named")
         if self.available and self.submitted_at is None:
             raise ValueError("a retrieved review records when it was submitted")
+        if self.available and not self.summary.strip() and not self.comments:
+            raise ValueError("an available review must carry readable content")
         if not self.available and (self.summary or self.comments):
             raise ValueError("an unavailable review carries no review content")
 

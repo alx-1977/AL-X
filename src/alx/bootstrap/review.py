@@ -88,18 +88,18 @@ def build_review_runtime(
         return None
 
     def request_review(review: ReviewRequest) -> Any:
-        # Read before the trigger is posted, and used as the watched task's
-        # requested_at. The observer only considers results later than that
-        # moment, so a timestamp taken after the request excluded reviews that
-        # finished quickly: the result was already there before the watcher
-        # was willing to look at anything, and the task waited forever.
-        requested_at = datetime.now(UTC)
+        # The provider reports GitHub's timestamp for the trigger comment. It
+        # is the same clock used by result comments, so local clock skew cannot
+        # exclude a fast result or admit one that predates this request. An
+        # injected provider without that fact falls back to the pre-call time.
+        local_requested_at = datetime.now(UTC)
         outcome = selected.request(review)
-        if started is not None and outcome.head_sha:
-            # Only a confirmed revision is worth watching: without one there is
-            # nothing to recognise a result against, and a task that could
-            # never complete would sit in the terminal forever.
-            started(outcome.pull_request_number, outcome.head_sha, requested_at)
+        if started is not None:
+            started(
+                outcome.pull_request_number,
+                outcome.head_sha,
+                outcome.requested_at or local_requested_at,
+            )
         return outcome
 
     LOGGER.info(

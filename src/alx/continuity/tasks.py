@@ -12,12 +12,15 @@ carried through here.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
 from alx.contracts.task import ExternalTask, TaskState
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TaskStoreCorrupt(Exception):
@@ -102,9 +105,15 @@ class SQLiteTaskStore:
                         completed_at, conversation_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(task_id) DO UPDATE SET
+                        kind = excluded.kind,
+                        service = excluded.service,
+                        subject_reference = excluded.subject_reference,
                         state = excluded.state,
+                        requested_at = excluded.requested_at,
                         last_checked_at = excluded.last_checked_at,
-                        completed_at = excluded.completed_at
+                        completed_at = excluded.completed_at,
+                        conversation_id = excluded.conversation_id,
+                        handed_over = 0
                     """,
                     (
                         task.task_id,
@@ -150,7 +159,7 @@ class SQLiteTaskStore:
                 raise TaskStoreCorrupt(str(error)) from error
             finally:
                 database.close()
-        return tuple(self._task(row) for row in rows)
+        return self._valid_tasks(rows)
 
     def mark_handed_over(self, task_id: str) -> None:
         """Record that the Core has been given this completion."""
@@ -186,7 +195,17 @@ class SQLiteTaskStore:
                 raise TaskStoreCorrupt(str(error)) from error
             finally:
                 database.close()
-        return tuple(self._task(row) for row in rows)
+        return self._valid_tasks(rows)
+
+    @classmethod
+    def _valid_tasks(cls, rows: list[tuple]) -> tuple[ExternalTask, ...]:
+        tasks: list[ExternalTask] = []
+        for row in rows:
+            try:
+                tasks.append(cls._task(row))
+            except (TypeError, ValueError):
+                LOGGER.warning("Skipping corrupt external task row: %s", row[0])
+        return tuple(tasks)
 
     @staticmethod
     def _task(row: tuple) -> ExternalTask:

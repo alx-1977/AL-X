@@ -7,6 +7,7 @@ import logging
 import re
 from collections.abc import Callable, Mapping
 from time import monotonic
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -16,6 +17,16 @@ from alx.providers.errors import ProviderError, raise_provider_failure
 
 
 LOGGER = logging.getLogger(__name__)
+
+_TERMINAL_CODES = frozenset(
+    {
+        "account_deactivated",
+        "billing_hard_limit_reached",
+        "credit_balance_exhausted",
+        "insufficient_quota",
+        "invalid_api_key",
+    }
+)
 
 
 class _OpenAIProtocolError(ValueError):
@@ -71,8 +82,18 @@ class OpenAIReasoningModel:
         self._service_tier = service_tier
         self._reasoning_effort = reasoning_effort
         self._telemetry_sink = telemetry_sink
+        self._availability_lock = Lock()
+        self._terminal_failure = ""
+
+    def ensure_available(self) -> None:
+        """Refuse a known-terminal provider before any new budget reservation."""
+        with self._availability_lock:
+            failure = self._terminal_failure
+        if failure:
+            raise_provider_failure("openai", failure)
 
     def complete(self, request: ModelRequest) -> ModelCompletion:
+        self.ensure_available()
         started_at = monotonic()
         LOGGER.info("Reasoning provider request started")
         payload: dict[str, Any] = {
@@ -148,6 +169,9 @@ class OpenAIReasoningModel:
             return completion
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             error_code = self._safe_error_code(error)
+            if self._terminal(error_code):
+                with self._availability_lock:
+                    self._terminal_failure = error_code
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -276,12 +300,31 @@ class OpenAIReasoningModel:
         if isinstance(error, json.JSONDecodeError):
             return "structured_json_invalid"
         if isinstance(error, httpx.HTTPError):
+            response = getattr(error, "response", None)
+            if response is not None:
+                try:
+                    body = response.json()
+                except (TypeError, ValueError):
+                    body = None
+                details = body.get("error") if isinstance(body, Mapping) else None
+                code = details.get("code") if isinstance(details, Mapping) else None
+                if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code):
+                    safe = code.replace(".", "_").replace("-", "_").lower()
+                    return f"{type(error).__name__}_{safe}"
             return type(error).__name__
         if isinstance(error, KeyError):
             return "response_field_missing"
         if isinstance(error, TypeError):
             return "response_type_invalid"
         return "response_value_invalid"
+
+    @staticmethod
+    def _terminal(code: str) -> bool:
+        normalised = code.lower()
+        return any(
+            normalised == terminal or normalised.endswith(f"_{terminal}")
+            for terminal in _TERMINAL_CODES
+        )
 
     @staticmethod
     def _failure_event_code(event: Mapping[str, Any], event_type: str) -> str:

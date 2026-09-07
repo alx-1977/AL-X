@@ -153,6 +153,15 @@ class XAIAdapterTests(unittest.TestCase):
         self.assertNotIn("remote body", str(caught.exception))
 
 class OpenAIAdapterTests(unittest.TestCase):
+    @staticmethod
+    def _request() -> ModelRequest:
+        return ModelRequest(
+            (ModelMessage(ModelRole.USER, "private request"),),
+            "result",
+            {"type": "object"},
+            "conversation-1",
+        )
+
     def test_responses_request_preserves_neutral_structured_contract(self) -> None:
         captured = {}
 
@@ -346,6 +355,90 @@ class OpenAIAdapterTests(unittest.TestCase):
         )
         self.assertNotIn("provider detail", str(caught.exception))
         self.assertNotIn("very-secret", str(caught.exception))
+
+    def test_credit_exhaustion_opens_a_terminal_circuit(self) -> None:
+        calls = 0
+
+        def exhausted(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "code": "insufficient_quota",
+                        "message": "private account detail",
+                    }
+                },
+            )
+
+        adapter = OpenAIReasoningModel(
+            "model",
+            "very-secret",
+            "https://example",
+            10,
+            httpx.Client(transport=httpx.MockTransport(exhausted)),
+            streaming=False,
+        )
+        for _ in range(2):
+            with self.assertRaises(ProviderError) as caught:
+                adapter.complete(self._request())
+            self.assertEqual(
+                caught.exception.reason,
+                "HTTPStatusError_insufficient_quota",
+            )
+            self.assertNotIn("private account detail", str(caught.exception))
+        self.assertEqual(calls, 1)
+
+    def test_retryable_rate_limit_does_not_open_the_terminal_circuit(self) -> None:
+        calls = 0
+
+        def throttled(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                429,
+                json={"error": {"code": "rate_limit_exceeded"}},
+            )
+
+        adapter = OpenAIReasoningModel(
+            "model",
+            "secret",
+            "https://example",
+            10,
+            httpx.Client(transport=httpx.MockTransport(throttled)),
+            streaming=False,
+        )
+        for _ in range(2):
+            with self.assertRaises(ProviderError):
+                adapter.complete(self._request())
+        self.assertEqual(calls, 2)
+
+    def test_streamed_credit_exhaustion_opens_the_same_circuit(self) -> None:
+        calls = 0
+
+        def exhausted(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            event = {
+                "type": "response.failed",
+                "response": {"error": {"code": "credit_balance_exhausted"}},
+            }
+            return httpx.Response(200, text=f"data: {json.dumps(event)}\n\n")
+
+        adapter = OpenAIReasoningModel(
+            "model",
+            "secret",
+            "https://example",
+            10,
+            httpx.Client(transport=httpx.MockTransport(exhausted)),
+            streaming=True,
+        )
+        with self.assertRaises(ProviderError):
+            adapter.complete(self._request())
+        with self.assertRaises(ProviderError):
+            adapter.ensure_available()
+        self.assertEqual(calls, 1)
 
 
 class FakeSocket:

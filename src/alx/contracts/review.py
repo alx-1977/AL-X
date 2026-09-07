@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 
 # \Z rather than $: $ also matches before a terminal newline, so a value
@@ -83,20 +84,29 @@ class ReviewOutcome:
     head_sha: str
     requested: bool
     reviewer: str
+    requested_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.head_sha and not valid_sha(self.head_sha):
             raise ValueError("head_sha must be a full 40-character commit id")
         if not self.reviewer.strip():
             raise ValueError("the reviewer must be named")
+        if self.requested_at is not None and (
+            self.requested_at.tzinfo is None
+            or self.requested_at.utcoffset() is None
+        ):
+            raise ValueError("requested_at must be timezone-aware")
 
     def as_values(self) -> dict[str, object]:
-        return {
+        values = {
             "pull_request_number": self.pull_request_number,
             "head_sha": self.head_sha,
             "requested": self.requested,
             "reviewer": self.reviewer,
         }
+        if self.requested_at is not None:
+            values["requested_at"] = self.requested_at.isoformat()
+        return values
 
 
 __all__ = [

@@ -169,7 +169,7 @@ html, body {
   color: #c7f7dc;
 }
 
-#task-elapsed { color: rgba(255, 255, 255, .6); }
+.diagnostics__task time { color: rgba(255, 255, 255, .6); }
 
 .diagnostics__log {
   position: relative;

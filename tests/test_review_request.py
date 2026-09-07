@@ -344,16 +344,24 @@ class ReviewRequestTest(unittest.TestCase):
 class QodoProviderTest(unittest.TestCase):
     """The Qodo trigger itself, without contacting GitHub."""
 
-    def _provider(self, head: str, post_status: int = 201, after: str | None = None):
+    def _provider(
+        self,
+        head: str,
+        post_status: int = 201,
+        after: str | None = None,
+        post_headers: dict | None = None,
+        post_body: dict | None = None,
+    ):
         """`after` is the head on the second read, when it differs."""
         from alx.providers import qodo_review
 
         calls: dict = {"get": [], "post": []}
 
         class Response:
-            def __init__(self, status, body):
+            def __init__(self, status, body, response_headers=None):
                 self.status_code = status
                 self._body = body
+                self.headers = response_headers or {}
 
             def json(self):
                 return self._body
@@ -366,7 +374,7 @@ class QodoProviderTest(unittest.TestCase):
 
         def post(url, json, headers, timeout):  # noqa: A002
             calls["post"].append((url, json))
-            return Response(post_status, {})
+            return Response(post_status, post_body or {}, post_headers)
 
         original_get, original_post = qodo_review.httpx.get, qodo_review.httpx.post
         qodo_review.httpx.get = get
@@ -427,6 +435,27 @@ class QodoProviderTest(unittest.TestCase):
         with self.assertRaises(ReviewError) as caught:
             provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(caught.exception.code, "review_refused")
+
+    def test_a_throttled_403_is_unavailable_not_refused(self) -> None:
+        provider, _ = self._provider(
+            head=HEAD,
+            post_status=403,
+            post_headers={"Retry-After": "60"},
+        )
+        with self.assertRaises(ReviewError) as caught:
+            provider.request(ReviewRequest(pull_request_number=21))
+        self.assertEqual(caught.exception.code, "review_unavailable")
+
+    def test_githubs_request_timestamp_defines_the_watch_boundary(self) -> None:
+        provider, _ = self._provider(
+            head=HEAD,
+            post_body={"created_at": "2026-09-07T05:00:00Z"},
+        )
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        self.assertEqual(
+            outcome.requested_at,
+            datetime(2026, 9, 7, 5, 0, tzinfo=UTC),
+        )
 
     def test_a_malformed_repository_is_refused_at_construction(self) -> None:
         from alx.providers.qodo_review import QodoReviewProvider

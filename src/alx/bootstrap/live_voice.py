@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 import logging
+from uuid import uuid4
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -148,16 +149,15 @@ def _watch_review(
     if task_runtime is None:
         return
     try:
-        task_runtime.store.record(
+        task_runtime.poller.record(
             ExternalTask(
-                # The moment is part of the identity. Two requests for the same
-                # revision are two occasions, and sharing an id let the second
-                # reopen the first and be completed instantly by the first
-                # one's result.
-                task_id=f"review:{number}:{head_sha}:{int(requested_at.timestamp())}",
+                # Two same-second requests are still distinct occasions. A
+                # timestamp identifier collided and silently inherited the
+                # earlier row's handoff state, so identity is now collision-safe.
+                task_id=f"review:{number}:{uuid4().hex}",
                 kind="external_review",
                 service="qodo",
-                subject_reference=subject_reference(number, head_sha),
+                subject_reference=subject_reference(number),
                 state=TaskState.REQUESTED,
                 requested_at=requested_at,
                 conversation_id=conversation_id,
@@ -702,6 +702,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
         response_transport=server,
+        spend_observer=occasion_spend,
         commissioning_limit=autonomous_commissioning_limit(environment),
     )
     due_cognition = DueCognitionSource(
