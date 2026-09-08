@@ -9,13 +9,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from alx.config import ConfigurationError, RuntimeSettings
+from alx.config.settings import CLAUDE_SUBSCRIPTION_PROVIDER, NO_PROVIDER
 from alx.contracts import ReasoningModel, SpeechSynthesizer, SpeechTranscriber
 from alx.providers import (
     CartesiaTranscriber,
+    ClaudeSubscriptionReasoningModel,
     ElevenLabsSynthesizer,
     OpenAIReasoningModel,
     XAIReasoningModel,
 )
+from alx.providers.claude_subscription import subscription_cli_present
 from alx.providers.gated_transcription import GatedTranscriber
 
 
@@ -49,6 +52,20 @@ def _build_reasoning_model(
     Core instead: that is the expensive path this exists to avoid, and a silent
     fallback would hide the misconfiguration.
     """
+    if settings.provider == NO_PROVIDER:
+        # Deliberately absent, not misconfigured. Nothing is constructed, so
+        # there is no client holding a credential and nothing that could be
+        # invoked by accident. The work refuses instead.
+        LOGGER.info("Specialist reasoning is disabled by configuration")
+        return None
+    if settings.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        # Scoped to the conversational Core. Specialist and research cognition
+        # are not authorised on the subscription path, so this is refused
+        # rather than quietly built.
+        raise ConfigurationError(
+            f"{CLAUDE_SUBSCRIPTION_PROVIDER} is not available for specialist "
+            "or research cognition"
+        )
     if settings.provider == "openai":
         return OpenAIReasoningModel(
             settings.model,
@@ -92,7 +109,22 @@ def build_runtime_providers(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> RuntimeProviders:
-    if settings.reasoning.provider == "openai":
+    if settings.reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        # Friedl's Claude subscription, through the Claude Code CLI. No API key
+        # is held, none is passed to the child, and there is no metered path to
+        # fall back to: if the subscription cannot answer, the turn fails and
+        # AL/X says nothing rather than quietly billing another provider.
+        if not subscription_cli_present():
+            raise ConfigurationError(
+                "the Claude Code CLI is required for the "
+                f"{CLAUDE_SUBSCRIPTION_PROVIDER} reasoner and was not found"
+            )
+        reasoning = ClaudeSubscriptionReasoningModel(
+            settings.reasoning.model,
+            settings.reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+        )
+    elif settings.reasoning.provider == "openai":
         reasoning = OpenAIReasoningModel(
             settings.reasoning.model,
             settings.reasoning.api_key,

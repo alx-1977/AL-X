@@ -74,7 +74,8 @@ from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteCo
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
-from alx.observability import BudgetExceeded, SandboxBudget, XERO_BILL_BUDGET, SQLiteUsageRecorder
+from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
+from alx.observability.usage import bill_budget_for
 from alx.specialists import ModelSpecialist, extract_invoice
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
@@ -187,6 +188,11 @@ async def run(repository_root: Path) -> None:
     # arm the ceiling for the task that is actually running.
     current_conversation_id = [""]
 
+    # Whether the turn now reaching the Core came from Friedl. Set by the
+    # transport, which is the only place that knows; the Core is never told
+    # which reasoner or which origin is spending, and must not be.
+    person_turn_in_progress = [False]
+
     def budget_check(conversation_id: str) -> None:
         """Stop a runaway task, and convert that stop into bounded recovery.
 
@@ -196,12 +202,21 @@ async def run(repository_root: Path) -> None:
         Friedl says fails before it is heard. Declaring recovery here gives
         the next turns the configured allowance and nothing more. It is
         idempotent, so being stopped repeatedly never buys a further one.
+
+        The allowance is declared only for a person turn. It exists so Friedl
+        is not left talking to a conversation that cannot answer, and a
+        background turn does not need it: nobody is waiting on one. On
+        2026-09-08 the opposite happened - a stopped task checkpointed in a
+        millisecond, background turns cycled through the allowance in the gap
+        before Friedl typed, and the conversation could no longer reason at
+        all. Reserving it is what keeps the recovery for the person it is for.
         """
         current_conversation_id[0] = conversation_id
         try:
             usage.check(conversation_id)
         except BudgetExceeded:
-            usage.enter_recovery(conversation_id)
+            if person_turn_in_progress[0]:
+                usage.enter_recovery(conversation_id)
             raise
 
     def telemetry(task_id: str, values: Mapping[str, Any]) -> None:
@@ -530,7 +545,14 @@ async def run(repository_root: Path) -> None:
         # Reaching for any bill capability declares the task routine, so the
         # ceiling applies from the first one rather than from the commit.
         if call.capability_id in BILL_TASK_CAPABILITIES:
-            usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
+            # The ceiling counts reasoning calls, so it depends on how many
+            # calls the configured reasoner spends on one turn. Chosen from the
+            # provider name, in the runtime that already knows it; the Core is
+            # never told which provider answers.
+            usage.set_budget(
+                current_conversation_id[0],
+                bill_budget_for(provider_settings.reasoning.provider),
+            )
         try:
             attempt = broker.dispatch(
                 call,
@@ -671,6 +693,7 @@ async def run(repository_root: Path) -> None:
         diagnostics=diagnostics,
         event_source=mail_runtime.source,
         core_turn_lock=core_turn_lock,
+        turn_origin_sink=lambda person: person_turn_in_progress.__setitem__(0, person),
     )
     server = LiveVoiceServer(
         session,

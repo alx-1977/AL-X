@@ -60,6 +60,24 @@ EXECUTION_SITE = MACOS_BACKEND / "runner.py"
 LAUNCHER_SITE = MACOS_BACKEND / "launcher.py"
 EXECUTION_SITES = {EXECUTION_SITE, LAUNCHER_SITE}
 
+# One production module outside the Sandbox starts a process, and it is not an
+# execution site in D-027's sense.
+#
+# D-027 governs exactly one outcome: running an AL/X-authored experiment. Its
+# claim is "exactly one governed production path that executes an experiment"
+# and "no competing module starts Sandbox experiments". The Claude subscription
+# reasoner starts the Claude Code CLI to ask a question and read one JSON
+# answer back. That is a reasoning transport - the same outcome the OpenAI and
+# xAI adapters reach over HTTP - and it runs no AL/X-authored program, takes no
+# source, has no workspace, no session, no manifest and no retention.
+#
+# It is listed by name rather than exempted by pattern, so a genuinely new
+# execution site still fails these tests, and the assertions below prove it
+# cannot become a second route to running an experiment: it may not import the
+# Sandbox, and the fixed argument vector it builds names only the CLI.
+REASONING_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "claude_subscription.py"
+PROCESS_STARTING_SITES = EXECUTION_SITES | {REASONING_TRANSPORT_SITE}
+
 
 def _sandbox_modules() -> list[Path]:
     named = set(PRODUCTION_ROOT.rglob("*sandbox*.py"))
@@ -410,7 +428,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES:
+            if path in PROCESS_STARTING_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -434,7 +452,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES:
+            if path in PROCESS_STARTING_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -553,6 +571,58 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 self.test_no_production_module_calls_a_process_execution_function()
         finally:
             planted.unlink()
+
+    def test_the_reasoning_transport_cannot_run_an_experiment(self) -> None:
+        """The one non-Sandbox process start is not a second experiment route.
+
+        Listing a file above removes it from the absence scan, so the claim it
+        is exempted under must be proved rather than asserted in a comment. A
+        reasoning transport that could reach the Sandbox, or start a program of
+        AL/X's choosing, would be exactly the competing path D-027 forbids.
+        """
+        source = REASONING_TRANSPORT_SITE.read_text()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            for name in names:
+                self.assertNotIn(
+                    "sandbox",
+                    name,
+                    "the reasoning transport must not reach the Sandbox",
+                )
+        # It starts one named executable and nothing the Core can choose. The
+        # command is built from the configured CLI name, never from a request
+        # field, so no reasoning output can redirect what is run.
+        self.assertNotIn("shell=True", source)
+        self.assertIn("shell=False", source)
+
+    def test_the_reasoning_transport_starts_only_the_configured_cli(self) -> None:
+        """Its argument vector names the CLI, never a program from a request."""
+        from alx.contracts import ModelMessage, ModelRequest, ModelRole
+        from alx.providers.claude_subscription import (
+            ClaudeSubscriptionReasoningModel,
+        )
+
+        model = ClaudeSubscriptionReasoningModel(
+            "opus", 60, executable="/usr/local/bin/claude"
+        )
+        request = ModelRequest(
+            (
+                ModelMessage(ModelRole.SYSTEM, "laws"),
+                ModelMessage(ModelRole.USER, "/bin/sh -c 'echo escaped'"),
+            ),
+            "alx_core_decision",
+            {"type": "object"},
+        )
+        command = model.command(request)
+        self.assertEqual(command[0], "/usr/local/bin/claude")
+        # Nothing the caller supplied as turn content appears in the vector;
+        # the prompt travels on stdin, so it cannot become an argument.
+        self.assertNotIn("/bin/sh", " ".join(command))
 
     def test_no_sandbox_module_can_reach_a_promotion_path(self) -> None:
         """D-027: there is no path from a run to the repository or a deploy."""

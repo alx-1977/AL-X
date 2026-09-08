@@ -318,6 +318,90 @@ class XeroSettings:
 
 
 
+# The Core reasoner that runs on Friedl's Claude subscription instead of metered
+# API credit. Named here so configuration, the adapter and the tests agree on
+# one spelling.
+CLAUDE_SUBSCRIPTION_PROVIDER = "claude_subscription"
+
+# A provider deliberately configured as absent. The runtime builds nothing for
+# it, reads no credential, and the work it would have done refuses instead of
+# being answered somewhere more expensive. Already the spelling text-to-speech
+# uses, reused here rather than inventing a second word for the same idea.
+NO_PROVIDER = "none"
+
+
+def _core_reasoning_settings(
+    environment: Mapping[str, str],
+    provider: str,
+    provider_key_name: str,
+    provider_base_name: str,
+    provider_base_fallback: "str | None",
+) -> "ReasoningSettings":
+    """The conversational Core's reasoner.
+
+    The subscription path is configured differently from the metered ones
+    because it genuinely is different: it authenticates through the Claude Code
+    installation, so there is no key to supply and no base URL to point at.
+    Demanding either would refuse a correct configuration, and accepting a key
+    would put a billable credential into the one path whose entire purpose is
+    not to use one.
+
+    Nothing else about the Core changes. The same dataclass is returned, so the
+    reasoner, the loop and the capability layer see one shape.
+    """
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        api_key = environment.get("ALX_REASONING_API_KEY", "").strip()
+        if api_key:
+            # Refused rather than ignored. A key sitting in the configuration
+            # of a path that must never bill is either a misunderstanding or a
+            # leftover, and silently not using it would leave Friedl believing
+            # something about this runtime that is not true.
+            raise ConfigurationError(
+                "ALX_REASONING_API_KEY must not be set for "
+                f"{CLAUDE_SUBSCRIPTION_PROVIDER}: it authenticates through the "
+                "Claude Code subscription and never through a billed key"
+            )
+        return ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_REASONING_MODEL"),
+            api_key="",
+            base_url="",
+            timeout_seconds=_positive_integer(
+                environment, "ALX_REASONING_TIMEOUT_SECONDS", 300
+            ),
+            # The port is not a streaming port: `complete()` returns one whole
+            # completion. The CLI is asked for one JSON result, so there is no
+            # stream to enable and the setting would describe nothing.
+            streaming=False,
+            service_tier="default",
+            # A subscription turn has no tier or effort dial to set. Fixed at
+            # the neutral value rather than read from configuration, so no
+            # setting appears to be active while doing nothing.
+            effort="medium",
+        )
+    return ReasoningSettings(
+        provider=provider,
+        model=_required(environment, "ALX_REASONING_MODEL"),
+        api_key=_credential(
+            environment, "ALX_REASONING_API_KEY", provider_key_name
+        ),
+        base_url=_configured(
+            environment,
+            "ALX_REASONING_BASE_URL",
+            provider_base_name,
+            provider_base_fallback,
+        ).rstrip("/"),
+        timeout_seconds=_positive_integer(
+            environment, "ALX_REASONING_TIMEOUT_SECONDS", 120
+        ),
+        streaming=_boolean(environment, "ALX_REASONING_STREAMING", True),
+        service_tier=environment.get(
+            "ALX_REASONING_SERVICE_TIER", "default"
+        ).strip().lower(),
+        effort=environment.get("ALX_REASONING_EFFORT", "medium").strip().lower(),
+    )
+
+
 def _specialist_settings(
     environment: Mapping[str, str], core_provider: str
 ) -> "ReasoningSettings":
@@ -327,9 +411,43 @@ def _specialist_settings(
     reasoning setting that still returns reliable structured output. Nothing
     here changes the Core.
     """
-    provider = environment.get(
-        "ALX_SPECIALIST_PROVIDER", core_provider
-    ).strip().lower() or core_provider
+    requested = environment.get("ALX_SPECIALIST_PROVIDER", "").strip().lower()
+    provider = requested or core_provider
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER and requested:
+        # Asked for by name. Specialist cognition is not authorised on the
+        # subscription path, so this is refused rather than quietly turned
+        # into something else: a configuration that names a provider and
+        # silently gets another is worse than one that stops.
+        raise ConfigurationError(
+            f"{CLAUDE_SUBSCRIPTION_PROVIDER} is not available for specialist "
+            "cognition; set ALX_SPECIALIST_PROVIDER=none to disable it"
+        )
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        # This change is scoped to the conversational Core. The specialist
+        # inherits the Core's provider by default, so a Core moved to the
+        # subscription would otherwise drag specialist extraction onto it
+        # silently - a second cognition path switched by a setting nobody
+        # pointed at it. There is no subscription specialist, so the default
+        # becomes "none": absent, and refusing, rather than quietly running on
+        # a path that was never chosen for it.
+        provider = NO_PROVIDER
+    if provider == NO_PROVIDER:
+        # Deliberately absent. Nothing is built, so no credential is read and
+        # no metered client exists to be invoked by accident. Extraction then
+        # refuses rather than falling back to the Core, which is the expensive
+        # path that separation exists to avoid.
+        return ReasoningSettings(
+            provider=NO_PROVIDER,
+            model=NO_PROVIDER,
+            api_key="",
+            base_url="",
+            timeout_seconds=_positive_integer(
+                environment, "ALX_SPECIALIST_TIMEOUT_SECONDS", 60
+            ),
+            streaming=False,
+            service_tier="default",
+            effort="none",
+        )
     key_name = {
         "openai": "OPENAI_API_KEY",
         "xai": "XAI_API_KEY",
@@ -393,6 +511,20 @@ def _tier_settings(
         environment.get(f"{prefix}_PROVIDER", "").strip().lower()
         or specialist.provider
     )
+    if provider == NO_PROVIDER:
+        # A tier whose provider is absent stays absent. Research already
+        # refuses a tier it cannot build; what matters here is that no
+        # credential is required and no metered client is constructed.
+        return ReasoningSettings(
+            provider=NO_PROVIDER,
+            model=NO_PROVIDER,
+            api_key="",
+            base_url="",
+            timeout_seconds=specialist.timeout_seconds,
+            streaming=False,
+            service_tier="default",
+            effort="none",
+        )
     key_name = {
         "openai": "OPENAI_API_KEY",
         "xai": "XAI_API_KEY",
@@ -653,6 +785,10 @@ class RuntimeSettings:
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> RuntimeSettings:
         reasoning_provider = _required(environment, "ALX_REASONING_PROVIDER")
+        # The subscription path authenticates through the Claude Code
+        # installation, so it has no key and no base URL to configure. Asking
+        # for either would either refuse a correct configuration or invite a
+        # key into the one path whose purpose is not to use one.
         provider_key_name = {
             "openai": "OPENAI_API_KEY",
             "xai": "XAI_API_KEY",
@@ -669,26 +805,12 @@ class RuntimeSettings:
             "kimi": "https://api.moonshot.ai",
         }.get(reasoning_provider)
         return cls(
-            reasoning=ReasoningSettings(
-                provider=reasoning_provider,
-                model=_required(environment, "ALX_REASONING_MODEL"),
-                api_key=_credential(
-                    environment, "ALX_REASONING_API_KEY", provider_key_name
-                ),
-                base_url=_configured(
-                    environment,
-                    "ALX_REASONING_BASE_URL",
-                    provider_base_name,
-                    provider_base_fallback,
-                ).rstrip("/"),
-                timeout_seconds=_positive_integer(environment, "ALX_REASONING_TIMEOUT_SECONDS", 120),
-                streaming=_boolean(environment, "ALX_REASONING_STREAMING", True),
-                service_tier=environment.get(
-                    "ALX_REASONING_SERVICE_TIER", "default"
-                ).strip().lower(),
-                effort=environment.get(
-                    "ALX_REASONING_EFFORT", "medium"
-                ).strip().lower(),
+            reasoning=_core_reasoning_settings(
+                environment,
+                reasoning_provider,
+                provider_key_name,
+                provider_base_name,
+                provider_base_fallback,
             ),
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),

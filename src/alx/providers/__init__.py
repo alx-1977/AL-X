@@ -2,6 +2,7 @@
 
 from alx.providers.cartesia import CartesiaTranscriber
 from alx.providers.elevenlabs import ElevenLabsSynthesizer
+from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
 from alx.providers.openai import OpenAIReasoningModel
 from alx.providers.xai import XAIReasoningModel
 from alx.providers.icloud_mail import ICloudMailAdapter, SQLiteMailObservationState
@@ -37,6 +38,7 @@ __all__ = [
     "parse_public_url",
     "CartesiaTranscriber",
     "ElevenLabsSynthesizer",
+    "ClaudeSubscriptionReasoningModel",
     "OpenAIReasoningModel",
     "XAIReasoningModel",
     "ICloudMailAdapter",
