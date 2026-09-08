@@ -307,62 +307,63 @@ class VoiceSession:
                 try:
                     async with self._core_turn_lock:
                         self._turn_origin_sink(kind != "background")
-                        if kind == "background":
-                            outcome = await run_core_worker(
-                                self._gateway.receive_background_event,
-                                conversation_id,
-                                item,
-                                self._step_budget,
-                                now + timedelta(days=self._retention_days),
-                            )
-                        else:
-                            # Spoken and typed converge here, before the
-                            # gateway. They differ only in provenance and in
-                            # whether a transcriber was involved; from this
-                            # point there is one person-turn path, one Core
-                            # call, one conversation and one goal treatment.
-                            if kind == "typed":
-                                origin = ConversationOrigin.TYPED
-                                content = item
-                            else:
-                                LOGGER.info(
-                                    "Cartesia event received: %s", item.state.value
+                        try:
+                            if kind == "background":
+                                outcome = await run_core_worker(
+                                    self._gateway.receive_background_event,
+                                    conversation_id,
+                                    item,
+                                    self._step_budget,
+                                    now + timedelta(days=self._retention_days),
                                 )
-                                origin = ConversationOrigin.SPEECH_TRANSCRIPT
-                                content = item.content
-                            turn = ConversationTurn(
-                                conversation_id=conversation_id,
-                                turn_id=self._identifier_factory(),
-                                origin=origin,
-                                content=content,
-                                occurred_at=now,
-                                person_id=self._person_id,
-                            )
-                            outcome = await run_core_worker(
-                                self._gateway.receive_conversation_turn,
-                                turn,
-                                self._step_budget,
-                                now + timedelta(days=self._retention_days),
-                            )
+                            else:
+                                # Spoken and typed converge here, before the
+                                # gateway. They differ only in provenance and in
+                                # whether a transcriber was involved; from this
+                                # point there is one person-turn path, one Core
+                                # call, one conversation and one goal treatment.
+                                if kind == "typed":
+                                    origin = ConversationOrigin.TYPED
+                                    content = item
+                                else:
+                                    LOGGER.info(
+                                        "Cartesia event received: %s", item.state.value
+                                    )
+                                    origin = ConversationOrigin.SPEECH_TRANSCRIPT
+                                    content = item.content
+                                turn = ConversationTurn(
+                                    conversation_id=conversation_id,
+                                    turn_id=self._identifier_factory(),
+                                    origin=origin,
+                                    content=content,
+                                    occurred_at=now,
+                                    person_id=self._person_id,
+                                )
+                                outcome = await run_core_worker(
+                                    self._gateway.receive_conversation_turn,
+                                    turn,
+                                    self._step_budget,
+                                    now + timedelta(days=self._retention_days),
+                                )
+                        finally:
+                            self._turn_origin_sink(False)
                 except Exception:
                     yield VoiceEvent(
                         VoiceEventKind.ERROR, reason="conversation_gateway_error"
                     )
                     return
 
-                # A background turn that stopped on the budget must not be
-                # followed straight back into the same checkpoint. A person
-                # turn always clears the suppression: she may now be able to
-                # reason again, and only trying can establish that.
-                if kind == "background":
-                    if outcome.reason == "budget_exceeded":
-                        if not background_stopped_on_budget[0]:
-                            LOGGER.info(
-                                "Deferring background work: the conversation's "
-                                "execution budget is exhausted"
-                            )
-                        background_stopped_on_budget[0] = True
-                else:
+                # A person checkpoint grants recovery but has not made budget
+                # headroom for background work. Keep it suppressed until a
+                # person turn reaches a different outcome.
+                if outcome.reason == "budget_exceeded":
+                    if not background_stopped_on_budget[0]:
+                        LOGGER.info(
+                            "Deferring background work: the conversation's "
+                            "execution budget is exhausted"
+                        )
+                    background_stopped_on_budget[0] = True
+                elif kind != "background":
                     background_stopped_on_budget[0] = False
 
                 delivered = True

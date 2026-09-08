@@ -983,7 +983,7 @@ class BudgetRecoveryReservationTests(unittest.IsolatedAsyncioTestCase):
             )
         return conversation
 
-    def _budget_check(self, recorder, person_flag):
+    def _production_callbacks(self, recorder):
         """Compile the actual bootstrap callbacks, without starting live IO.
 
         No budget/origin logic is reproduced here. Both nodes are taken from
@@ -1006,9 +1006,14 @@ class BudgetRecoveryReservationTests(unittest.IsolatedAsyncioTestCase):
         exec(compile(ast.Module(body=[callback], type_ignores=[]), str(source), "exec"), namespace)
         origin_sink = eval(compile(ast.Expression(body=sink), str(source), "eval"), namespace)
 
+        return namespace["budget_check"], origin_sink
+
+    def _budget_check(self, recorder, person_flag):
+        callback, origin_sink = self._production_callbacks(recorder)
+
         def check(conversation_id):
             origin_sink(person_flag[0])
-            return namespace["budget_check"](conversation_id)
+            return callback(conversation_id)
 
         return check
 
@@ -1079,6 +1084,105 @@ class BudgetRecoveryReservationTests(unittest.IsolatedAsyncioTestCase):
             )
         with self.assertRaises(BudgetExceeded):
             check(conversation)
+
+    async def test_person_checkpoint_reserves_recovery_and_resets_origin(self):
+        from alx.observability import BudgetExceeded
+        from alx.observability.usage import bill_budget_for
+
+        recorder = self._recorder()
+        conversation = self._exhausted(recorder, bill_budget_for("claude_subscription"))
+        check, sink = self._production_callbacks(recorder)
+        test = self
+
+        class Gateway(FakeGateway):
+            def receive_conversation_turn(self, turn, *args):
+                self.calls.append(turn)
+                with test.assertRaises(BudgetExceeded):
+                    check(conversation)
+                return outcome(GoalStatus.ACTIVE, None, reason="budget_exceeded",
+                               core_state=CoreState.CHECKPOINTED)
+
+            def receive_background_event(self, *args):
+                self.background_calls.append(args)
+                return outcome(GoalStatus.ACTIVE, "unexpected")
+
+        gateway = Gateway(())
+        typed = asyncio.Queue()
+        await typed.put("continue")
+        session = VoiceSession(
+            gateway, BackgroundCheckpointStormTests._OpenTranscriber(),
+            FakeSynthesizer(), "friedl", 8, 3650, clock=lambda: NOW,
+            event_source=BackgroundCheckpointStormTests._Source(3),
+            turn_origin_sink=sink,
+        )
+        iterator = session.exchange(conversation, incoming_audio(), typed=typed)
+        try:
+            for _ in range(20):
+                try:
+                    await asyncio.wait_for(iterator.__anext__(), 0.1)
+                except (asyncio.TimeoutError, StopAsyncIteration):
+                    break
+            self.assertEqual(len(gateway.calls), 1)
+            self.assertEqual(gateway.background_calls, [])
+            self.assertIn(conversation, recorder._recovery)
+            # After the person exits, a caller outside VoiceSession (including
+            # autonomous work) has no person origin and cannot spend recovery.
+            with self.assertRaises(BudgetExceeded):
+                check(conversation)
+            sink(True)
+            check(conversation)
+            sink(False)
+        finally:
+            await iterator.aclose()
+
+    async def test_gateway_error_clears_origin_before_releasing_lock(self):
+        from alx.observability import BudgetExceeded
+        from alx.observability.usage import bill_budget_for
+
+        recorder = self._recorder()
+        conversation = self._exhausted(recorder, bill_budget_for("claude_subscription"))
+        check, sink = self._production_callbacks(recorder)
+
+        class Gateway:
+            def receive_conversation_turn(self, *args):
+                raise RuntimeError("failed before budget check")
+
+        typed = asyncio.Queue()
+        await typed.put("continue")
+        lock = asyncio.Lock()
+        observed = []
+        def observing_sink(person):
+            observed.append((person, lock.locked()))
+            sink(person)
+        session = VoiceSession(
+            Gateway(), BackgroundCheckpointStormTests._OpenTranscriber(),
+            FakeSynthesizer(), "friedl", 8, 3650, clock=lambda: NOW,
+            turn_origin_sink=observing_sink, core_turn_lock=lock,
+        )
+        events = [event async for event in session.exchange(
+            conversation, incoming_audio(), typed=typed)]
+        self.assertTrue(any(event.kind is VoiceEventKind.ERROR for event in events))
+        self.assertEqual(observed, [(True, True), (False, True)])
+        with self.assertRaises(BudgetExceeded):
+            check(conversation)
+        self.assertNotIn(conversation, recorder._recovery)
+
+    def test_background_cannot_spend_an_already_granted_allowance(self):
+        from alx.observability import BudgetExceeded
+        from alx.observability.usage import bill_budget_for
+
+        recorder = self._recorder()
+        conversation = self._exhausted(recorder, bill_budget_for("claude_subscription"))
+        check, sink = self._production_callbacks(recorder)
+        sink(True)
+        with self.assertRaises(BudgetExceeded):
+            check(conversation)
+        sink(False)
+        for _ in range(3):
+            with self.assertRaises(BudgetExceeded):
+                check(conversation)
+        sink(True)
+        check(conversation)
 
     def test_a_new_conversation_gets_a_fresh_budget(self) -> None:
         from alx.observability.usage import bill_budget_for
@@ -1185,10 +1289,10 @@ class BackgroundCheckpointStormTests(unittest.IsolatedAsyncioTestCase):
         # sequence. The first background turn checkpoints on the budget and
         # engages suppression; his line must still be taken, and background
         # work must resume once it has been.
-        await typed.put("Hey ALX!")
         iterator = session.exchange(
             "conversation-1", incoming_audio(), typed=typed
         )
+        person_queued = False
         for _ in range(60):
             try:
                 await asyncio.wait_for(iterator.__anext__(), timeout=0.5)
@@ -1196,7 +1300,10 @@ class BackgroundCheckpointStormTests(unittest.IsolatedAsyncioTestCase):
                 break
             except asyncio.TimeoutError:
                 break
-            if gateway.calls and len(gateway.background_calls) >= 1:
+            if gateway.background_calls and not person_queued:
+                await typed.put("Hey ALX!")
+                person_queued = True
+            if gateway.calls and len(gateway.background_calls) >= 2:
                 break
 
         self.assertEqual(len(gateway.calls), 1, "the person turn did not run")

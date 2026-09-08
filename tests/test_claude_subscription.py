@@ -12,6 +12,7 @@ import tempfile
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -830,10 +831,57 @@ class ConfigurationTest(unittest.TestCase):
     def test_bootstrap_builds_the_subscription_reasoner(self) -> None:
         from alx.bootstrap.providers import build_runtime_providers
 
-        providers = build_runtime_providers(self._settings())
+        with patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
+            providers = build_runtime_providers(self._settings())
         self.assertIsInstance(
             providers.reasoning, ClaudeSubscriptionReasoningModel
         )
+
+
+class ResearchTierIsolationTest(unittest.TestCase):
+    def _settings(self, **overrides):
+        from alx.config.settings import RuntimeSettings
+        return RuntimeSettings.from_environment({
+            **ZeroMeteredApiConfigurationTest.ENVIRONMENT, **overrides,
+        })
+
+    def test_enabled_tiers_cannot_inherit_disabled_specialist(self):
+        from alx.config import ConfigurationError
+        for tier in ("survey", "compare", "judge"):
+            with self.subTest(tier=tier), self.assertRaises(ConfigurationError):
+                self._settings(ALX_RESEARCH_ENABLED_TIERS=tier)
+
+    def test_explicit_provider_requires_model_and_credential(self):
+        from alx.config import ConfigurationError
+        for tier in ("survey", "compare", "judge"):
+            prefix = "ALX_RESEARCH_" + tier.upper()
+            base = {"ALX_RESEARCH_ENABLED_TIERS": tier, prefix + "_PROVIDER": "openai"}
+            for extra in ({}, {prefix + "_MODEL": "configured-model"},
+                          {"OPENAI_API_KEY": "fake-key"},
+                          {prefix + "_MODEL": "none", "OPENAI_API_KEY": "fake-key"}):
+                with self.subTest(tier=tier, extra=extra), self.assertRaises(ConfigurationError):
+                    self._settings(**base, **extra)
+            settings = self._settings(**base, **{
+                prefix + "_MODEL": "configured-model", "OPENAI_API_KEY": "fake-key"})
+            configured = getattr(settings.research, tier)
+            self.assertEqual(configured.model, "configured-model")
+            self.assertEqual(configured.api_key, "fake-key")
+
+    def test_other_core_provider_does_not_require_claude(self):
+        from alx.bootstrap.providers import build_runtime_providers
+        settings = self._settings(ALX_REASONING_PROVIDER="openai",
+                                  ALX_REASONING_MODEL="configured-model",
+                                  OPENAI_API_KEY="fake-key")
+        with patch("alx.bootstrap.providers.subscription_cli_present",
+                   side_effect=AssertionError("must not inspect Claude")):
+            self.assertIsNotNone(build_runtime_providers(settings).reasoning)
+
+    def test_subscription_startup_still_refuses_missing_cli(self):
+        from alx.bootstrap.providers import build_runtime_providers
+        from alx.config import ConfigurationError
+        with patch("alx.bootstrap.providers.subscription_cli_present", return_value=False):
+            with self.assertRaises(ConfigurationError):
+                build_runtime_providers(self._settings())
 
 
 class ZeroMeteredApiConfigurationTest(unittest.TestCase):
@@ -867,9 +915,10 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
         from alx.bootstrap.providers import build_runtime_providers
         from alx.config.settings import RuntimeSettings
 
-        return build_runtime_providers(
-            RuntimeSettings.from_environment(dict(self.ENVIRONMENT))
-        )
+        with patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
+            return build_runtime_providers(
+                RuntimeSettings.from_environment(dict(self.ENVIRONMENT))
+            )
 
     def test_the_runtime_starts_with_no_api_key_of_any_kind(self) -> None:
         for name in (

@@ -540,15 +540,20 @@ def _tier_settings(
         "xai": "https://api.x.ai",
         "kimi": "https://api.moonshot.ai",
     }.get(provider, specialist.base_url)
+    if specialist.provider == NO_PROVIDER:
+        model = environment.get(f"{prefix}_MODEL", "").strip()
+        if not model or model.lower() == NO_PROVIDER:
+            raise ConfigurationError(f"{prefix}_MODEL must name a usable model")
+        api_key = _credential(environment, f"{prefix}_API_KEY", key_name)
+    else:
+        model = environment.get(f"{prefix}_MODEL", "").strip() or specialist.model
+        api_key = _configured(
+            environment, f"{prefix}_API_KEY", key_name, specialist.api_key
+        )
     return ReasoningSettings(
         provider=provider,
-        model=environment.get(f"{prefix}_MODEL", "").strip() or specialist.model,
-        api_key=_configured(
-            environment,
-            f"{prefix}_API_KEY",
-            key_name,
-            specialist.api_key,
-        ),
+        model=model,
+        api_key=api_key,
         base_url=_configured(
             environment,
             f"{prefix}_BASE_URL",
@@ -757,12 +762,22 @@ def _research_settings(
     environment: Mapping[str, str], core_provider: str
 ) -> "ResearchSettings":
     specialist = _specialist_settings(environment, core_provider)
+    tiers = {
+        name: _tier_settings(environment, name, specialist)
+        for name in ("survey", "compare", "judge")
+    }
+    enabled = _enabled_tiers(environment)
+    for name in enabled:
+        tier = tiers[name]
+        if (tier.provider == NO_PROVIDER or tier.model.lower() == NO_PROVIDER
+                or not tier.model.strip() or not tier.api_key.strip()):
+            raise ConfigurationError(
+                f"enabled research tier {name} requires a usable provider, model and credential"
+            )
     return ResearchSettings(
-        survey=_tier_settings(environment, "survey", specialist),
-        compare=_tier_settings(environment, "compare", specialist),
-        judge=_tier_settings(environment, "judge", specialist),
+        **tiers,
         limits=_research_budget(environment),
-        enabled_tiers=_enabled_tiers(environment),
+        enabled_tiers=enabled,
     )
 
 

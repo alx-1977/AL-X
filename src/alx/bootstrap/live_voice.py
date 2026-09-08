@@ -213,7 +213,9 @@ async def run(repository_root: Path) -> None:
         """
         current_conversation_id[0] = conversation_id
         try:
-            usage.check(conversation_id)
+            usage.check(
+                conversation_id, allow_recovery=person_turn_in_progress[0]
+            )
         except BudgetExceeded:
             if person_turn_in_progress[0]:
                 usage.enter_recovery(conversation_id)

@@ -421,11 +421,13 @@ class SQLiteUsageRecorder:
             return "warning"
         return "expected"
 
-    def check(self, task_id: str) -> None:
+    def check(self, task_id: str, *, allow_recovery: bool = True) -> None:
         """Raise before another reasoning call when a task has run away.
 
         Called before dispatching, so exceeding the ceiling prevents further
-        spend rather than merely recording that it happened.
+        spend rather than merely recording that it happened. The runtime may
+        exclude reserved recovery for a non-person turn without changing the
+        recorded allowance or budget window.
         """
         with self._lock:
             budget = self._budgets.get(task_id)
@@ -436,7 +438,7 @@ class SQLiteUsageRecorder:
                 # away; it must not also stop AL/X saying what she did. The
                 # next capability call opens a new window.
                 return
-            recovering = task_id in self._recovery
+            recovering = allow_recovery and task_id in self._recovery
             since = self._windows.get(task_id, 0)
         calls = self._calls_since(task_id, since)
         limit = budget.recovery_limit if recovering else budget.stop_above
