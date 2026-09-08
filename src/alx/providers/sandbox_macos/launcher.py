@@ -280,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
     except OSError:
-        return 71
+        return _report("launch_failed", None)
 
     # The experiment's group, read now that it exists. Reported to the parent
     # so a later runtime can reap this group after a crash, and used by every
@@ -309,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         },
     ):
         _reap(group, child)
-        return 72
+        return _report("launch_failed", None)
 
     # The identity a later runtime uses to decide whether a surviving process
     # belongs to this run. The durable note above is published first, so killing

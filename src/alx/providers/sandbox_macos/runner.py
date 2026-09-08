@@ -608,6 +608,11 @@ class SeatbeltSandboxRunner(SandboxRunner):
                 durable_report = self._read_live_run(paths)
                 if not started_report:
                     started_report = durable_report
+                if started_report.get("reason") == "launch_failed":
+                    process.wait(timeout=_LAUNCH_GRACE)
+                    if process.stdout is not None:
+                        process.stdout.close()
+                    raise SandboxError("sandbox_unavailable")
                 group = started_report.get("process_group")
                 if not isinstance(group, int) or isinstance(group, bool):
                     group = None
@@ -753,12 +758,13 @@ class SeatbeltSandboxRunner(SandboxRunner):
     def _launcher_line(process: subprocess.Popen) -> dict:
         """One line of the launcher's account, or an empty record.
 
-        The first names the experiment's process group, which only exists once
-        the child does, so the parent cannot know it in advance. The second
-        says what happened - exited, timeout, orphan - and carries the
-        program's own status separately from that account. Encoding the two in
-        one exit code made a program that exited 124 indistinguishable from a
-        run the sandbox timed out.
+        A successful first record names the experiment's process group, which
+        only exists once the child does, so the parent cannot know it in
+        advance. A launch failure is instead a terminal first record. After a
+        successful start, the second says what happened - exited, timeout,
+        orphan - and carries the program's own status separately from that
+        account. Encoding the two in one exit code made a program that exited
+        124 indistinguishable from a run the sandbox timed out.
 
         Read as it is produced, so the pipe cannot fill and block the launcher.
         Malformed or missing lines are empty dictionaries: the caller falls

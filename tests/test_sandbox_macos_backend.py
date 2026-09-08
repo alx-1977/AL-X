@@ -17,6 +17,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.contracts.sandbox import MAX_FILE_BYTES, MAX_PROCESSES, SandboxRequest  # noqa: E402
 from alx.providers.sandbox_macos import (  # noqa: E402
     LIVE_RUN_NAME,
@@ -26,6 +27,7 @@ from alx.providers.sandbox_macos import (  # noqa: E402
 from alx.providers.sandbox_macos import launcher as sandbox_launcher  # noqa: E402
 from alx.providers.sandbox_macos import runner as sandbox_runner  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
+from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT, build_sandbox_executors  # noqa: E402
 
 
 class TrustedLauncherTest(unittest.TestCase):
@@ -397,6 +399,36 @@ class TrustedLauncherTest(unittest.TestCase):
 
         self.assertTrue(outcome.timed_out)
         self.assertLess(time.monotonic() - started, 4)
+
+    def test_a_failed_inner_launch_is_a_capability_failure_not_an_outcome(self) -> None:
+        """A program that never started has no exit status to report."""
+        unavailable = self.root / "not-executable"
+        unavailable.write_text("not an executable", encoding="utf-8")
+        runner = SeatbeltSandboxRunner(
+            self.workspace,
+            sandbox_exec=str(unavailable),
+        )
+
+        def run(request: SandboxRequest):
+            paths = self.workspace.prepare(
+                request.experiment_id, request.session_id, request.run_id
+            )
+            return runner.run(request, paths)
+
+        executor = build_sandbox_executors(
+            run, lambda: "call-launch-failed", lambda: "run-launch-failed"
+        )[RUN_SANDBOX_EXPERIMENT]
+        result = executor(
+            {
+                "experiment_id": "exp-launch-failed",
+                "session_id": "ses-launch-failed",
+                "source": "print('never ran')",
+            }
+        )
+
+        self.assertIs(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "sandbox_unavailable")
+        self.assertNotIn("exit_status", result.values)
 
     def test_a_program_exit_of_124_is_not_a_timeout(self) -> None:
         if not self.runner.available():

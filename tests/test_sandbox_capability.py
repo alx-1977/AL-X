@@ -274,6 +274,41 @@ class SandboxCapabilityTest(unittest.TestCase):
         self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
         self.assertEqual(attempt.result.failure["code"], "arguments_unusable")
 
+    def test_an_empty_entry_filename_is_not_replaced_by_the_default(self) -> None:
+        attempt = self.broker.dispatch(
+            CapabilityCall(
+                "call-1",
+                RUN_SANDBOX_EXPERIMENT,
+                {
+                    "experiment_id": "exp-a",
+                    "session_id": "ses-a",
+                    "source": "print(1)",
+                    "entry_filename": "",
+                },
+            ),
+            self._authority(frozenset({SANDBOX_EXECUTE_PERMISSION})),
+        )
+        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "arguments_unusable")
+        self.assertFalse((self.root / "workspaces" / "exp-a").exists())
+
+    def test_non_utf8_source_is_rejected_before_workspace_creation(self) -> None:
+        attempt = self.broker.dispatch(
+            CapabilityCall(
+                "call-1",
+                RUN_SANDBOX_EXPERIMENT,
+                {
+                    "experiment_id": "exp-a",
+                    "session_id": "ses-a",
+                    "source": chr(0xD800),
+                },
+            ),
+            self._authority(frozenset({SANDBOX_EXECUTE_PERMISSION})),
+        )
+        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "arguments_unusable")
+        self.assertFalse((self.root / "workspaces" / "exp-a").exists())
+
     def test_an_exhausted_budget_refuses_rather_than_running(self) -> None:
         runtime = build_sandbox_runtime(
             True,

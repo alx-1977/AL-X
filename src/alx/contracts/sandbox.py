@@ -190,6 +190,10 @@ class SandboxRequest:
             raise ValueError("source must not be blank")
         if len(self.source) > MAX_SOURCE_CHARACTERS:
             raise ValueError("source exceeds the permitted size")
+        try:
+            self.source.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("source must be valid UTF-8 text") from error
         if not valid_entry_filename(self.entry_filename):
             raise ValueError("entry filename must be a plain .py segment")
         if not isinstance(self.wall_seconds, int) or isinstance(self.wall_seconds, bool):

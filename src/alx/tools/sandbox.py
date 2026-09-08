@@ -139,12 +139,15 @@ def build_sandbox_executors(
     def run(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
         try:
+            entry_filename = arguments.get("entry_filename")
             request = SandboxRequest(
                 experiment_id=str(arguments["experiment_id"]),
                 session_id=str(arguments["session_id"]),
                 run_id=run_id_source(),
                 source=str(arguments["source"]),
-                entry_filename=str(arguments.get("entry_filename") or "experiment.py"),
+                entry_filename=str(
+                    "experiment.py" if entry_filename is None else entry_filename
+                ),
                 # An omitted value takes the default; a supplied one is passed
                 # through for SandboxRequest to validate. `or` conflated the
                 # two, so an explicit zero became 30 seconds and ran, when the
