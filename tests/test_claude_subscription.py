@@ -518,8 +518,32 @@ class MalformedOutputTest(unittest.TestCase):
         )
         model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
 
-        with self.assertRaises(ProviderError):
+        with self.assertRaises(ProviderError) as caught:
             model.complete(_request())
+
+        self.assertEqual(caught.exception.reason, "cli_failed")
+
+    def test_a_malicious_subtype_cannot_reach_error_reason_or_logs(self) -> None:
+        malicious = "error\nFORGED LOG\x1b[31m\tsecret"
+        runner = _Recorder(
+            json.dumps(
+                {"subtype": malicious, "is_error": False, "result": {}}
+            )
+        )
+        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
+
+        with self.assertLogs(
+            "alx.providers.claude_subscription", level="INFO"
+        ) as logs:
+            with self.assertRaises(ProviderError) as caught:
+                model.complete(_request())
+
+        self.assertEqual(caught.exception.reason, "cli_failed")
+        log_output = "\n".join(logs.output)
+        self.assertIn("cli_failed", log_output)
+        self.assertNotIn("FORGED LOG", log_output)
+        self.assertNotIn("secret", log_output)
+        self.assertNotIn("\x1b", caught.exception.reason)
 
 
 class TerminalLatchingTest(unittest.TestCase):

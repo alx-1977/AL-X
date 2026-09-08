@@ -452,9 +452,11 @@ class ClaudeSubscriptionReasoningModel:
                 self._failure_code(str(envelope.get("result", "")), "")
             )
         if envelope.get("subtype") not in (None, "success"):
-            raise _ClaudeProtocolError(
-                f"response_{str(envelope.get('subtype'))[:40]}"
-            )
+            # `subtype` is external text. It may select failure here, but it
+            # must never become an error identifier, telemetry value or log
+            # content. This remains an ordinary CLI failure rather than an
+            # auth, exhaustion or malformed-output latch.
+            raise _ClaudeProtocolError("cli_failed")
         # The schema-conformant decision arrives in its own field. `result`
         # carries the assistant's prose for the same turn, which is not the
         # decision and does not parse as one: reading `result` first made every
