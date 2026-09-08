@@ -926,6 +926,7 @@ class IndependentReviewFindingsTest(unittest.TestCase):
         (paths.session_state / "a.txt").write_text("x")
         self.assertFalse(self.workspace.walk(paths.session_state).truncated)
 
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS file flags")
     def test_retention_deletes_bytes_the_experiment_protected(self) -> None:
         """G4: the previous fix stopped the sweep aborting, and stopped it
         deleting.
@@ -1122,6 +1123,7 @@ class FixesOfFixesTest(unittest.TestCase):
         self.workspace = SandboxWorkspace(self.root / "ws")
         self.runner = SeatbeltSandboxRunner(self.workspace)
 
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS file flags")
     def test_clearing_barriers_never_follows_a_link_to_a_host_file(self) -> None:
         """The retention fix wrote outside the workspace.
 

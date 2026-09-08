@@ -30,6 +30,7 @@ from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
 from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT, build_sandbox_executors  # noqa: E402
 
 
+@unittest.skipUnless(sys.platform == "darwin", "requires the macOS Sandbox backend")
 class TrustedLauncherTest(unittest.TestCase):
     """The launcher: limits applied safely, and nothing outliving the runtime.
 
