@@ -689,7 +689,7 @@ The following were verified by test on this machine rather than assumed:
 - a child process spawned by the experiment inherits the confinement and cannot escape it;
 - an unconfined profile fails to start the interpreter at all, proving the profile is applied.
 
-In addition: the child process receives an explicitly constructed empty environment, never the runtime's environment and never the `.env` mapping, so no credential can be inherited; `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_NPROC` are applied and were verified effective; the process runs in its own process group and a wall-clock timeout escalates from `SIGTERM` to `SIGKILL` across that group, so a run cannot outlive its call.
+In the current macOS development backend, the child process receives an explicitly constructed empty environment, never the runtime's environment and never the `.env` mapping, so no credential can be inherited; `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_NPROC` are applied and were verified effective; the experiment runs in its own process group; and the supervising launcher enforces the wall-clock timeout by sending `SIGKILL` to that group. These are properties of the Seatbelt backend, not requirements that a future backend use the same mechanisms.
 
 Read-only access to production data is permitted by the Laws but is **not** granted in V1. Denying all repository and production reads is simpler and verified. AL/X can pass whatever data an experiment needs into the source she writes, which keeps her judgement in the loop about what the experiment sees.
 
@@ -697,7 +697,7 @@ Read-only access to production data is permitted by the Laws but is **not** gran
 
 The architecture is platform-independent by construction. `SandboxRunner` is the abstraction; macOS with Seatbelt is the current development implementation.
 
-A future runner backed by Linux namespaces and cgroups, a container, or a virtual machine may satisfy the stronger production containment requirement above **without changing the capability, the broker, the SafetyGate, the Core, or the experiment and session model.** Only the runner implementation changes. That is the property that keeps the present host limitation from becoming an architectural commitment.
+A future runner backed by Linux namespaces and cgroups, a container, or a virtual machine may satisfy the stronger production containment requirement above **without changing the capability, the broker, the SafetyGate, the Core, or the experiment and session model.** The backend owns confinement, execution, supervision, process identity and orphan recovery, so replacing macOS means replacing that backend rather than extending shared retention logic. That is the property that keeps the present host limitation from becoming an architectural commitment.
 
 Where a platform provides no supported confinement mechanism, the capability is not registered at all rather than offered in a weakened form.
 
@@ -727,9 +727,9 @@ The manifest is bounded by construction and contains no experiment-authored free
 
 Deletion refuses any path that does not resolve to a child of the sandbox root and never follows symbolic links.
 
-### The trusted launcher, and what reaping actually means
+### Current macOS backend: the trusted launcher and orphan recovery
 
-An experiment is not started directly by the runtime. A small launcher sits
+In the current macOS development backend, an experiment is not started directly by the runtime. A small launcher sits
 between them: it applies the resource limits, establishes the process group,
 starts the one program, and supervises it. It is run as a script and never
 imported, so there is still exactly one route from AL/X to a running program —
@@ -744,7 +744,7 @@ inherits a held lock deadlocks before it can exec, and the call that started it
 never returns, holding the session lease and the day's reservation with it. The
 launcher is single-threaded, so the same work is safe there.
 
-And an experiment must not outlive the runtime. Its process identity used to
+The platform-independent invariant is that an experiment must not outlive the runtime. On macOS, its process identity used to
 exist only in the memory of the process that started it, so a crash left a
 program running that nothing would ever end — a sleeping process consumes no
 CPU allowance, so neither the wall clock nor RLIMIT_CPU applies. The launcher
@@ -752,20 +752,25 @@ watches the parent that asked for the run and kills the whole group when that
 parent disappears, immediately, rather than waiting for a restart that may
 never come.
 
-The launcher holds no authority. It cannot reach the Core, a capability, a goal
+The macOS launcher holds no authority. It cannot reach the Core, a capability, a goal
 or a store; it imports nothing from `alx`, has no configuration, no network and
 no interface beyond a fixed set of arguments naming one program to run. It runs
-inside the same confinement profile as the experiment it supervises.
+outside Seatbelt because the approved profile permits only self-targeted
+signals; the experiment it starts, and only that experiment, runs inside the
+Seatbelt profile in its own process group.
 
-Startup recovery is the second half. Each running experiment leaves a record of
+macOS startup recovery is the second half. Each running experiment leaves a record of
 its process identity beside its evidence, written by the parent into a
 directory the confined process cannot write to, so it cannot be forged. A later
 runtime reads those records and reaps what a crash left behind — but never on
 the strength of a stored number alone. Process identifiers are reused, and
 signalling a recorded one because it happens to exist would eventually kill
 something unrelated. A group is signalled only when the surviving process still
-identifies as that run; anything else has its stale record removed and is left
-alone.
+identifies as that run through its Darwin kernel process-group and process-start
+identity; anything else has its stale record removed and is left alone. A future
+backend must enforce the same ownership and orphan-cleanup invariants using its
+own platform identity, such as a dedicated Linux cgroup, rather than inheriting
+this PID and process-group mechanism.
 
 ### What is returned, and what is durably recorded
 

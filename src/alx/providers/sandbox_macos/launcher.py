@@ -1,6 +1,6 @@
 """The trusted launcher: start one experiment, supervise it, outlive nothing.
 
-Run as a script by `SandboxRunner`, never imported by the runtime. It is the
+Run as a script by the macOS `SandboxRunner`, never imported by the runtime. It is the
 one place that applies resource limits and establishes the experiment's process
 group, and it exists because doing either from inside AL/X was unsafe.
 
@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import resource
+import select
 import signal
 import subprocess
 import sys
@@ -71,30 +72,62 @@ def _apply_limits(cpu_seconds: int, file_bytes: int, processes: int) -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
-def _reap(group: int) -> None:
-    """End everything in the group except this process.
-
-    Signalling the group would include the launcher, which leads it: doing so
-    turned every successful run into an exit status of -9, and SIGKILL cannot
-    be ignored to work around it. So the launcher leaves the group first and
-    then signals it. From outside, `killpg` reaches every member and not this
-    process, which is exactly the set that must not outlive the call.
-
-    Enumerating the group would need `ps`, and the profile allows executing
-    only the interpreter - correctly, and this is not a reason to widen it.
-    """
+def _emit(values: dict[str, object]) -> bool:
+    """Write one protocol record, or report that the runtime is already gone."""
     try:
-        os.setpgid(0, 0)
-    except OSError:
-        # Already elsewhere, or not permitted. Killing the group would then
-        # include this process; exiting is what ends the run either way.
-        return
+        print(json.dumps(values), flush=True)
+    except (BrokenPipeError, OSError):
+        return False
+    return True
+
+
+def _report(reason: str, status: int | None) -> int:
+    """Say what happened, and exit 0 for having supervised it.
+
+    The outcome used to be encoded in this process's exit status: 124 for a
+    deadline, 125 for a lost parent, `128 - signal` for a signalled program.
+    Those numbers are also ordinary exit statuses a program may choose, so a
+    program that exited 124 was reported as a sandbox timeout, and one that
+    exited 137 as a program killed by SIGKILL. Evidence that cannot be told
+    apart from something else is not evidence.
+
+    So the supervisor's account and the program's status travel separately.
+    This line is the account; the status inside it is the program's own, or
+    null when the sandbox ended the run rather than the program ending itself.
+    """
+    # Parent loss closes the report pipe. Cleanup has already happened;
+    # reporting must not be able to undo it.
+    _emit({"reason": reason, "status": status})
+    return 0
+
+
+def _reap(group: int, leader: subprocess.Popen | None = None) -> None:
+    """End the experiment's whole process group.
+
+    The group is the experiment's own, not this launcher's. An earlier version
+    put the experiment in the launcher's group and then tried to step out of it
+    before signalling, because `killpg` would otherwise have killed the
+    supervisor too - which it did, turning every successful run into an exit
+    status of -9.
+
+    Stepping out cannot work. The launcher is a session leader, because the
+    runtime starts it with its own session, and a session leader is forbidden
+    to change its process group: `setpgid` fails with EPERM every time. The
+    error was caught and the function returned, so the kill never happened at
+    all and an experiment outlived the runtime exactly as before.
+
+    Giving the experiment its own group removes the conflict rather than
+    working around it: the launcher is not a member, so `killpg` reaches
+    everything the experiment started and nothing else.
+    """
     try:
         os.killpg(group, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         return
     deadline = time.monotonic() + _REAP_GRACE_SECONDS
     while time.monotonic() < deadline:
+        if leader is not None:
+            leader.poll()
         try:
             os.killpg(group, 0)
         except (ProcessLookupError, PermissionError):
@@ -104,6 +137,8 @@ def _reap(group: int) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--sandbox-exec", required=True)
+    parser.add_argument("--profile", required=True)
     parser.add_argument("--interpreter", required=True)
     parser.add_argument("--program", required=True)
     parser.add_argument("--directory", required=True)
@@ -117,36 +152,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--file-bytes", type=int, required=True)
     parser.add_argument("--processes", type=int, required=True)
     parser.add_argument("--wall-seconds", type=float, required=True)
-    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--parent-fd", type=int, required=True)
     arguments = parser.parse_args(argv)
 
-    # Its own session, so the experiment and anything it spawns can be
-    # signalled as one group, and so a terminal signal to AL/X does not reach
-    # the experiment by accident. The parent already starts this process in a
-    # new session, in which case it is the leader already and setsid refuses;
-    # either way the group below is this process's own.
-    try:
-        os.setsid()
-    except OSError:
-        pass
-    group = os.getpgid(0)
-
-    # The identity a later runtime uses to decide whether a surviving process
-    # is this run's or an unrelated one that reused the number. Written before
-    # the program starts and to stdout, so the caller records it without
-    # racing the child.
-    print(
-        json.dumps(
-            {
-                "launcher_pid": os.getpid(),
-                "process_group": group,
-                "identity": arguments.identity,
-                "started_at": time.time(),
-            }
-        ),
-        flush=True,
-    )
-
+    # This trusted supervisor deliberately runs outside Seatbelt. A confined
+    # process may signal only itself under the approved profile, so placing the
+    # supervisor inside that boundary made cross-session cleanup impossible.
+    # The program it starts remains behind sandbox-exec in its own session.
     # The program's streams are the descriptors this launcher was given, which
     # the parent opened on the run directory. The run directory is not writable
     # from inside the sandbox - that is what keeps a program from editing its
@@ -154,13 +166,25 @@ def main(argv: list[str] | None = None) -> int:
     # are inherited instead.
     try:
         child = subprocess.Popen(  # noqa: S603 - the one execution site
-            [arguments.interpreter, "-E", "-S", arguments.program],
+            [
+                arguments.sandbox_exec,
+                "-f",
+                arguments.profile,
+                arguments.interpreter,
+                "-E",
+                "-S",
+                arguments.program,
+            ],
             stdin=subprocess.DEVNULL,
             stdout=arguments.stdout_fd,
             stderr=arguments.stderr_fd,
             cwd=arguments.directory,
             env={},
-            close_fds=False,
+            close_fds=True,
+            # The experiment's own session, so its group contains it and
+            # whatever it spawns, and never this supervisor. That is what
+            # makes the group signallable.
+            start_new_session=True,
             # Applied to the child, from this process. `preexec_fn` is unsafe
             # in a multi-threaded program, which is what the AL/X runtime is
             # and this launcher deliberately is not: nothing here has ever
@@ -177,29 +201,56 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         return 71
 
+    # The experiment's group, read now that it exists. Reported to the parent
+    # so a later runtime can reap this group after a crash, and used by every
+    # kill below.
+    try:
+        group = os.getpgid(child.pid)
+    except OSError:
+        group = child.pid
+
+    # The identity a later runtime uses to decide whether a surviving process
+    # belongs to this run. One line, on stdout, which the parent reads.
+    if not _emit(
+        {
+            "launcher_pid": os.getpid(),
+            "experiment_pid": child.pid,
+            "process_group": group,
+            "identity": arguments.identity,
+            "started_at": time.time(),
+        }
+    ):
+        # The runtime can disappear in the few instructions between spawning
+        # the experiment and reporting its identity. A broken first report is
+        # therefore parent-loss evidence too, not a reason to abandon cleanup.
+        _reap(group, child)
+        return 0
+
     deadline = time.monotonic() + arguments.wall_seconds
     while True:
         status = child.poll()
         if status is not None:
-            # The leader finished. Anything it spawned is still in this
-            # group, and D-027 does not permit that to outlive the call.
-            _reap(group)
-            return status if status >= 0 else 128 - status
+            # The program ended on its own. Anything it spawned is still in
+            # its group, and D-027 does not permit that to outlive the call.
+            _reap(group, child)
+            return _report("exited", status)
 
         if time.monotonic() >= deadline:
-            _reap(group)
-            return 124
+            _reap(group, child)
+            return _report("timeout", None)
 
-        # The parent that asked for this experiment. If it is gone, the
-        # run is unsupervised: nothing is measuring its wall clock, nothing
-        # will collect its evidence, and nothing will delete what it wrote.
-        # A sleeping process would otherwise sit there indefinitely,
-        # because CPU limits do not end a process that uses no CPU.
-        if os.getppid() != arguments.parent_pid:
-            _reap(group)
-            return 125
-
-        time.sleep(_PARENT_POLL_SECONDS)
+        # The runtime owns the only write end of this pipe. EOF is therefore
+        # kernel evidence that the runtime disappeared or deliberately closed
+        # its end; it does not depend on PID reuse or reparenting behaviour.
+        readable, _, _ = select.select(
+            [arguments.parent_fd],
+            [],
+            [],
+            min(_PARENT_POLL_SECONDS, max(0.0, deadline - time.monotonic())),
+        )
+        if readable and os.read(arguments.parent_fd, 1) == b"":
+            _reap(group, child)
+            return _report("orphan", None)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess

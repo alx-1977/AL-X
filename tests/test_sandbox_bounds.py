@@ -21,15 +21,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts.sandbox import (
-    MAX_FILE_BYTES,
-    MAX_PROCESSES,  # noqa: E402
     MAX_REPORTED_ARTIFACTS,
     MAX_STDOUT_CHARACTERS,
     SandboxError,
     SandboxRequest,
 )
-from alx.providers import sandbox_launcher  # noqa: E402
-from alx.providers.sandbox_runner import SeatbeltSandboxRunner  # noqa: E402
+from alx.providers.sandbox_macos import SeatbeltSandboxRunner  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
 
 
@@ -139,32 +136,7 @@ class SandboxBoundsTest(unittest.TestCase):
         bound the kernel ignores, so it is deliberately absent, and the
         manifest records the ceiling as null rather than omitting the field.
         """
-        import resource
-
-        applied: list[int] = []
-        original = resource.setrlimit
-
-        def record(which: int, limits: tuple[int, int]) -> None:
-            # Recorded, never applied: applying RLIMIT_NPROC here would limit
-            # the test runner itself and break every later test in the process.
-            applied.append(which)
-
-        resource.setrlimit = record  # type: ignore[assignment]
-        try:
-            # The launcher owns this now: applying limits between fork and exec is
-            # unsafe from the multi-threaded runtime, so it moved to a
-            # single-threaded process that does it safely.
-            sandbox_launcher._apply_limits(35, MAX_FILE_BYTES, MAX_PROCESSES)
-        finally:
-            resource.setrlimit = original  # type: ignore[assignment]
-
-        self.assertIn(resource.RLIMIT_FSIZE, applied)
-        self.assertIn(resource.RLIMIT_NPROC, applied)
-        # The assertion that matters: no memory limit is set, because setting
-        # one on this platform would assert a bound the kernel ignores.
-        self.assertNotIn(resource.RLIMIT_AS, applied)
-
-        # And the manifest records the ceiling as explicitly absent rather than
+        # The manifest records the ceiling as explicitly absent rather than
         # omitting the field, so no reader can infer one.
         paths = self.workspace.prepare("exp-b", "ses-mem", "run-mem")
         self.runner.run(

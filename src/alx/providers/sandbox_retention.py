@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,11 +29,6 @@ from alx.providers.sandbox_workspace import MANIFEST_NAME, SandboxWorkspace
 
 
 LOGGER = logging.getLogger(__name__)
-
-# The note a running experiment leaves beside its evidence, written by the
-# parent. Defined here because recovery reads it and the runner writes it, and
-# a name spelled twice is a name that drifts.
-LIVE_RUN_NAME = "live.json"
 
 # Fifteen minutes. The TTL this enforces is measured in hours, so the sweep
 # only has to be much finer than the deadline, not close to it.
@@ -66,73 +60,6 @@ class SandboxRetention:
             raise ValueError("ttl_seconds must be positive")
         self._workspace = workspace
         self._ttl = ttl_seconds
-
-    def reap_orphans(self) -> int:
-        """Kill experiment groups a crashed runtime left running.
-
-        D-027 promises this and nothing performed it: an experiment's process
-        identity lived only in the memory of the process that started it, so a
-        crash left a program running that no wall clock, CPU limit or cleanup
-        would ever end - a sleeping process consumes no CPU allowance at all.
-
-        A pid is not proof. Numbers are reused, and signalling a recorded pid
-        because it happens to exist would eventually kill something unrelated
-        and entirely innocent. So a recorded run is reaped only when the
-        surviving process still identifies as that run: its process group must
-        match the record, and the leader must still be a member of it. A
-        process whose group has been recycled by something else fails that
-        test and is left alone, its note simply removed.
-
-        Returns how many groups were reaped.
-        """
-        root = self._workspace.root
-        if not root.is_dir():
-            return 0
-        reaped = 0
-        for note in sorted(root.glob(f"*/*/runs/*/{LIVE_RUN_NAME}")):
-            try:
-                record = json.loads(note.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                self._forget(note)
-                continue
-            group = record.get("process_group")
-            pid = record.get("pid")
-            if not isinstance(group, int) or not isinstance(pid, int):
-                self._forget(note)
-                continue
-            if record.get("parent_pid") == os.getpid():
-                # This runtime started it; it is not an orphan.
-                continue
-            if self._belongs_to_run(pid, group):
-                try:
-                    os.killpg(group, signal.SIGKILL)
-                    reaped += 1
-                    LOGGER.info("Reaped a sandbox process group left by a crash")
-                except (ProcessLookupError, PermissionError):
-                    pass
-            self._forget(note)
-        return reaped
-
-    @staticmethod
-    def _belongs_to_run(pid: int, group: int) -> bool:
-        """Whether the surviving process is still the run that was recorded.
-
-        The leader's own process group must still be the recorded one. A pid
-        that has been reused belongs to some other group, and a group number
-        reused by an unrelated session will not contain this leader, so both
-        directions of the mistake fail the same check.
-        """
-        try:
-            return os.getpgid(pid) == group
-        except (ProcessLookupError, PermissionError):
-            return False
-
-    @staticmethod
-    def _forget(note: Path) -> None:
-        try:
-            note.unlink(missing_ok=True)
-        except OSError:
-            LOGGER.warning("A stale sandbox run note could not be removed")
 
     async def run(self, interval_seconds: float = _SWEEP_INTERVAL_SECONDS) -> None:
         """Sweep for the life of the process, not only when something runs.

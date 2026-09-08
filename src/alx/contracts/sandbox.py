@@ -48,10 +48,9 @@ MAX_REPORTED_ARTIFACTS = 50
 MAX_WALKED_FILES = 5_000
 MAX_WORKSPACE_BYTES = 64 * 1024 * 1024
 
-# Per-process limits applied through setrlimit. RLIMIT_AS is deliberately
-# absent: it is ineffective on macOS arm64, and applying it would assert a
-# memory ceiling the kernel does not enforce. D-027 records that as a
-# development-host limitation rather than pretending it is bounded.
+# Backend-enforced V1 file and process ceilings. Memory containment is a
+# production-backend requirement recorded by D-027, not a shared numeric limit
+# that every platform is assumed to enforce through the same mechanism.
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_PROCESSES = 32
 

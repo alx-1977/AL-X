@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts.sandbox import SandboxRequest  # noqa: E402
 from alx.providers.sandbox_retention import SandboxRetention  # noqa: E402
-from alx.providers.sandbox_runner import SeatbeltSandboxRunner  # noqa: E402
+from alx.providers.sandbox_macos import SeatbeltSandboxRunner  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
 
 

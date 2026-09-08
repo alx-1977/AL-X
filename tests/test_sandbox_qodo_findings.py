@@ -37,7 +37,7 @@ from alx.observability.sandbox_ledger import (  # noqa: E402
     SandboxBudgetExceeded,
 )
 from alx.providers.sandbox_retention import SandboxRetention  # noqa: E402
-from alx.providers.sandbox_runner import SeatbeltSandboxRunner  # noqa: E402
+from alx.providers.sandbox_macos import SeatbeltSandboxRunner  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
 
 

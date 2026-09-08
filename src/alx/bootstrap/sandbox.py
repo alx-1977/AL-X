@@ -30,7 +30,8 @@ from alx.observability.sandbox_ledger import (
     SandboxLedgerCorrupt,
 )
 from alx.providers.sandbox_retention import SandboxRetention
-from alx.providers.sandbox_runner import SandboxRunner, SeatbeltSandboxRunner
+from alx.providers.sandbox_macos import SeatbeltSandboxRunner
+from alx.providers.sandbox_runner import SandboxRunner
 from alx.providers.sandbox_workspace import SandboxWorkspace
 from alx.safety import AuthorityPolicy
 from alx.tools.sandbox import (
@@ -107,10 +108,10 @@ def build_sandbox_runtime(
     # anything. A periodic sweep runs for the life of the process as well, so
     # the retention deadline does not depend on a restart or on another
     # experiment being started.
-    reaped = retention.reap_orphans()
+    reaped = selected.reap_orphans()
     if reaped:
         LOGGER.warning(
-            "Reaped %d sandbox process group(s) left by a previous run", reaped
+            "Reaped %d sandbox run(s) left by a previous runtime", reaped
         )
     retention.sweep()
 

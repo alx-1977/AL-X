@@ -45,7 +45,7 @@ PRODUCTION_ROOT = REPOSITORY_ROOT / "src" / "alx"
 
 # Two files may start a process, and they are one path rather than two.
 #
-# `sandbox_runner.py` starts the launcher. The launcher starts the experiment.
+# The macOS runner starts the launcher. The launcher starts the experiment.
 # Nothing else in production starts anything, and nothing - including the
 # runtime - imports the launcher: it is run as a script, by that one runner,
 # and a separate test asserts no module imports it. So there is still exactly
@@ -55,9 +55,16 @@ PRODUCTION_ROOT = REPOSITORY_ROOT / "src" / "alx"
 # exec is unsafe from a multi-threaded process, which the AL/X runtime is; the
 # launcher is single-threaded and does it safely. It also supervises the run
 # after the parent is gone, which a function inside the parent cannot do.
-EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "sandbox_runner.py"
-LAUNCHER_SITE = PRODUCTION_ROOT / "providers" / "sandbox_launcher.py"
+MACOS_BACKEND = PRODUCTION_ROOT / "providers" / "sandbox_macos"
+EXECUTION_SITE = MACOS_BACKEND / "runner.py"
+LAUNCHER_SITE = MACOS_BACKEND / "launcher.py"
 EXECUTION_SITES = {EXECUTION_SITE, LAUNCHER_SITE}
+
+
+def _sandbox_modules() -> list[Path]:
+    named = set(PRODUCTION_ROOT.rglob("*sandbox*.py"))
+    named.update(MACOS_BACKEND.rglob("*.py"))
+    return sorted(named)
 
 
 class SandboxCapabilityTest(unittest.TestCase):
@@ -140,7 +147,7 @@ class SandboxCapabilityTest(unittest.TestCase):
 
         # And no sandbox module depends on the concept: a comment may explain
         # why the origin is irrelevant, but nothing may import or branch on it.
-        for path in sorted(PRODUCTION_ROOT.rglob("*sandbox*.py")):
+        for path in _sandbox_modules():
             with self.subTest(module=path.name):
                 tree = ast.parse(path.read_text())
                 for node in ast.walk(tree):
@@ -446,7 +453,10 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     names = [node.module or ""]
                 else:
                     continue
-                if any("sandbox_launcher" in name for name in names):
+                if any(
+                    name == "alx.providers.sandbox_macos.launcher"
+                    for name in names
+                ):
                     offenders.append(
                         f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}"
                     )
@@ -469,6 +479,28 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     f"the launcher imported {name}",
                 )
 
+    def test_process_recovery_is_owned_by_the_backend(self) -> None:
+        shared_retention = (
+            PRODUCTION_ROOT / "providers" / "sandbox_retention.py"
+        ).read_text()
+        for backend_detail in (
+            "process_identity",
+            "process_group",
+            "killpg",
+            "libproc",
+            "live.json",
+        ):
+            self.assertNotIn(backend_detail, shared_retention)
+
+    def test_only_bootstrap_selects_the_macos_backend(self) -> None:
+        references = []
+        for path in self._production_modules():
+            if MACOS_BACKEND in path.parents:
+                continue
+            if "alx.providers.sandbox_macos" in path.read_text():
+                references.append(path.relative_to(REPOSITORY_ROOT).as_posix())
+        self.assertEqual(references, ["src/alx/bootstrap/sandbox.py"])
+
     def test_the_execution_site_itself_still_executes(self) -> None:
         """Guards the two tests above against passing for the wrong reason."""
         source = EXECUTION_SITE.read_text()
@@ -490,7 +522,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_sandbox_module_can_reach_a_promotion_path(self) -> None:
         """D-027: there is no path from a run to the repository or a deploy."""
         forbidden = ("git", "subprocess.run(['git'", "gh ", "pull_request", "deploy")
-        for path in sorted(PRODUCTION_ROOT.rglob("*sandbox*.py")):
+        for path in _sandbox_modules():
             source = path.read_text()
             with self.subTest(module=path.name):
                 self.assertNotIn("import git", source)

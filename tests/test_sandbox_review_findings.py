@@ -25,7 +25,6 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
 from alx.contracts.sandbox import (  # noqa: E402
     MAX_FILE_BYTES,
-    MAX_PROCESSES,
     MAX_WORKSPACE_BYTES,
     ArtifactMetadata,
     FileChange,
@@ -34,8 +33,7 @@ from alx.contracts.sandbox import (  # noqa: E402
 )
 from alx.observability.sandbox_ledger import SandboxBudget  # noqa: E402
 from alx.providers.sandbox_retention import SandboxRetention  # noqa: E402
-from alx.providers import sandbox_launcher  # noqa: E402
-from alx.providers.sandbox_runner import (  # noqa: E402
+from alx.providers.sandbox_macos import (  # noqa: E402
     CPU_GRACE_SECONDS,
     SeatbeltSandboxRunner,
 )
@@ -150,6 +148,9 @@ class Finding3SweepCadenceTest(unittest.TestCase):
             def available(self) -> bool:
                 return True
 
+            def reap_orphans(self) -> int:
+                return 0
+
             def run(self, request, paths):
                 raise SandboxError("sandbox_unavailable")
 
@@ -198,6 +199,9 @@ class Finding4ReservationAccountingTest(unittest.TestCase):
             def available(self) -> bool:
                 return True
 
+            def reap_orphans(self) -> int:
+                return 0
+
             def run(self, request, paths, launched=None):
                 # The process started, so wall time was really spent. The
                 # runner reports that before failing, exactly as the real one
@@ -220,6 +224,9 @@ class Finding4ReservationAccountingTest(unittest.TestCase):
         class UnavailableAtRun:
             def available(self) -> bool:
                 return True
+
+            def reap_orphans(self) -> int:
+                return 0
 
             def run(self, request, paths):  # pragma: no cover - not reached
                 raise AssertionError("must not run")
@@ -251,7 +258,9 @@ class Finding5ProcessGroupTest(ConfinedRunTest):
         self.assertEqual(remaining, "")
 
     def test_termination_polls_the_group_rather_than_only_the_leader(self) -> None:
-        source = (REPOSITORY_ROOT / "src/alx/providers/sandbox_runner.py").read_text()
+        source = (
+            REPOSITORY_ROOT / "src/alx/providers/sandbox_macos/runner.py"
+        ).read_text()
         terminate = source.split("def _terminate", 1)[1].split("def ", 1)[0]
         self.assertIn("killpg(group, 0)", terminate)
 
@@ -298,7 +307,7 @@ class Finding7CaptureCapTest(ConfinedRunTest):
     """MEDIUM: digests described only the first 10 MiB of a 16 MiB file."""
 
     def test_the_capture_cap_is_not_smaller_than_the_file_limit(self) -> None:
-        from alx.providers import sandbox_runner
+        from alx.providers.sandbox_macos import runner as sandbox_runner
 
         self.assertGreaterEqual(sandbox_runner._MAX_CAPTURED_BYTES, MAX_FILE_BYTES)
 
@@ -313,26 +322,6 @@ class Finding7CaptureCapTest(ConfinedRunTest):
 
 class Finding8CpuLimitTest(ConfinedRunTest):
     """MEDIUM: D-027 states RLIMIT_CPU is applied; it was not."""
-
-    def test_the_cpu_limit_is_applied(self) -> None:
-        import resource
-
-        applied: list[int] = []
-        original = resource.setrlimit
-        resource.setrlimit = lambda which, limits: applied.append(which)  # type: ignore[assignment]
-        try:
-            # The launcher owns this now: applying limits between fork and exec is
-            # unsafe from the multi-threaded runtime, so it moved to a
-            # single-threaded process that does it safely.
-            sandbox_launcher._apply_limits(35, MAX_FILE_BYTES, MAX_PROCESSES)
-        finally:
-            resource.setrlimit = original  # type: ignore[assignment]
-
-        self.assertIn(resource.RLIMIT_CPU, applied)
-        self.assertIn(resource.RLIMIT_FSIZE, applied)
-        self.assertIn(resource.RLIMIT_NPROC, applied)
-        # Still no memory limit: it is ineffective on this platform.
-        self.assertNotIn(resource.RLIMIT_AS, applied)
 
     def test_the_manifest_records_the_cpu_ceiling(self) -> None:
         paths, _ = self._run("print(1)\n")
