@@ -21,8 +21,8 @@ from alx.config.settings import (
     XeroSettings,
 )
 
+from alx.config.settings import SandboxSettings, sandbox_settings
 from alx.config.settings import MergeSettings, merge_settings
-
 from alx.config.settings import ReviewSettings, review_settings
 
 __all__ = [
@@ -45,6 +45,8 @@ __all__ = [
     "ResearchLimits",
     "ResearchSettings",
     "RuntimeSettings",
+    "SandboxSettings",
+    "sandbox_settings",
     "SpeechToTextSettings",
     "TextToSpeechSettings",
     "XeroSettings",

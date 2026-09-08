@@ -19,6 +19,7 @@ from alx.bootstrap.mail import (
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
+from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.repository import build_repository_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
@@ -73,7 +74,7 @@ from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteCo
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
-from alx.observability import BudgetExceeded, XERO_BILL_BUDGET, SQLiteUsageRecorder
+from alx.observability import BudgetExceeded, SandboxBudget, XERO_BILL_BUDGET, SQLiteUsageRecorder
 from alx.specialists import ModelSpecialist, extract_invoice
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
@@ -367,6 +368,45 @@ async def run(repository_root: Path) -> None:
         policies.update(web_runtime.policies)
         executors.update(web_runtime.executors)
         permissions.update(web_runtime.permissions)
+
+    # D-027 authorises isolated experimentation. The sandbox root is kept
+    # apart from the runtime storage root, which holds goals, memories and a
+    # private key. The repository, that storage root and the user's private
+    # keys are denied to the confined process explicitly.
+    #
+    # A relative sandbox root is resolved against the repository, exactly as
+    # the runtime storage root above is. Passed through as configured, it was
+    # interpreted against the process working directory: launching the service
+    # from elsewhere silently created a different workspace and a different
+    # ledger, so a session lost its history and the day's spend started again
+    # from zero.
+    sandbox_workspace_root = voice_settings.sandbox.workspace_root
+    sandbox_ledger_path = voice_settings.sandbox.ledger_path
+    if sandbox_workspace_root is not None and not sandbox_workspace_root.is_absolute():
+        sandbox_workspace_root = repository_root / sandbox_workspace_root
+    if sandbox_ledger_path is not None and not sandbox_ledger_path.is_absolute():
+        sandbox_ledger_path = repository_root / sandbox_ledger_path
+    sandbox_runtime = build_sandbox_runtime(
+        voice_settings.sandbox.is_usable,
+        sandbox_workspace_root,
+        sandbox_ledger_path,
+        lambda: current_call_id[0],
+        denied_read_paths=(
+            repository_root,
+            storage_root,
+            Path.home() / ".ssh",
+        ),
+        budget=SandboxBudget(
+            voice_settings.sandbox.daily_runs,
+            voice_settings.sandbox.daily_wall_seconds,
+        ),
+    )
+    if sandbox_runtime is not None:
+        for definition in sandbox_runtime.definitions:
+            registry.register(definition)
+        policies.update(sandbox_runtime.policies)
+        executors.update(sandbox_runtime.executors)
+        permissions.update(sandbox_runtime.permissions)
 
     # Requesting an external review is effectful and may spend review credits,
     # so its policy requires an approval grounded in Friedl's own turn.
@@ -731,6 +771,12 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(mail_poller.run())
             if task_runtime is not None:
                 runtime_tasks.create_task(task_runtime.poller.run())
+            if sandbox_runtime is not None:
+                # D-027's retention deadline is a property of time passing, not
+                # of anything happening. Swept only at composition and before
+                # each experiment, an idle runtime kept the last session's
+                # bytes indefinitely.
+                runtime_tasks.create_task(sandbox_runtime.retention.run())
     finally:
         # Cancelling the producer does not stop work already running inside
         # asyncio.to_thread: the coroutine unwinds while the worker keeps going.

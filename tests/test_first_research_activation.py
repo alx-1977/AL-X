@@ -691,17 +691,24 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "create_task"
         ]
-        # Exactly four: the voice server, the due-cognition tick, the
-        # mechanical mail poll, and the external-task watcher. Each is named,
-        # so a fifth scheduled activity fails here rather than passing on a
-        # count.
+        # Exactly five: the voice server, the due-cognition tick, the
+        # mechanical mail poll, the external-task watcher, and the sandbox
+        # retention sweep. Each is named, so a sixth scheduled activity fails
+        # here rather than passing on a count.
         #
         # The watcher belongs on this list for the same reason the mail poll
         # does: it observes something outside the process and decides nothing.
         # It cannot request a review, retry, spend or merge, which is asserted
         # structurally in tests/test_task_status.py.
+        #
+        # The retention sweep belongs for a narrower reason: it deletes
+        # expired experiment bytes and does nothing else. D-027 sets that
+        # deadline in hours, and a deadline enforced only when something else
+        # happens is not one - an idle runtime kept the last session's bytes
+        # indefinitely. It starts no work, reads no goal, and cannot reach a
+        # capability.
         rendered = [ast.dump(call) for call in scheduled]
-        self.assertEqual(len(scheduled), 4, rendered)
+        self.assertEqual(len(scheduled), 5, rendered)
         self.assertEqual(
             sorted(
                 name
@@ -709,11 +716,18 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
                     "serve_forever",
                     "due_cognition",
                     "mail_poller",
+                    "sandbox_runtime",
                     "task_runtime",
                 )
                 if any(name in item for item in rendered)
             ),
-            ["due_cognition", "mail_poller", "serve_forever", "task_runtime"],
+            [
+                "due_cognition",
+                "mail_poller",
+                "sandbox_runtime",
+                "serve_forever",
+                "task_runtime",
+            ],
         )
         for item in rendered:
             with self.subTest(task=item[:60]):

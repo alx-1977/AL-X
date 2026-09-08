@@ -65,6 +65,11 @@ from alx.tools.dhl import (
     build_dhl_executors,
 )
 
+from alx.tools.sandbox import (
+    DEFINITION as SANDBOX_DEFINITION,
+    RUN_SANDBOX_EXPERIMENT,
+    build_sandbox_executors,
+)
 from alx.tools.review import (
     DEFINITION as REVIEW_DEFINITION,
     REQUEST_EXTERNAL_REVIEW,
@@ -81,7 +86,11 @@ from alx.tools.repository import (
     build_repository_executors,
 )
 
+
 __all__ = [
+    "RUN_SANDBOX_EXPERIMENT",
+    "SANDBOX_DEFINITION",
+    "build_sandbox_executors",
     "REQUEST_EXTERNAL_REVIEW",
     "REVIEW_DEFINITION",
     "build_review_executors",
