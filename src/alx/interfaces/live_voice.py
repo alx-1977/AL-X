@@ -222,9 +222,29 @@ class VoiceSession:
         # Ordering rather than exclusion. Nothing here weighs how interesting
         # an item is: the only question asked is which source it came from, so
         # a person waiting is served before queued background work. Background
-        # work is not dropped, rate-limited or deferred by a timer, and D-024
+        # Distinct background work is not dropped, rate-limited or deferred by
+        # a timer. Equivalent re-emissions are coalesced below, and D-024
         # continues exactly as before once nothing is waiting.
         deferred_background: deque[tuple[str, Any]] = deque()
+        # An undelivered observation is re-emitted with the same durable
+        # identity. Keep its first queued occurrence and coalesce later copies;
+        # distinct observations retain their arrival order and are never
+        # truncated. The identifier leaves this set when its entry leaves the
+        # deque, allowing a still-undelivered observation to be offered again.
+        deferred_background_ids: set[str] = set()
+
+        def defer_background(entry: tuple[str, Any]) -> None:
+            event_id = entry[1].event_id
+            if event_id in deferred_background_ids:
+                return
+            deferred_background.append(entry)
+            deferred_background_ids.add(event_id)
+
+        def take_background() -> tuple[str, Any]:
+            entry = deferred_background.popleft()
+            deferred_background_ids.remove(entry[1].event_id)
+            return entry
+
         # Set when a background turn stopped without reasoning because the
         # conversation's execution budget was exhausted. While it holds, more
         # background work is deferred rather than run: the next one would take
@@ -249,19 +269,19 @@ class VoiceSession:
                     except asyncio.QueueEmpty:
                         break
                     if entry[0] == "background":
-                        deferred_background.append(entry)
+                        defer_background(entry)
                     else:
                         # A person turn, an error or her own words. Anything
                         # background found on the way keeps its place in
                         # `deferred_background` and runs once this is done.
                         return entry
                 if deferred_background and not background_stopped_on_budget[0]:
-                    return deferred_background.popleft()
+                    return take_background()
                 # Nothing runnable pending: wait, as the plain queue read did.
                 entry = await incoming.get()
                 if entry[0] != "background":
                     return entry
-                deferred_background.append(entry)
+                defer_background(entry)
 
         try:
             while True:

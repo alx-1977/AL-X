@@ -1224,6 +1224,102 @@ class BackgroundCheckpointStormTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Future()
             yield  # pragma: no cover - never reached
 
+    async def test_repeated_observations_are_coalesced_while_suppressed(self) -> None:
+        """Re-polls cannot grow the deferred queue; distinct mail stays ordered."""
+        first_finished = threading.Event()
+        typed = asyncio.Queue()
+        repeated = BackgroundEvent(
+            "mail:777:repeat",
+            "mail.message_arrived",
+            NOW,
+            {"mailbox_id": "INBOX", "uid": "repeat"},
+        )
+        distinct = tuple(
+            BackgroundEvent(
+                f"mail:777:{index}",
+                "mail.message_arrived",
+                NOW,
+                {"mailbox_id": "INBOX", "uid": str(index)},
+            )
+            for index in range(3)
+        )
+
+        class RepeatingSource:
+            def __init__(self):
+                self.delivered = []
+
+            async def events(source_self):
+                yield repeated
+                while not first_finished.is_set():
+                    await asyncio.sleep(0)
+                for _ in range(2_000):
+                    yield repeated
+                for event in distinct:
+                    yield event
+                await typed.put("person")
+                await asyncio.Future()
+
+            def record_delivery(source_self, event_id):
+                source_self.delivered.append(event_id)
+                return True
+
+        class Gateway(FakeGateway):
+            def receive_background_event(self, *args):
+                result = super().receive_background_event(*args)
+                first_finished.set()
+                return result
+
+        source = RepeatingSource()
+        gateway = Gateway(
+            (
+                outcome(
+                    GoalStatus.ACTIVE,
+                    None,
+                    reason="budget_exceeded",
+                    core_state=CoreState.CHECKPOINTED,
+                ),
+                outcome(GoalStatus.ACTIVE, "person answer"),
+            )
+            + tuple(
+                outcome(GoalStatus.ACTIVE, "background answer")
+                for _ in range(4)
+            )
+        )
+        session = VoiceSession(
+            gateway,
+            self._OpenTranscriber(),
+            FakeSynthesizer(),
+            "friedl",
+            8,
+            3650,
+            clock=lambda: NOW,
+            event_source=source,
+        )
+        iterator = session.exchange(
+            "conversation-1", incoming_audio(), typed=typed
+        )
+        try:
+            for _ in range(40):
+                try:
+                    await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    break
+            background_ids = [
+                call[1].event_id for call in gateway.background_calls
+            ]
+            self.assertEqual(gateway.turn_order[:2], ["background", "person"])
+            self.assertEqual(
+                background_ids,
+                [repeated.event_id, repeated.event_id]
+                + [event.event_id for event in distinct],
+            )
+            self.assertEqual(
+                source.delivered,
+                [repeated.event_id] + [event.event_id for event in distinct],
+            )
+        finally:
+            await iterator.aclose()
+
     async def test_background_work_stops_after_one_budget_checkpoint(self) -> None:
         source = self._Source(40)
         gateway = FakeGateway(

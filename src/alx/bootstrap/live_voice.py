@@ -81,6 +81,28 @@ from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
 
 
+def _bill_budget_for_turn(
+    settings: RuntimeSettings, autonomous_opportunity_id: str
+):
+    """Choose the bill ceiling from the provider executing this turn.
+
+    The occasion relay is populated only while the autonomous runner is inside
+    its Core turn. Voice and observed-mail turns use the conversational
+    reasoner, while a populated occasion uses the separately configured
+    autonomous reasoner. An impossible autonomous turn without its configured
+    provider gets the strict default rather than the subscription allowance.
+    """
+    if autonomous_opportunity_id:
+        provider = (
+            settings.autonomous.provider
+            if settings.autonomous is not None
+            else ""
+        )
+    else:
+        provider = settings.reasoning.provider
+    return bill_budget_for(provider)
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -547,13 +569,16 @@ async def run(repository_root: Path) -> None:
         # Reaching for any bill capability declares the task routine, so the
         # ceiling applies from the first one rather than from the commit.
         if call.capability_id in BILL_TASK_CAPABILITIES:
-            # The ceiling counts reasoning calls, so it depends on how many
-            # calls the configured reasoner spends on one turn. Chosen from the
-            # provider name, in the runtime that already knows it; the Core is
-            # never told which provider answers.
+            # The ceiling counts reasoning calls, so it follows the provider
+            # executing this turn. The occasion relay is already the durable
+            # boundary between autonomous and conversational turns; no model
+            # selection or authority changes here.
             usage.set_budget(
                 current_conversation_id[0],
-                bill_budget_for(provider_settings.reasoning.provider),
+                _bill_budget_for_turn(
+                    provider_settings,
+                    occasion_spend.current_opportunity_id(),
+                ),
             )
         try:
             attempt = broker.dispatch(
