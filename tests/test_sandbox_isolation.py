@@ -135,13 +135,20 @@ class SandboxConfinementTest(unittest.TestCase):
         """The escape most likely to be forgotten: spawn a helper and retry."""
         outcome = self._run(
             "import subprocess, sys\n"
-            "result = subprocess.run(\n"
-            "    [sys.executable, '-c', "
+            "try:\n"
+            "    result = subprocess.run(\n"
+            "        [sys.executable, '-c', "
             "'import socket; socket.create_connection((\"1.1.1.1\", 443), timeout=5); print(\"CHILD LEAK\")'],\n"
-            "    capture_output=True)\n"
-            "print('child rc', result.returncode)\n"
-            "print(result.stdout.decode())\n"
+            "        capture_output=True)\n"
+            "except OSError as error:\n"
+            "    print('CHILD NOT STARTED', type(error).__name__)\n"
+            "else:\n"
+            "    print('CHILD STARTED', result.returncode)\n"
+            "    print(result.stdout.decode())\n"
         )
+        if "CHILD NOT STARTED" in outcome.stdout:
+            self.skipTest("the macOS process limit refused the child probe")
+        self.assertIn("CHILD STARTED", outcome.stdout)
         self.assertNotIn("CHILD LEAK", outcome.stdout)
 
     def test_no_production_credential_is_inherited(self) -> None:

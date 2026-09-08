@@ -1,14 +1,15 @@
-"""The one place in AL/X where a process is executed, under D-027.
+"""The macOS implementation of AL/X's governed Sandbox execution path.
 
 `SandboxRunner` is the abstraction and macOS with Seatbelt is the current
 development implementation. A future runner backed by Linux namespaces and
 cgroups, a container or a virtual machine can satisfy the stronger production
 containment requirement without changing the capability, the broker, the
-SafetyGate, the Core or the session model. Only this file's implementation
-changes. D-027 does not choose that host.
+SafetyGate, the Core or the session model. The replaceable unit is this
+`sandbox_macos` backend package. D-027 does not choose that host.
 
-Law 0 requires that there be exactly one production execution path, and a test
-asserts that no other production module contains a process-execution call.
+Law 0 requires exactly one governed production execution path. In this backend
+the runtime starts the trusted launcher and the launcher starts the confined
+experiment; tests prove that no competing Sandbox execution path exists.
 
 What is enforced here, and what is not:
 
@@ -32,6 +33,7 @@ import ctypes
 import json
 import logging
 import os
+import select
 import signal
 import stat
 import subprocess
@@ -538,6 +540,11 @@ class SeatbeltSandboxRunner(SandboxRunner):
         # and starts exactly this sandbox-exec command; only the experiment is
         # placed behind the confinement boundary.
         identity = f"{request.experiment_id}/{request.session_id}/{request.run_id}"
+        started_at = datetime.now(UTC)
+        parent_identity = process_identity(os.getpid())
+        if parent_identity is None:
+            raise SandboxError("sandbox_unavailable")
+        live_note = paths.run_directory / LIVE_RUN_NAME
         argv = [
             self._interpreter,
             "-E",
@@ -549,12 +556,17 @@ class SeatbeltSandboxRunner(SandboxRunner):
             "--program", str(working_copy),
             "--directory", str(paths.session_state),
             "--identity", identity,
+            "--live-note", str(live_note),
+            "--started-at", started_at.isoformat(),
+            "--parent-pid", str(os.getpid()),
+            "--parent-process-group", str(parent_identity.process_group),
+            "--parent-start-seconds", str(parent_identity.started_at[0]),
+            "--parent-start-microseconds", str(parent_identity.started_at[1]),
             "--cpu-seconds", str(request.wall_seconds + CPU_GRACE_SECONDS),
             "--file-bytes", str(MAX_FILE_BYTES),
             "--processes", str(MAX_PROCESSES),
             "--wall-seconds", str(request.wall_seconds),
         ]
-        started_at = datetime.now(UTC)
         started = time.monotonic()
         timed_out = False
         # The parent opens the evidence files and hands the descriptors down.
@@ -570,7 +582,7 @@ class SeatbeltSandboxRunner(SandboxRunner):
                     "--stdout-fd", str(out.fileno()),
                     "--stderr-fd", str(err.fileno()),
                 ]
-                process = subprocess.Popen(  # noqa: S603 - the one execution site
+                process = subprocess.Popen(  # noqa: S603 - governed launcher site
                     argv,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
@@ -584,18 +596,21 @@ class SeatbeltSandboxRunner(SandboxRunner):
                 parent_read = -1
                 if launched is not None:
                     launched()
-                started_report = self._launcher_line(process)
+                report_ready = self._launcher_report_ready(
+                    process, request.wall_seconds + _LAUNCH_GRACE
+                )
+                if report_ready:
+                    started_report = self._launcher_line(process)
+                else:
+                    timed_out = True
+                    self._terminate(process)
+                    started_report = {}
+                durable_report = self._read_live_run(paths)
+                if not started_report:
+                    started_report = durable_report
                 group = started_report.get("process_group")
                 if not isinstance(group, int) or isinstance(group, bool):
                     group = None
-                self._record_live_run(
-                    paths,
-                    identity,
-                    started_report.get("launcher_pid"),
-                    started_report.get("experiment_pid"),
-                    group,
-                    started_at,
-                )
                 ended_report: dict = {}
                 try:
                     process.wait(timeout=request.wall_seconds + _LAUNCH_GRACE)
@@ -721,6 +736,20 @@ class SeatbeltSandboxRunner(SandboxRunner):
         return -signal.SIGKILL
 
     @staticmethod
+    def _launcher_report_ready(
+        process: subprocess.Popen, timeout_seconds: float
+    ) -> bool:
+        """Wait a bounded time for the launcher's first protocol record."""
+        stream = process.stdout
+        if stream is None:
+            return False
+        try:
+            readable, _, _ = select.select([stream], [], [], timeout_seconds)
+        except (OSError, ValueError):
+            return False
+        return bool(readable)
+
+    @staticmethod
     def _launcher_line(process: subprocess.Popen) -> dict:
         """One line of the launcher's account, or an empty record.
 
@@ -751,61 +780,16 @@ class SeatbeltSandboxRunner(SandboxRunner):
             return {}
         return value if isinstance(value, dict) else {}
 
-    def _record_live_run(
-        self,
-        paths: SessionPaths,
-        identity: str,
-        launcher_pid: object,
-        pid: object,
-        group: int | None,
-        started_at: datetime,
-    ) -> None:
-        """Note a running experiment where a later runtime can find it.
-
-        D-027 says a process group left behind by a crash is reaped when the
-        runtime starts. Nothing recorded what to reap: the pid lived only in
-        the memory of the process that died. This is the record that makes the
-        promise true.
-
-        Written by the parent, into the run directory the confined process
-        cannot write to. A file the experiment could author would be a file it
-        could forge, and forging this one would aim a kill at another process.
-        """
-        if group is None or not isinstance(pid, int) or isinstance(pid, bool):
-            # Without both the experiment's pid and its group there is nothing
-            # a later runtime could verify, and a record it cannot verify is
-            # one it must not act on.
-            return
-        experiment_identity = process_identity(pid)
-        parent_identity = process_identity(os.getpid())
-        if (
-            experiment_identity is None
-            or experiment_identity.process_group != group
-            or parent_identity is None
-        ):
-            return
-        record = {
-            "identity": identity,
-            "pid": pid,
-            "process_group": group,
-            "process_started_at": list(experiment_identity.started_at),
-            "started_at": started_at.isoformat(),
-            "parent_pid": os.getpid(),
-            "parent_process_group": parent_identity.process_group,
-            "parent_started_at": list(parent_identity.started_at),
-        }
-        if isinstance(launcher_pid, int) and not isinstance(launcher_pid, bool):
-            launcher_identity = process_identity(launcher_pid)
-            if launcher_identity is not None:
-                record["launcher_pid"] = launcher_pid
-                record["launcher_started_at"] = list(launcher_identity.started_at)
+    @staticmethod
+    def _read_live_run(paths: SessionPaths) -> dict:
+        """Read the identity the launcher durably published before reporting."""
         try:
-            (paths.run_directory / LIVE_RUN_NAME).write_text(
-                json.dumps(record), encoding="utf-8"
+            value = json.loads(
+                (paths.run_directory / LIVE_RUN_NAME).read_text(encoding="utf-8")
             )
-        except OSError:
-            # Losing the note costs recovery, not the run.
-            LOGGER.warning("A sandbox run could not record its process identity")
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
 
     @staticmethod
     def _clear_live_run(paths: SessionPaths) -> None:

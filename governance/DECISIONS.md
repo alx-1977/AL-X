@@ -686,7 +686,7 @@ The following were verified by test on this machine rather than assumed:
 - outbound network access is denied, and denial is enforced by the kernel rather than by our code;
 - reads of this repository, of `.env`, and of `~/.ssh` are denied;
 - writes anywhere outside the session workspace are denied;
-- a child process spawned by the experiment inherits the confinement and cannot escape it;
+- a child process spawned by the experiment inherits the confinement and cannot escape it when the host process limit permits that probe to start; the test skips explicitly rather than claiming verification when the child is refused;
 - an unconfined profile fails to start the interpreter at all, proving the profile is applied.
 
 In the current macOS development backend, the child process receives an explicitly constructed empty environment, never the runtime's environment and never the `.env` mapping, so no credential can be inherited; `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_NPROC` are applied and were verified effective; the experiment runs in its own process group; and the supervising launcher enforces the wall-clock timeout by sending `SIGKILL` to that group. These are properties of the Seatbelt backend, not requirements that a future backend use the same mechanisms.
@@ -701,9 +701,9 @@ A future runner backed by Linux namespaces and cgroups, a container, or a virtua
 
 Where a platform provides no supported confinement mechanism, the capability is not registered at all rather than offered in a weakened form.
 
-### One capability, one execution site
+### One capability, one governed execution path
 
-There is exactly one public capability, `run_sandbox_experiment`, and exactly one place in production code where a process is executed. No second capability reads files, no second module spawns a process, and iteration happens by calling the same capability again rather than through a separate session or artifact-reading capability. Law 0 requires this to be proved by absence: a test asserts that no production module other than the sandbox runner contains any process-execution call, and that no sandbox module can reach git, this repository, or any deployment path.
+There is exactly one public capability, `run_sandbox_experiment`, and exactly one governed production path that executes an experiment. The current replaceable `sandbox_macos` backend implements that path through the runner and its trusted launcher; those two process starts are one supervised sequence, not independently usable execution routes. No second capability reads files, no competing module starts Sandbox experiments, and iteration happens by calling the same capability again rather than through a separate session or artifact-reading capability. Law 0 requires this to be proved by absence: tests enumerate the backend's two execution sites, prove no production module imports the launcher as another path, and prove that no sandbox module can reach git, this repository, or any deployment path.
 
 ### Workspace, session state and run evidence
 
@@ -760,7 +760,8 @@ signals; the experiment it starts, and only that experiment, runs inside the
 Seatbelt profile in its own process group.
 
 macOS startup recovery is the second half. Each running experiment leaves a record of
-its process identity beside its evidence, written by the parent into a
+its process identity beside its evidence, written by the trusted launcher immediately
+after the experiment starts and before its first protocol report to the parent, into a
 directory the confined process cannot write to, so it cannot be forged. A later
 runtime reads those records and reaps what a crash left behind — but never on
 the strength of a stored number alone. Process identifiers are reused, and
@@ -799,6 +800,16 @@ The protection is structural: the result travels as a capability result marked u
 - a bounded session workspace size;
 - 8,000 characters of stdout and 4,000 of stderr returned, with the number omitted reported alongside;
 - at most 50 changed files described, with the number omitted reported.
+
+On the current macOS development backend, the workspace-byte ceiling is checked
+after execution and directory traversal occurs in the privileged parent. It is
+therefore a retention and evidence bound, not a during-run disk quota: a run can
+temporarily consume additional disk space or create a directory expensive for
+the parent to enumerate before the overflow is purged. This operational host-risk
+limitation is accepted for macOS development and is deferred to the Linux
+production backend, where the backend must provide a real quota or equivalent
+bounded storage mechanism. Shared retention logic is not to be extended to
+pretend that post-hoc counting provides that containment.
 
 The two daily ceilings are independent invariants: many quick runs exhaust the count, one slow run exhausts the seconds. They never raise themselves, survive restart, refuse further execution once exhausted, and fail closed if their durable accounting cannot be read.
 

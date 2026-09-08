@@ -24,6 +24,7 @@ from alx.providers.sandbox_macos import (  # noqa: E402
     process_identity,
 )
 from alx.providers.sandbox_macos import launcher as sandbox_launcher  # noqa: E402
+from alx.providers.sandbox_macos import runner as sandbox_runner  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
 
 
@@ -331,6 +332,71 @@ class TrustedLauncherTest(unittest.TestCase):
 
         parent.wait(timeout=15)
         self._wait_for_process_to_end(record["pid"])
+
+    def test_identity_is_durable_before_the_parent_reads_the_first_report(self) -> None:
+        """Launcher death after spawn still leaves verified cleanup identity."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        paths = self.workspace.prepare("exp-gap", "ses-gap", "run-gap")
+        note = paths.run_directory / LIVE_RUN_NAME
+        recorded: dict[str, object] = {}
+
+        def kill_launcher_after_note() -> None:
+            self._wait_for_path(note)
+            recorded.update(json.loads(note.read_text(encoding="utf-8")))
+            os.kill(int(recorded["launcher_pid"]), signal.SIGKILL)
+
+        self.runner.run(
+            SandboxRequest(
+                "exp-gap",
+                "ses-gap",
+                "run-gap",
+                "import time; time.sleep(45)",
+                wall_seconds=45,
+            ),
+            paths,
+            kill_launcher_after_note,
+        )
+
+        self.assertIn("process_started_at", recorded)
+        self._wait_for_process_to_end(int(recorded["pid"]))
+        self.assertFalse(note.exists())
+
+    def test_the_initial_launcher_report_has_a_wall_clock_backstop(self) -> None:
+        """A stopped launcher cannot hold the Core turn indefinitely."""
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
+        stalled_launcher = self.root / "stalled_launcher.py"
+        stalled_launcher.write_text(
+            "import os, signal\nos.kill(os.getpid(), signal.SIGSTOP)\n",
+            encoding="utf-8",
+        )
+        paths = self.workspace.prepare("exp-stop", "ses-stop", "run-stop")
+        original_launcher = sandbox_runner._LAUNCHER
+        original_launch_grace = sandbox_runner._LAUNCH_GRACE
+        original_term_grace = sandbox_runner._TERM_GRACE_SECONDS
+        sandbox_runner._LAUNCHER = stalled_launcher
+        sandbox_runner._LAUNCH_GRACE = 0.2
+        sandbox_runner._TERM_GRACE_SECONDS = 0.2
+        started = time.monotonic()
+        try:
+            outcome = self.runner.run(
+                SandboxRequest(
+                    "exp-stop",
+                    "ses-stop",
+                    "run-stop",
+                    "print('never reached')",
+                    wall_seconds=1,
+                ),
+                paths,
+            )
+        finally:
+            sandbox_runner._LAUNCHER = original_launcher
+            sandbox_runner._LAUNCH_GRACE = original_launch_grace
+            sandbox_runner._TERM_GRACE_SECONDS = original_term_grace
+
+        self.assertTrue(outcome.timed_out)
+        self.assertLess(time.monotonic() - started, 4)
 
     def test_a_program_exit_of_124_is_not_a_timeout(self) -> None:
         if not self.runner.available():

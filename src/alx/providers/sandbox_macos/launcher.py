@@ -36,6 +36,7 @@ Core, a capability, a goal or a store, and it imports nothing from `alx`.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import resource
@@ -54,6 +55,80 @@ _REAP_GRACE_SECONDS = 2.0
 # How often the parent is checked. Frequent enough that an orphaned experiment
 # dies promptly, cheap enough to be irrelevant next to the run itself.
 _PARENT_POLL_SECONDS = 0.25
+
+
+class _DarwinBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _process_started_at(pid: int) -> tuple[int, int] | None:
+    """Return the Darwin kernel start identity for one live process."""
+    if pid <= 0 or sys.platform != "darwin":
+        return None
+    info = _DarwinBSDInfo()
+    try:
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        function = library.proc_pidinfo
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        function.restype = ctypes.c_int
+        size = function(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+    except (AttributeError, OSError):
+        return None
+    if size != ctypes.sizeof(info) or info.pbi_pid != pid:
+        return None
+    return int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)
+
+
+def _publish_live_run(path: str, values: dict[str, object]) -> bool:
+    """Atomically publish recovery identity before the protocol report."""
+    temporary = f"{path}.tmp-{os.getpid()}"
+    try:
+        with open(temporary, "x", encoding="utf-8") as handle:
+            json.dump(values, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(os.path.dirname(path), os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        return False
+    return True
 
 def _apply_limits(cpu_seconds: int, file_bytes: int, processes: int) -> None:
     """Bound the child, in a process where it is safe to do so.
@@ -143,6 +218,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--program", required=True)
     parser.add_argument("--directory", required=True)
     parser.add_argument("--identity", required=True)
+    parser.add_argument("--live-note", required=True)
+    parser.add_argument("--started-at", required=True)
+    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--parent-process-group", type=int, required=True)
+    parser.add_argument("--parent-start-seconds", type=int, required=True)
+    parser.add_argument("--parent-start-microseconds", type=int, required=True)
     # The descriptors the parent opened for the program's output. Numbers
     # rather than paths, because the run directory is deliberately not
     # writable from inside the sandbox.
@@ -165,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     # own evidence - so the files cannot be opened here, and the descriptors
     # are inherited instead.
     try:
-        child = subprocess.Popen(  # noqa: S603 - the one execution site
+        child = subprocess.Popen(  # noqa: S603 - confined experiment site
             [
                 arguments.sandbox_exec,
                 "-f",
@@ -209,8 +290,30 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         group = child.pid
 
+    process_started_at = _process_started_at(child.pid)
+    if process_started_at is None or not _publish_live_run(
+        arguments.live_note,
+        {
+            "identity": arguments.identity,
+            "pid": child.pid,
+            "process_group": group,
+            "process_started_at": list(process_started_at or ()),
+            "started_at": arguments.started_at,
+            "parent_pid": arguments.parent_pid,
+            "parent_process_group": arguments.parent_process_group,
+            "parent_started_at": [
+                arguments.parent_start_seconds,
+                arguments.parent_start_microseconds,
+            ],
+            "launcher_pid": os.getpid(),
+        },
+    ):
+        _reap(group, child)
+        return 72
+
     # The identity a later runtime uses to decide whether a surviving process
-    # belongs to this run. One line, on stdout, which the parent reads.
+    # belongs to this run. The durable note above is published first, so killing
+    # this launcher before the parent reads the line cannot erase that identity.
     if not _emit(
         {
             "launcher_pid": os.getpid(),

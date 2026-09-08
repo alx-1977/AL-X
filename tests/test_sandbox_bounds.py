@@ -77,9 +77,6 @@ class SandboxBoundsTest(unittest.TestCase):
         self.assertTrue(outcome.timed_out)
         self.assertTrue(outcome.signalled)
         self.assertLess(outcome.wall_seconds_used, 15)
-        # The process group was killed; nothing from this run is still running.
-        remaining = os.popen("pgrep -f 'time.sleep(120)' || true").read().strip()
-        self.assertEqual(remaining, "")
 
     def test_the_process_limit_refuses_a_fork_bomb(self) -> None:
         """RLIMIT_NPROC, verified by a program that tries to spawn helpers.

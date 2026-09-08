@@ -277,36 +277,6 @@ class TruncatedArtifactCountTest(unittest.TestCase):
     def _built(**overrides) -> SandboxOutcome:
         return _build_outcome(**overrides)
 
-
-def _build_outcome(**overrides) -> SandboxOutcome:
-    """One valid outcome, with only the field under test varied."""
-    from datetime import UTC, datetime
-
-    if True:
-        values = dict(
-            experiment_id="exp-f5",
-            session_id="ses-f5",
-            run_id="run-1",
-            exit_status=0,
-            signalled=False,
-            timed_out=False,
-            stdout="",
-            stderr="",
-            stdout_omitted_characters=0,
-            stderr_omitted_characters=0,
-            stdout_digest="0" * 64,
-            stderr_digest="0" * 64,
-            stdout_byte_size=0,
-            stderr_byte_size=0,
-            artifacts=(),
-            artifacts_omitted=0,
-            wall_seconds_used=0.1,
-            started_at=datetime(2026, 9, 7, tzinfo=UTC),
-            finished_at=datetime(2026, 9, 7, tzinfo=UTC),
-        )
-        values.update(overrides)
-        return SandboxOutcome(**values)
-
     def test_the_outcome_carries_whether_the_state_was_complete(self) -> None:
         self.assertTrue(self._built(state_truncated=True).state_truncated)
         self.assertFalse(self._built().state_truncated)
@@ -327,6 +297,35 @@ def _build_outcome(**overrides) -> SandboxOutcome:
         """It is a boolean, so making counts honest costs no privacy."""
         durable = self._built(state_truncated=True).durable_values()
         self.assertIsInstance(durable["state_truncated"], bool)
+
+
+def _build_outcome(**overrides) -> SandboxOutcome:
+    """One valid outcome, with only the field under test varied."""
+    from datetime import UTC, datetime
+
+    values = dict(
+        experiment_id="exp-f5",
+        session_id="ses-f5",
+        run_id="run-1",
+        exit_status=0,
+        signalled=False,
+        timed_out=False,
+        stdout="",
+        stderr="",
+        stdout_omitted_characters=0,
+        stderr_omitted_characters=0,
+        stdout_digest="0" * 64,
+        stderr_digest="0" * 64,
+        stdout_byte_size=0,
+        stderr_byte_size=0,
+        artifacts=(),
+        artifacts_omitted=0,
+        wall_seconds_used=0.1,
+        started_at=datetime(2026, 9, 7, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 7, tzinfo=UTC),
+    )
+    values.update(overrides)
+    return SandboxOutcome(**values)
 
 
 class PreLaunchAccountingTest(unittest.TestCase):

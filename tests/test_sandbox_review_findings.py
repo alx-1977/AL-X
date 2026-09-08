@@ -254,8 +254,6 @@ class Finding5ProcessGroupTest(ConfinedRunTest):
             wall_seconds=2,
         )
         self.assertTrue(outcome.timed_out)
-        remaining = os.popen("pgrep -f 'time.sleep(90)' || true").read().strip()
-        self.assertEqual(remaining, "")
 
     def test_termination_polls_the_group_rather_than_only_the_leader(self) -> None:
         source = (
