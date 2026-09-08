@@ -12,6 +12,14 @@ here. One prompt goes in, one JSON decision comes back, and the process exits.
 Nothing is resumed, nothing is remembered on the far side, and nothing out
 there may act.
 
+Claude Code does not currently expose a mode that both retains subscription
+OAuth/keychain authentication and suppresses organization-managed hooks.
+`--setting-sources ""` excludes the user, project, and local sources the CLI
+allows a caller to select, but managed policy remains authoritative. Therefore
+this transport must run under an unmanaged subscription account, or under
+managed policy that sets `disableAllHooks: true`; the process command cannot
+enforce that administrative boundary itself.
+
 Why a subprocess rather than an HTTP client: the subscription credential is
 held by the Claude Code installation - in its OAuth login or the system
 keychain - and the supported way to reason on it is the CLI's own headless
@@ -244,13 +252,16 @@ class ClaudeSubscriptionReasoningModel:
 
         A method so a test can assert the flags rather than trust a comment.
 
-        `--print` is one-shot headless mode. `--tools ""` removes built-in
-        tools; an explicit empty MCP configuration and strict mode remove MCP
-        servers. No continuation flags appear: AL/X owns durable continuity.
+        `--print` is one-shot headless mode and `--no-session-persistence`
+        prevents the CLI from writing a resumable transcript. `--tools ""`
+        removes built-in tools; an explicit empty MCP configuration and strict
+        mode remove MCP servers. No continuation flags appear: AL/X owns
+        durable continuity.
         """
         return [
             self._executable,
             "--print",
+            "--no-session-persistence",
             "--output-format",
             "json",
             "--model",

@@ -170,6 +170,16 @@ class SuccessTest(unittest.TestCase):
 class StatelessInvocationTest(unittest.TestCase):
     """AL/X's durable goal state is the only continuity there is."""
 
+    def test_every_turn_disables_cli_session_persistence(self) -> None:
+        runner = _Recorder(_envelope(DECISION))
+        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
+
+        model.complete(_request())
+        model.complete(_request())
+
+        for call in runner.calls:
+            self.assertEqual(call["command"].count("--no-session-persistence"), 1)
+
     def test_no_conversation_is_continued_or_resumed(self) -> None:
         runner = _Recorder(_envelope(DECISION))
         model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
@@ -223,6 +233,7 @@ class NoClaudeCapabilitiesTest(unittest.TestCase):
         self.assertIn('Only use MCP servers from --mcp-config, ignoring all other MCP configurations', help_text)
         self.assertIn('--mcp-config <configs...> Load MCP servers from JSON files or strings', help_text)
         self.assertIn('--setting-sources <sources>', help_text)
+        self.assertIn('--no-session-persistence Disable session persistence', help_text)
 
     def test_private_empty_cwd_is_unique_and_cleaned_on_every_exit(self) -> None:
         directories = []
