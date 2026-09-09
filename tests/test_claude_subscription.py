@@ -7,6 +7,7 @@ installed CLI contract without making a model call or consuming tokens.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import subprocess
@@ -227,13 +228,39 @@ class NoClaudeCapabilitiesTest(unittest.TestCase):
                 [executable, "--help"], cwd=cwd, env=model.child_environment(),
                 capture_output=True, text=True, timeout=15, check=True,
             )
-        help_text = " ".join(result.stdout.split())
-        self.assertIn('--tools <tools...> Specify the list of available tools', help_text)
-        self.assertIn('Use "" to disable all tools', help_text)
-        self.assertIn('Only use MCP servers from --mcp-config, ignoring all other MCP configurations', help_text)
-        self.assertIn('--mcp-config <configs...> Load MCP servers from JSON files or strings', help_text)
-        self.assertIn('--setting-sources <sources>', help_text)
-        self.assertIn('--no-session-persistence Disable session persistence', help_text)
+        def option(flag: str) -> tuple[str, set[str]]:
+            lines = result.stdout.splitlines()
+            start = next(
+                (index for index, line in enumerate(lines)
+                 if re.search(rf"(?:^|\s){re.escape(flag)}(?:\s|$)", line)),
+                None,
+            )
+            self.assertIsNotNone(start, f"installed Claude CLI lacks {flag}")
+            block = [lines[start]]
+            for line in lines[start + 1:]:
+                if re.match(r"^  (?:-\w, )?--[a-z]", line):
+                    break
+                block.append(line)
+            description = " ".join(" ".join(block).split()).lower()
+            return description, set(re.findall(r"[a-z]+", description))
+
+        tools, tool_words = option("--tools")
+        self.assertIn('""', tools)
+        self.assertTrue({"disable", "all", "tools"} <= tool_words)
+        _strict_mcp, strict_mcp_words = option("--strict-mcp-config")
+        self.assertTrue(
+            {"only", "mcp", "servers", "ignoring", "other", "configurations"}
+            <= strict_mcp_words
+        )
+        _mcp, mcp_words = option("--mcp-config")
+        self.assertTrue({"load", "mcp", "servers", "json", "strings"} <= mcp_words)
+        _sources, source_words = option("--setting-sources")
+        self.assertTrue({"user", "project", "local"} <= source_words)
+        _persistence, persistence_words = option("--no-session-persistence")
+        self.assertTrue(
+            {"disable", "persistence", "saved", "resumed", "print"}
+            <= persistence_words
+        )
 
     def test_private_empty_cwd_is_unique_and_cleaned_on_every_exit(self) -> None:
         directories = []
@@ -886,6 +913,41 @@ class ResearchTierIsolationTest(unittest.TestCase):
             with self.subTest(tier=tier), self.assertRaises(ConfigurationError):
                 self._settings(ALX_RESEARCH_ENABLED_TIERS=tier)
 
+    def test_disabled_tier_does_not_require_a_usable_transport(self):
+        settings = self._settings(
+            ALX_RESEARCH_SURVEY_PROVIDER="openai",
+            ALX_RESEARCH_SURVEY_MODEL="",
+            OPENAI_API_KEY="",
+        )
+
+        self.assertEqual(settings.research.enabled_tiers, frozenset())
+        self.assertEqual(settings.research.survey.provider, "none")
+        self.assertEqual(settings.research.survey.model, "none")
+        self.assertEqual(settings.research.survey.api_key, "")
+
+    def test_same_unusable_tier_fails_when_enabled(self):
+        from alx.config import ConfigurationError
+
+        with self.assertRaises(ConfigurationError):
+            self._settings(
+                ALX_RESEARCH_ENABLED_TIERS="survey",
+                ALX_RESEARCH_SURVEY_PROVIDER="openai",
+                ALX_RESEARCH_SURVEY_MODEL="",
+                OPENAI_API_KEY="",
+            )
+
+    def test_enabled_valid_tier_keeps_its_configured_transport(self):
+        settings = self._settings(
+            ALX_RESEARCH_ENABLED_TIERS="survey",
+            ALX_RESEARCH_SURVEY_PROVIDER="openai",
+            ALX_RESEARCH_SURVEY_MODEL="configured-model",
+            OPENAI_API_KEY="fake-key",
+        )
+
+        self.assertEqual(settings.research.survey.provider, "openai")
+        self.assertEqual(settings.research.survey.model, "configured-model")
+        self.assertEqual(settings.research.survey.api_key, "fake-key")
+
     def test_explicit_provider_requires_model_and_credential(self):
         from alx.config import ConfigurationError
         for tier in ("survey", "compare", "judge"):
@@ -999,13 +1061,19 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
 
     def test_an_ordinary_turn_reaches_the_subscription_provider(self) -> None:
         """The Core's own request, through the real adapter, faked at exec."""
-        runner = _Recorder(_envelope(DECISION))
-        providers = self._providers()
-        reasoning = providers.reasoning
-        reasoning._runner = runner
-        reasoning._environment = {"PATH": "/usr/bin"}
+        from alx.bootstrap.providers import build_runtime_providers
+        from alx.config.settings import RuntimeSettings
 
-        completion = reasoning.complete(_request())
+        runner = _Recorder(_envelope(DECISION))
+        with (
+            patch("alx.bootstrap.providers.subscription_cli_present", return_value=True),
+            patch("alx.providers.claude_subscription.subprocess.run", runner),
+            patch("alx.providers.claude_subscription.os.environ", {"PATH": "/usr/bin"}),
+        ):
+            providers = build_runtime_providers(
+                RuntimeSettings.from_environment(dict(self.ENVIRONMENT))
+            )
+            completion = providers.reasoning.complete(_request())
 
         self.assertEqual(completion.provider, PROVIDER_NAME)
         self.assertEqual(len(runner.calls), 1)

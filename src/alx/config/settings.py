@@ -762,11 +762,24 @@ def _research_settings(
     environment: Mapping[str, str], core_provider: str
 ) -> "ResearchSettings":
     specialist = _specialist_settings(environment, core_provider)
+    enabled = _enabled_tiers(environment)
     tiers = {
-        name: _tier_settings(environment, name, specialist)
+        name: (
+            _tier_settings(environment, name, specialist)
+            if name in enabled
+            else ReasoningSettings(
+                provider=NO_PROVIDER,
+                model=NO_PROVIDER,
+                api_key="",
+                base_url="",
+                timeout_seconds=specialist.timeout_seconds,
+                streaming=False,
+                service_tier="default",
+                effort="none",
+            )
+        )
         for name in ("survey", "compare", "judge")
     }
-    enabled = _enabled_tiers(environment)
     for name in enabled:
         tier = tiers[name]
         if (tier.provider == NO_PROVIDER or tier.model.lower() == NO_PROVIDER

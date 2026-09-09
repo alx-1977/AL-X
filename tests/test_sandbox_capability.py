@@ -71,12 +71,11 @@ EXECUTION_SITES = {EXECUTION_SITE, LAUNCHER_SITE}
 # xAI adapters reach over HTTP - and it runs no AL/X-authored program, takes no
 # source, has no workspace, no session, no manifest and no retention.
 #
-# It is listed by name rather than exempted by pattern, so a genuinely new
-# execution site still fails these tests, and the assertions below prove it
-# cannot become a second route to running an experiment: it may not import the
-# Sandbox, and the fixed argument vector it builds names only the CLI.
+# Its one subprocess import and one injected runner call are inspected
+# structurally below. The module is not removed from the generic absence scans:
+# only that exact import is admitted, and any additional process reference or
+# runner invocation fails the dedicated boundary test.
 REASONING_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "claude_subscription.py"
-PROCESS_STARTING_SITES = EXECUTION_SITES | {REASONING_TRANSPORT_SITE}
 
 
 def _sandbox_modules() -> list[Path]:
@@ -425,13 +424,117 @@ class SingleExecutionSiteTest(unittest.TestCase):
             if "__pycache__" not in path.parts
         ]
 
+    @staticmethod
+    def _is_approved_transport_import(path: Path, node: ast.AST) -> bool:
+        """The one import needed to bind the Claude CLI runner."""
+        return (
+            path == REASONING_TRANSPORT_SITE
+            and isinstance(node, ast.Import)
+            and len(node.names) == 1
+            and node.names[0].name == "subprocess"
+            and node.names[0].asname is None
+        )
+
+    def _assert_reasoning_transport_process_boundary(self, source: str) -> None:
+        """Permit one runner binding and one invocation, never a module exemption."""
+        tree = ast.parse(source)
+        process_modules = {"subprocess", "multiprocessing", "pty"}
+        process_imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name.split(".", 1)[0] in process_modules
+                for alias in node.names
+            ):
+                process_imports.append(node)
+            elif isinstance(node, ast.ImportFrom):
+                module = (node.module or "").split(".", 1)[0]
+                names = {alias.name for alias in node.names}
+                if (
+                    module in process_modules
+                    or module == "os" and names & self.EXECUTION_NAMES
+                    or module == "asyncio" and names & self.ASYNCIO_EXECUTION_NAMES
+                ):
+                    process_imports.append(node)
+        self.assertEqual(len(process_imports), 1)
+        self.assertTrue(
+            self._is_approved_transport_import(
+                REASONING_TRANSPORT_SITE, process_imports[0]
+            )
+        )
+
+        process_references = []
+        dynamic_references = []
+        runner_calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                owner = node.value.id
+                if (
+                    owner in ("subprocess", "os")
+                    and node.attr in self.EXECUTION_NAMES
+                ) or (
+                    owner == "asyncio"
+                    and node.attr in self.ASYNCIO_EXECUTION_NAMES
+                ):
+                    process_references.append(node)
+            if not isinstance(node, ast.Call):
+                continue
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+                and node.func.attr == "_runner"
+            ):
+                runner_calls.append(node)
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in {"subprocess", "os", "asyncio"}
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value
+                in self.EXECUTION_NAMES | self.ASYNCIO_EXECUTION_NAMES
+            ):
+                dynamic_references.append(node)
+
+        self.assertEqual(len(process_references), 1)
+        reference = process_references[0]
+        self.assertEqual((reference.value.id, reference.attr), ("subprocess", "run"))
+        self.assertEqual(dynamic_references, [])
+
+        model_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "ClaudeSubscriptionReasoningModel"
+        )
+        constructor = next(
+            node for node in model_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        )
+        self.assertIn(reference, tuple(ast.walk(constructor)))
+
+        self.assertEqual(len(runner_calls), 1)
+        completion = next(
+            node for node in model_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "complete"
+        )
+        runner_call = runner_calls[0]
+        self.assertIn(runner_call, tuple(ast.walk(completion)))
+        keywords = {keyword.arg: keyword.value for keyword in runner_call.keywords}
+        for name in ("input", "timeout", "env", "cwd", "shell", "check"):
+            self.assertIn(name, keywords)
+        self.assertIs(keywords["shell"].value, False)
+        self.assertIs(keywords["check"].value, False)
+
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in PROCESS_STARTING_SITES:
+            if path in EXECUTION_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
+                if self._is_approved_transport_import(path, node):
+                    continue
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
                 elif isinstance(node, ast.ImportFrom):
@@ -452,7 +555,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in PROCESS_STARTING_SITES:
+            if path in EXECUTION_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -572,15 +675,9 @@ class SingleExecutionSiteTest(unittest.TestCase):
         finally:
             planted.unlink()
 
-    def test_the_reasoning_transport_cannot_run_an_experiment(self) -> None:
-        """The one non-Sandbox process start is not a second experiment route.
-
-        Listing a file above removes it from the absence scan, so the claim it
-        is exempted under must be proved rather than asserted in a comment. A
-        reasoning transport that could reach the Sandbox, or start a program of
-        AL/X's choosing, would be exactly the competing path D-027 forbids.
-        """
+    def test_the_reasoning_transport_has_one_approved_runner_site(self) -> None:
         source = REASONING_TRANSPORT_SITE.read_text()
+        self._assert_reasoning_transport_process_boundary(source)
         tree = ast.parse(source)
         for node in ast.walk(tree):
             names = []
@@ -594,11 +691,15 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     name,
                     "the reasoning transport must not reach the Sandbox",
                 )
-        # It starts one named executable and nothing the Core can choose. The
-        # command is built from the configured CLI name, never from a request
-        # field, so no reasoning output can redirect what is run.
-        self.assertNotIn("shell=True", source)
-        self.assertIn("shell=False", source)
+
+    def test_a_second_reasoning_transport_launch_site_fails(self) -> None:
+        source = REASONING_TRANSPORT_SITE.read_text() + (
+            "\n\ndef second_process():\n"
+            "    return subprocess.Popen(['other'])\n"
+        )
+
+        with self.assertRaises(AssertionError):
+            self._assert_reasoning_transport_process_boundary(source)
 
     def test_the_reasoning_transport_starts_only_the_configured_cli(self) -> None:
         """Its argument vector names the CLI, never a program from a request."""
