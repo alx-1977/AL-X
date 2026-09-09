@@ -24,14 +24,23 @@ from alx.contracts.coding import (
 
 
 _GIT_INSPECT = frozenset({"status", "diff", "log"})
+_GIT_FLAGS = {
+    "status": frozenset({"--porcelain"}),
+    "diff": frozenset({"--stat", "--name-only", "--cached", "--no-color"}),
+    "log": frozenset({"--oneline", "--no-color"}),
+}
 _PYTHON_NAMES = frozenset({"python", "python3"})
 _PYTEST_FLAGS = frozenset({
-    "-q", "-v", "-x", "-k", "--tb=short", "--tb=line", "--tb=no",
-    "-p", "no:cacheprovider",
+    "-q", "-v", "-x", "--tb=short", "--tb=line", "--tb=no",
 })
+_PYTEST_VALUE_FLAGS = frozenset({"-k"})
+_PYTEST_PLUGIN = "no:cacheprovider"
 
 
-def command_permitted(argv: list[str] | tuple[str, ...]) -> bool:
+def command_permitted(
+    argv: list[str] | tuple[str, ...],
+    worktree: Path | None = None,
+) -> bool:
     """Whether this exact argv is a permitted development command.
 
     The check is the authority. A coding model cannot widen it, and a missing
@@ -49,38 +58,61 @@ def command_permitted(argv: list[str] | tuple[str, ...]) -> bool:
     if executable == "git":
         if not rest or rest[0] not in _GIT_INSPECT:
             return False
-        if any(
-            item in {"-c", "--exec-path", "--upload-pack", "--receive-pack"}
-            or item.startswith("-c")
-            for item in rest[1:]
-        ):
-            return False
-        return True
+        allowed = _GIT_FLAGS[rest[0]]
+        return all(item in allowed for item in rest[1:])
     if executable in _PYTHON_NAMES:
         if len(rest) >= 2 and rest[0] == "-m" and rest[1] in {"pytest", "unittest"}:
-            return _pytest_args_permitted(rest[2:])
+            return _pytest_args_permitted(rest[2:], worktree)
         return False
     if executable == "pytest":
-        return _pytest_args_permitted(rest)
+        return _pytest_args_permitted(rest, worktree)
     return False
 
 
-def _pytest_args_permitted(args: tuple[str, ...]) -> bool:
+def _pytest_args_permitted(
+    args: tuple[str, ...], worktree: Path | None
+) -> bool:
     expecting_value = False
+    expecting_plugin = False
     for item in args:
+        if expecting_plugin:
+            if item != _PYTEST_PLUGIN:
+                return False
+            expecting_plugin = False
+            continue
         if expecting_value:
             expecting_value = False
             continue
-        if item in {"-k", "-p"}:
+        if item == "-p":
+            # Only the cacheprovider disablement used by tests. Any other
+            # plugin would load executable code chosen by the coding model.
+            expecting_plugin = True
+            continue
+        if item in _PYTEST_VALUE_FLAGS:
             expecting_value = True
             continue
-        if item in _PYTEST_FLAGS or item.startswith("--tb="):
+        if item in _PYTEST_FLAGS:
             continue
         if item.startswith("-"):
             return False
-        if Path(item).is_absolute() or item.startswith(".."):
+        if not _path_in_worktree(item, worktree):
             return False
-    return not expecting_value
+    return not expecting_value and not expecting_plugin
+
+
+def _path_in_worktree(relative: str, worktree: Path | None) -> bool:
+    if worktree is None:
+        return False
+    if Path(relative).is_absolute():
+        return False
+    if ".." in Path(relative).parts:
+        return False
+    try:
+        resolved = (worktree / relative).resolve()
+        resolved.relative_to(worktree.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _bound(text: str, limit: int) -> str:
@@ -103,7 +135,7 @@ def run_permitted_command(
     timeout_seconds: int = DEFAULT_COMMAND_SECONDS,
 ) -> CodingCommandRecord:
     """Run one allowlisted command with cwd bound to the worktree."""
-    if not command_permitted(argv):
+    if not command_permitted(argv, worktree):
         raise CodingError("command_not_permitted")
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool):
         raise CodingError("arguments_unusable")

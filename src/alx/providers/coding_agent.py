@@ -90,9 +90,26 @@ class CodingAgent:
         written: list[str] = []
         tests_run = False
         tests_passed: bool | None = None
+        stop_reason = "step_budget_exhausted"
 
         for _step in range(request.step_budget):
-            answer = self._ask(request, observations)
+            try:
+                answer = self._ask(request, observations)
+            except CodingError as error:
+                git_status, git_diff = self._git_evidence(workspace)
+                return self._outcome(
+                    status="failed",
+                    summary="the coding model failed before the job finished",
+                    files=self._files_changed(written, git_status),
+                    commands=commands,
+                    tests_run=tests_run,
+                    tests_passed=tests_passed,
+                    git_status=git_status,
+                    git_diff=git_diff,
+                    issues=(error.code,),
+                    review=False,
+                    failure_status=True,
+                )
             decision = str(answer.get("decision") or "")
             if decision == "finish":
                 status = str(answer.get("status") or "failed")
@@ -140,26 +157,38 @@ class CodingAgent:
                 commands.append(command)
                 if is_test_command(command.argv):
                     tests_run = True
-                    tests_passed = command.exit_status == 0 and not command.timed_out
+                    passed = command.exit_status == 0 and not command.timed_out
+                    if not passed:
+                        tests_passed = False
+                    elif tests_passed is None:
+                        tests_passed = True
             kind = str(answer.get("action_kind") or "")
             if kind == "write_file":
                 path = str(answer.get("path") or "").strip()
                 if path and path not in written:
                     written.append(path)
             if len(commands) >= MAX_REPORTED_COMMANDS:
+                stop_reason = "command_budget_exhausted"
                 break
+        else:
+            stop_reason = "step_budget_exhausted"
 
         git_status, git_diff = self._git_evidence(workspace)
+        summary = (
+            "the coding job reached its command budget without finishing"
+            if stop_reason == "command_budget_exhausted"
+            else "the coding job reached its step budget without finishing"
+        )
         return self._outcome(
             status="failed",
-            summary="the coding job reached its step budget without finishing",
+            summary=summary,
             files=self._files_changed(written, git_status),
             commands=commands,
             tests_run=tests_run,
             tests_passed=tests_passed,
             git_status=git_status,
             git_diff=git_diff,
-            issues=("step_budget_exhausted",),
+            issues=(stop_reason,),
             review=False,
             failure_status=True,
         )

@@ -17,8 +17,7 @@ from alx.contracts.coding import (
 )
 
 
-_BLOCKED_READ_NAMES = frozenset({".env", ".env.local", ".env.secret"})
-_BLOCKED_WRITE_PREFIXES = (".git/", ".env")
+_BLOCKED_ENV_NAMES = frozenset({".env", ".env.local", ".env.secret"})
 
 
 class CodingWorkspace:
@@ -48,14 +47,17 @@ class CodingWorkspace:
     def relative_of(self, path: Path) -> str:
         return path.resolve().relative_to(self.root).as_posix()
 
-    def _blocked_read(self, path: Path) -> bool:
-        return path.name in _BLOCKED_READ_NAMES
-
-    def _blocked_write(self, path: Path) -> bool:
-        relative = self.relative_of(path)
-        if relative == ".env" or relative.startswith(".env."):
+    def _blocked_name(self, name: str) -> bool:
+        folded = name.casefold()
+        if folded == ".git":
             return True
-        return relative == ".git" or relative.startswith(".git/")
+        if folded in _BLOCKED_ENV_NAMES or folded.startswith(".env."):
+            return True
+        return False
+
+    def _blocked_path(self, path: Path) -> bool:
+        relative = self.relative_of(path)
+        return any(self._blocked_name(part) for part in Path(relative).parts)
 
     def list_dir(self, relative: str) -> tuple[str, ...]:
         path = self.resolve(relative or ".")
@@ -73,13 +75,15 @@ class CodingWorkspace:
 
     def read_text(self, relative: str) -> str:
         path = self.resolve(relative)
-        if self._blocked_read(path):
+        if self._blocked_path(path):
             raise CodingError("path_not_permitted")
         if not path.is_file():
             raise CodingError("path_outside_worktree")
         text = path.read_text(encoding="utf-8")
         if len(text) > MAX_FILE_CHARACTERS:
-            return text[:MAX_FILE_CHARACTERS]
+            # Refuse rather than return a prefix the model could write back
+            # over the unseen remainder.
+            raise CodingError("file_too_large")
         return text
 
     def write_text(self, relative: str, content: str) -> str:
@@ -88,7 +92,7 @@ class CodingWorkspace:
         if len(content) > MAX_FILE_CHARACTERS:
             raise CodingError("arguments_unusable")
         path = self.resolve(relative)
-        if self._blocked_write(path):
+        if self._blocked_path(path):
             raise CodingError("path_not_permitted")
         path.parent.mkdir(parents=True, exist_ok=True)
         try:

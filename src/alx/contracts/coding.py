@@ -34,10 +34,12 @@ CODING_FAILURES = (
     "worktree_unusable",
     "path_outside_worktree",
     "path_not_permitted",
+    "file_too_large",
     "command_not_permitted",
     "execution_timeout",
     "provider_failed",
     "step_budget_exhausted",
+    "command_budget_exhausted",
     "task_failed",
 )
 

@@ -147,9 +147,15 @@ def build_coding_executors(
 
         values = outcome.as_values()
         if outcome.status != "succeeded":
-            code = "step_budget_exhausted" if (
-                "step_budget_exhausted" in outcome.unresolved_issues
-            ) else "task_failed"
+            issues = outcome.unresolved_issues
+            if "step_budget_exhausted" in issues:
+                code = "step_budget_exhausted"
+            elif "command_budget_exhausted" in issues:
+                code = "command_budget_exhausted"
+            elif "provider_failed" in issues:
+                code = "provider_failed"
+            else:
+                code = "task_failed"
             return CapabilityResult(
                 call_id,
                 RUN_CODING_TASK,

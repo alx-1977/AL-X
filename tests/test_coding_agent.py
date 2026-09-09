@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
@@ -35,7 +36,10 @@ from alx.contracts import (  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 
+from alx.contracts.coding import MAX_FILE_CHARACTERS, CodingError  # noqa: E402
 from alx.providers.coding_process import command_permitted  # noqa: E402
+from alx.providers.coding_workspace import CodingWorkspace  # noqa: E402
+from alx.providers import coding_agent as coding_agent_module  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
 
@@ -372,8 +376,11 @@ class CodingAgentTests(unittest.TestCase):
         """G. The push/merge refusal is load-bearing."""
         source = CODING_PROCESS.read_text(encoding="utf-8")
         mutated = source.replace(
-            'if not rest or rest[0] not in _GIT_INSPECT:\n            return False',
-            "if False:\n            return False",
+            "        if not rest or rest[0] not in _GIT_INSPECT:\n"
+            "            return False\n"
+            "        allowed = _GIT_FLAGS[rest[0]]\n"
+            "        return all(item in allowed for item in rest[1:])",
+            "        return True",
         )
         self.assertNotEqual(source, mutated)
         namespace: dict[str, object] = {}
@@ -397,18 +404,166 @@ class CodingAgentTests(unittest.TestCase):
         escaped = workspace.resolve("../secret.txt")
         self.assertFalse(str(escaped).startswith(str(workspace.root)))
 
+    def test_git_cannot_write_or_point_outside_the_worktree(self) -> None:
+        worktree = _worktree(self.root)
+        attacks = (
+            ["git", "diff", "--output=../escaped"],
+            ["git", "diff", "--output", "../escaped"],
+            ["git", "status", "--work-tree=/tmp"],
+            ["git", "log", "--git-dir=/tmp/other.git"],
+        )
+        for argv in attacks:
+            with self.subTest(argv=argv):
+                self.assertFalse(command_permitted(argv, worktree))
+
+    def test_pytest_cannot_load_plugins_or_escape_with_parent_paths(self) -> None:
+        worktree = _worktree(self.root)
+        self.assertTrue(
+            command_permitted(
+                ["python", "-m", "unittest", "-q", "test_app"], worktree
+            )
+        )
+        self.assertFalse(
+            command_permitted(
+                ["python", "-m", "pytest", "-p", "evilplugin"], worktree
+            )
+        )
+        self.assertFalse(
+            command_permitted(
+                ["python", "-m", "pytest", "pkg/../../outside"], worktree
+            )
+        )
+        self.assertFalse(
+            command_permitted(
+                ["python", "-m", "pytest", "--rootdir", "/tmp"], worktree
+            )
+        )
+        self.assertFalse(
+            command_permitted(
+                ["python", "-m", "pytest", "-c", "pytest.ini"], worktree
+            )
+        )
+        self.assertFalse(
+            command_permitted(
+                ["python", "-m", "pytest", "--pyargs", "os"], worktree
+            )
+        )
+
+    def test_mutation_allowing_git_output_is_detected(self) -> None:
+        worktree = _worktree(self.root)
+        source = CODING_PROCESS.read_text(encoding="utf-8")
+        mutated = source.replace(
+            "        allowed = _GIT_FLAGS[rest[0]]\n"
+            "        return all(item in allowed for item in rest[1:])",
+            "        return True",
+        )
+        self.assertNotEqual(source, mutated)
+        namespace: dict[str, object] = {}
+        exec(compile(mutated, str(CODING_PROCESS), "exec"), namespace)
+        permitted = namespace["command_permitted"]
+        self.assertTrue(
+            permitted(["git", "diff", "--output=../escaped"], worktree)
+        )
+        self.assertFalse(
+            command_permitted(["git", "diff", "--output=../escaped"], worktree)
+        )
+
+    def test_provider_failure_keeps_accumulated_evidence(self) -> None:
+        worktree = _worktree(self.root)
+
+        class FailAfterWrite(ScriptedModel):
+            def complete(self, request):
+                if self.outputs:
+                    return super().complete(request)
+                raise RuntimeError("provider down")
+
+        model = FailAfterWrite(
+            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
+        )
+        attempt = self._dispatch(
+            model, {"task": "fix add", "worktree": str(worktree)}
+        )
+        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "provider_failed")
+        self.assertIn("app.py", attempt.result.values["files_changed"])
+        self.assertIn("app.py", attempt.result.values["git_status"])
+        self.assertTrue(attempt.result.values["git_diff"])
+
+    def test_a_later_passing_test_cannot_hide_an_earlier_failure(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "test_ok.py").write_text(
+            "import unittest\n\n\nclass OkTests(unittest.TestCase):\n"
+            "    def test_ok(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        model = ScriptedModel(
+            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
+            _act("run_command", command=["python", "-m", "unittest", "-q", "test_ok"]),
+            _finish(status="succeeded", summary="narrow tests passed"),
+        )
+        attempt = self._dispatch(
+            model, {"task": "fix add", "worktree": str(worktree)}
+        )
+        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertIs(attempt.result.values["tests_passed"], False)
+
+    def test_nested_env_and_git_paths_cannot_be_written(self) -> None:
+        worktree = _worktree(self.root)
+        workspace = CodingWorkspace(str(worktree))
+        with self.assertRaises(CodingError) as raised:
+            workspace.write_text("service/.env", "SECRET=1\n")
+        self.assertEqual(raised.exception.code, "path_not_permitted")
+        with self.assertRaises(CodingError) as raised:
+            workspace.write_text(".ENV", "SECRET=1\n")
+        self.assertEqual(raised.exception.code, "path_not_permitted")
+        with self.assertRaises(CodingError) as raised:
+            workspace.write_text("vendor/.git/config", "[core]\n")
+        self.assertEqual(raised.exception.code, "path_not_permitted")
+        self.assertFalse((worktree / "service" / ".env").exists())
+
+    def test_oversized_reads_are_refused_instead_of_truncated(self) -> None:
+        worktree = _worktree(self.root)
+        huge = worktree / "huge.py"
+        huge.write_text("x" * (MAX_FILE_CHARACTERS + 1), encoding="utf-8")
+        workspace = CodingWorkspace(str(worktree))
+        with self.assertRaises(CodingError) as raised:
+            workspace.read_text("huge.py")
+        self.assertEqual(raised.exception.code, "file_too_large")
+        self.assertEqual(len(huge.read_text(encoding="utf-8")), MAX_FILE_CHARACTERS + 1)
+
+    def test_command_cap_is_not_reported_as_step_budget(self) -> None:
+        worktree = _worktree(self.root)
+        model = ScriptedModel(
+            _act("run_command", command=["git", "status", "--porcelain"]),
+            _act("run_command", command=["git", "diff"]),
+            _finish(summary="should not be asked"),
+        )
+        with patch.object(coding_agent_module, "MAX_REPORTED_COMMANDS", 1):
+            attempt = self._dispatch(
+                model, {"task": "inspect", "worktree": str(worktree), "step_budget": 8}
+            )
+        self.assertEqual(
+            attempt.result.failure["code"], "command_budget_exhausted"
+        )
+        self.assertIn(
+            "command_budget_exhausted", attempt.result.values["unresolved_issues"]
+        )
+
     def test_one_coding_process_site(self) -> None:
         source = CODING_PROCESS.read_text(encoding="utf-8")
         tree = ast.parse(source)
-        runs = [
-            node
+        process_attrs = [
+            node.attr
             for node in ast.walk(tree)
             if isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
             and node.value.id == "subprocess"
-            and node.attr == "run"
         ]
-        self.assertEqual(len(runs), 1)
+        self.assertEqual(
+            [name for name in process_attrs if name == "run"],
+            ["run"],
+        )
+        self.assertNotIn("Popen", process_attrs)
         self.assertIn("shell=False", source)
 
     def test_coding_and_sandbox_stay_separate_outcomes(self) -> None:

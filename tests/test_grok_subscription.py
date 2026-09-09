@@ -233,6 +233,12 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(runner.calls[0]["command"][0], "grok")
 
     def test_installed_cli_help_documents_the_headless_contract(self) -> None:
+        import os
+
+        if os.environ.get("ALX_GROK_CLI_HELP_PROBE", "").strip().lower() not in {
+            "1", "true", "yes",
+        }:
+            self.skipTest("set ALX_GROK_CLI_HELP_PROBE=1 to probe the installed CLI")
         executable = shutil.which("grok")
         if executable is None:
             self.skipTest("unverified on this CLI: grok is not installed")

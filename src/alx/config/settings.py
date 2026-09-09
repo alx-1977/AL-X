@@ -873,9 +873,18 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
             ),
             streaming=False,
             service_tier="default",
-            effort=environment.get("ALX_CODING_EFFORT", "medium").strip().lower(),
+            effort=_coding_effort(environment),
         ),
     )
+
+
+def _coding_effort(environment: Mapping[str, str]) -> str:
+    effort = environment.get("ALX_CODING_EFFORT", "medium").strip().lower()
+    if effort not in ("none", "low", "medium", "high", "xhigh", "max"):
+        raise ConfigurationError(
+            "ALX_CODING_EFFORT must be none, low, medium, high, xhigh, or max"
+        )
+    return effort
 
 
 @dataclass(frozen=True, slots=True)

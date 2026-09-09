@@ -89,6 +89,16 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(enabled.coding.reasoning.api_key, "")
         self.assertEqual(enabled.reasoning.provider, "xai")
         self.assertEqual(enabled.reasoning.model, "reasoning-model")
+        with self.assertRaises(ConfigurationError) as raised:
+            RuntimeSettings.from_environment(
+                environment(
+                    ALX_CODING_ENABLED="true",
+                    ALX_CODING_PROVIDER="grok_subscription",
+                    ALX_CODING_EFFORT="not-a-tier",
+                )
+            )
+        self.assertIn("ALX_CODING_EFFORT", str(raised.exception))
+        self.assertNotIn("ALX_REASONING_EFFORT", str(raised.exception))
 
     def test_every_provider_and_model_is_configuration(self) -> None:
         settings = RuntimeSettings.from_environment(environment())
