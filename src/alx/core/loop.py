@@ -989,8 +989,23 @@ class CoreAgent:
             if state.blockers or state.outstanding_work or any(
                 item.disposition is CapabilityAttemptDisposition.PENDING for item in state.attempts):
                 raise ValueError("completion_has_unresolved_work")
-            supported = {criterion for item in state.evidence if item.source_references
-                         for criterion in item.supports}
+            succeeded_attempts = {
+                f"attempt:{item.call.call_id}"
+                for item in state.attempts
+                if CoreAgent._attempt_is_citable_evidence_source(item)
+                and item.result.state is CapabilityResultState.SUCCEEDED
+            }
+            supported: set[str] = set()
+            for item in state.evidence:
+                if not item.source_references:
+                    continue
+                if any(
+                    reference.startswith("attempt:")
+                    and reference not in succeeded_attempts
+                    for reference in item.source_references
+                ):
+                    raise ValueError("completion_lacks_sourced_evidence")
+                supported.update(item.supports)
             required = {item.criterion_id for item in state.success_criteria}
             if not required.issubset(supported):
                 raise ValueError("completion_lacks_sourced_evidence")
@@ -1011,16 +1026,38 @@ class CoreAgent:
         return state
 
     @staticmethod
+    def _attempt_is_citable_evidence_source(item: CapabilityAttempt) -> bool:
+        """Whether this attempt may be named as attempt:<call-id> evidence.
+
+        A terminal attempt with a result is a real source, including FAILED
+        jobs that ran. PENDING and never-executed attempts are not. Citing a
+        failed result records that it happened; it does not prove success.
+        """
+        if item.call is None:
+            return False
+        if item.disposition is CapabilityAttemptDisposition.PENDING:
+            return False
+        if item.implementation_invoked is not True:
+            return False
+        result = item.result
+        if result is None:
+            return False
+        return result.state in {
+            CapabilityResultState.SUCCEEDED,
+            CapabilityResultState.FAILED,
+        }
+
+    @staticmethod
     def _evidence_grounding_error(conversation: ConversationSnapshot,
                                   state: GoalState, existing: tuple,
                                   proposed: tuple) -> str | None:
         known = {f"turn:{item.turn_id}" for item in conversation.turns}
         known.update(f"event:{item.event_id}" for item in conversation.events)
-        known.update(f"attempt:{item.call.call_id}" for item in state.attempts
-                     if item.call is not None
-                     and item.disposition is not CapabilityAttemptDisposition.PENDING
-                     and item.result is not None
-                     and item.result.state is CapabilityResultState.SUCCEEDED)
+        known.update(
+            f"attempt:{item.call.call_id}"
+            for item in state.attempts
+            if CoreAgent._attempt_is_citable_evidence_source(item)
+        )
         known.update(f"evidence:{item.evidence_id}" for item in existing)
         criteria = {item.criterion_id for item in state.success_criteria}
         seen = {item.evidence_id for item in existing}

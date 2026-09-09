@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sys
 import tempfile
 import unittest
@@ -710,6 +711,143 @@ def _state(
     state.corrections = referencing(corrections)
     state.approvals = referencing(approvals)
     return state
+
+
+class AttemptEvidenceCitationTests(unittest.TestCase):
+    """Terminal attempts with a result are citable; pending and missing are not."""
+
+    def _call(self, call_id: str = "call-1") -> CapabilityCall:
+        return CapabilityCall(call_id, "inspect", {})
+
+    def _succeeded(self, call_id: str = "call-1") -> CapabilityAttempt:
+        call = self._call(call_id)
+        return CapabilityAttempt(
+            call,
+            CapabilityAttemptDisposition.EXECUTED,
+            True,
+            CapabilityResult(call_id, "inspect", CapabilityResultState.SUCCEEDED, {"ok": True}),
+        )
+
+    def _failed(self, call_id: str = "call-1") -> CapabilityAttempt:
+        call = self._call(call_id)
+        return CapabilityAttempt(
+            call,
+            CapabilityAttemptDisposition.EXECUTED,
+            True,
+            CapabilityResult(
+                call_id,
+                "inspect",
+                CapabilityResultState.FAILED,
+                {"files_changed": ["app.py"]},
+                {"code": "task_failed"},
+            ),
+        )
+
+    def _pending(self, call_id: str = "call-1") -> CapabilityAttempt:
+        return CapabilityAttempt(
+            self._call(call_id),
+            CapabilityAttemptDisposition.PENDING,
+            None,
+            reason_code="dispatch_pending",
+        )
+
+    def _error(self, attempts: tuple, source: str) -> str | None:
+        evidence = Evidence(
+            "ev-1",
+            "observation",
+            supports=("criterion-1",),
+            source_references=(source,),
+        )
+        return CoreAgent._evidence_grounding_error(
+            conversation(),
+            goal(attempts=attempts),
+            (),
+            (evidence,),
+        )
+
+    def test_succeeded_attempt_with_result_is_citable(self) -> None:
+        self.assertIsNone(self._error((self._succeeded(),), "attempt:call-1"))
+
+    def test_failed_attempt_with_result_is_citable(self) -> None:
+        self.assertIsNone(self._error((self._failed(),), "attempt:call-1"))
+
+    def test_pending_attempt_is_not_citable(self) -> None:
+        self.assertEqual(
+            self._error((self._pending(),), "attempt:call-1"),
+            "evidence_source_unknown",
+        )
+
+    def test_nonexistent_attempt_is_not_citable(self) -> None:
+        self.assertEqual(
+            self._error((self._failed(),), "attempt:call-missing"),
+            "evidence_source_unknown",
+        )
+
+    def test_failed_attempt_can_be_recorded_without_completing_the_goal(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        self.addCleanup(store.close)
+        store.create(goal(), "conversation-1", RETENTION)
+        call = self._call()
+        failed = self._failed()
+        evidence = Evidence(
+            "ev-coding",
+            "coding_job",
+            supports=("criterion-1",),
+            source_references=("attempt:call-1",),
+        )
+        reasoner = Queued(
+            AgentDecision(call=call),
+            AgentDecision(
+                response="The job ran and failed its tests.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.UPDATE,
+                    new_evidence=(evidence,),
+                ),
+            ),
+            selects="goal-1",
+        )
+        outcome = CoreAgent(
+            store, reasoner, lambda proposed, state: failed, (DEFINITION,),
+            clock=lambda: NOW,
+        ).process(conversation(), RETENTION, 5)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertNotEqual(outcome.reason, "goal_proposal_rejected")
+        stored = store.load("goal-1").state
+        self.assertEqual(stored.status, GoalStatus.ACTIVE)
+        self.assertEqual(stored.evidence, (evidence,))
+        self.assertIs(stored.attempts[0].result.state, CapabilityResultState.FAILED)
+
+    def test_mutation_succeeded_only_rule_reproduces_the_live_rejection(self) -> None:
+        source = inspect.getsource(CoreAgent._attempt_is_citable_evidence_source)
+        self.assertIn("CapabilityResultState.FAILED", source)
+        mutated = source.replace(
+            "        return result.state in {\n"
+            "            CapabilityResultState.SUCCEEDED,\n"
+            "            CapabilityResultState.FAILED,\n"
+            "        }",
+            "        return result.state is CapabilityResultState.SUCCEEDED",
+        )
+        self.assertNotEqual(source, mutated)
+        original = CoreAgent._attempt_is_citable_evidence_source
+
+        def succeeded_only(item):
+            return (
+                original(item)
+                and item.result is not None
+                and item.result.state is CapabilityResultState.SUCCEEDED
+            )
+
+        CoreAgent._attempt_is_citable_evidence_source = staticmethod(succeeded_only)
+        try:
+            self.assertEqual(
+                self._error((self._failed(),), "attempt:call-1"),
+                "evidence_source_unknown",
+            )
+        finally:
+            CoreAgent._attempt_is_citable_evidence_source = original
+        self.assertIsNone(self._error((self._failed(),), "attempt:call-1"))
 
 
 if __name__ == "__main__":

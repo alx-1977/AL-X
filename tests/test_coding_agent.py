@@ -28,7 +28,11 @@ from alx.contracts import (  # noqa: E402
     ConversationOrigin,
     ConversationSnapshot,
     ConversationTurn,
+    Evidence,
+    GoalMutationKind,
+    GoalProposal,
     GoalState,
+    GoalStatus,
     ModelCompletion,
     Objective,
     SuccessCriterion,
@@ -228,6 +232,83 @@ class CodingAgentTests(unittest.TestCase):
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(reasoner.contexts[0].capabilities[0].capability_id, RUN_CODING_TASK)
+
+    def test_failed_coding_job_can_be_cited_as_goal_evidence(self) -> None:
+        """Live CA regression: FAILED run_coding_task is still attempt: evidence."""
+        worktree = _worktree(self.root)
+        model = ScriptedModel(
+            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
+            _finish(summary="tests still fail", status="failed"),
+        )
+        runtime = self._runtime(model)
+        broker = self._broker(runtime)
+        store = SQLiteGoalStore(self.root / "goals.sqlite3")
+        self.addCleanup(store.close)
+        store.create(
+            GoalState(
+                "goal-1",
+                Objective("turn:turn-1", "Fix the test"),
+                success_criteria=(SuccessCriterion("c1", "tests pass"),),
+            ),
+            "conversation-1",
+            RETENTION,
+        )
+        call = CapabilityCall(
+            "call-1",
+            RUN_CODING_TASK,
+            {"task": "make add correct", "worktree": str(worktree)},
+        )
+        evidence = Evidence(
+            "ev-attempt02-result",
+            "coding_job",
+            supports=("c1",),
+            source_references=("attempt:call-1",),
+        )
+        reasoner = Queued(
+            AgentDecision(call=call),
+            AgentDecision(
+                response="The coding job ran; tests still fail.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.UPDATE,
+                    new_evidence=(evidence,),
+                ),
+            ),
+        )
+        agent = CoreAgent(
+            store,
+            reasoner,
+            lambda proposed, state: broker.dispatch(proposed, self._authority()),
+            runtime.definitions,
+            clock=lambda: NOW,
+            approval_free_capabilities=frozenset({RUN_CODING_TASK}),
+        )
+        outcome = agent.process(
+            ConversationSnapshot(
+                "conversation-1",
+                (
+                    ConversationTurn(
+                        "conversation-1",
+                        "turn-1",
+                        ConversationOrigin.TYPED,
+                        "fix the tests",
+                        NOW,
+                        "friedl",
+                    ),
+                ),
+                1,
+                RETENTION,
+            ),
+            RETENTION,
+            5,
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertNotEqual(outcome.reason, "goal_proposal_rejected")
+        self.assertNotEqual(outcome.reason, "goal_proposal_invalid")
+        attempt = outcome.snapshot.state.attempts[0]
+        self.assertEqual(attempt.call.capability_id, RUN_CODING_TASK)
+        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(outcome.snapshot.state.evidence, (evidence,))
+        self.assertIs(outcome.snapshot.state.status, GoalStatus.ACTIVE)
 
     def test_edits_stay_inside_the_assigned_worktree(self) -> None:
         """B. A fixture job cannot modify a sibling tree."""
