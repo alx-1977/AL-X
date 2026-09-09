@@ -76,6 +76,14 @@ EXECUTION_SITES = {EXECUTION_SITE, LAUNCHER_SITE}
 # only that exact import is admitted, and any additional process reference or
 # runner invocation fails the dedicated boundary test.
 REASONING_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "claude_subscription.py"
+GROK_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "grok_subscription.py"
+REASONING_TRANSPORT_SITES = {REASONING_TRANSPORT_SITE, GROK_TRANSPORT_SITE}
+
+# D-028: one production site starts a process for a coding job. That is a
+# different outcome from a Sandbox experiment. The generic absence scans skip
+# it; dedicated coding-agent tests prove it cannot push, merge, deploy or
+# request a review, and that it is the only coding process site.
+CODING_EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "coding_process.py"
 
 
 def _sandbox_modules() -> list[Path]:
@@ -426,9 +434,9 @@ class SingleExecutionSiteTest(unittest.TestCase):
 
     @staticmethod
     def _is_approved_transport_import(path: Path, node: ast.AST) -> bool:
-        """The one import needed to bind the Claude CLI runner."""
+        """The one import needed to bind a subscription CLI runner."""
         return (
-            path == REASONING_TRANSPORT_SITE
+            path in REASONING_TRANSPORT_SITES
             and isinstance(node, ast.Import)
             and len(node.names) == 1
             and node.names[0].name == "subprocess"
@@ -529,7 +537,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES:
+            if path in EXECUTION_SITES or path == CODING_EXECUTION_SITE:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -555,7 +563,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES:
+            if path in EXECUTION_SITES or path == CODING_EXECUTION_SITE:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):

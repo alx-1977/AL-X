@@ -925,3 +925,59 @@ approval rather than a reviewer's suggestion.
 ### Review condition
 
 Revisit when AL/X moves to dedicated hardware, at which point the production-host containment requirement above applies; if Apple removes or breaks the macOS sandbox mechanism; if an experiment ever reaches the network, this repository, production data, or any inherited credential; if sandbox output is ever acted upon as an instruction; if experiment-authored bytes are found surviving their retention limit or accumulating in durable goal state; if the daily fuses prove to be shaping what AL/X is willing to try rather than merely bounding runaway use; or if the Python standard library proves inadequate often enough to argue for dependencies, which would be a new decision rather than an adjustment of this one.
+
+---
+
+## D-028 — Coding Agent MVP (bounded Core-delegated coding jobs)
+
+- **Date:** 2026-09-09
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-09.** Authorised by Friedl's instruction to implement CA-MVP on `feat/coding-agent-mvp`.
+
+**Purpose.** Give AL/X Core a reusable execution capability that can carry out one bounded software-engineering job in an assigned worktree and return structured evidence. This removes Friedl from the manual loop between Core, a coding model, repository edits, tests and the evidence of what happened. The Coding Agent is not a second AL/X, not a second planning architecture, and not a replacement for Core.
+
+**One outcome, one path.** The production outcome is: execute one Core-delegated coding job against an assigned worktree and return structured evidence. The authoritative path is `run_coding_task` through the existing registry, broker and Safety Gate. There is no coding conversation path, no frontend, no scheduler, no background coding, and no reuse of `run_sandbox_experiment` for repository work.
+
+### What AL/X decides
+
+Whether a coding job should be delegated at all; the task, the assigned worktree, the relevant context and the acceptance criteria; what the returned evidence means; whether to retry, refine, ask Friedl, request an external review through the existing `review.request` capability, or merge through the existing `merge_pull_request` capability.
+
+### What the Coding Agent may do
+
+Inspect and edit files inside the assigned worktree; run permitted development commands (tests and read-only git inspection); and return structured evidence: status, summary, files changed, commands and test results, git status/diff, unresolved issues, whether external review is recommended, and machine-readable failure information.
+
+### What it must not do
+
+Merge; push; deploy; request a paid or external review; change governance; broaden its task; perform unrelated work; discard unrelated user work; reset unrelated changes; or silently claim success.
+
+D-026 remains unchanged: merge and review authority stay with the single Core reasoning path and are not transitive to the coding agent.
+
+### Authority
+
+Granted through a new `coding.execute` permission, separate from `sandbox.execute`, `repository.merge` and `review.request`. It is not approval-gated per job. Core selects the capability as an ordinary catalogue entry; Friedl does not have to issue a special middleware command. A runtime not given the permission, or not given a usable coding model, does not register the capability.
+
+The assigned worktree is an explicit structured argument. Path resolution must remain a child of that worktree. Writes to `.git/` and `.env` are refused. Commands are argv lists with an allowlist; a generic shell is not authorised.
+
+### Sandbox is not this path
+
+D-027 forbids the sandbox from reading or writing this repository, running git, or becoming a development environment. Routing coding jobs through `run_sandbox_experiment` would violate that decision. The two capabilities remain separate outcomes.
+
+### Model
+
+Coding jobs use the existing provider-neutral `ReasoningModel.complete()` structured-output port, with request kind `coding`. Configuration is independent of the conversational Core. The Claude subscription is not available for coding jobs and must not be consumed by them.
+
+The coding backend is the Grok CLI subscription (`grok_subscription`), the same class of path V1 used (`grok -p` on the user's Grok login). It is not the xAI HTTP API, does not require `XAI_API_KEY`, and must not inherit that key from the runtime. If the CLI fails there is no fallback to xAI, OpenAI or Claude. The adapter remains a replaceable `ReasoningModel`; the coding loop above it does not change.
+
+The coding model is a worker. It receives the bounded job, not AL/X's laws, identity, catalogue, memory or merge authority. The Grok CLI's own tools, subagents, shell and worktree flags are refused: repository edits and tests stay in the bounded coding executor.
+
+### Failure
+
+Fail closed. Infrastructure failures return a declared failure code. A job that ran but did not meet its criteria returns structured evidence with status `failed` and must not be reported as a succeeded capability. The agent cannot turn a refused push, merge, deploy or review request into success by asking.
+
+### Not authorised by this decision
+
+UI; dashboards; task history; a generic agent framework; multi-agent swarms; long-term coding-agent memory; autonomous project management; scheduling; background coding; Diary; live repair of DHL document processing; or any change to Core model configuration.
+
+### Review condition
+
+Revisit if a coding job edits a path outside its assigned worktree; if it pushes, merges, deploys or requests a review; if it claims success after tests failed; if coding jobs run on the Claude subscription; if sandbox and coding become one path; or before the first live acceptance task (`Fix DHL document processing`) is delegated by Core.

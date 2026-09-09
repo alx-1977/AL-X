@@ -323,6 +323,10 @@ class XeroSettings:
 # one spelling.
 CLAUDE_SUBSCRIPTION_PROVIDER = "claude_subscription"
 
+# Grok CLI subscription used by the Coding Agent. Named to match the Claude
+# subscription spelling: a CLI login, not a metered API key.
+GROK_SUBSCRIPTION_PROVIDER = "grok_subscription"
+
 # A provider deliberately configured as absent. The runtime builds nothing for
 # it, reads no credential, and the work it would have done refuses instead of
 # being answered somewhere more expensive. Already the spelling text-to-speech
@@ -795,6 +799,86 @@ def _research_settings(
 
 
 @dataclass(frozen=True, slots=True)
+class CodingSettings:
+    """Coding-agent model and authority, off until it is configured.
+
+    Independent of the conversational Core. A Core on the Claude subscription
+    must not drag coding jobs onto that path, and coding jobs must not change
+    Core configuration.
+    """
+
+    enabled: bool
+    reasoning: ReasoningSettings
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(
+            self.enabled
+            and self.reasoning.provider == GROK_SUBSCRIPTION_PROVIDER
+            and self.reasoning.model.strip()
+            and self.reasoning.model.lower() != NO_PROVIDER
+        )
+
+
+def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
+    """Configure the coding backend independently of the Core.
+
+    Defaults to the Grok CLI subscription when enabled. Metered xAI/OpenAI
+    keys are not read and cannot make this path usable. Naming the Claude
+    subscription for coding is refused rather than rewritten.
+    """
+    enabled = _boolean(environment, "ALX_CODING_ENABLED", False)
+    absent = ReasoningSettings(
+        provider=NO_PROVIDER,
+        model=NO_PROVIDER,
+        api_key="",
+        base_url="",
+        timeout_seconds=120,
+        streaming=False,
+        service_tier="default",
+        effort="none",
+    )
+    if not enabled:
+        return CodingSettings(False, absent)
+    provider = (
+        environment.get("ALX_CODING_PROVIDER", GROK_SUBSCRIPTION_PROVIDER)
+        .strip()
+        .lower()
+        or GROK_SUBSCRIPTION_PROVIDER
+    )
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        raise ConfigurationError(
+            f"{CLAUDE_SUBSCRIPTION_PROVIDER} is not available for coding jobs"
+        )
+    if provider in ("xai", "openai", "kimi"):
+        raise ConfigurationError(
+            "coding jobs use grok_subscription, not a metered API provider"
+        )
+    if provider == NO_PROVIDER:
+        return CodingSettings(True, absent)
+    if provider != GROK_SUBSCRIPTION_PROVIDER:
+        raise ConfigurationError(
+            f"coding provider adapter is not installed: {provider}"
+        )
+    return CodingSettings(
+        True,
+        ReasoningSettings(
+            provider=GROK_SUBSCRIPTION_PROVIDER,
+            model=environment.get("ALX_CODING_MODEL", "grok-4.6").strip()
+            or "grok-4.6",
+            api_key="",
+            base_url="",
+            timeout_seconds=_positive_integer(
+                environment, "ALX_CODING_TIMEOUT_SECONDS", 120
+            ),
+            streaming=False,
+            service_tier="default",
+            effort=environment.get("ALX_CODING_EFFORT", "medium").strip().lower(),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     reasoning: ReasoningSettings
     # Bounded extraction does not need Core-level reasoning, and reasoning
@@ -807,6 +891,8 @@ class RuntimeSettings:
     # D-024a experiment: the Core that answers an autonomous turn. None when
     # unconfigured, which disables the experiment entirely.
     autonomous: "ReasoningSettings | None"
+    # D-028 coding jobs. Independent of the conversational Core.
+    coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
     text_to_speech: TextToSpeechSettings
 
@@ -843,6 +929,7 @@ class RuntimeSettings:
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),
             autonomous=autonomous_reasoning_settings(environment),
+            coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
                 model=_required(environment, "ALX_STT_MODEL"),

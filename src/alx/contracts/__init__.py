@@ -14,6 +14,12 @@ from alx.contracts.repository import (
     MergeOutcome,
     MergeRequest,
 )
+from alx.contracts.coding import (
+    CODING_FAILURES,
+    CodingError,
+    CodingOutcome,
+    CodingRequest,
+)
 from alx.contracts.continuity import (
     AutonomousResponseTransport,
     run_core_worker,
@@ -200,6 +206,10 @@ __all__ = [
     "MergeError",
     "MergeOutcome",
     "MergeRequest",
+    "CODING_FAILURES",
+    "CodingError",
+    "CodingOutcome",
+    "CodingRequest",
     "CONNECT_TIMEOUT_SECONDS",
     "TOTAL_DEADLINE_SECONDS",
     "MAX_DURABLE_METADATA_CHARACTERS",

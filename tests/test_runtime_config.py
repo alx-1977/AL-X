@@ -58,6 +58,38 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(settings.primary_person_id, "friedl")
         self.assertEqual(settings.core_step_budget, 8)
 
+    def test_coding_backend_is_off_and_independent_of_the_core(self) -> None:
+        settings = RuntimeSettings.from_environment(environment())
+        self.assertFalse(settings.coding.enabled)
+        self.assertFalse(settings.coding.is_usable)
+        with self.assertRaises(ConfigurationError):
+            RuntimeSettings.from_environment(
+                environment(
+                    ALX_CODING_ENABLED="true",
+                    ALX_CODING_PROVIDER="claude_subscription",
+                )
+            )
+        with self.assertRaises(ConfigurationError):
+            RuntimeSettings.from_environment(
+                environment(
+                    ALX_CODING_ENABLED="true",
+                    ALX_CODING_PROVIDER="xai",
+                    XAI_API_KEY="coding-secret",
+                )
+            )
+        enabled = RuntimeSettings.from_environment(
+            environment(
+                ALX_CODING_ENABLED="true",
+                ALX_CODING_PROVIDER="grok_subscription",
+                XAI_API_KEY="must-not-become-the-coding-credential",
+            )
+        )
+        self.assertTrue(enabled.coding.is_usable)
+        self.assertEqual(enabled.coding.reasoning.provider, "grok_subscription")
+        self.assertEqual(enabled.coding.reasoning.api_key, "")
+        self.assertEqual(enabled.reasoning.provider, "xai")
+        self.assertEqual(enabled.reasoning.model, "reasoning-model")
+
     def test_every_provider_and_model_is_configuration(self) -> None:
         settings = RuntimeSettings.from_environment(environment())
         self.assertEqual(settings.reasoning.provider, "xai")

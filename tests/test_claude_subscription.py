@@ -1042,6 +1042,7 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
             providers.reasoning,
             providers.specialist,
             providers.autonomous,
+            providers.coding,
         ):
             self.assertNotIsInstance(built, OpenAIReasoningModel)
             self.assertNotIsInstance(built, XAIReasoningModel)
