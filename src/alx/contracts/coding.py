@@ -11,12 +11,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
+from typing import Protocol
 
 
 DEFAULT_STEP_BUDGET = 16
 MAX_STEP_BUDGET = 32
+MAX_PLANNING_ATTEMPTS = 3
+# The native agent runs its own tool loop, so AL/X no longer counts model
+# turns. What remains bounded is the verification AL/X performs afterwards.
+MAX_VERIFICATION_COMMANDS = 8
 DEFAULT_COMMAND_SECONDS = 60
-MAX_COMMAND_SECONDS = 120
+# The known full suite takes about 90 seconds. Verification keeps its own
+# realistic bound rather than inheriting the short default for inspection.
+DEFAULT_VERIFICATION_COMMAND_SECONDS = 180
+MAX_COMMAND_SECONDS = 180
 MAX_FILE_CHARACTERS = 256_000
 MAX_COMMAND_OUTPUT_CHARACTERS = 16_000
 MAX_DIFF_CHARACTERS = 32_000
@@ -41,8 +50,9 @@ CODING_FAILURES = (
     "execution_timeout",
     "provider_failed",
     "plan_unusable",
-    "step_budget_exhausted",
-    "command_budget_exhausted",
+    "planning_failed",
+    "sandbox_unusable",
+    "session_failed",
     "task_failed",
 )
 
@@ -60,6 +70,32 @@ class CodingError(Exception):
             if value is not None
         }
         super().__init__(code)
+
+
+def lexical_worktree_path(relative: str) -> str:
+    """Collapse . and .. without leaving the worktree. Absolute paths refuse.
+
+    Purely lexical, so it is safe before a path exists and shared by the
+    workspace bound and the sandbox-profile generator.
+    """
+    if not isinstance(relative, str) or not relative.strip():
+        raise CodingError("path_outside_worktree")
+    if "\x00" in relative:
+        raise CodingError("path_outside_worktree")
+    path = PurePosixPath(relative.replace("\\", "/"))
+    if path.is_absolute():
+        raise CodingError("path_outside_worktree")
+    parts: list[str] = []
+    for part in path.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise CodingError("path_outside_worktree")
+            parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
 
 
 def path_matches_blocked(relative: str, blocked: tuple[str, ...]) -> bool:
@@ -133,6 +169,43 @@ class CodingRequest:
             for item in blocked
         ):
             raise ValueError("blocked paths must be non-blank bounded strings")
+
+
+@dataclass(frozen=True, slots=True)
+class CodingSessionResult:
+    """What one native coding-agent session reports about itself.
+
+    This is the agent's own account, not evidence. It says what the agent
+    believes it did; AL/X verifies the repository and the tests separately and
+    Core decides what the two together mean.
+    """
+
+    completed: bool
+    report: str
+    turns: int = 0
+    failure_code: str = ""
+    diagnostics: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "report", str(self.report))
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics or {}))
+        if not isinstance(self.turns, int) or isinstance(self.turns, bool):
+            raise TypeError("turns must be an integer")
+        if self.turns < 0:
+            raise ValueError("turns must not be negative")
+
+
+class CodingSession(Protocol):
+    """Run one native coding-agent session inside an assigned worktree.
+
+    The implementation launches a real agent with its own tool loop. It never
+    receives raw user language as a routing decision and never decides whether
+    the coding job mattered; it returns what happened.
+    """
+
+    def run_session(
+        self, request: "CodingRequest", briefing: str
+    ) -> CodingSessionResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +312,10 @@ __all__ = [
     "CodingError",
     "CodingOutcome",
     "CodingRequest",
+    "CodingSession",
+    "CodingSessionResult",
     "DEFAULT_COMMAND_SECONDS",
+    "DEFAULT_VERIFICATION_COMMAND_SECONDS",
     "DEFAULT_STEP_BUDGET",
     "MAX_COMMAND_OUTPUT_CHARACTERS",
     "MAX_COMMAND_SECONDS",
@@ -248,7 +324,10 @@ __all__ = [
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
     "MAX_STEP_BUDGET",
+    "MAX_PLANNING_ATTEMPTS",
+    "MAX_VERIFICATION_COMMANDS",
     "MAX_BLOCKED_PATHS",
     "MAX_BLOCKED_PATH_CHARACTERS",
+    "lexical_worktree_path",
     "path_matches_blocked",
 ]

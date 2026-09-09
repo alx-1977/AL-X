@@ -85,6 +85,28 @@ REASONING_TRANSPORT_SITES = {REASONING_TRANSPORT_SITE, GROK_TRANSPORT_SITE}
 # request a review, and that it is the only coding process site.
 CODING_EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "coding_process.py"
 
+# D-028 execution, second half. The coding job is carried out by a native
+# coding-agent session rather than by AL/X replaying one operation at a time,
+# so two further modules start a process and neither is a Sandbox experiment:
+#
+# - `coding_session.py` launches the coding CLI as an agent in the assigned
+#   worktree. It runs no AL/X-authored program and takes no source; the agent
+#   edits the repository Core named, under a kernel-enforced sandbox profile,
+#   with its terminal withheld;
+# - `coding_containment.py` reads git metadata locations (`git rev-parse`) so the
+#   real object store can be denied. Its argv is fixed and contains no model
+#   output, and it never executes anything the job chose.
+#
+# Both stay inside the generic absence scans for promotion paths. What they are
+# admitted for is starting a process at all.
+CODING_SESSION_SITE = PRODUCTION_ROOT / "providers" / "coding_session.py"
+CODING_CONTAINMENT_SITE = PRODUCTION_ROOT / "providers" / "coding_containment.py"
+CODING_PROCESS_SITES = {
+    CODING_EXECUTION_SITE,
+    CODING_SESSION_SITE,
+    CODING_CONTAINMENT_SITE,
+}
+
 
 def _sandbox_modules() -> list[Path]:
     named = set(PRODUCTION_ROOT.rglob("*sandbox*.py"))
@@ -537,7 +559,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES or path == CODING_EXECUTION_SITE:
+            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -563,7 +585,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES or path == CODING_EXECUTION_SITE:
+            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):

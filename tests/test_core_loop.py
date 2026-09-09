@@ -18,6 +18,7 @@ from alx.contracts import (  # noqa: E402
     ConversationTurn, DecisionValidationError, Evidence, GoalMutationKind,
     GoalProposal, GoalState, GoalStatus, Objective, SideEffect,
     MemoryKind, MemoryProposal, StructuredSchema, SuccessCriterion, ValueKind,
+    GoalStopReason,
     WorkItem,
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
@@ -293,6 +294,96 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(
             self.store.load("goal-1").state.status, GoalStatus.COMPLETED
         )
+
+    def test_await_input_without_outstanding_work_stays_active(self) -> None:
+        """A stale goal in this shape refused every further turn on its thread."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        proposal = GoalProposal(GoalMutationKind.AWAIT_INPUT)
+        outcome = self.agent(Queued(
+            AgentDecision(
+                response="That run failed; tell me how you want to proceed.",
+                goal_proposal=proposal,
+                response_requires_goal_commit=True,
+            ),
+            selects="goal-1",
+        )).process(conversation(), RETENTION, 1)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertNotEqual(outcome.reason, "goal_proposal_invalid")
+        state = self.store.load("goal-1").state
+        self.assertIs(state.status, GoalStatus.ACTIVE)
+        self.assertIsNone(state.stop_reason)
+        # No work was invented to satisfy the validator.
+        self.assertEqual(state.outstanding_work, ())
+
+    def test_await_input_still_waits_when_work_is_genuinely_outstanding(self) -> None:
+        """The real meaning of awaiting input is preserved."""
+        self.store.create(
+            goal(outstanding_work=(WorkItem("work-1", "which branch?"),)),
+            "conversation-1", RETENTION,
+        )
+        proposal = GoalProposal(GoalMutationKind.AWAIT_INPUT)
+        outcome = self.agent(Queued(
+            AgentDecision(response="Which branch should I use?",
+                          goal_proposal=proposal),
+            selects="goal-1",
+        )).process(conversation(), RETENTION, 1)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        state = self.store.load("goal-1").state
+        self.assertIs(state.status, GoalStatus.AWAITING_INPUT)
+        self.assertIs(state.stop_reason, GoalStopReason.REQUIRED_INPUT)
+
+    def test_a_new_instruction_can_dispatch_from_that_state(self) -> None:
+        """The stale goal must not block acting on what Friedl asks next."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatched: list[CapabilityCall] = []
+
+        def dispatch(call, state):
+            dispatched.append(call)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    call.call_id, call.capability_id,
+                    CapabilityResultState.SUCCEEDED, {"value": 1},
+                ),
+            )
+
+        outcome = self.agent(Queued(
+            AgentDecision(
+                call=CapabilityCall("call-1", "inspect", {}),
+                goal_proposal=GoalProposal(GoalMutationKind.AWAIT_INPUT),
+            ),
+            AgentDecision(response="Here is what I found."),
+            selects="goal-1",
+        ), dispatch=dispatch).process(conversation(), RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual([item.capability_id for item in dispatched], ["inspect"])
+        self.assertIs(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
+
+    def test_a_failed_attempt_cannot_close_the_goal(self) -> None:
+        """Failed coding evidence stays failed and cannot complete a goal."""
+        call = CapabilityCall("call-1", "inspect", {})
+        result = CapabilityResult(
+            "call-1", "inspect", CapabilityResultState.FAILED,
+            {"status": "failed"},
+            failure={"code": "task_failed"},
+        )
+        attempt = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True, result,
+        )
+        self.store.create(goal(attempts=(attempt,)), "conversation-1", RETENTION)
+        evidence = Evidence(
+            "evidence-1", "the coding job failed", supports=("criterion-1",),
+            source_references=("attempt:call-1",),
+        )
+        proposal = GoalProposal(
+            GoalMutationKind.REQUEST_COMPLETION, new_evidence=(evidence,),
+        )
+        outcome = self.agent(Queued(
+            AgentDecision(response="All done.", goal_proposal=proposal),
+            selects="goal-1",
+        )).process(conversation(), RETENTION, 1)
+        self.assertEqual(outcome.reason, "goal_proposal_rejected")
+        self.assertIs(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
 
     def test_completion_rejects_outstanding_work_even_with_evidence(self) -> None:
         self.store.create(goal(outstanding_work=(WorkItem("work-1", "verify"),)),
@@ -573,6 +664,223 @@ class CoreTests(unittest.TestCase):
         closed = stored.attempts[-1]
         self.assertEqual(closed.reason_code, "dispatch_interrupted")
         self.assertEqual(closed.result.failure["code"], "dispatch_interrupted")
+
+    def test_effectful_queue_continues_after_premature_response(self) -> None:
+        """A call-less end must not stop a queue that can still run this turn.
+
+        After the first successful item the Core used to accept a response as
+        the end of the person turn. The goal stayed ACTIVE, no further
+        dispatches ran, and nothing was scheduled that could continue without
+        another user turn. Remaining approval-required work also could not
+        resume later, because a later turn is no longer grounded in Friedl's
+        instruction.
+        """
+        effectful = CapabilityDefinition(
+            "change", "Change structured material", SCHEMA, SCHEMA,
+            SideEffect.EFFECTFUL,
+        )
+        self.store.create(
+            goal(outstanding_work=(
+                WorkItem("item-1", "first item"),
+                WorkItem("item-2", "second item"),
+            )),
+            "conversation-1",
+            RETENTION,
+        )
+
+        def approved(call_id: str, item_id: str):
+            arguments = {"item_id": item_id}
+            call = CapabilityCall(
+                call_id, "change", arguments, f"approval-{call_id}",
+            )
+            return call, ApprovalProposal(
+                call.approval_id,
+                ApprovalScope("change", arguments),
+                "turn:turn-1",
+            )
+
+        first, first_approval = approved("call-1", "item-1")
+        second, second_approval = approved("call-2", "item-2")
+        dispatched: list[str] = []
+
+        def dispatch(call, state):
+            dispatched.append(call.call_id)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    call.call_id, call.capability_id,
+                    CapabilityResultState.SUCCEEDED, {"ok": True},
+                ),
+            )
+
+        reasoner = Queued(
+            AgentDecision(call=first, approval_proposal=first_approval),
+            AgentDecision(
+                response="Still working through the rest.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.UPDATE,
+                    outstanding_work=(WorkItem("item-2", "second item"),),
+                ),
+            ),
+            AgentDecision(call=second, approval_proposal=second_approval),
+            AgentDecision(
+                response="Both items are done.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.UPDATE, outstanding_work=(),
+                ),
+            ),
+            AssertionError("the turn continued past the truthful response"),
+            selects="goal-1",
+        )
+        outcome = CoreAgent(
+            self.store, reasoner, dispatch, (effectful,), clock=lambda: NOW,
+        ).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Both items are done.")
+        self.assertEqual(dispatched, ["call-1", "call-2"])
+        self.assertEqual(len(reasoner.contexts), 4)
+        notice = reasoner.contexts[2].continuation_notices[0]
+        self.assertEqual(notice["reason"], "remaining_work_still_executable")
+        self.assertEqual(notice["outstanding_work"], ["item-2"])
+        self.assertEqual(reasoner.contexts[3].continuation_notices, ())
+        stored = self.store.load("goal-1").state
+        self.assertIs(stored.status, GoalStatus.ACTIVE)
+        self.assertEqual(stored.outstanding_work, ())
+
+    def test_a_second_call_less_end_after_the_notice_parks_the_goal(self) -> None:
+        """The continuation notice is one-shot; ending again parks remaining work."""
+        effectful = CapabilityDefinition(
+            "change", "Change structured material", SCHEMA, SCHEMA,
+            SideEffect.EFFECTFUL,
+        )
+        self.store.create(
+            goal(outstanding_work=(
+                WorkItem("item-1", "first item"),
+                WorkItem("item-2", "second item"),
+            )),
+            "conversation-1",
+            RETENTION,
+        )
+        arguments = {"item_id": "item-1"}
+        call = CapabilityCall("call-1", "change", arguments, "approval-1")
+        dispatched: list[str] = []
+
+        def dispatch(proposed, state):
+            dispatched.append(proposed.call_id)
+            return CapabilityAttempt(
+                proposed, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    proposed.call_id, proposed.capability_id,
+                    CapabilityResultState.SUCCEEDED, {"ok": True},
+                ),
+            )
+
+        reasoner = Queued(
+            AgentDecision(
+                call=call,
+                approval_proposal=ApprovalProposal(
+                    "approval-1",
+                    ApprovalScope("change", arguments),
+                    "turn:turn-1",
+                ),
+            ),
+            AgentDecision(response="Still working."),
+            AgentDecision(response="I cannot continue from here."),
+            AssertionError("a second call-less end continued the loop"),
+            selects="goal-1",
+        )
+        outcome = CoreAgent(
+            self.store, reasoner, dispatch, (effectful,), clock=lambda: NOW,
+        ).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "I cannot continue from here.")
+        self.assertEqual(dispatched, ["call-1"])
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(
+            reasoner.contexts[2].continuation_notices[0]["reason"],
+            "remaining_work_still_executable",
+        )
+        stored = self.store.load("goal-1").state
+        self.assertIs(stored.status, GoalStatus.AWAITING_INPUT)
+        self.assertTrue(stored.outstanding_work)
+
+    def test_turn_bound_remaining_work_parks_instead_of_staying_active(self) -> None:
+        """Spent turn-bound work cannot continue without another person turn."""
+        bound = CapabilityDefinition(
+            "review_once", "Request one review", SCHEMA, SCHEMA,
+            SideEffect.EFFECTFUL,
+        )
+        self.store.create(
+            goal(outstanding_work=(
+                WorkItem("item-1", "first review"),
+                WorkItem("item-2", "second review"),
+            )),
+            "conversation-1",
+            RETENTION,
+        )
+        arguments = {"target": "one"}
+        call = CapabilityCall("call-1", "review_once", arguments, "approval-1")
+        dispatched: list[str] = []
+
+        def dispatch(proposed, state):
+            dispatched.append(proposed.call_id)
+            return CapabilityAttempt(
+                proposed, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    proposed.call_id, proposed.capability_id,
+                    CapabilityResultState.SUCCEEDED, {"ok": True},
+                ),
+            )
+
+        reasoner = Queued(
+            AgentDecision(
+                call=call,
+                approval_proposal=ApprovalProposal(
+                    "approval-1",
+                    ApprovalScope("review_once", arguments),
+                    "turn:turn-1",
+                ),
+            ),
+            AgentDecision(
+                response="Still working on the rest.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.UPDATE,
+                    outstanding_work=(WorkItem("item-2", "second review"),),
+                ),
+            ),
+            AssertionError("a spent turn-bound action continued without a new turn"),
+            selects="goal-1",
+        )
+        outcome = CoreAgent(
+            self.store, reasoner, dispatch, (bound,), clock=lambda: NOW,
+            turn_bound_capabilities=frozenset({"review_once"}),
+        ).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertNotEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(dispatched, ["call-1"])
+        self.assertEqual(len(reasoner.contexts), 2)
+        stored = self.store.load("goal-1").state
+        self.assertIs(stored.status, GoalStatus.AWAITING_INPUT)
+        self.assertIs(stored.stop_reason, GoalStopReason.REQUIRED_INPUT)
+        self.assertEqual(
+            [item.item_id for item in stored.outstanding_work], ["item-2"],
+        )
+
+    def test_empty_outstanding_work_ordinary_response_is_unchanged(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        reasoner = Queued(
+            AgentDecision(response="A normal answer."),
+            AssertionError("ordinary response continued the loop"),
+            selects="goal-1",
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "A normal answer.")
+        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(reasoner.contexts[0].continuation_notices, ())
+        stored = self.store.load("goal-1").state
+        self.assertIs(stored.status, GoalStatus.ACTIVE)
+        self.assertEqual(stored.outstanding_work, ())
 
 
 class ReasoningProjectionTests(unittest.TestCase):

@@ -455,6 +455,7 @@ async def run(repository_root: Path) -> None:
         provider_settings.coding.enabled,
         providers.coding,
         lambda: current_call_id[0],
+        session=providers.coding_session,
     )
     if coding_runtime is not None:
         for definition in coding_runtime.definitions:

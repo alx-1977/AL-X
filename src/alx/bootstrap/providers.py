@@ -23,6 +23,8 @@ from alx.providers import (
     XAIReasoningModel,
 )
 from alx.providers.claude_subscription import subscription_cli_present
+from alx.contracts import CodingSession
+from alx.providers.coding_session import GrokCodingSession
 from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
 from alx.providers.gated_transcription import GatedTranscriber
 
@@ -44,6 +46,11 @@ class RuntimeProviders:
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
+    # The native coding-agent session that carries a plan out in the assigned
+    # worktree. None when the configured coding provider has no session
+    # adapter, which leaves the capability unregistered rather than letting a
+    # job plan and then have nothing to execute it.
+    coding_session: CodingSession | None
     speech_to_text: SpeechTranscriber
     # None when no speech transport is configured. Audio is then absent and
     # nothing else differs: the Core never learns whether anyone could hear.
@@ -111,6 +118,33 @@ def _build_reasoning_model(
         )
     LOGGER.info("Specialist adapter is not installed: %s", settings.provider)
     return None
+
+
+def _build_coding_session(
+    settings: RuntimeSettings,
+) -> "CodingSession | None":
+    """The native session that executes a coding plan, or None.
+
+    Only the Grok subscription path has a session adapter. Another configured
+    coding provider can still plan, but nothing would carry the plan out, so
+    the capability is left unregistered instead.
+    """
+    coding = settings.coding
+    if not coding.enabled or not coding.is_usable:
+        return None
+    if coding.reasoning.provider != GROK_SUBSCRIPTION_PROVIDER:
+        LOGGER.info(
+            "Coding session adapter is not installed: %s",
+            coding.reasoning.provider,
+        )
+        return None
+    # Deliberately not `reasoning.timeout_seconds`: that bounds one planning
+    # call, and a native session working a real defect needs far longer.
+    return GrokCodingSession(
+        coding.reasoning.model,
+        coding.session_timeout_seconds,
+        effort=coding.reasoning.effort,
+    )
 
 
 def _build_coding_model(
@@ -207,6 +241,7 @@ def build_runtime_providers(
         else _build_reasoning_model(settings.autonomous, telemetry_sink)
     )
     coding = _build_coding_model(settings, telemetry_sink)
+    coding_session = _build_coding_session(settings)
 
     if settings.speech_to_text.provider != "cartesia":
         raise ConfigurationError(
@@ -226,6 +261,7 @@ def build_runtime_providers(
         specialist=specialist,
         autonomous=autonomous,
         coding=coding,
+        coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth
         # paying to transmit; what the audio means is still Cartesia's answer
         # and then AL/X's. Removing the wrapper restores the previous

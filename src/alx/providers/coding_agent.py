@@ -1,28 +1,48 @@
 """Run one bounded coding job and return structured evidence.
 
-The loop is mechanical: ask the configured coding model for one structured
-action, execute it inside the assigned worktree, or finish. The model is not
-AL/X. It holds no catalogue, no goal, no merge or review authority, and cannot
-widen the task. Core interprets the evidence that comes back.
+The shape of this is deliberate, and it is the second attempt. The first asked
+the coding model to emit one AL/X-specific JSON operation per provider call and
+executed each one here. That protocol produced valid plans and then no
+actionable operation at all: the model was being asked to hand-serialise a tool
+loop it already implements, statelessly, one round trip per file read.
+
+So the model now runs as what it is. It plans, then a native coding-agent
+session works inside the assigned worktree with its own tools and its own
+multi-turn context. Containment moved from a per-operation Python check to the
+kernel, where a generated sandbox profile denies git metadata, credentials and
+every blocked path for every process the agent starts.
+
+What did not move is authority. The agent has no terminal in this iteration, so
+it cannot commit, push, merge, deploy or request a review, and it cannot run a
+test either. AL/X runs verification afterwards through the allowlisted command
+executor, which is the only site in this package that starts a development
+process. The agent's own report is treated as an account, never as evidence:
+the repository diff and the test results are what Core is given.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Mapping
 
 from alx.contracts import ModelMessage, ModelRequest, ModelRole, ReasoningModel
 from alx.contracts.coding import (
+    MAX_PLANNING_ATTEMPTS,
     MAX_REPORTED_COMMANDS,
     MAX_REPORTED_FILES,
+    MAX_VERIFICATION_COMMANDS,
+    DEFAULT_VERIFICATION_COMMAND_SECONDS,
     CodingCommandRecord,
     CodingError,
     CodingOutcome,
     CodingRequest,
+    CodingSession,
+    CodingSessionResult,
 )
 from alx.providers.coding_process import (
+    command_permitted,
     files_from_git_status,
     inspect_git,
     is_test_command,
@@ -30,35 +50,19 @@ from alx.providers.coding_process import (
 )
 from alx.providers.coding_workspace import CodingWorkspace
 from alx.providers.errors import ProviderError
+import json
 
 
 PLAN_INSTRUCTION = (
     "You are a bounded coding worker preparing an implementation plan for one "
     "assigned software-engineering job. You are not AL/X and have no product, "
     "merge, deploy, push, review or governance authority. Produce only the "
-    "requested structured plan. The operation contract is exhaustive: do not "
-    "plan shell commands or authority the executor cannot perform."
+    "requested structured plan. You will carry the plan out yourself in an "
+    "assigned worktree using ordinary file reading, searching and editing, so "
+    "plan real code changes. You will not have a terminal: do not plan shell "
+    "commands, and describe verification as the tests that should be run "
+    "rather than as commands you will run. You are in PLAN mode."
 )
-
-INSTRUCTION = (
-    "You are a bounded coding worker executing one assigned software-engineering "
-    "job. You are not AL/X and have no product, merge, deploy, push, review or "
-    "governance authority. Stay inside the assigned worktree and task. You may "
-    "read, list and write files there, and run permitted development commands "
-    "(tests and read-only git inspection). Blocked paths in the job, and all of "
-    "their descendants, must not be read or written; the executor enforces that. "
-    "When the job is done or blocked, finish with status, summary, unresolved "
-    "issues and whether an external review is recommended. Do not claim success "
-    "if tests failed or the change is incomplete."
-)
-
-OPERATION_CONTRACT = {
-    "read_file": "read UTF-8 file inside assigned worktree",
-    "list_dir": "list directory inside assigned worktree",
-    "write_file": "write UTF-8 file inside assigned worktree",
-    "run_command": "argv-only permitted tests or read-only git inspection",
-    "refused": ["generic shell", "commit", "push", "merge", "deploy", "review"],
-}
 
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -79,189 +83,350 @@ PLAN_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-ANSWER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "decision": {"type": "string", "enum": ["act", "finish"]},
-        "action_kind": {
-            "type": "string",
-            "enum": ["read_file", "list_dir", "write_file", "run_command", "none"],
-        },
-        "path": {"type": "string"},
-        "content": {"type": "string"},
-        "command": {"type": "array", "items": {"type": "string"}},
-        "summary": {"type": "string"},
-        "unresolved_issues": {"type": "array", "items": {"type": "string"}},
-        "external_review_recommended": {"type": "boolean"},
-        "status": {"type": "string", "enum": ["succeeded", "failed", "blocked"]},
-    },
-    "required": [
-        "decision",
-        "action_kind",
-        "path",
-        "content",
-        "command",
-        "summary",
-        "unresolved_issues",
-        "external_review_recommended",
-        "status",
-    ],
-    "additionalProperties": False,
-}
-
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-class CodingAgent:
-    """One coding job through one model and one worktree-bounded executor."""
+def _strings(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in value if str(item).strip())
 
-    def __init__(self, model: ReasoningModel) -> None:
+
+def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
+    """The human-language instruction handed to the native coding session.
+
+    Written as prose because the agent is a coding agent, not a protocol
+    endpoint. It states the task, the accepted plan and the boundaries it
+    cannot cross, including the two that are enforced elsewhere regardless of
+    what it reads here: it has no terminal, and denied paths are refused by the
+    operating system rather than by its own restraint.
+    """
+    lines = [
+        "You are completing one assigned software-engineering task inside a git",
+        "worktree that has already been prepared for you. Work directly: read,",
+        "search and edit files with your normal tools until the task is done.",
+        "",
+        "# Task",
+        request.task.strip(),
+    ]
+    if request.context.strip():
+        lines += ["", "# Context", request.context.strip()]
+    criteria = [item for item in request.acceptance_criteria if item.strip()]
+    if criteria:
+        lines += ["", "# Acceptance criteria"]
+        lines += [f"- {item.strip()}" for item in criteria]
+    lines += ["", "# Your accepted plan", str(plan.get("problem_understanding", "")).strip()]
+    for label, key in (
+        ("Intended changes", "intended_changes"),
+        ("Verification expected", "verification"),
+        ("Risks and constraints", "risks_constraints"),
+    ):
+        items = _strings(plan.get(key))
+        if items:
+            lines += ["", f"## {label}"]
+            lines += [f"- {item}" for item in items]
+    if request.test_guidance.strip():
+        lines += ["", "# Test guidance", request.test_guidance.strip()]
+    if request.blocked_paths:
+        lines += ["", "# Paths you must not read or write"]
+        lines += [f"- {item}" for item in request.blocked_paths]
+    lines += [
+        "",
+        "# Boundaries",
+        "- You have no terminal in this task. You cannot run commands or tests.",
+        "  AL/X runs the tests after you finish and reads the result itself.",
+        "- Do not commit, push, merge, deploy, or request a code review.",
+        "- Stay inside this worktree. Git metadata, environment files and",
+        "  credential files are denied by the operating system, not by you.",
+        "- Change only what this task requires.",
+        "",
+        "# Finishing",
+        "When the work is done or you are genuinely blocked, stop and report",
+        "plainly: what you changed and why, which files, anything you could not",
+        "resolve, and what should be tested. Do not claim the task is complete",
+        "if it is not.",
+    ]
+    return "\n".join(lines)
+
+
+class CodingAgent:
+    """One coding job: AL/X plans it, a native session does it, AL/X verifies it."""
+
+    def __init__(
+        self, model: ReasoningModel, session: CodingSession | None = None
+    ) -> None:
         self._model = model
+        self._session = session
 
     def run(self, request: CodingRequest) -> CodingOutcome:
         workspace = CodingWorkspace(request.worktree, request.blocked_paths)
-        observations: list[str] = []
         commands: list[CodingCommandRecord] = []
-        written: list[str] = []
-        tests_run = False
-        tests_passed: bool | None = None
-        stop_reason = "step_budget_exhausted"
         preexisting_status, _ = self._git_evidence(workspace)
         preexisting_dirty = files_from_git_status(preexisting_status)
+
+        plan, planning_failure = self._planning_phase(request, workspace)
+        if plan is None:
+            git_status, git_diff = self._git_evidence(workspace)
+            issue = (
+                "provider_failed"
+                if planning_failure.get("failure_code") == "provider_failed"
+                else "planning_failed"
+            )
+            return self._outcome(
+                status="failed",
+                summary="the coding model did not produce a usable plan",
+                files=(), preexisting_dirty=preexisting_dirty, commands=commands,
+                tests_run=False, tests_passed=None, git_status=git_status,
+                git_diff=git_diff, issues=(issue,), review=False,
+                failure_status=True, diagnostics=planning_failure,
+            )
+        plan_summary = str(plan["problem_understanding"])
+
+        if self._session is None:
+            git_status, git_diff = self._git_evidence(workspace)
+            return self._outcome(
+                status="failed",
+                summary="no coding session is configured to carry out the plan",
+                files=(), preexisting_dirty=preexisting_dirty, commands=commands,
+                tests_run=False, tests_passed=None, git_status=git_status,
+                git_diff=git_diff, issues=("coding_unavailable",), review=False,
+                failure_status=True, plan_summary=plan_summary,
+                diagnostics={"phase": "execution", "reason_code": "no_session"},
+            )
+
         try:
-            plan = self._plan(request, workspace)
+            session = self._session.run_session(
+                request, build_briefing(request, plan)
+            )
         except CodingError as error:
             git_status, git_diff = self._git_evidence(workspace)
             return self._outcome(
-                status="failed", summary="the coding model did not produce a usable plan",
-                files=(), preexisting_dirty=preexisting_dirty, commands=commands,
+                status="failed",
+                summary="the coding session could not be started or completed",
+                files=self._files_changed((), git_status, preexisting_dirty),
+                preexisting_dirty=preexisting_dirty, commands=commands,
                 tests_run=False, tests_passed=None, git_status=git_status,
                 git_diff=git_diff, issues=(error.code,), review=False,
-                failure_status=True, diagnostics=error.details,
+                failure_status=True, plan_summary=plan_summary,
+                diagnostics={"phase": "execution", **error.details},
             )
-        plan_summary = str(plan["problem_understanding"])
-        observations.append("plan accepted: " + plan_summary[:2_000])
 
-        for _step in range(request.step_budget):
+        # Verification is AL/X's, not the session's. The agent has no terminal,
+        # so every command below is chosen here and refused unless the
+        # allowlist already permits it.
+        post_session_status, _ = self._git_evidence(workspace)
+        session_files = self._files_changed(
+            (), post_session_status, preexisting_dirty
+        )
+        tests_run = False
+        tests_passed: bool | None = None
+        for argv in self._verification_commands(request, plan, session_files):
             try:
-                answer = self._ask(request, observations)
+                record = run_permitted_command(
+                    list(argv), workspace.root,
+                    timeout_seconds=DEFAULT_VERIFICATION_COMMAND_SECONDS,
+                    blocked_paths=workspace.blocked_paths,
+                )
             except CodingError as error:
-                git_status, git_diff = self._git_evidence(workspace)
-                return self._outcome(
-                    status="failed",
-                    summary="the coding model failed before the job finished",
-                    files=self._files_changed(
-                        written, git_status, preexisting_dirty
-                    ),
-                    preexisting_dirty=preexisting_dirty,
-                    commands=commands,
-                    tests_run=tests_run,
-                    tests_passed=tests_passed,
-                    git_status=git_status,
-                    git_diff=git_diff,
-                    issues=(error.code,),
-                    review=False,
-                    failure_status=True,
-                    diagnostics=error.details,
-                    plan_summary=plan_summary,
-                )
-            decision = str(answer.get("decision") or "")
-            if decision == "finish":
-                status = str(answer.get("status") or "failed")
-                if status == "succeeded" and tests_run and tests_passed is False:
-                    status = "failed"
-                git_status, git_diff = self._git_evidence(workspace)
-                files = self._files_changed(
-                    written, git_status, preexisting_dirty
-                )
-                issues = _strings(answer.get("unresolved_issues"))
-                if status == "succeeded" and issues:
-                    status = "failed"
-                return self._outcome(
-                    status=status,
-                    summary=str(answer.get("summary") or "coding job finished").strip()
-                    or "coding job finished",
-                    files=files,
-                    preexisting_dirty=preexisting_dirty,
-                    commands=commands,
-                    tests_run=tests_run,
-                    tests_passed=tests_passed,
-                    git_status=git_status,
-                    git_diff=git_diff,
-                    issues=issues,
-                    review=bool(answer.get("external_review_recommended")),
-                    plan_summary=plan_summary,
-                )
-            if decision != "act":
-                observations.append("invalid_decision")
-                continue
-            try:
-                observation, command = self._act(workspace, answer)
-            except CodingError as error:
-                observations.append(f"error:{error.code}")
-                if str(answer.get("action_kind") or "") == "run_command":
-                    commands.append(
-                        CodingCommandRecord(
-                            tuple(str(item) for item in (answer.get("command") or ())),
-                            -1,
-                            "",
-                            error.code,
-                            False,
-                            error.code != "command_not_permitted",
-                        )
+                commands.append(
+                    CodingCommandRecord(
+                        tuple(argv), -1, "", error.code, False,
+                        error.code != "command_not_permitted",
                     )
+                )
                 continue
-            observations.append(observation[:8_000])
-            if command is not None:
-                commands.append(command)
-                if is_test_command(command.argv):
-                    tests_run = True
-                    passed = command.exit_status == 0 and not command.timed_out
-                    if not passed:
-                        tests_passed = False
-                    elif tests_passed is None:
-                        tests_passed = True
-            kind = str(answer.get("action_kind") or "")
-            if kind == "write_file":
-                path = str(answer.get("path") or "").strip()
-                if path and path not in written:
-                    written.append(path)
-            if len(commands) >= MAX_REPORTED_COMMANDS:
-                stop_reason = "command_budget_exhausted"
-                break
-        else:
-            stop_reason = "step_budget_exhausted"
+            commands.append(record)
+            if is_test_command(record.argv):
+                tests_run = True
+                passed = record.exit_status == 0 and not record.timed_out
+                if not passed:
+                    tests_passed = False
+                elif tests_passed is None:
+                    tests_passed = True
 
         git_status, git_diff = self._git_evidence(workspace)
-        summary = (
-            "the coding job reached its command budget without finishing"
-            if stop_reason == "command_budget_exhausted"
-            else "the coding job reached its step budget without finishing"
-        )
+        files = self._files_changed((), git_status, preexisting_dirty)
+        issues = list(_strings(session.diagnostics.get("unresolved_issues")))
+        status = "succeeded"
+        if not session.completed:
+            status = "failed"
+            if session.failure_code:
+                issues.append(session.failure_code)
+            else:
+                issues.append("session_failed")
+        elif not files:
+            # A session that reports success while changing nothing has not
+            # done the job. V1 treated an unchanged worktree the same way.
+            status = "failed"
+            issues.append("no_files_changed")
+        elif tests_run and tests_passed is False:
+            status = "failed"
+
+        summary = session.report.strip() or "the coding session returned no report"
         return self._outcome(
-            status="failed",
-            summary=summary,
-            files=self._files_changed(
-                written, git_status, preexisting_dirty
-            ),
+            status=status,
+            summary=summary[:8_000],
+            files=files,
             preexisting_dirty=preexisting_dirty,
             commands=commands,
             tests_run=tests_run,
             tests_passed=tests_passed,
             git_status=git_status,
             git_diff=git_diff,
-            issues=(stop_reason,),
+            issues=tuple(issues),
             review=False,
-            failure_status=True,
             plan_summary=plan_summary,
+            diagnostics={
+                "phase": "execution",
+                "session_turns": session.turns,
+                "session_completed": session.completed,
+                **{
+                    key: value
+                    for key, value in session.diagnostics.items()
+                    if key != "unresolved_issues"
+                },
+            },
         )
 
-    def _plan(
+    def _verification_commands(
+        self,
+        request: CodingRequest,
+        plan: Mapping[str, Any],
+        changed_files: tuple[str, ...] = (),
+    ) -> tuple[tuple[str, ...], ...]:
+        """The bounded checks AL/X runs after the session finishes.
+
+        Explicit test guidance and the accepted plan come first. The session's
+        changed test modules and deterministic source-to-test neighbours follow.
+        Each is accepted only if `command_permitted` already allows it, so this
+        cannot widen the allowlist; only an absence of targeted evidence falls
+        back to the worktree's broader suite.
+        """
+        chosen: list[tuple[str, ...]] = []
+        seen: set[tuple[str, ...]] = set()
+
+        def choose(argv: tuple[str, ...]) -> bool:
+            if argv in seen:
+                return False
+            if not command_permitted(
+                list(argv), self._root(request), tuple(request.blocked_paths)
+            ):
+                return False
+            seen.add(argv)
+            chosen.append(argv)
+            return len(chosen) >= MAX_VERIFICATION_COMMANDS
+
+        for text in (request.test_guidance, *_strings(plan.get("verification"))):
+            for argv in self._candidate_arguments(text):
+                if choose(argv):
+                    return tuple(chosen)
+        derived = self._changed_test_modules(request, changed_files)
+        if derived and choose(("python", "-m", "pytest", "-q", *derived)):
+            return tuple(chosen)
+        if not chosen:
+            fallback = ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider")
+            choose(fallback)
+        return tuple(chosen)
+
+    def _changed_test_modules(
+        self, request: CodingRequest, changed_files: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Test files changed by the job or mechanically adjacent to its source.
+
+        No name is invented from task language. A source module has only the
+        conventional test candidates derived from its path, and a candidate is
+        returned only when it already exists inside the assigned worktree.
+        """
+        root = self._root(request)
+        tests: list[str] = []
+        for relative in changed_files:
+            path = Path(relative)
+            candidates: list[Path] = []
+            if path.suffix == ".py" and path.name.startswith("test_"):
+                candidates.append(path)
+            if path.suffix == ".py" and path.parts[:2] == ("src", "alx"):
+                module_parts = path.with_suffix("").parts[2:]
+                candidates.extend((
+                    Path("tests") / f"test_{'_'.join(module_parts)}.py",
+                    Path("tests") / f"test_{path.stem}.py",
+                ))
+            for candidate in candidates:
+                name = candidate.as_posix()
+                if (
+                    name not in tests
+                    and (root / candidate).is_file()
+                    and command_permitted(
+                        ["python", "-m", "pytest", "-q", name],
+                        root,
+                        tuple(request.blocked_paths),
+                    )
+                ):
+                    tests.append(name)
+        return tuple(tests)
+
+    @staticmethod
+    def _root(request: CodingRequest):
+        return Path(request.worktree).expanduser().resolve()
+
+    @staticmethod
+    def _candidate_arguments(text: str) -> tuple[tuple[str, ...], ...]:
+        """Read command-shaped lines out of guidance text.
+
+        This never executes what it finds. A candidate only becomes a command
+        after the allowlist accepts it, so a wrong guess is discarded rather
+        than run.
+        """
+        if not isinstance(text, str) or not text.strip():
+            return ()
+        found: list[tuple[str, ...]] = []
+        for line in text.splitlines():
+            stripped = line.strip().strip("`").strip()
+            if not stripped:
+                continue
+            for prefix in ("$ ", "- ", "* "):
+                if stripped.startswith(prefix):
+                    stripped = stripped[len(prefix):].strip()
+            parts = stripped.split()
+            if not parts:
+                continue
+            if parts[0].lower() in ("pytest", "python", "python3", "git"):
+                found.append(tuple(parts))
+        return tuple(found)
+
+    def _planning_phase(
         self, request: CodingRequest, workspace: CodingWorkspace
+    ) -> tuple[Mapping[str, Any] | None, dict[str, object]]:
+        feedback: list[str] = []
+        last: dict[str, object] = {}
+        for attempt in range(1, MAX_PLANNING_ATTEMPTS + 1):
+            try:
+                return self._plan(request, workspace, feedback), {}
+            except CodingError as error:
+                last = {
+                    "phase": "planning",
+                    "failure_code": error.code,
+                    "reason_code": error.details.get("reason_code", error.code),
+                    "planning_attempts": attempt,
+                    "structured_output_received": error.code != "provider_failed",
+                    "parsing_succeeded": error.code != "provider_failed",
+                    "validation_succeeded": False,
+                    **error.details,
+                }
+                # A selected transport failure fails closed. Only a parsed but
+                # invalid plan receives bounded corrective feedback.
+                if error.code == "provider_failed":
+                    return None, last
+                feedback.append("plan_validation_error:" + str(last["reason_code"]))
+        return None, last
+
+    def _plan(
+        self, request: CodingRequest, workspace: CodingWorkspace,
+        feedback: list[str],
     ) -> Mapping[str, Any]:
         material = {
+            "phase": "planning",
             "task": request.task,
             "worktree": str(workspace.root),
             # A bounded, blocked-path-filtered root listing grounds the plan in
@@ -272,7 +437,12 @@ class CodingAgent:
             "context": request.context,
             "test_guidance": request.test_guidance,
             "blocked_paths": list(request.blocked_paths),
-            "operation_contract": OPERATION_CONTRACT,
+            "execution_model": {
+                "tools": "native file reading, searching and editing",
+                "terminal": False,
+                "tests_run_by": "alx_after_session",
+            },
+            "planning_feedback": feedback[-2:],
         }
         values = self._complete(
             PLAN_INSTRUCTION, material, "alx_coding_plan", PLAN_SCHEMA
@@ -295,19 +465,6 @@ class CodingAgent:
         except CodingError as error:
             raise CodingError("plan_unusable", reason_code=error.code) from error
         return values
-
-    def _ask(
-        self, request: CodingRequest, observations: list[str]
-    ) -> Mapping[str, Any]:
-        material = {
-            "task": request.task,
-            "acceptance_criteria": list(request.acceptance_criteria),
-            "context": request.context,
-            "test_guidance": request.test_guidance,
-            "blocked_paths": list(request.blocked_paths),
-            "observations": observations[-12:],
-        }
-        return self._complete(INSTRUCTION, material, "alx_coding_decision", ANSWER_SCHEMA)
 
     def _complete(
         self, instruction: str, material: Mapping[str, Any], affinity: str,
@@ -342,36 +499,6 @@ class CodingAgent:
             return values
         raise CodingError("provider_failed", **details)
 
-    def _act(
-        self, workspace: CodingWorkspace, answer: Mapping[str, Any]
-    ) -> tuple[str, CodingCommandRecord | None]:
-        kind = str(answer.get("action_kind") or "")
-        path = str(answer.get("path") or "")
-        if kind == "read_file":
-            return f"read:{path}\n{workspace.read_text(path)}", None
-        if kind == "list_dir":
-            names = workspace.list_dir(path or ".")
-            return f"list:{path or '.'}\n" + "\n".join(names), None
-        if kind == "write_file":
-            written = workspace.write_text(path, str(answer.get("content") or ""))
-            return f"wrote:{written}", None
-        if kind == "run_command":
-            raw = answer.get("command") or []
-            if not isinstance(raw, (list, tuple)) or any(
-                not isinstance(item, str) for item in raw
-            ):
-                raise CodingError("arguments_unusable")
-            record = run_permitted_command(
-                list(raw),
-                workspace.root,
-                blocked_paths=workspace.blocked_paths,
-            )
-            return (
-                f"command:{' '.join(record.argv)} exit={record.exit_status}",
-                record,
-            )
-        raise CodingError("arguments_unusable")
-
     def _git_evidence(self, workspace: CodingWorkspace) -> tuple[str, str]:
         try:
             return inspect_git(workspace.root)
@@ -380,7 +507,7 @@ class CodingAgent:
 
     def _files_changed(
         self,
-        written: list[str],
+        written: tuple[str, ...],
         git_status: str,
         preexisting_dirty: tuple[str, ...],
     ) -> tuple[str, ...]:
@@ -432,9 +559,3 @@ class CodingAgent:
             diagnostics,
             plan_summary,
         )
-
-
-def _strings(value: object) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(str(item) for item in value if str(item).strip())

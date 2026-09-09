@@ -190,6 +190,11 @@ class ReasoningContext:
     # repeating the same refused call ends the turn rather than buying
     # another reasoning step against an unchanged state.
     refused_calls: tuple[Mapping[str, Any], ...] = ()
+    # A call-less decision would have ended the turn while remaining
+    # outstanding work was still immediately executable. Mechanical reason
+    # and remaining work identifiers only; the premature response was not
+    # delivered. Shown once so the next step can issue the next call.
+    continuation_notices: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
@@ -197,6 +202,9 @@ class ReasoningContext:
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
         object.__setattr__(self, "memory_conflicts", tuple(self.memory_conflicts))
         object.__setattr__(self, "refused_calls", tuple(self.refused_calls))
+        object.__setattr__(
+            self, "continuation_notices", tuple(self.continuation_notices)
+        )
         object.__setattr__(
             self, "undelivered_responses", tuple(self.undelivered_responses)
         )

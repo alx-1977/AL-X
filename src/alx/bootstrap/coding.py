@@ -12,7 +12,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from alx.contracts import CapabilityDefinition, CapabilityResult, ReasoningModel, StructuredData
+from alx.contracts import (
+    CapabilityDefinition,
+    CapabilityResult,
+    CodingSession,
+    ReasoningModel,
+    StructuredData,
+)
 from alx.contracts.coding import CodingRequest
 from alx.providers.coding_agent import CodingAgent
 from alx.safety import AuthorityPolicy
@@ -49,15 +55,25 @@ def build_coding_runtime(
     model: ReasoningModel | None,
     call_id_source: Callable[[], str],
     agent: CodingAgent | None = None,
+    session: CodingSession | None = None,
 ) -> CodingRuntime | None:
-    """Compose coding-job authority, or leave it unregistered."""
+    """Compose coding-job authority, or leave it unregistered.
+
+    Both halves are required: a model to plan with, and a session to carry the
+    plan out in the worktree. Without the session the capability is registered
+    but every job fails at execution, which is a worse answer than the
+    capability being honestly absent.
+    """
     if not enabled:
         LOGGER.info("Coding agent is not enabled: no coding capability")
         return None
     if agent is None and model is None:
         LOGGER.info("Coding agent has no model: no coding capability")
         return None
-    selected = agent or CodingAgent(model)
+    if agent is None and session is None:
+        LOGGER.info("Coding agent has no session: no coding capability")
+        return None
+    selected = agent or CodingAgent(model, session)
 
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)

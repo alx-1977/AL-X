@@ -22,6 +22,7 @@ from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.config.settings import RuntimeSettings  # noqa: E402
 from alx.contracts import (  # noqa: E402
     CapabilityAttemptDisposition,
+    CodingSessionResult,
     CapabilityCall,
     CapabilityResultState,
     ModelMessage,
@@ -36,6 +37,7 @@ from alx.providers import (  # noqa: E402
 )
 from alx.providers.errors import ProviderError  # noqa: E402
 from alx.providers.grok_subscription import PROVIDER_NAME  # noqa: E402
+from alx.providers.coding_agent import PLAN_SCHEMA  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
 from datetime import UTC, datetime  # noqa: E402
@@ -72,6 +74,18 @@ def _request() -> ModelRequest:
     )
 
 
+def _plan_request() -> ModelRequest:
+    return ModelRequest(
+        (
+            ModelMessage(ModelRole.SYSTEM, "PLAN mode"),
+            ModelMessage(ModelRole.USER, json.dumps({"phase": "planning"})),
+        ),
+        "alx_coding_plan",
+        PLAN_SCHEMA,
+        kind="coding",
+    )
+
+
 class _Recorder:
     def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
         self.stdout = stdout
@@ -101,6 +115,23 @@ def _envelope(structured, **extra) -> str:
     }
     envelope.update(extra)
     return json.dumps(envelope)
+
+
+class _StubSession:
+    """Stands in for the native coding session in transport-level tests."""
+
+    def __init__(self, worktree: Path) -> None:
+        self.worktree = worktree
+        self.calls: list[str] = []
+
+    def run_session(self, request, briefing):
+        self.calls.append(briefing)
+        (Path(request.worktree) / "app.py").write_text(
+            "changed\n", encoding="utf-8"
+        )
+        return CodingSessionResult(
+            completed=True, report="applied the bounded change", turns=4
+        )
 
 
 def _environment(**changes: str) -> dict[str, str]:
@@ -149,7 +180,8 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(child["PATH"], "/usr/bin")
         self.assertEqual(child["GROK_SUBAGENTS"], "0")
 
-    def test_command_is_headless_structured_and_tool_free(self) -> None:
+    def test_planning_command_is_headless_and_structured(self) -> None:
+        """This transport carries the planning turn, not the coding session."""
         runner = _Recorder(_envelope({"decision": "finish"}))
         model = GrokSubscriptionReasoningModel(
             "grok-4.6", 30, runner=runner, environment={"PATH": "/usr/bin"}
@@ -159,11 +191,13 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(command[0], "grok")
         self.assertIn("--prompt-file", command)
         self.assertIn("--json-schema", command)
-        self.assertEqual(command[command.index("--tools") + 1], "")
-        self.assertIn("run_terminal_cmd", command[command.index("--disallowed-tools") + 1])
         self.assertIn("--no-subagents", command)
         self.assertIn("--disable-web-search", command)
-        self.assertEqual(command[command.index("--max-turns") + 1], "1")
+        # The planning turn runs in an empty temporary directory, so it needs
+        # no tool grants at all. Execution is a separate native session.
+        self.assertNotIn("--tools", command)
+        self.assertNotIn("--max-turns", command)
+        self.assertNotIn("--sandbox", command)
         self.assertNotIn("-c", command)
         self.assertNotIn("--continue", command)
         self.assertNotIn("--always-approve", command)
@@ -224,7 +258,9 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         model = GrokSubscriptionReasoningModel(
             "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
         )
-        runtime = build_coding_runtime(True, model, lambda: "call-1")
+        runtime = build_coding_runtime(
+            True, model, lambda: "call-1", session=_StubSession(root)
+        )
         broker = CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
             SafetyGate(runtime.policies),
@@ -316,6 +352,28 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         )
         completion = model.complete(_request())
         self.assertEqual(completion.output["status"], "probe_ok")
+
+    def test_real_grok_envelope_shape_preserves_a_plan_object(self) -> None:
+        plan = {
+            "problem_understanding": "inspect the bounded task",
+            "hypotheses": ["the continuation is incomplete"],
+            "inspection_targets": ["src/alx/core"],
+            "intended_changes": ["correct the continuation state"],
+            "verification": ["run targeted tests"],
+            "risks_constraints": ["no shell authority"],
+            "more_context_required": False,
+        }
+        runner = _Recorder(json.dumps({
+            "structuredOutput": plan,
+            "text": json.dumps(plan),
+            "is_error": False,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }))
+        model = GrokSubscriptionReasoningModel(
+            "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
+        )
+        output = model.complete(_plan_request()).output
+        self.assertEqual(json.loads(json.dumps(dict(output))), plan)
 
     def test_one_subprocess_runner_binding(self) -> None:
         source = (

@@ -43,12 +43,21 @@ from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 
 from alx.contracts.coding import (  # noqa: E402
-    MAX_FILE_CHARACTERS,
+    DEFAULT_VERIFICATION_COMMAND_SECONDS,
     MAX_STEP_BUDGET,
     MAX_TASK_CHARACTERS,
+    CodingCommandRecord,
     CodingError,
+    CodingRequest,
+    CodingSessionResult,
 )
+from alx.providers import coding_containment  # noqa: E402
 from alx.providers.coding_process import command_permitted  # noqa: E402
+from alx.providers.coding_session import (  # noqa: E402
+    NATIVE_TOOLS,
+    WITHHELD_TOOLS,
+    GrokCodingSession,
+)
 from alx.providers.coding_workspace import CodingWorkspace  # noqa: E402
 from alx.providers.errors import ProviderError  # noqa: E402
 from alx.providers import coding_agent as coding_agent_module  # noqa: E402
@@ -91,28 +100,6 @@ def _worktree(parent: Path, name: str = "job") -> Path:
     return root
 
 
-def _finish(**changes) -> dict:
-    values = {
-        "decision": "finish",
-        "action_kind": "none",
-        "path": "",
-        "content": "",
-        "command": [],
-        "summary": "done",
-        "unresolved_issues": [],
-        "external_review_recommended": False,
-        "status": "succeeded",
-    }
-    values.update(changes)
-    return values
-
-
-def _act(kind: str, **changes) -> dict:
-    values = _finish(decision="act", action_kind=kind, status="succeeded")
-    values.update(changes)
-    return values
-
-
 def _plan(**changes) -> dict:
     values = {
         "problem_understanding": "Inspect the assigned task before making a bounded change.",
@@ -127,772 +114,678 @@ def _plan(**changes) -> dict:
     return values
 
 
-class ScriptedModel:
-    def __init__(self, *outputs: dict) -> None:
-        self.outputs = list(outputs)
+class PlanningModel:
+    """Answers the planning turn only. Any other call is a defect."""
+
+    def __init__(self, plan: dict | None = None, error: Exception | None = None) -> None:
+        self._plan = plan if plan is not None else _plan()
+        self._error = error
         self.requests = []
 
     def complete(self, request):
         self.requests.append(request)
-        if request.output_schema_name == "alx_coding_plan":
-            if self.outputs and "problem_understanding" in self.outputs[0]:
-                return ModelCompletion("xai", "scripted", self.outputs.pop(0))
-            return ModelCompletion("xai", "scripted", _plan())
-        if not self.outputs:
-            raise AssertionError("unexpected coding-model call")
-        return ModelCompletion("xai", "scripted", self.outputs.pop(0))
+        if request.output_schema_name != "alx_coding_plan":
+            raise AssertionError(
+                "the native execution model must not ask the model for steps"
+            )
+        if self._error is not None:
+            raise self._error
+        return ModelCompletion("xai", "scripted", self._plan)
 
 
-class Queued:
-    def __init__(self, *decisions, selects: str | None = "goal-1") -> None:
-        self.decisions = list(decisions)
-        self.contexts = []
-        self._selects = selects
+class RecordingSession:
+    """A native session stand-in that edits the worktree the way Grok would."""
 
-    def decide(self, context):
-        self.contexts.append(context)
-        item = self.decisions.pop(0)
-        if self._selects is not None and item.goal_id is None:
-            from dataclasses import replace
-            item = replace(item, goal_id=self._selects)
-        return item
+    def __init__(
+        self,
+        *,
+        edits: dict[str, str] | None = None,
+        completed: bool = True,
+        report: str = "made the bounded change",
+        failure_code: str = "",
+        raises: CodingError | None = None,
+        turns: int = 7,
+    ) -> None:
+        self.edits = edits or {}
+        self.completed = completed
+        self.report = report
+        self.failure_code = failure_code
+        self.raises = raises
+        self.turns = turns
+        self.calls: list[tuple[CodingRequest, str]] = []
+
+    def run_session(self, request, briefing):
+        self.calls.append((request, briefing))
+        if self.raises is not None:
+            raise self.raises
+        root = Path(request.worktree)
+        for name, content in self.edits.items():
+            (root / name).write_text(content, encoding="utf-8")
+        return CodingSessionResult(
+            completed=self.completed,
+            report=self.report,
+            turns=self.turns,
+            failure_code=self.failure_code,
+        )
 
 
-class CodingAgentTests(unittest.TestCase):
+_FIXED = "def add(a, b):\n    return a + b\n"
+
+
+class NativeExecutionTests(unittest.TestCase):
+    """PLAN, then a native session, then AL/X's own verification."""
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.addCleanup(self.directory.cleanup)
 
-    def _runtime(self, model) -> object:
-        runtime = build_coding_runtime(True, model, lambda: "call-1")
+    def _run(self, model, session, **arguments):
+        runtime = build_coding_runtime(
+            True, model, lambda: "call-1", session=session
+        )
         self.assertIsNotNone(runtime)
-        return runtime
-
-    def _broker(self, runtime):
-        return CapabilityBroker(
+        broker = CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
             SafetyGate(runtime.policies),
             runtime.executors,
         )
-
-    def _authority(self, permissions=None) -> AuthorityContext:
-        return AuthorityContext(
-            "friedl",
-            permissions or frozenset({CODING_EXECUTE_PERMISSION}),
-            NOW,
-        )
-
-    def _dispatch(self, model, arguments, permissions=None):
-        runtime = self._runtime(model)
-        return self._broker(runtime).dispatch(
+        return broker.dispatch(
             CapabilityCall("call-1", RUN_CODING_TASK, arguments),
-            self._authority(permissions),
-        )
-
-    def test_core_dispatches_the_coding_capability_as_an_ordinary_call(self) -> None:
-        """A. No special Friedl middleware command: Core selects the catalogue entry."""
-        worktree = _worktree(self.root)
-        model = ScriptedModel(
-            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _finish(summary="fixed addition"),
-        )
-        runtime = self._runtime(model)
-        broker = self._broker(runtime)
-        store = SQLiteGoalStore(self.root / "goals.sqlite3")
-        self.addCleanup(store.close)
-        store.create(
-            GoalState(
-                "goal-1",
-                Objective("turn:turn-1", "Fix the test"),
-                success_criteria=(SuccessCriterion("c1", "tests pass"),),
-            ),
-            "conversation-1",
-            RETENTION,
-        )
-        call = CapabilityCall(
-            "call-1",
-            RUN_CODING_TASK,
-            {"task": "make add correct", "worktree": str(worktree)},
-        )
-
-        def dispatch(proposed, state):
-            return broker.dispatch(proposed, self._authority())
-
-        from dataclasses import replace
-        reasoner = Queued(
-            AgentDecision(call=call),
-            AgentDecision(response="The coding job finished."),
-        )
-        agent = CoreAgent(
-            store,
-            reasoner,
-            dispatch,
-            runtime.definitions,
-            clock=lambda: NOW,
-            approval_free_capabilities=frozenset({RUN_CODING_TASK}),
-        )
-        outcome = agent.process(
-            ConversationSnapshot(
-                "conversation-1",
-                (
-                    ConversationTurn(
-                        "conversation-1",
-                        "turn-1",
-                        ConversationOrigin.TYPED,
-                        "the addition helper is wrong",
-                        NOW,
-                        "friedl",
-                    ),
-                ),
-                1,
-                RETENTION,
-            ),
-            RETENTION,
-            3,
-        )
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        attempt = outcome.snapshot.state.attempts[0]
-        self.assertEqual(attempt.call.capability_id, RUN_CODING_TASK)
-        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
-        self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual(reasoner.contexts[0].capabilities[0].capability_id, RUN_CODING_TASK)
-
-    def test_failed_coding_job_can_be_cited_as_goal_evidence(self) -> None:
-        """Live CA regression: FAILED run_coding_task is still attempt: evidence."""
-        worktree = _worktree(self.root)
-        model = ScriptedModel(
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _finish(summary="tests still fail", status="failed"),
-        )
-        runtime = self._runtime(model)
-        broker = self._broker(runtime)
-        store = SQLiteGoalStore(self.root / "goals.sqlite3")
-        self.addCleanup(store.close)
-        store.create(
-            GoalState(
-                "goal-1",
-                Objective("turn:turn-1", "Fix the test"),
-                success_criteria=(SuccessCriterion("c1", "tests pass"),),
-            ),
-            "conversation-1",
-            RETENTION,
-        )
-        call = CapabilityCall(
-            "call-1",
-            RUN_CODING_TASK,
-            {"task": "make add correct", "worktree": str(worktree)},
-        )
-        evidence = Evidence(
-            "ev-attempt02-result",
-            "coding_job",
-            supports=("c1",),
-            source_references=("attempt:call-1",),
-        )
-        reasoner = Queued(
-            AgentDecision(call=call),
-            AgentDecision(
-                response="The coding job ran; tests still fail.",
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.UPDATE,
-                    new_evidence=(evidence,),
-                ),
+            AuthorityContext(
+                "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
             ),
         )
-        agent = CoreAgent(
-            store,
-            reasoner,
-            lambda proposed, state: broker.dispatch(proposed, self._authority()),
-            runtime.definitions,
-            clock=lambda: NOW,
-            approval_free_capabilities=frozenset({RUN_CODING_TASK}),
-        )
-        outcome = agent.process(
-            ConversationSnapshot(
-                "conversation-1",
-                (
-                    ConversationTurn(
-                        "conversation-1",
-                        "turn-1",
-                        ConversationOrigin.TYPED,
-                        "fix the tests",
-                        NOW,
-                        "friedl",
-                    ),
-                ),
-                1,
-                RETENTION,
-            ),
-            RETENTION,
-            5,
-        )
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertNotEqual(outcome.reason, "goal_proposal_rejected")
-        self.assertNotEqual(outcome.reason, "goal_proposal_invalid")
-        attempt = outcome.snapshot.state.attempts[0]
-        self.assertEqual(attempt.call.capability_id, RUN_CODING_TASK)
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(outcome.snapshot.state.evidence, (evidence,))
-        self.assertIs(outcome.snapshot.state.status, GoalStatus.ACTIVE)
 
-    def test_edits_stay_inside_the_assigned_worktree(self) -> None:
-        """B. A fixture job cannot modify a sibling tree."""
-        assigned = _worktree(self.root, "assigned")
-        other = _worktree(self.root, "other")
-        original = (other / "app.py").read_text(encoding="utf-8")
-        model = ScriptedModel(
-            _act(
-                "write_file",
-                path="../other/app.py",
-                content="escaped",
-            ),
-            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
-            _finish(summary="stayed inside"),
-        )
-        attempt = self._dispatch(
-            model,
-            {"task": "fix add", "worktree": str(assigned)},
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual((other / "app.py").read_text(encoding="utf-8"), original)
-        self.assertIn("return a + b", (assigned / "app.py").read_text(encoding="utf-8"))
+    def test_plan_completes_before_the_native_session_begins(self) -> None:
+        """1. PLAN runs first; the session only ever sees an accepted plan."""
+        order: list[str] = []
 
-    def test_runs_a_relevant_test_and_returns_the_result(self) -> None:
-        """C. The job runs the relevant unit tests and reports the result."""
+        class OrderedModel(PlanningModel):
+            def complete(self, request):
+                order.append("plan")
+                return super().complete(request)
+
+        class OrderedSession(RecordingSession):
+            def run_session(self, request, briefing):
+                order.append("session")
+                return super().run_session(request, briefing)
+
         worktree = _worktree(self.root)
-        model = ScriptedModel(
-            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _finish(summary="tests passed"),
+        session = OrderedSession(edits={"app.py": _FIXED})
+        self._run(
+            OrderedModel(), session, task="fix add", worktree=str(worktree)
         )
-        attempt = self._dispatch(
-            model,
-            {
-                "task": "fix add",
-                "worktree": str(worktree),
-                "test_guidance": "python -m unittest -q test_app",
-            },
-        )
-        self.assertTrue(attempt.result.values["tests_run"])
-        self.assertTrue(attempt.result.values["tests_passed"])
-        commands = attempt.result.values["commands"]
-        self.assertTrue(
-            any(list(item["argv"][:3]) == ["python", "-m", "unittest"] for item in commands)
-        )
-        self.assertEqual(commands[-1]["exit_status"], 0)
+        self.assertEqual(order, ["plan", "session"])
 
-    def test_plan_precedes_execution_and_receives_operation_contract(self) -> None:
+    def test_a_failed_plan_never_reaches_the_session(self) -> None:
+        model = PlanningModel(plan=_plan(problem_understanding="   "))
+        session = RecordingSession(edits={"app.py": _FIXED})
         worktree = _worktree(self.root)
-        model = ScriptedModel(
-            _plan(inspection_targets=["app.py"]),
-            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _finish(summary="fixed addition"),
+        attempt = self._run(
+            model, session, task="fix add", worktree=str(worktree)
         )
-        attempt = self._dispatch(
-            model,
-            {"task": "Fix the addition helper from a normal coding request.",
-             "worktree": str(worktree), "blocked_paths": ["private"]},
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual(model.requests[0].output_schema_name, "alx_coding_plan")
-        plan_material = json.loads(model.requests[0].messages[1].content)
-        self.assertIn("write_file", plan_material["operation_contract"])
-        self.assertIn("generic shell", plan_material["operation_contract"]["refused"])
-        self.assertEqual(plan_material["blocked_paths"], ["private"])
-        self.assertIn("app.py", plan_material["worktree_entries"])
-        self.assertEqual(model.requests[1].output_schema_name, "alx_coding_decision")
-        self.assertTrue(attempt.result.values["plan_summary"])
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(attempt.result.failure["code"], "planning_failed")
 
-    def test_blocked_paths_refuse_planning_inspection_before_execution(self) -> None:
+    def test_the_session_receives_the_real_worktree_and_the_plan(self) -> None:
+        """2. Grok's cwd is the assigned worktree, not a synthetic path."""
         worktree = _worktree(self.root)
-        model = ScriptedModel(_plan(inspection_targets=["secret/config.py"]))
-        attempt = self._dispatch(
-            model,
-            {"task": "inspect configuration", "worktree": str(worktree),
-             "blocked_paths": ["secret"]},
+        session = RecordingSession(edits={"app.py": _FIXED})
+        self._run(
+            PlanningModel(),
+            session,
+            task="fix the add helper",
+            worktree=str(worktree),
+            acceptance_criteria=["add returns the sum"],
         )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["reason_code"], "path_not_permitted")
-        self.assertEqual(len(model.requests), 1)
+        request, briefing = session.calls[0]
+        self.assertEqual(Path(request.worktree), worktree)
+        self.assertIn("fix the add helper", briefing)
+        self.assertIn("add returns the sum", briefing)
+        self.assertIn("Inspect the assigned task", briefing)
 
-    def test_refused_shell_command_can_be_corrected_with_bounded_operation(self) -> None:
+    def test_the_briefing_states_the_withheld_authority(self) -> None:
+        """14. Commit, push, merge and review are refused in the instruction."""
         worktree = _worktree(self.root)
-        model = ScriptedModel(
+        session = RecordingSession(edits={"app.py": _FIXED})
+        self._run(
+            PlanningModel(), session, task="fix add", worktree=str(worktree)
+        )
+        briefing = session.calls[0][1].lower()
+        for forbidden in ("commit", "push", "merge", "deploy", "review"):
+            self.assertIn(forbidden, briefing)
+        self.assertIn("no terminal", briefing)
+
+    def test_alx_verifies_with_its_own_bounded_executor(self) -> None:
+        """13. Tests are run by AL/X after the session, through the allowlist."""
+        worktree = _worktree(self.root)
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            PlanningModel(),
+            session,
+            task="fix add",
+            worktree=str(worktree),
+            test_guidance="python -m unittest -q test_app",
+        )
+        values = attempt.result.values
+        self.assertTrue(values["tests_run"])
+        self.assertTrue(values["tests_passed"])
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        argv = tuple(values["commands"][0]["argv"])
+        self.assertEqual(argv[:3], ("python", "-m", "unittest"))
+
+    def test_changed_test_modules_are_preferred_to_the_full_suite(self) -> None:
+        """The native session's own regression is the first test evidence."""
+        worktree = _worktree(self.root)
+        agent = coding_agent_module.CodingAgent(PlanningModel(), RecordingSession())
+        commands = agent._verification_commands(
+            CodingRequest(task="fix add", worktree=str(worktree)),
             _plan(),
-            _act("run_command", command=["sh", "-c", "pytest"]),
-            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _finish(summary="used the permitted test operation"),
+            ("app.py", "test_app.py"),
         )
-        attempt = self._dispatch(
-            model, {"task": "fix addition", "worktree": str(worktree)}
+        self.assertEqual(
+            commands,
+            (("python", "-m", "pytest", "-q", "test_app.py"),),
         )
-        self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
-        self.assertFalse(attempt.result.values["commands"][0]["permitted"])
-        execution_material = json.loads(model.requests[2].messages[1].content)
-        self.assertIn("error:command_not_permitted", execution_material["observations"])
+        self.assertNotIn(
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
+            commands,
+        )
 
-    def test_core_receives_structured_evidence(self) -> None:
-        """D. Files, commands, tests and git evidence are in the result."""
+    def test_changed_pytest_module_can_verify_a_successful_job(self) -> None:
+        """A newly changed regression test is run through AL/X's executor."""
         worktree = _worktree(self.root)
-        model = ScriptedModel(
-            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _finish(summary="addition now returns the sum"),
+        session = RecordingSession(
+            edits={
+                "app.py": _FIXED,
+                "test_app.py": (worktree / "test_app.py").read_text(
+                    encoding="utf-8"
+                ) + "\n# Regression coverage updated by this job.\n",
+            }
         )
-        attempt = self._dispatch(
-            model, {"task": "fix add", "worktree": str(worktree)}
+        attempt = self._run(
+            PlanningModel(), session, task="fix add", worktree=str(worktree)
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(attempt.result.values["tests_passed"])
+        self.assertEqual(
+            tuple(attempt.result.values["commands"][0]["argv"]),
+            ("python", "-m", "pytest", "-q", "test_app.py"),
+        )
+
+    def test_verification_timeout_remains_failed_bounded_evidence(self) -> None:
+        """A realistic bound does not turn a genuine timeout into success."""
+        worktree = _worktree(self.root)
+        session = RecordingSession(edits={"app.py": _FIXED})
+
+        def timed_out(argv, *_args, **kwargs):
+            self.assertEqual(
+                kwargs["timeout_seconds"], DEFAULT_VERIFICATION_COMMAND_SECONDS
+            )
+            return CodingCommandRecord(tuple(argv), -1, "partial", "", True, True)
+
+        with patch.object(coding_agent_module, "run_permitted_command", timed_out):
+            attempt = self._run(
+                PlanningModel(), session, task="fix add", worktree=str(worktree),
+                test_guidance="python -m unittest -q test_app",
+            )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertFalse(attempt.result.values["tests_passed"])
+        command = attempt.result.values["commands"][0]
+        self.assertTrue(command["timed_out"])
+        self.assertEqual(command["stdout"], "partial")
+
+    def test_failing_tests_defeat_a_confident_session_report(self) -> None:
+        """A session claiming success cannot outrank a failing suite."""
+        worktree = _worktree(self.root)
+        session = RecordingSession(
+            edits={"app.py": "def add(a, b):\n    return a - b - 1\n"},
+            report="all good",
+        )
+        attempt = self._run(
+            PlanningModel(),
+            session,
+            task="fix add",
+            worktree=str(worktree),
+            test_guidance="python -m unittest -q test_app",
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertFalse(attempt.result.values["tests_passed"])
+
+    def test_verification_refuses_a_command_outside_the_allowlist(self) -> None:
+        """14. Guidance naming a forbidden command never runs it."""
+        worktree = _worktree(self.root)
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            PlanningModel(),
+            session,
+            task="fix add",
+            worktree=str(worktree),
+            test_guidance="git commit -am done\ngit push origin main",
+        )
+        for record in attempt.result.values["commands"]:
+            argv = tuple(record["argv"])
+            self.assertNotIn("commit", argv)
+            self.assertNotIn("push", argv)
+            self.assertTrue(command_permitted(list(argv), worktree))
+
+    def test_a_session_that_changes_nothing_is_not_a_success(self) -> None:
+        worktree = _worktree(self.root)
+        session = RecordingSession(edits={}, report="nothing needed")
+        attempt = self._run(
+            PlanningModel(), session, task="fix add", worktree=str(worktree)
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertIn("no_files_changed", attempt.result.values["unresolved_issues"])
+
+    def test_a_session_failure_is_reported_not_swallowed(self) -> None:
+        worktree = _worktree(self.root)
+        session = RecordingSession(
+            raises=CodingError("sandbox_unusable", reason_code="sandbox_not_applied")
+        )
+        attempt = self._run(
+            PlanningModel(), session, task="fix add", worktree=str(worktree)
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "sandbox_unusable")
+        self.assertEqual(
+            attempt.result.failure["reason_code"], "sandbox_not_applied"
+        )
+
+    def test_outcome_separates_job_changes_from_preexisting_dirt(self) -> None:
+        """15. Work already in the tree is not claimed as this job's."""
+        worktree = _worktree(self.root)
+        (worktree / "unrelated.py").write_text("already dirty\n", encoding="utf-8")
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            PlanningModel(), session, task="fix add", worktree=str(worktree)
         )
         values = attempt.result.values
-        self.assertEqual(values["status"], "succeeded")
+        self.assertIn("unrelated.py", values["preexisting_dirty"])
+        self.assertNotIn("unrelated.py", values["files_changed"])
         self.assertIn("app.py", values["files_changed"])
-        self.assertTrue(values["commands"])
-        self.assertIn("app.py", values["git_status"])
-        self.assertIn("return a + b", values["git_diff"])
-        self.assertEqual(
-            values["diff_digest"],
-            hashlib.sha256(values["git_diff"].encode("utf-8")).hexdigest(),
-        )
-        self.assertNotIn("return a + b", repr(attempt.result.durable_values))
 
-    def test_preexisting_dirty_blocked_file_is_not_listed_as_job_change(self) -> None:
-        """Live CA listed tests/test_coding_agent.py because git status was already dirty."""
-        worktree = _worktree(self.root)
-        blocked = worktree / "tests" / "test_coding_agent.py"
-        blocked.parent.mkdir()
-        blocked.write_text("tracked\n", encoding="utf-8")
-        _git(worktree, "add", "tests/test_coding_agent.py")
-        _git(worktree, "commit", "-m", "blocked fixture")
-        blocked.write_text("already-dirty\n", encoding="utf-8")
-        model = ScriptedModel(
-            _act("write_file", path="helper.py", content="ok\n"),
-            _finish(summary="wrote helper", status="succeeded"),
+    def test_capability_is_unregistered_without_a_session(self) -> None:
+        """A plan with nothing to execute it is honest absence, not a failure."""
+        self.assertIsNone(
+            build_coding_runtime(True, PlanningModel(), lambda: "call-1")
         )
-        attempt = self._dispatch(
-            model,
+
+
+class SessionLaunchTests(unittest.TestCase):
+    """What the native session actually asks the CLI to do."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.addCleanup(self.directory.cleanup)
+
+    def _session(self, **kwargs) -> GrokCodingSession:
+        return GrokCodingSession("grok-4.6", 900, **kwargs)
+
+    def test_native_file_tools_are_not_withheld(self) -> None:
+        """3. Reading, searching and editing stay native."""
+        for tool in NATIVE_TOOLS:
+            self.assertNotIn(tool, WITHHELD_TOOLS)
+        command = self._session().command(self.root / "p.txt", self.root)
+        withheld = command[command.index("--disallowed-tools") + 1].split(",")
+        for tool in NATIVE_TOOLS:
+            self.assertNotIn(tool, withheld)
+        self.assertNotIn("--tools", command)
+
+    def test_headless_file_edits_are_auto_approved_without_bypass(self) -> None:
+        """Native edits cannot wait for unavailable headless stdin."""
+        command = self._session().command(self.root / "p.txt", self.root)
+        self.assertIn("--always-approve", command)
+        self.assertNotIn("bypassPermissions", command)
+        self.assertNotIn("--permission-mode", command)
+        self.assertEqual(
+            command[command.index("--sandbox") + 1],
+            coding_containment.PROFILE_NAME,
+        )
+        withheld = command[command.index("--disallowed-tools") + 1].split(",")
+        self.assertIn("run_terminal_cmd", withheld)
+
+    def test_the_terminal_is_withheld(self) -> None:
+        """4. No native shell in this iteration, by name and by alias."""
+        command = self._session().command(self.root / "p.txt", self.root)
+        withheld = command[command.index("--disallowed-tools") + 1].split(",")
+        for tool in ("run_terminal_cmd", "run_terminal_command", "Bash", "bash"):
+            self.assertIn(tool, withheld)
+
+    def test_the_session_is_multi_turn(self) -> None:
+        """5. One turn is what broke execution before; it cannot return."""
+        command = self._session().command(self.root / "p.txt", self.root)
+        turns = int(command[command.index("--max-turns") + 1])
+        self.assertGreater(turns, 1)
+        with self.assertRaises(ValueError):
+            GrokCodingSession("grok-4.6", 900, max_turns=1)
+
+    def test_the_generated_sandbox_profile_is_named_and_used(self) -> None:
+        """6. Every job runs under its own generated custom profile."""
+        command = self._session().command(self.root / "p.txt", self.root)
+        self.assertEqual(
+            command[command.index("--sandbox") + 1], coding_containment.PROFILE_NAME
+        )
+        self.assertEqual(command[command.index("--cwd") + 1], str(self.root))
+
+    def test_metered_credentials_are_stripped_from_the_child(self) -> None:
+        """11. An exhausted subscription must not become billed API usage."""
+        session = self._session(
+            environment={
+                "PATH": "/usr/bin",
+                "HOME": "/home/x",
+                "XAI_API_KEY": "must-not-pass",
+                "OPENAI_API_KEY": "must-not-pass",
+                "ANTHROPIC_API_KEY": "must-not-pass",
+            }
+        )
+        environment = session.child_environment(self.root)
+        for key in ("XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            self.assertNotIn(key, environment)
+        self.assertEqual(environment["GROK_HOME"], str(self.root))
+
+    def test_no_provider_fallback_exists_in_the_session(self) -> None:
+        """12. The selected provider fails closed; it never substitutes one."""
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "providers" / "coding_session.py"
+        ).read_text(encoding="utf-8")
+        for forbidden in ("OpenAI", "Anthropic", "httpx", "xai_sdk"):
+            self.assertNotIn(forbidden, source)
+
+    def test_a_failed_sandbox_fails_the_job_closed(self) -> None:
+        """7. A profile that cannot be applied stops the job."""
+        def refuse(*_args, **_kwargs):
+            return subprocess.CompletedProcess(
+                [], 1, "", "error: could not apply the sandbox profile; "
+                "Refusing to start with its protections missing."
+            )
+
+        session = self._session(runner=refuse)
+        request = CodingRequest(task="t", worktree=str(self.root))
+        with self.assertRaises(CodingError) as raised:
+            session.run_session(request, "briefing")
+        self.assertEqual(raised.exception.code, "sandbox_unusable")
+        self.assertEqual(
+            raised.exception.details["reason_code"], "sandbox_not_applied"
+        )
+
+    def test_a_cut_off_session_is_not_reported_as_complete(self) -> None:
+        def truncated(*_args, **_kwargs):
+            return subprocess.CompletedProcess(
+                [], 0,
+                json.dumps({"text": "partial", "stopReason": "max_turns"}), "",
+            )
+
+        session = self._session(runner=truncated)
+        result = session.run_session(
+            CodingRequest(task="t", worktree=str(self.root)), "briefing"
+        )
+        self.assertFalse(result.completed)
+        self.assertEqual(result.failure_code, "session_failed")
+
+
+class SessionTimeoutTests(unittest.TestCase):
+    """The session's bound is its own, and exceeding it fails closed."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.addCleanup(self.directory.cleanup)
+
+    def test_planning_and_session_timeouts_are_independent(self) -> None:
+        """A planning call answers in seconds; a session needs far longer."""
+        from alx.config.settings import (
+            DEFAULT_CODING_SESSION_TIMEOUT_SECONDS,
+            _coding_settings,
+        )
+
+        settings = _coding_settings(
             {
-                "task": "add helper",
-                "worktree": str(worktree),
-                "blocked_paths": ["tests/test_coding_agent.py"],
-            },
+                "ALX_CODING_ENABLED": "true",
+                "ALX_CODING_PROVIDER": "grok_subscription",
+                "ALX_CODING_MODEL": "grok-4.6",
+            }
+        )
+        self.assertEqual(settings.reasoning.timeout_seconds, 120)
+        self.assertEqual(
+            settings.session_timeout_seconds,
+            DEFAULT_CODING_SESSION_TIMEOUT_SECONDS,
+        )
+        self.assertGreater(
+            settings.session_timeout_seconds, settings.reasoning.timeout_seconds
+        )
+
+    def test_each_timeout_is_configured_by_its_own_variable(self) -> None:
+        from alx.config.settings import _coding_settings
+
+        settings = _coding_settings(
+            {
+                "ALX_CODING_ENABLED": "true",
+                "ALX_CODING_PROVIDER": "grok_subscription",
+                "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_TIMEOUT_SECONDS": "45",
+                "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1800",
+            }
+        )
+        self.assertEqual(settings.reasoning.timeout_seconds, 45)
+        self.assertEqual(settings.session_timeout_seconds, 1800)
+        # Changing one must not move the other.
+        planning_only = _coding_settings(
+            {
+                "ALX_CODING_ENABLED": "true",
+                "ALX_CODING_PROVIDER": "grok_subscription",
+                "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_TIMEOUT_SECONDS": "45",
+            }
+        )
+        self.assertEqual(planning_only.reasoning.timeout_seconds, 45)
+        self.assertEqual(planning_only.session_timeout_seconds, 1200)
+
+    def test_the_native_session_is_built_with_the_session_timeout(self) -> None:
+        """The regression that killed a working session after two minutes."""
+        from alx.bootstrap.providers import _build_coding_session
+        from alx.config.settings import _coding_settings
+
+        class _Settings:
+            def __init__(self, coding):
+                self.coding = coding
+
+        settings = _coding_settings(
+            {
+                "ALX_CODING_ENABLED": "true",
+                "ALX_CODING_PROVIDER": "grok_subscription",
+                "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_TIMEOUT_SECONDS": "45",
+                "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1500",
+            }
+        )
+        session = _build_coding_session(_Settings(settings))
+        self.assertIsNotNone(session)
+        self.assertEqual(session._timeout_seconds, 1500)
+        self.assertNotEqual(
+            session._timeout_seconds, settings.reasoning.timeout_seconds
+        )
+
+    def test_a_timed_out_session_fails_closed_with_bounded_evidence(self) -> None:
+        """The failure is named, and what was already gathered survives it."""
+        def expire(*_args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd="grok", timeout=kwargs.get("timeout", 1200)
+            )
+
+        session = GrokCodingSession("grok-4.6", 1200, runner=expire)
+        with self.assertRaises(CodingError) as raised:
+            session.run_session(
+                CodingRequest(task="t", worktree=str(self.root)), "briefing"
+            )
+        self.assertEqual(raised.exception.code, "session_failed")
+        self.assertEqual(
+            raised.exception.details["reason_code"], "session_timeout"
+        )
+
+    def test_a_timeout_preserves_plan_and_dirty_state_evidence(self) -> None:
+        """Evidence accumulated before the timeout still reaches Core."""
+        worktree = _worktree(self.root)
+        (worktree / "already.py").write_text("dirty\n", encoding="utf-8")
+        session = RecordingSession(
+            raises=CodingError("session_failed", reason_code="session_timeout")
+        )
+        runtime = build_coding_runtime(
+            True, PlanningModel(), lambda: "call-1", session=session
+        )
+        attempt = CapabilityBroker(
+            CapabilityRegistry(runtime.definitions),
+            SafetyGate(runtime.policies),
+            runtime.executors,
+        ).dispatch(
+            CapabilityCall(
+                "call-1", RUN_CODING_TASK,
+                {"task": "fix add", "worktree": str(worktree)},
+            ),
+            AuthorityContext(
+                "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
+            ),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "session_failed")
+        self.assertEqual(
+            attempt.result.failure["reason_code"], "session_timeout"
         )
         values = attempt.result.values
-        self.assertIn("helper.py", values["files_changed"])
-        self.assertNotIn("tests/test_coding_agent.py", values["files_changed"])
-        self.assertIn("tests/test_coding_agent.py", values["preexisting_dirty"])
-        self.assertEqual(blocked.read_text(encoding="utf-8"), "already-dirty\n")
+        self.assertIn("already.py", values["preexisting_dirty"])
+        self.assertTrue(values["plan_summary"])
+        self.assertEqual(tuple(values["files_changed"]), ())
 
-    def test_provider_failed_keeps_evidence_and_cli_reason(self) -> None:
+    def test_a_timeout_is_not_retried(self) -> None:
         worktree = _worktree(self.root)
-        blocked = worktree / "tests" / "test_coding_agent.py"
-        blocked.parent.mkdir()
-        blocked.write_text("tracked\n", encoding="utf-8")
-        _git(worktree, "add", "tests/test_coding_agent.py")
-        _git(worktree, "commit", "-m", "blocked fixture")
-        blocked.write_text("already-dirty\n", encoding="utf-8")
-
-        class Boom:
-            def complete(self, request):
-                raise ProviderError(
-                    "grok_subscription",
-                    "cli_failed",
-                    {"exit_status": 1, "stderr_characters": 40, "stdout_characters": 0},
-                )
-
-        attempt = self._dispatch(
-            Boom(),
-            {
-                "task": "fix continuation",
-                "worktree": str(worktree),
-                "blocked_paths": ["tests/test_coding_agent.py"],
-            },
+        session = RecordingSession(
+            raises=CodingError("session_failed", reason_code="session_timeout")
         )
-        failure = attempt.result.failure
-        self.assertEqual(failure["code"], "provider_failed")
-        self.assertEqual(failure["reason_code"], "cli_failed")
-        self.assertEqual(failure["exit_status"], 1)
-        self.assertEqual(failure["stderr_characters"], 40)
-        self.assertNotIn("tests/test_coding_agent.py", attempt.result.values["files_changed"])
-        self.assertIn(
-            "tests/test_coding_agent.py",
-            attempt.result.values["preexisting_dirty"],
+        runtime = build_coding_runtime(
+            True, PlanningModel(), lambda: "call-1", session=session
         )
-        self.assertFalse(attempt.result.values["tests_run"])
+        CapabilityBroker(
+            CapabilityRegistry(runtime.definitions),
+            SafetyGate(runtime.policies),
+            runtime.executors,
+        ).dispatch(
+            CapabilityCall(
+                "call-1", RUN_CODING_TASK,
+                {"task": "fix add", "worktree": str(worktree)},
+            ),
+            AuthorityContext(
+                "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
+            ),
+        )
+        self.assertEqual(len(session.calls), 1)
 
-    def test_cannot_push_merge_deploy_or_request_review(self) -> None:
-        """E. Forbidden actions are refused and do not happen."""
+
+class SandboxProfileTests(unittest.TestCase):
+    """The deny list is the containment, so its text is the guarantee."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.addCleanup(self.directory.cleanup)
+
+    def test_environment_and_credential_files_are_denied(self) -> None:
+        """8. .env is denied wherever it sits, and so are private keys."""
         worktree = _worktree(self.root)
-        forbidden = (
-            ["git", "push"],
-            ["git", "merge", "main"],
-            ["git", "commit", "-am", "x"],
-            ["gh", "pr", "create"],
-            ["curl", "https://example.invalid/review"],
-        )
-        for argv in forbidden:
-            with self.subTest(argv=argv):
-                self.assertFalse(command_permitted(argv))
-        model = ScriptedModel(
-            _act("run_command", command=["git", "push"]),
-            _act("run_command", command=["git", "merge", "other"]),
-            _finish(status="failed", summary="could not push", unresolved_issues=["push refused"]),
-        )
-        attempt = self._dispatch(
-            model, {"task": "ship it", "worktree": str(worktree)}
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["code"], "task_failed")
-        self.assertFalse(all(item["permitted"] for item in attempt.result.values["commands"]))
-        source = (PRODUCTION_ROOT / "providers" / "coding_agent.py").read_text()
-        self.assertNotIn("request_external_review", source)
-        self.assertNotIn("merge_pull_request", source)
-        self.assertNotIn("run_sandbox_experiment", source)
+        profile = coding_containment.render_profile(worktree, ())
+        self.assertIn('"**/.env"', profile)
+        self.assertIn('"**/*.pem"', profile)
+        self.assertIn('"**/*.key"', profile)
+        self.assertIn('extends = "strict"', profile)
+        self.assertIn(f'read_write = ["{worktree}"]', profile)
 
-    def test_a_failed_job_does_not_claim_success(self) -> None:
-        """F. Failed tests return structured failure, not succeeded."""
+    def test_git_metadata_is_denied_in_a_normal_repository(self) -> None:
+        """9. A normal repository keeps .git as a directory."""
         worktree = _worktree(self.root)
-        model = ScriptedModel(
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _finish(status="succeeded", summary="all good"),
-        )
-        attempt = self._dispatch(
-            model, {"task": "fix add", "worktree": str(worktree)}
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.values["status"], "failed")
-        self.assertIs(attempt.result.values["tests_passed"], False)
-        self.assertEqual(attempt.result.failure["code"], "task_failed")
+        entries = coding_containment.deny_entries(worktree, ())
+        self.assertIn(str(worktree / ".git"), entries)
 
-    def test_without_permission_nothing_runs(self) -> None:
-        worktree = _worktree(self.root)
-        model = ScriptedModel(_finish())
-        attempt = self._dispatch(
-            model,
-            {"task": "fix add", "worktree": str(worktree)},
-            permissions=frozenset({"sandbox.execute"}),
-        )
-        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
-        self.assertEqual(attempt.reason_code, "permission_missing")
-        self.assertFalse(model.requests)
-
-    def test_unusable_worktree_fails_closed(self) -> None:
-        model = ScriptedModel(_finish())
-        missing = self.root / "missing"
-        attempt = self._dispatch(
-            model,
-            {"task": "fix add", "worktree": str(missing)},
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        failure = attempt.result.failure
-        self.assertEqual(failure["code"], "worktree_unusable")
-        self.assertEqual(failure["reason_code"], "missing")
-        self.assertIn("resolved", failure)
-
-    def test_live_github_repo_name_is_not_a_worktree(self) -> None:
-        """call-coding-agent-defect-fix-retry3 sent worktree 'AL-X', not the repo path."""
-        empty = self.root / "empty-cwd"
-        empty.mkdir()
-        model = ScriptedModel(_finish())
-        previous = Path.cwd()
-        try:
-            os.chdir(empty)
-            attempt = self._dispatch(
-                model,
-                {
-                    "task": "Investigate and fix the email-continuation defect.",
-                    "worktree": "AL-X",
-                    "blocked_paths": ["tests/test_coding_agent.py"],
-                    "step_budget": 32,
-                },
-            )
-        finally:
-            os.chdir(previous)
-        failure = attempt.result.failure
-        self.assertEqual(failure["code"], "worktree_unusable")
-        self.assertEqual(failure["reason_code"], "missing")
-        self.assertEqual(failure["received"], "AL-X")
-        self.assertTrue(str(failure["resolved"]).endswith("AL-X"))
-        self.assertFalse((empty / "AL-X").is_dir())
-        self.assertFalse(model.requests)
-        self.assertEqual(attempt.result.values, {})
-
-    def test_coding_requests_are_not_core_or_subscription_calls(self) -> None:
-        worktree = _worktree(self.root)
-        model = ScriptedModel(_finish(summary="nothing to do", status="blocked"))
-        self._dispatch(model, {"task": "inspect", "worktree": str(worktree)})
-        self.assertEqual(model.requests[0].kind, "coding")
-
-    def test_capability_is_absent_when_disabled(self) -> None:
-        self.assertIsNone(build_coding_runtime(False, ScriptedModel(), lambda: "c"))
-
-    def test_mutation_removing_the_git_allowlist_is_detected(self) -> None:
-        """G. The push/merge refusal is load-bearing."""
-        source = CODING_PROCESS.read_text(encoding="utf-8")
-        mutated = source.replace(
-            "        if not rest or rest[0] not in _GIT_INSPECT:\n"
-            "            return False\n"
-            "        allowed = _GIT_FLAGS[rest[0]]\n"
-            "        return all(item in allowed for item in rest[1:])",
-            "        return True",
-        )
-        self.assertNotEqual(source, mutated)
-        namespace: dict[str, object] = {}
-        exec(compile(mutated, str(CODING_PROCESS), "exec"), namespace)
-        permitted = namespace["command_permitted"]
-        self.assertTrue(permitted(["git", "push"]))
-        self.assertFalse(command_permitted(["git", "push"]))
-
-    def test_mutation_removing_the_worktree_bound_is_detected(self) -> None:
-        workspace_path = PRODUCTION_ROOT / "providers" / "coding_workspace.py"
-        source = workspace_path.read_text(encoding="utf-8")
-        mutated = source.replace(
-            "        if part == \"..\":\n"
-            "            if not parts:\n"
-            "                raise CodingError(\"path_outside_worktree\")\n"
-            "            parts.pop()\n"
-            "            continue\n",
-            "        parts.append(part)\n",
-        )
-        self.assertNotIn('if part == ".."', mutated)
-        mutated = mutated.replace(
-            "            raise CodingError(\"path_outside_worktree\") from error\n",
-            "            pass\n",
-        )
-        self.assertNotEqual(source, mutated)
-        namespace: dict[str, object] = {"__name__": "mutation"}
-        exec(compile(mutated, str(workspace_path), "exec"), namespace)
-        workspace = namespace["CodingWorkspace"](str(_worktree(self.root)))
-        escaped = workspace.resolve("../secret.txt")
-        self.assertFalse(str(escaped).startswith(str(workspace.root)))
-
-    def test_git_cannot_write_or_point_outside_the_worktree(self) -> None:
-        worktree = _worktree(self.root)
-        attacks = (
-            ["git", "diff", "--output=../escaped"],
-            ["git", "diff", "--output", "../escaped"],
-            ["git", "status", "--work-tree=/tmp"],
-            ["git", "log", "--git-dir=/tmp/other.git"],
-        )
-        for argv in attacks:
-            with self.subTest(argv=argv):
-                self.assertFalse(command_permitted(argv, worktree))
-
-    def test_pytest_cannot_load_plugins_or_escape_with_parent_paths(self) -> None:
-        worktree = _worktree(self.root)
+    def test_git_metadata_is_denied_through_a_linked_worktree(self) -> None:
+        """9. A linked worktree's .git is a file pointing at the real store."""
+        source = _worktree(self.root, "source")
+        linked = self.root / "linked"
+        _git(source, "worktree", "add", str(linked), "-b", "job")
+        self.assertTrue((linked / ".git").is_file())
+        entries = coding_containment.deny_entries(linked, ())
+        self.assertIn(str(linked / ".git"), entries)
+        # Denying only the pointer would leave the real object store readable
+        # through its target, which the containment experiment demonstrated.
+        common = (source / ".git").resolve()
         self.assertTrue(
-            command_permitted(
-                ["python", "-m", "unittest", "-q", "test_app"], worktree
-            )
-        )
-        self.assertFalse(
-            command_permitted(
-                ["python", "-m", "pytest", "-p", "evilplugin"], worktree
-            )
-        )
-        self.assertFalse(
-            command_permitted(
-                ["python", "-m", "pytest", "pkg/../../outside"], worktree
-            )
-        )
-        self.assertFalse(
-            command_permitted(
-                ["python", "-m", "pytest", "--rootdir", "/tmp"], worktree
-            )
-        )
-        self.assertFalse(
-            command_permitted(
-                ["python", "-m", "pytest", "-c", "pytest.ini"], worktree
-            )
-        )
-        self.assertFalse(
-            command_permitted(
-                ["python", "-m", "pytest", "--pyargs", "os"], worktree
-            )
+            any(entry.startswith(str(common)) for entry in entries),
+            f"the real git directory must be denied too: {entries}",
         )
 
-    def test_mutation_allowing_git_output_is_detected(self) -> None:
+    def test_blocked_paths_become_preventative_denies(self) -> None:
+        """10. Core's blocked paths reach the kernel, anchored to this tree."""
         worktree = _worktree(self.root)
-        source = CODING_PROCESS.read_text(encoding="utf-8")
-        mutated = source.replace(
-            "        allowed = _GIT_FLAGS[rest[0]]\n"
-            "        return all(item in allowed for item in rest[1:])",
-            "        return True",
+        entries = coding_containment.deny_entries(
+            worktree, ("tests/test_coding_agent.py", "governance")
         )
-        self.assertNotEqual(source, mutated)
-        namespace: dict[str, object] = {}
-        exec(compile(mutated, str(CODING_PROCESS), "exec"), namespace)
-        permitted = namespace["command_permitted"]
-        self.assertTrue(
-            permitted(["git", "diff", "--output=../escaped"], worktree)
-        )
-        self.assertFalse(
-            command_permitted(["git", "diff", "--output=../escaped"], worktree)
-        )
+        self.assertIn(str(worktree / "tests/test_coding_agent.py"), entries)
+        self.assertIn(str(worktree / "governance"), entries)
 
-    def test_provider_failure_keeps_accumulated_evidence(self) -> None:
+    def test_a_blocked_path_cannot_escape_the_worktree(self) -> None:
         worktree = _worktree(self.root)
+        with self.assertRaises(CodingError):
+            coding_containment.deny_entries(worktree, ("../outside",))
 
-        class FailAfterWrite(ScriptedModel):
-            def complete(self, request):
-                if self.outputs:
-                    return super().complete(request)
-                raise RuntimeError("provider down")
-
-        model = FailAfterWrite(
-            _act("write_file", path="app.py", content="def add(a, b):\n    return a + b\n"),
-        )
-        attempt = self._dispatch(
-            model, {"task": "fix add", "worktree": str(worktree)}
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["code"], "provider_failed")
-        self.assertIn("app.py", attempt.result.values["files_changed"])
-        self.assertIn("app.py", attempt.result.values["git_status"])
-        self.assertTrue(attempt.result.values["git_diff"])
-
-    def test_a_later_passing_test_cannot_hide_an_earlier_failure(self) -> None:
+    def test_an_inexpressible_blocked_path_fails_closed(self) -> None:
+        """Brace alternation makes the CLI refuse; refuse here with a reason."""
         worktree = _worktree(self.root)
-        (worktree / "test_ok.py").write_text(
-            "import unittest\n\n\nclass OkTests(unittest.TestCase):\n"
-            "    def test_ok(self):\n        self.assertTrue(True)\n",
-            encoding="utf-8",
-        )
-        model = ScriptedModel(
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_app"]),
-            _act("run_command", command=["python", "-m", "unittest", "-q", "test_ok"]),
-            _finish(status="succeeded", summary="narrow tests passed"),
-        )
-        attempt = self._dispatch(
-            model, {"task": "fix add", "worktree": str(worktree)}
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertIs(attempt.result.values["tests_passed"], False)
-
-    def test_nested_env_and_git_paths_cannot_be_written(self) -> None:
-        worktree = _worktree(self.root)
-        workspace = CodingWorkspace(str(worktree))
         with self.assertRaises(CodingError) as raised:
-            workspace.write_text("service/.env", "SECRET=1\n")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-        with self.assertRaises(CodingError) as raised:
-            workspace.write_text(".ENV", "SECRET=1\n")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-        with self.assertRaises(CodingError) as raised:
-            workspace.write_text("vendor/.git/config", "[core]\n")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-        self.assertFalse((worktree / "service" / ".env").exists())
+            coding_containment.deny_entries(worktree, ("secrets/*.{pem,key}",))
+        self.assertEqual(raised.exception.code, "sandbox_unusable")
 
-    def test_oversized_reads_are_refused_instead_of_truncated(self) -> None:
-        worktree = _worktree(self.root)
-        huge = worktree / "huge.py"
-        huge.write_text("x" * (MAX_FILE_CHARACTERS + 1), encoding="utf-8")
-        workspace = CodingWorkspace(str(worktree))
-        with self.assertRaises(CodingError) as raised:
-            workspace.read_text("huge.py")
-        self.assertEqual(raised.exception.code, "file_too_large")
-        self.assertEqual(len(huge.read_text(encoding="utf-8")), MAX_FILE_CHARACTERS + 1)
 
-    def test_command_cap_is_not_reported_as_step_budget(self) -> None:
-        worktree = _worktree(self.root)
-        model = ScriptedModel(
-            _act("run_command", command=["git", "status", "--porcelain"]),
-            _act("run_command", command=["git", "diff"]),
-            _finish(summary="should not be asked"),
-        )
-        with patch.object(coding_agent_module, "MAX_REPORTED_COMMANDS", 1):
-            attempt = self._dispatch(
-                model, {"task": "inspect", "worktree": str(worktree), "step_budget": 8}
+class SupersededExecutionPathTests(unittest.TestCase):
+    """16. Law 0: the per-step protocol is gone, not hidden behind a flag."""
+
+    def test_no_per_step_execution_protocol_remains(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "providers" / "coding_agent.py"
+        ).read_text(encoding="utf-8")
+        for removed in (
+            "ANSWER_SCHEMA",
+            "OPERATION_CONTRACT",
+            "MAX_INVALID_EXECUTION_REPLIES",
+            "_execution_protocol_failure",
+            "def _act(",
+            "def _ask(",
+        ):
+            self.assertNotIn(removed, source)
+
+    def test_the_agent_cannot_execute_a_model_chosen_operation(self) -> None:
+        module = coding_agent_module
+        agent = module.CodingAgent(PlanningModel(), RecordingSession())
+        for removed in ("_act", "_ask"):
+            self.assertFalse(
+                hasattr(agent, removed),
+                f"{removed} would be a second execution path",
             )
-        self.assertEqual(
-            attempt.result.failure["code"], "command_budget_exhausted"
-        )
-        self.assertIn(
-            "command_budget_exhausted", attempt.result.values["unresolved_issues"]
-        )
 
-    def test_one_coding_process_site(self) -> None:
-        source = CODING_PROCESS.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        process_attrs = [
-            node.attr
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "subprocess"
-        ]
-        self.assertEqual(
-            [name for name in process_attrs if name == "run"],
-            ["run"],
-        )
-        self.assertNotIn("Popen", process_attrs)
-        self.assertIn("shell=False", source)
+    def test_the_transport_no_longer_disables_native_tools(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "providers" / "grok_subscription.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("_DISALLOWED_TOOLS", source)
+        self.assertNotIn('"--tools"', source)
+        self.assertNotIn('"--max-turns"', source)
 
-    def test_coding_and_sandbox_stay_separate_outcomes(self) -> None:
-        for path in PRODUCTION_ROOT.rglob("*sandbox*.py"):
-            text = path.read_text(encoding="utf-8")
-            self.assertNotIn("run_coding_task", text)
-            self.assertNotIn("coding.execute", text)
-        agent = (PRODUCTION_ROOT / "providers" / "coding_agent.py").read_text()
-        self.assertNotIn("run_sandbox_experiment", agent)
-        self.assertNotIn("sandbox.execute", agent)
-
-    def test_live_step_budget_sixty_names_the_invalid_field(self) -> None:
-        """call-ca-retry-2/3/4: Core sent step_budget 60; max is 32."""
-        worktree = _worktree(self.root)
-        task = (
-            "Investigate and fix the defect that let AL/X's Core agent loop "
-            "stop working on an active multi-step goal after completing only "
-            "one step, while the goal remained active, and then report that "
-            "work was still in progress when nothing was actually running. "
-            "Do not modify tests/test_coding_agent.py."
-        )
-        attempt = self._dispatch(
-            ScriptedModel(),
-            {
-                "task": task,
-                "worktree": str(worktree),
-                "step_budget": 60,
-            },
-        )
-        failure = attempt.result.failure
-        self.assertEqual(failure["code"], "arguments_unusable")
-        self.assertEqual(failure["invalid_field"], "step_budget")
-        self.assertEqual(failure["reason_code"], "out_of_range")
-        self.assertEqual(failure["received"], 60)
-        self.assertIn(str(MAX_STEP_BUDGET), failure["detail"])
-        self.assertNotIn(task, str(dict(failure)))
-        self.assertEqual(attempt.result.values, {})
-
-    def test_live_required_fields_only_still_run(self) -> None:
-        """call-ca-retry-1 shape: task and worktree alone must not be unusable."""
-        worktree = _worktree(self.root)
-        attempt = self._dispatch(
-            ScriptedModel(_finish(summary="blocked", status="blocked")),
-            {
-                "task": "Diagnose the goal-continuation defect.",
-                "worktree": str(worktree),
-            },
-        )
-        self.assertNotEqual(
-            attempt.result.failure.get("code") if attempt.result.failure else None,
-            "arguments_unusable",
-        )
-
-    def test_oversized_task_reports_length_not_content(self) -> None:
-        worktree = _worktree(self.root)
-        task = "x" * (MAX_TASK_CHARACTERS + 1)
-        attempt = self._dispatch(
-            ScriptedModel(),
-            {"task": task, "worktree": str(worktree)},
-        )
-        failure = attempt.result.failure
-        self.assertEqual(failure["code"], "arguments_unusable")
-        self.assertEqual(failure["invalid_field"], "task")
-        self.assertEqual(failure["reason_code"], "too_long")
-        self.assertEqual(failure["received_length"], MAX_TASK_CHARACTERS + 1)
-        self.assertNotIn(task, str(dict(failure)))
+    def test_the_workspace_can_no_longer_write_repository_files(self) -> None:
+        """Editing is the session's; the workspace keeps only path arithmetic."""
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "providers" / "coding_workspace.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("def write_text", source)
+        self.assertNotIn("def read_text", source)
 
 
 class BlockedPathTests(unittest.TestCase):
@@ -912,54 +805,6 @@ class BlockedPathTests(unittest.TestCase):
     def _workspace(self, blocked: tuple[str, ...]) -> CodingWorkspace:
         return CodingWorkspace(str(self.repo), blocked)
 
-    def test_blocked_test_file_cannot_be_written(self) -> None:
-        workspace = self._workspace(("tests/test_coding_agent.py",))
-        with self.assertRaises(CodingError) as raised:
-            workspace.write_text("tests/test_coding_agent.py", "changed\n")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-        self.assertEqual(
-            (self.repo / "tests" / "test_coding_agent.py").read_text(encoding="utf-8"),
-            "original\n",
-        )
-
-    def test_blocked_test_file_cannot_be_read(self) -> None:
-        workspace = self._workspace(("tests/test_coding_agent.py",))
-        with self.assertRaises(CodingError) as raised:
-            workspace.read_text("tests/test_coding_agent.py")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-
-    def test_blocking_tests_directory_blocks_descendants(self) -> None:
-        workspace = self._workspace(("tests",))
-        with self.assertRaises(CodingError) as raised:
-            workspace.read_text("tests/test_other.py")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-        with self.assertRaises(CodingError):
-            workspace.write_text("tests/new.py", "nope\n")
-        with self.assertRaises(CodingError):
-            workspace.list_dir("tests")
-
-    def test_parent_traversal_cannot_bypass_a_blocked_file(self) -> None:
-        workspace = self._workspace(("tests/test_coding_agent.py",))
-        with self.assertRaises(CodingError) as raised:
-            workspace.write_text(
-                "tests/../tests/test_coding_agent.py", "changed\n"
-            )
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-        self.assertEqual(
-            (self.repo / "tests" / "test_coding_agent.py").read_text(encoding="utf-8"),
-            "original\n",
-        )
-
-    def test_symlink_to_a_blocked_file_is_refused(self) -> None:
-        alias = self.repo / "alias.py"
-        alias.symlink_to(self.repo / "tests" / "test_coding_agent.py")
-        workspace = self._workspace(("tests/test_coding_agent.py",))
-        with self.assertRaises(CodingError) as raised:
-            workspace.read_text("alias.py")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-        with self.assertRaises(CodingError):
-            workspace.write_text("alias.py", "changed\n")
-
     def test_pytest_cannot_target_a_blocked_path(self) -> None:
         self.assertFalse(
             command_permitted(
@@ -974,82 +819,6 @@ class BlockedPathTests(unittest.TestCase):
                 self.repo,
                 ("tests/test_coding_agent.py",),
             )
-        )
-
-    def test_ordinary_unrelated_files_remain_accessible(self) -> None:
-        workspace = self._workspace(("tests/test_coding_agent.py",))
-        self.assertEqual(workspace.read_text("app.py"), "safe\n")
-        self.assertEqual(workspace.write_text("app.py", "still-safe\n"), "app.py")
-        self.assertEqual(workspace.read_text("tests/test_other.py"), "other\n")
-
-    def test_env_and_git_blocks_remain_independent(self) -> None:
-        workspace = self._workspace(("tests/test_coding_agent.py",))
-        (self.repo / ".env").write_text("secret=1\n", encoding="utf-8")
-        with self.assertRaises(CodingError) as raised:
-            workspace.read_text(".env")
-        self.assertEqual(raised.exception.code, "path_not_permitted")
-
-    def test_capability_refuses_a_write_to_the_blocked_file(self) -> None:
-        model = ScriptedModel(
-            _act(
-                "write_file",
-                path="tests/test_coding_agent.py",
-                content="changed\n",
-            ),
-            _finish(summary="stopped", status="blocked"),
-        )
-        runtime = build_coding_runtime(True, model, lambda: "call-1")
-        broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
-        )
-        attempt = broker.dispatch(
-            CapabilityCall(
-                "call-1",
-                RUN_CODING_TASK,
-                {
-                    "task": "fix continuation",
-                    "worktree": str(self.repo),
-                    "blocked_paths": ["tests/test_coding_agent.py"],
-                },
-            ),
-            AuthorityContext(
-                "friedl",
-                frozenset({CODING_EXECUTE_PERMISSION}),
-                NOW,
-            ),
-        )
-        self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(
-            (self.repo / "tests" / "test_coding_agent.py").read_text(encoding="utf-8"),
-            "original\n",
-        )
-        self.assertNotIn(
-            "tests/test_coding_agent.py",
-            attempt.result.values.get("files_changed") or [],
-        )
-
-    def test_mutation_dropping_scope_checks_is_detected(self) -> None:
-        source = (
-            PRODUCTION_ROOT / "providers" / "coding_workspace.py"
-        ).read_text(encoding="utf-8")
-        mutated = source.replace(
-            "        if self._blocked_path(resolved) or self._scope_blocked(relative, resolved):\n"
-            "            raise CodingError(\"path_not_permitted\")\n",
-            "        return\n",
-            1,
-        )
-        self.assertNotEqual(source, mutated)
-        namespace: dict[str, object] = {"__name__": "mutation"}
-        exec(compile(mutated, "coding_workspace.py", "exec"), namespace)
-        workspace = namespace["CodingWorkspace"](
-            str(self.repo), ("tests/test_coding_agent.py",)
-        )
-        workspace.write_text("tests/test_coding_agent.py", "leaked\n")
-        self.assertEqual(
-            (self.repo / "tests" / "test_coding_agent.py").read_text(encoding="utf-8"),
-            "leaked\n",
         )
 
 

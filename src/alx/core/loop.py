@@ -202,6 +202,11 @@ class CoreAgent:
         memory_conflicts: tuple[Mapping[str, Any], ...] = ()
         # Calls refused before approval this turn, each reported to her once.
         refused_calls: tuple[Mapping[str, Any], ...] = ()
+        # One-shot notice that a call-less decision would have ended the turn
+        # while remaining work was still immediately executable. Shown on the
+        # next reasoning step, then cleared.
+        continuation_notices: tuple[Mapping[str, Any], ...] = ()
+        continuation_notice_issued = False
         # Capabilities this turn has already dispatched under an approval.
         # One instruction from Friedl authorises one such action, and the
         # single-use approval identifier does not enforce that on its own: the
@@ -225,7 +230,7 @@ class CoreAgent:
         # goal before acting is legitimate; walking the conversation's goals
         # one at a time buys a reasoning call per goal, so it is not.
         selections = 0
-        for _ in range(step_budget):
+        for step_index in range(step_budget):
             try:
                 now = self._clock()
                 if now.tzinfo is None or now.utcoffset() is None:
@@ -267,10 +272,12 @@ class CoreAgent:
                     undelivered_responses=self._undelivered_responses(),
                     memory_conflicts=memory_conflicts,
                     refused_calls=refused_calls,
+                    continuation_notices=continuation_notices,
                 ))
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
+            continuation_notices = ()
             if decision.goal_id is not None:
                 selection_error = self._goal_selection_error(
                     decision, snapshot, summaries, selections
@@ -492,6 +499,19 @@ class CoreAgent:
                 memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                if proposal_error is None:
+                    snapshot, deferred = self._defer_or_park_premature_end(
+                        snapshot,
+                        approved_dispatches,
+                        continuation_notice_issued,
+                        step_index,
+                        step_budget,
+                        decision_provenance,
+                    )
+                    if deferred is not None:
+                        continuation_notice_issued = True
+                        continuation_notices = deferred
+                        continue
                 if decision.finish_silently:
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,
@@ -530,6 +550,7 @@ class CoreAgent:
                         or attempt.disposition is CapabilityAttemptDisposition.PENDING):
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
                 transient_attempts = (*transient_attempts, attempt)
+                continuation_notice_issued = False
                 continue
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
@@ -623,6 +644,28 @@ class CoreAgent:
                 # boundary, so a corrected call may still use the same turn.
                 approved_dispatches.add(decision.call.capability_id)
             snapshot = self._finalize_dispatch(snapshot, attempt, now)
+            continuation_notice_issued = False
+        if (
+            snapshot is not None
+            and snapshot.state.status is GoalStatus.ACTIVE
+            and (snapshot.state.outstanding_work or snapshot.state.blockers)
+        ):
+            # Remaining work will not run without another step. Park rather
+            # than leave ACTIVE checkpointed work that looks as if it is
+            # still going to execute.
+            try:
+                now = self._clock()
+                if now.tzinfo is None or now.utcoffset() is None:
+                    raise ValueError("Core clock must be timezone-aware")
+                snapshot = self._park_unfinished_goal(
+                    snapshot,
+                    self._derived_provenance(
+                        now, conversation, snapshot, retrieved_memories,
+                        transient_attempts,
+                    ),
+                )
+            except Exception:
+                LOGGER.info("Unfinished goal could not be parked after step budget")
         if conflict_response is not None or conflict_silent:
             # She finished what she wanted to say, then ran out of steps while
             # resolving a memory identifier. Discarding the answer to report a
@@ -826,6 +869,90 @@ class CoreAgent:
             None,
         )
 
+    def _immediately_executable_remaining_work(
+        self,
+        state: GoalState | None,
+        approved_dispatches: set[str],
+    ) -> bool:
+        """Whether the selected goal still has work this turn can run.
+
+        Taken only from durable goal fields and turn-local spend: ACTIVE,
+        nonempty outstanding_work, no blockers, and remaining actions not
+        already spent by a turn-bound capability dispatched this turn.
+        """
+        if state is None or state.status is not GoalStatus.ACTIVE:
+            return False
+        if not state.outstanding_work or state.blockers:
+            return False
+        if approved_dispatches & self._turn_bound_capabilities:
+            return False
+        return True
+
+    def _park_unfinished_goal(
+        self,
+        snapshot: GoalSnapshot,
+        provenance: ContentProvenance,
+    ) -> GoalSnapshot:
+        """Reduce an ACTIVE goal that cannot continue to a truthful parked status.
+
+        Does not complete the goal: completion still requires REQUEST_COMPLETION
+        and sourced evidence.
+        """
+        state = snapshot.state
+        if state.status is not GoalStatus.ACTIVE:
+            return snapshot
+        if state.blockers:
+            kind = GoalMutationKind.BLOCK
+        elif state.outstanding_work:
+            kind = GoalMutationKind.AWAIT_INPUT
+        else:
+            return snapshot
+        return self._store.replace(
+            self._derive_goal_status(state, kind),
+            snapshot.retention_until,
+            snapshot.revision,
+            provenance,
+        )
+
+    def _defer_or_park_premature_end(
+        self,
+        snapshot: GoalSnapshot | None,
+        approved_dispatches: set[str],
+        continuation_notice_issued: bool,
+        step_index: int,
+        step_budget: int,
+        provenance: ContentProvenance,
+    ) -> tuple[GoalSnapshot | None, tuple[Mapping[str, Any], ...] | None]:
+        """Continue the step loop, park, or let a call-less decision stand.
+
+        A deferred end returns a one-shot continuation notice and does not
+        deliver the premature response. Any other remaining unfinished work
+        is parked before the person-facing outcome is returned.
+        """
+        state = None if snapshot is None else snapshot.state
+        if self._immediately_executable_remaining_work(state, approved_dispatches):
+            assert state is not None
+            if not continuation_notice_issued and step_index + 1 < step_budget:
+                LOGGER.info(
+                    "Premature turn end deferred: remaining work still executable"
+                )
+                return snapshot, ({
+                    "reason": "remaining_work_still_executable",
+                    "outstanding_work": [
+                        item.item_id for item in state.outstanding_work
+                    ],
+                },)
+            if snapshot is not None:
+                snapshot = self._park_unfinished_goal(snapshot, provenance)
+            return snapshot, None
+        if (
+            snapshot is not None
+            and snapshot.state.status is GoalStatus.ACTIVE
+            and (snapshot.state.outstanding_work or snapshot.state.blockers)
+        ):
+            snapshot = self._park_unfinished_goal(snapshot, provenance)
+        return snapshot, None
+
     def _dispatch_blocked_reason(self, call: CapabilityCall,
                                  state: GoalState | None) -> str | None:
         """Why a call cannot be dispatched in this goal state, if it cannot.
@@ -1012,6 +1139,20 @@ class CoreAgent:
             return replace(state, status=GoalStatus.COMPLETED,
                            stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET)
         if kind is GoalMutationKind.AWAIT_INPUT:
+            # Awaiting input means work is genuinely parked on an answer, so
+            # the record has to name that work. Where there is none, the goal
+            # is not waiting on Friedl; it is simply active with nothing
+            # pending, and the response itself hands the turn back.
+            #
+            # Staying ACTIVE is the honest reading of that state, and it is the
+            # only one available: inventing an outstanding item would fabricate
+            # work nobody asked for, and completing the goal would claim a
+            # result no evidence supports. Failing the turn instead is what
+            # this replaces - a stale goal in exactly this shape refused every
+            # further turn on its conversation, so no new instruction could be
+            # acted on at all.
+            if not state.outstanding_work:
+                return replace(state, status=GoalStatus.ACTIVE, stop_reason=None)
             return replace(state, status=GoalStatus.AWAITING_INPUT,
                            stop_reason=GoalStopReason.REQUIRED_INPUT)
         if kind is GoalMutationKind.AWAIT_APPROVAL:

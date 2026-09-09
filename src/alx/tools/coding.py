@@ -147,14 +147,18 @@ def build_coding_executors(
         values = outcome.as_values()
         if outcome.status != "succeeded":
             issues = outcome.unresolved_issues
-            if "step_budget_exhausted" in issues:
-                code = "step_budget_exhausted"
-            elif "command_budget_exhausted" in issues:
-                code = "command_budget_exhausted"
+            if "sandbox_unusable" in issues:
+                code = "sandbox_unusable"
+            elif "session_failed" in issues:
+                code = "session_failed"
+            elif "coding_unavailable" in issues:
+                code = "coding_unavailable"
             elif "provider_failed" in issues:
                 code = "provider_failed"
             elif "plan_unusable" in issues:
                 code = "plan_unusable"
+            elif "planning_failed" in issues:
+                code = "planning_failed"
             else:
                 code = "task_failed"
             return CapabilityResult(

@@ -1,9 +1,15 @@
-"""Filesystem bound for one assigned coding worktree.
+"""Path bound for one assigned coding worktree.
 
-Paths are resolved and must remain children of the worktree. This is the
-authority boundary for repository editing: the job may read and write only
-inside the worktree Core named. It cannot grant itself another tree, follow a
-symlink out, or write governance or credential files.
+The coding session edits the worktree with its own native tools, so this is no
+longer the site that performs each read and write. What remains is the path
+arithmetic AL/X still needs on its own side of the boundary: validating a
+plan's inspection targets, listing the root to ground planning, and
+normalising blocked paths into the deny entries the sandbox is built from.
+
+Enforcement during the session itself belongs to the kernel, in
+`alx.providers.coding_sandbox`. Keeping these checks here as well is not a
+second execution path: nothing in this module can open a file the session
+edits.
 """
 
 from __future__ import annotations
@@ -12,34 +18,14 @@ import os
 from pathlib import Path
 
 from alx.contracts.coding import (
-    MAX_FILE_CHARACTERS,
     MAX_REPORTED_FILES,
     CodingError,
+    lexical_worktree_path,
     path_matches_blocked,
 )
 
 
 _BLOCKED_ENV_NAMES = frozenset({".env", ".env.local", ".env.secret"})
-
-
-def lexical_worktree_path(relative: str) -> str:
-    """Collapse . and .. without leaving the worktree. Absolute paths refuse."""
-    if not isinstance(relative, str) or not relative.strip():
-        raise CodingError("path_outside_worktree")
-    path = Path(relative)
-    if path.is_absolute():
-        raise CodingError("path_outside_worktree")
-    parts: list[str] = []
-    for part in path.parts:
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not parts:
-                raise CodingError("path_outside_worktree")
-            parts.pop()
-            continue
-        parts.append(part)
-    return "/".join(parts)
 
 
 def diagnose_worktree(worktree: str) -> dict[str, object] | None:
@@ -194,31 +180,4 @@ class CodingWorkspace:
         """Validate a plan's proposed inspection path without reading it."""
         path = self.resolve(relative)
         self._refuse_if_blocked(relative, path)
-        return self.relative_of(path)
-
-    def read_text(self, relative: str) -> str:
-        path = self.resolve(relative)
-        self._refuse_if_blocked(relative, path)
-        if not path.is_file():
-            raise CodingError("path_outside_worktree")
-        text = path.read_text(encoding="utf-8")
-        if len(text) > MAX_FILE_CHARACTERS:
-            # Refuse rather than return a prefix the model could write back
-            # over the unseen remainder.
-            raise CodingError("file_too_large")
-        return text
-
-    def write_text(self, relative: str, content: str) -> str:
-        if not isinstance(content, str):
-            raise CodingError("arguments_unusable")
-        if len(content) > MAX_FILE_CHARACTERS:
-            raise CodingError("arguments_unusable")
-        path = self.resolve(relative)
-        self._refuse_if_blocked(relative, path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.resolve().relative_to(self.root)
-        except ValueError as error:
-            raise CodingError("path_outside_worktree") from error
-        path.write_text(content, encoding="utf-8")
         return self.relative_of(path)
