@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
@@ -21,7 +22,11 @@ from alx.bootstrap.xero import (  # noqa: E402
     BILL_TASK_CAPABILITIES,
     build_xero_runtime,
 )
+from alx.bootstrap.live_voice import _bill_budget_for_turn  # noqa: E402
 from alx.observability import XERO_BILL_BUDGET  # noqa: E402
+from alx.observability.usage import (  # noqa: E402
+    CLAUDE_SUBSCRIPTION_BILL_BUDGET,
+)
 from alx.tools import (  # noqa: E402
     CAPTURE_SUPPLIER_INVOICE,
     LIST_XERO_ACCOUNTS,
@@ -105,6 +110,20 @@ class ArmedBudgetTests(unittest.TestCase):
         ).read_text()
         self.tree = ast.parse(self.source)
 
+    def _dispatch_source(self) -> str:
+        run = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "run"
+        )
+        dispatch = next(
+            node
+            for node in run.body
+            if isinstance(node, ast.FunctionDef) and node.name == "dispatch"
+        )
+        return ast.unparse(dispatch)
+
     def test_the_runtime_passes_a_budget_check_to_the_core(self) -> None:
         core = [
             node
@@ -121,7 +140,12 @@ class ArmedBudgetTests(unittest.TestCase):
         """Without this the ceiling never applies to a real bill task."""
         self.assertIn("BILL_TASK_CAPABILITIES", self.source)
         self.assertIn("usage.set_budget(", self.source)
-        self.assertIn("XERO_BILL_BUDGET", self.source)
+        # The budget is chosen by provider now, so the literal name no longer
+        # appears at the arming site. What must remain true is that arming a
+        # bill task selects a ceiling through that one function.
+        dispatch = self._dispatch_source()
+        self.assertIn("_bill_budget_for_turn(", dispatch)
+        self.assertIn("occasion_spend.current_opportunity_id()", dispatch)
 
     def test_the_armed_budget_is_the_agreed_shape(self) -> None:
         self.assertEqual(XERO_BILL_BUDGET.expected, 2)
@@ -129,6 +153,68 @@ class ArmedBudgetTests(unittest.TestCase):
         self.assertEqual(XERO_BILL_BUDGET.stop_above, 4)
         self.assertEqual(XERO_BILL_BUDGET.recovery_allowance, 2)
         self.assertEqual(XERO_BILL_BUDGET.recovery_limit, 6)
+
+    def test_the_metered_ceiling_is_what_an_api_provider_receives(self) -> None:
+        """A metered provider keeps the ceiling it was sized for."""
+        from alx.observability.usage import bill_budget_for
+
+        for provider in ("openai", "xai", "kimi", "unknown-provider"):
+            with self.subTest(provider=provider):
+                self.assertIs(bill_budget_for(provider), XERO_BILL_BUDGET)
+
+    def test_the_subscription_ceiling_is_larger_and_still_finite(self) -> None:
+        """Sized for a reasoner that spends several calls on one turn."""
+        from alx.observability.usage import (
+            CLAUDE_SUBSCRIPTION_BILL_BUDGET,
+            bill_budget_for,
+        )
+
+        budget = bill_budget_for("claude_subscription")
+        self.assertIs(budget, CLAUDE_SUBSCRIPTION_BILL_BUDGET)
+        self.assertEqual(budget.stop_above, 24)
+        self.assertEqual(budget.recovery_limit, 26)
+        self.assertGreater(budget.stop_above, XERO_BILL_BUDGET.stop_above)
+        # Bounded, not unlimited: a runaway loop is still stopped.
+        self.assertLess(budget.stop_above, 100)
+
+    def test_autonomous_bill_budget_uses_its_executing_metered_provider(
+        self,
+    ) -> None:
+        """A subscription Core cannot loosen an autonomous metered turn."""
+        settings = SimpleNamespace(
+            reasoning=SimpleNamespace(provider="claude_subscription"),
+            autonomous=SimpleNamespace(provider="openai"),
+        )
+
+        self.assertIs(
+            _bill_budget_for_turn(settings, "occasion-1"),
+            XERO_BILL_BUDGET,
+        )
+        self.assertIs(
+            _bill_budget_for_turn(settings, ""),
+            CLAUDE_SUBSCRIPTION_BILL_BUDGET,
+        )
+
+    def test_unconfigured_autonomous_turn_fails_to_the_strict_budget(self) -> None:
+        settings = SimpleNamespace(
+            reasoning=SimpleNamespace(provider="claude_subscription"),
+            autonomous=None,
+        )
+        self.assertIs(
+            _bill_budget_for_turn(settings, "unexpected-occasion"),
+            XERO_BILL_BUDGET,
+        )
+
+    def test_a_four_call_work_turn_does_not_nearly_exhaust_the_budget(self) -> None:
+        """The live DHL turn spent four calls and was killed at six."""
+        from alx.observability.usage import bill_budget_for
+
+        budget = bill_budget_for("claude_subscription")
+        self.assertGreaterEqual(
+            budget.stop_above - 4,
+            12,
+            "four calls of real work must leave room to keep working",
+        )
 
     def test_any_bill_capability_arms_the_ceiling_not_only_the_commit(self) -> None:
         """Arming on the commit was too late; a task reached seven calls first."""

@@ -125,6 +125,7 @@ class VoiceSession:
         diagnostics: VoiceDiagnosticBuffer | None = None,
         event_source: CognitionOpportunitySource | None = None,
         core_turn_lock: asyncio.Lock | None = None,
+        turn_origin_sink: Callable[[bool], None] | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")
@@ -148,6 +149,11 @@ class VoiceSession:
         # autonomous turn run while Friedl was speaking. One is created here
         # only when no runtime supplied one, which is the test path.
         self._core_turn_lock = core_turn_lock or asyncio.Lock()
+        # Told, for each turn, whether a person is waiting on it. The runtime
+        # uses it to reserve the budget recovery allowance for Friedl; nothing
+        # here reads it back, and the Core is never given it. Transport
+        # knowledge stays in the transport.
+        self._turn_origin_sink = turn_origin_sink or (lambda _person: None)
 
     async def exchange(
         self,
@@ -201,9 +207,85 @@ class VoiceSession:
             tasks.append(asyncio.create_task(receive_typed_lines()))
         if self._event_source is not None:
             tasks.append(asyncio.create_task(receive_events()))
+        # Background work that arrived while a person was already waiting, kept
+        # in arrival order until the person path is idle.
+        #
+        # One queue carries every source, and it is strictly first-in-first-out.
+        # Mail observations re-emit each poll cycle until a turn records their
+        # delivery, so an observation AL/X answers silently is offered again on
+        # the next cycle. A background turn takes longer than the poll interval,
+        # so the queue gains events faster than it drains, and typed input added
+        # behind that backlog is never reached: on 2026-09-08 five consecutive
+        # background turns ran and two typed messages were never processed at
+        # all.
+        #
+        # Ordering rather than exclusion. Nothing here weighs how interesting
+        # an item is: the only question asked is which source it came from, so
+        # a person waiting is served before queued background work. Background
+        # Distinct background work is not dropped, rate-limited or deferred by
+        # a timer. Equivalent re-emissions are coalesced below, and D-024
+        # continues exactly as before once nothing is waiting.
+        deferred_background: deque[tuple[str, Any]] = deque()
+        # An undelivered observation is re-emitted with the same durable
+        # identity. Keep its first queued occurrence and coalesce later copies;
+        # distinct observations retain their arrival order and are never
+        # truncated. The identifier leaves this set when its entry leaves the
+        # deque, allowing a still-undelivered observation to be offered again.
+        deferred_background_ids: set[str] = set()
+
+        def defer_background(entry: tuple[str, Any]) -> None:
+            event_id = entry[1].event_id
+            if event_id in deferred_background_ids:
+                return
+            deferred_background.append(entry)
+            deferred_background_ids.add(event_id)
+
+        def take_background() -> tuple[str, Any]:
+            entry = deferred_background.popleft()
+            deferred_background_ids.remove(entry[1].event_id)
+            return entry
+
+        # Set when a background turn stopped without reasoning because the
+        # conversation's execution budget was exhausted. While it holds, more
+        # background work is deferred rather than run: the next one would take
+        # the same millisecond to reach the same checkpoint, and on 2026-09-08
+        # that produced 213 of them in one second, which spent the recovery
+        # allowance Friedl was about to need. Cleared by the next person turn,
+        # which is the only thing that can change the answer.
+        background_stopped_on_budget = [False]
+
+        async def next_item() -> tuple[str, Any]:
+            """The next thing to work on, person input before background.
+
+            Drains what has already arrived without blocking, so anything
+            queued behind a backlog of background events is still found. Only
+            when nothing is waiting at all does this block, which leaves the
+            idle path identical to a plain queue read.
+            """
+            while True:
+                while True:
+                    try:
+                        entry = incoming.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if entry[0] == "background":
+                        defer_background(entry)
+                    else:
+                        # A person turn, an error or her own words. Anything
+                        # background found on the way keeps its place in
+                        # `deferred_background` and runs once this is done.
+                        return entry
+                if deferred_background and not background_stopped_on_budget[0]:
+                    return take_background()
+                # Nothing runnable pending: wait, as the plain queue read did.
+                entry = await incoming.get()
+                if entry[0] != "background":
+                    return entry
+                defer_background(entry)
+
         try:
             while True:
-                kind, item = await incoming.get()
+                kind, item = await next_item()
                 if kind == "error":
                     yield VoiceEvent(VoiceEventKind.ERROR, reason=item)
                     # A background observation failure leaves speech intact, so the
@@ -244,48 +326,65 @@ class VoiceSession:
                 LOGGER.info("Authoritative Core turn started: %s", kind)
                 try:
                     async with self._core_turn_lock:
-                        if kind == "background":
-                            outcome = await run_core_worker(
-                                self._gateway.receive_background_event,
-                                conversation_id,
-                                item,
-                                self._step_budget,
-                                now + timedelta(days=self._retention_days),
-                            )
-                        else:
-                            # Spoken and typed converge here, before the
-                            # gateway. They differ only in provenance and in
-                            # whether a transcriber was involved; from this
-                            # point there is one person-turn path, one Core
-                            # call, one conversation and one goal treatment.
-                            if kind == "typed":
-                                origin = ConversationOrigin.TYPED
-                                content = item
-                            else:
-                                LOGGER.info(
-                                    "Cartesia event received: %s", item.state.value
+                        self._turn_origin_sink(kind != "background")
+                        try:
+                            if kind == "background":
+                                outcome = await run_core_worker(
+                                    self._gateway.receive_background_event,
+                                    conversation_id,
+                                    item,
+                                    self._step_budget,
+                                    now + timedelta(days=self._retention_days),
                                 )
-                                origin = ConversationOrigin.SPEECH_TRANSCRIPT
-                                content = item.content
-                            turn = ConversationTurn(
-                                conversation_id=conversation_id,
-                                turn_id=self._identifier_factory(),
-                                origin=origin,
-                                content=content,
-                                occurred_at=now,
-                                person_id=self._person_id,
-                            )
-                            outcome = await run_core_worker(
-                                self._gateway.receive_conversation_turn,
-                                turn,
-                                self._step_budget,
-                                now + timedelta(days=self._retention_days),
-                            )
+                            else:
+                                # Spoken and typed converge here, before the
+                                # gateway. They differ only in provenance and in
+                                # whether a transcriber was involved; from this
+                                # point there is one person-turn path, one Core
+                                # call, one conversation and one goal treatment.
+                                if kind == "typed":
+                                    origin = ConversationOrigin.TYPED
+                                    content = item
+                                else:
+                                    LOGGER.info(
+                                        "Cartesia event received: %s", item.state.value
+                                    )
+                                    origin = ConversationOrigin.SPEECH_TRANSCRIPT
+                                    content = item.content
+                                turn = ConversationTurn(
+                                    conversation_id=conversation_id,
+                                    turn_id=self._identifier_factory(),
+                                    origin=origin,
+                                    content=content,
+                                    occurred_at=now,
+                                    person_id=self._person_id,
+                                )
+                                outcome = await run_core_worker(
+                                    self._gateway.receive_conversation_turn,
+                                    turn,
+                                    self._step_budget,
+                                    now + timedelta(days=self._retention_days),
+                                )
+                        finally:
+                            self._turn_origin_sink(False)
                 except Exception:
                     yield VoiceEvent(
                         VoiceEventKind.ERROR, reason="conversation_gateway_error"
                     )
                     return
+
+                # A person checkpoint grants recovery but has not made budget
+                # headroom for background work. Keep it suppressed until a
+                # person turn reaches a different outcome.
+                if outcome.reason == "budget_exceeded":
+                    if not background_stopped_on_budget[0]:
+                        LOGGER.info(
+                            "Deferring background work: the conversation's "
+                            "execution budget is exhausted"
+                        )
+                    background_stopped_on_budget[0] = True
+                elif kind != "background":
+                    background_stopped_on_budget[0] = False
 
                 delivered = True
                 async for response_event in self._response_events(

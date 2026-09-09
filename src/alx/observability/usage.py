@@ -46,7 +46,39 @@ class ExecutionBudget:
 # A routine supplier bill is one or two Core reasoning calls: one to start it
 # and one to report. Anything beyond four is not a slow success, it is a loop.
 # Specialist calls are counted separately and are not subject to this ceiling.
+#
+# Sized against a metered provider that answers a whole turn in one call. It
+# stays the default, because on that provider four calls really is a loop.
 XERO_BILL_BUDGET = ExecutionBudget(expected=2, warn_above=2, stop_above=4)
+
+# The same task, on a reasoner that thinks in more, smaller steps.
+#
+# The ceiling counts Core reasoning calls, not work done, so it only means
+# "this has run away" while a call is roughly a turn. On the Claude
+# subscription it is not: an ordinary turn takes two calls and a real bill
+# took four, so a task that was progressing normally hit a limit meant for a
+# loop. The bound is raised to match the provider's shape and stays finite -
+# twenty-four calls is still unmistakably a loop, and nothing here is
+# unlimited.
+#
+# It is a separate value rather than a multiplier so the number that applies
+# is readable, and it lives here beside the budget it varies rather than in
+# Core, which must not know which provider answered.
+CLAUDE_SUBSCRIPTION_BILL_BUDGET = ExecutionBudget(
+    expected=4, warn_above=8, stop_above=24
+)
+
+
+def bill_budget_for(provider: str) -> ExecutionBudget:
+    """The bill ceiling appropriate to the reasoner that will spend it.
+
+    Configuration chooses the provider; this chooses the bound that matches
+    how that provider consumes calls. Every provider gets a finite ceiling,
+    and an unknown one gets the stricter default rather than the looser bound.
+    """
+    if provider == "claude_subscription":
+        return CLAUDE_SUBSCRIPTION_BILL_BUDGET
+    return XERO_BILL_BUDGET
 
 
 class BudgetExceeded(Exception):
@@ -389,11 +421,13 @@ class SQLiteUsageRecorder:
             return "warning"
         return "expected"
 
-    def check(self, task_id: str) -> None:
+    def check(self, task_id: str, *, allow_recovery: bool = True) -> None:
         """Raise before another reasoning call when a task has run away.
 
         Called before dispatching, so exceeding the ceiling prevents further
-        spend rather than merely recording that it happened.
+        spend rather than merely recording that it happened. The runtime may
+        exclude reserved recovery for a non-person turn without changing the
+        recorded allowance or budget window.
         """
         with self._lock:
             budget = self._budgets.get(task_id)
@@ -404,7 +438,7 @@ class SQLiteUsageRecorder:
                 # away; it must not also stop AL/X saying what she did. The
                 # next capability call opens a new window.
                 return
-            recovering = task_id in self._recovery
+            recovering = allow_recovery and task_id in self._recovery
             since = self._windows.get(task_id, 0)
         calls = self._calls_since(task_id, since)
         limit = budget.recovery_limit if recovering else budget.stop_above
