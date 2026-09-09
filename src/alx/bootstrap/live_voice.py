@@ -20,6 +20,7 @@ from alx.bootstrap.mail import (
 )
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
+from alx.bootstrap.coding import build_coding_runtime
 from alx.bootstrap.repository import build_repository_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
@@ -446,6 +447,21 @@ async def run(repository_root: Path) -> None:
         policies.update(sandbox_runtime.policies)
         executors.update(sandbox_runtime.executors)
         permissions.update(sandbox_runtime.permissions)
+
+    # D-028 authorises one bounded coding job in an assigned worktree. It is
+    # a separate authority from sandbox.execute: the sandbox cannot touch a
+    # repository, and this cannot merge, push, deploy or request a review.
+    coding_runtime = build_coding_runtime(
+        provider_settings.coding.enabled,
+        providers.coding,
+        lambda: current_call_id[0],
+    )
+    if coding_runtime is not None:
+        for definition in coding_runtime.definitions:
+            registry.register(definition)
+        policies.update(coding_runtime.policies)
+        executors.update(coding_runtime.executors)
+        permissions.update(coding_runtime.permissions)
 
     # Requesting an external review is effectful and may spend review credits,
     # so its policy requires an approval grounded in Friedl's own turn.

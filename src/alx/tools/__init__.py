@@ -85,6 +85,11 @@ from alx.tools.repository import (
     MERGE_PULL_REQUEST,
     build_repository_executors,
 )
+from alx.tools.coding import (
+    DEFINITION as CODING_DEFINITION,
+    RUN_CODING_TASK,
+    build_coding_executors,
+)
 
 
 __all__ = [
@@ -100,6 +105,9 @@ __all__ = [
     "MERGE_DEFINITION",
     "MERGE_PULL_REQUEST",
     "build_repository_executors",
+    "CODING_DEFINITION",
+    "RUN_CODING_TASK",
+    "build_coding_executors",
     "ASK_WEB_PAGE",
     "ASK_WEB_SEARCH",
     "WEB_SEARCH_DEFINITION",

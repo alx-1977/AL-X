@@ -64,8 +64,8 @@ class ModelRequest:
         object.__setattr__(self, "output_schema", freeze_data(self.output_schema))
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive when set")
-        if self.kind not in ("core", "specialist", "research"):
-            raise ValueError("kind must be core, specialist, or research")
+        if self.kind not in ("core", "specialist", "research", "coding"):
+            raise ValueError("kind must be core, specialist, research, or coding")
         if self.reserved_usd < 0:
             raise ValueError("reserved_usd must not be negative")
         if self.kind == "research" and not self.tier:

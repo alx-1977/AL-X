@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from alx.config import ConfigurationError, RuntimeSettings
-from alx.config.settings import CLAUDE_SUBSCRIPTION_PROVIDER, NO_PROVIDER
+from alx.config.settings import (
+    CLAUDE_SUBSCRIPTION_PROVIDER,
+    GROK_SUBSCRIPTION_PROVIDER,
+    NO_PROVIDER,
+)
 from alx.contracts import ReasoningModel, SpeechSynthesizer, SpeechTranscriber
 from alx.providers import (
     CartesiaTranscriber,
@@ -19,6 +23,7 @@ from alx.providers import (
     XAIReasoningModel,
 )
 from alx.providers.claude_subscription import subscription_cli_present
+from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
 from alx.providers.gated_transcription import GatedTranscriber
 
 
@@ -36,6 +41,9 @@ class RuntimeProviders:
     # unconfigured, which disables the experiment rather than sending an
     # autonomous turn to the conversational Core under another name.
     autonomous: ReasoningModel | None
+    # D-028 coding jobs. Independent of the conversational Core. None when
+    # unconfigured or unusable, which leaves the capability unregistered.
+    coding: ReasoningModel | None
     speech_to_text: SpeechTranscriber
     # None when no speech transport is configured. Audio is then absent and
     # nothing else differs: the Core never learns whether anyone could hear.
@@ -105,6 +113,33 @@ def _build_reasoning_model(
     return None
 
 
+def _build_coding_model(
+    settings: RuntimeSettings,
+    telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
+) -> ReasoningModel | None:
+    """The Coding Agent's model, or None when the capability should be absent.
+
+    Only the Grok CLI subscription is composed. A metered xAI/OpenAI adapter
+    is never built here, even when those keys exist for other work. Failure of
+    the CLI is a coding-job failure, not a reason to construct another client.
+    """
+    coding = settings.coding
+    if not coding.enabled or not coding.is_usable:
+        LOGGER.info("Coding agent reasoning is disabled by configuration")
+        return None
+    if coding.reasoning.provider != GROK_SUBSCRIPTION_PROVIDER:
+        raise ConfigurationError(
+            "coding jobs use grok_subscription, not "
+            f"{coding.reasoning.provider}"
+        )
+    return GrokSubscriptionReasoningModel(
+        coding.reasoning.model,
+        coding.reasoning.timeout_seconds,
+        telemetry_sink=telemetry_sink,
+        effort=coding.reasoning.effort,
+    )
+
+
 def build_runtime_providers(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
@@ -158,6 +193,7 @@ def build_runtime_providers(
         None if settings.autonomous is None
         else _build_reasoning_model(settings.autonomous, telemetry_sink)
     )
+    coding = _build_coding_model(settings, telemetry_sink)
 
     if settings.speech_to_text.provider != "cartesia":
         raise ConfigurationError(
@@ -176,6 +212,7 @@ def build_runtime_providers(
         reasoning=reasoning,
         specialist=specialist,
         autonomous=autonomous,
+        coding=coding,
         # Wrapped, not replaced. The gate decides which audio is worth
         # paying to transmit; what the audio means is still Cartesia's answer
         # and then AL/X's. Removing the wrapper restores the previous
