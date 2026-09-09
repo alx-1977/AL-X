@@ -814,7 +814,8 @@ class CodingSettings:
     def is_usable(self) -> bool:
         return bool(
             self.enabled
-            and self.reasoning.provider == GROK_SUBSCRIPTION_PROVIDER
+            and self.reasoning.provider
+            in (GROK_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER, "openai")
             and self.reasoning.model.strip()
             and self.reasoning.model.lower() != NO_PROVIDER
         )
@@ -823,9 +824,9 @@ class CodingSettings:
 def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
     """Configure the coding backend independently of the Core.
 
-    Defaults to the Grok CLI subscription when enabled. Metered xAI/OpenAI
-    keys are not read and cannot make this path usable. Naming the Claude
-    subscription for coding is refused rather than rewritten.
+    Defaults to the Grok CLI subscription when enabled. Provider selection is
+    explicit and independent from the Core; no configuration path substitutes
+    another provider when the selected one is unavailable.
     """
     enabled = _boolean(environment, "ALX_CODING_ENABLED", False)
     absent = ReasoningSettings(
@@ -846,20 +847,35 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
         .lower()
         or GROK_SUBSCRIPTION_PROVIDER
     )
-    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
-        raise ConfigurationError(
-            f"{CLAUDE_SUBSCRIPTION_PROVIDER} is not available for coding jobs"
-        )
-    if provider in ("xai", "openai", "kimi"):
-        raise ConfigurationError(
-            "coding jobs use grok_subscription, not a metered API provider"
-        )
     if provider == NO_PROVIDER:
         return CodingSettings(True, absent)
-    if provider != GROK_SUBSCRIPTION_PROVIDER:
+    if provider not in (GROK_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER, "openai"):
         raise ConfigurationError(
             f"coding provider adapter is not installed: {provider}"
         )
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        if environment.get("ALX_CODING_API_KEY", "").strip():
+            raise ConfigurationError(
+                "ALX_CODING_API_KEY must not be set for claude_subscription"
+            )
+        return CodingSettings(True, ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_CODING_MODEL"),
+            api_key="", base_url="",
+            timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),
+            streaming=False, service_tier="default", effort="medium",
+        ))
+    if provider == "openai":
+        return CodingSettings(True, ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_CODING_MODEL"),
+            api_key=_credential(environment, "ALX_CODING_API_KEY", "OPENAI_API_KEY"),
+            base_url=_configured(environment, "ALX_CODING_BASE_URL", "OPENAI_BASE_URL", "https://api.openai.com").rstrip("/"),
+            timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),
+            streaming=False,
+            service_tier=environment.get("ALX_CODING_SERVICE_TIER", "default").strip().lower(),
+            effort=_coding_effort(environment),
+        ))
     return CodingSettings(
         True,
         ReasoningSettings(

@@ -203,6 +203,18 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             model.complete(_request())
         self.assertEqual(raised.exception.reason, "subscription_unauthenticated")
 
+    def test_nonzero_exit_reports_cli_failed_with_exit_status(self) -> None:
+        runner = _Recorder(stderr="command failed", returncode=2)
+        model = GrokSubscriptionReasoningModel(
+            "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
+        )
+        with self.assertRaises(ProviderError) as raised:
+            model.complete(_request())
+        self.assertEqual(raised.exception.reason, "cli_failed")
+        self.assertEqual(raised.exception.details.get("exit_status"), 2)
+        self.assertEqual(raised.exception.details.get("stderr_characters"), len("command failed"))
+        self.assertNotIn("command failed", str(raised.exception.details))
+
     def test_scripted_cli_json_drives_a_coding_job(self) -> None:
         work = tempfile.TemporaryDirectory()
         self.addCleanup(work.cleanup)
@@ -228,7 +240,7 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.values["status"], "blocked")
+        self.assertEqual(attempt.result.values["status"], "failed")
         self.assertTrue(runner.calls)
         self.assertEqual(runner.calls[0]["command"][0], "grok")
 
@@ -364,6 +376,30 @@ class GrokCodingCompositionTests(unittest.TestCase):
         self.assertNotIsInstance(providers.coding, XAIReasoningModel)
         with patch.dict("os.environ", {"XAI_API_KEY": "metered-secret"}):
             self.assertNotIn("XAI_API_KEY", providers.coding.child_environment())
+
+    def test_openai_coding_provider_is_selected_without_changing_core(self) -> None:
+        with patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
+            providers = build_runtime_providers(RuntimeSettings.from_environment(
+                _environment(
+                    ALX_CODING_PROVIDER="openai",
+                    ALX_CODING_MODEL="codex-test",
+                    ALX_CODING_API_KEY="coding-key",
+                )
+            ))
+        self.assertIsInstance(providers.reasoning, ClaudeSubscriptionReasoningModel)
+        self.assertIsInstance(providers.coding, OpenAIReasoningModel)
+        self.assertEqual(providers.coding._api_key, "coding-key")
+
+    def test_claude_coding_provider_is_explicit_and_independent(self) -> None:
+        with patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
+            providers = build_runtime_providers(RuntimeSettings.from_environment(
+                _environment(
+                    ALX_CODING_PROVIDER="claude_subscription",
+                    ALX_CODING_MODEL="claude-test",
+                )
+            ))
+        self.assertIsInstance(providers.reasoning, ClaudeSubscriptionReasoningModel)
+        self.assertIsInstance(providers.coding, ClaudeSubscriptionReasoningModel)
 
 
 if __name__ == "__main__":

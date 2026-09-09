@@ -980,4 +980,28 @@ UI; dashboards; task history; a generic agent framework; multi-agent swarms; lon
 
 ### Review condition
 
-Revisit if a coding job edits a path outside its assigned worktree; if it pushes, merges, deploys or requests a review; if it claims success after tests failed; if coding jobs run on the Claude subscription; if sandbox and coding become one path; or before the first live acceptance task (`Fix DHL document processing`) is delegated by Core.
+Revisit if a coding job edits a path outside its assigned worktree; if it pushes, merges, deploys or requests a review; if it claims success after tests failed; if sandbox and coding become one path; or before the first live acceptance task (`Fix DHL document processing`) is delegated by Core.
+
+### Amendment — selectable Coding Agent provider
+
+- **Date:** 2026-09-09
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-09.**
+
+The Coding Agent may use an explicitly configured coding-model provider that is
+independent of AL/X Core. The approved provider classes for this phase are
+`grok_subscription`, the existing OpenAI/Codex-backed reasoning transport where
+technically compatible, and `claude_subscription`. A future local provider may
+be added through the same provider-neutral coding-model port when separately
+implemented.
+
+Provider selection is configuration, never autonomous provider hopping. A
+selected provider that is unusable or fails fails closed and returns its
+structured evidence to Core. It must not consume another hosted, subscription,
+or API-credit provider as a fallback. Selecting a coding provider does not alter
+the Core provider and grants no repository, shell, merge, push, deploy, review,
+or governance authority beyond the existing `coding.execute` authority.
+
+This amendment supersedes only the requirement that `grok_subscription` is the
+sole Coding Agent provider and the blanket prohibition on OpenAI and Claude
+coding transports. All other D-028 constraints remain unchanged.

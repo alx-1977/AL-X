@@ -26,6 +26,8 @@ MAX_TASK_CHARACTERS = 16_000
 MAX_CONTEXT_CHARACTERS = 16_000
 MAX_CRITERIA = 16
 MAX_CRITERION_CHARACTERS = 1_000
+MAX_BLOCKED_PATHS = 32
+MAX_BLOCKED_PATH_CHARACTERS = 512
 
 
 CODING_FAILURES = (
@@ -38,6 +40,7 @@ CODING_FAILURES = (
     "command_not_permitted",
     "execution_timeout",
     "provider_failed",
+    "plan_unusable",
     "step_budget_exhausted",
     "command_budget_exhausted",
     "task_failed",
@@ -47,11 +50,30 @@ CODING_FAILURES = (
 class CodingError(Exception):
     """A coding job could not be performed, with a declared machine-readable code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, **details: object) -> None:
         if code not in CODING_FAILURES:
             raise ValueError("coding failures must be declared")
         self.code = code
+        self.details = {
+            key: value
+            for key, value in details.items()
+            if value is not None
+        }
         super().__init__(code)
+
+
+def path_matches_blocked(relative: str, blocked: tuple[str, ...]) -> bool:
+    """True if a worktree-relative path is a blocked path or a descendant."""
+    folded = relative.casefold()
+    if not folded:
+        return any(not spec for spec in blocked)
+    for spec in blocked:
+        target = spec.casefold()
+        if not target:
+            return True
+        if folded == target or folded.startswith(target + "/"):
+            return True
+    return False
 
 
 def _required(value: str, name: str) -> None:
@@ -74,6 +96,7 @@ class CodingRequest:
     context: str = ""
     test_guidance: str = ""
     step_budget: int = DEFAULT_STEP_BUDGET
+    blocked_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -99,6 +122,17 @@ class CodingRequest:
             raise TypeError("step_budget must be an integer")
         if not 1 <= self.step_budget <= MAX_STEP_BUDGET:
             raise ValueError("step_budget must be within the permitted bound")
+        blocked = tuple(self.blocked_paths)
+        object.__setattr__(self, "blocked_paths", blocked)
+        if len(blocked) > MAX_BLOCKED_PATHS:
+            raise ValueError("too many blocked paths")
+        if any(
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > MAX_BLOCKED_PATH_CHARACTERS
+            for item in blocked
+        ):
+            raise ValueError("blocked paths must be non-blank bounded strings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +183,9 @@ class CodingOutcome:
     external_review_recommended: bool
     finished_at: datetime
     diff_digest: str = ""
+    preexisting_dirty: tuple[str, ...] = ()
+    diagnostics: dict[str, object] | None = None
+    plan_summary: str = ""
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "failed", "blocked"):
@@ -156,8 +193,11 @@ class CodingOutcome:
         _required(self.summary, "summary")
         _aware(self.finished_at, "finished_at")
         object.__setattr__(self, "files_changed", tuple(self.files_changed))
+        object.__setattr__(self, "preexisting_dirty", tuple(self.preexisting_dirty))
         object.__setattr__(self, "commands", tuple(self.commands))
         object.__setattr__(self, "unresolved_issues", tuple(self.unresolved_issues))
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics or {}))
+        object.__setattr__(self, "plan_summary", str(self.plan_summary).strip())
         if self.tests_passed is not None and not self.tests_run:
             raise ValueError("tests cannot have passed or failed if none ran")
 
@@ -176,6 +216,8 @@ class CodingOutcome:
         values: dict[str, object] = {
             "status": self.status,
             "files_changed": list(self.files_changed),
+            "preexisting_dirty": list(self.preexisting_dirty),
+            "plan_summary": self.plan_summary,
             "file_count": len(self.files_changed),
             "command_count": len(self.commands),
             "tests_run": self.tests_run,
@@ -183,6 +225,7 @@ class CodingOutcome:
             "unresolved_count": len(self.unresolved_issues),
             "diff_digest": self.diff_digest,
             "finished_at": self.finished_at.isoformat(),
+            "plan_summary": self.plan_summary,
             "commands": [item.durable_values() for item in self.commands],
         }
         if self.tests_passed is not None:
@@ -205,4 +248,7 @@ __all__ = [
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
     "MAX_STEP_BUDGET",
+    "MAX_BLOCKED_PATHS",
+    "MAX_BLOCKED_PATH_CHARACTERS",
+    "path_matches_blocked",
 ]

@@ -20,6 +20,7 @@ from alx.contracts.coding import (
     MAX_DIFF_CHARACTERS,
     CodingCommandRecord,
     CodingError,
+    path_matches_blocked,
 )
 
 
@@ -40,6 +41,7 @@ _PYTEST_PLUGIN = "no:cacheprovider"
 def command_permitted(
     argv: list[str] | tuple[str, ...],
     worktree: Path | None = None,
+    blocked_paths: tuple[str, ...] = (),
 ) -> bool:
     """Whether this exact argv is a permitted development command.
 
@@ -62,15 +64,17 @@ def command_permitted(
         return all(item in allowed for item in rest[1:])
     if executable in _PYTHON_NAMES:
         if len(rest) >= 2 and rest[0] == "-m" and rest[1] in {"pytest", "unittest"}:
-            return _pytest_args_permitted(rest[2:], worktree)
+            return _pytest_args_permitted(rest[2:], worktree, blocked_paths)
         return False
     if executable == "pytest":
-        return _pytest_args_permitted(rest, worktree)
+        return _pytest_args_permitted(rest, worktree, blocked_paths)
     return False
 
 
 def _pytest_args_permitted(
-    args: tuple[str, ...], worktree: Path | None
+    args: tuple[str, ...],
+    worktree: Path | None,
+    blocked_paths: tuple[str, ...] = (),
 ) -> bool:
     expecting_value = False
     expecting_plugin = False
@@ -95,12 +99,16 @@ def _pytest_args_permitted(
             continue
         if item.startswith("-"):
             return False
-        if not _path_in_worktree(item, worktree):
+        if not _path_in_worktree(item, worktree, blocked_paths):
             return False
     return not expecting_value and not expecting_plugin
 
 
-def _path_in_worktree(relative: str, worktree: Path | None) -> bool:
+def _path_in_worktree(
+    relative: str,
+    worktree: Path | None,
+    blocked_paths: tuple[str, ...] = (),
+) -> bool:
     if worktree is None:
         return False
     if Path(relative).is_absolute():
@@ -109,8 +117,10 @@ def _path_in_worktree(relative: str, worktree: Path | None) -> bool:
         return False
     try:
         resolved = (worktree / relative).resolve()
-        resolved.relative_to(worktree.resolve())
+        resolved_relative = resolved.relative_to(worktree.resolve()).as_posix()
     except (OSError, ValueError):
+        return False
+    if path_matches_blocked(resolved_relative, blocked_paths):
         return False
     return True
 
@@ -133,9 +143,10 @@ def run_permitted_command(
     argv: list[str],
     worktree: Path,
     timeout_seconds: int = DEFAULT_COMMAND_SECONDS,
+    blocked_paths: tuple[str, ...] = (),
 ) -> CodingCommandRecord:
     """Run one allowlisted command with cwd bound to the worktree."""
-    if not command_permitted(argv, worktree):
+    if not command_permitted(argv, worktree, blocked_paths):
         raise CodingError("command_not_permitted")
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool):
         raise CodingError("arguments_unusable")

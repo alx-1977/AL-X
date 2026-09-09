@@ -119,24 +119,37 @@ def _build_coding_model(
 ) -> ReasoningModel | None:
     """The Coding Agent's model, or None when the capability should be absent.
 
-    Only the Grok CLI subscription is composed. A metered xAI/OpenAI adapter
-    is never built here, even when those keys exist for other work. Failure of
-    the CLI is a coding-job failure, not a reason to construct another client.
+    The configured coding provider is composed independently of the Core. A
+    provider failure remains a coding-job failure; this function never selects
+    a replacement.
     """
     coding = settings.coding
     if not coding.enabled or not coding.is_usable:
         LOGGER.info("Coding agent reasoning is disabled by configuration")
         return None
-    if coding.reasoning.provider != GROK_SUBSCRIPTION_PROVIDER:
-        raise ConfigurationError(
-            "coding jobs use grok_subscription, not "
-            f"{coding.reasoning.provider}"
+    if coding.reasoning.provider == GROK_SUBSCRIPTION_PROVIDER:
+        return GrokSubscriptionReasoningModel(
+            coding.reasoning.model, coding.reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink, effort=coding.reasoning.effort,
         )
-    return GrokSubscriptionReasoningModel(
-        coding.reasoning.model,
-        coding.reasoning.timeout_seconds,
-        telemetry_sink=telemetry_sink,
-        effort=coding.reasoning.effort,
+    if coding.reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        if not subscription_cli_present():
+            raise ConfigurationError("the Claude Code CLI is required for coding")
+        return ClaudeSubscriptionReasoningModel(
+            coding.reasoning.model, coding.reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+        )
+    if coding.reasoning.provider == "openai":
+        return OpenAIReasoningModel(
+            coding.reasoning.model, coding.reasoning.api_key,
+            coding.reasoning.base_url, coding.reasoning.timeout_seconds,
+            streaming=coding.reasoning.streaming,
+            service_tier=coding.reasoning.service_tier,
+            reasoning_effort=coding.reasoning.effort,
+            telemetry_sink=telemetry_sink,
+        )
+    raise ConfigurationError(
+        f"coding provider adapter is not installed: {coding.reasoning.provider}"
     )
 
 

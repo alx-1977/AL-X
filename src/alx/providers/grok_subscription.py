@@ -131,8 +131,9 @@ def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
 
 
 class _GrokProtocolError(ValueError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, **details: object) -> None:
         self.code = code
+        self.details = dict(details)
         super().__init__(code)
 
 
@@ -294,7 +295,10 @@ class GrokSubscriptionReasoningModel:
 
             if completed.returncode != 0:
                 raise _GrokProtocolError(
-                    self._failure_code(completed.stderr, completed.stdout)
+                    self._failure_code(completed.stderr, completed.stdout),
+                    exit_status=completed.returncode,
+                    stderr_characters=len(completed.stderr or ""),
+                    stdout_characters=len(completed.stdout or ""),
                 )
             output, model, usage = self._parse(completed.stdout)
             completion = ModelCompletion(
@@ -323,6 +327,11 @@ class GrokSubscriptionReasoningModel:
             return completion
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
             error_code = self._safe_error_code(error)
+            details = (
+                dict(error.details)
+                if isinstance(error, _GrokProtocolError)
+                else {}
+            )
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -341,7 +350,7 @@ class GrokSubscriptionReasoningModel:
                 duration,
                 error_code,
             )
-        raise_provider_failure(PROVIDER_NAME, error_code)
+        raise_provider_failure(PROVIDER_NAME, error_code, **details)
 
     def _install_subscription_auth(self, grok_home: Path) -> None:
         """Copy the CLI login file only. Never copy an API key.
