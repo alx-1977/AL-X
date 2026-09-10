@@ -80,8 +80,11 @@ start() {
   record_config "$pid"
   for _ in $(seq 1 30); do
     sleep 1
-    healthy && { echo "up at $URL"; show_config; return 0; }
+    # The endpoint is shared, so a healthy answer alone proves only that
+    # something is serving it. Our own child must still be alive, or a
+    # start that died would report another checkout's runtime as this one.
     kill -0 "$pid" 2>/dev/null || break
+    healthy && { echo "up at $URL"; show_config; return 0; }
   done
   # Nothing is running under this record, so it must not survive to be
   # reported as a live configuration.
