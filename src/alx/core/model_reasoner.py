@@ -13,7 +13,9 @@ from alx.contracts import (
     AgentDecision,
     ApprovalProposal,
     ApprovalScope,
+    CapabilityAttemptDisposition,
     CapabilityCall,
+    CapabilityResultState,
     DecisionValidationError,
     Evidence,
     GoalMutationKind,
@@ -49,7 +51,11 @@ capability rule. Ordinary conversation does not require a goal update. When usef
 a goal mutation separately; the runtime, not you, decides whether it becomes durable
 truth. Request completion rather than authoring completed state. Every proposed item
 of evidence must cite one or more available durable source references exactly as
-supplied. An evidence item's supports field lists success criterion identifiers
+supplied. Evidence records what has already happened, so an attempt is citable
+only once it has actually run: available_memory_sources lists exactly those, and
+a call you are about to make, one still pending, or one refused before it ran is
+not among them. A call you intend to make becomes citable
+once its result is in your context, which is a later step. An evidence item's supports field lists success criterion identifiers
 only, taken from the active goal's success_criteria or from the criteria created
 in the same mutation; it is not for decision, correction, or progress record
 identifiers, and evidence supporting no criterion must leave it empty. Never route by phrase, call an unregistered capability, fabricate evidence,
@@ -466,6 +472,29 @@ def _result_fields(schema: StructuredSchema) -> Any:
     return schema.kind.value
 
 
+def _attempt_is_citable(item: Any) -> bool:
+    """Whether this attempt may be offered as an `attempt:<id>` source.
+
+    Deliberately the same rule the runtime's grounding check applies: a
+    terminal attempt whose implementation was invoked and which carries a
+    result, succeeded or failed. Pending and never-invoked attempts describe
+    an intention rather than something that happened.
+    """
+    if item.call is None:
+        return False
+    if item.disposition is CapabilityAttemptDisposition.PENDING:
+        return False
+    if item.implementation_invoked is not True:
+        return False
+    result = item.result
+    if result is None:
+        return False
+    return result.state in {
+        CapabilityResultState.SUCCEEDED,
+        CapabilityResultState.FAILED,
+    }
+
+
 def _attempt_payload(item: Any) -> dict[str, Any]:
     return {
         "semantic_role": "capability_observation_not_conversation",
@@ -640,10 +669,17 @@ def _context_payload(context: ReasoningContext) -> str:
                 {"reference": f"progress:{item.record_id}", "person_id": None}
                 for item in (() if goal is None else goal.progress)
             ),
+            # Only attempts that actually ran. An attempt still pending, or
+            # refused before its implementation was invoked, records nothing
+            # that happened, and the grounding check refuses it. Listing every
+            # attempt here offered references this list's own name says are
+            # available and the runtime then rejects, which is how a call that
+            # had not executed - and once, one that did not exist at all - came
+            # to be cited as evidence.
             *(
                 {"reference": f"attempt:{item.call.call_id}", "person_id": None}
                 for item in (() if goal is None else goal.attempts)
-                if item.call is not None
+                if item.call is not None and _attempt_is_citable(item)
             ),
         ],
         "retrieved_memories": [
@@ -802,7 +838,9 @@ def decision_schema() -> dict[str, Any]:
                         "description": (
                             "Where this evidence came from, using an available "
                             "durable reference exactly as supplied: turn:<id>, "
-                            "event:<id>, or attempt:<call_id>."
+                            "event:<id>, or attempt:<call_id>. Each must appear "
+                            "in available_memory_sources now; an attempt that "
+                            "has not run yet is not a source."
                         ),
                     },
                 }
