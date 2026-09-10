@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Start, stop, restart or inspect the AL/X live-voice runtime.
+#
+# The runtime is one process: `python -m alx.bootstrap.live_voice`, run from
+# the repository root with PYTHONPATH=src, serving on 127.0.0.1:8765. This
+# script exists so a restart after a code or .env change is one command
+# instead of a remembered sequence.
+#
+#   scripts/alx restart     stop it, start it, wait until it answers
+#   scripts/alx start
+#   scripts/alx stop
+#   scripts/alx status
+#   scripts/alx log         follow the log
+#
+# Config comes from .env as it always has; this changes nothing about how the
+# runtime is configured, only how it is launched.
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+URL="http://127.0.0.1:8765"
+LOG="$ROOT/.alx/runtime/live_voice.log"
+PYTHON="${ALX_PYTHON:-python3}"
+PATTERN="alx.bootstrap.live_voice"
+
+cd "$ROOT" || exit 1
+
+pids() { pgrep -f "$PATTERN" 2>/dev/null; }
+healthy() { curl -fsS -o /dev/null --max-time 3 "$URL" 2>/dev/null; }
+
+stop() {
+  local found; found="$(pids)"
+  if [ -z "$found" ]; then
+    echo "not running"
+    return 0
+  fi
+  echo "stopping: $(echo "$found" | tr '\n' ' ')"
+  # SIGTERM first so the runtime closes its stores cleanly; SIGKILL only if
+  # it will not go, because a half-written SQLite goal store is worse than a
+  # slow shutdown.
+  kill $found 2>/dev/null
+  for _ in $(seq 1 15); do
+    [ -z "$(pids)" ] && { echo "stopped"; return 0; }
+    sleep 1
+  done
+  echo "did not exit in 15s, forcing"
+  kill -9 $(pids) 2>/dev/null
+  sleep 1
+  [ -z "$(pids)" ] && echo "stopped (forced)" || { echo "STILL RUNNING"; return 1; }
+}
+
+start() {
+  if [ -n "$(pids)" ]; then
+    echo "already running: $(pids | tr '\n' ' ')"
+    return 1
+  fi
+  mkdir -p "$(dirname "$LOG")"
+  [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev"
+  PYTHONPATH=src nohup "$PYTHON" -m "$PATTERN" >"$LOG" 2>&1 &
+  local pid=$!
+  echo "started pid $pid"
+  for _ in $(seq 1 30); do
+    sleep 1
+    healthy && { echo "up at $URL"; show_config; return 0; }
+    kill -0 "$pid" 2>/dev/null || break
+  done
+  echo "FAILED to come up. Last lines of $LOG:"
+  grep -v "connection rejected" "$LOG" 2>/dev/null | tail -15
+  return 1
+}
+
+show_config() {
+  # Print what actually loaded, so a restart meant to pick up a config change
+  # can be seen to have picked it up.
+  PYTHONPATH=src "$PYTHON" - <<'PY' 2>/dev/null
+from pathlib import Path
+from alx.bootstrap.live_voice import load_environment
+from alx.config.settings import _coding_settings
+env = load_environment(Path(".env"))
+c = _coding_settings(env)
+print(f"  coding: provider={c.reasoning.provider} model={c.reasoning.model} "
+      f"plan_timeout={c.reasoning.timeout_seconds}s "
+      f"session_timeout={c.session_timeout_seconds}s")
+PY
+}
+
+status() {
+  local found; found="$(pids)"
+  if [ -z "$found" ]; then
+    echo "stopped"
+  else
+    echo "running: $(echo "$found" | tr '\n' ' ')"
+    ps -o pid,lstart,etime,%cpu -p $found | tail -n +2
+  fi
+  healthy && echo "health: OK ($URL)" || echo "health: not answering"
+  local job; job="$(pgrep -f 'sandbox alx_coding_job' 2>/dev/null)"
+  [ -n "$job" ] && echo "coding session IN PROGRESS: pid $job"
+  [ -n "$found" ] && show_config
+  return 0
+}
+
+case "${1:-restart}" in
+  restart) stop; start ;;
+  start)   start ;;
+  stop)    stop ;;
+  status)  status ;;
+  log)     tail -f "$LOG" ;;
+  *) echo "usage: scripts/alx {restart|start|stop|status|log}"; exit 2 ;;
+esac
