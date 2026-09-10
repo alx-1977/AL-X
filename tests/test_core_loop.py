@@ -258,6 +258,67 @@ class CategoryARecoveryTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "memory_proposal_invalid")
 
+    def test_a_memory_cannot_cite_an_attempt_that_never_ran(self) -> None:
+        """Durable memory must not record something that never happened.
+
+        Evidence grounding already refused this. Memory grounding accepted
+        every attempt with a call, so a proposal citing a pending or refused
+        attempt could persist a claim outliving the turn that made it.
+        """
+        call = CapabilityCall("call-1", "remove_item", {}, "appr-1")
+        # Refused before its implementation ran, so nothing happened under it.
+        refused = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.REJECTED, False, None,
+            reason_code="approval_invalid",
+        )
+        self.store.create(
+            goal(attempts=(refused,)), "conversation-1", RETENTION,
+        )
+        dispatch, _ = self._executes()
+        proposal = MemoryProposal(
+            "memory-1", MemoryKind.FACTUAL, "the item was removed",
+            ("attempt:call-1",), NOW,
+        )
+        reasoner = Queued(
+            AgentDecision(response="Noted.", memory_proposals=(proposal,)),
+            AgentDecision(response="Corrected."),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        # Refused, and correctable rather than fatal: the citation is wrong,
+        # not the turn.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertTrue(any(
+            item["reason"] == "memory_proposal_invalid"
+            for item in reasoner.contexts[-1].refused_calls
+        ))
+
+    def test_a_memory_may_cite_an_attempt_that_did_run(self) -> None:
+        """The rule narrows nothing that genuinely happened."""
+        call = CapabilityCall("call-1", "remove_item", {}, "appr-1")
+        executed = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(
+                "call-1", "remove_item", CapabilityResultState.SUCCEEDED,
+                {"removed": True},
+            ),
+        )
+        self.store.create(
+            goal(attempts=(executed,)), "conversation-1", RETENTION,
+        )
+        dispatch, _ = self._executes()
+        proposal = MemoryProposal(
+            "memory-1", MemoryKind.FACTUAL, "the item was removed",
+            ("attempt:call-1",), NOW,
+        )
+        reasoner = Queued(
+            AgentDecision(response="Noted.", memory_proposals=(proposal,)),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[-1].refused_calls, ())
+
     def test_an_earlier_correction_does_not_swallow_an_approval_refusal(self) -> None:
         """A corrected identifier slip must not hide the next, unrelated refusal.
 

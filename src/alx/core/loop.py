@@ -1511,8 +1511,15 @@ class CoreAgent:
             references.update(f"decision:{item.record_id}" for item in state.decisions)
             references.update(f"correction:{item.record_id}" for item in state.corrections)
             references.update(f"progress:{item.record_id}" for item in state.progress)
-            references.update(f"attempt:{item.call.call_id}" for item in state.attempts
-                              if item.call is not None)
+            # The same rule evidence grounding applies. A memory citing a
+            # call that has not run would persist a durable claim about
+            # something that never happened, which outlives the turn that
+            # made it.
+            references.update(
+                f"attempt:{item.call.call_id}"
+                for item in state.attempts
+                if CoreAgent._attempt_is_citable_evidence_source(item)
+            )
         for proposal in proposals:
             if proposal.formed_at > as_of:
                 return "formed_after_core_evaluation"
