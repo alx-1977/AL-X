@@ -206,6 +206,7 @@ class CoreAgent:
         # while remaining work was still immediately executable. Shown on the
         # next reasoning step, then cleared.
         continuation_notices: tuple[Mapping[str, Any], ...] = ()
+        refused_goal_selections: tuple[Mapping[str, Any], ...] = ()
         continuation_notice_issued = False
         # Capabilities this turn has already dispatched under an approval.
         # One instruction from Friedl authorises one such action, and the
@@ -273,6 +274,7 @@ class CoreAgent:
                     memory_conflicts=memory_conflicts,
                     refused_calls=refused_calls,
                     continuation_notices=continuation_notices,
+                    refused_goal_selections=refused_goal_selections,
                 ))
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
@@ -284,6 +286,31 @@ class CoreAgent:
                 )
                 if selection_error is not None:
                     LOGGER.info("Goal selection rejected: %s", selection_error)
+                    # Selecting a goal this conversation does not offer is a
+                    # correctable slip, not the end of the conversation. It
+                    # read nothing, changed nothing and dispatched nothing, so
+                    # the state she would reason from next is the state she
+                    # reasoned from just now, plus the fact that the identifier
+                    # is unavailable. Killing the turn instead cost a person
+                    # their whole voice session for a wrong identifier on
+                    # 2026-09-10, with their actual request never attempted.
+                    #
+                    # Only an unknown identifier is corrected here. The other
+                    # selection errors are budget rules whose state a further
+                    # reasoning step cannot change, so they still stop.
+                    if (selection_error == "goal_selection_unknown"
+                            and not refused_goal_selections):
+                        refused_goal_selections = (*refused_goal_selections, {
+                            "goal_id": decision.goal_id,
+                            "reason": selection_error,
+                            "available_goal_ids": [
+                                item.goal_id for item in summaries
+                            ],
+                        })
+                        continue
+                    # Told once and selected an unavailable goal again, or an
+                    # error correction cannot help: reasoning further against
+                    # an unchanged list is the runaway this stops.
                     return CoreOutcome(CoreState.ERROR, snapshot, reason=selection_error)
                 if snapshot is None or snapshot.state.goal_id != decision.goal_id:
                     snapshot = self._store.load(decision.goal_id)
@@ -445,7 +472,21 @@ class CoreAgent:
             )
             if memory_error is not None:
                 LOGGER.info("Memory proposal rejected: %s", memory_error)
-                return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_proposal_invalid")
+                # Nothing is stored for a rejected proposal, and this fires
+                # before the goal is persisted, so the decision leaves no trace
+                # to undo. The specific grounding fault is named so she can
+                # correct that field rather than resend the same proposal.
+                if self._already_refused(
+                    refused_calls, "memory_proposal_invalid", memory_error
+                ):
+                    return CoreOutcome(
+                        CoreState.ERROR, snapshot, reason="memory_proposal_invalid"
+                    )
+                refused_calls = (*refused_calls, {
+                    "reason": "memory_proposal_invalid",
+                    "subject": memory_error,
+                })
+                continue
             if proposal_error is None and (
                 decision.goal_proposal is not None
                 or decision.approval_proposal is not None
@@ -458,7 +499,21 @@ class CoreAgent:
 
             if decision.memory_query is not None:
                 if decision.memory_query.query_id in memory_query_ids:
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_id_reused")
+                    if self._already_refused(
+                        refused_calls,
+                        "memory_query_id_reused",
+                        decision.memory_query.query_id,
+                    ):
+                        return CoreOutcome(
+                            CoreState.ERROR, snapshot,
+                            reason="memory_query_id_reused",
+                        )
+                    LOGGER.info("Memory query rejected: memory_query_id_reused")
+                    refused_calls = (*refused_calls, {
+                        "reason": "memory_query_id_reused",
+                        "subject": decision.memory_query.query_id,
+                    })
+                    continue
                 if not self._memory_query_is_authorized(conversation, decision.memory_query):
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_query_unauthorized")
                 try:
@@ -530,7 +585,20 @@ class CoreAgent:
                 # without an active goal was stopped above.
                 if any(item.call is not None and item.call.call_id == decision.call.call_id
                        for item in transient_attempts):
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
+                    if self._already_refused(
+                        refused_calls, "call_id_reused", decision.call.call_id
+                    ):
+                        return CoreOutcome(
+                            CoreState.ERROR, snapshot, reason="call_id_reused"
+                        )
+                    LOGGER.info("Call rejected: call_id_reused")
+                    refused_calls = (*refused_calls, {
+                        "call_id": decision.call.call_id,
+                        "capability_id": decision.call.capability_id,
+                        "reason": "call_id_reused",
+                        "subject": decision.call.call_id,
+                    })
+                    continue
                 try:
                     snapshot, committed = self._commit_memories(
                         snapshot, decision.memory_proposals, retention_until)
@@ -552,7 +620,20 @@ class CoreAgent:
                 continuation_notice_issued = False
                 continue
             if self._call_id_exists(snapshot.state, decision.call.call_id):
-                return CoreOutcome(CoreState.ERROR, snapshot, reason="call_id_reused")
+                if self._already_refused(
+                    refused_calls, "call_id_reused", decision.call.call_id
+                ):
+                    return CoreOutcome(
+                        CoreState.ERROR, snapshot, reason="call_id_reused"
+                    )
+                LOGGER.info("Call rejected: call_id_reused")
+                refused_calls = (*refused_calls, {
+                    "call_id": decision.call.call_id,
+                    "capability_id": decision.call.capability_id,
+                    "reason": "call_id_reused",
+                    "subject": decision.call.call_id,
+                })
+                continue
             if (
                 decision.call.capability_id in self._turn_bound_capabilities
                 and decision.call.capability_id in approved_dispatches
@@ -585,7 +666,7 @@ class CoreAgent:
                     snapshot,
                     reason="approval_capability_already_dispatched",
                 )
-            if self._repeats_rejected_call(snapshot.state, decision.call):
+            if self._repeats_rejected_call(snapshot.state, decision.call, now):
                 return CoreOutcome(
                     CoreState.ERROR,
                     snapshot,
@@ -1449,27 +1530,99 @@ class CoreAgent:
                       if item.origin.value != "alx_response"]
         return bool(user_turns) and user_turns[-1].person_id == query.person_id
 
+    # Category A recovery: a decision refused for a correctable slip in its own
+    # fields. Nothing was read, written or dispatched under it, so the state
+    # she reasons from next is the state she reasoned from just now plus the
+    # name of what was wrong. The existing refused_calls channel carries it,
+    # rather than a second retry subsystem beside it.
+    #
+    # One correction per distinct rejection. Making the same mistake again
+    # means reasoning cannot repair it, and the turn stops as it always did.
+    @staticmethod
+    def _already_refused(
+        refused: tuple[Mapping[str, Any], ...], reason: str, subject: str
+    ) -> bool:
+        return any(
+            item.get("reason") == reason and item.get("subject") == subject
+            for item in refused
+        )
+
     @staticmethod
     def _call_id_exists(state: GoalState, call_id: str) -> bool:
         return any((item.call is not None and item.call.call_id == call_id)
                    or (item.call is None and item.result is not None
                    and item.result.call_id == call_id) for item in state.attempts)
 
-    @staticmethod
-    def _repeats_rejected_call(state: GoalState, call: CapabilityCall) -> bool:
+    # Rejections a later step can genuinely repair by supplying a real
+    # approval. In each of these the approval itself was the fault - absent,
+    # malformed, mis-scoped, mis-bound, reused, or citing the wrong turn - the
+    # action never ran, and nothing about it is settled. A fresh valid
+    # approval changes the authority state, so the retry is the correction
+    # this guard should elicit rather than punish.
+    #
+    # Deliberately excluded, because a new approval does not touch the cause:
+    # `active_goal_required` (the goal, not the approval), `policy_missing`,
+    # `policy_denied` and `permission_missing` (authority configuration),
+    # `input_invalid` (the arguments), `approval_covers_unheard_text` (the
+    # content), and `approval_capability_already_dispatched` - that last one
+    # is the once-per-instruction rule, and bypassing it on a fresh approval
+    # is exactly the double-send it exists to prevent.
+    _CORRECTABLE_REJECTION_REASONS = frozenset({
+        "approval_invalid",
+        "approval_call_id_mismatch",
+        "approval_scope_mismatch",
+        "approval_id_reused",
+        "approval_source_missing",
+        "approval_source_not_latest_person_turn",
+    })
+
+    @classmethod
+    def _repeats_rejected_call(
+        cls, state: GoalState, call: CapabilityCall, at: datetime
+    ) -> bool:
         """Stop deterministic safety/input rejections from becoming model loops.
 
-        The identity of a repeat is the capability and its arguments. A new
-        call or approval identifier does not make a refused action different,
-        so retrying the same refused action with fresh identifiers is still a
-        loop and is stopped here.
+        The identity of a repeat is the capability and its arguments. A fresh
+        call or approval identifier does not by itself make a refused action
+        different, so retrying with new identifiers alone is still a loop.
+
+        One case is not a loop. A call rejected as `approval_invalid` names an
+        approval that did not authorise it; the action was never attempted and
+        nothing about it is settled. If the Core then obtains a real approval
+        that permits this exact call now, the authority state has changed, and
+        the retry is the correction this guard is meant to elicit rather than
+        punish. Refusing it cost a person their session on 2026-09-10 after
+        the Core had already recovered correctly.
+
+        The approval still has to be real: `permits` re-checks lifecycle,
+        identifier, expiry and scope against this call, so an absent, stale,
+        consumed or mismatched approval leaves the retry a repeat.
         """
-        return any(
-            item.call is not None
+        repeats = [
+            item
+            for item in state.attempts
+            if item.call is not None
             and item.disposition is CapabilityAttemptDisposition.REJECTED
             and item.call.capability_id == call.capability_id
             and item.call.arguments == call.arguments
-            for item in state.attempts
+        ]
+        if not repeats:
+            return False
+        if any(
+            item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS
+            for item in repeats
+        ):
+            # A refusal this call cannot repair stands, whatever else happened.
+            return True
+        if call.approval_id is None:
+            return True
+        if any(item.call.approval_id == call.approval_id for item in repeats):
+            # The same approval identifier that was already refused.
+            return True
+        return not any(
+            approval.approval_id == call.approval_id
+            and approval.permits(call, at)
+            for approval in state.approvals
         )
 
     @staticmethod

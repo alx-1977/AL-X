@@ -57,7 +57,15 @@ erase history, or alter approvals. You may propose one exact action approval onl
 when the latest retained person turn explicitly authorizes that same consequential
 capability call; cite that turn exactly. The proposal's approval_id must be the
 same identifier the call carries, and its capability_id and arguments_json must
-match the call exactly, since the approval authorizes that one action alone. A response may depend on a goal commit only when
+match the call exactly, since the approval authorizes that one action alone.
+A call_id names one capability call and an approval_id names one approval,
+each permanently. Every new call takes a fresh call_id and every new approval
+proposal takes a fresh approval_id, including a call that retries something
+that was just refused: reusing an identifier already in this goal's attempts
+or approvals is refused and nothing happens. When a decision is rejected,
+correct the field the rejection names and keep the rest; repeating the same
+decision unchanged, or retrying under an identifier that was itself rejected,
+is refused again. A response may depend on a goal commit only when
 the response would become materially false or unsafe if that proposal were rejected.
 Approval fields apply only to capabilities whose side_effect is effectful. Calls whose
 side_effect is none or attention_state require null approval fields.
@@ -87,6 +95,12 @@ continuation_notices is shown when a response or silence would have ended the
 turn while remaining outstanding_work was still immediately executable. Nothing
 was delivered. Issue the next executable call in this turn, or park the goal
 truthfully; a second call-less end after this notice parks the goal.
+refused_goal_selections is shown when you selected a goal this conversation
+does not offer. Nothing was read, changed or dispatched under it. Select one of
+the goals actually listed in unfinished_goals, or work without a goal and
+create one if the request needs it; an unfinished_goals list that is empty
+means this conversation has none yet. Selecting an unavailable goal again ends
+the turn.
 An attempt whose disposition is rejected carries reason_code: the mechanical
 reason deterministic governance refused it. Read it. Some reasons cannot change
 until Friedl says something new, so repeating the same action in this turn will
@@ -659,6 +673,12 @@ def _context_payload(context: ReasoningContext) -> str:
         # work is still immediately executable. Compact and transient, same
         # shape as refused_calls: a mechanical reason and remaining work ids.
         "continuation_notices": [dict(item) for item in context.continuation_notices],
+        # A goal identifier selected that this conversation does not offer.
+        # Nothing was read or dispatched under it. Same compact, transient
+        # shape: the unavailable identifier and the ones that are available.
+        "refused_goal_selections": [
+            dict(item) for item in context.refused_goal_selections
+        ],
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 

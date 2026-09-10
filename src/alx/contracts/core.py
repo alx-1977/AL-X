@@ -195,6 +195,12 @@ class ReasoningContext:
     # and remaining work identifiers only; the premature response was not
     # delivered. Shown once so the next step can issue the next call.
     continuation_notices: tuple[Mapping[str, Any], ...] = ()
+    # A goal was selected that this conversation does not offer. Nothing was
+    # read, changed or dispatched under it. She is told which identifier was
+    # unavailable and which are, so she can select an offered goal or work
+    # without one; selecting an unavailable goal again ends the turn rather
+    # than buying another reasoning step against an unchanged list.
+    refused_goal_selections: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
@@ -202,6 +208,9 @@ class ReasoningContext:
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
         object.__setattr__(self, "memory_conflicts", tuple(self.memory_conflicts))
         object.__setattr__(self, "refused_calls", tuple(self.refused_calls))
+        object.__setattr__(
+            self, "refused_goal_selections", tuple(self.refused_goal_selections)
+        )
         object.__setattr__(
             self, "continuation_notices", tuple(self.continuation_notices)
         )

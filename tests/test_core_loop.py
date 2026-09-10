@@ -21,7 +21,9 @@ from alx.contracts import (  # noqa: E402
     GoalStopReason,
     WorkItem,
 )
+from alx.contracts.memory import MemoryQuery  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
+from alx.memories import SQLiteMemoryStore  # noqa: E402
 from alx.core.loop import (  # noqa: E402
     REASONING_TURN_WINDOW,
     project_turns_for_reasoning,
@@ -74,6 +76,196 @@ class Queued:
         if self._selects is not None and item.goal_id is None:
             item = replace(item, goal_id=self._selects)
         return item
+
+
+class CategoryARecoveryTests(unittest.TestCase):
+    """Identifier slips are corrected, not fatal.
+
+    A reused call_id killed a live voice turn on 2026-09-10 after the Core had
+    otherwise recovered. None of these rejections reads, writes or dispatches
+    anything, so the only thing a further step needs is the name of what was
+    wrong.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "goals.sqlite3"
+        self.store = SQLiteGoalStore(self.path)
+        self.addCleanup(self.directory.cleanup)
+        self.addCleanup(self.store.close)
+
+    def _agent(self, reasoner, dispatch):
+        return CoreAgent(
+            self.store, reasoner, dispatch, (DEFINITION,),
+            memory_store=SQLiteMemoryStore(Path(self.directory.name) / "m.sqlite3"),
+            clock=lambda: NOW, identifier_factory=lambda: "goal-1",
+        )
+
+    @staticmethod
+    def _executes():
+        dispatched: list[CapabilityCall] = []
+
+        def dispatch(call, state):
+            dispatched.append(call)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    call.call_id, call.capability_id,
+                    CapabilityResultState.SUCCEEDED, {"value": 1},
+                ),
+            )
+
+        return dispatch, dispatched
+
+    def test_a_reused_call_id_is_corrected_and_a_fresh_one_proceeds(self) -> None:
+        """1: the live failure, now recoverable."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, dispatched = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),  # reused
+            AgentDecision(call=CapabilityCall("call-2", "inspect", {})),  # corrected
+            AgentDecision(response="Both done."),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Both done.")
+        self.assertEqual([item.call_id for item in dispatched], ["call-1", "call-2"])
+
+    def test_the_correction_names_the_reused_identifier(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(response="Corrected."),
+            selects="goal-1",
+        )
+        self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        refused = reasoner.contexts[-1].refused_calls
+        self.assertTrue(any(
+            item["reason"] == "call_id_reused" and item["subject"] == "call-1"
+            for item in refused
+        ))
+
+    def test_reusing_the_same_call_id_again_still_stops(self) -> None:
+        """2: told once and repeated, so reasoning cannot repair it."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, dispatched = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(response="unreachable"),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "call_id_reused")
+        self.assertEqual([item.call_id for item in dispatched], ["call-1"])
+
+    def test_a_rejected_call_id_leaves_no_state_or_tool_effect(self) -> None:
+        """5: the rejected decision changed nothing."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, dispatched = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(response="Done."),
+            selects="goal-1",
+        )
+        self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        attempts = self.store.load("goal-1").state.attempts
+        # One dispatch, one attempt: the refused decision added neither.
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0].call.call_id, "call-1")
+
+    def test_a_reused_memory_query_id_is_corrected(self) -> None:
+        """3: same shape, memory retrieval."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        query = MemoryQuery("q-1", kinds=(MemoryKind.RELATIONSHIP,), person_id="friedl")
+        reasoner = Queued(
+            AgentDecision(memory_query=query),
+            AgentDecision(memory_query=query),  # reused
+            AgentDecision(memory_query=MemoryQuery("q-2", kinds=(MemoryKind.RELATIONSHIP,), person_id="friedl")),
+            AgentDecision(response="Recalled."),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertTrue(any(
+            item["reason"] == "memory_query_id_reused"
+            for item in reasoner.contexts[-1].refused_calls
+        ))
+
+    def test_a_reused_memory_query_id_twice_still_stops(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        query = MemoryQuery("q-1", kinds=(MemoryKind.RELATIONSHIP,), person_id="friedl")
+        reasoner = Queued(
+            AgentDecision(memory_query=query),
+            AgentDecision(memory_query=query),
+            AgentDecision(memory_query=query),
+            AgentDecision(response="unreachable"),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "memory_query_id_reused")
+
+    def test_an_invalid_memory_proposal_is_corrected(self) -> None:
+        """4: the ungrounded proposal is dropped, a valid turn continues."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        ungrounded = MemoryProposal(
+            "memory-1", MemoryKind.FACTUAL, "unsupported", ("turn:not-real",), NOW,
+        )
+        reasoner = Queued(
+            AgentDecision(response="One.", memory_proposals=(ungrounded,)),
+            AgentDecision(response="Corrected."),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Corrected.")
+        self.assertTrue(any(
+            item["reason"] == "memory_proposal_invalid"
+            for item in reasoner.contexts[-1].refused_calls
+        ))
+
+    def test_an_invalid_memory_proposal_repeated_still_stops(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        ungrounded = MemoryProposal(
+            "memory-1", MemoryKind.FACTUAL, "unsupported", ("turn:not-real",), NOW,
+        )
+        reasoner = Queued(
+            AgentDecision(response="One.", memory_proposals=(ungrounded,)),
+            AgentDecision(response="Two.", memory_proposals=(ungrounded,)),
+            AgentDecision(response="unreachable"),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "memory_proposal_invalid")
+
+    def test_the_step_budget_still_bounds_corrections(self) -> None:
+        """6: a correction is a step, and the budget still ends the turn."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, dispatched = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(response="never reached"),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 2)
+        self.assertIsNone(outcome.response)
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(len(reasoner.contexts), 2)
 
 
 class CoreTests(unittest.TestCase):
@@ -205,11 +397,13 @@ class CoreTests(unittest.TestCase):
             "memory-1", MemoryKind.FACTUAL, "unsupported",
             ("turn:not-real",), NOW,
         )
+        # One step, so the correction has nowhere to go and the turn still
+        # stops. What must not happen either way is a partial commit.
         outcome = self.agent(Queued(AgentDecision(
             response="response", goal_proposal=proposal,
             memory_proposals=(invalid_memory,),
         ), selects="goal-1")).process(conversation(), RETENTION, 1)
-        self.assertEqual(outcome.reason, "memory_proposal_invalid")
+        self.assertIsNone(outcome.response)
         self.assertEqual(self.store.load("goal-1").state.objective.summary,
                          "Do the work")
 
