@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.contracts import (  # noqa: E402
     AgentDecision, ApprovalLifecycle, ApprovalProposal, ApprovalScope,
-    BackgroundEvent, CapabilityAttemptDisposition, CapabilityCall,
+    BackgroundEvent, CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall,
     CapabilityDefinition, CapabilityResult, CapabilityResultState,
     ConversationOrigin, ConversationSnapshot, ConversationTurn, Evidence,
     GoalMutationKind, GoalProposal, MemoryKind, MemoryProposal, SideEffect,
@@ -178,6 +178,254 @@ class ApprovalReleaseTests(unittest.TestCase):
         outcome = agent.process(conversation(), RETENTION, 4)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 1, "the refused action must not repeat")
+
+
+class CorrectedApprovalRetryTests(unittest.TestCase):
+    """The live 2026-09-10 sequence: rejected on a bad approval, then repaired.
+
+    Core named an approval that did not exist, the gate refused the call, Core
+    obtained a real approval for the same message, and the retry was then
+    stopped as a repeat. The action never ran and the session was lost, after
+    the Core had already done the right thing.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
+        self.addCleanup(self.store.close)
+
+    def _agent(self, reasoner, dispatch):
+        return CoreAgent(
+            self.store, reasoner, dispatch, (DEFINITION,),
+            clock=lambda: NOW, identifier_factory=lambda: "goal-1",
+        )
+
+    @staticmethod
+    def _create(call):
+        return AgentDecision(
+            goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE,
+                objective_summary="Move the reminder to Trash",
+                success_criteria=(SuccessCriterion("criterion-1", "moved"),),
+            ),
+            call=call,
+        )
+
+    @staticmethod
+    def _proposal(approval_id):
+        return ApprovalProposal(
+            approval_id, ApprovalScope(TRASH, ARGS), "turn:turn-1",
+        )
+
+    def _recording_dispatch(self, reject_reason="approval_invalid"):
+        """Reject whatever cites a bogus approval; execute a properly approved call."""
+        dispatched: list[CapabilityCall] = []
+
+        def dispatch(call, state):
+            dispatched.append(call)
+            granted = any(
+                item.approval_id == call.approval_id
+                and item.lifecycle is not ApprovalLifecycle.CONSUMED
+                for item in (state.approvals if state is not None else ())
+            )
+            if not granted:
+                return CapabilityAttempt(
+                    call, CapabilityAttemptDisposition.REJECTED, False,
+                    reason_code=reject_reason,
+                )
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    call.call_id, TRASH, CapabilityResultState.SUCCEEDED,
+                    {"moved": True},
+                ),
+            )
+
+        return dispatch, dispatched
+
+    def test_a_new_valid_approval_permits_the_same_operation(self) -> None:
+        """1 and 6: the corrected retry runs, and the turn still answers."""
+        dispatch, dispatched = self._recording_dispatch()
+        reasoner = Queued(
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            AgentDecision(
+                call=CapabilityCall("call-2", TRASH, ARGS, "appr-retry"),
+                approval_proposal=self._proposal("appr-retry"),
+            ),
+            AgentDecision(response="Moved it to Trash."),
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Moved it to Trash.")
+        self.assertEqual(
+            [item.call_id for item in dispatched], ["call-1", "call-2"]
+        )
+
+    def test_the_original_rejection_stays_in_history(self) -> None:
+        """5: the refused attempt is preserved, not rewritten by the retry."""
+        dispatch, _ = self._recording_dispatch()
+        reasoner = Queued(
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            AgentDecision(
+                call=CapabilityCall("call-2", TRASH, ARGS, "appr-retry"),
+                approval_proposal=self._proposal("appr-retry"),
+            ),
+            AgentDecision(response="Done."),
+        )
+        self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        attempts = self.store.load("goal-1").state.attempts
+        rejected = [
+            item for item in attempts
+            if item.disposition is CapabilityAttemptDisposition.REJECTED
+        ]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0].call.call_id, "call-1")
+        self.assertEqual(rejected[0].reason_code, "approval_invalid")
+        self.assertTrue(any(
+            item.disposition is CapabilityAttemptDisposition.EXECUTED
+            for item in attempts
+        ))
+
+    def test_reusing_the_same_invalid_approval_is_still_a_repeat(self) -> None:
+        """2: nothing about the authority changed, so it is still a loop."""
+        dispatch, dispatched = self._recording_dispatch()
+        reasoner = Queued(
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "appr-missing")),
+            AgentDecision(response="unreachable"),
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        self.assertEqual(outcome.reason, "repeated_rejected_call")
+        self.assertEqual(len(dispatched), 1)
+
+    def test_a_fresh_identifier_without_a_real_approval_is_still_a_repeat(self) -> None:
+        """3: a new approval id that authorises nothing does not repair it."""
+        dispatch, dispatched = self._recording_dispatch()
+        reasoner = Queued(
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "appr-invented")),
+            AgentDecision(response="unreachable"),
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        self.assertEqual(outcome.reason, "repeated_rejected_call")
+        self.assertEqual(len(dispatched), 1)
+
+    def test_a_call_without_any_approval_is_still_a_repeat(self) -> None:
+        """3, the other shape: dropping the approval entirely repairs nothing."""
+        dispatch, dispatched = self._recording_dispatch()
+        reasoner = Queued(
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS)),
+            AgentDecision(response="unreachable"),
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        self.assertIn(
+            outcome.reason, ("repeated_rejected_call", "approval_required"),
+        )
+        self.assertEqual(len(dispatched), 1)
+
+    def test_the_live_two_rejection_sequence_then_a_valid_approval(self) -> None:
+        """The exact 2026-09-10 sequence, which the first fix still blocked.
+
+        Two differently-named approval failures landed on the same message
+        before the retry. Requiring every prior rejection to be `approval_invalid`
+        meant a legitimate corrected retry was still refused.
+        """
+        dispatched: list[CapabilityCall] = []
+
+        def dispatch(call, state):
+            dispatched.append(call)
+            granted = any(
+                item.approval_id == call.approval_id
+                and item.lifecycle is not ApprovalLifecycle.CONSUMED
+                for item in (state.approvals if state is not None else ())
+            )
+            if not granted:
+                return CapabilityAttempt(
+                    call, CapabilityAttemptDisposition.REJECTED, False,
+                    reason_code="approval_invalid",
+                )
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    call.call_id, TRASH, CapabilityResultState.SUCCEEDED,
+                    {"moved": True},
+                ),
+            )
+
+        reasoner = Queued(
+            # 1. gate refuses: the named approval does not exist.
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            # 2. proposal refused: cites a turn that is not the latest person turn.
+            AgentDecision(
+                call=CapabilityCall("call-2", TRASH, ARGS, "appr-stale"),
+                approval_proposal=ApprovalProposal(
+                    "appr-stale", ApprovalScope(TRASH, ARGS), "turn:not-latest",
+                ),
+            ),
+            # 3. corrected: fresh identifier, latest person turn.
+            AgentDecision(
+                call=CapabilityCall("call-3", TRASH, ARGS, "appr-good"),
+                approval_proposal=self._proposal("appr-good"),
+            ),
+            AgentDecision(response="Moved it to Trash."),
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Moved it to Trash.")
+        # The second never reached dispatch; the third executed.
+        self.assertEqual([item.call_id for item in dispatched], ["call-1", "call-3"])
+        attempts = self.store.load("goal-1").state.attempts
+        self.assertTrue(any(
+            item.disposition is CapabilityAttemptDisposition.EXECUTED
+            for item in attempts
+        ))
+
+    def test_a_mixed_history_with_a_non_repairable_rejection_still_blocks(self) -> None:
+        """An approval cannot repair input_invalid, so the retry stays refused."""
+        dispatched: list[CapabilityCall] = []
+        reasons = iter(("approval_invalid", "input_invalid"))
+
+        def dispatch(call, state):
+            dispatched.append(call)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.REJECTED, False,
+                reason_code=next(reasons, "input_invalid"),
+            )
+
+        reasoner = Queued(
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            AgentDecision(
+                call=CapabilityCall("call-2", TRASH, ARGS, "appr-second"),
+                approval_proposal=self._proposal("appr-second"),
+            ),
+            # Third: a genuinely valid approval, but input_invalid stands.
+            AgentDecision(
+                call=CapabilityCall("call-3", TRASH, ARGS, "appr-third"),
+                approval_proposal=self._proposal("appr-third"),
+            ),
+            AgentDecision(response="unreachable"),
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "repeated_rejected_call")
+        self.assertEqual(len(dispatched), 2)
+
+    def test_a_non_approval_rejection_keeps_the_existing_guard(self) -> None:
+        """4: input_invalid is not repaired by an approval, so it still stops."""
+        dispatch, dispatched = self._recording_dispatch(reject_reason="input_invalid")
+        reasoner = Queued(
+            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            AgentDecision(
+                call=CapabilityCall("call-2", TRASH, ARGS, "appr-retry"),
+                approval_proposal=self._proposal("appr-retry"),
+            ),
+            AgentDecision(response="unreachable"),
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        self.assertEqual(outcome.reason, "repeated_rejected_call")
+        self.assertEqual(len(dispatched), 1)
 
 
 class MailboxQuotingTests(unittest.TestCase):

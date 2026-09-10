@@ -327,16 +327,100 @@ class GoalSummaryTests(Fixture):
             ["goal-a"],
         )
 
-    def test_a_selection_of_an_unknown_goal_is_refused(self) -> None:
-        self.store.create(active_goal(), "conversation-1", RETENTION)
+    def test_an_unknown_goal_selection_is_corrected_not_fatal(self) -> None:
+        """A wrong identifier cost a whole voice session on 2026-09-10."""
+        self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
         reasoner = Queued(
             AgentDecision(response="Working on it.", goal_id="goal-invented"),
-            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
+            AgentDecision(response="Here is the answer.", goal_id="goal-a"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Here is the answer.")
+        # She reasoned again rather than losing the turn.
+        self.assertEqual(len(reasoner.contexts), 2)
+
+    def test_the_refused_selection_names_what_is_available(self) -> None:
+        self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
+        reasoner = Queued(
+            AgentDecision(response="Working on it.", goal_id="goal-invented"),
+            AgentDecision(response="Corrected.", goal_id="goal-a"),
+        )
+        self.agent(reasoner).process(conversation(), RETENTION, 25)
+        refused = reasoner.contexts[1].refused_goal_selections
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(refused[0]["goal_id"], "goal-invented")
+        self.assertEqual(refused[0]["reason"], "goal_selection_unknown")
+        self.assertEqual(refused[0]["available_goal_ids"], ["goal-a"])
+        # The first step was not told anything: nothing had been refused yet.
+        self.assertEqual(reasoner.contexts[0].refused_goal_selections, ())
+
+    def test_a_refused_selection_changes_and_dispatches_nothing(self) -> None:
+        """It read nothing, wrote nothing and ran nothing under that id."""
+        self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
+        before = self.store.load("goal-a")
+        reasoner = Queued(
+            AgentDecision(response="Working on it.", goal_id="goal-invented"),
+            AgentDecision(response="Corrected."),
+        )
+        self.agent(reasoner).process(conversation(), RETENTION, 25)
+        after = self.store.load("goal-a")
+        self.assertEqual(after.state, before.state)
+        self.assertEqual(after.revision, before.revision)
+        self.assertEqual(self.broker.calls, [])
+        self.assertEqual(self.broker.executed, 0)
+        self.assertEqual(len(self.store.list_goals()), 1)
+
+    def test_with_no_goals_offered_core_can_create_one(self) -> None:
+        """The live failure: an empty list, and the request still gets served."""
+        reasoner = Queued(
+            AgentDecision(response="Working on it.", goal_id="goal-remembered"),
+            AgentDecision(
+                response="Deleting those now.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.CREATE,
+                    "Delete the four GitHub notification emails",
+                    (SuccessCriterion("criterion-1", "all four are removed"),),
+                ),
+            ),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[0].unfinished_goals, ())
+        self.assertEqual(len(self.store.list_goals()), 1)
+        self.assertEqual(
+            self.store.list_goals()[0].state.objective.summary,
+            "Delete the four GitHub notification emails",
+        )
+
+    def test_a_second_unavailable_selection_still_stops(self) -> None:
+        """Told once and asked again unchanged: bounded, not a loop."""
+        self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
+        reasoner = Queued(
+            AgentDecision(response="One.", goal_id="goal-invented"),
+            AgentDecision(response="Two.", goal_id="goal-still-invented"),
+            AgentDecision(response="never reached"),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "goal_selection_unknown")
-        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(len(reasoner.contexts), 2)
+
+    def test_another_conversations_goal_stays_unavailable(self) -> None:
+        """Correction must not become cross-conversation access."""
+        self.store.create(active_goal("goal-z"), "another-conversation", RETENTION)
+        reasoner = Queued(
+            AgentDecision(response="One.", goal_id="goal-z"),
+            AgentDecision(response="Two.", goal_id="goal-z"),
+            AgentDecision(response="never reached"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "goal_selection_unknown")
+        # Never loaded, so its record is untouched by this conversation.
+        self.assertEqual(
+            self.store.load("goal-z").conversation_id, "another-conversation"
+        )
 
     def test_asking_twice_for_the_same_goal_is_stopped(self) -> None:
         """Inspection is a step toward acting, never a way to spend the budget."""
@@ -375,11 +459,12 @@ class SelectionUsesTheCanonicalPathTests(Fixture):
                 ),
                 memory_proposals=(ungrounded,),
             ),
-            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
+            # Corrected: the ungrounded memory is dropped, nothing else changes.
+            AgentDecision(response="Noted."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "memory_proposal_invalid")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        # The adversarial part is unchanged: the rejected turn committed nothing.
         self.assertEqual(self.store.load("goal-a"), before)
         self.assertEqual(
             self.store.load("goal-a").state.objective.summary,
