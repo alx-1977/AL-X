@@ -580,7 +580,10 @@ class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
         self.assertEqual(
             payload["refused_calls"],
             [{"call_id": "call-m1", "capability_id": SEND_MAIL_REPLY,
-              "reason": "approval_covers_unheard_text"}],
+              "reason": "approval_covers_unheard_text",
+              # The refusal is scoped by reason and subject, so one corrected
+              # refusal cannot swallow the next unrelated one.
+              "subject": SEND_MAIL_REPLY}],
         )
 
     def test_no_goal_and_no_durable_attempt_are_created(self) -> None:

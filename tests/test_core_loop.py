@@ -21,6 +21,7 @@ from alx.contracts import (  # noqa: E402
     GoalStopReason,
     WorkItem,
 )
+from alx.contracts import ApprovalProposal, ApprovalScope  # noqa: E402
 from alx.contracts.memory import MemoryQuery  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.memories import SQLiteMemoryStore  # noqa: E402
@@ -35,6 +36,11 @@ RETENTION = NOW + timedelta(days=30)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
 DEFINITION = CapabilityDefinition(
     "inspect", "Inspect structured material", SCHEMA, SCHEMA, SideEffect.NONE,
+)
+# Approval metadata is stripped from a side-effect-free call, so the approval
+# refusal guards can only be exercised through an effectful capability.
+EFFECTFUL = CapabilityDefinition(
+    "remove_item", "Remove one item", SCHEMA, SCHEMA, SideEffect.EFFECTFUL,
 )
 
 
@@ -96,7 +102,7 @@ class CategoryARecoveryTests(unittest.TestCase):
 
     def _agent(self, reasoner, dispatch):
         return CoreAgent(
-            self.store, reasoner, dispatch, (DEFINITION,),
+            self.store, reasoner, dispatch, (DEFINITION, EFFECTFUL),
             memory_store=SQLiteMemoryStore(Path(self.directory.name) / "m.sqlite3"),
             clock=lambda: NOW, identifier_factory=lambda: "goal-1",
         )
@@ -251,6 +257,64 @@ class CategoryARecoveryTests(unittest.TestCase):
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "memory_proposal_invalid")
+
+    def test_an_earlier_correction_does_not_swallow_an_approval_refusal(self) -> None:
+        """A corrected identifier slip must not hide the next, unrelated refusal.
+
+        The older guards stopped on any existing refused_calls entry. Once an
+        identifier slip could be corrected, that entry made the very next
+        approval error checkpoint before the Core was ever told what was wrong
+        with it.
+        """
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, dispatched = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            # A corrected identifier slip: records a refusal of its own.
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            # An unrelated approval error must still reach her as feedback.
+            AgentDecision(
+                call=CapabilityCall("call-2", "remove_item", {}, "appr-1"),
+                approval_proposal=ApprovalProposal(
+                    "appr-mismatch", ApprovalScope("remove_item", {}), "turn:turn-1",
+                ),
+            ),
+            AgentDecision(response="Corrected both."),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Corrected both.")
+        reasons = {
+            item["reason"] for item in reasoner.contexts[-1].refused_calls
+        }
+        self.assertIn("call_id_reused", reasons)
+        self.assertIn("approval_call_id_mismatch", reasons)
+
+    def test_the_same_approval_refusal_twice_still_checkpoints(self) -> None:
+        """Scoping the guard must not disable it."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        bad = AgentDecision(
+            call=CapabilityCall("call-1", "remove_item", {}, "appr-1"),
+            approval_proposal=ApprovalProposal(
+                "appr-mismatch", ApprovalScope("remove_item", {}), "turn:turn-1",
+            ),
+        )
+        reasoner = Queued(
+            bad,
+            AgentDecision(
+                call=CapabilityCall("call-2", "remove_item", {}, "appr-2"),
+                approval_proposal=ApprovalProposal(
+                    "appr-mismatch-2", ApprovalScope("remove_item", {}), "turn:turn-1",
+                ),
+            ),
+            AgentDecision(response="unreachable"),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.reason, "approval_call_id_mismatch")
 
     def test_the_step_budget_still_bounds_corrections(self) -> None:
         """6: a correction is a step, and the budget still ends the turn."""

@@ -380,11 +380,16 @@ class CoreAgent:
                         blocked,
                         decision.call.capability_id,
                     )
-                    # One explanation per turn, not one per capability. A
-                    # Core cycling through different impossible capabilities
-                    # would otherwise spend the whole step budget, which is
-                    # the runaway this check exists to prevent.
-                    if refused_calls:
+                    # One explanation per reason and capability, not one per
+                    # turn. A Core cycling through different impossible
+                    # capabilities would spend the whole step budget, which is
+                    # the runaway this check exists to prevent; but stopping on
+                    # any earlier refusal of any kind would mean a corrected
+                    # identifier slip earlier in the turn silently swallowed an
+                    # unrelated dispatch refusal before she ever saw it.
+                    if self._already_refused(
+                        refused_calls, blocked, decision.call.capability_id
+                    ):
                         # She has been told this reason for this capability and
                         # asked for it again unchanged. Reasoning further cannot
                         # make the dispatch possible, so the turn stops here as
@@ -400,6 +405,7 @@ class CoreAgent:
                         "call_id": decision.call.call_id,
                         "capability_id": decision.call.capability_id,
                         "reason": blocked,
+                        "subject": decision.call.capability_id,
                     })
                     continue
             if proposal_error is None and decision.approval_proposal is not None:
@@ -437,10 +443,13 @@ class CoreAgent:
                     # dispatch-blocked path beside this one already does.
                     # Nothing durable is created, because nothing was
                     # dispatched and no external effect occurred.
-                    if refused_calls:
-                        # One explanation per turn, as above. She has been told
-                        # a reason and asked for something refused again; a
-                        # further step would spend the budget on the same wall.
+                    if self._already_refused(
+                        refused_calls, approval_error, decision.call.capability_id
+                    ):
+                        # One explanation per reason and capability, as above.
+                        # She has been told this reason and asked for the same
+                        # thing again; a further step would spend the budget on
+                        # the same wall.
                         return CoreOutcome(
                             CoreState.CHECKPOINTED, snapshot, reason=approval_error,
                         )
@@ -448,6 +457,7 @@ class CoreAgent:
                         "call_id": decision.call.call_id,
                         "capability_id": decision.call.capability_id,
                         "reason": approval_error,
+                        "subject": decision.call.capability_id,
                     })
                     continue
                 assert candidate is not None
