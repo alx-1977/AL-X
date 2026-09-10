@@ -252,7 +252,9 @@ class GrokCodingSession:
         }
         # `end_turn` is the agent choosing to stop. Anything else means it was
         # cut off, which is a failure to complete even if files changed.
-        completed_cleanly = stop_reason in ("", "end_turn")
+        completed_cleanly = stop_reason.strip().lower() in (
+            "", "end_turn", "endturn",
+        )
         if not completed_cleanly:
             diagnostics["unresolved_issues"] = [f"session_stopped:{stop_reason}"]
         return CodingSessionResult(

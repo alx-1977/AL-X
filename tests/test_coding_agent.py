@@ -526,6 +526,20 @@ class SessionLaunchTests(unittest.TestCase):
         self.assertFalse(result.completed)
         self.assertEqual(result.failure_code, "session_failed")
 
+    def test_camelcase_endturn_is_reported_as_complete(self) -> None:
+        def completed(*_args, **_kwargs):
+            return subprocess.CompletedProcess(
+                [], 0,
+                json.dumps({"text": "done", "stopReason": "EndTurn"}), "",
+            )
+
+        session = self._session(runner=completed)
+        result = session.run_session(
+            CodingRequest(task="t", worktree=str(self.root)), "briefing"
+        )
+        self.assertTrue(result.completed)
+        self.assertEqual(result.failure_code, "")
+
 
 class SessionTimeoutTests(unittest.TestCase):
     """The session's bound is its own, and exceeding it fails closed."""
@@ -816,6 +830,13 @@ class BlockedPathTests(unittest.TestCase):
         self.assertTrue(
             command_permitted(
                 ["python", "-m", "unittest", "app.py"],
+                self.repo,
+                ("tests/test_coding_agent.py",),
+            )
+        )
+        self.assertFalse(
+            command_permitted(
+                ["python", "-m", "unittest", "tests.test_coding_agent"],
                 self.repo,
                 ("tests/test_coding_agent.py",),
             )

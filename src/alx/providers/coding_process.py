@@ -115,13 +115,25 @@ def _path_in_worktree(
         return False
     if ".." in Path(relative).parts:
         return False
-    try:
-        resolved = (worktree / relative).resolve()
-        resolved_relative = resolved.relative_to(worktree.resolve()).as_posix()
-    except (OSError, ValueError):
-        return False
-    if path_matches_blocked(resolved_relative, blocked_paths):
-        return False
+    candidates = (relative,)
+    # `unittest` also accepts dotted module targets, optionally followed by a
+    # class or method selector. Resolve the longest existing module prefix so
+    # a blocked test cannot be reached merely by changing its spelling.
+    if "/" not in relative and "\\" not in relative and "." in relative:
+        parts = relative.split(".")
+        for end in range(len(parts), 0, -1):
+            module = Path(*parts[:end]).with_suffix(".py")
+            if (worktree / module).is_file():
+                candidates = (module.as_posix(),)
+                break
+    for candidate in candidates:
+        try:
+            resolved = (worktree / candidate).resolve()
+            resolved_relative = resolved.relative_to(worktree.resolve()).as_posix()
+        except (OSError, ValueError):
+            return False
+        if path_matches_blocked(resolved_relative, blocked_paths):
+            return False
     return True
 
 

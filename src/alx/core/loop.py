@@ -499,19 +499,18 @@ class CoreAgent:
                 memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
-                if proposal_error is None:
-                    snapshot, deferred = self._defer_or_park_premature_end(
-                        snapshot,
-                        approved_dispatches,
-                        continuation_notice_issued,
-                        step_index,
-                        step_budget,
-                        decision_provenance,
-                    )
-                    if deferred is not None:
-                        continuation_notice_issued = True
-                        continuation_notices = deferred
-                        continue
+                snapshot, deferred = self._defer_or_park_premature_end(
+                    snapshot,
+                    approved_dispatches,
+                    continuation_notice_issued,
+                    step_index,
+                    step_budget,
+                    decision_provenance,
+                )
+                if deferred is not None:
+                    continuation_notice_issued = True
+                    continuation_notices = deferred
+                    continue
                 if decision.finish_silently:
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,

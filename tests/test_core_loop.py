@@ -156,6 +156,34 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.store.load("goal-1").state, goal())
         self.assertEqual(len(reasoner.contexts), 1)
 
+    def test_invalid_optional_proposal_does_not_end_executable_work(self) -> None:
+        self.store.create(
+            goal(outstanding_work=(WorkItem("work-1", "continue investigation"),)),
+            "conversation-1", RETENTION,
+        )
+        invalid = GoalProposal(
+            GoalMutationKind.REQUEST_COMPLETION,
+            new_evidence=(Evidence(
+                "evidence-1", "unsupported", supports=("criterion-1",),
+                source_references=("turn:not-real",),
+            ),),
+        )
+        reasoner = Queued(
+            AgentDecision(response="Premature response.", goal_proposal=invalid),
+            AgentDecision(
+                response="Investigation continued.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.UPDATE, outstanding_work=(),
+                ),
+            ),
+            selects="goal-1",
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Investigation continued.")
+        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(self.store.load("goal-1").state.outstanding_work, ())
+
     def test_materially_dependent_rejection_fails_without_blanket_retry(self) -> None:
         self.store.create(goal(), "conversation-1", RETENTION)
         proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
@@ -398,7 +426,9 @@ class CoreTests(unittest.TestCase):
             conversation(), RETENTION, 1,
         )
         self.assertEqual(outcome.reason, "goal_proposal_rejected")
-        self.assertEqual(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
+        self.assertEqual(
+            self.store.load("goal-1").state.status, GoalStatus.AWAITING_INPUT
+        )
 
     def test_tool_result_reenters_same_core_before_response(self) -> None:
         self.store.create(goal(), "conversation-1", RETENTION)

@@ -42,6 +42,7 @@ from alx.contracts import (
     normalise_usage,
 )
 from alx.providers.errors import ProviderError, raise_provider_failure
+from alx.providers.coding_session import WITHHELD_TOOLS
 
 
 LOGGER = logging.getLogger(__name__)
@@ -196,6 +197,8 @@ class GrokSubscriptionReasoningModel:
             "--system-prompt-override",
             self._system_prompt(request),
             "--disable-web-search",
+            "--disallowed-tools",
+            ",".join(WITHHELD_TOOLS),
             "--no-subagents",
             "--no-plan",
             "--no-leader",

@@ -193,6 +193,10 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         self.assertIn("--json-schema", command)
         self.assertIn("--no-subagents", command)
         self.assertIn("--disable-web-search", command)
+        self.assertIn("--disallowed-tools", command)
+        withheld = command[command.index("--disallowed-tools") + 1].split(",")
+        self.assertIn("run_terminal_cmd", withheld)
+        self.assertIn("web_search", withheld)
         # The planning turn runs in an empty temporary directory, so it needs
         # no tool grants at all. Execution is a separate native session.
         self.assertNotIn("--tools", command)
