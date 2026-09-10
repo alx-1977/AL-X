@@ -68,15 +68,19 @@ start() {
   fi
   mkdir -p "$(dirname "$LOG")"
   [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev"
-  record_config
+  rm -f "$STAMP"
   PYTHONPATH=src nohup "$PYTHON" -m "$PATTERN" >"$LOG" 2>&1 &
   local pid=$!
   echo "started pid $pid"
+  record_config "$pid"
   for _ in $(seq 1 30); do
     sleep 1
     healthy && { echo "up at $URL"; show_config; return 0; }
     kill -0 "$pid" 2>/dev/null || break
   done
+  # Nothing is running under this record, so it must not survive to be
+  # reported as a live configuration.
+  rm -f "$STAMP"
   echo "FAILED to come up. Last lines of $LOG:"
   grep -v "connection rejected" "$LOG" 2>/dev/null | tail -15
   return 1
@@ -85,21 +89,31 @@ start() {
 show_config() {
   # Print what actually loaded, so a restart meant to pick up a config change
   # can be seen to have picked it up.
-  # What the running process actually loaded, recorded by `start` at launch.
-  # Re-reading .env here would report the file's current contents rather than
-  # the configuration in effect, which is exactly the confusion this script
-  # exists to remove: an edited .env would look live before any restart.
-  if [ -f "$STAMP" ]; then
-    cat "$STAMP"
+  # What the running process actually loaded, recorded by `start` against the
+  # PID it launched. Re-reading .env here would report the file's current
+  # contents rather than the configuration in effect, which is exactly the
+  # confusion this script exists to remove: an edited .env would look live
+  # before any restart.
+  #
+  # The record is shown only when it belongs to the PID running now. A stale
+  # file - a start that failed, or a runtime someone launched by hand - would
+  # otherwise be presented as that process's configuration.
+  local running; running="$(pids | head -1)"
+  if [ -n "$running" ] && [ -f "$STAMP" ] \
+     && [ "$(head -1 "$STAMP")" = "pid=$running" ]; then
+    tail -n +2 "$STAMP"
   else
-    echo "  coding: unknown (started outside this script)"
+    echo "  coding: unknown (not started by this script)"
   fi
 }
 
-# Read the configuration this process is about to load. Called once, by start,
-# before the runtime is launched, so what it prints is what that PID has.
+# Record the configuration this runtime loaded, against the PID that loaded it.
+# Called by start once the process exists, so the record can never outlive or
+# misattribute the process it describes.
 record_config() {
-  PYTHONPATH=src "$PYTHON" - <<'PY' 2>/dev/null >"$STAMP"
+  local pid="$1"
+  printf 'pid=%s\n' "$pid" >"$STAMP"
+  PYTHONPATH=src "$PYTHON" - <<'PY' 2>/dev/null >>"$STAMP"
 from pathlib import Path
 from alx.bootstrap.live_voice import load_environment
 from alx.config.settings import _coding_settings
