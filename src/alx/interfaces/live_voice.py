@@ -232,9 +232,18 @@ class VoiceSession:
         # truncated. The identifier leaves this set when its entry leaves the
         # deque, allowing a still-undelivered observation to be offered again.
         deferred_background_ids: set[str] = set()
+        # Observations already put in front of the Core in this session. The
+        # durable record is what survives a restart; this is what stops the
+        # same disappearance being re-offered within one session, where a
+        # vanished report records no presentation and so never looks delivered.
+        carried_background_ids: set[str] = set()
 
         def defer_background(entry: tuple[str, Any]) -> None:
             event_id = entry[1].event_id
+            if event_id in carried_background_ids:
+                # Already carried. Re-offering it would buy another reasoning
+                # call to reach the same conclusion about the same fact.
+                return
             if event_id in deferred_background_ids:
                 return
             deferred_background.append(entry)
@@ -404,10 +413,24 @@ class VoiceSession:
                         # cleared by a later scan. She has already spoken, so
                         # there is nothing to repair and nothing to say; the
                         # session continues.
+                        #
+                        # False is not "undelivered". It means no presentation
+                        # was recorded, which is also what a vanished report
+                        # always returns: it announces no mail, so it presents
+                        # nothing. Treating that as a failed delivery offered
+                        # the same disappearance again on the next cycle, and
+                        # each re-offer spent a full reasoning call to conclude
+                        # there was nothing to say. Whether the delivery was
+                        # carried is a separate question, and the durable flag
+                        # already answers it.
                         LOGGER.info(
                             "Mail delivery already reconciled: %s",
                             item.event_id,
                         )
+                    # Carried either way. The event has now been put in front
+                    # of the Core once, and re-offering it cannot change what
+                    # it says.
+                    carried_background_ids.add(item.event_id)
         finally:
             for task in tasks:
                 task.cancel()

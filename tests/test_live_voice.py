@@ -669,6 +669,161 @@ class CoreTurnStarvationTests(unittest.IsolatedAsyncioTestCase):
             len(gateway.calls), 1, "silent background turns starved the person"
         )
 
+    class _VanishedSource:
+        """A poll cycle that keeps re-offering the same disappearance.
+
+        `record_delivery` returns False for a vanished report, because it
+        records no presentation: the report announces no mail, so there is
+        nothing to present. The adapter behaves exactly this way, and the
+        session must not read that as "undelivered" and ask again.
+        """
+
+        def __init__(self, event, repeats):
+            self._event = event
+            self._repeats = repeats
+            self.delivered = []
+
+        async def events(self):
+            # One at a time, yielding the next only after the previous has
+            # left the queue. A poll cycle re-emits an observation it still
+            # considers undelivered, which is exactly when the in-queue
+            # coalescing cannot help: the earlier copy has already been taken.
+            for _ in range(self._repeats):
+                yield self._event
+                # Let the loop take it before offering the same fact again.
+                for _ in range(200):
+                    if self.delivered:
+                        break
+                    await asyncio.sleep(0)
+            await asyncio.Future()
+
+        def record_delivery(self, event_id):
+            self.delivered.append(event_id)
+            return False
+
+    @staticmethod
+    def _vanished(uid=93):
+        return BackgroundEvent(
+            f"mail:777:{uid}:vanished",
+            "mail.message_vanished",
+            NOW,
+            {"mailbox_id": "INBOX", "uid": str(uid)},
+        )
+
+    async def _run_until_quiet(self, session, limit=60):
+        # Background work is drained by the same loop that serves a person, so
+        # the exchange has to be running for anything to be offered at all.
+        iterator = session.exchange(
+            "conversation-1", incoming_audio(), typed=self.typed
+        )
+        for _ in range(limit):
+            try:
+                await asyncio.wait_for(iterator.__anext__(), timeout=1.0)
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                break
+        await iterator.aclose()
+
+    async def test_a_vanished_report_wakes_core_once(self) -> None:
+        """The live waste: one disappearance, repeatedly re-offered.
+
+        On 2026-09-10 two deleted messages each spent a full reasoning call on
+        every poll cycle, concluding there was nothing to say each time.
+        """
+        source = self._VanishedSource(self._vanished(), repeats=6)
+        gateway = FakeGateway(
+            tuple(
+                outcome(
+                    GoalStatus.ACTIVE, None, reason="core_selected_silence",
+                    core_state=CoreState.FINISHED_SILENTLY,
+                )
+                for _ in range(6)
+            )
+        )
+        session = VoiceSession(
+            gateway, FakeTranscriber(()), FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, event_source=source,
+        )
+        await self._run_until_quiet(session)
+        self.assertEqual(
+            len(gateway.background_calls), 1,
+            "the same disappearance bought more than one reasoning call",
+        )
+        self.assertEqual(len(source.delivered), 1)
+
+    async def test_repeated_polling_of_a_vanished_report_is_idempotent(self) -> None:
+        """Later passes see it absent and must record nothing further."""
+        source = self._VanishedSource(self._vanished(), repeats=10)
+        gateway = FakeGateway(
+            tuple(
+                outcome(
+                    GoalStatus.ACTIVE, None, reason="core_selected_silence",
+                    core_state=CoreState.FINISHED_SILENTLY,
+                )
+                for _ in range(10)
+            )
+        )
+        session = VoiceSession(
+            gateway, FakeTranscriber(()), FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, event_source=source,
+        )
+        await self._run_until_quiet(session)
+        self.assertEqual(source.delivered, ["mail:777:93:vanished"])
+
+    async def test_new_mail_still_wakes_core_after_a_vanished_report(self) -> None:
+        """Suppression must be per observation, not a mute switch."""
+
+        class _Mixed(self._VanishedSource):
+            async def events(self):
+                yield CoreTurnStarvationTests._vanished(93)
+                yield CoreTurnStarvationTests._vanished(93)
+                yield BackgroundEvent(
+                    "mail:777:200", "mail.message_arrived", NOW,
+                    {"mailbox_id": "INBOX", "uid": "200"},
+                )
+                await asyncio.Future()
+
+        source = _Mixed(self._vanished(), repeats=0)
+        gateway = FakeGateway(
+            tuple(
+                outcome(
+                    GoalStatus.ACTIVE, None, reason="core_selected_silence",
+                    core_state=CoreState.FINISHED_SILENTLY,
+                )
+                for _ in range(4)
+            )
+        )
+        session = VoiceSession(
+            gateway, FakeTranscriber(()), FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, event_source=source,
+        )
+        await self._run_until_quiet(session)
+        # The disappearance once, and the genuinely new message as well.
+        self.assertEqual(len(gateway.background_calls), 2)
+        self.assertIn("mail:777:200", source.delivered)
+
+    async def test_a_carried_arrival_is_not_re_offered_either(self) -> None:
+        """The same rule for an ordinary arrival answered silently."""
+        event = BackgroundEvent(
+            "mail:777:300", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid": "300"},
+        )
+        source = self._VanishedSource(event, repeats=5)
+        gateway = FakeGateway(
+            tuple(
+                outcome(
+                    GoalStatus.ACTIVE, None, reason="core_selected_silence",
+                    core_state=CoreState.FINISHED_SILENTLY,
+                )
+                for _ in range(5)
+            )
+        )
+        session = VoiceSession(
+            gateway, FakeTranscriber(()), FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, event_source=source,
+        )
+        await self._run_until_quiet(session)
+        self.assertEqual(len(gateway.background_calls), 1)
+
     async def test_background_work_resumes_after_the_person_turn(self) -> None:
         """Requirement 4: nothing is dropped, only reordered."""
         events = self._events(3)
