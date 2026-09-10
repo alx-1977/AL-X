@@ -11,12 +11,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
+from typing import Protocol
 
 
 DEFAULT_STEP_BUDGET = 16
 MAX_STEP_BUDGET = 32
+MAX_PLANNING_ATTEMPTS = 3
+# The native agent runs its own tool loop, so AL/X no longer counts model
+# turns. What remains bounded is the verification AL/X performs afterwards.
+MAX_VERIFICATION_COMMANDS = 8
 DEFAULT_COMMAND_SECONDS = 60
-MAX_COMMAND_SECONDS = 120
+# The known full suite takes about 90 seconds. Verification keeps its own
+# realistic bound rather than inheriting the short default for inspection.
+DEFAULT_VERIFICATION_COMMAND_SECONDS = 180
+MAX_COMMAND_SECONDS = 180
 MAX_FILE_CHARACTERS = 256_000
 MAX_COMMAND_OUTPUT_CHARACTERS = 16_000
 MAX_DIFF_CHARACTERS = 32_000
@@ -26,6 +35,8 @@ MAX_TASK_CHARACTERS = 16_000
 MAX_CONTEXT_CHARACTERS = 16_000
 MAX_CRITERIA = 16
 MAX_CRITERION_CHARACTERS = 1_000
+MAX_BLOCKED_PATHS = 32
+MAX_BLOCKED_PATH_CHARACTERS = 512
 
 
 CODING_FAILURES = (
@@ -38,8 +49,10 @@ CODING_FAILURES = (
     "command_not_permitted",
     "execution_timeout",
     "provider_failed",
-    "step_budget_exhausted",
-    "command_budget_exhausted",
+    "plan_unusable",
+    "planning_failed",
+    "sandbox_unusable",
+    "session_failed",
     "task_failed",
 )
 
@@ -47,11 +60,56 @@ CODING_FAILURES = (
 class CodingError(Exception):
     """A coding job could not be performed, with a declared machine-readable code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, **details: object) -> None:
         if code not in CODING_FAILURES:
             raise ValueError("coding failures must be declared")
         self.code = code
+        self.details = {
+            key: value
+            for key, value in details.items()
+            if value is not None
+        }
         super().__init__(code)
+
+
+def lexical_worktree_path(relative: str) -> str:
+    """Collapse . and .. without leaving the worktree. Absolute paths refuse.
+
+    Purely lexical, so it is safe before a path exists and shared by the
+    workspace bound and the sandbox-profile generator.
+    """
+    if not isinstance(relative, str) or not relative.strip():
+        raise CodingError("path_outside_worktree")
+    if "\x00" in relative:
+        raise CodingError("path_outside_worktree")
+    path = PurePosixPath(relative.replace("\\", "/"))
+    if path.is_absolute():
+        raise CodingError("path_outside_worktree")
+    parts: list[str] = []
+    for part in path.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise CodingError("path_outside_worktree")
+            parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def path_matches_blocked(relative: str, blocked: tuple[str, ...]) -> bool:
+    """True if a worktree-relative path is a blocked path or a descendant."""
+    folded = relative.casefold()
+    if not folded:
+        return any(not spec for spec in blocked)
+    for spec in blocked:
+        target = spec.casefold()
+        if not target:
+            return True
+        if folded == target or folded.startswith(target + "/"):
+            return True
+    return False
 
 
 def _required(value: str, name: str) -> None:
@@ -74,6 +132,7 @@ class CodingRequest:
     context: str = ""
     test_guidance: str = ""
     step_budget: int = DEFAULT_STEP_BUDGET
+    blocked_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -99,6 +158,54 @@ class CodingRequest:
             raise TypeError("step_budget must be an integer")
         if not 1 <= self.step_budget <= MAX_STEP_BUDGET:
             raise ValueError("step_budget must be within the permitted bound")
+        blocked = tuple(self.blocked_paths)
+        object.__setattr__(self, "blocked_paths", blocked)
+        if len(blocked) > MAX_BLOCKED_PATHS:
+            raise ValueError("too many blocked paths")
+        if any(
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > MAX_BLOCKED_PATH_CHARACTERS
+            for item in blocked
+        ):
+            raise ValueError("blocked paths must be non-blank bounded strings")
+
+
+@dataclass(frozen=True, slots=True)
+class CodingSessionResult:
+    """What one native coding-agent session reports about itself.
+
+    This is the agent's own account, not evidence. It says what the agent
+    believes it did; AL/X verifies the repository and the tests separately and
+    Core decides what the two together mean.
+    """
+
+    completed: bool
+    report: str
+    turns: int = 0
+    failure_code: str = ""
+    diagnostics: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "report", str(self.report))
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics or {}))
+        if not isinstance(self.turns, int) or isinstance(self.turns, bool):
+            raise TypeError("turns must be an integer")
+        if self.turns < 0:
+            raise ValueError("turns must not be negative")
+
+
+class CodingSession(Protocol):
+    """Run one native coding-agent session inside an assigned worktree.
+
+    The implementation launches a real agent with its own tool loop. It never
+    receives raw user language as a routing decision and never decides whether
+    the coding job mattered; it returns what happened.
+    """
+
+    def run_session(
+        self, request: "CodingRequest", briefing: str
+    ) -> CodingSessionResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +256,9 @@ class CodingOutcome:
     external_review_recommended: bool
     finished_at: datetime
     diff_digest: str = ""
+    preexisting_dirty: tuple[str, ...] = ()
+    diagnostics: dict[str, object] | None = None
+    plan_summary: str = ""
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "failed", "blocked"):
@@ -156,8 +266,11 @@ class CodingOutcome:
         _required(self.summary, "summary")
         _aware(self.finished_at, "finished_at")
         object.__setattr__(self, "files_changed", tuple(self.files_changed))
+        object.__setattr__(self, "preexisting_dirty", tuple(self.preexisting_dirty))
         object.__setattr__(self, "commands", tuple(self.commands))
         object.__setattr__(self, "unresolved_issues", tuple(self.unresolved_issues))
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics or {}))
+        object.__setattr__(self, "plan_summary", str(self.plan_summary).strip())
         if self.tests_passed is not None and not self.tests_run:
             raise ValueError("tests cannot have passed or failed if none ran")
 
@@ -176,6 +289,8 @@ class CodingOutcome:
         values: dict[str, object] = {
             "status": self.status,
             "files_changed": list(self.files_changed),
+            "preexisting_dirty": list(self.preexisting_dirty),
+            "plan_summary": self.plan_summary,
             "file_count": len(self.files_changed),
             "command_count": len(self.commands),
             "tests_run": self.tests_run,
@@ -183,6 +298,7 @@ class CodingOutcome:
             "unresolved_count": len(self.unresolved_issues),
             "diff_digest": self.diff_digest,
             "finished_at": self.finished_at.isoformat(),
+            "plan_summary": self.plan_summary,
             "commands": [item.durable_values() for item in self.commands],
         }
         if self.tests_passed is not None:
@@ -196,7 +312,10 @@ __all__ = [
     "CodingError",
     "CodingOutcome",
     "CodingRequest",
+    "CodingSession",
+    "CodingSessionResult",
     "DEFAULT_COMMAND_SECONDS",
+    "DEFAULT_VERIFICATION_COMMAND_SECONDS",
     "DEFAULT_STEP_BUDGET",
     "MAX_COMMAND_OUTPUT_CHARACTERS",
     "MAX_COMMAND_SECONDS",
@@ -205,4 +324,10 @@ __all__ = [
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
     "MAX_STEP_BUDGET",
+    "MAX_PLANNING_ATTEMPTS",
+    "MAX_VERIFICATION_COMMANDS",
+    "MAX_BLOCKED_PATHS",
+    "MAX_BLOCKED_PATH_CHARACTERS",
+    "lexical_worktree_path",
+    "path_matches_blocked",
 ]

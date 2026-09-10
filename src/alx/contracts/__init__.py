@@ -19,6 +19,8 @@ from alx.contracts.coding import (
     CodingError,
     CodingOutcome,
     CodingRequest,
+    CodingSession,
+    CodingSessionResult,
 )
 from alx.contracts.continuity import (
     AutonomousResponseTransport,
@@ -210,6 +212,8 @@ __all__ = [
     "CodingError",
     "CodingOutcome",
     "CodingRequest",
+    "CodingSession",
+    "CodingSessionResult",
     "CONNECT_TIMEOUT_SECONDS",
     "TOTAL_DEADLINE_SECONDS",
     "MAX_DURABLE_METADATA_CHARACTERS",

@@ -38,7 +38,7 @@ from alx.contracts import (
 
 # Every conversation sends the same stable prefix, so they share one cache
 # rather than each warming a separate one.
-CACHE_KEY = "alx-core-v1"
+CACHE_KEY = "alx-core-v2"
 
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
 Interpret the continuous conversation and the optional active goal. Choose either
@@ -83,6 +83,10 @@ want to return to an enquiry later, request_future_cognition is how you make tha
 for yourself. Nothing schedules it otherwise, and leaving a thread untouched is fine.
 refused_calls lists actions refused this turn before anything was dispatched,
 each with the mechanical reason. Nothing happened, so no goal records them.
+continuation_notices is shown when a response or silence would have ended the
+turn while remaining outstanding_work was still immediately executable. Nothing
+was delivered. Issue the next executable call in this turn, or park the goal
+truthfully; a second call-less end after this notice parks the goal.
 An attempt whose disposition is rejected carries reason_code: the mechanical
 reason deterministic governance refused it. Read it. Some reasons cannot change
 until Friedl says something new, so repeating the same action in this turn will
@@ -120,6 +124,13 @@ the call continues. A paused goal you select continues only with an update mutat
 a call against a paused goal without one cannot run and ends the turn. Do not create a goal merely for an
 ordinary response or a none/attention_state call unless the conversation independently
 establishes meaningful unfinished work.
+A queue of remaining actions is recorded as outstanding_work. While the selected
+goal is active, outstanding_work remains, and those actions can still run in this
+turn, issue the next executable capability call now. Do not end the turn with a
+response or silence first. Say you are still working only when you are making a
+call now, or when continuation will actually run without another person turn.
+If you cannot act now, await input or record a blocker so the goal is not left
+active with work that will not run.
 You may optionally form memories through semantic judgement;
 never create them by score, keyword, quota, or schedule. Every memory source must
 use an available durable reference exactly as supplied. The runtime owns memory
@@ -644,6 +655,10 @@ def _context_payload(context: ReasoningContext) -> str:
         # nothing happened. Without this she reasoned on blind, which is how
         # one refusal became sixteen.
         "refused_calls": [dict(item) for item in context.refused_calls],
+        # One-shot notice that a call-less end was deferred because remaining
+        # work is still immediately executable. Compact and transient, same
+        # shape as refused_calls: a mechanical reason and remaining work ids.
+        "continuation_notices": [dict(item) for item in context.continuation_notices],
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 

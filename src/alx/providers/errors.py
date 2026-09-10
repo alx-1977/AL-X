@@ -16,9 +16,15 @@ from __future__ import annotations
 class ProviderError(RuntimeError):
     """A provider failure carrying a code, never the request that caused it."""
 
-    def __init__(self, provider: str, reason: str) -> None:
+    def __init__(
+        self,
+        provider: str,
+        reason: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
         self.provider = provider
         self.reason = reason
+        self.details = dict(details or {})
         super().__init__(f"{provider} provider failure: {reason}")
 
 
@@ -38,7 +44,9 @@ def status_code_of(error: BaseException) -> int | None:
     return code if isinstance(code, int) else None
 
 
-def raise_provider_failure(provider: str, reason: str) -> None:
+def raise_provider_failure(
+    provider: str, reason: str, **details: object
+) -> None:
     """Raise a provider failure carrying no reference to the request.
 
     This must be called after the `except` block has exited, not inside it.
@@ -59,4 +67,4 @@ def raise_provider_failure(provider: str, reason: str) -> None:
             return result
         raise_provider_failure("openai", code)
     """
-    raise ProviderError(provider, reason)
+    raise ProviderError(provider, reason, details)

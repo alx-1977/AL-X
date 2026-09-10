@@ -1,14 +1,14 @@
-"""Grok CLI subscription transport behind the provider-neutral model port.
+"""Grok CLI subscription transport for the coding model's planning turn.
 
-V1 invoked Grok as an external coding CLI (`grok -p ...`), authenticated by
-the user's existing Grok login rather than by `XAI_API_KEY`. This adapter
-keeps that subscription path and exposes it as `ReasoningModel.complete()`.
+This carries one structured reasoning turn — the coding job's PLAN — on the
+user's Grok login rather than a metered `XAI_API_KEY`. One prompt goes in, one
+JSON object matching the caller's schema comes back, and the process exits.
 
-**It is a reasoning transport, not an agent.** The Grok CLI can run tools,
-edit a worktree, spawn subagents and persist sessions. Those are a second
-authority beside AL/X's coding loop, so they are refused here. One prompt
-goes in, one JSON object matching the caller's schema comes back, and the
-process exits.
+It is not where the coding job is carried out. Execution is a native
+coding-agent session with its own tools and multi-turn loop, launched by
+`alx.providers.coding_session`. That separation is the point: a planning turn
+needs no repository access, so it is given none, while the session that does
+need it runs under a kernel-enforced sandbox instead.
 
 Why a subprocess rather than the xAI HTTP client: the subscription credential
 is the CLI login stored in `~/.grok/auth.json`. The documented API-key path
@@ -42,37 +42,12 @@ from alx.contracts import (
     normalise_usage,
 )
 from alx.providers.errors import ProviderError, raise_provider_failure
+from alx.providers.coding_session import WITHHELD_TOOLS
 
 
 LOGGER = logging.getLogger(__name__)
 
 PROVIDER_NAME = "grok_subscription"
-
-# Tool IDs from `grok --help` / the CLI's headless-mode documentation. An empty
-# `--tools` allowlist is the primary control; this denylist remains so a CLI
-# that ignores an empty allowlist still cannot shell, edit, search or spawn.
-_DISALLOWED_TOOLS = ",".join(
-    (
-        "run_terminal_cmd",
-        "search_replace",
-        "web_search",
-        "web_fetch",
-        "task",
-        "Agent",
-        "search_tool",
-        "use_tool",
-        "bash",
-        "grep",
-        "read_file",
-        "list_dir",
-        "todo_write",
-        "memory_search",
-        "memory_get",
-        "lsp",
-        "kill_task",
-        "get_task_output",
-    )
-)
 
 _METERED_ENVIRONMENT_KEYS = frozenset(
     {
@@ -131,17 +106,18 @@ def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
 
 
 class _GrokProtocolError(ValueError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, **details: object) -> None:
         self.code = code
+        self.details = dict(details)
         super().__init__(code)
 
 
 class GrokSubscriptionReasoningModel:
     """Reason through the Grok CLI on the user's subscription.
 
-    Satisfies the `ReasoningModel` port with one stateless call per coding
-    step. The caller's JSON schema is handed to `--json-schema`, matching the
-    CLI's documented structured-output flag.
+    Satisfies the `ReasoningModel` port with one call per structured
+    reasoning turn. The caller's JSON schema is handed to `--json-schema`,
+    matching the CLI's documented structured-output flag.
     """
 
     supports_bounded_research = False
@@ -203,9 +179,10 @@ class GrokSubscriptionReasoningModel:
 
         Headless mode is `-p` / `--single` in V1 and on the installed CLI;
         `--prompt-file` is the current CLI's documented way to supply that
-        same single-turn prompt from a file so the job text is not an argv
-        argument. `--json-schema` is the structured-output flag. Tools, web
-        search, subagents and session continuation are refused.
+        prompt from a file so the job text is not an argv argument, and
+        `--json-schema` is the structured-output flag. The planning turn runs
+        in an empty temporary directory with no repository, so it needs no
+        tool grants; web search and subagents are refused outright.
         """
         command = [
             self._executable,
@@ -219,14 +196,10 @@ class GrokSubscriptionReasoningModel:
             self._model,
             "--system-prompt-override",
             self._system_prompt(request),
-            "--tools",
-            "",
-            "--disallowed-tools",
-            _DISALLOWED_TOOLS,
-            "--no-subagents",
             "--disable-web-search",
-            "--max-turns",
-            "1",
+            "--disallowed-tools",
+            ",".join(WITHHELD_TOOLS),
+            "--no-subagents",
             "--no-plan",
             "--no-leader",
             "--verbatim",
@@ -294,7 +267,10 @@ class GrokSubscriptionReasoningModel:
 
             if completed.returncode != 0:
                 raise _GrokProtocolError(
-                    self._failure_code(completed.stderr, completed.stdout)
+                    self._failure_code(completed.stderr, completed.stdout),
+                    exit_status=completed.returncode,
+                    stderr_characters=len(completed.stderr or ""),
+                    stdout_characters=len(completed.stdout or ""),
                 )
             output, model, usage = self._parse(completed.stdout)
             completion = ModelCompletion(
@@ -323,6 +299,11 @@ class GrokSubscriptionReasoningModel:
             return completion
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
             error_code = self._safe_error_code(error)
+            details = (
+                dict(error.details)
+                if isinstance(error, _GrokProtocolError)
+                else {}
+            )
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -341,7 +322,7 @@ class GrokSubscriptionReasoningModel:
                 duration,
                 error_code,
             )
-        raise_provider_failure(PROVIDER_NAME, error_code)
+        raise_provider_failure(PROVIDER_NAME, error_code, **details)
 
     def _install_subscription_auth(self, grok_home: Path) -> None:
         """Copy the CLI login file only. Never copy an API key.

@@ -798,6 +798,12 @@ def _research_settings(
     )
 
 
+# Twenty minutes. A planning call answers in seconds; a session that inspects
+# a repository, edits it and reports back needs room to finish, and cutting one
+# off mid-edit is what `session_timeout` evidence showed.
+DEFAULT_CODING_SESSION_TIMEOUT_SECONDS = 1200
+
+
 @dataclass(frozen=True, slots=True)
 class CodingSettings:
     """Coding-agent model and authority, off until it is configured.
@@ -809,12 +815,17 @@ class CodingSettings:
 
     enabled: bool
     reasoning: ReasoningSettings
+    # A native coding session is a multi-turn agent working a real defect, not
+    # one model call. Sizing it from `reasoning.timeout_seconds` killed a
+    # working session after two minutes, so it carries its own bound.
+    session_timeout_seconds: int = DEFAULT_CODING_SESSION_TIMEOUT_SECONDS
 
     @property
     def is_usable(self) -> bool:
         return bool(
             self.enabled
-            and self.reasoning.provider == GROK_SUBSCRIPTION_PROVIDER
+            and self.reasoning.provider
+            in (GROK_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER, "openai")
             and self.reasoning.model.strip()
             and self.reasoning.model.lower() != NO_PROVIDER
         )
@@ -823,9 +834,9 @@ class CodingSettings:
 def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
     """Configure the coding backend independently of the Core.
 
-    Defaults to the Grok CLI subscription when enabled. Metered xAI/OpenAI
-    keys are not read and cannot make this path usable. Naming the Claude
-    subscription for coding is refused rather than rewritten.
+    Defaults to the Grok CLI subscription when enabled. Provider selection is
+    explicit and independent from the Core; no configuration path substitutes
+    another provider when the selected one is unavailable.
     """
     enabled = _boolean(environment, "ALX_CODING_ENABLED", False)
     absent = ReasoningSettings(
@@ -838,28 +849,48 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
         service_tier="default",
         effort="none",
     )
+    session_timeout_seconds = _positive_integer(
+        environment,
+        "ALX_CODING_SESSION_TIMEOUT_SECONDS",
+        DEFAULT_CODING_SESSION_TIMEOUT_SECONDS,
+    )
     if not enabled:
-        return CodingSettings(False, absent)
+        return CodingSettings(False, absent, session_timeout_seconds)
     provider = (
         environment.get("ALX_CODING_PROVIDER", GROK_SUBSCRIPTION_PROVIDER)
         .strip()
         .lower()
         or GROK_SUBSCRIPTION_PROVIDER
     )
-    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
-        raise ConfigurationError(
-            f"{CLAUDE_SUBSCRIPTION_PROVIDER} is not available for coding jobs"
-        )
-    if provider in ("xai", "openai", "kimi"):
-        raise ConfigurationError(
-            "coding jobs use grok_subscription, not a metered API provider"
-        )
     if provider == NO_PROVIDER:
-        return CodingSettings(True, absent)
-    if provider != GROK_SUBSCRIPTION_PROVIDER:
+        return CodingSettings(True, absent, session_timeout_seconds)
+    if provider not in (GROK_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER, "openai"):
         raise ConfigurationError(
             f"coding provider adapter is not installed: {provider}"
         )
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        if environment.get("ALX_CODING_API_KEY", "").strip():
+            raise ConfigurationError(
+                "ALX_CODING_API_KEY must not be set for claude_subscription"
+            )
+        return CodingSettings(True, ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_CODING_MODEL"),
+            api_key="", base_url="",
+            timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),
+            streaming=False, service_tier="default", effort="medium",
+        ), session_timeout_seconds)
+    if provider == "openai":
+        return CodingSettings(True, ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_CODING_MODEL"),
+            api_key=_credential(environment, "ALX_CODING_API_KEY", "OPENAI_API_KEY"),
+            base_url=_configured(environment, "ALX_CODING_BASE_URL", "OPENAI_BASE_URL", "https://api.openai.com").rstrip("/"),
+            timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),
+            streaming=False,
+            service_tier=environment.get("ALX_CODING_SERVICE_TIER", "default").strip().lower(),
+            effort=_coding_effort(environment),
+        ), session_timeout_seconds)
     return CodingSettings(
         True,
         ReasoningSettings(
@@ -875,6 +906,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
             service_tier="default",
             effort=_coding_effort(environment),
         ),
+        session_timeout_seconds,
     )
 
 

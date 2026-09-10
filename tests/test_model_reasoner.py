@@ -137,7 +137,29 @@ class ModelReasonerTests(unittest.TestCase):
         self.assertIsNone(supplied["active_goal"])
         self.assertEqual(supplied["conversation"][0]["content"], "Please investigate")
         self.assertNotIn("rejected_decision_feedback", supplied)
+        self.assertEqual(supplied["continuation_notices"], [])
         self.assertEqual(model.requests[0].affinity_key, "conversation-1")
+
+    def test_continuation_notices_reach_the_reasoner_payload(self) -> None:
+        model = FakeModel(base_output())
+        notice = {
+            "reason": "remaining_work_still_executable",
+            "outstanding_work": ["item-2"],
+        }
+        active = goal()
+        ModelReasoner(model, "Approved Laws", "Approved identity").decide(
+            ReasoningContext(
+                active,
+                (ConversationTurn("conversation-1", "turn-1",
+                                  ConversationOrigin.SPEECH_TRANSCRIPT,
+                                  "Please investigate", NOW, "friedl"),),
+                (CAPABILITY,),
+                unfinished_goals=(GoalSummary.of(active),),
+                continuation_notices=(notice,),
+            )
+        )
+        supplied = json.loads(model.requests[0].messages[-1].content)
+        self.assertEqual(supplied["continuation_notices"], [notice])
 
     def test_silent_completion_is_a_general_core_decision(self) -> None:
         model = FakeModel(base_output(disposition="finish_silently"))
@@ -273,6 +295,17 @@ class ModelReasonerTests(unittest.TestCase):
             "Every memory you form takes a\nnew identifier",
             "set supersedes_memory_id to the identifier being replaced",
             "same\nkind and concern the same person",
+        ):
+            self.assertIn(stated, PROTOCOL_INSTRUCTIONS)
+
+    def test_the_protocol_states_when_a_queue_must_continue_this_turn(self) -> None:
+        from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
+
+        for stated in (
+            "A queue of remaining actions is recorded as outstanding_work",
+            "issue the next executable capability call now",
+            "Say you are still working only when",
+            "continuation_notices is shown when",
         ):
             self.assertIn(stated, PROTOCOL_INSTRUCTIONS)
 

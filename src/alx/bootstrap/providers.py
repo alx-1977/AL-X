@@ -23,6 +23,8 @@ from alx.providers import (
     XAIReasoningModel,
 )
 from alx.providers.claude_subscription import subscription_cli_present
+from alx.contracts import CodingSession
+from alx.providers.coding_session import GrokCodingSession
 from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
 from alx.providers.gated_transcription import GatedTranscriber
 
@@ -44,6 +46,11 @@ class RuntimeProviders:
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
+    # The native coding-agent session that carries a plan out in the assigned
+    # worktree. None when the configured coding provider has no session
+    # adapter, which leaves the capability unregistered rather than letting a
+    # job plan and then have nothing to execute it.
+    coding_session: CodingSession | None
     speech_to_text: SpeechTranscriber
     # None when no speech transport is configured. Audio is then absent and
     # nothing else differs: the Core never learns whether anyone could hear.
@@ -113,30 +120,70 @@ def _build_reasoning_model(
     return None
 
 
+def _build_coding_session(
+    settings: RuntimeSettings,
+) -> "CodingSession | None":
+    """The native session that executes a coding plan, or None.
+
+    Only the Grok subscription path has a session adapter. Another configured
+    coding provider can still plan, but nothing would carry the plan out, so
+    the capability is left unregistered instead.
+    """
+    coding = settings.coding
+    if not coding.enabled or not coding.is_usable:
+        return None
+    if coding.reasoning.provider != GROK_SUBSCRIPTION_PROVIDER:
+        LOGGER.info(
+            "Coding session adapter is not installed: %s",
+            coding.reasoning.provider,
+        )
+        return None
+    # Deliberately not `reasoning.timeout_seconds`: that bounds one planning
+    # call, and a native session working a real defect needs far longer.
+    return GrokCodingSession(
+        coding.reasoning.model,
+        coding.session_timeout_seconds,
+        effort=coding.reasoning.effort,
+    )
+
+
 def _build_coding_model(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
 ) -> ReasoningModel | None:
     """The Coding Agent's model, or None when the capability should be absent.
 
-    Only the Grok CLI subscription is composed. A metered xAI/OpenAI adapter
-    is never built here, even when those keys exist for other work. Failure of
-    the CLI is a coding-job failure, not a reason to construct another client.
+    The configured coding provider is composed independently of the Core. A
+    provider failure remains a coding-job failure; this function never selects
+    a replacement.
     """
     coding = settings.coding
     if not coding.enabled or not coding.is_usable:
         LOGGER.info("Coding agent reasoning is disabled by configuration")
         return None
-    if coding.reasoning.provider != GROK_SUBSCRIPTION_PROVIDER:
-        raise ConfigurationError(
-            "coding jobs use grok_subscription, not "
-            f"{coding.reasoning.provider}"
+    if coding.reasoning.provider == GROK_SUBSCRIPTION_PROVIDER:
+        return GrokSubscriptionReasoningModel(
+            coding.reasoning.model, coding.reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink, effort=coding.reasoning.effort,
         )
-    return GrokSubscriptionReasoningModel(
-        coding.reasoning.model,
-        coding.reasoning.timeout_seconds,
-        telemetry_sink=telemetry_sink,
-        effort=coding.reasoning.effort,
+    if coding.reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        if not subscription_cli_present():
+            raise ConfigurationError("the Claude Code CLI is required for coding")
+        return ClaudeSubscriptionReasoningModel(
+            coding.reasoning.model, coding.reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+        )
+    if coding.reasoning.provider == "openai":
+        return OpenAIReasoningModel(
+            coding.reasoning.model, coding.reasoning.api_key,
+            coding.reasoning.base_url, coding.reasoning.timeout_seconds,
+            streaming=coding.reasoning.streaming,
+            service_tier=coding.reasoning.service_tier,
+            reasoning_effort=coding.reasoning.effort,
+            telemetry_sink=telemetry_sink,
+        )
+    raise ConfigurationError(
+        f"coding provider adapter is not installed: {coding.reasoning.provider}"
     )
 
 
@@ -194,6 +241,7 @@ def build_runtime_providers(
         else _build_reasoning_model(settings.autonomous, telemetry_sink)
     )
     coding = _build_coding_model(settings, telemetry_sink)
+    coding_session = _build_coding_session(settings)
 
     if settings.speech_to_text.provider != "cartesia":
         raise ConfigurationError(
@@ -213,6 +261,7 @@ def build_runtime_providers(
         specialist=specialist,
         autonomous=autonomous,
         coding=coding,
+        coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth
         # paying to transmit; what the audio means is still Cartesia's answer
         # and then AL/X's. Removing the wrapper restores the previous
