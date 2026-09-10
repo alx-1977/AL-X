@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -297,6 +298,108 @@ class ModelReasonerTests(unittest.TestCase):
             "same\nkind and concern the same person",
         ):
             self.assertIn(stated, PROTOCOL_INSTRUCTIONS)
+
+    def test_only_executed_attempts_are_offered_as_evidence_sources(self) -> None:
+        """A call that has not run is not a source, and must not be listed.
+
+        On 2026-09-10 the Core cited attempt:call-trash-59094 as evidence while
+        that call had not executed. available_memory_sources listed every
+        attempt regardless of whether anything had happened, so the list its
+        own name presents as available offered references the grounding check
+        then refused.
+        """
+        from alx.core.model_reasoner import _context_payload
+
+        def attempt(call_id, disposition, invoked, result_state, reason=None):
+            result = None
+            if result_state is not None:
+                result = CapabilityResult(
+                    call_id, "search_records", result_state, {"v": 1},
+                    failure=None if result_state is CapabilityResultState.SUCCEEDED
+                    else {"code": "task_failed"},
+                )
+            return CapabilityAttempt(
+                CapabilityCall(call_id, "search_records", {}),
+                disposition, invoked, result, reason_code=reason,
+            )
+
+        state = replace(goal(), attempts=(
+            attempt("done-ok", CapabilityAttemptDisposition.EXECUTED, True,
+                    CapabilityResultState.SUCCEEDED),
+            attempt("done-failed", CapabilityAttemptDisposition.EXECUTED, True,
+                    CapabilityResultState.FAILED),
+            attempt("refused", CapabilityAttemptDisposition.REJECTED, False,
+                    None, "approval_invalid"),
+            # An unresolved dispatch must be the latest attempt.
+            attempt("still-pending", CapabilityAttemptDisposition.PENDING, None,
+                    None, "dispatch_pending"),
+        ))
+        payload = json.loads(_context_payload(ReasoningContext(
+            active_goal=state, turns=(), capabilities=(CAPABILITY,),
+            unfinished_goals=(GoalSummary.of(state),),
+            conversation_id="conversation-1",
+        )))
+        offered = {
+            item["reference"] for item in payload["available_memory_sources"]
+        }
+        # Executed attempts, succeeded or failed, are real sources.
+        self.assertIn("attempt:done-ok", offered)
+        self.assertIn("attempt:done-failed", offered)
+        # An intention is not.
+        self.assertNotIn("attempt:still-pending", offered)
+        self.assertNotIn("attempt:refused", offered)
+
+    def test_the_offered_sources_match_what_the_runtime_accepts(self) -> None:
+        """The list and the grounding check must not disagree.
+
+        Whatever else changes, an attempt offered here has to be one the
+        runtime will accept: the divergence is the defect, not either rule.
+        """
+        import inspect
+        from alx.core.model_reasoner import _attempt_is_citable
+        from alx.core.loop import CoreAgent
+
+        def rules(function):
+            return [
+                line.strip()
+                for line in inspect.getsource(function).splitlines()
+                if line.strip().startswith(("if ", "return"))
+            ]
+
+        self.assertEqual(
+            rules(_attempt_is_citable),
+            rules(CoreAgent._attempt_is_citable_evidence_source),
+        )
+
+    def test_a_future_call_id_is_never_offered(self) -> None:
+        """The live case: an identifier for a call that does not exist yet."""
+        from alx.core.model_reasoner import _context_payload
+
+        state = goal()
+        payload = json.loads(_context_payload(ReasoningContext(
+            active_goal=state, turns=(), capabilities=(CAPABILITY,),
+            unfinished_goals=(GoalSummary.of(state),),
+            conversation_id="conversation-1",
+        )))
+        offered = {
+            item["reference"] for item in payload["available_memory_sources"]
+        }
+        self.assertNotIn("attempt:call-trash-59094", offered)
+        self.assertFalse([r for r in offered if r.startswith("attempt:")])
+
+    def test_the_protocol_states_when_an_attempt_becomes_citable(self) -> None:
+        from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
+
+        for stated in (
+            "Evidence records what has already happened",
+            "an attempt is citable\nonly once it has actually run",
+            "not among them",
+        ):
+            self.assertIn(stated, PROTOCOL_INSTRUCTIONS)
+
+    def test_the_evidence_schema_states_the_same_rule(self) -> None:
+        description = json.dumps(decision_schema())
+        self.assertIn("an attempt that has not run yet is not a source", description)
 
     def test_the_protocol_states_when_a_queue_must_continue_this_turn(self) -> None:
         from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
