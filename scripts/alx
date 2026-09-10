@@ -20,12 +20,24 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 URL="http://127.0.0.1:8765"
 LOG="$ROOT/.alx/runtime/live_voice.log"
+STAMP="$ROOT/.alx/runtime/live_voice.config"
 PYTHON="${ALX_PYTHON:-python3}"
 PATTERN="alx.bootstrap.live_voice"
 
 cd "$ROOT" || exit 1
 
-pids() { pgrep -f "$PATTERN" 2>/dev/null; }
+# Only this checkout's runtime. `pgrep -f` alone matches the same module in
+# any clone on the machine, so a restart here would kill a second checkout's
+# process. Each candidate is kept only when its own working directory is this
+# repository, which is the property that actually identifies it.
+pids() {
+  local candidate
+  for candidate in $(pgrep -f "$PATTERN" 2>/dev/null); do
+    if [ "$(lsof -a -p "$candidate" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')" = "$ROOT" ]; then
+      printf '%s\n' "$candidate"
+    fi
+  done
+}
 healthy() { curl -fsS -o /dev/null --max-time 3 "$URL" 2>/dev/null; }
 
 stop() {
@@ -40,7 +52,7 @@ stop() {
   # slow shutdown.
   kill $found 2>/dev/null
   for _ in $(seq 1 15); do
-    [ -z "$(pids)" ] && { echo "stopped"; return 0; }
+    [ -z "$(pids)" ] && { rm -f "$STAMP"; echo "stopped"; return 0; }
     sleep 1
   done
   echo "did not exit in 15s, forcing"
@@ -56,6 +68,7 @@ start() {
   fi
   mkdir -p "$(dirname "$LOG")"
   [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev"
+  record_config
   PYTHONPATH=src nohup "$PYTHON" -m "$PATTERN" >"$LOG" 2>&1 &
   local pid=$!
   echo "started pid $pid"
@@ -72,7 +85,21 @@ start() {
 show_config() {
   # Print what actually loaded, so a restart meant to pick up a config change
   # can be seen to have picked it up.
-  PYTHONPATH=src "$PYTHON" - <<'PY' 2>/dev/null
+  # What the running process actually loaded, recorded by `start` at launch.
+  # Re-reading .env here would report the file's current contents rather than
+  # the configuration in effect, which is exactly the confusion this script
+  # exists to remove: an edited .env would look live before any restart.
+  if [ -f "$STAMP" ]; then
+    cat "$STAMP"
+  else
+    echo "  coding: unknown (started outside this script)"
+  fi
+}
+
+# Read the configuration this process is about to load. Called once, by start,
+# before the runtime is launched, so what it prints is what that PID has.
+record_config() {
+  PYTHONPATH=src "$PYTHON" - <<'PY' 2>/dev/null >"$STAMP"
 from pathlib import Path
 from alx.bootstrap.live_voice import load_environment
 from alx.config.settings import _coding_settings
