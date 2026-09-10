@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import tempfile
 import unittest
 import json
@@ -30,6 +31,10 @@ from alx.contracts import (  # noqa: E402
     TranscriptionState,
 )
 from alx.interfaces import VoiceDiagnosticBuffer, VoiceEventKind, VoiceSession  # noqa: E402
+from alx.interfaces.live_voice import (  # noqa: E402
+    MAX_CARRIED_BACKGROUND_IDS,
+    _remember_carried_background,
+)
 from alx.core import CoreState
 from alx.core.loop import CoreOutcome  # noqa: E402
 from alx.conversation import SQLiteConversationStore  # noqa: E402
@@ -749,6 +754,21 @@ class CoreTurnStarvationTests(unittest.IsolatedAsyncioTestCase):
             "the same disappearance bought more than one reasoning call",
         )
         self.assertEqual(len(source.delivered), 1)
+
+    def test_unreconciled_background_tracking_is_bounded(self) -> None:
+        event_ids: set[str] = set()
+        event_order = deque()
+        for number in range(MAX_CARRIED_BACKGROUND_IDS + 1):
+            _remember_carried_background(
+                f"mail:777:{number}:vanished", event_ids, event_order
+            )
+
+        self.assertEqual(len(event_ids), MAX_CARRIED_BACKGROUND_IDS)
+        self.assertEqual(len(event_order), MAX_CARRIED_BACKGROUND_IDS)
+        self.assertNotIn("mail:777:0:vanished", event_ids)
+        self.assertIn(
+            f"mail:777:{MAX_CARRIED_BACKGROUND_IDS}:vanished", event_ids
+        )
 
     async def test_repeated_polling_of_a_vanished_report_is_idempotent(self) -> None:
         """Later passes see it absent and must record nothing further."""

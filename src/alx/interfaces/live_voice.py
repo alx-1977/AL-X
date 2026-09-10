@@ -29,6 +29,26 @@ from alx.conversation import ConversationGateway
 LOGGER = logging.getLogger(__name__)
 
 
+# A session may remain open indefinitely. This is only a transient guard for
+# observations the durable source could not mark delivered, so it must not turn
+# each distinct observation into permanent session memory.
+MAX_CARRIED_BACKGROUND_IDS = 256
+
+
+def _remember_carried_background(
+    event_id: str,
+    event_ids: set[str],
+    event_order: deque[str],
+) -> None:
+    """Remember one unreconciled observation without unbounded session growth."""
+    if event_id in event_ids:
+        return
+    if len(event_order) == MAX_CARRIED_BACKGROUND_IDS:
+        event_ids.remove(event_order.popleft())
+    event_ids.add(event_id)
+    event_order.append(event_id)
+
+
 class VoiceEventKind(str, Enum):
     HEARING = "hearing"
     THINKING = "thinking"
@@ -232,11 +252,12 @@ class VoiceSession:
         # truncated. The identifier leaves this set when its entry leaves the
         # deque, allowing a still-undelivered observation to be offered again.
         deferred_background_ids: set[str] = set()
-        # Observations already put in front of the Core in this session. The
-        # durable record is what survives a restart; this is what stops the
-        # same disappearance being re-offered within one session, where a
-        # vanished report records no presentation and so never looks delivered.
+        # Unreconciled observations already put in front of Core in this
+        # session. The durable record remains authoritative when delivery was
+        # recorded; this bounded guard prevents a vanished report, which has no
+        # presentation to record, from re-entering Core on every poll cycle.
         carried_background_ids: set[str] = set()
+        carried_background_order: deque[str] = deque()
 
         def defer_background(entry: tuple[str, Any]) -> None:
             event_id = entry[1].event_id
@@ -427,10 +448,12 @@ class VoiceSession:
                             "Mail delivery already reconciled: %s",
                             item.event_id,
                         )
-                    # Carried either way. The event has now been put in front
-                    # of the Core once, and re-offering it cannot change what
-                    # it says.
-                    carried_background_ids.add(item.event_id)
+                    if not recorded:
+                        _remember_carried_background(
+                            item.event_id,
+                            carried_background_ids,
+                            carried_background_order,
+                        )
         finally:
             for task in tasks:
                 task.cancel()
