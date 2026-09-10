@@ -40,6 +40,11 @@ pids() {
 }
 healthy() { curl -fsS -o /dev/null --max-time 3 "$URL" 2>/dev/null; }
 
+# A PID is not an identity: the OS reuses it, and a runtime started by hand
+# could inherit the number of one this script recorded. Pairing it with the
+# process creation time names one process rather than one slot.
+started_at() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+
 stop() {
   local found; found="$(pids)"
   if [ -z "$found" ]; then
@@ -100,7 +105,7 @@ show_config() {
   # otherwise be presented as that process's configuration.
   local running; running="$(pids | head -1)"
   if [ -n "$running" ] && [ -f "$STAMP" ] \
-     && [ "$(head -1 "$STAMP")" = "pid=$running" ]; then
+     && [ "$(head -1 "$STAMP")" = "pid=$running $(started_at "$running")" ]; then
     tail -n +2 "$STAMP"
   else
     echo "  coding: unknown (not started by this script)"
@@ -112,7 +117,7 @@ show_config() {
 # misattribute the process it describes.
 record_config() {
   local pid="$1"
-  printf 'pid=%s\n' "$pid" >"$STAMP"
+  printf 'pid=%s %s\n' "$pid" "$(started_at "$pid")" >"$STAMP"
   PYTHONPATH=src "$PYTHON" - <<'PY' 2>/dev/null >>"$STAMP"
 from pathlib import Path
 from alx.bootstrap.live_voice import load_environment
