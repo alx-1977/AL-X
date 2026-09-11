@@ -9,6 +9,8 @@ review invocation are refused here even if a coding model asks for them.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 import subprocess  # noqa: S404 - the one coding-job process site
 import sys
@@ -61,6 +63,18 @@ def command_permitted(
         if not rest or rest[0] not in _GIT_INSPECT:
             return False
         allowed = _GIT_FLAGS[rest[0]]
+        # A pathspec after `--` narrows the diff to the files a job is about.
+        # Everything after it is a path and is held to the same worktree and
+        # blocked-path rules as a test target, so narrowing can never reach
+        # outside the assigned worktree or read a blocked file.
+        if rest[0] == "diff" and "--" in rest:
+            flags = rest[1:rest.index("--")]
+            paths = rest[rest.index("--") + 1:]
+            if not paths:
+                return False
+            return all(item in allowed for item in flags) and all(
+                _path_in_worktree(item, worktree, blocked_paths) for item in paths
+            )
         return all(item in allowed for item in rest[1:])
     if executable in _PYTHON_NAMES:
         if len(rest) >= 2 and rest[0] == "-m" and rest[1] in {"pytest", "unittest"}:
@@ -122,6 +136,11 @@ def _path_in_worktree(
     if "/" not in relative and "\\" not in relative and "." in relative:
         parts = relative.split(".")
         for end in range(len(parts), 0, -1):
+            # A dotfile such as `.env` splits to an empty first segment, which
+            # is not a module path at all. Skip rather than raise: the literal
+            # candidate below still checks it against the blocked paths.
+            if not all(parts[:end]):
+                continue
             module = Path(*parts[:end]).with_suffix(".py")
             if (worktree / module).is_file():
                 candidates = (module.as_posix(),)
@@ -156,8 +175,14 @@ def run_permitted_command(
     worktree: Path,
     timeout_seconds: int = DEFAULT_COMMAND_SECONDS,
     blocked_paths: tuple[str, ...] = (),
+    output_characters: int = MAX_COMMAND_OUTPUT_CHARACTERS,
 ) -> CodingCommandRecord:
-    """Run one allowlisted command with cwd bound to the worktree."""
+    """Run one allowlisted command with cwd bound to the worktree.
+
+    `output_characters` of 0 returns stdout unbounded, for the one caller that
+    applies its own larger bound and needs the length before it is applied.
+    Bounding twice hid how much had been cut.
+    """
     if not command_permitted(argv, worktree, blocked_paths):
         raise CodingError("command_not_permitted")
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool):
@@ -187,7 +212,7 @@ def run_permitted_command(
         return CodingCommandRecord(
             tuple(argv),
             -1,
-            _bound(stdout, MAX_COMMAND_OUTPUT_CHARACTERS),
+            stdout if output_characters == 0 else _bound(stdout, output_characters),
             _bound(stderr, MAX_COMMAND_OUTPUT_CHARACTERS),
             True,
             True,
@@ -197,20 +222,62 @@ def run_permitted_command(
     return CodingCommandRecord(
         tuple(argv),
         completed.returncode,
-        _bound(completed.stdout or "", MAX_COMMAND_OUTPUT_CHARACTERS),
+        (completed.stdout or "") if output_characters == 0
+        else _bound(completed.stdout or "", output_characters),
         _bound(completed.stderr or "", MAX_COMMAND_OUTPUT_CHARACTERS),
         False,
         True,
     )
 
 
-def inspect_git(worktree: Path) -> tuple[str, str]:
-    """Mechanical git status and diff. One correct outcome, so not a model call."""
+@dataclass(frozen=True, slots=True)
+class GitEvidence:
+    """Git evidence with its own completeness stated.
+
+    Bounding used to be invisible: a clipped diff and a whole one were the
+    same string, so nothing downstream could tell partial evidence from
+    complete evidence. The length before bounding is kept so the difference is
+    a fact rather than an inference.
+    """
+
+    status: str
+    diff: str
+    diff_characters: int
+
+    @property
+    def diff_truncated(self) -> bool:
+        return self.diff_characters > len(self.diff)
+
+
+def inspect_git(
+    worktree: Path, paths: Sequence[str] = ()
+) -> GitEvidence:
+    """Mechanical git status and diff. One correct outcome, so not a model call.
+
+    `paths` narrows the diff to the files this job is about. A job runs in a
+    worktree it does not own, so an unrelated dirty tree otherwise spends the
+    diff budget: on 2026-09-11 a 109k worktree diff clipped at 32k to files
+    alphabetically before the ones under repair, and four sessions were shown
+    the same truncated prefix of somebody else's work. Status still reports
+    the whole tree, because what else is dirty is a fact the job needs.
+    """
     status = run_permitted_command(["git", "status", "--porcelain"], worktree)
-    diff = run_permitted_command(["git", "diff"], worktree)
-    return (
+    argv = ["git", "diff"]
+    if paths:
+        argv.extend(["--", *paths])
+    # Read the diff at its own bound rather than the generic command bound.
+    # run_permitted_command clips stdout to MAX_COMMAND_OUTPUT_CHARACTERS,
+    # which is smaller: routing the diff through it clipped twice, so the
+    # length reported here described an already-shortened string and could
+    # call a truncated diff complete.
+    diff = run_permitted_command(argv, worktree, output_characters=0)
+    # The diff is bounded once, here, at its own limit. Its length before
+    # bounding is what makes truncation visible rather than inferred.
+    text = diff.stdout
+    return GitEvidence(
         _bound(status.stdout or status.stderr, MAX_COMMAND_OUTPUT_CHARACTERS),
-        _bound(diff.stdout, MAX_DIFF_CHARACTERS),
+        _bound(text, MAX_DIFF_CHARACTERS),
+        len(text),
     )
 
 
