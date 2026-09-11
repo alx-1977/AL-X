@@ -65,7 +65,21 @@ the bare IDs explicitly listed in available_history_evidence_ids, or an ID creat
 in new_evidence in this same mutation. Never add an evidence: prefix there and never
 invent an identifier. If available_history_evidence_ids is empty and you create no
 new evidence, evidence_refs must be empty. Never route by phrase, call an unregistered capability, fabricate evidence,
-erase history, or alter approvals. You may propose one exact action approval only
+erase history, or alter approvals.
+The capability catalogue you are shown is the authoritative namespace of what you
+can call on this step. Its ids are exact strings: call one by the id exactly as
+written, never by an approximation, a description or a name you expect to exist.
+Every entry in it is a capability currently available to you. Read both directions
+of that. A capability absent from the catalogue does not exist for you, and you may
+not invent one or call it. A capability present in it is available, so you may not
+say that it does not exist, that you cannot find it, that you have no access to it,
+or anything else that reports it as absent. Choosing not to call an offered
+capability is ordinary and often right; when you explain that choice, give the
+actual reason, which is about state, arguments, intent, authority, or evidence you
+already have. If the thing you were going to act on has changed or is no longer
+there, say that about the thing, not about the capability. Never substitute an
+account of an unavailable capability for one of those reasons.
+You may propose one exact action approval only
 when the latest retained person turn explicitly authorizes that same consequential
 capability call; cite that turn exactly. The proposal's approval_id must be the
 same identifier the call carries, and its capability_id and arguments_json must
@@ -528,10 +542,24 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
     message as the goal and conversation, which change constantly. A cache only
     reuses an unchanged prefix, so anything volatile in front of the catalogue
     stopped it from ever being reused. It is now its own stable message.
+
+    The payload states what it is. It used to arrive as a bare object whose
+    meaning had to be inferred, and on 2026-09-10 the Core told Friedl it could
+    not find the delete capability on a step where that exact id was in this
+    list. Nothing had said that these ids are exact, or that their presence
+    means available. Both facts are now carried by the message itself.
     """
     shared = _shared_failure_codes(capabilities)
     return json.dumps(
         {
+            "catalogue_semantics": (
+                "The authoritative namespace of capabilities available to call "
+                "on this reasoning step. Each id is exact; call it as written. "
+                "Every capability listed here is available now, so none of them "
+                "may be described as missing, unfindable or inaccessible. A "
+                "capability not listed here does not exist and must not be "
+                "invented."
+            ),
             "capabilities": [
                 {
                     "id": item.capability_id,
@@ -929,7 +957,15 @@ def decision_schema() -> dict[str, Any]:
         {
             "type": {"type": "string", "const": "call_capability"},
             "call_id": string,
-            "capability_id": string,
+            "capability_id": {
+                "type": "string",
+                "description": (
+                    "One id from the capability catalogue, exactly as written "
+                    "there. The catalogue is the authoritative namespace: every "
+                    "id in it is available to call now, and an id absent from it "
+                    "does not exist and must never be invented."
+                ),
+            },
             "arguments_json": string,
             "approval_id": nullable_string,
             "approval_proposal": approval_proposal,
