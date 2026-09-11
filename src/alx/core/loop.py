@@ -1616,6 +1616,14 @@ class CoreAgent:
     # is the once-per-instruction rule, and bypassing it on a fresh approval
     # is exactly the double-send it exists to prevent.
     _CORRECTABLE_REJECTION_REASONS = frozenset({
+        # The ordinary first-time refusal of a consequential action: the call
+        # carried no approval because none had been given yet. Asking Friedl
+        # and retrying with what he then granted is the whole point of that
+        # refusal, so it must not also be the thing that forbids the retry.
+        # On 2026-09-11 he answered "yes please" to a draft-bill deletion and
+        # the turn died without a word, exactly as the approval_invalid case
+        # below had died the day before.
+        "approval_required",
         "approval_invalid",
         "approval_call_id_mismatch",
         "approval_scope_mismatch",
