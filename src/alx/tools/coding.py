@@ -65,10 +65,20 @@ _COMMAND = StructuredSchema(
 
 DEFINITION = CapabilityDefinition(
     RUN_CODING_TASK,
+    # The two bounds the runtime enforces are stated here because the
+    # structured schema cannot carry them: StructuredSchema describes kinds,
+    # not numeric ranges or path semantics. A live job spent one attempt on
+    # step_budget=40 and another on a worktree name that does not exist on
+    # disk, both discovered only by rejection. MAX_STEP_BUDGET is interpolated
+    # rather than written out, so the stated ceiling cannot drift from the one
+    # the executor applies.
     "Execute one bounded software-engineering job in an assigned worktree: "
     "inspect and edit files there, run permitted tests and git inspection, "
     "and return structured evidence. Does not merge, push, deploy, or request "
-    "an external review.",
+    "an external review. worktree is a filesystem path to an existing "
+    "directory, resolved from the runtime's working directory, so \".\" is the "
+    "repository the runtime is running in; it is not a project or repository "
+    f"name. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
