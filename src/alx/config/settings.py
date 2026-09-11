@@ -322,6 +322,7 @@ class XeroSettings:
 # API credit. Named here so configuration, the adapter and the tests agree on
 # one spelling.
 CLAUDE_SUBSCRIPTION_PROVIDER = "claude_subscription"
+CODEX_SUBSCRIPTION_PROVIDER = "codex_subscription"
 
 # Grok CLI subscription used by the Coding Agent. Named to match the Claude
 # subscription spelling: a CLI login, not a metered API key.
@@ -815,6 +816,9 @@ class CodingSettings:
 
     enabled: bool
     reasoning: ReasoningSettings
+    # The local reviewer is independently configured. It is advisory only,
+    # but must never silently become the coding model (or vice versa).
+    reviewer: ReasoningSettings
     # A native coding session is a multi-turn agent working a real defect, not
     # one model call. Sizing it from `reasoning.timeout_seconds` killed a
     # working session after two minutes, so it carries its own bound.
@@ -828,7 +832,106 @@ class CodingSettings:
             in (GROK_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER, "openai")
             and self.reasoning.model.strip()
             and self.reasoning.model.lower() != NO_PROVIDER
+            and self.reviewer.provider
+            in (
+                GROK_SUBSCRIPTION_PROVIDER,
+                CLAUDE_SUBSCRIPTION_PROVIDER,
+                CODEX_SUBSCRIPTION_PROVIDER,
+                "openai",
+            )
+            and self.reviewer.model.strip()
+            and self.reviewer.model.lower() != NO_PROVIDER
         )
+
+
+def _coding_reviewer_settings(
+    environment: Mapping[str, str],
+) -> ReasoningSettings:
+    """Configure the local reviewer without inheriting Coding Agent settings."""
+    provider = (
+        environment.get("ALX_CODING_REVIEWER_PROVIDER", GROK_SUBSCRIPTION_PROVIDER)
+        .strip()
+        .lower()
+        or GROK_SUBSCRIPTION_PROVIDER
+    )
+    if provider not in (
+        GROK_SUBSCRIPTION_PROVIDER,
+        CLAUDE_SUBSCRIPTION_PROVIDER,
+        CODEX_SUBSCRIPTION_PROVIDER,
+        "openai",
+    ):
+        raise ConfigurationError(
+            f"coding reviewer provider adapter is not installed: {provider}"
+        )
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        if environment.get("ALX_CODING_REVIEWER_API_KEY", "").strip():
+            raise ConfigurationError(
+                "ALX_CODING_REVIEWER_API_KEY must not be set for "
+                "claude_subscription"
+            )
+        return ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_CODING_REVIEWER_MODEL"),
+            api_key="",
+            base_url="",
+            timeout_seconds=_positive_integer(
+                environment, "ALX_CODING_TIMEOUT_SECONDS", 120
+            ),
+            streaming=False,
+            service_tier="default",
+            effort="medium",
+        )
+    if provider == CODEX_SUBSCRIPTION_PROVIDER:
+        if environment.get("ALX_CODING_REVIEWER_API_KEY", "").strip():
+            raise ConfigurationError(
+                "ALX_CODING_REVIEWER_API_KEY must not be set for "
+                "codex_subscription"
+            )
+        return ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_CODING_REVIEWER_MODEL"),
+            api_key="",
+            base_url="",
+            timeout_seconds=_positive_integer(
+                environment, "ALX_CODING_TIMEOUT_SECONDS", 120
+            ),
+            streaming=False,
+            service_tier="default",
+            effort=_coding_effort(environment, "ALX_CODING_REVIEWER_EFFORT"),
+        )
+    if provider == "openai":
+        return ReasoningSettings(
+            provider=provider,
+            model=_required(environment, "ALX_CODING_REVIEWER_MODEL"),
+            api_key=_credential(
+                environment, "ALX_CODING_REVIEWER_API_KEY", "OPENAI_API_KEY"
+            ),
+            base_url=_configured(
+                environment,
+                "ALX_CODING_REVIEWER_BASE_URL",
+                "OPENAI_BASE_URL",
+                "https://api.openai.com",
+            ).rstrip("/"),
+            timeout_seconds=_positive_integer(
+                environment, "ALX_CODING_TIMEOUT_SECONDS", 120
+            ),
+            streaming=False,
+            service_tier=environment.get(
+                "ALX_CODING_REVIEWER_SERVICE_TIER", "default"
+            ).strip().lower(),
+            effort=_coding_effort(environment, "ALX_CODING_REVIEWER_EFFORT"),
+        )
+    return ReasoningSettings(
+        provider=GROK_SUBSCRIPTION_PROVIDER,
+        model=environment.get("ALX_CODING_REVIEWER_MODEL", "grok-4.6").strip()
+        or "grok-4.6",
+        api_key="",
+        base_url="",
+        timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),
+        streaming=False,
+        service_tier="default",
+        effort=_coding_effort(environment, "ALX_CODING_REVIEWER_EFFORT"),
+    )
 
 
 def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
@@ -855,7 +958,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
         DEFAULT_CODING_SESSION_TIMEOUT_SECONDS,
     )
     if not enabled:
-        return CodingSettings(False, absent, session_timeout_seconds)
+        return CodingSettings(False, absent, absent, session_timeout_seconds)
     provider = (
         environment.get("ALX_CODING_PROVIDER", GROK_SUBSCRIPTION_PROVIDER)
         .strip()
@@ -863,7 +966,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
         or GROK_SUBSCRIPTION_PROVIDER
     )
     if provider == NO_PROVIDER:
-        return CodingSettings(True, absent, session_timeout_seconds)
+        return CodingSettings(True, absent, absent, session_timeout_seconds)
     if provider not in (GROK_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER, "openai"):
         raise ConfigurationError(
             f"coding provider adapter is not installed: {provider}"
@@ -879,7 +982,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
             api_key="", base_url="",
             timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),
             streaming=False, service_tier="default", effort="medium",
-        ), session_timeout_seconds)
+        ), _coding_reviewer_settings(environment), session_timeout_seconds)
     if provider == "openai":
         return CodingSettings(True, ReasoningSettings(
             provider=provider,
@@ -890,7 +993,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
             streaming=False,
             service_tier=environment.get("ALX_CODING_SERVICE_TIER", "default").strip().lower(),
             effort=_coding_effort(environment),
-        ), session_timeout_seconds)
+        ), _coding_reviewer_settings(environment), session_timeout_seconds)
     return CodingSettings(
         True,
         ReasoningSettings(
@@ -906,15 +1009,16 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
             service_tier="default",
             effort=_coding_effort(environment),
         ),
+        _coding_reviewer_settings(environment),
         session_timeout_seconds,
     )
 
 
-def _coding_effort(environment: Mapping[str, str]) -> str:
-    effort = environment.get("ALX_CODING_EFFORT", "medium").strip().lower()
+def _coding_effort(environment: Mapping[str, str], name: str = "ALX_CODING_EFFORT") -> str:
+    effort = environment.get(name, "medium").strip().lower()
     if effort not in ("none", "low", "medium", "high", "xhigh", "max"):
         raise ConfigurationError(
-            "ALX_CODING_EFFORT must be none, low, medium, high, xhigh, or max"
+            f"{name} must be none, low, medium, high, xhigh, or max"
         )
     return effort
 

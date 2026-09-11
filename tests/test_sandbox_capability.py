@@ -77,7 +77,12 @@ EXECUTION_SITES = {EXECUTION_SITE, LAUNCHER_SITE}
 # runner invocation fails the dedicated boundary test.
 REASONING_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "claude_subscription.py"
 GROK_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "grok_subscription.py"
-REASONING_TRANSPORT_SITES = {REASONING_TRANSPORT_SITE, GROK_TRANSPORT_SITE}
+CODEX_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "codex_subscription.py"
+REASONING_TRANSPORT_SITES = {
+    REASONING_TRANSPORT_SITE,
+    GROK_TRANSPORT_SITE,
+    CODEX_TRANSPORT_SITE,
+}
 
 # D-028: one production site starts a process for a coding job. That is a
 # different outcome from a Sandbox experiment. The generic absence scans skip
@@ -465,7 +470,12 @@ class SingleExecutionSiteTest(unittest.TestCase):
             and node.names[0].asname is None
         )
 
-    def _assert_reasoning_transport_process_boundary(self, source: str) -> None:
+    def _assert_reasoning_transport_process_boundary(
+        self,
+        source: str,
+        site: Path = REASONING_TRANSPORT_SITE,
+        model_class_name: str = "ClaudeSubscriptionReasoningModel",
+    ) -> None:
         """Permit one runner binding and one invocation, never a module exemption."""
         tree = ast.parse(source)
         process_modules = {"subprocess", "multiprocessing", "pty"}
@@ -488,7 +498,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
         self.assertEqual(len(process_imports), 1)
         self.assertTrue(
             self._is_approved_transport_import(
-                REASONING_TRANSPORT_SITE, process_imports[0]
+                site, process_imports[0]
             )
         )
 
@@ -535,7 +545,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
         model_class = next(
             node for node in tree.body
             if isinstance(node, ast.ClassDef)
-            and node.name == "ClaudeSubscriptionReasoningModel"
+            and node.name == model_class_name
         )
         constructor = next(
             node for node in model_class.body
@@ -706,21 +716,27 @@ class SingleExecutionSiteTest(unittest.TestCase):
             planted.unlink()
 
     def test_the_reasoning_transport_has_one_approved_runner_site(self) -> None:
-        source = REASONING_TRANSPORT_SITE.read_text()
-        self._assert_reasoning_transport_process_boundary(source)
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            names = []
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                names = [node.module or ""]
-            for name in names:
-                self.assertNotIn(
-                    "sandbox",
-                    name,
-                    "the reasoning transport must not reach the Sandbox",
-                )
+        for site, model_class_name in (
+            (REASONING_TRANSPORT_SITE, "ClaudeSubscriptionReasoningModel"),
+            (CODEX_TRANSPORT_SITE, "CodexSubscriptionReasoningModel"),
+        ):
+            source = site.read_text()
+            self._assert_reasoning_transport_process_boundary(
+                source, site, model_class_name
+            )
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""]
+                for name in names:
+                    self.assertNotIn(
+                        "sandbox",
+                        name,
+                        "the reasoning transport must not reach the Sandbox",
+                    )
 
     def test_a_second_reasoning_transport_launch_site_fails(self) -> None:
         source = REASONING_TRANSPORT_SITE.read_text() + (

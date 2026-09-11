@@ -30,11 +30,18 @@ from alx.contracts import (  # noqa: E402
     TranscriptionEvent,
     TranscriptionState,
 )
-from alx.interfaces import VoiceDiagnosticBuffer, VoiceEventKind, VoiceSession  # noqa: E402
+from alx.interfaces import (  # noqa: E402
+    VoiceActivityStatus,
+    VoiceDiagnosticBuffer,
+    VoiceEventKind,
+    VoiceSession,
+)
 from alx.interfaces.live_voice import (  # noqa: E402
     MAX_CARRIED_BACKGROUND_IDS,
+    VoiceEvent,
     _remember_carried_background,
 )
+from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.core import CoreState
 from alx.core.loop import CoreOutcome  # noqa: E402
 from alx.conversation import SQLiteConversationStore  # noqa: E402
@@ -166,6 +173,69 @@ class VoiceDiagnosticBufferTests(unittest.TestCase):
 
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_is_forwarded_while_the_same_core_turn_is_running(self) -> None:
+        """The terminal sees explicit worker activity before Core returns."""
+        activity = VoiceActivityStatus()
+        release = threading.Event()
+
+        class CodingGateway(FakeGateway):
+            def receive_conversation_turn(self, turn, step_budget, retention_until):
+                activity.set("coding")
+                if not release.wait(timeout=1):
+                    raise RuntimeError("test did not release the Core worker")
+                return super().receive_conversation_turn(
+                    turn, step_budget, retention_until
+                )
+
+        session = VoiceSession(
+            CodingGateway((outcome(GoalStatus.ACTIVE),)),
+            FakeTranscriber((transcription("one", TranscriptionState.FINAL, "Hi"),)),
+            FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: "turn-1",
+            activity=activity,
+        )
+        iterator = session.exchange("conversation-1", incoming_audio())
+        self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.THINKING)
+        current = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+        self.assertIs(current.kind, VoiceEventKind.ACTIVITY)
+        self.assertEqual(current.activity, "coding")
+        release.set()
+        events = [event async for event in iterator]
+        self.assertIn(VoiceEventKind.LISTENING, [event.kind for event in events])
+
+    async def test_websocket_forwards_activity_transitions_in_the_active_exchange(self) -> None:
+        """No second user turn or polling request is needed for terminal state."""
+        class Session:
+            async def exchange(self, *_args, **_kwargs):
+                yield VoiceEvent(VoiceEventKind.ACTIVITY, activity="coding")
+                yield VoiceEvent(VoiceEventKind.ACTIVITY, activity="reviewing")
+                yield VoiceEvent(VoiceEventKind.LISTENING)
+
+        sent: list[str] = []
+
+        class Connection:
+            async def send(self, payload):
+                sent.append(payload)
+
+        server = LiveVoiceServer.__new__(LiveVoiceServer)
+        server._session = Session()
+        server._await_audio_confirmation = False
+        server._delivery_queues = {}
+        server._typed_queues = {}
+
+        async def audio():
+            if False:
+                yield AudioChunk("mic", 0, b"", "audio/pcm", 16000)
+
+        server._audio = lambda _connection, _conversation: audio()
+        await server._exchange_once(Connection(), "conversation-1")
+        activities = [
+            json.loads(frame)["value"]
+            for frame in sent
+            if json.loads(frame).get("type") == "activity"
+        ]
+        self.assertEqual(activities, ["coding", "reviewing"])
+
     async def test_background_event_enters_same_gateway_and_only_core_response_is_spoken(self) -> None:
         event = BackgroundEvent(
             "mail:777:2",

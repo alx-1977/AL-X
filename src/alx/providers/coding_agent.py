@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Mapping
 
 from alx.contracts import ModelMessage, ModelRequest, ModelRole, ReasoningModel
@@ -32,6 +33,8 @@ from alx.contracts.coding import (
     MAX_PLANNING_ATTEMPTS,
     MAX_REPORTED_COMMANDS,
     MAX_REPORTED_FILES,
+    MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS,
+    MAX_LOCAL_REVIEW_CYCLES,
     MAX_VERIFICATION_COMMANDS,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
     CodingCommandRecord,
@@ -82,6 +85,40 @@ PLAN_SCHEMA: dict[str, Any] = {
     ],
     "additionalProperties": False,
 }
+
+LOCAL_REVIEW_INSTRUCTION = (
+    "You are an advisory local code reviewer for one bounded coding job. "
+    "You cannot edit files, run commands, commit, push, merge, deploy, or "
+    "request an external review. Inspect only the supplied task, diff, bounded "
+    "file context, and test evidence. Return findings only when the candidate "
+    "misses the stated cause, leaves an adjacent path violating the same "
+    "invariant, or lacks meaningful regression coverage. Do not make style-only "
+    "findings."
+)
+
+LOCAL_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string"},
+                    "title": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "correction": {"type": "string"},
+                },
+                "required": ["severity", "title", "evidence", "correction"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["findings"],
+    "additionalProperties": False,
+}
+
+_MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high"})
 
 
 def _digest(text: str) -> str:
@@ -155,12 +192,29 @@ class CodingAgent:
     """One coding job: AL/X plans it, a native session does it, AL/X verifies it."""
 
     def __init__(
-        self, model: ReasoningModel, session: CodingSession | None = None
+        self, model: ReasoningModel, session: CodingSession | None,
+        reviewer: ReasoningModel, activity_sink: Callable[[str], None] | None = None,
     ) -> None:
         self._model = model
         self._session = session
+        self._reviewer = reviewer
+        self._activity_sink = activity_sink or (lambda _activity: None)
+        self._current_activity: str | None = None
+
+    def _report_activity(self, activity: str) -> None:
+        if self._current_activity == activity:
+            return
+        self._current_activity = activity
+        self._activity_sink(activity)
 
     def run(self, request: CodingRequest) -> CodingOutcome:
+        """Run one job and never leave runtime telemetry at a worker state."""
+        try:
+            return self._run(request)
+        finally:
+            self._report_activity("reasoning")
+
+    def _run(self, request: CodingRequest) -> CodingOutcome:
         workspace = CodingWorkspace(request.worktree, request.blocked_paths)
         commands: list[CodingCommandRecord] = []
         preexisting_status, _ = self._git_evidence(workspace)
@@ -196,6 +250,7 @@ class CodingAgent:
                 diagnostics={"phase": "execution", "reason_code": "no_session"},
             )
 
+        self._report_activity("coding")
         try:
             session = self._session.run_session(
                 request, build_briefing(request, plan)
@@ -213,13 +268,34 @@ class CodingAgent:
                 diagnostics={"phase": "execution", **error.details},
             )
 
-        # Verification is AL/X's, not the session's. The agent has no terminal,
-        # so every command below is chosen here and refused unless the
-        # allowlist already permits it.
         post_session_status, _ = self._git_evidence(workspace)
         session_files = self._files_changed(
             (), post_session_status, preexisting_dirty
         )
+        review_failure: str | None = None
+        review_issues: tuple[str, ...] = ()
+        # There is no candidate to review when the native session reports a
+        # failed execution. Preserve that failure for AL/X's normal outcome.
+        if session.completed and session_files:
+            review_failure, review_issues = self._local_review_loop(
+                request, workspace, plan, session_files
+            )
+        if review_failure is not None:
+            git_status, git_diff = self._git_evidence(workspace, session_files)
+            return self._outcome(
+                status="failed", summary=review_failure, files=self._files_changed(
+                    (), git_status, preexisting_dirty
+                ), preexisting_dirty=preexisting_dirty, commands=commands,
+                tests_run=False, tests_passed=None, git_status=git_status,
+                git_diff=git_diff, issues=tuple(review_issues), review=False,
+                failure_status=True, plan_summary=plan_summary,
+                diagnostics={"phase": "local_review"},
+            )
+
+        # Verification is AL/X's, not the session's. The agent has no terminal,
+        # so every command below is chosen here and refused unless the
+        # allowlist already permits it.
+        self._report_activity("reasoning")
         tests_run = False
         tests_passed: bool | None = None
         for argv in self._verification_commands(request, plan, session_files):
@@ -246,9 +322,10 @@ class CodingAgent:
                 elif tests_passed is None:
                     tests_passed = True
 
-        git_status, git_diff = self._git_evidence(workspace)
+        git_status, git_diff = self._git_evidence(workspace, session_files)
         files = self._files_changed((), git_status, preexisting_dirty)
         issues = list(_strings(session.diagnostics.get("unresolved_issues")))
+        issues.extend(review_issues)
         status = "succeeded"
         if not session.completed:
             status = "failed"
@@ -289,6 +366,90 @@ class CodingAgent:
                 },
             },
         )
+
+    def _local_review_loop(
+        self, request: CodingRequest, workspace: CodingWorkspace,
+        plan: Mapping[str, Any], initial_files: tuple[str, ...],
+    ) -> tuple[str | None, tuple[str, ...]]:
+        """Review a candidate once, then re-review one bounded correction."""
+        for cycle in range(MAX_LOCAL_REVIEW_CYCLES):
+            # The reviewer judges this job's diff, not the worktree's. Same
+            # scoping as the outcome evidence, so both see the same thing.
+            git_status, git_diff = self._git_evidence(workspace, initial_files)
+            changed_files = self._files_changed((), git_status, ())
+            files = tuple(dict.fromkeys((
+                *initial_files, *changed_files,
+                *_strings(plan.get("inspection_targets")),
+            )))
+            self._report_activity("reviewing")
+            try:
+                findings = self._review(request, workspace, plan, files, git_diff)
+            except CodingError:
+                return "the local reviewer could not produce a usable result", ("review_failed",)
+            material = [item for item in findings if item["severity"] in _MATERIAL_REVIEW_SEVERITIES]
+            if not material:
+                return None, ()
+            if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
+                return "the local reviewer found unresolved material issues", ("local_review_material_findings",)
+            before = (git_status, git_diff)
+            briefing = build_briefing(request, plan) + "\n\n# Local reviewer findings\n" + "\n".join(
+                f"- [{item['severity']}] {item['title']}: {item['evidence']} Correction: {item['correction']}"
+                for item in material
+            )
+            self._report_activity("coding")
+            try:
+                correction = self._session.run_session(request, briefing)
+            except CodingError:
+                return "the coding session could not correct local review findings", ("session_failed",)
+            if not correction.completed:
+                return "the coding session could not correct local review findings", (
+                    correction.failure_code or "session_failed",
+                )
+            # Scoped exactly as `before` was. Comparing a narrowed diff with a
+            # whole-worktree one would never match, so a correction that
+            # changed nothing would read as progress.
+            after = self._git_evidence(workspace, initial_files)
+            if after == before:
+                return "the coding session did not change the reviewed candidate", ("local_review_material_findings",)
+        raise AssertionError("local review loop must return within its bound")
+
+    def _review(
+        self, request: CodingRequest, workspace: CodingWorkspace,
+        plan: Mapping[str, Any], files: tuple[str, ...], git_diff: str,
+    ) -> tuple[dict[str, str], ...]:
+        """Ask the configured coding model for bounded advisory findings only."""
+        remaining = MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS
+        context: dict[str, str] = {}
+        for name in files:
+            if remaining <= 0:
+                break
+            try:
+                workspace.validate_inspection_target(name)
+                text = workspace.resolve(name).read_text(encoding="utf-8")
+            except (CodingError, OSError, UnicodeDecodeError):
+                continue
+            context[name] = text[:remaining]
+            remaining -= len(context[name])
+        values = self._complete(LOCAL_REVIEW_INSTRUCTION, {
+            "task": request.task, "root_cause_context": request.context,
+            "acceptance_criteria": list(request.acceptance_criteria),
+            "plan": dict(plan), "git_diff": git_diff,
+            "changed_files": list(files), "changed_file_context": context,
+            "test_guidance": request.test_guidance,
+        }, "alx_coding_local_review", LOCAL_REVIEW_SCHEMA, model=self._reviewer)
+        raw = values.get("findings")
+        if not isinstance(raw, (list, tuple)):
+            raise CodingError("review_failed", reason_code="review_schema_invalid")
+        findings: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise CodingError("review_failed", reason_code="review_schema_invalid")
+            finding = {key: str(item.get(key, "")).strip() for key in ("severity", "title", "evidence", "correction")}
+            finding["severity"] = finding["severity"].lower()
+            if not all(finding.values()) or finding["severity"] not in {"low", "medium", "high"}:
+                raise CodingError("review_failed", reason_code="review_schema_invalid")
+            findings.append(finding)
+        return tuple(findings)
 
     def _verification_commands(
         self,
@@ -445,7 +606,8 @@ class CodingAgent:
             "planning_feedback": feedback[-2:],
         }
         values = self._complete(
-            PLAN_INSTRUCTION, material, "alx_coding_plan", PLAN_SCHEMA
+            PLAN_INSTRUCTION, material, "alx_coding_plan", PLAN_SCHEMA,
+            model=self._model,
         )
         required_lists = (
             "hypotheses", "inspection_targets", "intended_changes",
@@ -468,7 +630,7 @@ class CodingAgent:
 
     def _complete(
         self, instruction: str, material: Mapping[str, Any], affinity: str,
-        schema: Mapping[str, Any],
+        schema: Mapping[str, Any], *, model: ReasoningModel,
     ) -> Mapping[str, Any]:
         model_request = ModelRequest(
             (
@@ -483,7 +645,7 @@ class CodingAgent:
         )
         details: dict[str, object] = {}
         try:
-            completion = self._model.complete(model_request)
+            completion = model.complete(model_request)
         except ProviderError as error:
             details = {
                 "reason_code": error.reason,
@@ -499,11 +661,31 @@ class CodingAgent:
             return values
         raise CodingError("provider_failed", **details)
 
-    def _git_evidence(self, workspace: CodingWorkspace) -> tuple[str, str]:
+    def _git_evidence(
+        self, workspace: CodingWorkspace, paths: tuple[str, ...] = ()
+    ) -> tuple[str, str]:
+        """Status for the whole tree, diff for the files this job touched.
+
+        The worktree is not the job's to own. On 2026-09-11 a 109k diff of
+        somebody else's uncommitted work clipped at the 32k bound before
+        reaching any file under repair, and four sessions were handed the same
+        truncated prefix. Narrowing the diff spends the budget on this job;
+        status still covers everything, because what else is dirty is a fact
+        the job needs to know.
+        """
         try:
-            return inspect_git(workspace.root)
+            evidence = inspect_git(workspace.root, paths)
         except CodingError:
             return "", ""
+        diff = evidence.diff
+        if evidence.diff_truncated:
+            # Never present clipped evidence as complete. The reader decides
+            # what a partial diff is worth; it may not be left to infer it.
+            diff = (
+                f"[diff truncated: showing {len(diff)} of "
+                f"{evidence.diff_characters} characters]\n{diff}"
+            )
+        return evidence.status, diff
 
     def _files_changed(
         self,

@@ -56,6 +56,9 @@ class VoiceEventKind(str, Enum):
     LISTENING = "listening"
     AUDIO = "audio"
     DIAGNOSTIC = "diagnostic"
+    # Runtime telemetry for the diagnostic terminal. Unlike a phase, this is
+    # an explicit lifecycle observation and never authors AL/X's wording.
+    ACTIVITY = "activity"
     # AL/X's final wording, for the console. Rendered, never re-derived.
     TEXT = "text"
     ERROR = "error"
@@ -67,6 +70,7 @@ class VoiceEvent:
     audio: AudioChunk | None = None
     reason: str | None = None
     diagnostic: Mapping[str, Any] | None = None
+    activity: str | None = None
     text: str | None = None
 
     def __post_init__(self) -> None:
@@ -82,6 +86,10 @@ class VoiceEvent:
             raise ValueError("diagnostic events require diagnostic values")
         if self.kind is not VoiceEventKind.DIAGNOSTIC and self.diagnostic is not None:
             raise ValueError("only diagnostic events may carry diagnostic values")
+        if self.kind is VoiceEventKind.ACTIVITY and not self.activity:
+            raise ValueError("activity events require an activity value")
+        if self.kind is not VoiceEventKind.ACTIVITY and self.activity is not None:
+            raise ValueError("only activity events may carry an activity value")
         if self.kind is VoiceEventKind.ERROR and not self.reason:
             raise ValueError("error events require a reason")
         if self.kind is not VoiceEventKind.ERROR and self.reason is not None:
@@ -129,6 +137,42 @@ class VoiceDiagnosticBuffer:
         return events
 
 
+class VoiceActivityStatus:
+    """Thread-safe current runtime activity for the existing voice event path.
+
+    Coding sessions run on Core's worker thread. Subscribers are notified
+    directly when that thread enters a lifecycle boundary, so the terminal can
+    update without waiting for the Core turn to return or making another model
+    call.
+    """
+
+    def __init__(self) -> None:
+        self._value = "reasoning"
+        self._listeners: set[Callable[[str], None]] = set()
+        self._lock = Lock()
+
+    def set(self, value: str) -> None:
+        if value not in {"reasoning", "coding", "reviewing"}:
+            raise ValueError("activity must be reasoning, coding, or reviewing")
+        with self._lock:
+            if self._value == value:
+                return
+            self._value = value
+            listeners = tuple(self._listeners)
+        for listener in listeners:
+            listener(value)
+
+    def subscribe(self, listener: Callable[[str], None]) -> Callable[[], None]:
+        with self._lock:
+            self._listeners.add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                self._listeners.discard(listener)
+
+        return unsubscribe
+
+
 class VoiceSession:
     """Move audio and Core outcomes; never infer intent or select capabilities."""
 
@@ -146,6 +190,7 @@ class VoiceSession:
         event_source: CognitionOpportunitySource | None = None,
         core_turn_lock: asyncio.Lock | None = None,
         turn_origin_sink: Callable[[bool], None] | None = None,
+        activity: VoiceActivityStatus | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")
@@ -174,6 +219,7 @@ class VoiceSession:
         # here reads it back, and the Core is never given it. Transport
         # knowledge stays in the transport.
         self._turn_origin_sink = turn_origin_sink or (lambda _person: None)
+        self._activity = activity or VoiceActivityStatus()
 
     async def exchange(
         self,
@@ -354,54 +400,86 @@ class VoiceSession:
                     return
                 yield VoiceEvent(VoiceEventKind.THINKING)
                 LOGGER.info("Authoritative Core turn started: %s", kind)
-                try:
+
+                async def run_turn() -> Any:
+                    """Keep one Core lock while forwarding worker activity."""
                     async with self._core_turn_lock:
                         self._turn_origin_sink(kind != "background")
                         try:
                             if kind == "background":
-                                outcome = await run_core_worker(
+                                return await run_core_worker(
                                     self._gateway.receive_background_event,
                                     conversation_id,
                                     item,
                                     self._step_budget,
                                     now + timedelta(days=self._retention_days),
                                 )
+                            # Spoken and typed converge here, before the
+                            # gateway. They differ only in provenance and in
+                            # whether a transcriber was involved; from this
+                            # point there is one person-turn path, one Core
+                            # call, one conversation and one goal treatment.
+                            if kind == "typed":
+                                origin = ConversationOrigin.TYPED
+                                content = item
                             else:
-                                # Spoken and typed converge here, before the
-                                # gateway. They differ only in provenance and in
-                                # whether a transcriber was involved; from this
-                                # point there is one person-turn path, one Core
-                                # call, one conversation and one goal treatment.
-                                if kind == "typed":
-                                    origin = ConversationOrigin.TYPED
-                                    content = item
-                                else:
-                                    LOGGER.info(
-                                        "Cartesia event received: %s", item.state.value
-                                    )
-                                    origin = ConversationOrigin.SPEECH_TRANSCRIPT
-                                    content = item.content
-                                turn = ConversationTurn(
-                                    conversation_id=conversation_id,
-                                    turn_id=self._identifier_factory(),
-                                    origin=origin,
-                                    content=content,
-                                    occurred_at=now,
-                                    person_id=self._person_id,
+                                LOGGER.info(
+                                    "Cartesia event received: %s", item.state.value
                                 )
-                                outcome = await run_core_worker(
-                                    self._gateway.receive_conversation_turn,
-                                    turn,
-                                    self._step_budget,
-                                    now + timedelta(days=self._retention_days),
-                                )
+                                origin = ConversationOrigin.SPEECH_TRANSCRIPT
+                                content = item.content
+                            turn = ConversationTurn(
+                                conversation_id=conversation_id,
+                                turn_id=self._identifier_factory(),
+                                origin=origin,
+                                content=content,
+                                occurred_at=now,
+                                person_id=self._person_id,
+                            )
+                            return await run_core_worker(
+                                self._gateway.receive_conversation_turn,
+                                turn,
+                                self._step_budget,
+                                now + timedelta(days=self._retention_days),
+                            )
                         finally:
                             self._turn_origin_sink(False)
+
+                updates: asyncio.Queue[str] = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+                unsubscribe = self._activity.subscribe(
+                    lambda value: loop.call_soon_threadsafe(updates.put_nowait, value)
+                )
+                self._activity.set("reasoning")
+                core_task = asyncio.create_task(run_turn())
+                try:
+                    while not core_task.done():
+                        update_task = asyncio.create_task(updates.get())
+                        done, _ = await asyncio.wait(
+                            (core_task, update_task),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if update_task in done:
+                            yield VoiceEvent(
+                                VoiceEventKind.ACTIVITY,
+                                activity=update_task.result(),
+                            )
+                        else:
+                            update_task.cancel()
+                            await asyncio.gather(update_task, return_exceptions=True)
+                    outcome = await core_task
+                    while not updates.empty():
+                        yield VoiceEvent(
+                            VoiceEventKind.ACTIVITY,
+                            activity=updates.get_nowait(),
+                        )
                 except Exception:
                     yield VoiceEvent(
                         VoiceEventKind.ERROR, reason="conversation_gateway_error"
                     )
                     return
+                finally:
+                    unsubscribe()
 
                 # A person checkpoint grants recovery but has not made budget
                 # headroom for background work. Keep it suppressed until a

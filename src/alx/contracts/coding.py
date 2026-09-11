@@ -37,6 +37,8 @@ MAX_CRITERIA = 16
 MAX_CRITERION_CHARACTERS = 1_000
 MAX_BLOCKED_PATHS = 32
 MAX_BLOCKED_PATH_CHARACTERS = 512
+MAX_LOCAL_REVIEW_CYCLES = 2
+MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS = 16_000
 
 
 CODING_FAILURES = (
@@ -51,6 +53,7 @@ CODING_FAILURES = (
     "provider_failed",
     "plan_unusable",
     "planning_failed",
+    "review_failed",
     "sandbox_unusable",
     "session_failed",
     "task_failed",
@@ -321,6 +324,8 @@ __all__ = [
     "MAX_COMMAND_SECONDS",
     "MAX_DIFF_CHARACTERS",
     "MAX_FILE_CHARACTERS",
+    "MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS",
+    "MAX_LOCAL_REVIEW_CYCLES",
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
     "MAX_STEP_BUDGET",

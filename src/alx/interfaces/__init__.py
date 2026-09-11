@@ -3,6 +3,7 @@
 from alx.interfaces.live_voice import (
     VoiceEvent,
     VoiceEventKind,
+    VoiceActivityStatus,
     VoiceDiagnosticBuffer,
     VoiceSession,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "LiveVoiceServer",
     "VoiceEvent",
     "VoiceEventKind",
+    "VoiceActivityStatus",
     "VoiceDiagnosticBuffer",
     "VoiceSession",
 ]

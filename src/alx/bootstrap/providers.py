@@ -11,6 +11,7 @@ from typing import Any
 from alx.config import ConfigurationError, RuntimeSettings
 from alx.config.settings import (
     CLAUDE_SUBSCRIPTION_PROVIDER,
+    CODEX_SUBSCRIPTION_PROVIDER,
     GROK_SUBSCRIPTION_PROVIDER,
     NO_PROVIDER,
 )
@@ -18,11 +19,13 @@ from alx.contracts import ReasoningModel, SpeechSynthesizer, SpeechTranscriber
 from alx.providers import (
     CartesiaTranscriber,
     ClaudeSubscriptionReasoningModel,
+    CodexSubscriptionReasoningModel,
     ElevenLabsSynthesizer,
     OpenAIReasoningModel,
     XAIReasoningModel,
 )
 from alx.providers.claude_subscription import subscription_cli_present
+from alx.providers.codex_subscription import subscription_cli_present as codex_subscription_cli_present
 from alx.contracts import CodingSession
 from alx.providers.coding_session import GrokCodingSession
 from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
@@ -46,6 +49,9 @@ class RuntimeProviders:
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
+    # A separate advisory model for local CA review. It must not share the
+    # coding planner instance, even when both use the same provider and model.
+    coding_reviewer: ReasoningModel | None
     # The native coding-agent session that carries a plan out in the assigned
     # worktree. None when the configured coding provider has no session
     # adapter, which leaves the capability unregistered rather than letting a
@@ -147,43 +153,80 @@ def _build_coding_session(
     )
 
 
+def _build_coding_reasoning_model(
+    reasoning,
+    telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
+    purpose: str,
+) -> ReasoningModel | None:
+    """Build one configured Coding Agent reasoning adapter.
+
+    Planning and local review deliberately call this separately, so they have
+    independent model instances and selected-provider failures cannot cross.
+    """
+    if reasoning.provider == GROK_SUBSCRIPTION_PROVIDER:
+        return GrokSubscriptionReasoningModel(
+            reasoning.model, reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink, effort=reasoning.effort,
+        )
+    if reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        if not subscription_cli_present():
+            raise ConfigurationError(
+                f"the Claude Code CLI is required for {purpose}"
+            )
+        return ClaudeSubscriptionReasoningModel(
+            reasoning.model, reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+        )
+    if reasoning.provider == CODEX_SUBSCRIPTION_PROVIDER:
+        if not codex_subscription_cli_present():
+            raise ConfigurationError(
+                f"the Codex CLI is required for {purpose}"
+            )
+        return CodexSubscriptionReasoningModel(
+            reasoning.model,
+            reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+            effort=reasoning.effort,
+        )
+    if reasoning.provider == "openai":
+        return OpenAIReasoningModel(
+            reasoning.model, reasoning.api_key,
+            reasoning.base_url, reasoning.timeout_seconds,
+            streaming=reasoning.streaming,
+            service_tier=reasoning.service_tier,
+            reasoning_effort=reasoning.effort,
+            telemetry_sink=telemetry_sink,
+        )
+    raise ConfigurationError(
+        f"{purpose} provider adapter is not installed: {reasoning.provider}"
+    )
+
+
 def _build_coding_model(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
 ) -> ReasoningModel | None:
-    """The Coding Agent's model, or None when the capability should be absent.
-
-    The configured coding provider is composed independently of the Core. A
-    provider failure remains a coding-job failure; this function never selects
-    a replacement.
-    """
+    """The Coding Agent's planner model, or None when disabled."""
     coding = settings.coding
     if not coding.enabled or not coding.is_usable:
         LOGGER.info("Coding agent reasoning is disabled by configuration")
         return None
-    if coding.reasoning.provider == GROK_SUBSCRIPTION_PROVIDER:
-        return GrokSubscriptionReasoningModel(
-            coding.reasoning.model, coding.reasoning.timeout_seconds,
-            telemetry_sink=telemetry_sink, effort=coding.reasoning.effort,
-        )
-    if coding.reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
-        if not subscription_cli_present():
-            raise ConfigurationError("the Claude Code CLI is required for coding")
-        return ClaudeSubscriptionReasoningModel(
-            coding.reasoning.model, coding.reasoning.timeout_seconds,
-            telemetry_sink=telemetry_sink,
-        )
-    if coding.reasoning.provider == "openai":
-        return OpenAIReasoningModel(
-            coding.reasoning.model, coding.reasoning.api_key,
-            coding.reasoning.base_url, coding.reasoning.timeout_seconds,
-            streaming=coding.reasoning.streaming,
-            service_tier=coding.reasoning.service_tier,
-            reasoning_effort=coding.reasoning.effort,
-            telemetry_sink=telemetry_sink,
-        )
-    raise ConfigurationError(
-        f"coding provider adapter is not installed: {coding.reasoning.provider}"
+    return _build_coding_reasoning_model(
+        coding.reasoning, telemetry_sink, "coding"
+    )
+
+
+def _build_coding_reviewer_model(
+    settings: RuntimeSettings,
+    telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
+) -> ReasoningModel | None:
+    """The independent advisory local-review model, or None when disabled."""
+    coding = settings.coding
+    if not coding.enabled or not coding.is_usable:
+        LOGGER.info("Coding reviewer reasoning is disabled by configuration")
+        return None
+    return _build_coding_reasoning_model(
+        coding.reviewer, telemetry_sink, "coding reviewer"
     )
 
 
@@ -241,6 +284,7 @@ def build_runtime_providers(
         else _build_reasoning_model(settings.autonomous, telemetry_sink)
     )
     coding = _build_coding_model(settings, telemetry_sink)
+    coding_reviewer = _build_coding_reviewer_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)
 
     if settings.speech_to_text.provider != "cartesia":
@@ -261,6 +305,7 @@ def build_runtime_providers(
         specialist=specialist,
         autonomous=autonomous,
         coding=coding,
+        coding_reviewer=coding_reviewer,
         coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth
         # paying to transmit; what the audio means is still Cartesia's answer

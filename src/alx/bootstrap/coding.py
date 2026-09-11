@@ -56,6 +56,8 @@ def build_coding_runtime(
     call_id_source: Callable[[], str],
     agent: CodingAgent | None = None,
     session: CodingSession | None = None,
+    reviewer: ReasoningModel | None = None,
+    activity_sink: Callable[[str], None] | None = None,
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
 
@@ -70,10 +72,13 @@ def build_coding_runtime(
     if agent is None and model is None:
         LOGGER.info("Coding agent has no model: no coding capability")
         return None
+    if agent is None and reviewer is None:
+        LOGGER.info("Coding agent has no reviewer model: no coding capability")
+        return None
     if agent is None and session is None:
         LOGGER.info("Coding agent has no session: no coding capability")
         return None
-    selected = agent or CodingAgent(model, session)
+    selected = agent or CodingAgent(model, session, reviewer, activity_sink)
 
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)

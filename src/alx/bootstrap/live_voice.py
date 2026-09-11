@@ -74,7 +74,12 @@ from alx.observability.autonomous_budget import SQLiteAutonomousLedger
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
-from alx.interfaces import LiveVoiceServer, VoiceDiagnosticBuffer, VoiceSession
+from alx.interfaces import (
+    LiveVoiceServer,
+    VoiceActivityStatus,
+    VoiceDiagnosticBuffer,
+    VoiceSession,
+)
 from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
 from alx.observability.usage import bill_budget_for
 from alx.specialists import ModelSpecialist, extract_invoice
@@ -206,6 +211,7 @@ async def run(repository_root: Path) -> None:
     storage_root.mkdir(parents=True, exist_ok=True)
 
     diagnostics = VoiceDiagnosticBuffer()
+    activity = VoiceActivityStatus()
     usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
     # The Core names the conversation on every budget check, so a dispatch can
     # arm the ceiling for the task that is actually running.
@@ -456,6 +462,8 @@ async def run(repository_root: Path) -> None:
         providers.coding,
         lambda: current_call_id[0],
         session=providers.coding_session,
+        reviewer=providers.coding_reviewer,
+        activity_sink=activity.set,
     )
     if coding_runtime is not None:
         for definition in coding_runtime.definitions:
@@ -738,6 +746,7 @@ async def run(repository_root: Path) -> None:
         event_source=mail_runtime.source,
         core_turn_lock=core_turn_lock,
         turn_origin_sink=lambda person: person_turn_in_progress.__setitem__(0, person),
+        activity=activity,
     )
     server = LiveVoiceServer(
         session,
