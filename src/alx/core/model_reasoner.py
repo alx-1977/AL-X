@@ -95,6 +95,11 @@ when the latest retained person turn explicitly authorizes that same consequenti
 capability call; cite that turn exactly. The proposal's approval_id must be the
 same identifier the call carries, and its capability_id and arguments_json must
 match the call exactly, since the approval authorizes that one action alone.
+An approval in the goal's approvals list carries expires_at. Past that moment it
+authorises nothing, whatever its lifecycle still says, and a call citing it is
+refused. An action you were authorised for earlier but have not yet carried out
+therefore needs a fresh approval grounded in what the person has just said, not
+the lapsed one reused.
 A call_id names one capability call and an approval_id names one approval,
 each permanently. Every new call takes a fresh call_id and every new approval
 proposal takes a fresh approval_id, including a call that retries something
@@ -464,6 +469,18 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
                 "capability_id": item.scope.capability_id,
                 "arguments": _plain(item.scope.arguments),
                 "lifecycle": item.lifecycle.value,
+                # When this approval stops authorising its action. Omitting it
+                # made a lapsed grant indistinguishable from a live one: on
+                # 2026-09-11 Friedl approved discarding a draft bill, the
+                # approval expired while a coding session ran, and the Core --
+                # shown only lifecycle "granted" -- kept reusing it instead of
+                # proposing a fresh one. Three turns died without a word. The
+                # runtime already refuses an expired approval; this is the same
+                # fact, told rather than enforced silently.
+                "expires_at": (
+                    None if item.expires_at is None
+                    else item.expires_at.isoformat()
+                ),
             }
             for item in state.approvals
         ],
