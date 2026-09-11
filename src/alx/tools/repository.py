@@ -80,8 +80,6 @@ DEFINITION = CapabilityDefinition(
     # Declared rather than left at the default, so the Core's check on text
     # Friedl has not heard applies here as it does to mail.
     transmits_authored_text=True,
-    # A merge changes the repository and cannot be quietly undone.
-    externally_observable_mutation=True,
 )
 
 

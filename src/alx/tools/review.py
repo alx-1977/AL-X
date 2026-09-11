@@ -73,11 +73,6 @@ DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     REVIEW_FAILURES,
-    # Posts a request to the external reviewer, which Friedl can see on the
-    # pull request. Declaring this changes nothing about how a review is
-    # requested or read; it only means she cannot say she asked for one
-    # unless the request actually succeeded.
-    externally_observable_mutation=True,
 )
 
 

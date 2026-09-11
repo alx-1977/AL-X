@@ -83,8 +83,6 @@ def response_output(text: str = "A normal response.") -> dict:
             "type": "respond",
             "response": text,
             "response_requires_goal_commit": False,
-            "claimed_completed_actions": [],
-            "unfinished_actions": [],
         },
     }
 

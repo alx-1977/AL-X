@@ -121,8 +121,6 @@ DEFINITION = CapabilityDefinition(
     SideEffect.EFFECTFUL,
     CODING_FAILURES,
     durable_input_fields=("task", "worktree", "blocked_paths"),
-    # Writes code into a real worktree on disk.
-    externally_observable_mutation=True,
 )
 
 

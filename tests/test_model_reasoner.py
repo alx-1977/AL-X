@@ -51,10 +51,6 @@ def base_output(**changes):
             "response_requires_goal_commit": changes.pop(
                 "response_requires_goal_commit", False
             ),
-            "claimed_completed_actions": changes.pop(
-                "claimed_completed_actions", []
-            ),
-            "unfinished_actions": changes.pop("unfinished_actions", []),
         }
     elif action_type == "finish_silently":
         changes.pop("response", None)

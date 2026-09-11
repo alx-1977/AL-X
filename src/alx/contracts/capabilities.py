@@ -119,18 +119,6 @@ class CapabilityDefinition:
     # search argument `subject` once made every search look like unsent mail
     # and be refused. A capability that sends must therefore say so.
     transmits_authored_text: bool = False
-    # Whether executing this capability changes something outside AL/X that
-    # Friedl could observe: mail moved or sent, a file written, code pushed, a
-    # device flashed. It scopes the rule that she may not say an action is done
-    # unless the attempt that does it actually succeeded.
-    #
-    # Declared rather than inferred, for the same reason as the field above.
-    # `side_effect` distinguishes whether there is an effect, not what kind: a
-    # web search and a mail send are both EFFECTFUL, and only one of them
-    # changes the world. Reading EFFECTFUL as "mutation" would make a search
-    # claimable as a completed action and hold every search to a rule about
-    # external change. A capability that mutates must therefore say so.
-    externally_observable_mutation: bool = False
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -141,11 +129,6 @@ class CapabilityDefinition:
             raise TypeError("side_effect must be a SideEffect")
         if not isinstance(self.transmits_authored_text, bool):
             raise TypeError("transmits_authored_text must be a bool")
-        if not isinstance(self.externally_observable_mutation, bool):
-            raise TypeError("externally_observable_mutation must be a bool")
-        if self.externally_observable_mutation and self.side_effect is not SideEffect.EFFECTFUL:
-            # Changing the world outside AL/X is an effect by definition.
-            raise ValueError("an externally observable mutation must be effectful")
         codes = tuple(self.possible_failure_codes)
         object.__setattr__(self, "possible_failure_codes", codes)
         if any(not isinstance(item, str) or not item.strip() for item in codes):

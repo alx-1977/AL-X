@@ -232,8 +232,6 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     _FAILURES + ("document_has_no_text", "not_an_invoice", "extraction_unverified"),
-    # Creates a draft bill in Xero, which Friedl can see there.
-    externally_observable_mutation=True,
 )
 
 DELETE_DRAFT_DEFINITION = CapabilityDefinition(
@@ -250,8 +248,6 @@ DELETE_DRAFT_DEFINITION = CapabilityDefinition(
     _BILL_RESULT,
     SideEffect.EFFECTFUL,
     _FAILURES,
-    # Discards a bill in Xero.
-    externally_observable_mutation=True,
 )
 
 DEFINITIONS = (
