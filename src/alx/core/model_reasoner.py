@@ -117,6 +117,11 @@ want to return to an enquiry later, request_future_cognition is how you make tha
 for yourself. Nothing schedules it otherwise, and leaving a thread untouched is fine.
 refused_calls lists actions refused this turn before anything was dispatched,
 each with the mechanical reason. Nothing happened, so no goal records them.
+An entry carrying mutation_kind refused the goal mutation you offered rather than
+a call. goal_missing means you proposed a mutation of a goal that does not exist:
+this conversation has none yet, so there is nothing to update, and the mutation
+that starts work is create, with a concise objective and explicit success criteria.
+Offer that instead and the call you intended can run in the same decision.
 continuation_notices is shown when a response or silence would have ended the
 turn while remaining outstanding_work was still immediately executable. Nothing
 was delivered. Issue the next executable call in this turn, or park the goal

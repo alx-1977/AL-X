@@ -179,10 +179,17 @@ class BlockedDispatchTest(unittest.TestCase):
             "she must be told why the dispatch was impossible",
         )
         refusals = self.reasoner.contexts[1].refused_calls
-        self.assertEqual(len(refusals), 1)
-        self.assertEqual(refusals[0]["reason"], "active_goal_required")
+        # Two independent facts, both true and both hers to act on: the
+        # proposal's evidence cited a source the runtime does not offer, and
+        # nothing was dispatched because that left no goal. She used to be
+        # told only the second, which is not the one she can correct.
+        reasons = {item["reason"] for item in refusals}
+        self.assertEqual(reasons, {"evidence_source_unknown", "active_goal_required"})
+        dispatch_refusal = next(
+            item for item in refusals if item["reason"] == "active_goal_required"
+        )
         self.assertEqual(
-            refusals[0]["capability_id"], "move_mail_message_to_trash",
+            dispatch_refusal["capability_id"], "move_mail_message_to_trash",
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "I cannot ground that safely yet.")
@@ -219,8 +226,13 @@ class BlockedDispatchTest(unittest.TestCase):
             AgentDecision(response="unreachable"),
             budget=6,
         )
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
-        self.assertEqual(outcome.reason, "active_goal_required")
+        # Repeating the identical proposal is now caught one step earlier, by
+        # the goal-proposal reason rather than the dispatch reason: she was
+        # told the evidence source was unknown and offered the same proposal
+        # unchanged. The property under test is the same -- the turn stops
+        # rather than buying further paid calls from an unchanged state.
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(len(self.reasoner.contexts), 2)
         self.assertEqual(self.dispatched, [])
 

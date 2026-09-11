@@ -357,6 +357,29 @@ class CoreAgent:
                 )
                 if decision.response_requires_goal_commit or decision.finish_silently:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_proposal_invalid")
+                # The reason reaches the Core, exactly as an approval or memory
+                # rejection already does. It used to go only to the log and the
+                # rejection record, so a proposal refused here was invisible to
+                # the next step: on 2026-09-11 an update mutation offered with
+                # no goal was rejected as goal_missing, the Core was told only
+                # that dispatch required an active goal, and it proposed the
+                # same update again. Both steps were spent and the session
+                # ended without the deletion it had decided to make.
+                #
+                # Subject is the mutation kind rather than the capability: the
+                # fault is which mutation was offered, and a later call for the
+                # same capability is a different refusal.
+                if self._already_refused(
+                    refused_calls, proposal_error, decision.goal_proposal.kind.value
+                ):
+                    return CoreOutcome(
+                        CoreState.ERROR, snapshot, reason="goal_proposal_invalid",
+                    )
+                refused_calls = (*refused_calls, {
+                    "reason": proposal_error,
+                    "subject": decision.goal_proposal.kind.value,
+                    "mutation_kind": decision.goal_proposal.kind.value,
+                })
             # The goal a call would run under: the reduced proposal when it was
             # accepted, otherwise the attached goal exactly as it stands.
             effective = (
