@@ -238,6 +238,7 @@ MARK_SEEN_DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     _FAILURES,
+    externally_observable_mutation=True,
 )
 
 FILE_DEFINITION = CapabilityDefinition(
@@ -252,6 +253,7 @@ FILE_DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     _FAILURES,
+    externally_observable_mutation=True,
 )
 
 TRASH_DEFINITION = CapabilityDefinition(
@@ -266,6 +268,7 @@ TRASH_DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     _FAILURES,
+    externally_observable_mutation=True,
 )
 
 _ADDRESS_LIST = StructuredSchema(ValueKind.ARRAY, items=_STRING)
@@ -314,6 +317,9 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
     # rather than inferred: a capability that transmits says so, and nothing
     # else is checked against what she last said.
     transmits_authored_text=True,
+    # A sent message has left the account and cannot be recalled, so saying it
+    # was sent requires that this attempt actually succeeded.
+    externally_observable_mutation=True,
 )
 
 DEFINITIONS = (

@@ -251,6 +251,22 @@ class AgentDecision:
     # goal; None without one is goal-less conversation. A decision that
     # carries only a goal_id asks for that goal's full state before acting.
     goal_id: str | None = None
+    # The call_ids of externally observable actions this response tells Friedl
+    # have already happened. The Core names them; deterministic code checks
+    # each one against a successful executed attempt before the words are
+    # delivered. Empty means the response claims no completed external action.
+    #
+    # Whether a sentence claims completion is meaning, so she declares it
+    # rather than having code read her wording. Verifying a named call_id
+    # actually succeeded has one correct answer, so that is code's.
+    claimed_completed_actions: tuple[str, ...] = ()
+    # The call_ids of externally observable actions this response reports as
+    # not completed: failed, refused, still pending, or abandoned. Naming one
+    # asserts nothing about the world, so it needs no proof. It is checked
+    # only in the other direction: a call that actually succeeded may not be
+    # described as unfinished, because understating what happened outside
+    # AL/X is its own untruth.
+    unfinished_actions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.finish_silently, bool):
@@ -284,6 +300,19 @@ class AgentDecision:
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
             raise ValueError("a decision cannot repeat a memory identifier")
+        for name in ("claimed_completed_actions", "unfinished_actions"):
+            values = tuple(getattr(self, name))
+            object.__setattr__(self, name, values)
+            if any(not isinstance(item, str) or not item.strip() for item in values):
+                raise ValueError(f"{name} must be call identifiers")
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} cannot repeat a call identifier")
+        if (
+            self.claimed_completed_actions or self.unfinished_actions
+        ) and self.response is None:
+            # Silence accounts for nothing, and a capability call is not an
+            # account of what has already happened.
+            raise ValueError("only a response can account for an action")
 
     @property
     def selects_only(self) -> bool:

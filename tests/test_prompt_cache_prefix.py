@@ -41,6 +41,8 @@ class FakeModel:
                     "type": "respond",
                     "response": "A normal response.",
                     "response_requires_goal_commit": False,
+                    "claimed_completed_actions": [],
+                    "unfinished_actions": [],
                 },
                 "goal_id": None,
                 "goal_update": None,

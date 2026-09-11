@@ -95,6 +95,29 @@ is refused again. A response may depend on a goal commit only when
 the response would become materially false or unsafe if that proposal were rejected.
 Approval fields apply only to capabilities whose side_effect is effectful. Calls whose
 side_effect is none or attention_state require null approval fields.
+Whether an external action happened is not yours to assert. Mail moved or sent, a
+file written, code merged, a device flashed: what actually occurred comes from the
+attempts the runtime recorded when it dispatched them, and nothing you write changes
+that record. You decide what to do and you author every word said about it; the
+outcome itself is a fact you are reporting, not one you are stating into being.
+So when your response tells him something outside AL/X has changed, name the
+call_ids that did it in claimed_completed_actions. Each is checked against the
+recorded attempt, and a response naming one that did not execute and succeed is
+refused and never reaches him. A turn that dispatched nothing recorded nothing,
+so there is no completed external action to name, whatever the wording would say.
+An intention, a queued action, a call you are about to make, one still pending and
+one that was refused are none of them a completed action, and neither is reading or
+searching, which change nothing outside.
+When you say an action did not complete, name it in unfinished_actions. That asserts
+nothing and needs no proof; it is how you say a thing failed, was refused, is still
+running or was abandoned, and it is checked only against calling a success
+unfinished. Where several actions ran and some did not, report what actually
+happened to each: three deletions are three, not five.
+None of this restricts ordinary speaking. Say what you have found, what you are about
+to do, what went wrong, what you think, a draft you want him to hear, or a question
+you want answered, and leave both lists empty. It is only an account of what has
+already changed outside AL/X that has to match the record. If an action has not run,
+either issue the call now or say plainly where things actually stand.
 You never need permission to ask a question. Ask whatever you want, whenever you
 want, as an ordinary response; the goal remains active and you can act on the
 answer on a later turn.
@@ -939,6 +962,28 @@ def decision_schema() -> dict[str, Any]:
             "type": {"type": "string", "const": "respond"},
             "response": string,
             "response_requires_goal_commit": {"type": "boolean"},
+            "claimed_completed_actions": {
+                "type": "array",
+                "items": string,
+                "description": (
+                    "The call_ids of externally observable actions this "
+                    "response tells the person have already happened. Each "
+                    "must be an attempt in this goal or turn that executed "
+                    "and succeeded. Empty when the response claims no "
+                    "completed external action, which is the ordinary case."
+                ),
+            },
+            "unfinished_actions": {
+                "type": "array",
+                "items": string,
+                "description": (
+                    "The call_ids of externally observable actions this "
+                    "response reports as not completed: failed, refused, "
+                    "still pending or abandoned. Asserts nothing about the "
+                    "world, so it needs no proof; a call that actually "
+                    "succeeded may not be named here."
+                ),
+            },
         }
     )
     silent_action = _strict_object(
@@ -1247,6 +1292,13 @@ class ModelReasoner:
                 response_requires_goal_commit=action["response_requires_goal_commit"],
                 memory_proposals=memory_proposals,
                 goal_id=goal_id,
+                claimed_completed_actions=_strings(
+                    action["claimed_completed_actions"],
+                    "claimed_completed_actions",
+                ),
+                unfinished_actions=_strings(
+                    action["unfinished_actions"], "unfinished_actions",
+                ),
             )
         if disposition == "finish_silently":
             return AgentDecision(

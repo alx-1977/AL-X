@@ -138,6 +138,8 @@ DEFINITION = CapabilityDefinition(
         "dhl_supplier_not_configured",
         "contact_not_found",
     ),
+    # Creates the import bill in Xero, which Friedl can see there.
+    externally_observable_mutation=True,
 )
 
 DEFINITIONS = (DEFINITION,)
