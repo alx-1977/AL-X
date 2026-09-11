@@ -28,7 +28,7 @@ from alx.contracts.coding import (
 
 _GIT_INSPECT = frozenset({"status", "diff", "log"})
 _GIT_FLAGS = {
-    "status": frozenset({"--porcelain"}),
+    "status": frozenset({"--porcelain", "--porcelain=v1", "-z"}),
     "diff": frozenset({"--stat", "--name-only", "--cached", "--no-color"}),
     "log": frozenset({"--oneline", "--no-color"}),
 }
@@ -261,7 +261,9 @@ def inspect_git(
     the same truncated prefix of somebody else's work. Status still reports
     the whole tree, because what else is dirty is a fact the job needs.
     """
-    status = run_permitted_command(["git", "status", "--porcelain"], worktree)
+    status = run_permitted_command(
+        ["git", "status", "--porcelain=v1", "-z"], worktree
+    )
     argv = ["git", "diff"]
     if paths:
         argv.extend(["--", *paths])
@@ -282,6 +284,23 @@ def inspect_git(
 
 
 def files_from_git_status(status: str) -> tuple[str, ...]:
+    """Paths from porcelain v1, including literal spaces and quotes."""
+    if "\0" in status:
+        names = []
+        entries = iter(status.split("\0"))
+        for entry in entries:
+            if not entry or len(entry) < 4:
+                continue
+            kind = entry[:2]
+            path = entry[3:]
+            # Porcelain v1 -z puts the source path of a rename/copy in the
+            # next field. The first path is the destination that git diff
+            # must inspect.
+            if "R" in kind or "C" in kind:
+                next(entries, None)
+            if path:
+                names.append(path)
+        return tuple(names)
     names = []
     for line in status.splitlines():
         path = line[3:].strip() if len(line) > 3 else ""

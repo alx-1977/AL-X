@@ -848,12 +848,18 @@ def _coding_reviewer_settings(
     environment: Mapping[str, str],
 ) -> ReasoningSettings:
     """Configure the local reviewer without inheriting Coding Agent settings."""
-    provider = (
-        environment.get("ALX_CODING_REVIEWER_PROVIDER", GROK_SUBSCRIPTION_PROVIDER)
-        .strip()
-        .lower()
-        or GROK_SUBSCRIPTION_PROVIDER
-    )
+    provider = environment.get("ALX_CODING_REVIEWER_PROVIDER", "").strip().lower()
+    if not provider or provider == NO_PROVIDER:
+        return ReasoningSettings(
+            provider=NO_PROVIDER,
+            model=NO_PROVIDER,
+            api_key="",
+            base_url="",
+            timeout_seconds=120,
+            streaming=False,
+            service_tier="default",
+            effort="none",
+        )
     if provider not in (
         GROK_SUBSCRIPTION_PROVIDER,
         CLAUDE_SUBSCRIPTION_PROVIDER,
@@ -923,8 +929,7 @@ def _coding_reviewer_settings(
         )
     return ReasoningSettings(
         provider=GROK_SUBSCRIPTION_PROVIDER,
-        model=environment.get("ALX_CODING_REVIEWER_MODEL", "grok-4.6").strip()
-        or "grok-4.6",
+        model=_required(environment, "ALX_CODING_REVIEWER_MODEL"),
         api_key="",
         base_url="",
         timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),

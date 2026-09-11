@@ -794,13 +794,11 @@ class DhlImportLifecycleTests(unittest.TestCase):
             return {**stored, "FileName": "xero-renamed.pdf"}
 
         self.xero.attach_bill_document = renamed_response
-        self.xero.list_bill_attachments = lambda _invoice_id: (_ for _ in ()).throw(
-            AssertionError("post-upload verification must not rediscover by filename")
-        )
 
         result = self.duty_tax()
 
         self.assertTrue(result.values["completed"])
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
 
     def test_multiple_uploads_read_back_the_exact_returned_attachment_ids(self) -> None:
         original_read = self.xero.read_bill_attachment
@@ -814,7 +812,7 @@ class DhlImportLifecycleTests(unittest.TestCase):
         result = self.customs()
 
         self.assertTrue(result.values["completed"])
-        self.assertEqual(read_ids, ["attachment-1", "attachment-2"])
+        self.assertEqual(read_ids[-2:], ["attachment-1", "attachment-2"])
 
     def test_missing_attachment_id_in_upload_response_fails_closed(self) -> None:
         original = self.xero.attach_bill_document
@@ -861,6 +859,7 @@ class DhlImportLifecycleTests(unittest.TestCase):
         second = self.duty_tax()
         self.assertTrue(second.values["completed"])
         self.assertEqual(self.xero.created, 1)
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
 
     def test_duty_tax_paid_is_retry_safe_after_attachment_failure(self) -> None:
         original = self.xero.attach_bill_document
@@ -879,6 +878,43 @@ class DhlImportLifecycleTests(unittest.TestCase):
         second = self.duty_tax()
         self.assertTrue(second.values["completed"])
         self.assertEqual(self.xero.created, 1)
+
+    def test_duty_tax_does_not_duplicate_an_attachment_after_authorisation_failure(self) -> None:
+        original = self.xero.authorise_bill
+        attempts = 0
+
+        def fail_once(invoice_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise XeroAccessError("connection_failed")
+            return original(invoice_id)
+
+        self.xero.authorise_bill = fail_once
+        first = self.duty_tax()
+        self.assertEqual(first.failure["code"], "connection_failed")
+        second = self.duty_tax()
+        self.assertTrue(second.values["completed"])
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
+
+    def test_duty_tax_rechecks_the_attachment_immediately_before_authorisation(self) -> None:
+        original = self.xero.read_bill
+        reads = 0
+
+        def tamper_before_authorisation(invoice_id):
+            nonlocal reads
+            result = original(invoice_id)
+            reads += 1
+            if reads == 2:
+                record, _content = self.xero.attachments[invoice_id][-1]
+                self.xero.attachments[invoice_id][-1] = (record, b"replaced")
+            return result
+
+        self.xero.read_bill = tamper_before_authorisation
+        result = self.duty_tax()
+
+        self.assertEqual(result.values["returned_for"], "supporting_document_missing")
+        self.assertEqual(self.xero.authorised, [])
 
     def test_a_draft_changed_during_attachment_is_not_authorised(self) -> None:
         original = self.xero.attach_bill_document

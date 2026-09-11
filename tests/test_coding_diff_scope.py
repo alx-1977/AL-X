@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.contracts.coding import MAX_DIFF_CHARACTERS  # noqa: E402
 from alx.providers.coding_process import (  # noqa: E402
     command_permitted,
+    files_from_git_status,
     inspect_git,
 )
 
@@ -110,6 +111,19 @@ class UnrelatedWorkDoesNotSpendTheBudget(Repository):
         )
         # And status still reports it, because that is a fact the job needs.
         self.assertIn("unrelated.py", inspect_git(self.root, ("target.py",)).status)
+
+    def test_literal_spaces_and_quotes_remain_valid_scoped_paths(self) -> None:
+        name = 'space "quoted" name.py'
+        (self.root / name).write_text("original\n")
+        git(self.root, "add", name)
+        git(self.root, "commit", "-qm", "add quoted target")
+        self.dirty(name, 200)
+        evidence = inspect_git(self.root, (name,))
+
+        self.assertIn(name, files_from_git_status(evidence.status))
+        self.assertTrue(evidence.diff)
+        self.assertIn("quoted", evidence.diff)
+        self.assertFalse(evidence.diff_truncated)
 
 
 class TruncationIsStated(Repository):

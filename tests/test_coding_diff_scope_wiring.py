@@ -26,11 +26,12 @@ from alx.providers.coding_agent import CodingAgent  # noqa: E402
 class BothReadersSeeTheSameScopedEvidence(unittest.TestCase):
     """One helper, one file set, so neither can be shown more than the other."""
 
-    def test_both_call_sites_pass_the_session_file_set(self) -> None:
+    def test_both_call_sites_pass_the_evolving_reviewed_file_set(self) -> None:
         source = inspect.getsource(CodingAgent)
-        # The outcome Core reads, and the diff the reviewer judges.
-        self.assertIn("self._git_evidence(workspace, session_files)", source)
-        self.assertIn("self._git_evidence(workspace, initial_files)", source)
+        # The outcome Core reads, and the diff the reviewer judges. The set
+        # starts with session files and gains any correction-only path.
+        self.assertIn("self._git_evidence(workspace, reviewed_files)", source)
+        self.assertIn("reviewed_files = next_files", source)
 
     def test_the_agent_labels_a_truncated_diff(self) -> None:
         source = inspect.getsource(CodingAgent._git_evidence)

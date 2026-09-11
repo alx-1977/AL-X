@@ -343,6 +343,8 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("Local reviewer findings", session.calls[1][1])
         first_review = json.loads(reviewer.requests[0].messages[-1].content)
         self.assertIn("parallel.py", first_review["changed_file_context"])
+        self.assertIn("parallel.py", attempt.result.values["files_changed"])
+        self.assertIn("parallel.py", attempt.result.values["git_diff"])
         self.assertEqual(
             [request.output_schema_name for request in model.requests],
             ["alx_coding_plan"],
@@ -631,6 +633,22 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertNotIn("unrelated.py", values["files_changed"])
         self.assertIn("app.py", values["files_changed"])
 
+    def test_local_reviewer_does_not_receive_unmodified_preexisting_dirt(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "unrelated.py").write_text("private dirty work\n", encoding="utf-8")
+        reviewer = PlanningModel(reviews=[{"findings": []}])
+        model = PlanningModel(plan=_plan(
+            inspection_targets=["app.py", "unrelated.py"]
+        ))
+        attempt = self._run(
+            model, RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=reviewer, task="fix add", worktree=str(worktree),
+        )
+
+        payload = json.loads(reviewer.requests[0].messages[-1].content)
+        self.assertNotIn("unrelated.py", payload["changed_file_context"])
+        self.assertNotIn("unrelated.py", attempt.result.values["git_diff"])
+
     def test_capability_is_unregistered_without_a_session(self) -> None:
         """A plan with nothing to execute it is honest absence, not a failure."""
         self.assertIsNone(
@@ -804,6 +822,8 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_ENABLED": "true",
                 "ALX_CODING_PROVIDER": "grok_subscription",
                 "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+                "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
                 "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1800",
             }
@@ -836,6 +856,8 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_ENABLED": "true",
                 "ALX_CODING_PROVIDER": "grok_subscription",
                 "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+                "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
                 "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1500",
             }

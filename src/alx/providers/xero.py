@@ -51,22 +51,8 @@ def _raise_clean(code: str) -> None:
     raise XeroAccessError(code)
 
 
-def _looks_like_attachment_record(item: Any) -> bool:
-    return isinstance(item, Mapping) and any(
-        key in item for key in ("AttachmentID", "FileName", "Content")
-    )
-
-
-def _is_attachment_collection(body: Any) -> bool:
-    """True only for a Xero Attachments envelope or attachment records."""
-    if isinstance(body, Mapping):
-        return "Attachments" in body or _looks_like_attachment_record(body)
-    if isinstance(body, (list, tuple)):
-        return bool(body) and all(_looks_like_attachment_record(item) for item in body)
-    return False
-
-
-def _json_if_present(raw: bytes) -> Any | None:
+def _json_attachment_envelope(raw: bytes) -> Any | None:
+    """A Xero attachment-list envelope, never arbitrary JSON file content."""
     stripped = bytes(raw).lstrip()
     if not stripped.startswith((b"{", b"[")):
         return None
@@ -74,7 +60,10 @@ def _json_if_present(raw: bytes) -> Any | None:
         body = json.loads(raw)
     except Exception:
         return None
-    if _is_attachment_collection(body):
+    # A standalone attachment record is also valid JSON file content. Xero's
+    # list response is the only response shape this binary read needs to
+    # decode, and it has this explicit envelope.
+    if isinstance(body, Mapping) and "Attachments" in body:
         return body
     return None
 
@@ -110,7 +99,7 @@ def _base64_content_from_json(body: Any, identity: str) -> bytes:
     if not isinstance(content, str) or not content.strip():
         _raise_clean("response_invalid")
     try:
-        return base64.b64decode(content)
+        return base64.b64decode(content.strip(), validate=True)
     except Exception:
         _raise_clean("response_invalid")
 
@@ -471,7 +460,16 @@ class XeroAccountingAdapter:
         if response.status_code >= 400:
             _raise_clean("request_rejected")
         if binary:
-            return bytes(response.content)
+            content_type = response.headers.get("content-type", "")
+            # Test doubles and a few HTTP shims expose no usable header. Xero
+            # metadata is JSON by contract; raw bytes still remain raw unless
+            # their body is the explicit Attachments envelope below.
+            if not isinstance(content_type, str):
+                content_type = "application/json"
+            return (
+                bytes(response.content),
+                content_type.split(";", 1)[0].lower(),
+            )
         body: Any = None
         try:
             body = response.json()
@@ -602,13 +600,20 @@ class XeroAccountingAdapter:
     def read_bill_attachment(
         self, invoice_id: str, attachment_id: str, media_type: str
     ) -> bytes:
-        raw = self._request(
+        raw, response_media_type = self._request(
             "GET",
             f"/Invoices/{quote(invoice_id, safe='')}/Attachments/{quote(attachment_id, safe='')}",
             media_type=media_type,
             binary=True,
         )
-        body = _json_if_present(raw)
+        # JSON is a legitimate attachment media type. Only an API JSON
+        # response to a non-JSON attachment request can be Xero metadata.
+        body = (
+            _json_attachment_envelope(raw)
+            if response_media_type == "application/json"
+            and media_type.lower() != "application/json"
+            else None
+        )
         if body is None:
             return bytes(raw)
         # Xero's JSON lists every file on the bill. The requested identity

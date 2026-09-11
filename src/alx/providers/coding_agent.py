@@ -219,6 +219,9 @@ class CodingAgent:
         commands: list[CodingCommandRecord] = []
         preexisting_status, _ = self._git_evidence(workspace)
         preexisting_dirty = files_from_git_status(preexisting_status)
+        preexisting_fingerprints = self._file_fingerprints(
+            workspace, preexisting_dirty
+        )
 
         plan, planning_failure = self._planning_phase(request, workspace)
         if plan is None:
@@ -260,7 +263,12 @@ class CodingAgent:
             return self._outcome(
                 status="failed",
                 summary="the coding session could not be started or completed",
-                files=self._files_changed((), git_status, preexisting_dirty),
+                files=self._files_changed(
+                    (), git_status, preexisting_dirty,
+                    self._modified_preexisting(
+                        workspace, preexisting_fingerprints
+                    ),
+                ),
                 preexisting_dirty=preexisting_dirty, commands=commands,
                 tests_run=False, tests_passed=None, git_status=git_status,
                 git_diff=git_diff, issues=(error.code,), review=False,
@@ -270,21 +278,27 @@ class CodingAgent:
 
         post_session_status, _ = self._git_evidence(workspace)
         session_files = self._files_changed(
-            (), post_session_status, preexisting_dirty
+            (), post_session_status, preexisting_dirty,
+            self._modified_preexisting(workspace, preexisting_fingerprints),
         )
         review_failure: str | None = None
         review_issues: tuple[str, ...] = ()
+        reviewed_files = session_files
         # There is no candidate to review when the native session reports a
         # failed execution. Preserve that failure for AL/X's normal outcome.
         if session.completed and session_files:
-            review_failure, review_issues = self._local_review_loop(
-                request, workspace, plan, session_files
+            review_failure, review_issues, reviewed_files = self._local_review_loop(
+                request, workspace, plan, session_files, preexisting_dirty,
+                preexisting_fingerprints,
             )
         if review_failure is not None:
-            git_status, git_diff = self._git_evidence(workspace, session_files)
+            git_status, git_diff = self._git_evidence(workspace, reviewed_files)
             return self._outcome(
                 status="failed", summary=review_failure, files=self._files_changed(
-                    (), git_status, preexisting_dirty
+                    (), git_status, preexisting_dirty,
+                    self._modified_preexisting(
+                        workspace, preexisting_fingerprints
+                    ),
                 ), preexisting_dirty=preexisting_dirty, commands=commands,
                 tests_run=False, tests_passed=None, git_status=git_status,
                 git_diff=git_diff, issues=tuple(review_issues), review=False,
@@ -322,8 +336,11 @@ class CodingAgent:
                 elif tests_passed is None:
                     tests_passed = True
 
-        git_status, git_diff = self._git_evidence(workspace, session_files)
-        files = self._files_changed((), git_status, preexisting_dirty)
+        git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+        files = self._files_changed(
+            (), git_status, preexisting_dirty,
+            self._modified_preexisting(workspace, preexisting_fingerprints),
+        )
         issues = list(_strings(session.diagnostics.get("unresolved_issues")))
         issues.extend(review_issues)
         status = "succeeded"
@@ -370,27 +387,44 @@ class CodingAgent:
     def _local_review_loop(
         self, request: CodingRequest, workspace: CodingWorkspace,
         plan: Mapping[str, Any], initial_files: tuple[str, ...],
-    ) -> tuple[str | None, tuple[str, ...]]:
+        preexisting_dirty: tuple[str, ...],
+        preexisting_fingerprints: Mapping[str, str | None],
+    ) -> tuple[str | None, tuple[str, ...], tuple[str, ...]]:
         """Review a candidate once, then re-review one bounded correction."""
+        reviewed_files = initial_files
         for cycle in range(MAX_LOCAL_REVIEW_CYCLES):
             # The reviewer judges this job's diff, not the worktree's. Same
             # scoping as the outcome evidence, so both see the same thing.
-            git_status, git_diff = self._git_evidence(workspace, initial_files)
-            changed_files = self._files_changed((), git_status, ())
+            git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+            changed_files = self._files_changed(
+                (), git_status, preexisting_dirty,
+                self._modified_preexisting(workspace, preexisting_fingerprints),
+            )
+            reviewed_files = tuple(dict.fromkeys((*reviewed_files, *changed_files)))
+            inspection_targets = tuple(
+                name
+                for name in _strings(plan.get("inspection_targets"))
+                if name not in preexisting_dirty or name in changed_files
+            )
             files = tuple(dict.fromkeys((
-                *initial_files, *changed_files,
-                *_strings(plan.get("inspection_targets")),
+                *reviewed_files, *inspection_targets,
             )))
             self._report_activity("reviewing")
             try:
                 findings = self._review(request, workspace, plan, files, git_diff)
             except CodingError:
-                return "the local reviewer could not produce a usable result", ("review_failed",)
+                return (
+                    "the local reviewer could not produce a usable result",
+                    ("review_failed",), reviewed_files,
+                )
             material = [item for item in findings if item["severity"] in _MATERIAL_REVIEW_SEVERITIES]
             if not material:
-                return None, ()
+                return None, (), reviewed_files
             if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
-                return "the local reviewer found unresolved material issues", ("local_review_material_findings",)
+                return (
+                    "the local reviewer found unresolved material issues",
+                    ("local_review_material_findings",), reviewed_files,
+                )
             before = (git_status, git_diff)
             briefing = build_briefing(request, plan) + "\n\n# Local reviewer findings\n" + "\n".join(
                 f"- [{item['severity']}] {item['title']}: {item['evidence']} Correction: {item['correction']}"
@@ -400,17 +434,31 @@ class CodingAgent:
             try:
                 correction = self._session.run_session(request, briefing)
             except CodingError:
-                return "the coding session could not correct local review findings", ("session_failed",)
+                return (
+                    "the coding session could not correct local review findings",
+                    ("session_failed",), reviewed_files,
+                )
             if not correction.completed:
-                return "the coding session could not correct local review findings", (
-                    correction.failure_code or "session_failed",
+                return (
+                    "the coding session could not correct local review findings",
+                    (correction.failure_code or "session_failed",), reviewed_files,
                 )
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
             # whole-worktree one would never match, so a correction that
             # changed nothing would read as progress.
-            after = self._git_evidence(workspace, initial_files)
+            post_correction_status, _ = self._git_evidence(workspace)
+            corrected_files = self._files_changed(
+                (), post_correction_status, preexisting_dirty,
+                self._modified_preexisting(workspace, preexisting_fingerprints),
+            )
+            next_files = tuple(dict.fromkeys((*reviewed_files, *corrected_files)))
+            after = self._git_evidence(workspace, next_files)
             if after == before:
-                return "the coding session did not change the reviewed candidate", ("local_review_material_findings",)
+                return (
+                    "the coding session did not change the reviewed candidate",
+                    ("local_review_material_findings",), reviewed_files,
+                )
+            reviewed_files = next_files
         raise AssertionError("local review loop must return within its bound")
 
     def _review(
@@ -692,15 +740,44 @@ class CodingAgent:
         written: tuple[str, ...],
         git_status: str,
         preexisting_dirty: tuple[str, ...],
+        modified_preexisting: tuple[str, ...] = (),
     ) -> tuple[str, ...]:
         preexisting = set(preexisting_dirty)
+        modified = set(modified_preexisting)
         names = list(written)
         for item in files_from_git_status(git_status):
-            if item in preexisting:
+            if item in preexisting and item not in modified:
                 continue
             if item not in names:
                 names.append(item)
         return tuple(names[:MAX_REPORTED_FILES])
+
+    @staticmethod
+    def _file_fingerprints(
+        workspace: CodingWorkspace, paths: tuple[str, ...]
+    ) -> dict[str, str | None]:
+        """Streaming fingerprints distinguish job edits from inherited dirt."""
+        fingerprints: dict[str, str | None] = {}
+        for name in paths:
+            try:
+                target = workspace.resolve(name)
+                digest = hashlib.sha256()
+                with target.open("rb") as source:
+                    for chunk in iter(lambda: source.read(64 * 1024), b""):
+                        digest.update(chunk)
+            except (CodingError, OSError):
+                fingerprints[name] = None
+            else:
+                fingerprints[name] = digest.hexdigest()
+        return fingerprints
+
+    @classmethod
+    def _modified_preexisting(
+        cls, workspace: CodingWorkspace, before: Mapping[str, str | None]
+    ) -> tuple[str, ...]:
+        """Only inherited paths whose bytes changed become this job's evidence."""
+        after = cls._file_fingerprints(workspace, tuple(before))
+        return tuple(name for name, value in before.items() if after.get(name) != value)
 
     def _outcome(
         self,

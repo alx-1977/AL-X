@@ -299,10 +299,27 @@ def build_dhl_executors(
         payload = account.read_bill_attachment(invoice_id, attachment_id, media_type)
         return hashlib.sha256(payload).hexdigest() == digest
 
+    def _stored_attachment(
+        invoice_id: str, attachment: Any
+    ) -> Mapping[str, Any] | None:
+        """Find this exact already-stored payload through Xero's stable IDs."""
+        for item in account.list_bill_attachments(invoice_id):
+            attachment_id = str(item.get("AttachmentID") or "")
+            if not attachment_id:
+                continue
+            media_type = str(item.get("MimeType") or attachment.media_type)
+            if _verified_attachment(
+                invoice_id, attachment_id, media_type, attachment.sha256
+            ):
+                return item
+        return None
+
     def _attach(invoice_id: str, attachment: Any, payload: bytes) -> Mapping[str, Any]:
-        uploaded = account.attach_bill_document(
-            invoice_id, attachment.filename, attachment.media_type, payload
-        )
+        uploaded = _stored_attachment(invoice_id, attachment)
+        if uploaded is None:
+            uploaded = account.attach_bill_document(
+                invoice_id, attachment.filename, attachment.media_type, payload
+            )
         attachment_id = str(uploaded.get("AttachmentID") or "")
         if not attachment_id:
             raise XeroAccessError("response_invalid")
@@ -1103,7 +1120,7 @@ def build_dhl_executors(
         steps.append("verified_duty_tax_draft")
 
         # D-022 names the PDF as the human-readable source stored with the bill.
-        _attach(invoice_id, pdf_attachment, pdf_payload)
+        uploaded = _attach(invoice_id, pdf_attachment, pdf_payload)
         steps.append("attached_and_verified_invoice")
 
         # Attachment is an external write too. Re-read after it and compare
@@ -1124,6 +1141,21 @@ def build_dhl_executors(
                 "dhl_duty_tax_invoice",
                 "draft_changed",
                 f"the duty-tax-paid draft changed before authorisation: {mismatch}",
+                waybill,
+                before_authorisation,
+                steps,
+                references,
+            )
+        if not _verified_attachment(
+            invoice_id,
+            str(uploaded.get("AttachmentID") or ""),
+            pdf_attachment.media_type,
+            pdf_attachment.sha256,
+        ):
+            return returned(
+                "dhl_duty_tax_invoice",
+                "supporting_document_missing",
+                "the duty-tax invoice is no longer stored on the bill being authorised",
                 waybill,
                 before_authorisation,
                 steps,

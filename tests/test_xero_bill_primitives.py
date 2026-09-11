@@ -821,6 +821,23 @@ class XeroAccountingAdapterTests(unittest.TestCase):
                         payload,
                     )
 
+    def test_json_attachment_content_is_not_treated_as_xero_metadata(self) -> None:
+        payload = json.dumps({
+            "Attachments": [{
+                "AttachmentID": "att-sad",
+                "Content": "this is the attachment's own JSON",
+            }],
+        }).encode("utf-8")
+        response = self.response({})
+        response.content = payload
+        with patch("httpx.request", return_value=response):
+            self.assertEqual(
+                self.adapter.read_bill_attachment(
+                    "bill/1", "att-sad", "application/json"
+                ),
+                payload,
+            )
+
     def test_attachment_readback_matches_attachment_id_without_a_filename(self) -> None:
         sad = b"sad-500-pdf"
         worksheet = b"worksheet-pdf"
@@ -889,6 +906,11 @@ class XeroAccountingAdapterTests(unittest.TestCase):
                 "AttachmentID": "att-sad",
                 "FileName": "SAD 500.pdf",
                 "Content": "A",
+            }),
+            ("invalid_characters", {
+                "AttachmentID": "att-sad",
+                "FileName": "SAD 500.pdf",
+                "Content": "YWJj!!!",
             }),
         ):
             with self.subTest(label=label):
