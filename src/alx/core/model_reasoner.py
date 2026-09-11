@@ -66,6 +66,17 @@ in new_evidence in this same mutation. Never add an evidence: prefix there and n
 invent an identifier. If available_history_evidence_ids is empty and you create no
 new evidence, evidence_refs must be empty. Never route by phrase, call an unregistered capability, fabricate evidence,
 erase history, or alter approvals.
+Completion is granted on evidence, not on assertion. A request_completion mutation
+succeeds only when every success criterion of the goal is named in the supports field
+of some evidence item, and each of those items cites the attempt that actually did the
+work, as attempt:<call_id> from available_memory_sources. A criterion nobody's evidence
+supports leaves the goal unfinished however well the work went, and the mutation is
+refused. Progress, decision and correction records do not carry this: they describe
+what happened, while evidence is what a criterion rests on.
+Include those evidence items in the same goal mutation as the request_completion, in
+new_evidence. That is one decision, so a criterion proved by a call whose result you
+already have needs no further step: record the evidence and request completion
+together.
 The capability catalogue you are shown is the authoritative namespace of what you
 can call on this step. Its ids are exact strings: call one by the id exactly as
 written, never by an approximation, a description or a name you expect to exist.
@@ -853,6 +864,14 @@ def decision_schema() -> dict[str, Any]:
                     item.value for item in GoalMutationKind
                     if item is not GoalMutationKind.AWAIT_APPROVAL
                 ],
+                "description": (
+                    "request_completion is accepted only when every success "
+                    "criterion is named in the supports field of some evidence "
+                    "item citing the succeeded attempt that did the work. "
+                    "Include that evidence in new_evidence in this same "
+                    "mutation; a criterion no evidence supports leaves the "
+                    "goal unfinished and the mutation is refused."
+                ),
             },
             "objective_summary": nullable_string,
             "success_criteria": _nullable(_array({"id": string, "description": string})),
