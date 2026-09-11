@@ -291,30 +291,26 @@ def build_dhl_executors(
             "TaxAmount": 0.0,
         }
 
-    def _verified_attachment(invoice_id: str, filename: str, digest: str) -> bool:
-        for item in account.list_bill_attachments(invoice_id):
-            if str(item.get("FileName") or "") != filename:
-                continue
-            payload = account.read_bill_attachment(
-                invoice_id,
-                str(item.get("AttachmentID") or ""),
-                str(item.get("MimeType") or ""),
-            )
-            if hashlib.sha256(payload).hexdigest() == digest:
-                return True
-        return False
+    def _verified_attachment(
+        invoice_id: str, attachment_id: str, media_type: str, digest: str
+    ) -> bool:
+        if not attachment_id:
+            return False
+        payload = account.read_bill_attachment(invoice_id, attachment_id, media_type)
+        return hashlib.sha256(payload).hexdigest() == digest
 
-    def _attach(invoice_id: str, attachment: Any, payload: bytes) -> None:
-        stored = {
-            str(item.get("FileName") or "")
-            for item in account.list_bill_attachments(invoice_id)
-        }
-        if attachment.filename not in stored:
-            account.attach_bill_document(
-                invoice_id, attachment.filename, attachment.media_type, payload
-            )
-        if not _verified_attachment(invoice_id, attachment.filename, attachment.sha256):
+    def _attach(invoice_id: str, attachment: Any, payload: bytes) -> Mapping[str, Any]:
+        uploaded = account.attach_bill_document(
+            invoice_id, attachment.filename, attachment.media_type, payload
+        )
+        attachment_id = str(uploaded.get("AttachmentID") or "")
+        if not attachment_id:
+            raise XeroAccessError("response_invalid")
+        if not _verified_attachment(
+            invoice_id, attachment_id, attachment.media_type, attachment.sha256
+        ):
             raise DhlDocumentError("supporting_document_mismatch")
+        return uploaded
 
     def _expected_lines(
         waybill: str, duty: Decimal, vat: Decimal
@@ -753,10 +749,13 @@ def build_dhl_executors(
         # Every customs document found above, plus the invoice, must still be
         # on the bill when it is authorised.
         required_documents = [
-            (str(item.get("FileName") or ""), hashlib.sha256(stored).hexdigest())
+            (
+                str(item.get("AttachmentID") or ""),
+                str(item.get("MimeType") or ""),
+                hashlib.sha256(stored).hexdigest(),
+            )
             for item, stored in customs_records
         ]
-        required_documents.append((attachment.filename, attachment.sha256))
         steps.append("re_verified_customs_evidence")
 
         # The draft must still agree with that evidence before it is completed.
@@ -812,7 +811,14 @@ def build_dhl_executors(
         # The invoice is attached before the bill is renamed. Renaming first
         # would strand a bill that no longer answers to its provisional number
         # if attachment then failed, leaving neither stage able to find it.
-        _attach(invoice_id, attachment, payload)
+        uploaded = _attach(invoice_id, attachment, payload)
+        required_documents.append(
+            (
+                str(uploaded.get("AttachmentID") or ""),
+                attachment.media_type,
+                attachment.sha256,
+            )
+        )
         steps.append("attached_and_verified_invoice")
 
         completed_bill = {
@@ -861,12 +867,12 @@ def build_dhl_executors(
 
         # Every source document must still be on the bill, byte-for-byte, at
         # the moment it is authorised.
-        for filename, digest in required_documents:
-            if not _verified_attachment(invoice_id, filename, digest):
+        for attachment_id, media_type, digest in required_documents:
+            if not _verified_attachment(invoice_id, attachment_id, media_type, digest):
                 return returned(
                     "dhl_invoice",
                     "supporting_document_missing",
-                    f"{filename} is not stored on the bill being authorised",
+                    "a required supporting document is not stored on the bill being authorised",
                     waybill,
                     updated,
                     steps,
@@ -1099,16 +1105,6 @@ def build_dhl_executors(
         # D-022 names the PDF as the human-readable source stored with the bill.
         _attach(invoice_id, pdf_attachment, pdf_payload)
         steps.append("attached_and_verified_invoice")
-        if not _verified_attachment(invoice_id, pdf_attachment.filename, pdf_attachment.sha256):
-            return returned(
-                "dhl_duty_tax_invoice",
-                "supporting_document_missing",
-                f"{pdf_attachment.filename} is not stored on the bill",
-                waybill,
-                before,
-                steps,
-                references,
-            )
 
         # Attachment is an external write too. Re-read after it and compare
         # the exact payload again immediately before authorisation, rather

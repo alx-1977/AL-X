@@ -786,6 +786,64 @@ class DhlImportLifecycleTests(unittest.TestCase):
         self.assertTrue(all(line["TaxAmount"] == 0 for line in bill["LineItems"]))
         self.assertEqual(result.values["attached"], ("CPTIR00273840.pdf",))
 
+    def test_upload_response_identity_verifies_when_xero_returns_a_different_filename(self) -> None:
+        original = self.xero.attach_bill_document
+
+        def renamed_response(invoice_id, filename, media_type, content):
+            stored = original(invoice_id, filename, media_type, content)
+            return {**stored, "FileName": "xero-renamed.pdf"}
+
+        self.xero.attach_bill_document = renamed_response
+        self.xero.list_bill_attachments = lambda _invoice_id: (_ for _ in ()).throw(
+            AssertionError("post-upload verification must not rediscover by filename")
+        )
+
+        result = self.duty_tax()
+
+        self.assertTrue(result.values["completed"])
+
+    def test_multiple_uploads_read_back_the_exact_returned_attachment_ids(self) -> None:
+        original_read = self.xero.read_bill_attachment
+        read_ids = []
+
+        def record_read(invoice_id, attachment_id, media_type):
+            read_ids.append(attachment_id)
+            return original_read(invoice_id, attachment_id, media_type)
+
+        self.xero.read_bill_attachment = record_read
+        result = self.customs()
+
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(read_ids, ["attachment-1", "attachment-2"])
+
+    def test_missing_attachment_id_in_upload_response_fails_closed(self) -> None:
+        original = self.xero.attach_bill_document
+
+        def missing_id(invoice_id, filename, media_type, content):
+            original(invoice_id, filename, media_type, content)
+            return {"FileName": filename, "MimeType": media_type}
+
+        self.xero.attach_bill_document = missing_id
+        result = self.duty_tax()
+
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "response_invalid")
+
+    def test_wrong_content_at_the_returned_attachment_id_still_fails_hash_verification(self) -> None:
+        original = self.xero.attach_bill_document
+
+        def attach_then_tamper(invoice_id, filename, media_type, content):
+            record = original(invoice_id, filename, media_type, content)
+            records = self.xero.attachments[invoice_id]
+            records[-1] = (record, b"different document")
+            return record
+
+        self.xero.attach_bill_document = attach_then_tamper
+        result = self.duty_tax()
+
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "supporting_document_mismatch")
+
     def test_duty_tax_paid_is_retry_safe_after_authorisation_failure(self) -> None:
         original = self.xero.authorise_bill
         attempts = 0
