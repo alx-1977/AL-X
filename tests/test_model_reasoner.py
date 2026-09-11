@@ -15,7 +15,7 @@ from alx.contracts import (  # noqa: E402
     CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
     ConversationOrigin, ConversationTurn, DecisionValidationError,
     GoalMutationKind, GoalState, GoalSummary, MemoryKind, ModelCompletion, Objective,
-    ReasoningContext, SideEffect,
+    ReasoningContext, SideEffect, Evidence, history_evidence_ids,
     StructuredSchema, SuccessCriterion, ValueKind,
 )
 from alx.core import ModelReasoner  # noqa: E402
@@ -370,6 +370,31 @@ class ModelReasonerTests(unittest.TestCase):
             rules(_attempt_is_citable),
             rules(CoreAgent._attempt_is_citable_evidence_source),
         )
+
+    def test_history_evidence_ids_offered_to_core_match_runtime_grounding(self) -> None:
+        """History records cite bare evidence IDs, never provenance references."""
+        from alx.core.model_reasoner import _context_payload
+
+        state = replace(goal(), evidence=(Evidence(
+            "evidence-mail-59093", "mail_observation",
+            source_references=("turn:turn-1",),
+        ),))
+        payload = json.loads(_context_payload(ReasoningContext(
+            active_goal=state, turns=(), capabilities=(CAPABILITY,),
+            unfinished_goals=(GoalSummary.of(state),),
+            conversation_id="conversation-1",
+        )))
+        offered = set(payload["available_history_evidence_ids"])
+        self.assertEqual(offered, history_evidence_ids(state.evidence))
+        self.assertNotIn("evidence:evidence-mail-59093", offered)
+
+    def test_protocol_and_schema_forbid_invented_history_evidence_ids(self) -> None:
+        from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
+
+        self.assertIn("available_history_evidence_ids", PROTOCOL_INSTRUCTIONS)
+        self.assertIn("never\ninvent an identifier", PROTOCOL_INSTRUCTIONS)
+        description = json.dumps(decision_schema())
+        self.assertIn("Never invent", description)
 
     def test_a_future_call_id_is_never_offered(self) -> None:
         """The live case: an identifier for a call that does not exist yet."""

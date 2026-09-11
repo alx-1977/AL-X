@@ -21,6 +21,7 @@ from alx.contracts import (
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
     ContentOrigin, ContentProvenance, RetentionPolicy,
+    history_evidence_ids,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -1162,10 +1163,7 @@ class CoreAgent:
             proposed_ids = [getattr(item, attribute) for item in proposed]
             if len(proposed_ids) != len(set(proposed_ids)) or existing_ids.intersection(proposed_ids):
                 return "durable_record_id_reused"
-        evidence_ids = {
-            *(item.evidence_id for item in state.evidence),
-            *(item.evidence_id for item in proposal.new_evidence),
-        }
+        evidence_ids = history_evidence_ids(state.evidence, proposal.new_evidence)
         for record in (
             *proposal.new_decisions,
             *proposal.new_corrections,
@@ -1190,7 +1188,7 @@ class CoreAgent:
             if len(identifiers) != len(set(identifiers)):
                 return "durable_record_id_reused"
         evidence_ids = set() if existing_evidence_ids is None else set(existing_evidence_ids)
-        evidence_ids.update(item.evidence_id for item in proposal.new_evidence)
+        evidence_ids.update(history_evidence_ids(proposal.new_evidence))
         for record in (
             *proposal.new_decisions,
             *proposal.new_corrections,
@@ -1412,11 +1410,21 @@ class CoreAgent:
         references: list[str] = []
         for item in proposal.new_evidence:
             references.extend(item.source_references)
+        history_references = [
+            reference
+            for record in (
+                *proposal.new_decisions,
+                *proposal.new_corrections,
+                *proposal.new_progress,
+            )
+            for reference in record.evidence_refs
+        ]
         try:
             self._record_goal_rejection({
                 "conversation_id": conversation.conversation_id,
                 "reason": reason,
                 "source_references": references,
+                "history_evidence_references": history_references,
                 "evidence_ids": [item.evidence_id for item in proposal.new_evidence],
                 "mutation_kind": proposal.kind.value,
                 "recorded_at": now.isoformat(),

@@ -35,6 +35,7 @@ from alx.contracts import (
     StructuredSchema,
     SuccessCriterion,
     WorkItem,
+    history_evidence_ids,
 )
 
 
@@ -58,7 +59,12 @@ not among them. A call you intend to make becomes citable
 once its result is in your context, which is a later step. An evidence item's supports field lists success criterion identifiers
 only, taken from the active goal's success_criteria or from the criteria created
 in the same mutation; it is not for decision, correction, or progress record
-identifiers, and evidence supporting no criterion must leave it empty. Never route by phrase, call an unregistered capability, fabricate evidence,
+identifiers, and evidence supporting no criterion must leave it empty. A decision,
+correction, or progress record's evidence_refs is a different namespace: use only
+the bare IDs explicitly listed in available_history_evidence_ids, or an ID created
+in new_evidence in this same mutation. Never add an evidence: prefix there and never
+invent an identifier. If available_history_evidence_ids is empty and you create no
+new evidence, evidence_refs must be empty. Never route by phrase, call an unregistered capability, fabricate evidence,
 erase history, or alter approvals. You may propose one exact action approval only
 when the latest retained person turn explicitly authorizes that same consequential
 capability call; cite that turn exactly. The proposal's approval_id must be the
@@ -682,6 +688,11 @@ def _context_payload(context: ReasoningContext) -> str:
                 if item.call is not None and _attempt_is_citable(item)
             ),
         ],
+        # History records cite bare evidence IDs, not provenance references.
+        # This list uses the exact predicate the runtime grounding check uses.
+        "available_history_evidence_ids": sorted(
+            history_evidence_ids(() if goal is None else goal.evidence)
+        ),
         "retrieved_memories": [
             {
                 "memory_id": item.memory_id,
@@ -756,7 +767,9 @@ def decision_schema() -> dict[str, Any]:
             "description": (
                 "Identifiers of evidence items supporting this record. Each must "
                 "already exist in the goal's evidence or be created as new_evidence "
-                "in this same mutation. Empty if the record rests on no evidence."
+                "in this same mutation. Existing IDs are listed exactly, without an "
+                "evidence: prefix, in available_history_evidence_ids. Never invent "
+                "an identifier. Empty if the record rests on no evidence."
             ),
         },
     }
