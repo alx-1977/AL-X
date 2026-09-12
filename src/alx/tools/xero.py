@@ -38,6 +38,7 @@ DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
 
 _FAILURES = (
     "arguments_unusable",
+    "specialist_unconfigured",
     "connection_failed",
     "not_connected",
     "token_unreadable",
@@ -954,7 +955,7 @@ def build_xero_executors(
             )
 
         if extractor is None:
-            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+            return failed(CAPTURE_SUPPLIER_INVOICE, "specialist_unconfigured")
         try:
             reference = MailReference(
                 _required(arguments, "mailbox_id"),

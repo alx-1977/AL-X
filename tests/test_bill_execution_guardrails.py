@@ -61,6 +61,7 @@ def runtime():
             Path(directory),
             FakeMail(),
             lambda: "call",
+            lambda *_: {},
         )
 
 

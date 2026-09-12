@@ -107,14 +107,15 @@ def build_xero_runtime(
         LIST_XERO_TAX_RATES: read_policy,
         FIND_XERO_BILL: read_policy,
         READ_XERO_BILL: read_policy,
-        CAPTURE_SUPPLIER_INVOICE: write_policy,
         DELETE_XERO_DRAFT_BILL: delete_policy,
     }
-    return XeroRuntime(
-        oauth,
-        adapter,
-        XERO_DEFINITIONS,
-        policies,
+    definitions = tuple(
+        definition
+        for definition in XERO_DEFINITIONS
+        if extractor is not None
+        or definition.capability_id != CAPTURE_SUPPLIER_INVOICE
+    )
+    executors = dict(
         build_xero_executors(
             adapter,
             mail_account,
@@ -123,7 +124,22 @@ def build_xero_runtime(
             settings.default_account_code,
             settings.default_tax_type,
             classify_dhl_document,
-        ),
+        )
+    )
+    if extractor is not None:
+        policies[CAPTURE_SUPPLIER_INVOICE] = write_policy
+    else:
+        # The catalogue promises that each offered capability is callable in
+        # this runtime. Supplier capture cannot read a document without its
+        # bounded specialist, so it is absent rather than advertised as a
+        # callable that will fail before doing any work.
+        executors.pop(CAPTURE_SUPPLIER_INVOICE)
+    return XeroRuntime(
+        oauth,
+        adapter,
+        definitions,
+        policies,
+        executors,
         frozenset(
             {
                 XERO_READ_PERMISSION,

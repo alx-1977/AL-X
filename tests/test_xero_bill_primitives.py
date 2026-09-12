@@ -242,6 +242,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: "call",
+                lambda *_: captured_invoice(),
             )
         # Unattended bill writes must not silently carry deletion with them.
         self.assertFalse(runtime.policies[CAPTURE_SUPPLIER_INVOICE].approval_required)
@@ -312,6 +313,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: "call",
+                lambda *_: captured_invoice(),
             )
         gate = SafetyGate(runtime.policies)
         for capability_id in (
@@ -343,6 +345,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: "call",
+                lambda *_: captured_invoice(),
             )
         self.assertEqual(
             runtime.permissions,
@@ -422,6 +425,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: current_call_id[0],
+                lambda *_: captured_invoice(),
             )
             broker = CapabilityBroker(
                 registry,
