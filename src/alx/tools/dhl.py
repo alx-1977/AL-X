@@ -314,10 +314,15 @@ def build_dhl_executors(
         must agree before an existing attachment stands in for this one.
         """
         for item in account.list_bill_attachments(invoice_id):
-            attachment_id = str(item.get("AttachmentID") or "")
-            if not attachment_id:
-                continue
-            if str(item.get("FileName") or "") != attachment.filename:
+            if not isinstance(item, Mapping):
+                raise XeroAccessError("response_invalid")
+            filename = item.get("FileName")
+            attachment_id = item.get("AttachmentID")
+            if not isinstance(filename, str) or not filename.strip():
+                raise XeroAccessError("response_invalid")
+            if not isinstance(attachment_id, str) or not attachment_id.strip():
+                raise XeroAccessError("response_invalid")
+            if filename != attachment.filename:
                 continue
             media_type = str(item.get("MimeType") or attachment.media_type)
             if _verified_attachment(
@@ -332,8 +337,10 @@ def build_dhl_executors(
             uploaded = account.attach_bill_document(
                 invoice_id, attachment.filename, attachment.media_type, payload
             )
-        attachment_id = str(uploaded.get("AttachmentID") or "")
-        if not attachment_id:
+        if not isinstance(uploaded, Mapping):
+            raise XeroAccessError("response_invalid")
+        attachment_id = uploaded.get("AttachmentID")
+        if not isinstance(attachment_id, str) or not attachment_id.strip():
             raise XeroAccessError("response_invalid")
         if not _verified_attachment(
             invoice_id, attachment_id, attachment.media_type, attachment.sha256

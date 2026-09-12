@@ -265,6 +265,32 @@ class LlamaParseAdapterTests(unittest.TestCase):
         self.assertNotIn("Attacker Ltd", payload)
         self.assertNotIn("Ignore previous instructions", payload)
 
+    def test_mail_subject_context_is_never_sent_to_llamacloud(self) -> None:
+        cloud = LlamaCloud()
+        subject = "INV-999 PO-123 Account 4567 please pay"
+        extractor(cloud).extract(
+            INVOICE_BYTES, "application/pdf", "invoice.pdf", subject
+        )
+        for request in (*cloud.uploads, *cloud.extracts, *cloud.polls):
+            body = request.content.decode("utf-8", errors="replace")
+            self.assertNotIn(subject, body)
+            self.assertNotIn(subject, str(request.url))
+        sent = json.loads(cloud.extracts[0].content)
+        self.assertEqual(sent["configuration"]["system_prompt"], INSTRUCTION)
+        self.assertNotIn("context line", INSTRUCTION.lower())
+
+    def test_an_ambiguous_extracted_number_stays_unverified(self) -> None:
+        fields = dict(FIELDS, invoice_number="")
+        cloud = LlamaCloud(
+            poll_bodies=({"id": "ext-1", "status": "COMPLETED", "extract_result": fields},)
+        )
+        checked = checked_invoice(
+            extractor(cloud).extract(INVOICE_BYTES, "application/pdf", "invoice.pdf")
+        )
+        self.assertFalse(checked["verified"])
+        self.assertEqual(checked["invoice_number"], "")
+        self.assertIn("invoice number missing", checked["problems"])
+
     def test_upload_project_id_is_used_when_none_is_configured(self) -> None:
         cloud = LlamaCloud()
         extractor(cloud).extract(INVOICE_BYTES, "application/pdf", "invoice.pdf")

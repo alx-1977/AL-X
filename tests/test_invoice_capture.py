@@ -674,6 +674,43 @@ class StaleDraftTests(unittest.TestCase):
         self.assertEqual(len(self.xero.bills), created, "a retry duplicated the bill")
         self.assertIn("resumed_existing_draft", result.values["steps"])
 
+    def test_malformed_attachment_filename_does_not_duplicate_on_retry(self) -> None:
+        capture = self.build()
+        capture(arguments())
+        invoice_id = next(iter(self.xero.bills))
+        self.xero.bills[invoice_id]["Status"] = "DRAFT"
+        before = len(self.xero.attachments[invoice_id])
+        original = self.xero.list_bill_attachments
+
+        def broken(listed_id):
+            rows = [dict(item) for item in original(listed_id)]
+            rows[0].pop("FileName")
+            return tuple(rows)
+
+        self.xero.list_bill_attachments = broken
+        result = capture(arguments())
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "response_invalid")
+        self.assertEqual(len(self.xero.attachments[invoice_id]), before)
+
+    def test_malformed_attachment_id_does_not_duplicate_on_retry(self) -> None:
+        capture = self.build()
+        capture(arguments())
+        invoice_id = next(iter(self.xero.bills))
+        self.xero.bills[invoice_id]["Status"] = "DRAFT"
+        before = len(self.xero.attachments[invoice_id])
+        original = self.xero.list_bill_attachments
+
+        def broken(listed_id):
+            rows = [dict(item) for item in original(listed_id)]
+            rows[0]["AttachmentID"] = ""
+            return tuple(rows)
+
+        self.xero.list_bill_attachments = broken
+        result = capture(arguments())
+        self.assertEqual(result.failure["code"], "response_invalid")
+        self.assertEqual(len(self.xero.attachments[invoice_id]), before)
+
 
 class ProcessedFilingTests(unittest.TestCase):
     """A captured invoice's mail is filed rather than left in the inbox."""
@@ -760,6 +797,20 @@ class ReturnsToCoreTests(unittest.TestCase):
         self.assertFalse(result.values["completed"])
         self.assertEqual(result.values["returned_for"], "extraction_unverified")
         self.assertIn("total missing", result.values["detail"])
+        self.assertEqual(self.xero.created, 0)
+
+    def test_an_empty_invoice_number_returns_unverified_to_core(self) -> None:
+        capture = self.build(
+            lambda *_: extracted(
+                invoice_number="",
+                verified=False,
+                problems=("invoice number missing",),
+            )
+        )
+        result = capture(arguments())
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "extraction_unverified")
+        self.assertIn("invoice number missing", result.values["detail"])
         self.assertEqual(self.xero.created, 0)
 
     def test_two_similar_suppliers_return_to_core(self) -> None:

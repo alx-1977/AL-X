@@ -247,6 +247,18 @@ class ExtractionTests(unittest.TestCase):
         self.assertIn("invoice number missing", result["problems"])
         self.assertIn("supplier name missing", result["problems"])
 
+    def test_an_ambiguous_invoice_number_is_unverified_not_guessed(self) -> None:
+        """Extraction leaves the number empty; checked_invoice does not invent one."""
+        result = checked_invoice(answer(invoice_number=""))
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["invoice_number"], "")
+        self.assertIn("invoice number missing", result["problems"])
+
+    def test_extraction_must_leave_an_ambiguous_invoice_number_empty(self) -> None:
+        self.assertIn("empty invoice_number", INSTRUCTION)
+        self.assertIn("Do not guess", INSTRUCTION)
+        self.assertNotIn("context line", INSTRUCTION.lower())
+
     def test_an_unreadable_total_is_never_guessed(self) -> None:
         result = checked_invoice(answer(total="see attached"))
         self.assertFalse(result["verified"])

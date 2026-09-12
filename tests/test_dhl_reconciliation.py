@@ -1537,6 +1537,76 @@ class AttachmentIdentityTests(unittest.TestCase):
         self.assertNotEqual(worksheets[0][1], worksheets[1][1])
         self.assertNotEqual(worksheets[0][0], worksheets[1][0])
 
+    def test_missing_filename_metadata_fails_closed_before_reupload(self) -> None:
+        original = self.xero.authorise_bill
+        attempts = 0
+
+        def fail_once(invoice_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise XeroAccessError("connection_failed")
+            return original(invoice_id)
+
+        self.xero.authorise_bill = fail_once
+        first = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertEqual(first.failure["code"], "connection_failed")
+        record, _content = self.xero.attachments["bill-1"][0]
+        record.pop("FileName")
+        before = len(self.xero.attachments["bill-1"])
+        second = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertEqual(second.failure["code"], "response_invalid")
+        self.assertEqual(len(self.xero.attachments["bill-1"]), before)
+
+    def test_missing_attachment_id_fails_closed_before_reupload(self) -> None:
+        original = self.xero.authorise_bill
+        attempts = 0
+
+        def fail_once(invoice_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise XeroAccessError("connection_failed")
+            return original(invoice_id)
+
+        self.xero.authorise_bill = fail_once
+        first = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertEqual(first.failure["code"], "connection_failed")
+        record, _content = self.xero.attachments["bill-1"][0]
+        record["AttachmentID"] = None
+        before = len(self.xero.attachments["bill-1"])
+        second = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertEqual(second.failure["code"], "response_invalid")
+        self.assertEqual(len(self.xero.attachments["bill-1"]), before)
+
 
 class TamperedDraftTests(unittest.TestCase):
     """A resumed draft is verified against its evidence, never assumed.

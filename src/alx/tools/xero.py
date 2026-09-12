@@ -637,6 +637,34 @@ def _required_attachment_values(
     return tuple(found)
 
 
+def _attachment_row_identity(item: Any) -> tuple[str, str]:
+    """Filename and AttachmentID from one Xero list row, or response_invalid.
+
+    Reuse inspects every listed row. A missing name cannot be classified as
+    'already stored' or 'not this document', and a missing identity cannot
+    be the selected attachment, so both fail closed before another upload.
+    """
+    if not isinstance(item, Mapping):
+        raise XeroAccessError("response_invalid")
+    filename = item.get("FileName")
+    attachment_id = item.get("AttachmentID")
+    if not isinstance(filename, str) or not filename.strip():
+        raise XeroAccessError("response_invalid")
+    if not isinstance(attachment_id, str) or not attachment_id.strip():
+        raise XeroAccessError("response_invalid")
+    return filename, attachment_id
+
+
+def _listed_attachments(
+    account: XeroAccountingAccount, invoice_id: str
+) -> tuple[Mapping[str, Any], ...]:
+    listed = []
+    for row in account.list_bill_attachments(invoice_id):
+        _attachment_row_identity(row)
+        listed.append(row)
+    return tuple(listed)
+
+
 def _verified_attachment(
     account: XeroAccountingAccount,
     invoice_id: str,
@@ -645,13 +673,13 @@ def _verified_attachment(
 ) -> Mapping[str, Any]:
     candidates = tuple(
         item
-        for item in account.list_bill_attachments(invoice_id)
-        if str(item.get("FileName") or "") == filename
+        for item in _listed_attachments(account, invoice_id)
+        if item.get("FileName") == filename
     )
     for item in candidates:
         attachment_id = str(item.get("AttachmentID") or "")
         media_type = str(item.get("MimeType") or "")
-        if not attachment_id or not media_type:
+        if not media_type:
             continue
         payload = account.read_bill_attachment(invoice_id, attachment_id, media_type)
         if hashlib.sha256(payload).hexdigest() == digest:
@@ -854,8 +882,8 @@ def build_xero_executors(
                 steps.append("created_draft")
 
             stored = {
-                str(item.get("FileName") or "")
-                for item in account.list_bill_attachments(invoice_id)
+                str(item.get("FileName"))
+                for item in _listed_attachments(account, invoice_id)
             }
             for document in documents:
                 if not isinstance(document, Mapping):
