@@ -40,6 +40,7 @@ from alx.providers.llamaparse import (  # noqa: E402
     EXTRACT_PATH,
     EXTRACT_TARGET,
     EXTRACT_TIER,
+    EXTRACT_VERSION,
     FILES_PATH,
     LlamaParseInvoiceExtractor,
     MAX_DOCUMENT_BYTES,
@@ -238,6 +239,15 @@ class LlamaParseAdapterTests(unittest.TestCase):
         self.assertEqual(configuration["system_prompt"], INSTRUCTION)
         self.assertNotIn("structured_output_json_schema_name", sent)
         self.assertNotIn("structured_output_json_schema_name", configuration)
+
+    def test_extract_sends_the_pinned_version_never_latest(self) -> None:
+        cloud = LlamaCloud()
+        extractor(cloud).extract(INVOICE_BYTES, "application/pdf", "invoice.pdf")
+        configuration = json.loads(cloud.extracts[0].content)["configuration"]
+        self.assertEqual(EXTRACT_VERSION, "2026-03-31")
+        self.assertEqual(configuration["version"], EXTRACT_VERSION)
+        self.assertNotEqual(configuration["version"], "latest")
+        self.assertNotIn('"latest"', cloud.extracts[0].content.decode("utf-8"))
 
     def test_untrusted_context_line_cannot_alter_the_system_prompt(self) -> None:
         cloud = LlamaCloud()

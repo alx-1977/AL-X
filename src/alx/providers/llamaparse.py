@@ -28,7 +28,11 @@ DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
 FILES_PATH = "/api/v1/beta/files"
 EXTRACT_PATH = "/api/v2/extract"
 EXTRACT_TIER = "agentic"
-EXTRACT_VERSION = "latest"
+# Extract v2 production pin: YYYY-MM-DD, not "latest". Official REST/SDK
+# examples use 2026-03-31 with the agentic tier.
+# https://developers.llamaindex.ai/llamaparse/extract/api/
+# https://developers.llamaindex.ai/llamaparse/extract/guides/configuring-extract/
+EXTRACT_VERSION = "2026-03-31"
 EXTRACT_TARGET = "per_doc"
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 20
