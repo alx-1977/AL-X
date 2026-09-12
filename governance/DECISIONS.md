@@ -1005,3 +1005,203 @@ or governance authority beyond the existing `coding.execute` authority.
 This amendment supersedes only the requirement that `grok_subscription` is the
 sole Coding Agent provider and the blanket prohibition on OpenAI and Claude
 coding transports. All other D-028 constraints remain unchanged.
+
+## D-029 — Bounded Git workspace authority for the Coding Agent
+
+- **Date:** 2026-09-12
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-12 during the AL/X development session,** explicitly authorising bounded Coding Agent Git workspace writes under this decision, including the path-scoped index-rollback exception. He stated the granted authority and its exclusions in his own words and directed that this record be moved from PROPOSED to APPROVED with that scope. This decision record is the durable governance record of that approval; no external ticket exists and none is required. Implemented on `feat/ca-git-workspace`, reviewed at PR #31.
+
+**Why this is a separate record.** D-028 enumerates what the Coding Agent may
+do, and read-only git inspection is the only git it names. Creating a branch
+and a commit is repository write state. That is new authority, so it is stated
+here rather than read into D-028's existing grant, and Friedl approved it on
+its own terms rather than by extension.
+
+**Purpose.** Let a coding job hand its result back as a branch and a commit
+SHA. Before this, a job returned a dirty worktree and AL/X had to reconstruct
+which change belonged to which job from a diff — which failed on 2026-09-11
+when a worktree carrying 109k of unrelated uncommitted work truncated the
+evidence four sessions in a row.
+
+**One outcome, one path.** The production outcome is: establish and report the
+git branch and commit state of one assigned coding worktree for one coding job.
+The authoritative path is `alx.providers.coding_git`, called only from
+`CodingAgent`. `coding_process.py` keeps its existing read-only git allowlist
+for diff and status evidence and gains nothing; it cannot create a branch or a
+commit, and `coding_git` cannot run a test. There is no second route, no shell,
+and no git authority for the coding session itself.
+
+### What AL/X decides
+
+Whether a job's result should become a branch and a commit at all; what the
+branch is called; what the commit says. These arrive as the structured
+`repair_branch` and `commit_message` arguments. Omitted, the capability behaves
+exactly as it did: it edits the worktree and returns a diff.
+
+### What the capability may do
+
+As approved by Friedl on 2026-09-12:
+
+- inspect HEAD, status and diff inside its assigned isolated worktree;
+- create or switch to the repair branch selected for that coding job;
+- stage only job-owned paths;
+- create one non-amending commit, after the job has passed its required
+  verification;
+- report branch, commit SHA, changed files and worktree state.
+
+### What it must not do
+
+Push; fetch; pull; merge; rebase; repository reset; checkout of unrelated
+paths; remote modification; stash operations of any kind; branch deletion;
+history rewriting; operation outside the assigned worktree; or staging a
+pre-existing dirty file the job did not itself change.
+
+These are refused by enumeration rather than by a denylist. `_WRITE_SHAPES`
+lists the exact argv forms that may run; nothing else can be constructed, so a
+forbidden operation is impossible rather than merely discouraged. A test
+asserts the size and subcommand set of that enumeration, so widening the
+authority cannot happen without a visible change to this boundary.
+
+The count is deliberately not repeated here. Stating it in two places let them
+drift: this record said eleven while the code had thirteen, which is a
+governance record understating granted authority — found in the PR #31
+re-review. The test is the authority on the number, and it fails on any
+change.
+
+### The index-rollback exception
+
+Friedl approved on 2026-09-12, in the same session recorded in the status
+above, the retention of one narrowly scoped reset:
+
+```
+git reset --quiet -- <paths>
+```
+
+solely as an index rollback mechanism when staging validation fails. Its
+approved scope:
+
+- it may operate only on explicitly named job paths;
+- it may not use `--hard`, `--soft` or `--mixed`, and may not target a commit
+  or a ref;
+- it may not discard worktree content;
+- it may not be exposed to the Coding Agent as general reset authority.
+
+The enumerated shape is a path-scoped reset with no ref argument, so all four
+conditions hold by construction rather than by convention: a `--hard` form or a
+commit argument is not a shape that can be built. This is not an entry in
+`governance/EXCEPTIONS.md`, which remains empty: it is a bound on an approved
+authority, not a permission to breach a law.
+
+### Deterministic sequence under Law 2
+
+`run_coding_task` may prepare the repair branch before the session and create
+the commit after verification, without returning to AL/X between those steps.
+This extends the deterministic-execution reasoning of D-020
+(`capture_supplier_invoice`) and D-021 (`process_dhl_import`) to this
+capability, and is named here because `docs/LAW_ENFORCEMENT.md` requires a
+deterministic sequence longer than a single external call to be named in an
+approved decision.
+
+The capability was already a sequence before this change — plan, session,
+local review, verification — and the outcome is unchanged: one bounded coding
+job, with evidence returned. What the two new steps add is the *form* that
+evidence takes, not a second outcome. Every step in the sequence has one
+objectively correct result; none decides business meaning. AL/X still decides
+whether to delegate at all, what the branch is called, what the commit says,
+and what the returned evidence means. Both new steps are optional and are
+performed only because she asked for them: omitting `repair_branch` and
+`commit_message` leaves the capability exactly as it was.
+
+Raised by the PR #31 review as a possible Law 2 violation (one tool hiding a
+workflow). It is recorded rather than dismissed because the rule it cites is
+the right rule; what it lacked was this repository's precedent that a named
+deterministic sequence is permitted.
+
+### Repository-supplied code
+
+No hook and no attribute filter contributes to a coding job's commit. Two
+mechanisms let a repository execute its own code inside an ordinary git
+command, both demonstrated on 2026-09-12, and both run with AL/X's privileges
+rather than the coding session's sandboxed ones:
+
+- a `pre-commit` hook runs after the index is authorised and can stage
+  anything. Suppressed by pointing `core.hooksPath` at a directory that does
+  not exist, which `--no-verify` does not achieve;
+- a `.gitattributes` clean filter runs during `git add` and rewrites the bytes
+  entering the index. It cannot be suppressed — filter names are arbitrary and
+  an in-tree `.gitattributes` overrides no configuration — so a path carrying
+  one is refused instead, detected with `git check-attr`, which reports the
+  filter without running it.
+
+A repository legitimately depending on a clean filter, Git LFS being the
+common case, therefore cannot be committed to by a coding job. That is the
+correct default for an authority this narrow. Supporting it would mean running
+arbitrary repository code, which is a change to this decision rather than a
+default to loosen.
+
+**Stated plainly:** refusing a filtered path prevents tampered content
+entering a commit. It does not prevent the filter from *executing*: `git
+status` and `git diff` run a clean filter to decide whether a path is
+modified, so any inspection of a filtered worktree runs it — including the
+read-only inspection that predates this decision. That is git's behaviour, not
+this capability's, and it is recorded here rather than left for a later
+reviewer to rediscover.
+
+### The residual concurrency window
+
+A coding job runs in a worktree it does not own, so another writer may stage
+something between the index readback and the commit. The PR #31 re-review
+raised this and it was reproduced by staging inside that window.
+
+The consequence is bounded but not eliminated. The committed tree is read back
+and compared against the authorised set, so such a commit is always detected
+and the job fails with `commit_contains_unauthorised_paths` naming the SHA. It
+is detected *after* the commit exists, and the commit is left in place: undoing
+it means moving a ref, which is history rewriting this decision withholds.
+What returns to AL/X is therefore the truth — a commit exists, it contains
+something the job did not authorise, and here is its SHA — and deciding what to
+do about it is hers.
+
+Eliminating the window entirely would require building the tree through an
+isolated temporary index and updating the ref by compare-and-swap. That is a
+larger mechanism than this authority currently justifies, and it is recorded
+here as a known bound rather than left for a later reviewer to rediscover.
+
+### Verification precedes the commit
+
+A commit is created only after the job has passed its required verification.
+Both halves are required: verification must have *run* and must have passed. A
+job where no candidate command survived the allowlist has not passed
+verification — it skipped it — and is reported with
+`unverified_not_committed` rather than committed. The job still succeeds and
+its work remains in the worktree as a diff; what it does not get is a commit
+asserting it was checked.
+
+This was found during the authority-boundary review of PR #31 and fixed there.
+The original condition failed a job only on `tests_run and tests_passed is
+False`, so an unverified job reached "succeeded" and was committed. An
+unverified commit is indistinguishable downstream from a verified one, which
+is what made the gap consequential rather than cosmetic.
+
+### Fail closed
+
+Staging is by named path only. After staging, the index is read back and
+compared against the authorised set; one unauthorised entry refuses the commit
+entirely rather than narrowing or widening it. An index already holding
+somebody else's staged work refuses before anything is touched, because
+un-staging it would be a change to their working state made without being
+asked. A failed job is never committed.
+
+### Not authorised by this decision
+
+Push authority; pull-request creation; GitHub interaction of any kind; merge;
+tags; history rewriting; branch deletion; stash use; or any change to D-026's
+merge authority, which remains with the single Core reasoning path.
+
+### Review condition
+
+Revisit if a coding job commits a file it did not change; if it reaches a
+repository other than its assigned worktree; if the enumerated shapes grow to
+include a network or history-rewriting operation; or before push or
+pull-request authority is considered.
