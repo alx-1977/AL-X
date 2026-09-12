@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlparse
 
 
 class ConfigurationError(ValueError):
@@ -320,6 +321,16 @@ class XeroSettings:
 LLAMAPARSE_DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
 
 
+def _absolute_http_url(value: str) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = urlparse(value.strip())
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
 @dataclass(frozen=True, slots=True)
 class LlamaParseSettings:
     """LlamaCloud structured extraction for supplier invoices, not Core cognition.
@@ -352,7 +363,7 @@ class LlamaParseSettings:
 
     @property
     def is_usable(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key) and _absolute_http_url(self.base_url)
 
     def __repr__(self) -> str:
         return (

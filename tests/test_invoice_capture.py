@@ -18,7 +18,11 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
-from alx.contracts import CapabilityResultState, MailAttachment  # noqa: E402
+from alx.contracts import (  # noqa: E402
+    CapabilityResultState,
+    MailAttachment,
+    XeroAccessError,
+)
 from alx.contracts import SideEffect  # noqa: E402
 from alx.bootstrap.xero import build_xero_runtime  # noqa: E402
 from support import xero_settings  # noqa: E402
@@ -237,6 +241,7 @@ class RoutineCaptureTests(unittest.TestCase):
                 "validated_supplied_values",
                 "created_draft",
                 "attached_and_verified_documents",
+                "re_verified_before_authorisation",
                 "authorised",
                 "read_back",
                 "verified",
@@ -248,6 +253,118 @@ class RoutineCaptureTests(unittest.TestCase):
         line = self.xero.bills["bill-1"]["LineItems"][0]
         self.assertEqual(line["AccountCode"], "310")
         self.assertEqual(line["TaxType"], "NONE")
+
+
+class AttachmentToctouTests(unittest.TestCase):
+    """Verified bytes must still be the bytes on the bill at authorisation."""
+
+    def capture_with(self, xero: FakeXero | None = None):
+        self.xero = xero or FakeXero()
+        self.authorised: list[str] = []
+        original = self.xero.authorise_bill
+
+        def authorise(invoice_id):
+            self.authorised.append(invoice_id)
+            return original(invoice_id)
+
+        self.xero.authorise_bill = authorise
+        return build_xero_executors(
+            self.xero, FakeMail(), lambda: "call-1", lambda *_: extracted()
+        )[CAPTURE_SUPPLIER_INVOICE]
+
+    def test_unchanged_attachment_is_authorised(self) -> None:
+        result = self.capture_with()(arguments())
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(self.authorised, ["bill-1"])
+        self.assertEqual(self.xero.bills["bill-1"]["Status"], "AUTHORISED")
+        self.assertIn("re_verified_before_authorisation", result.values["steps"])
+
+    def test_attachment_changed_before_authorisation_is_refused(self) -> None:
+        capture = self.capture_with()
+        original_read = self.xero.read_bill_attachment
+        reads = {"count": 0}
+
+        def read(invoice_id, attachment_id, media_type):
+            payload = original_read(invoice_id, attachment_id, media_type)
+            reads["count"] += 1
+            if reads["count"] >= 2:
+                return b"replaced-after-verify"
+            return payload
+
+        self.xero.read_bill_attachment = read
+        result = capture(arguments())
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "supporting_document_mismatch")
+        self.assertEqual(self.authorised, [])
+        self.assertNotEqual(self.xero.bills["bill-1"]["Status"], "AUTHORISED")
+
+    def test_attachment_changed_after_authorisation_returns_the_authorised_bill(self) -> None:
+        capture = self.capture_with()
+        original_read = self.xero.read_bill_attachment
+        reads = {"count": 0}
+
+        def read(invoice_id, attachment_id, media_type):
+            payload = original_read(invoice_id, attachment_id, media_type)
+            reads["count"] += 1
+            if reads["count"] >= 3:
+                return b"replaced-after-authorise"
+            return payload
+
+        self.xero.read_bill_attachment = read
+        result = capture(arguments())
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(result.failure)
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "supporting_document_mismatch")
+        self.assertEqual(self.authorised, ["bill-1"])
+        self.assertEqual(result.values["bill"]["status"], "AUTHORISED")
+        self.assertEqual(self.xero.bills["bill-1"]["Status"], "AUTHORISED")
+        self.assertIn("re_verified_before_authorisation", result.values["steps"])
+        self.assertIn("authorised", result.values["steps"])
+
+        created = self.xero.created
+        retry = capture(arguments())
+        self.assertFalse(retry.values["completed"])
+        self.assertEqual(retry.values["returned_for"], "duplicate_bill")
+        self.assertEqual(retry.values["bill"]["status"], "AUTHORISED")
+        self.assertEqual(self.xero.created, created)
+        self.assertEqual(self.authorised, ["bill-1"])
+
+    def test_post_authorisation_read_errors_still_return_the_authorised_bill(self) -> None:
+        capture = self.capture_with()
+        original_read = self.xero.read_bill_attachment
+        reads = {"count": 0}
+
+        def read(invoice_id, attachment_id, media_type):
+            payload = original_read(invoice_id, attachment_id, media_type)
+            reads["count"] += 1
+            if reads["count"] >= 3:
+                raise XeroAccessError("connection_failed")
+            return payload
+
+        self.xero.read_bill_attachment = read
+        result = capture(arguments())
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(result.failure)
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "connection_failed")
+        self.assertEqual(self.authorised, ["bill-1"])
+        self.assertEqual(result.values["bill"]["status"], "AUTHORISED")
+        self.assertIn("authorised", result.values["steps"])
+
+    def test_authorisation_reread_does_not_rediscover_by_filename(self) -> None:
+        capture = self.capture_with()
+        lists: list[int] = []
+        original_list = self.xero.list_bill_attachments
+
+        def listed(invoice_id):
+            lists.append(1)
+            return original_list(invoice_id)
+
+        self.xero.list_bill_attachments = listed
+        result = capture(arguments())
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(len(lists), 2)
 
 
 class RealDocumentTypeTests(unittest.TestCase):

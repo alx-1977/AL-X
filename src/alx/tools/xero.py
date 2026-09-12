@@ -689,6 +689,23 @@ def _verified_attachment(
     )
 
 
+def _require_attachment_bytes(
+    account: XeroAccountingAccount,
+    invoice_id: str,
+    attachment_id: str,
+    media_type: str,
+    digest: str,
+) -> None:
+    """Re-read one stored file by AttachmentID. Filename is not identity."""
+    if not isinstance(attachment_id, str) or not attachment_id.strip():
+        raise XeroAccessError("response_invalid")
+    if not isinstance(media_type, str) or not media_type.strip():
+        raise XeroAccessError("response_invalid")
+    payload = account.read_bill_attachment(invoice_id, attachment_id, media_type)
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise XeroAccessError("supporting_document_mismatch")
+
+
 def build_xero_executors(
     account: XeroAccountingAccount,
     mail: MailAccount,
@@ -885,6 +902,7 @@ def build_xero_executors(
                 str(item.get("FileName"))
                 for item in _listed_attachments(account, invoice_id)
             }
+            required_attachments: list[tuple[str, str, str]] = []
             for document in documents:
                 if not isinstance(document, Mapping):
                     raise ValueError("source_documents")
@@ -909,17 +927,37 @@ def build_xero_executors(
                         invoice_id, attachment.filename, attachment.media_type, content
                     )
                     stored.add(attachment.filename)
-                _verified_attachment(
+                item = _verified_attachment(
                     account, invoice_id, attachment.filename, digest
                 )
+                _filename, attachment_id = _attachment_row_identity(item)
+                media_type = str(item.get("MimeType") or "")
+                if not media_type:
+                    raise XeroAccessError("response_invalid")
+                required_attachments.append((attachment_id, media_type, digest))
                 attached.append(attachment.filename)
             steps.append("attached_and_verified_documents")
 
             if authorise_requested:
-                account.authorise_bill(invoice_id)
+                for attachment_id, media_type, digest in required_attachments:
+                    _require_attachment_bytes(
+                        account, invoice_id, attachment_id, media_type, digest
+                    )
+                steps.append("re_verified_before_authorisation")
+                authorised_payload = account.authorise_bill(invoice_id)
                 steps.append("authorised")
+                try:
+                    raw_bill = account.read_bill(invoice_id)
+                except XeroAccessError as error:
+                    return returned(
+                        error.code,
+                        "the authorised bill could not be read back",
+                        authorised_payload,
+                    )
+            else:
+                raw_bill = account.read_bill(invoice_id)
 
-            final = _bill_values(account.read_bill(invoice_id))
+            final = _bill_values(raw_bill)
             steps.append("read_back")
             expected_status = "AUTHORISED" if authorise_requested else "DRAFT"
             if (
@@ -934,8 +972,26 @@ def build_xero_executors(
                 return returned(
                     "read_back_mismatch",
                     "the committed bill does not match the requested values",
-                    account.read_bill(invoice_id),
+                    raw_bill,
                 )
+            if authorise_requested:
+                try:
+                    for attachment_id, media_type, digest in required_attachments:
+                        _require_attachment_bytes(
+                            account, invoice_id, attachment_id, media_type, digest
+                        )
+                except XeroAccessError as error:
+                    # Authorisation already happened. Report the AUTHORISED
+                    # bill with the real verification reason; do not collapse
+                    # this into a pre-authorisation failed() that looks like
+                    # the write never occurred.
+                    detail = (
+                        "the authorised bill's attachment no longer matches "
+                        "the verified document"
+                        if error.code == "supporting_document_mismatch"
+                        else "the authorised bill could not be re-verified"
+                    )
+                    return returned(error.code, detail, raw_bill)
             steps.append("verified")
             return CapabilityResult(
                 call_id_source(),
