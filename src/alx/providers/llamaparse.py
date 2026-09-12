@@ -123,22 +123,17 @@ class LlamaParseInvoiceExtractor:
             raise SpecialistError("unsupported_media_type")
         if not isinstance(filename, str):
             filename = ""
-        if not isinstance(context_line, str):
-            context_line = ""
         if not _usable_media(media_type, filename):
             raise SpecialistError("unsupported_media_type")
+        # context_line is untrusted mail metadata (subject/filename). Extract v2
+        # has no separate data field for it, so it is not sent: putting it in
+        # system_prompt would give it the same authority as INSTRUCTION.
         safe_name = Path(filename).name or _default_filename(media_type)
-        prompt = self._instruction
-        if context_line.strip():
-            prompt = (
-                f"{self._instruction}\n\n"
-                f"Context (email subject / filename): {context_line.strip()}"
-            )
         deadline = self._clock() + self._timeout_seconds
         file_id, project_id = self._upload(
             bytes(payload), media_type, safe_name, deadline
         )
-        job_id = self._start_extract(file_id, project_id, prompt, deadline)
+        job_id = self._start_extract(file_id, project_id, deadline)
         result = self._poll_extract(job_id, project_id, deadline)
         return _invoice_fields(result)
 
@@ -156,108 +151,102 @@ class LlamaParseInvoiceExtractor:
     def _url(self, path: str) -> str:
         return f"{self._base_url}{path}"
 
+    def _remaining(self, deadline: float) -> float:
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise SpecialistError("extraction_timeout")
+        return remaining
+
+    def _request(self, deadline: float, method: str, url: str, **kwargs) -> httpx.Response:
+        remaining = self._remaining(deadline)
+        kwargs["timeout"] = remaining
+        kwargs.setdefault("headers", self._headers())
+        failure = ""
+        try:
+            response = self._client.request(method, url, **kwargs)
+        except httpx.TimeoutException:
+            failure = "extraction_timeout"
+        except httpx.HTTPError:
+            failure = "provider_failed"
+        else:
+            self._remaining(deadline)
+            return response
+        self._remaining(deadline)
+        raise SpecialistError(failure)
+
     def _upload(
         self, payload: bytes, media_type: str, filename: str, deadline: float
     ) -> tuple[str, str]:
         kind = media_type.strip() or "application/octet-stream"
-        failure = ""
-        try:
-            response = self._client.post(
-                self._url(FILES_PATH),
-                headers=self._headers(),
-                params=self._params(),
-                files={"file": (filename, payload, kind)},
-                data={"purpose": "extract"},
-            )
-        except httpx.TimeoutException:
-            failure = "extraction_timeout"
-        except httpx.HTTPError:
-            failure = "provider_failed"
-        else:
-            body = _json_object(response)
-            file_id = body.get("id")
-            if not isinstance(file_id, str) or not file_id.strip():
-                raise SpecialistError("provider_failed")
-            project_id = body.get("project_id")
-            project = project_id.strip() if isinstance(project_id, str) else ""
-            return file_id.strip(), project
-        _raise_if_deadline(self._clock(), deadline)
-        raise SpecialistError(failure)
+        response = self._request(
+            deadline,
+            "POST",
+            self._url(FILES_PATH),
+            params=self._params(),
+            files={"file": (filename, payload, kind)},
+            data={"purpose": "extract"},
+        )
+        body = _json_object(response)
+        file_id = body.get("id")
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise SpecialistError("provider_failed")
+        project_id = body.get("project_id")
+        project = project_id.strip() if isinstance(project_id, str) else ""
+        return file_id.strip(), project
 
-    def _start_extract(
-        self, file_id: str, project_id: str, prompt: str, deadline: float
-    ) -> str:
-        failure = ""
-        try:
-            response = self._client.post(
-                self._url(EXTRACT_PATH),
-                headers=self._headers(),
-                params=self._params(project_id),
-                json={
-                    "file_input": file_id,
-                    "configuration": {
-                        "tier": EXTRACT_TIER,
-                        "version": EXTRACT_VERSION,
-                        "extraction_target": EXTRACT_TARGET,
-                        "max_pages": MAX_PAGES,
-                        "data_schema": self._data_schema,
-                        "system_prompt": prompt,
-                        "cite_sources": False,
-                        "confidence_scores": False,
-                    },
+    def _start_extract(self, file_id: str, project_id: str, deadline: float) -> str:
+        response = self._request(
+            deadline,
+            "POST",
+            self._url(EXTRACT_PATH),
+            params=self._params(project_id),
+            json={
+                "file_input": file_id,
+                "configuration": {
+                    "tier": EXTRACT_TIER,
+                    "version": EXTRACT_VERSION,
+                    "extraction_target": EXTRACT_TARGET,
+                    "max_pages": MAX_PAGES,
+                    "data_schema": self._data_schema,
+                    "system_prompt": self._instruction,
+                    "cite_sources": False,
+                    "confidence_scores": False,
                 },
-            )
-        except httpx.TimeoutException:
-            failure = "extraction_timeout"
-        except httpx.HTTPError:
-            failure = "provider_failed"
-        else:
-            job_id = _json_object(response).get("id")
-            if not isinstance(job_id, str) or not job_id.strip():
-                raise SpecialistError("provider_failed")
-            return job_id.strip()
-        _raise_if_deadline(self._clock(), deadline)
-        raise SpecialistError(failure)
+            },
+        )
+        job_id = _json_object(response).get("id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise SpecialistError("provider_failed")
+        return job_id.strip()
 
     def _poll_extract(
         self, job_id: str, project_id: str, deadline: float
     ) -> Mapping[str, Any]:
         path = f"{EXTRACT_PATH}/{job_id}"
         while True:
-            _raise_if_deadline(self._clock(), deadline)
-            failure = ""
-            try:
-                response = self._client.get(
-                    self._url(path),
-                    headers=self._headers(),
-                    params=self._params(project_id),
-                )
-            except httpx.TimeoutException:
-                failure = "extraction_timeout"
-            except httpx.HTTPError:
-                failure = "provider_failed"
-            else:
-                body = _json_object(response)
-                status = body.get("status")
-                if not isinstance(status, str):
-                    raise SpecialistError("provider_failed")
-                if status == "COMPLETED":
-                    result = body.get("extract_result")
-                    if not isinstance(result, Mapping):
-                        raise SpecialistError("answer_not_structured")
-                    return result
-                if status == "FAILED":
-                    raise SpecialistError("provider_failed")
-                if status == "CANCELLED":
-                    raise SpecialistError("provider_failed")
-                if status not in ("PENDING", "RUNNING"):
-                    raise SpecialistError("provider_failed")
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    raise SpecialistError("extraction_timeout")
-                self._sleeper(min(self._poll_interval_seconds, remaining))
-                continue
-            raise SpecialistError(failure)
+            response = self._request(
+                deadline,
+                "GET",
+                self._url(path),
+                params=self._params(project_id),
+            )
+            body = _json_object(response)
+            status = body.get("status")
+            if not isinstance(status, str):
+                raise SpecialistError("provider_failed")
+            if status == "COMPLETED":
+                result = body.get("extract_result")
+                if not isinstance(result, Mapping):
+                    raise SpecialistError("answer_not_structured")
+                return result
+            if status == "FAILED":
+                raise SpecialistError("provider_failed")
+            if status == "CANCELLED":
+                raise SpecialistError("provider_failed")
+            if status not in ("PENDING", "RUNNING"):
+                raise SpecialistError("provider_failed")
+            remaining = self._remaining(deadline)
+            self._sleeper(min(self._poll_interval_seconds, remaining))
 
 
 def _usable_media(media_type: str, filename: str) -> bool:
@@ -307,8 +296,3 @@ def _as_text(value: Any) -> str:
         except InvalidOperation:
             return ""
     return ""
-
-
-def _raise_if_deadline(now: float, deadline: float) -> None:
-    if now >= deadline:
-        raise SpecialistError("extraction_timeout")

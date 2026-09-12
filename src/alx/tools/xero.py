@@ -236,7 +236,13 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
         ("completed", "returned_for", "detail", "invoice", "bill", "attached", "steps"),
     ),
     SideEffect.EFFECTFUL,
-    _FAILURES + ("document_has_no_text", "not_an_invoice", "extraction_unverified"),
+    _FAILURES
+    + (
+        "document_has_no_text",
+        "not_an_invoice",
+        "extraction_unverified",
+        "answer_not_structured",
+    ),
 )
 
 DELETE_DRAFT_DEFINITION = CapabilityDefinition(
