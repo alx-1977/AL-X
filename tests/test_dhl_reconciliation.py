@@ -1409,6 +1409,135 @@ class ConfiguredSupplierAndAccountsTests(unittest.TestCase):
         self.assertEqual(self.xero.state.get("created", 0), 0)
 
 
+class AttachmentIdentityTests(unittest.TestCase):
+    """An existing attachment stands in for this one only if both agree.
+
+    Reuse exists so a resumed run does not upload the same document twice.
+    Keying it on the digest alone made two separately required documents with
+    identical bytes collapse onto one AttachmentID: the second upload was
+    skipped and one stored file was recorded as both. Pre-authorisation
+    verification could not see it, because both expected entries named a real
+    attachment holding exactly the bytes they expected.
+    """
+
+    def setUp(self) -> None:
+        self.mail = FakeMail()
+        self.xero = FakeXeroBills()
+        self.executor = executor_for(self.mail, self.xero)
+
+    def customs(self):
+        return self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "worksheet", "11"),
+                    source_for(self.mail, "sad", "12"),
+                ]
+            }
+        )
+
+    def stored(self):
+        return [
+            (record["AttachmentID"], record["FileName"], content)
+            for record, content in self.xero.attachments["bill-1"]
+        ]
+
+    def test_the_same_document_on_a_resumed_run_is_reused_not_duplicated(self) -> None:
+        """1. Same filename, same bytes: the existing attachment is kept."""
+        original = self.xero.authorise_bill
+        attempts = 0
+
+        def fail_once(invoice_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise XeroAccessError("connection_failed")
+            return original(invoice_id)
+
+        self.xero.authorise_bill = fail_once
+        first = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertEqual(first.failure["code"], "connection_failed")
+        before = self.stored()
+        second = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertTrue(second.values["completed"])
+        # Nothing re-uploaded: the same single attachment, same identity.
+        self.assertEqual(self.stored(), before)
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
+
+    def test_identical_bytes_under_different_names_stay_distinct(self) -> None:
+        """2. The collapse itself, at the stage boundary that produced it.
+
+        A document already on the bill under one required name holds exactly
+        the bytes the invoice stage is about to attach under another. Reusing
+        it skipped the invoice upload and recorded the other document's
+        AttachmentID as the invoice, so the bill authorised without ever
+        storing invoice.pdf -- and every later check still passed, because the
+        identity it named did hold those bytes.
+        """
+        self.customs()
+        invoice_bytes = self.mail.payloads["invoice"][2]
+        self.xero.attachments["bill-1"].append(
+            (
+                {
+                    "AttachmentID": "customs-extra-1",
+                    "FileName": "customs-extra.pdf",
+                    "MimeType": "application/pdf",
+                },
+                invoice_bytes,
+            )
+        )
+
+        result = self.executor(
+            {"documents": [source_for(self.mail, "invoice", "10")]}
+        )
+        self.assertTrue(result.values["completed"])
+
+        names = [name for _id, name, _content in self.stored()]
+        # The invoice is stored under its own name and identity, not merged
+        # into the identically-valued document already present.
+        self.assertIn("invoice.pdf", names)
+        self.assertIn("customs-extra.pdf", names)
+        invoices = [item for item, name, _c in self.stored() if name == "invoice.pdf"]
+        self.assertEqual(len(invoices), 1)
+        self.assertNotIn("customs-extra-1", invoices)
+
+    def test_the_same_name_carrying_different_bytes_is_not_reused(self) -> None:
+        """3. Filename alone is not identity; changed bytes must upload."""
+        self.customs()
+        first = self.stored()
+        self.assertEqual(len(first), 2)
+
+        # The same required name arrives again with different content.
+        replaced = worksheet_pdf(waybill="1234567890") + b"\n% revised\n"
+        self.mail.payloads["worksheet"] = (
+            "worksheet.pdf", "application/pdf", replaced,
+        )
+        self.customs()
+
+        worksheets = [
+            (item, content)
+            for item, name, content in self.stored()
+            if name == "worksheet.pdf"
+        ]
+        # The changed document was uploaded rather than matched by name.
+        self.assertEqual(len(worksheets), 2)
+        self.assertNotEqual(worksheets[0][1], worksheets[1][1])
+        self.assertNotEqual(worksheets[0][0], worksheets[1][0])
+
+
 class TamperedDraftTests(unittest.TestCase):
     """A resumed draft is verified against its evidence, never assumed.
 

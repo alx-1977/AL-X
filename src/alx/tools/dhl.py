@@ -302,10 +302,22 @@ def build_dhl_executors(
     def _stored_attachment(
         invoice_id: str, attachment: Any
     ) -> Mapping[str, Any] | None:
-        """Find this exact already-stored payload through Xero's stable IDs."""
+        """Find this exact already-stored document through Xero's stable IDs.
+
+        Identity is the filename and the bytes together. A digest alone is not
+        identity: two separately required documents can hold identical bytes
+        under different names, and reusing one for the other skipped the second
+        upload and recorded a single AttachmentID as both. Every later check
+        then passed, because both expected entries named one genuinely stored
+        file. The filename alone is not identity either -- a rerun carrying
+        changed bytes under the same name must upload, not reuse -- so both
+        must agree before an existing attachment stands in for this one.
+        """
         for item in account.list_bill_attachments(invoice_id):
             attachment_id = str(item.get("AttachmentID") or "")
             if not attachment_id:
+                continue
+            if str(item.get("FileName") or "") != attachment.filename:
                 continue
             media_type = str(item.get("MimeType") or attachment.media_type)
             if _verified_attachment(
