@@ -41,8 +41,10 @@ from alx.contracts.coding import (
     CodingError,
     CodingOutcome,
     CodingRequest,
+    CodingCommit,
     CodingSession,
     CodingSessionResult,
+    GitWorkspaceState,
 )
 from alx.providers.coding_process import (
     command_permitted,
@@ -50,6 +52,11 @@ from alx.providers.coding_process import (
     inspect_git,
     is_test_command,
     run_permitted_command,
+)
+from alx.providers.coding_git import (
+    commit_job_changes,
+    create_repair_branch,
+    read_workspace_state,
 )
 from alx.providers.coding_workspace import CodingWorkspace
 from alx.providers.errors import ProviderError
@@ -166,6 +173,15 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
             lines += [f"- {item}" for item in items]
     if request.test_guidance.strip():
         lines += ["", "# Test guidance", request.test_guidance.strip()]
+    if request.repair_branch.strip():
+        # Stated so the agent knows its edits are already on the repair branch
+        # and has no reason to try to arrange one. It cannot run git either way.
+        lines += [
+            "",
+            "# Branch",
+            f"This worktree is already on the branch {request.repair_branch.strip()},",
+            "prepared for you. Do not attempt to change it.",
+        ]
     if request.blocked_paths:
         lines += ["", "# Paths you must not read or write"]
         lines += [f"- {item}" for item in request.blocked_paths]
@@ -174,7 +190,8 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
         "# Boundaries",
         "- You have no terminal in this task. You cannot run commands or tests.",
         "  AL/X runs the tests after you finish and reads the result itself.",
-        "- Do not commit, push, merge, deploy, or request a code review.",
+        "- Do not commit, push, merge, deploy, or request a code review. AL/X",
+        "  manages the branch and the commit herself after the tests pass.",
         "- Stay inside this worktree. Git metadata, environment files and",
         "  credential files are denied by the operating system, not by you.",
         "- Change only what this task requires.",
@@ -222,6 +239,33 @@ class CodingAgent:
         preexisting_fingerprints = self._file_fingerprints(
             workspace, preexisting_dirty
         )
+        # The baseline is read before anything else touches the worktree, so a
+        # job can prove which HEAD it started from and what dirt it inherited.
+        # Git being unreadable is not fatal on its own: a job that was not
+        # asked for a commit still works in a directory that is not a
+        # repository, so the baseline is simply absent.
+        baseline = self._read_baseline(workspace)
+        # The branch is created before the session so its edits land on the
+        # branch rather than on whatever was checked out. A branch that cannot
+        # be created fails the job closed: the alternative is a session that
+        # writes to the wrong branch and only discovers it at commit time.
+        if request.repair_branch.strip():
+            try:
+                baseline = create_repair_branch(
+                    workspace.root, request.repair_branch.strip()
+                )
+            except CodingError as error:
+                git_status, git_diff = self._git_evidence(workspace)
+                return self._outcome(
+                    status="failed",
+                    summary="the repair branch could not be prepared",
+                    files=(), preexisting_dirty=preexisting_dirty,
+                    commands=commands, tests_run=False, tests_passed=None,
+                    git_status=git_status, git_diff=git_diff,
+                    issues=(error.code,), review=False, failure_status=True,
+                    baseline=baseline,
+                    diagnostics={"phase": "git_branch", **error.details},
+                )
 
         plan, planning_failure = self._planning_phase(request, workspace)
         if plan is None:
@@ -238,6 +282,7 @@ class CodingAgent:
                 tests_run=False, tests_passed=None, git_status=git_status,
                 git_diff=git_diff, issues=(issue,), review=False,
                 failure_status=True, diagnostics=planning_failure,
+                baseline=baseline,
             )
         plan_summary = str(plan["problem_understanding"])
 
@@ -251,6 +296,7 @@ class CodingAgent:
                 git_diff=git_diff, issues=("coding_unavailable",), review=False,
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "execution", "reason_code": "no_session"},
+                baseline=baseline,
             )
 
         self._report_activity("coding")
@@ -274,6 +320,7 @@ class CodingAgent:
                 git_diff=git_diff, issues=(error.code,), review=False,
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "execution", **error.details},
+                baseline=baseline,
             )
 
         post_session_status, _ = self._git_evidence(workspace)
@@ -304,6 +351,7 @@ class CodingAgent:
                 git_diff=git_diff, issues=tuple(review_issues), review=False,
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "local_review"},
+                baseline=baseline,
             )
 
         # Verification is AL/X's, not the session's. The agent has no terminal,
@@ -360,6 +408,34 @@ class CodingAgent:
         elif tests_run and tests_passed is False:
             status = "failed"
 
+        # Only a job that actually succeeded is committed. A failed one leaves
+        # its work in the worktree for AL/X to read as a diff: committing it
+        # would turn evidence Core still has to judge into a branch and a SHA
+        # that read as a finished repair.
+        commit: CodingCommit | None = None
+        if status == "succeeded" and request.commit_message.strip():
+            try:
+                commit = commit_job_changes(
+                    workspace.root,
+                    request.repair_branch.strip(),
+                    request.commit_message.strip(),
+                    files,
+                    preexisting_dirty,
+                    workspace.blocked_paths,
+                )
+            except CodingError as error:
+                # A refused commit is a failed job, not a succeeded one with a
+                # footnote. `unrelated_changes_staged` is the case this exists
+                # for: rather than commit somebody else's work alongside the
+                # repair, nothing is committed and Core is told why.
+                status = "failed"
+                issues.append(error.code)
+                git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+            else:
+                # Re-read after the commit: the files are now in history, so
+                # the diff and status Core sees must describe what is left.
+                git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+
         summary = session.report.strip() or "the coding session returned no report"
         return self._outcome(
             status=status,
@@ -374,6 +450,8 @@ class CodingAgent:
             issues=tuple(issues),
             review=False,
             plan_summary=plan_summary,
+            baseline=baseline,
+            commit=commit,
             diagnostics={
                 "phase": "execution",
                 "session_turns": session.turns,
@@ -711,6 +789,21 @@ class CodingAgent:
             return values
         raise CodingError("provider_failed", **details)
 
+    @staticmethod
+    def _read_baseline(workspace: CodingWorkspace) -> GitWorkspaceState | None:
+        """The worktree's branch, HEAD and inherited dirt before the job runs.
+
+        Absent rather than fatal when git cannot answer: a job that was not
+        asked for a branch or a commit still works in a directory that is not
+        a repository, and refusing it here would withdraw a capability that
+        already exists. A job that *was* asked for one fails at the branch
+        step instead, where the refusal is the right answer.
+        """
+        try:
+            return read_workspace_state(workspace.root)
+        except CodingError:
+            return None
+
     def _git_evidence(
         self, workspace: CodingWorkspace, paths: tuple[str, ...] = ()
     ) -> tuple[str, str]:
@@ -798,6 +891,8 @@ class CodingAgent:
         failure_status: bool = False,
         diagnostics: dict[str, object] | None = None,
         plan_summary: str = "",
+        baseline: GitWorkspaceState | None = None,
+        commit: CodingCommit | None = None,
     ) -> CodingOutcome:
         if status not in ("succeeded", "failed", "blocked"):
             status = "failed"
@@ -819,4 +914,6 @@ class CodingAgent:
             preexisting_dirty,
             diagnostics,
             plan_summary,
+            baseline,
+            commit,
         )

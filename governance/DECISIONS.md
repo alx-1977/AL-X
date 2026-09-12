@@ -1005,3 +1005,79 @@ or governance authority beyond the existing `coding.execute` authority.
 This amendment supersedes only the requirement that `grok_subscription` is the
 sole Coding Agent provider and the blanket prohibition on OpenAI and Claude
 coding transports. All other D-028 constraints remain unchanged.
+
+## D-029 — Bounded Git workspace authority for the Coding Agent
+
+- **Date:** 2026-09-12
+- **Decision owner:** Friedl
+- **Status: PROPOSED. Implemented on `feat/ca-git-workspace` at Friedl's instruction; his approval of this record is still outstanding.**
+
+**Why this is a separate record.** D-028 enumerates what the Coding Agent may
+do, and read-only git inspection is the only git it names. Creating a branch
+and a commit is repository write state. That is new authority, so it is stated
+here rather than read into D-028's existing grant. The change was built because
+Friedl asked for it in these terms; the record exists so the authority is
+visible rather than implied by code.
+
+**Purpose.** Let a coding job hand its result back as a branch and a commit
+SHA. Before this, a job returned a dirty worktree and AL/X had to reconstruct
+which change belonged to which job from a diff — which failed on 2026-09-11
+when a worktree carrying 109k of unrelated uncommitted work truncated the
+evidence four sessions in a row.
+
+**One outcome, one path.** The production outcome is: establish and report the
+git branch and commit state of one assigned coding worktree for one coding job.
+The authoritative path is `alx.providers.coding_git`, called only from
+`CodingAgent`. `coding_process.py` keeps its existing read-only git allowlist
+for diff and status evidence and gains nothing; it cannot create a branch or a
+commit, and `coding_git` cannot run a test. There is no second route, no shell,
+and no git authority for the coding session itself.
+
+### What AL/X decides
+
+Whether a job's result should become a branch and a commit at all; what the
+branch is called; what the commit says. These arrive as the structured
+`repair_branch` and `commit_message` arguments. Omitted, the capability behaves
+exactly as it did: it edits the worktree and returns a diff.
+
+### What the capability may do
+
+Read the current branch, HEAD SHA, status and inherited dirt; create or switch
+to a repair branch inside the assigned worktree; stage only the files the
+current job changed; create one commit; report branch, commit SHA, committed
+files and worktree cleanliness.
+
+### What it must not do
+
+Push; fetch; pull; merge; rebase; reset or checkout unrelated paths; alter
+remotes; touch any stash; delete or rename branches; amend or rewrite a
+commit; operate outside its assigned worktree; or stage a pre-existing dirty
+file the job did not itself change.
+
+These are refused by enumeration rather than by a denylist. `_WRITE_SHAPES`
+lists the eleven argv forms that may run; nothing else can be constructed, so a
+forbidden operation is impossible rather than merely discouraged. A test
+asserts the size of that enumeration, so widening the authority cannot happen
+without a visible change to this boundary.
+
+### Fail closed
+
+Staging is by named path only. After staging, the index is read back and
+compared against the authorised set; one unauthorised entry refuses the commit
+entirely rather than narrowing or widening it. An index already holding
+somebody else's staged work refuses before anything is touched, because
+un-staging it would be a change to their working state made without being
+asked. A failed job is never committed.
+
+### Not authorised by this decision
+
+Push authority; pull-request creation; GitHub interaction of any kind; merge;
+tags; history rewriting; branch deletion; stash use; or any change to D-026's
+merge authority, which remains with the single Core reasoning path.
+
+### Review condition
+
+Revisit if a coding job commits a file it did not change; if it reaches a
+repository other than its assigned worktree; if the enumerated shapes grow to
+include a network or history-rewriting operation; or before push or
+pull-request authority is considered.

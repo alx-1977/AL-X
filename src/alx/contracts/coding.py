@@ -39,6 +39,11 @@ MAX_BLOCKED_PATHS = 32
 MAX_BLOCKED_PATH_CHARACTERS = 512
 MAX_LOCAL_REVIEW_CYCLES = 2
 MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS = 16_000
+MAX_BRANCH_NAME_CHARACTERS = 200
+MAX_COMMIT_MESSAGE_CHARACTERS = 4_000
+# One commit per job. Staging is a named path list, and a job that touched
+# more files than this has outgrown the bounded repair the capability is for.
+MAX_STAGED_FILES = MAX_REPORTED_FILES
 
 
 CODING_FAILURES = (
@@ -54,6 +59,9 @@ CODING_FAILURES = (
     "plan_unusable",
     "planning_failed",
     "review_failed",
+    "git_refused",
+    "git_unavailable",
+    "unrelated_changes_staged",
     "sandbox_unusable",
     "session_failed",
     "task_failed",
@@ -136,6 +144,13 @@ class CodingRequest:
     test_guidance: str = ""
     step_budget: int = DEFAULT_STEP_BUDGET
     blocked_paths: tuple[str, ...] = ()
+    # Core decides whether a job's result should be handed back as a branch and
+    # a commit at all, and what to call it. Left unset, the job behaves as it
+    # did before: it edits the worktree and returns evidence, and AL/X sees the
+    # change as a diff rather than as a commit. Naming the branch is a judgment
+    # about what this repair is, so it does not belong in deterministic code.
+    repair_branch: str = ""
+    commit_message: str = ""
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -172,6 +187,12 @@ class CodingRequest:
             for item in blocked
         ):
             raise ValueError("blocked paths must be non-blank bounded strings")
+        if len(self.repair_branch) > MAX_BRANCH_NAME_CHARACTERS:
+            raise ValueError("repair_branch exceeds the permitted size")
+        if len(self.commit_message) > MAX_COMMIT_MESSAGE_CHARACTERS:
+            raise ValueError("commit_message exceeds the permitted size")
+        if self.commit_message.strip() and not self.repair_branch.strip():
+            raise ValueError("a commit_message requires a repair_branch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +230,64 @@ class CodingSession(Protocol):
     def run_session(
         self, request: "CodingRequest", briefing: str
     ) -> CodingSessionResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class GitWorkspaceState:
+    """What the assigned worktree's git state is at one moment.
+
+    Read before the session so a job can prove its baseline, and read again
+    after so the difference is a measured fact rather than the session's word.
+    `inherited_dirty` is the tree's dirt at the baseline: files somebody else
+    left modified, which this job did not write and must never stage.
+    """
+
+    branch: str
+    head_sha: str
+    inherited_dirty: tuple[str, ...] = ()
+    clean: bool = True
+    detached: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "branch", str(self.branch))
+        object.__setattr__(self, "head_sha", str(self.head_sha))
+        object.__setattr__(self, "inherited_dirty", tuple(self.inherited_dirty))
+
+    def as_values(self) -> dict[str, object]:
+        return {
+            "branch": self.branch,
+            "head_sha": self.head_sha,
+            "inherited_dirty": list(self.inherited_dirty),
+            "clean": self.clean,
+            "detached": self.detached,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CodingCommit:
+    """One commit this job created in its assigned worktree.
+
+    The branch and SHA are read back out of git after the commit rather than
+    predicted from it, so what Core receives is what the repository holds.
+    """
+
+    branch: str
+    commit_sha: str
+    committed_files: tuple[str, ...]
+    worktree_clean: bool
+
+    def __post_init__(self) -> None:
+        _required(self.branch, "branch")
+        _required(self.commit_sha, "commit_sha")
+        object.__setattr__(self, "committed_files", tuple(self.committed_files))
+
+    def as_values(self) -> dict[str, object]:
+        return {
+            "branch": self.branch,
+            "commit_sha": self.commit_sha,
+            "committed_files": list(self.committed_files),
+            "worktree_clean": self.worktree_clean,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +341,8 @@ class CodingOutcome:
     preexisting_dirty: tuple[str, ...] = ()
     diagnostics: dict[str, object] | None = None
     plan_summary: str = ""
+    baseline: "GitWorkspaceState | None" = None
+    commit: "CodingCommit | None" = None
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "failed", "blocked"):
@@ -306,17 +387,27 @@ class CodingOutcome:
         }
         if self.tests_passed is not None:
             values["tests_passed"] = self.tests_passed
+        if self.baseline is not None:
+            values["baseline"] = self.baseline.as_values()
+        if self.commit is not None:
+            values["commit"] = self.commit.as_values()
+            # Promoted to the top level because these two are what Core hands
+            # on when it asks for the repair: a branch and the SHA on it.
+            values["branch"] = self.commit.branch
+            values["commit_sha"] = self.commit.commit_sha
         return values
 
 
 __all__ = [
     "CODING_FAILURES",
     "CodingCommandRecord",
+    "CodingCommit",
     "CodingError",
     "CodingOutcome",
     "CodingRequest",
     "CodingSession",
     "CodingSessionResult",
+    "GitWorkspaceState",
     "DEFAULT_COMMAND_SECONDS",
     "DEFAULT_VERIFICATION_COMMAND_SECONDS",
     "DEFAULT_STEP_BUDGET",
@@ -331,6 +422,9 @@ __all__ = [
     "MAX_STEP_BUDGET",
     "MAX_PLANNING_ATTEMPTS",
     "MAX_VERIFICATION_COMMANDS",
+    "MAX_BRANCH_NAME_CHARACTERS",
+    "MAX_COMMIT_MESSAGE_CHARACTERS",
+    "MAX_STAGED_FILES",
     "MAX_BLOCKED_PATHS",
     "MAX_BLOCKED_PATH_CHARACTERS",
     "lexical_worktree_path",
