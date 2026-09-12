@@ -1010,14 +1010,13 @@ coding transports. All other D-028 constraints remain unchanged.
 
 - **Date:** 2026-09-12
 - **Decision owner:** Friedl
-- **Status: PROPOSED. Implemented on `feat/ca-git-workspace` at Friedl's instruction; his approval of this record is still outstanding.**
+- **Status: APPROVED by Friedl, 2026-09-12.** Implemented on `feat/ca-git-workspace`.
 
 **Why this is a separate record.** D-028 enumerates what the Coding Agent may
 do, and read-only git inspection is the only git it names. Creating a branch
 and a commit is repository write state. That is new authority, so it is stated
-here rather than read into D-028's existing grant. The change was built because
-Friedl asked for it in these terms; the record exists so the authority is
-visible rather than implied by code.
+here rather than read into D-028's existing grant, and Friedl approved it on
+its own terms rather than by extension.
 
 **Purpose.** Let a coding job hand its result back as a branch and a commit
 SHA. Before this, a job returned a dirty worktree and AL/X had to reconstruct
@@ -1042,23 +1041,50 @@ exactly as it did: it edits the worktree and returns a diff.
 
 ### What the capability may do
 
-Read the current branch, HEAD SHA, status and inherited dirt; create or switch
-to a repair branch inside the assigned worktree; stage only the files the
-current job changed; create one commit; report branch, commit SHA, committed
-files and worktree cleanliness.
+As approved by Friedl on 2026-09-12:
+
+- inspect HEAD, status and diff inside its assigned isolated worktree;
+- create or switch to the repair branch selected for that coding job;
+- stage only job-owned paths;
+- create one non-amending commit, after the job has passed its required
+  verification;
+- report branch, commit SHA, changed files and worktree state.
 
 ### What it must not do
 
-Push; fetch; pull; merge; rebase; reset or checkout unrelated paths; alter
-remotes; touch any stash; delete or rename branches; amend or rewrite a
-commit; operate outside its assigned worktree; or stage a pre-existing dirty
-file the job did not itself change.
+Push; fetch; pull; merge; rebase; repository reset; checkout of unrelated
+paths; remote modification; stash operations of any kind; branch deletion;
+history rewriting; operation outside the assigned worktree; or staging a
+pre-existing dirty file the job did not itself change.
 
 These are refused by enumeration rather than by a denylist. `_WRITE_SHAPES`
 lists the eleven argv forms that may run; nothing else can be constructed, so a
 forbidden operation is impossible rather than merely discouraged. A test
 asserts the size of that enumeration, so widening the authority cannot happen
 without a visible change to this boundary.
+
+### The index-rollback exception
+
+Friedl approved on 2026-09-12 the retention of one narrowly scoped reset:
+
+```
+git reset --quiet -- <paths>
+```
+
+solely as an index rollback mechanism when staging validation fails. Its
+approved scope:
+
+- it may operate only on explicitly named job paths;
+- it may not use `--hard`, `--soft` or `--mixed`, and may not target a commit
+  or a ref;
+- it may not discard worktree content;
+- it may not be exposed to the Coding Agent as general reset authority.
+
+The enumerated shape is a path-scoped reset with no ref argument, so all four
+conditions hold by construction rather than by convention: a `--hard` form or a
+commit argument is not a shape that can be built. This is not an entry in
+`governance/EXCEPTIONS.md`, which remains empty: it is a bound on an approved
+authority, not a permission to breach a law.
 
 ### Fail closed
 

@@ -434,6 +434,48 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         ):
             self.assertTrue(git_write_permitted(argv), " ".join(argv))
 
+    def test_the_index_rollback_reset_stays_inside_its_approved_scope(self) -> None:
+        """D-029 approves one reset shape, and only as an index rollback.
+
+        Friedl's approval names four conditions: named job paths only, no
+        `--hard`/`--soft`/`--mixed`, no commit or ref target, and no exposure
+        as general reset authority. Each is asserted here against the
+        allowlist, so the record's claim that they hold by construction is
+        something the tests prove rather than something the prose asserts.
+        """
+        for argv in (
+            ["git", "reset", "--hard"],
+            ["git", "reset", "--soft", "HEAD~1"],
+            ["git", "reset", "--mixed"],
+            ["git", "reset", "--quiet", "--hard"],
+            ["git", "reset", "--quiet", "--soft", "--", "target.py"],
+            # A ref target, with and without the separator.
+            ["git", "reset", "--quiet", "HEAD"],
+            ["git", "reset", "--quiet", "--", "HEAD"],
+            ["git", "reset", "--quiet", "--", "HEAD~1"],
+            ["git", "reset", "--quiet", "--", "refs/heads/main"],
+            # General reset authority, which CA never receives.
+            ["git", "reset"],
+            ["git", "reset", "--quiet"],
+        ):
+            self.assertFalse(git_write_permitted(argv), " ".join(argv))
+
+        # The one approved form: named paths, no ref, index only.
+        self.assertTrue(
+            git_write_permitted(["git", "reset", "--quiet", "--", "target.py"])
+        )
+
+    def test_a_ref_shaped_pathspec_is_refused_everywhere(self) -> None:
+        """Not only for reset: `add` is held to the same reading."""
+        for argv in (
+            ["git", "add", "--", "HEAD"],
+            ["git", "add", "--", "refs/heads/main"],
+            ["git", "add", "--", "main@{1}"],
+            ["git", "add", "--", "a..b"],
+            ["git", "add", "--", ":/message"],
+        ):
+            self.assertFalse(git_write_permitted(argv), " ".join(argv))
+
     def test_the_enumeration_has_not_quietly_grown(self) -> None:
         """Adding authority must be a visible change, not an accident.
 

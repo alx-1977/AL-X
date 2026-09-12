@@ -62,7 +62,8 @@ GIT_TIMEOUT_SECONDS = 60
 #
 # "none"  - no further arguments at all
 # "value" - exactly one further argument, checked by the caller that built it
-# "paths" - a `--` separator followed by one or more worktree-relative paths
+# "paths" - a `--` separator followed by one or more worktree-relative paths,
+#           none of which may be spelled as a ref
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("rev-parse", "HEAD"): "none",
     ("rev-parse", "--abbrev-ref", "HEAD"): "none",
@@ -122,8 +123,33 @@ def git_write_permitted(argv: list[str] | tuple[str, ...]) -> bool:
         if remainder == "value":
             return len(tail) == 1 and not tail[0].startswith("-")
         if remainder == "paths":
-            return bool(tail) and not any(item.startswith("-") for item in tail)
+            return bool(tail) and all(_pathspec_permitted(item) for item in tail)
     return False
+
+
+# Git already reads everything after `--` as a pathspec, so a ref spelled there
+# is a filename. D-029 nonetheless states that the approved index rollback
+# cannot target a commit or a ref, and that guarantee should hold by reading the
+# argv rather than by knowing git's separator semantics. A ref-shaped argument
+# is refused, so the reset shape is a path operation on its face.
+_REF_SHAPED = frozenset({"HEAD", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD"})
+
+
+def _pathspec_permitted(item: str) -> bool:
+    """A path after `--`, never something a reader could mistake for a ref."""
+    if item.startswith("-"):
+        return False
+    if item in _REF_SHAPED or item.startswith("refs/"):
+        return False
+    # Revision syntax: HEAD~1, main@{1}, a..b, branch^, :/message. `~` and `^`
+    # are legal in a filename but vanishingly rare in a source path, and a job
+    # that cannot stage one is a better outcome than an argv a reader has to
+    # reason about git's separator rules to clear.
+    if any(token in item for token in ("@{", "..", "~", "^")):
+        return False
+    if item.startswith(":"):
+        return False
+    return True
 
 
 def branch_name_permitted(name: str) -> bool:
