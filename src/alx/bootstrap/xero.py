@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from alx.config import XeroSettings
+from alx.config import LlamaParseSettings, XeroSettings
 from alx.contracts import CapabilityDefinition, CapabilityResult, MailAccount, StructuredData
-from alx.providers import SQLiteXeroOAuth, XeroAccountingAdapter
+from alx.providers import LlamaParseInvoiceExtractor, SQLiteXeroOAuth, XeroAccountingAdapter
 from alx.providers.dhl import classify_dhl_document
 from alx.safety import AuthorityPolicy
+from alx.specialists import ANSWER_SCHEMA, INSTRUCTION, checked_invoice
 from alx.tools import (
     PROCESS_DHL_IMPORT,
     CAPTURE_SUPPLIER_INVOICE,
@@ -56,6 +57,38 @@ BILL_TASK_CAPABILITIES = BILL_EXECUTION_CAPABILITIES | {
 }
 
 
+def build_supplier_invoice_extractor(
+    settings: LlamaParseSettings,
+    *,
+    client: Any = None,
+) -> Callable[[bytes, str, str, str], Mapping[str, Any]] | None:
+    """Wire LlamaParse into the capture extractor, or None when unusable.
+
+    Capture is advertised only when this returns an extractor. Missing
+    configuration must not fall back to the Core or the generic specialist.
+    """
+    if not settings.is_usable:
+        return None
+    adapter = LlamaParseInvoiceExtractor(
+        settings.api_key,
+        settings.base_url,
+        settings.timeout_seconds,
+        settings.project_id,
+        ANSWER_SCHEMA,
+        INSTRUCTION,
+        client,
+    )
+
+    def extract(
+        payload: bytes, media_type: str, filename: str, context_line: str
+    ) -> Mapping[str, Any]:
+        return checked_invoice(
+            adapter.extract(payload, media_type, filename, context_line)
+        )
+
+    return extract
+
+
 @dataclass(frozen=True, slots=True)
 class XeroRuntime:
     oauth: SQLiteXeroOAuth
@@ -71,7 +104,7 @@ def build_xero_runtime(
     storage_root: Path,
     mail_account: MailAccount,
     call_id_source: Callable[[], str],
-    extractor: Callable[[str, str], Mapping[str, Any]] | None = None,
+    extractor: Callable[[bytes, str, str, str], Mapping[str, Any]] | None = None,
 ) -> XeroRuntime:
     oauth = SQLiteXeroOAuth(
         storage_root / "xero.sqlite3",
@@ -131,7 +164,7 @@ def build_xero_runtime(
     else:
         # The catalogue promises that each offered capability is callable in
         # this runtime. Supplier capture cannot read a document without its
-        # bounded specialist, so it is absent rather than advertised as a
+        # LlamaParse extractor, so it is absent rather than advertised as a
         # callable that will fail before doing any work.
         executors.pop(CAPTURE_SUPPLIER_INVOICE)
     return XeroRuntime(

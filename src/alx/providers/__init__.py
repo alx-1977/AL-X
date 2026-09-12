@@ -15,6 +15,7 @@ from alx.providers.web_url import is_public_address, parse_public_url
 from alx.providers.icloud_mail_send import ICloudMailSender
 from alx.providers.xero import SQLiteXeroOAuth, XeroAccountingAdapter
 from alx.providers.dhl import DhlImportAnalyzerAdapter
+from alx.providers.llamaparse import LlamaParseInvoiceExtractor
 
 from alx.providers.sandbox_runner import SandboxRunner
 from alx.providers.sandbox_workspace import SandboxWorkspace
@@ -52,4 +53,5 @@ __all__ = [
     "SQLiteXeroOAuth",
     "XeroAccountingAdapter",
     "DhlImportAnalyzerAdapter",
+    "LlamaParseInvoiceExtractor",
 ]

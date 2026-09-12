@@ -42,6 +42,7 @@ from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
     BILL_TASK_CAPABILITIES,
+    build_supplier_invoice_extractor,
     build_xero_runtime,
 )
 from alx.bootstrap.dhl import build_dhl_runtime
@@ -56,6 +57,7 @@ from alx.config import (
     AUTONOMOUS_MAX_OUTPUT_TOKENS,
     ConfigurationError,
     LiveVoiceSettings,
+    LlamaParseSettings,
     MailSendSettings,
     MailSettings,
     RuntimeSettings,
@@ -82,7 +84,6 @@ from alx.interfaces import (
 )
 from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
 from alx.observability.usage import bill_budget_for
-from alx.specialists import ModelSpecialist, extract_invoice
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, SafetyGate
 
@@ -521,25 +522,23 @@ async def run(repository_root: Path) -> None:
     except ConfigurationError as error:
         LOGGER.info("Xero unavailable: %s", error)
     else:
-        # Extraction is a bounded question, so it goes to a specialist with
-        # its own model and reasoning effort. When no specialist is configured
-        # the extractor stays absent and capture refuses: answering it through
-        # the Core is the expensive path this exists to avoid.
-        specialist = (
-            None if providers.specialist is None
-            else ModelSpecialist(providers.specialist)
-        )
+        # Extraction is a bounded LlamaCloud document read. When LlamaParse
+        # is not configured the extractor stays absent and capture is not
+        # advertised: answering it through the Core or the generic specialist
+        # is the expensive path this exists to avoid.
+        extractor = None
+        try:
+            extractor = build_supplier_invoice_extractor(
+                LlamaParseSettings.from_environment(environment)
+            )
+        except ConfigurationError as error:
+            LOGGER.info("Supplier invoice extraction unavailable: %s", error)
         xero_runtime = build_xero_runtime(
             xero_settings,
             storage_root,
             mail_runtime.source,
             lambda: current_call_id[0],
-            None if specialist is None
-            else (
-                lambda text, context_line: extract_invoice(
-                    specialist, text, context_line
-                )
-            ),
+            extractor,
         )
         for definition in xero_runtime.definitions:
             registry.register(definition)

@@ -2,6 +2,7 @@
 
 from alx.specialists.coding import prior_coding, resolve_supplier
 from alx.specialists.invoice import (
+    ANSWER_SCHEMA,
     EXTRACT_INVOICE,
     INSTRUCTION,
     checked_invoice,
@@ -19,6 +20,7 @@ from alx.specialists.research import (
 from alx.specialists.runner import ModelSpecialist, json_schema
 
 __all__ = [
+    "ANSWER_SCHEMA",
     "EXTRACT_INVOICE",
     "INSTRUCTION",
     "ModelSpecialist",
