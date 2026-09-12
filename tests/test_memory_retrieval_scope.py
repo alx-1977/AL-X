@@ -22,6 +22,7 @@ request omitted it.
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -77,6 +78,14 @@ def protocol_text() -> str:
     )
 
 
+def request_payload() -> dict:
+    request = reasoner().build_request(context())
+    return json.loads(next(
+        message.content for message in request.messages
+        if message.role.value == "user"
+    ))
+
+
 class RetrievalScopeProtocolTest(unittest.TestCase):
     def test_the_built_request_states_the_scope_requirement(self) -> None:
         text = protocol_text()
@@ -88,6 +97,31 @@ class RetrievalScopeProtocolTest(unittest.TestCase):
         for field in NARROWING_FIELDS:
             with self.subTest(field=field):
                 self.assertIn(field, text)
+
+    def test_the_current_person_is_projected_to_the_reasoner_request(self) -> None:
+        payload = request_payload()
+        self.assertEqual(payload["conversation"][-1]["person_id"], "friedl")
+        self.assertEqual(
+            payload["available_memory_sources"][0],
+            {"reference": "turn:t1", "person_id": "friedl"},
+        )
+
+    def test_relationship_retrieval_names_the_required_current_person_binding(self) -> None:
+        request = reasoner().build_request(context())
+        text = protocol_text()
+        person_field = request.output_schema["properties"]["action"]["anyOf"][3][
+            "properties"
+        ]["memory_person_id"]
+        for stated in (
+            "memory_person_id is required",
+            "exact person_id from the current/latest person turn",
+            "Never use another person's identifier",
+        ):
+            with self.subTest(stated=stated):
+                self.assertIn(stated, text)
+        self.assertIn("Required when memory_kinds includes relationship", person_field["description"])
+        self.assertIn("current/latest person turn", person_field["description"])
+        self.assertIn("Another person's id is forbidden", person_field["description"])
 
     def test_the_guidance_sits_with_the_retrieval_instruction(self) -> None:
         """The advice to retrieve and how to scope it must not drift apart."""

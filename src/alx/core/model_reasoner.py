@@ -199,6 +199,11 @@ timestamps; do not invent one. Factual memory has null
 person_id and null meaning. Relationship memory requires the matching person_id
 and null meaning. Autobiographical memory has null person_id and requires your
 first-person meaning reflection.
+For a relationship-memory retrieval, memory_person_id is required: copy the
+exact person_id from the current/latest person turn shown in conversation. That
+value is already in your context. Never use another person's identifier; the
+runtime will refuse it. For a retrieval without relationship memory,
+memory_person_id must be null.
 retrieved_memories holds only what you asked for this turn; it starts empty and
 is never the whole store. Memories you formed in earlier conversations are not
 shown to you unless you retrieve them, so before forming a memory about
@@ -1021,7 +1026,15 @@ def decision_schema() -> dict[str, Any]:
                 "items": {"type": "string", "enum": [item.value for item in MemoryKind]},
             },
             "memory_ids": {"type": "array", "items": string},
-            "memory_person_id": nullable_string,
+            "memory_person_id": {
+                **nullable_string,
+                "description": (
+                    "Required when memory_kinds includes relationship: copy the "
+                    "exact person_id from the current/latest person turn in the "
+                    "model-visible conversation context. Another person's id is "
+                    "forbidden. Null when relationship is not requested."
+                ),
+            },
             "memory_formed_after": nullable_string,
             "memory_formed_before": nullable_string,
             "memory_source_references": {"type": "array", "items": string},
