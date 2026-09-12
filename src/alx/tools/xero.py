@@ -689,6 +689,23 @@ def _verified_attachment(
     )
 
 
+def _require_attachment_bytes(
+    account: XeroAccountingAccount,
+    invoice_id: str,
+    attachment_id: str,
+    media_type: str,
+    digest: str,
+) -> None:
+    """Re-read one stored file by AttachmentID. Filename is not identity."""
+    if not isinstance(attachment_id, str) or not attachment_id.strip():
+        raise XeroAccessError("response_invalid")
+    if not isinstance(media_type, str) or not media_type.strip():
+        raise XeroAccessError("response_invalid")
+    payload = account.read_bill_attachment(invoice_id, attachment_id, media_type)
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise XeroAccessError("supporting_document_mismatch")
+
+
 def build_xero_executors(
     account: XeroAccountingAccount,
     mail: MailAccount,
@@ -885,6 +902,7 @@ def build_xero_executors(
                 str(item.get("FileName"))
                 for item in _listed_attachments(account, invoice_id)
             }
+            required_attachments: list[tuple[str, str, str]] = []
             for document in documents:
                 if not isinstance(document, Mapping):
                     raise ValueError("source_documents")
@@ -909,13 +927,23 @@ def build_xero_executors(
                         invoice_id, attachment.filename, attachment.media_type, content
                     )
                     stored.add(attachment.filename)
-                _verified_attachment(
+                item = _verified_attachment(
                     account, invoice_id, attachment.filename, digest
                 )
+                _filename, attachment_id = _attachment_row_identity(item)
+                media_type = str(item.get("MimeType") or "")
+                if not media_type:
+                    raise XeroAccessError("response_invalid")
+                required_attachments.append((attachment_id, media_type, digest))
                 attached.append(attachment.filename)
             steps.append("attached_and_verified_documents")
 
             if authorise_requested:
+                for attachment_id, media_type, digest in required_attachments:
+                    _require_attachment_bytes(
+                        account, invoice_id, attachment_id, media_type, digest
+                    )
+                steps.append("re_verified_before_authorisation")
                 account.authorise_bill(invoice_id)
                 steps.append("authorised")
 
@@ -936,6 +964,11 @@ def build_xero_executors(
                     "the committed bill does not match the requested values",
                     account.read_bill(invoice_id),
                 )
+            if authorise_requested:
+                for attachment_id, media_type, digest in required_attachments:
+                    _require_attachment_bytes(
+                        account, invoice_id, attachment_id, media_type, digest
+                    )
             steps.append("verified")
             return CapabilityResult(
                 call_id_source(),

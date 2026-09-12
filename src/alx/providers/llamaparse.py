@@ -170,7 +170,7 @@ class LlamaParseInvoiceExtractor:
             response = self._client.request(method, url, **kwargs)
         except httpx.TimeoutException:
             failure = "extraction_timeout"
-        except httpx.HTTPError:
+        except (httpx.InvalidURL, httpx.HTTPError):
             failure = "provider_failed"
         else:
             self._remaining(deadline)

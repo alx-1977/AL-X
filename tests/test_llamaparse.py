@@ -206,6 +206,35 @@ class LlamaParseSettingsTests(unittest.TestCase):
         self.assertNotIn("visible-secret", repr(settings))
         self.assertIn("<redacted>", repr(settings))
 
+    def test_default_base_url_keeps_a_configured_extractor_usable(self) -> None:
+        settings = LlamaParseSettings.from_environment(
+            {"ALX_LLAMAPARSE_API_KEY": API_KEY}
+        )
+        self.assertEqual(settings.base_url, "https://api.cloud.llamaindex.ai")
+        self.assertTrue(settings.is_usable)
+        self.assertIsNotNone(build_supplier_invoice_extractor(settings))
+
+    def test_a_malformed_base_url_is_not_advertised(self) -> None:
+        settings = LlamaParseSettings.from_environment(
+            {
+                "ALX_LLAMAPARSE_API_KEY": API_KEY,
+                "ALX_LLAMAPARSE_BASE_URL": "not-a-url",
+            }
+        )
+        self.assertEqual(settings.base_url, "not-a-url")
+        self.assertFalse(settings.is_usable)
+        self.assertIsNone(build_supplier_invoice_extractor(settings))
+
+    def test_a_non_http_base_url_is_not_advertised(self) -> None:
+        settings = LlamaParseSettings.from_environment(
+            {
+                "ALX_LLAMAPARSE_API_KEY": API_KEY,
+                "ALX_LLAMAPARSE_BASE_URL": "ftp://api.cloud.llamaindex.ai",
+            }
+        )
+        self.assertFalse(settings.is_usable)
+        self.assertIsNone(build_supplier_invoice_extractor(settings))
+
 
 class LlamaParseAdapterTests(unittest.TestCase):
     def test_original_bytes_are_uploaded_to_the_documented_files_endpoint(self) -> None:
@@ -461,6 +490,28 @@ class LlamaParseAdapterTests(unittest.TestCase):
         self.assertNotIn(INVOICE_TEXT, str(captured.exception))
         self.assertNotIn(API_KEY, str(captured.exception))
         self.assertNotIn(INVOICE_BYTES.decode("latin-1"), str(captured.exception))
+        self.assertIsNone(captured.exception.__cause__)
+        self.assertIsNone(captured.exception.__context__)
+
+    def test_invalid_url_is_sanitised_as_provider_failed(self) -> None:
+        class Boom:
+            def request(self, *_args, **_kwargs):
+                raise httpx.InvalidURL("malformed")
+
+        adapter = LlamaParseInvoiceExtractor(
+            API_KEY,
+            "https://api.cloud.llamaindex.ai",
+            60,
+            "",
+            ANSWER_SCHEMA,
+            INSTRUCTION,
+            Boom(),
+        )
+        with self.assertRaises(SpecialistError) as captured:
+            adapter.extract(INVOICE_BYTES, "application/pdf", "invoice.pdf")
+        self.assertEqual(captured.exception.code, "provider_failed")
+        self.assertNotIn("malformed", str(captured.exception))
+        self.assertNotIn(API_KEY, str(captured.exception))
         self.assertIsNone(captured.exception.__cause__)
         self.assertIsNone(captured.exception.__context__)
 
