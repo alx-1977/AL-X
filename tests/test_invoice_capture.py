@@ -18,7 +18,11 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
-from alx.contracts import CapabilityResultState, MailAttachment  # noqa: E402
+from alx.contracts import (  # noqa: E402
+    CapabilityResultState,
+    MailAttachment,
+    XeroAccessError,
+)
 from alx.contracts import SideEffect  # noqa: E402
 from alx.bootstrap.xero import build_xero_runtime  # noqa: E402
 from support import xero_settings  # noqa: E402
@@ -316,6 +320,36 @@ class AttachmentToctouTests(unittest.TestCase):
         self.assertEqual(result.values["bill"]["status"], "AUTHORISED")
         self.assertEqual(self.xero.bills["bill-1"]["Status"], "AUTHORISED")
         self.assertIn("re_verified_before_authorisation", result.values["steps"])
+        self.assertIn("authorised", result.values["steps"])
+
+        created = self.xero.created
+        retry = capture(arguments())
+        self.assertFalse(retry.values["completed"])
+        self.assertEqual(retry.values["returned_for"], "duplicate_bill")
+        self.assertEqual(retry.values["bill"]["status"], "AUTHORISED")
+        self.assertEqual(self.xero.created, created)
+        self.assertEqual(self.authorised, ["bill-1"])
+
+    def test_post_authorisation_read_errors_still_return_the_authorised_bill(self) -> None:
+        capture = self.capture_with()
+        original_read = self.xero.read_bill_attachment
+        reads = {"count": 0}
+
+        def read(invoice_id, attachment_id, media_type):
+            payload = original_read(invoice_id, attachment_id, media_type)
+            reads["count"] += 1
+            if reads["count"] >= 3:
+                raise XeroAccessError("connection_failed")
+            return payload
+
+        self.xero.read_bill_attachment = read
+        result = capture(arguments())
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(result.failure)
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "connection_failed")
+        self.assertEqual(self.authorised, ["bill-1"])
+        self.assertEqual(result.values["bill"]["status"], "AUTHORISED")
         self.assertIn("authorised", result.values["steps"])
 
     def test_authorisation_reread_does_not_rediscover_by_filename(self) -> None:

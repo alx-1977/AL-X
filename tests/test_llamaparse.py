@@ -235,6 +235,16 @@ class LlamaParseSettingsTests(unittest.TestCase):
         self.assertFalse(settings.is_usable)
         self.assertIsNone(build_supplier_invoice_extractor(settings))
 
+    def test_a_malformed_ipv6_base_url_does_not_crash_startup(self) -> None:
+        settings = LlamaParseSettings.from_environment(
+            {
+                "ALX_LLAMAPARSE_API_KEY": API_KEY,
+                "ALX_LLAMAPARSE_BASE_URL": "https://[::1",
+            }
+        )
+        self.assertFalse(settings.is_usable)
+        self.assertIsNone(build_supplier_invoice_extractor(settings))
+
 
 class LlamaParseAdapterTests(unittest.TestCase):
     def test_original_bytes_are_uploaded_to_the_documented_files_endpoint(self) -> None:

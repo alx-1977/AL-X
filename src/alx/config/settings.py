@@ -324,7 +324,10 @@ LLAMAPARSE_DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
 def _absolute_http_url(value: str) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
-    parsed = urlparse(value.strip())
+    try:
+        parsed = urlparse(value.strip())
+    except ValueError:
+        return False
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 

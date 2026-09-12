@@ -944,10 +944,20 @@ def build_xero_executors(
                         account, invoice_id, attachment_id, media_type, digest
                     )
                 steps.append("re_verified_before_authorisation")
-                account.authorise_bill(invoice_id)
+                authorised_payload = account.authorise_bill(invoice_id)
                 steps.append("authorised")
+                try:
+                    raw_bill = account.read_bill(invoice_id)
+                except XeroAccessError as error:
+                    return returned(
+                        error.code,
+                        "the authorised bill could not be read back",
+                        authorised_payload,
+                    )
+            else:
+                raw_bill = account.read_bill(invoice_id)
 
-            final = _bill_values(account.read_bill(invoice_id))
+            final = _bill_values(raw_bill)
             steps.append("read_back")
             expected_status = "AUTHORISED" if authorise_requested else "DRAFT"
             if (
@@ -962,7 +972,7 @@ def build_xero_executors(
                 return returned(
                     "read_back_mismatch",
                     "the committed bill does not match the requested values",
-                    account.read_bill(invoice_id),
+                    raw_bill,
                 )
             if authorise_requested:
                 try:
@@ -972,15 +982,16 @@ def build_xero_executors(
                         )
                 except XeroAccessError as error:
                     # Authorisation already happened. Report the AUTHORISED
-                    # bill; do not collapse this into a pre-authorisation
-                    # failed() that looks like the write never occurred.
-                    if error.code != "supporting_document_mismatch":
-                        raise
-                    return returned(
-                        "supporting_document_mismatch",
-                        "the authorised bill's attachment no longer matches the verified document",
-                        account.read_bill(invoice_id),
+                    # bill with the real verification reason; do not collapse
+                    # this into a pre-authorisation failed() that looks like
+                    # the write never occurred.
+                    detail = (
+                        "the authorised bill's attachment no longer matches "
+                        "the verified document"
+                        if error.code == "supporting_document_mismatch"
+                        else "the authorised bill could not be re-verified"
                     )
+                    return returned(error.code, detail, raw_bill)
             steps.append("verified")
             return CapabilityResult(
                 call_id_source(),
