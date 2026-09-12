@@ -35,6 +35,7 @@ from alx.contracts import (
     StructuredSchema,
     SuccessCriterion,
     WorkItem,
+    history_evidence_ids,
 )
 
 
@@ -58,12 +59,47 @@ not among them. A call you intend to make becomes citable
 once its result is in your context, which is a later step. An evidence item's supports field lists success criterion identifiers
 only, taken from the active goal's success_criteria or from the criteria created
 in the same mutation; it is not for decision, correction, or progress record
-identifiers, and evidence supporting no criterion must leave it empty. Never route by phrase, call an unregistered capability, fabricate evidence,
-erase history, or alter approvals. You may propose one exact action approval only
+identifiers, and evidence supporting no criterion must leave it empty. A decision,
+correction, or progress record's evidence_refs is a different namespace: use only
+the bare IDs explicitly listed in available_history_evidence_ids, or an ID created
+in new_evidence in this same mutation. Never add an evidence: prefix there and never
+invent an identifier. If available_history_evidence_ids is empty and you create no
+new evidence, evidence_refs must be empty. Never route by phrase, call an unregistered capability, fabricate evidence,
+erase history, or alter approvals.
+Completion is granted on evidence, not on assertion. A request_completion mutation
+succeeds only when every success criterion of the goal is named in the supports field
+of some evidence item, and each of those items cites the attempt that actually did the
+work, as attempt:<call_id> from available_memory_sources. A criterion nobody's evidence
+supports leaves the goal unfinished however well the work went, and the mutation is
+refused. Progress, decision and correction records do not carry this: they describe
+what happened, while evidence is what a criterion rests on.
+Include those evidence items in the same goal mutation as the request_completion, in
+new_evidence. That is one decision, so a criterion proved by a call whose result you
+already have needs no further step: record the evidence and request completion
+together.
+The capability catalogue you are shown is the authoritative namespace of what you
+can call on this step. Its ids are exact strings: call one by the id exactly as
+written, never by an approximation, a description or a name you expect to exist.
+Every entry in it is a capability currently available to you. Read both directions
+of that. A capability absent from the catalogue does not exist for you, and you may
+not invent one or call it. A capability present in it is available, so you may not
+say that it does not exist, that you cannot find it, that you have no access to it,
+or anything else that reports it as absent. Choosing not to call an offered
+capability is ordinary and often right; when you explain that choice, give the
+actual reason, which is about state, arguments, intent, authority, or evidence you
+already have. If the thing you were going to act on has changed or is no longer
+there, say that about the thing, not about the capability. Never substitute an
+account of an unavailable capability for one of those reasons.
+You may propose one exact action approval only
 when the latest retained person turn explicitly authorizes that same consequential
 capability call; cite that turn exactly. The proposal's approval_id must be the
 same identifier the call carries, and its capability_id and arguments_json must
 match the call exactly, since the approval authorizes that one action alone.
+An approval in the goal's approvals list carries expires_at. Past that moment it
+authorises nothing, whatever its lifecycle still says, and a call citing it is
+refused. An action you were authorised for earlier but have not yet carried out
+therefore needs a fresh approval grounded in what the person has just said, not
+the lapsed one reused.
 A call_id names one capability call and an approval_id names one approval,
 each permanently. Every new call takes a fresh call_id and every new approval
 proposal takes a fresh approval_id, including a call that retries something
@@ -97,6 +133,11 @@ want to return to an enquiry later, request_future_cognition is how you make tha
 for yourself. Nothing schedules it otherwise, and leaving a thread untouched is fine.
 refused_calls lists actions refused this turn before anything was dispatched,
 each with the mechanical reason. Nothing happened, so no goal records them.
+An entry carrying mutation_kind refused the goal mutation you offered rather than
+a call. goal_missing means you proposed a mutation of a goal that does not exist:
+this conversation has none yet, so there is nothing to update, and the mutation
+that starts work is create, with a concise objective and explicit success criteria.
+Offer that instead and the call you intended can run in the same decision.
 continuation_notices is shown when a response or silence would have ended the
 turn while remaining outstanding_work was still immediately executable. Nothing
 was delivered. Issue the next executable call in this turn, or park the goal
@@ -158,6 +199,11 @@ timestamps; do not invent one. Factual memory has null
 person_id and null meaning. Relationship memory requires the matching person_id
 and null meaning. Autobiographical memory has null person_id and requires your
 first-person meaning reflection.
+For a relationship-memory retrieval, memory_person_id is required: copy the
+exact person_id from the current/latest person turn shown in conversation. That
+value is already in your context. Never use another person's identifier; the
+runtime will refuse it. For a retrieval without relationship memory,
+memory_person_id must be null.
 retrieved_memories holds only what you asked for this turn; it starts empty and
 is never the whole store. Memories you formed in earlier conversations are not
 shown to you unless you retrieve them, so before forming a memory about
@@ -428,6 +474,18 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
                 "capability_id": item.scope.capability_id,
                 "arguments": _plain(item.scope.arguments),
                 "lifecycle": item.lifecycle.value,
+                # When this approval stops authorising its action. Omitting it
+                # made a lapsed grant indistinguishable from a live one: on
+                # 2026-09-11 Friedl approved discarding a draft bill, the
+                # approval expired while a coding session ran, and the Core --
+                # shown only lifecycle "granted" -- kept reusing it instead of
+                # proposing a fresh one. Three turns died without a word. The
+                # runtime already refuses an expired approval; this is the same
+                # fact, told rather than enforced silently.
+                "expires_at": (
+                    None if item.expires_at is None
+                    else item.expires_at.isoformat()
+                ),
             }
             for item in state.approvals
         ],
@@ -522,10 +580,24 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
     message as the goal and conversation, which change constantly. A cache only
     reuses an unchanged prefix, so anything volatile in front of the catalogue
     stopped it from ever being reused. It is now its own stable message.
+
+    The payload states what it is. It used to arrive as a bare object whose
+    meaning had to be inferred, and on 2026-09-10 the Core told Friedl it could
+    not find the delete capability on a step where that exact id was in this
+    list. Nothing had said that these ids are exact, or that their presence
+    means available. Both facts are now carried by the message itself.
     """
     shared = _shared_failure_codes(capabilities)
     return json.dumps(
         {
+            "catalogue_semantics": (
+                "The authoritative namespace of capabilities available to call "
+                "on this reasoning step. Each id is exact; call it as written. "
+                "Every capability listed here is available now, so none of them "
+                "may be described as missing, unfindable or inaccessible. A "
+                "capability not listed here does not exist and must not be "
+                "invented."
+            ),
             "capabilities": [
                 {
                     "id": item.capability_id,
@@ -682,6 +754,11 @@ def _context_payload(context: ReasoningContext) -> str:
                 if item.call is not None and _attempt_is_citable(item)
             ),
         ],
+        # History records cite bare evidence IDs, not provenance references.
+        # This list uses the exact predicate the runtime grounding check uses.
+        "available_history_evidence_ids": sorted(
+            history_evidence_ids(() if goal is None else goal.evidence)
+        ),
         "retrieved_memories": [
             {
                 "memory_id": item.memory_id,
@@ -756,7 +833,9 @@ def decision_schema() -> dict[str, Any]:
             "description": (
                 "Identifiers of evidence items supporting this record. Each must "
                 "already exist in the goal's evidence or be created as new_evidence "
-                "in this same mutation. Empty if the record rests on no evidence."
+                "in this same mutation. Existing IDs are listed exactly, without an "
+                "evidence: prefix, in available_history_evidence_ids. Never invent "
+                "an identifier. Empty if the record rests on no evidence."
             ),
         },
     }
@@ -807,6 +886,14 @@ def decision_schema() -> dict[str, Any]:
                     item.value for item in GoalMutationKind
                     if item is not GoalMutationKind.AWAIT_APPROVAL
                 ],
+                "description": (
+                    "request_completion is accepted only when every success "
+                    "criterion is named in the supports field of some evidence "
+                    "item citing the succeeded attempt that did the work. "
+                    "Include that evidence in new_evidence in this same "
+                    "mutation; a criterion no evidence supports leaves the "
+                    "goal unfinished and the mutation is refused."
+                ),
             },
             "objective_summary": nullable_string,
             "success_criteria": _nullable(_array({"id": string, "description": string})),
@@ -916,7 +1003,15 @@ def decision_schema() -> dict[str, Any]:
         {
             "type": {"type": "string", "const": "call_capability"},
             "call_id": string,
-            "capability_id": string,
+            "capability_id": {
+                "type": "string",
+                "description": (
+                    "One id from the capability catalogue, exactly as written "
+                    "there. The catalogue is the authoritative namespace: every "
+                    "id in it is available to call now, and an id absent from it "
+                    "does not exist and must never be invented."
+                ),
+            },
             "arguments_json": string,
             "approval_id": nullable_string,
             "approval_proposal": approval_proposal,
@@ -931,7 +1026,15 @@ def decision_schema() -> dict[str, Any]:
                 "items": {"type": "string", "enum": [item.value for item in MemoryKind]},
             },
             "memory_ids": {"type": "array", "items": string},
-            "memory_person_id": nullable_string,
+            "memory_person_id": {
+                **nullable_string,
+                "description": (
+                    "Required when memory_kinds includes relationship: copy the "
+                    "exact person_id from the current/latest person turn in the "
+                    "model-visible conversation context. Another person's id is "
+                    "forbidden. Null when relationship is not requested."
+                ),
+            },
             "memory_formed_after": nullable_string,
             "memory_formed_before": nullable_string,
             "memory_source_references": {"type": "array", "items": string},

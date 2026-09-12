@@ -71,7 +71,7 @@ def runtimes():
     settings = xero_settings(unattended_bill_writes=True)
     with tempfile.TemporaryDirectory() as directory:
         xero = build_xero_runtime(
-            settings, Path(directory), FakeMail(), lambda: "call"
+            settings, Path(directory), FakeMail(), lambda: "call", lambda *_: {}
         )
     dhl = build_dhl_runtime(
         FakeMail(),

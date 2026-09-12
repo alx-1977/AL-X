@@ -3,6 +3,7 @@
 from alx.providers.cartesia import CartesiaTranscriber
 from alx.providers.elevenlabs import ElevenLabsSynthesizer
 from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
+from alx.providers.codex_subscription import CodexSubscriptionReasoningModel
 from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
 from alx.providers.openai import OpenAIReasoningModel
 from alx.providers.xai import XAIReasoningModel
@@ -41,6 +42,7 @@ __all__ = [
     "ElevenLabsSynthesizer",
     "ClaudeSubscriptionReasoningModel",
     "GrokSubscriptionReasoningModel",
+    "CodexSubscriptionReasoningModel",
     "OpenAIReasoningModel",
     "XAIReasoningModel",
     "ICloudMailAdapter",

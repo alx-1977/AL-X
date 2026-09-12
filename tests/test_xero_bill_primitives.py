@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import stat
 import hashlib
 import tempfile
@@ -240,6 +242,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: "call",
+                lambda *_: captured_invoice(),
             )
         # Unattended bill writes must not silently carry deletion with them.
         self.assertFalse(runtime.policies[CAPTURE_SUPPLIER_INVOICE].approval_required)
@@ -310,6 +313,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: "call",
+                lambda *_: captured_invoice(),
             )
         gate = SafetyGate(runtime.policies)
         for capability_id in (
@@ -341,6 +345,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: "call",
+                lambda *_: captured_invoice(),
             )
         self.assertEqual(
             runtime.permissions,
@@ -420,6 +425,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 Path(directory),
                 self.mail,
                 lambda: current_call_id[0],
+                lambda *_: captured_invoice(),
             )
             broker = CapabilityBroker(
                 registry,
@@ -765,6 +771,162 @@ class XeroAccountingAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Content-Type"], "application/pdf")
         self.assertEqual(kwargs["headers"]["contentType"], "application/pdf")
         self.assertEqual(kwargs["headers"]["Accept"], "application/octet-stream")
+
+    def test_attachment_readback_returns_each_document_on_a_multi_attachment_bill(
+        self,
+    ) -> None:
+        worksheet = b"customs-worksheet-pdf"
+        sad = b"sad-500-pdf"
+        body = {
+            "Attachments": [
+                {
+                    "AttachmentID": "att-worksheet",
+                    "FileName": "Customs Worksheet.pdf",
+                    "Content": base64.b64encode(worksheet).decode("ascii"),
+                },
+                {
+                    "AttachmentID": "att-sad",
+                    "FileName": "SAD 500.pdf",
+                    "Content": base64.b64encode(sad).decode("ascii"),
+                },
+            ]
+        }
+        response = self.response(body)
+        response.content = json.dumps(body).encode("ascii")
+        with patch("httpx.request", return_value=response):
+            by_id = self.adapter.read_bill_attachment(
+                "bill/1", "att-sad", "application/pdf"
+            )
+            first = self.adapter.read_bill_attachment(
+                "bill/1", "att-worksheet", "application/pdf"
+            )
+
+        self.assertEqual(by_id, sad)
+        self.assertEqual(first, worksheet)
+        self.assertNotEqual(by_id, first)
+
+    def test_attachment_readback_returns_raw_bytes_when_body_is_not_a_collection(
+        self,
+    ) -> None:
+        raw_pdf = b"%PDF-1.4 stored-exact-pdf"
+        prefixed = b"{not-json" + bytes((0, 255)) + b"%PDF"
+        unrelated = json.dumps({"Invoices": [{"InvoiceID": "bill-1"}]}).encode(
+            "ascii"
+        )
+        for payload in (raw_pdf, prefixed, unrelated):
+            with self.subTest(payload=payload[:16]):
+                response = self.response({})
+                response.content = payload
+                with patch("httpx.request", return_value=response):
+                    self.assertEqual(
+                        self.adapter.read_bill_attachment(
+                            "bill/1", "att-sad", "application/pdf"
+                        ),
+                        payload,
+                    )
+
+    def test_json_attachment_content_is_not_treated_as_xero_metadata(self) -> None:
+        payload = json.dumps({
+            "Attachments": [{
+                "AttachmentID": "att-sad",
+                "Content": "this is the attachment's own JSON",
+            }],
+        }).encode("utf-8")
+        response = self.response({})
+        response.content = payload
+        with patch("httpx.request", return_value=response):
+            self.assertEqual(
+                self.adapter.read_bill_attachment(
+                    "bill/1", "att-sad", "application/json"
+                ),
+                payload,
+            )
+
+    def test_attachment_readback_matches_attachment_id_without_a_filename(self) -> None:
+        sad = b"sad-500-pdf"
+        worksheet = b"worksheet-pdf"
+        body = {
+            "Attachments": [
+                {
+                    "AttachmentID": "att-worksheet",
+                    "FileName": "Customs Worksheet.pdf",
+                    "Content": base64.b64encode(worksheet).decode("ascii"),
+                },
+                {
+                    "AttachmentID": "att-sad",
+                    "Content": base64.b64encode(sad).decode("ascii"),
+                },
+            ]
+        }
+        response = self.response(body)
+        response.content = json.dumps(body).encode("ascii")
+        with patch("httpx.request", return_value=response):
+            payload = self.adapter.read_bill_attachment(
+                "bill/1", "att-sad", "application/pdf"
+            )
+        self.assertEqual(payload, sad)
+        self.assertNotEqual(payload, worksheet)
+
+    def test_attachment_readback_fails_when_the_identity_is_absent(self) -> None:
+        body = {
+            "Attachments": [
+                {
+                    "AttachmentID": "att-worksheet",
+                    "FileName": "Customs Worksheet.pdf",
+                    "Content": base64.b64encode(b"worksheet").decode("ascii"),
+                },
+                {
+                    "AttachmentID": "att-sad",
+                    "FileName": "SAD 500.pdf",
+                    "Content": base64.b64encode(b"sad-500").decode("ascii"),
+                },
+            ]
+        }
+        for payload in (body, {"Attachments": []}):
+            with self.subTest(payload=payload):
+                response = self.response(payload)
+                response.content = json.dumps(payload).encode("ascii")
+                with patch("httpx.request", return_value=response):
+                    with self.assertRaises(XeroAccessError) as captured:
+                        self.adapter.read_bill_attachment(
+                            "bill/1", "att-missing", "application/pdf"
+                        )
+                self.assertEqual(captured.exception.code, "response_invalid")
+
+    def test_attachment_readback_fails_when_content_is_unusable(self) -> None:
+        worksheet = {
+            "AttachmentID": "att-worksheet",
+            "FileName": "Customs Worksheet.pdf",
+            "Content": base64.b64encode(b"worksheet").decode("ascii"),
+        }
+        for label, sad in (
+            ("missing", {"AttachmentID": "att-sad", "FileName": "SAD 500.pdf"}),
+            ("empty", {
+                "AttachmentID": "att-sad",
+                "FileName": "SAD 500.pdf",
+                "Content": "   ",
+            }),
+            ("undecodable", {
+                "AttachmentID": "att-sad",
+                "FileName": "SAD 500.pdf",
+                "Content": "A",
+            }),
+            ("invalid_characters", {
+                "AttachmentID": "att-sad",
+                "FileName": "SAD 500.pdf",
+                "Content": "YWJj!!!",
+            }),
+        ):
+            with self.subTest(label=label):
+                body = {"Attachments": [worksheet, sad]}
+                response = self.response(body)
+                response.content = json.dumps(body).encode("ascii")
+                with patch("httpx.request", return_value=response):
+                    with self.assertRaises(XeroAccessError) as captured:
+                        self.adapter.read_bill_attachment(
+                            "bill/1", "att-sad", "application/pdf"
+                        )
+                self.assertEqual(captured.exception.code, "response_invalid")
 
     def test_update_targets_only_the_exact_xero_invoice_id(self) -> None:
         bill = {

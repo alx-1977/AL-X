@@ -20,6 +20,11 @@ const phaseLabels = {
   error: "Error",
   disconnected: "Disconnected",
 };
+const activityLabels = {
+  reasoning: "Reasoning",
+  coding: "Coding",
+  reviewing: "Reviewing",
+};
 
 let socket;
 let sending = false;
@@ -338,6 +343,11 @@ function handleControl(message) {
     diagnostic(`ALX > ${message.content}`, "ok", message.stream || "ALX");
     return;
   }
+  if (message.type === "activity") {
+    const label = activityLabels[message.value];
+    if (label) beginDiagnosticStage(label);
+    return;
+  }
   if (message.type === "diagnostic") {
     if (message.code === "microphone.audio_received") {
       diagnostic("AL/X server received microphone audio", "ok");
@@ -399,7 +409,7 @@ function handleControl(message) {
     diagnostic("Speech detected; transcription in progress", "active");
   }
   if (message.value === "thinking") {
-    beginDiagnosticStage("Core reasoning");
+    beginDiagnosticStage("Reasoning");
     diagnostic("Final transcription received", "ok");
     diagnostic("Authoritative Core reasoning in progress", "active");
   }

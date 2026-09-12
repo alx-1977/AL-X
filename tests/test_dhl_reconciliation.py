@@ -35,6 +35,7 @@ def worksheet_pdf(
     vat: str = "1100.55",
     total: str = "1116.15",
     waybill: str = "1234567890",
+    extra_lines: tuple[str, ...] = (),
 ) -> bytes:
     writer = PdfWriter()
     page = writer.add_blank_page(width=612, height=792)
@@ -48,10 +49,14 @@ def worksheet_pdf(
     page[NameObject("/Resources")] = DictionaryObject(
         {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
     )
+    extra_content = "".join(
+        f"0 -20 Td ({line}) Tj\n" for line in extra_lines
+    )
     content = f"""BT /F1 10 Tf
 1 0 0 1 100 760 Tm (CUSTOMS WORKSHEET) Tj
 0 -20 Td (DFM202604215028901) Tj
 0 -20 Td ({waybill}) Tj
+{extra_content}
 1 0 0 1 458 700 Tm (TOTAL DUTY 15.60) Tj
 0 -20 Td (TOTAL VAT {vat}) Tj
 1 0 0 1 344 660 Tm (TotalTotal) Tj
@@ -245,6 +250,44 @@ class DhlAnalyzerTests(unittest.TestCase):
         self.assertEqual(result["total"], "1116.15")
         self.assertEqual(result["waybill"], "1234567890")
         self.assertEqual(result["errors"], ())
+
+    def test_a_labelled_worksheet_waybill_beats_an_unrelated_ten_digit_number(self) -> None:
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [
+                worksheet_pdf(extra_lines=(
+                    "Customer reference 9999999999",
+                    "WAYBILL: 1234567890",
+                )),
+                sad500_pdf(),
+            ]
+        )
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["waybill"], "1234567890")
+
+    def test_unlabelled_multiple_worksheet_waybills_remain_ambiguous(self) -> None:
+        from alx.providers.dhl import _parse_worksheet
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_worksheet(worksheet_pdf(extra_lines=(
+                "Customer reference 9999999999",
+                "Other reference 8888888888",
+            )))
+        self.assertEqual(captured.exception.code, "worksheet_identity_ambiguous")
+
+    def test_conflicting_labelled_worksheet_waybills_remain_ambiguous(self) -> None:
+        from alx.providers.dhl import _parse_worksheet
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_worksheet(worksheet_pdf(extra_lines=(
+                "WAYBILL: 1234567890",
+                "WAYBILL NUMBER: 9999999999",
+            )))
+        self.assertEqual(captured.exception.code, "worksheet_identity_ambiguous")
+
+    def test_a_single_worksheet_waybill_remains_unchanged(self) -> None:
+        from alx.providers.dhl import _parse_worksheet
+
+        self.assertEqual(_parse_worksheet(worksheet_pdf()).waybill, "1234567890")
 
     def test_the_committed_invoice_fixture_parses_to_recorded_values(self) -> None:
         """The sanitized equivalent of the live CPTIR00273840 invoice.
@@ -786,6 +829,62 @@ class DhlImportLifecycleTests(unittest.TestCase):
         self.assertTrue(all(line["TaxAmount"] == 0 for line in bill["LineItems"]))
         self.assertEqual(result.values["attached"], ("CPTIR00273840.pdf",))
 
+    def test_upload_response_identity_verifies_when_xero_returns_a_different_filename(self) -> None:
+        original = self.xero.attach_bill_document
+
+        def renamed_response(invoice_id, filename, media_type, content):
+            stored = original(invoice_id, filename, media_type, content)
+            return {**stored, "FileName": "xero-renamed.pdf"}
+
+        self.xero.attach_bill_document = renamed_response
+
+        result = self.duty_tax()
+
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
+
+    def test_multiple_uploads_read_back_the_exact_returned_attachment_ids(self) -> None:
+        original_read = self.xero.read_bill_attachment
+        read_ids = []
+
+        def record_read(invoice_id, attachment_id, media_type):
+            read_ids.append(attachment_id)
+            return original_read(invoice_id, attachment_id, media_type)
+
+        self.xero.read_bill_attachment = record_read
+        result = self.customs()
+
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(read_ids[-2:], ["attachment-1", "attachment-2"])
+
+    def test_missing_attachment_id_in_upload_response_fails_closed(self) -> None:
+        original = self.xero.attach_bill_document
+
+        def missing_id(invoice_id, filename, media_type, content):
+            original(invoice_id, filename, media_type, content)
+            return {"FileName": filename, "MimeType": media_type}
+
+        self.xero.attach_bill_document = missing_id
+        result = self.duty_tax()
+
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "response_invalid")
+
+    def test_wrong_content_at_the_returned_attachment_id_still_fails_hash_verification(self) -> None:
+        original = self.xero.attach_bill_document
+
+        def attach_then_tamper(invoice_id, filename, media_type, content):
+            record = original(invoice_id, filename, media_type, content)
+            records = self.xero.attachments[invoice_id]
+            records[-1] = (record, b"different document")
+            return record
+
+        self.xero.attach_bill_document = attach_then_tamper
+        result = self.duty_tax()
+
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "supporting_document_mismatch")
+
     def test_duty_tax_paid_is_retry_safe_after_authorisation_failure(self) -> None:
         original = self.xero.authorise_bill
         attempts = 0
@@ -803,6 +902,7 @@ class DhlImportLifecycleTests(unittest.TestCase):
         second = self.duty_tax()
         self.assertTrue(second.values["completed"])
         self.assertEqual(self.xero.created, 1)
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
 
     def test_duty_tax_paid_is_retry_safe_after_attachment_failure(self) -> None:
         original = self.xero.attach_bill_document
@@ -821,6 +921,43 @@ class DhlImportLifecycleTests(unittest.TestCase):
         second = self.duty_tax()
         self.assertTrue(second.values["completed"])
         self.assertEqual(self.xero.created, 1)
+
+    def test_duty_tax_does_not_duplicate_an_attachment_after_authorisation_failure(self) -> None:
+        original = self.xero.authorise_bill
+        attempts = 0
+
+        def fail_once(invoice_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise XeroAccessError("connection_failed")
+            return original(invoice_id)
+
+        self.xero.authorise_bill = fail_once
+        first = self.duty_tax()
+        self.assertEqual(first.failure["code"], "connection_failed")
+        second = self.duty_tax()
+        self.assertTrue(second.values["completed"])
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
+
+    def test_duty_tax_rechecks_the_attachment_immediately_before_authorisation(self) -> None:
+        original = self.xero.read_bill
+        reads = 0
+
+        def tamper_before_authorisation(invoice_id):
+            nonlocal reads
+            result = original(invoice_id)
+            reads += 1
+            if reads == 2:
+                record, _content = self.xero.attachments[invoice_id][-1]
+                self.xero.attachments[invoice_id][-1] = (record, b"replaced")
+            return result
+
+        self.xero.read_bill = tamper_before_authorisation
+        result = self.duty_tax()
+
+        self.assertEqual(result.values["returned_for"], "supporting_document_missing")
+        self.assertEqual(self.xero.authorised, [])
 
     def test_a_draft_changed_during_attachment_is_not_authorised(self) -> None:
         original = self.xero.attach_bill_document
@@ -1270,6 +1407,135 @@ class ConfiguredSupplierAndAccountsTests(unittest.TestCase):
         result = executor_for(self.mail, self.xero)(self.documents())
         self.assertEqual(result.failure["code"], "account_mapping_invalid")
         self.assertEqual(self.xero.state.get("created", 0), 0)
+
+
+class AttachmentIdentityTests(unittest.TestCase):
+    """An existing attachment stands in for this one only if both agree.
+
+    Reuse exists so a resumed run does not upload the same document twice.
+    Keying it on the digest alone made two separately required documents with
+    identical bytes collapse onto one AttachmentID: the second upload was
+    skipped and one stored file was recorded as both. Pre-authorisation
+    verification could not see it, because both expected entries named a real
+    attachment holding exactly the bytes they expected.
+    """
+
+    def setUp(self) -> None:
+        self.mail = FakeMail()
+        self.xero = FakeXeroBills()
+        self.executor = executor_for(self.mail, self.xero)
+
+    def customs(self):
+        return self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "worksheet", "11"),
+                    source_for(self.mail, "sad", "12"),
+                ]
+            }
+        )
+
+    def stored(self):
+        return [
+            (record["AttachmentID"], record["FileName"], content)
+            for record, content in self.xero.attachments["bill-1"]
+        ]
+
+    def test_the_same_document_on_a_resumed_run_is_reused_not_duplicated(self) -> None:
+        """1. Same filename, same bytes: the existing attachment is kept."""
+        original = self.xero.authorise_bill
+        attempts = 0
+
+        def fail_once(invoice_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise XeroAccessError("connection_failed")
+            return original(invoice_id)
+
+        self.xero.authorise_bill = fail_once
+        first = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertEqual(first.failure["code"], "connection_failed")
+        before = self.stored()
+        second = self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "duty_csv", "20"),
+                    source_for(self.mail, "duty_pdf", "20"),
+                ]
+            }
+        )
+        self.assertTrue(second.values["completed"])
+        # Nothing re-uploaded: the same single attachment, same identity.
+        self.assertEqual(self.stored(), before)
+        self.assertEqual(len(self.xero.attachments["bill-1"]), 1)
+
+    def test_identical_bytes_under_different_names_stay_distinct(self) -> None:
+        """2. The collapse itself, at the stage boundary that produced it.
+
+        A document already on the bill under one required name holds exactly
+        the bytes the invoice stage is about to attach under another. Reusing
+        it skipped the invoice upload and recorded the other document's
+        AttachmentID as the invoice, so the bill authorised without ever
+        storing invoice.pdf -- and every later check still passed, because the
+        identity it named did hold those bytes.
+        """
+        self.customs()
+        invoice_bytes = self.mail.payloads["invoice"][2]
+        self.xero.attachments["bill-1"].append(
+            (
+                {
+                    "AttachmentID": "customs-extra-1",
+                    "FileName": "customs-extra.pdf",
+                    "MimeType": "application/pdf",
+                },
+                invoice_bytes,
+            )
+        )
+
+        result = self.executor(
+            {"documents": [source_for(self.mail, "invoice", "10")]}
+        )
+        self.assertTrue(result.values["completed"])
+
+        names = [name for _id, name, _content in self.stored()]
+        # The invoice is stored under its own name and identity, not merged
+        # into the identically-valued document already present.
+        self.assertIn("invoice.pdf", names)
+        self.assertIn("customs-extra.pdf", names)
+        invoices = [item for item, name, _c in self.stored() if name == "invoice.pdf"]
+        self.assertEqual(len(invoices), 1)
+        self.assertNotIn("customs-extra-1", invoices)
+
+    def test_the_same_name_carrying_different_bytes_is_not_reused(self) -> None:
+        """3. Filename alone is not identity; changed bytes must upload."""
+        self.customs()
+        first = self.stored()
+        self.assertEqual(len(first), 2)
+
+        # The same required name arrives again with different content.
+        replaced = worksheet_pdf(waybill="1234567890") + b"\n% revised\n"
+        self.mail.payloads["worksheet"] = (
+            "worksheet.pdf", "application/pdf", replaced,
+        )
+        self.customs()
+
+        worksheets = [
+            (item, content)
+            for item, name, content in self.stored()
+            if name == "worksheet.pdf"
+        ]
+        # The changed document was uploaded rather than matched by name.
+        self.assertEqual(len(worksheets), 2)
+        self.assertNotEqual(worksheets[0][1], worksheets[1][1])
+        self.assertNotEqual(worksheets[0][0], worksheets[1][0])
 
 
 class TamperedDraftTests(unittest.TestCase):

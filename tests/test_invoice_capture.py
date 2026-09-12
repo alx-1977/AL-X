@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,9 +20,13 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import CapabilityResultState, MailAttachment  # noqa: E402
 from alx.contracts import SideEffect  # noqa: E402
+from alx.bootstrap.xero import build_xero_runtime  # noqa: E402
 from support import xero_settings  # noqa: E402
 from alx.tools import (  # noqa: E402
     CAPTURE_SUPPLIER_INVOICE,
+    DELETE_XERO_DRAFT_BILL,
+    FIND_XERO_BILL,
+    READ_XERO_BILL,
     build_xero_executors,
 )
 
@@ -800,6 +805,7 @@ class NoFallbackTests(unittest.TestCase):
                 Path(directory),
                 FakeMail(),
                 lambda: "call",
+                lambda *_: extracted(),
             )
         offered = {item.capability_id for item in runtime.definitions}
         self.assertIn(CAPTURE_SUPPLIER_INVOICE, offered)
@@ -855,6 +861,45 @@ class NoFallbackTests(unittest.TestCase):
         )[CAPTURE_SUPPLIER_INVOICE]
         result = capture(arguments())
         self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "specialist_unconfigured")
+
+
+class SupplierCaptureAvailabilityTests(unittest.TestCase):
+    """The runtime catalogue must not promise an unavailable specialist path."""
+
+    def _runtime(self, extractor=None):
+        with tempfile.TemporaryDirectory() as directory:
+            return build_xero_runtime(
+                xero_settings(unattended_bill_writes=True),
+                Path(directory),
+                FakeMail(),
+                lambda: "call",
+                extractor,
+            )
+
+    def test_a_configured_specialist_exposes_supplier_capture(self) -> None:
+        runtime = self._runtime(lambda *_: extracted())
+        self.assertIn(
+            CAPTURE_SUPPLIER_INVOICE,
+            {item.capability_id for item in runtime.definitions},
+        )
+        self.assertIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
+        self.assertIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
+
+    def test_an_absent_specialist_does_not_advertise_supplier_capture(self) -> None:
+        runtime = self._runtime()
+        offered = {item.capability_id for item in runtime.definitions}
+        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, offered)
+        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
+        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
+        # The specialist gates only ordinary supplier capture. Xero reads and
+        # draft deletion remain independently callable, and DHL has its own
+        # deterministic runtime.
+        for capability_id in (FIND_XERO_BILL, READ_XERO_BILL, DELETE_XERO_DRAFT_BILL):
+            with self.subTest(capability_id=capability_id):
+                self.assertIn(capability_id, offered)
+                self.assertIn(capability_id, runtime.policies)
+                self.assertIn(capability_id, runtime.executors)
 
 
 if __name__ == "__main__":

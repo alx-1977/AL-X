@@ -155,6 +155,8 @@ def _environment(**changes: str) -> dict[str, str]:
         "ALX_CODING_ENABLED": "true",
         "ALX_CODING_PROVIDER": "grok_subscription",
         "ALX_CODING_MODEL": "grok-4.6",
+        "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+        "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
     }
     values.update(changes)
     return values
@@ -263,7 +265,10 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
         )
         runtime = build_coding_runtime(
-            True, model, lambda: "call-1", session=_StubSession(root)
+            True, model, lambda: "call-1", session=_StubSession(root),
+            reviewer=GrokSubscriptionReasoningModel(
+                "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
+            ),
         )
         broker = CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
@@ -425,6 +430,51 @@ class GrokCodingCompositionTests(unittest.TestCase):
             )
         self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
         self.assertNotIn("XAI_API_KEY", providers.coding.child_environment())
+
+    def test_local_reviewer_is_a_distinct_instance_when_explicitly_configured(self) -> None:
+        with patch(
+            "alx.bootstrap.providers.subscription_cli_present", return_value=True
+        ):
+            providers = build_runtime_providers(
+                RuntimeSettings.from_environment(_environment())
+            )
+        self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
+        self.assertIsInstance(
+            providers.coding_reviewer, GrokSubscriptionReasoningModel
+        )
+        self.assertIsNot(providers.coding, providers.coding_reviewer)
+
+    def test_missing_reviewer_configuration_disables_coding_without_fallback(self) -> None:
+        environment = _environment()
+        environment.pop("ALX_CODING_REVIEWER_PROVIDER")
+        environment.pop("ALX_CODING_REVIEWER_MODEL")
+        settings = RuntimeSettings.from_environment(environment)
+        self.assertFalse(settings.coding.is_usable)
+        self.assertEqual(settings.coding.reviewer.provider, "none")
+        with patch(
+            "alx.bootstrap.providers.subscription_cli_present", return_value=True
+        ):
+            providers = build_runtime_providers(settings)
+        self.assertIsNone(providers.coding)
+        self.assertIsNone(providers.coding_reviewer)
+
+    def test_local_reviewer_can_use_a_different_provider_and_model(self) -> None:
+        with patch(
+            "alx.bootstrap.providers.subscription_cli_present", return_value=True
+        ):
+            providers = build_runtime_providers(RuntimeSettings.from_environment(
+                _environment(
+                    ALX_CODING_REVIEWER_PROVIDER="openai",
+                    ALX_CODING_REVIEWER_MODEL="reviewer-test",
+                    ALX_CODING_REVIEWER_API_KEY="reviewer-key",
+                    ALX_CODING_REVIEWER_EFFORT="high",
+                )
+            ))
+        self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
+        self.assertIsInstance(providers.coding_reviewer, OpenAIReasoningModel)
+        self.assertEqual(providers.coding_reviewer._model, "reviewer-test")
+        self.assertEqual(providers.coding_reviewer._api_key, "reviewer-key")
+        self.assertEqual(providers.coding_reviewer._reasoning_effort, "high")
 
     def test_a_present_xai_key_does_not_become_the_coding_transport(self) -> None:
         with patch(

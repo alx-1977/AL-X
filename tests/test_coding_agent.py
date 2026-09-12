@@ -117,13 +117,17 @@ def _plan(**changes) -> dict:
 class PlanningModel:
     """Answers the planning turn only. Any other call is a defect."""
 
-    def __init__(self, plan: dict | None = None, error: Exception | None = None) -> None:
+    def __init__(self, plan: dict | None = None, error: Exception | None = None,
+                 reviews: list[dict] | None = None) -> None:
         self._plan = plan if plan is not None else _plan()
         self._error = error
+        self._reviews = list(reviews or [{"findings": []}])
         self.requests = []
 
     def complete(self, request):
         self.requests.append(request)
+        if request.output_schema_name == "alx_coding_local_review":
+            return ModelCompletion("xai", "scripted", self._reviews.pop(0))
         if request.output_schema_name != "alx_coding_plan":
             raise AssertionError(
                 "the native execution model must not ask the model for steps"
@@ -180,9 +184,12 @@ class NativeExecutionTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.addCleanup(self.directory.cleanup)
 
-    def _run(self, model, session, **arguments):
+    def _run(self, model, session, reviewer=None, **arguments):
+        reviewer = reviewer or PlanningModel()
+        activity_sink = arguments.pop("activity_sink", None)
         runtime = build_coding_runtime(
-            True, model, lambda: "call-1", session=session
+            True, model, lambda: "call-1", session=session, reviewer=reviewer,
+            activity_sink=activity_sink,
         )
         self.assertIsNotNone(runtime)
         broker = CapabilityBroker(
@@ -203,7 +210,10 @@ class NativeExecutionTests(unittest.TestCase):
 
         class OrderedModel(PlanningModel):
             def complete(self, request):
-                order.append("plan")
+                order.append(
+                    "review" if request.output_schema_name == "alx_coding_local_review"
+                    else "plan"
+                )
                 return super().complete(request)
 
         class OrderedSession(RecordingSession):
@@ -214,9 +224,73 @@ class NativeExecutionTests(unittest.TestCase):
         worktree = _worktree(self.root)
         session = OrderedSession(edits={"app.py": _FIXED})
         self._run(
-            OrderedModel(), session, task="fix add", worktree=str(worktree)
+            OrderedModel(), session, reviewer=OrderedModel(), task="fix add",
+            worktree=str(worktree),
         )
-        self.assertEqual(order, ["plan", "session"])
+        self.assertEqual(order, ["plan", "session", "review"])
+
+    def test_native_session_and_reviewer_report_explicit_activity(self) -> None:
+        worktree = _worktree(self.root)
+        activities: list[str] = []
+        self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(), activity_sink=activities.append,
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(activities, ["coding", "reviewing", "reasoning"])
+
+    def test_correction_cycle_reports_reviewing_coding_reviewing(self) -> None:
+        worktree = _worktree(self.root)
+        activities: list[str] = []
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "repair needed",
+                "evidence": "candidate is incomplete", "correction": "finish it",
+            }]},
+            {"findings": []},
+        ])
+        class CorrectingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                result = super().run_session(request, briefing)
+                if len(self.calls) > 1:
+                    path = Path(request.worktree) / "app.py"
+                    path.write_text(path.read_text(encoding="utf-8") + "# corrected\n", encoding="utf-8")
+                return result
+
+        self._run(
+            PlanningModel(), CorrectingSession(edits={"app.py": _FIXED}),
+            reviewer=reviewer, activity_sink=activities.append,
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(
+            activities,
+            ["coding", "reviewing", "coding", "reviewing", "reasoning"],
+        )
+
+    def test_session_failure_restores_reasoning_activity_without_another_model_call(self) -> None:
+        worktree = _worktree(self.root)
+        activities: list[str] = []
+        planner = PlanningModel()
+        reviewer = PlanningModel()
+        self._run(
+            planner,
+            RecordingSession(raises=CodingError("session_failed", reason_code="session_timeout")),
+            reviewer=reviewer, activity_sink=activities.append,
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(activities, ["coding", "reasoning"])
+        self.assertEqual(len(planner.requests), 1)
+        self.assertEqual(reviewer.requests, [])
+
+    def test_reviewer_failure_restores_reasoning_activity(self) -> None:
+        worktree = _worktree(self.root)
+        activities: list[str] = []
+        self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(reviews=[{"findings": "invalid"}]),
+            activity_sink=activities.append, task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(activities[-1], "reasoning")
 
     def test_a_failed_plan_never_reaches_the_session(self) -> None:
         model = PlanningModel(plan=_plan(problem_understanding="   "))
@@ -228,6 +302,156 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
         self.assertEqual(session.calls, [])
         self.assertEqual(attempt.result.failure["code"], "planning_failed")
+
+    def test_local_reviewer_catches_an_adjacent_unfixed_path_and_rechecks(self) -> None:
+        """A plausible one-line repair is not accepted while its twin is wrong."""
+        worktree = _worktree(self.root)
+        (worktree / "parallel.py").write_text(
+            "def add(a, b):\n    return a - b\n", encoding="utf-8"
+        )
+        _git(worktree, "add", "parallel.py")
+        _git(worktree, "commit", "-m", "add parallel helper")
+
+        class CorrectingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                if len(self.calls) == 1:
+                    (root / "app.py").write_text(_FIXED, encoding="utf-8")
+                else:
+                    (root / "parallel.py").write_text(_FIXED, encoding="utf-8")
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        model = PlanningModel(plan=_plan(
+            inspection_targets=["app.py", "parallel.py"]
+        ))
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "parallel helper remains wrong",
+                "evidence": "parallel.py still subtracts", "correction": "fix parallel.py",
+            }]},
+            {"findings": []},
+        ])
+        session = CorrectingSession()
+        attempt = self._run(
+            model, session, reviewer=reviewer, task="fix both add helpers",
+            worktree=str(worktree),
+        )
+
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 2)
+        self.assertIn("Local reviewer findings", session.calls[1][1])
+        first_review = json.loads(reviewer.requests[0].messages[-1].content)
+        self.assertIn("parallel.py", first_review["changed_file_context"])
+        self.assertIn("parallel.py", attempt.result.values["files_changed"])
+        self.assertIn("parallel.py", attempt.result.values["git_diff"])
+        self.assertEqual(
+            [request.output_schema_name for request in model.requests],
+            ["alx_coding_plan"],
+        )
+        self.assertEqual(
+            [request.output_schema_name for request in reviewer.requests],
+            ["alx_coding_local_review", "alx_coding_local_review"],
+        )
+
+    def test_local_reviewer_failure_never_accepts_the_job(self) -> None:
+        worktree = _worktree(self.root)
+        reviewer = PlanningModel(reviews=[{"findings": "not-a-list"}])
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=reviewer, task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "task_failed")
+
+    def test_unavailable_local_reviewer_fails_closed(self) -> None:
+        class UnavailableReviewer(PlanningModel):
+            def complete(self, request):
+                if request.output_schema_name == "alx_coding_local_review":
+                    raise ProviderError("local", "unavailable")
+                return super().complete(request)
+
+        worktree = _worktree(self.root)
+        planner = PlanningModel()
+        attempt = self._run(
+            planner, RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=UnavailableReviewer(),
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "task_failed")
+        self.assertIn("review_failed", attempt.result.values["unresolved_issues"])
+        self.assertEqual(
+            [item.output_schema_name for item in planner.requests],
+            ["alx_coding_plan"],
+        )
+
+    def test_reviewer_has_one_correction_and_one_recheck_bound(self) -> None:
+        worktree = _worktree(self.root)
+        model = PlanningModel()
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "first material issue",
+                "evidence": "candidate is incomplete", "correction": "complete it",
+            }]},
+            {"findings": [{
+                "severity": "high", "title": "still incomplete",
+                "evidence": "candidate remains incomplete", "correction": "complete it",
+            }]},
+        ])
+
+        class OneCorrection(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                (root / "app.py").write_text(
+                    _FIXED if len(self.calls) == 1 else _FIXED + "\n# reviewer correction\n",
+                    encoding="utf-8",
+                )
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        session = OneCorrection()
+        attempt = self._run(
+            model, session, reviewer=reviewer, task="fix add", worktree=str(worktree)
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(
+            [item.output_schema_name for item in reviewer.requests],
+            ["alx_coding_local_review", "alx_coding_local_review"],
+        )
+        self.assertIn(
+            "local_review_material_findings",
+            attempt.result.values["unresolved_issues"],
+        )
+
+    def test_clean_review_only_advises_and_proceeds_to_alx_verification(self) -> None:
+        worktree = _worktree(self.root)
+        model = PlanningModel()
+        reviewer = PlanningModel(reviews=[{"findings": []}])
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            model, session, reviewer=reviewer, task="fix add", worktree=str(worktree),
+            test_guidance="python -m unittest -q test_app",
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual([item.output_schema_name for item in model.requests], ["alx_coding_plan"])
+        review_request = reviewer.requests[0]
+        self.assertEqual(review_request.output_schema_name, "alx_coding_local_review")
+        instruction = review_request.messages[0].content.lower()
+        for withheld in ("edit", "run commands", "commit", "push", "merge", "external review"):
+            self.assertIn(withheld, instruction)
+        review_payload = json.loads(review_request.messages[-1].content)
+        self.assertNotIn("worktree", review_payload)
+        self.assertTrue(attempt.result.values["tests_run"])
+
+    def test_local_reviewer_does_not_touch_external_review_wiring(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "src" / "alx" / "providers" / "coding_agent.py"
+        ).read_text(encoding="utf-8")
+        for external in ("Qodo", "request_external_review", "review.request"):
+            self.assertNotIn(external, source)
 
     def test_the_session_receives_the_real_worktree_and_the_plan(self) -> None:
         """2. Grok's cwd is the assigned worktree, not a synthetic path."""
@@ -279,7 +503,9 @@ class NativeExecutionTests(unittest.TestCase):
     def test_changed_test_modules_are_preferred_to_the_full_suite(self) -> None:
         """The native session's own regression is the first test evidence."""
         worktree = _worktree(self.root)
-        agent = coding_agent_module.CodingAgent(PlanningModel(), RecordingSession())
+        agent = coding_agent_module.CodingAgent(
+            PlanningModel(), RecordingSession(), PlanningModel()
+        )
         commands = agent._verification_commands(
             CodingRequest(task="fix add", worktree=str(worktree)),
             _plan(),
@@ -314,6 +540,57 @@ class NativeExecutionTests(unittest.TestCase):
             tuple(attempt.result.values["commands"][0]["argv"]),
             ("python", "-m", "pytest", "-q", "test_app.py"),
         )
+
+    def test_a_correction_only_file_selects_the_targeted_verification(self) -> None:
+        """A file only the reviewer correction touched still chooses the tests.
+
+        The initial session changes `app.py` alone. The correction cycle adds
+        `test_parallel.py`, which never appeared in the original session's file
+        set. Targeted verification selects from the job's final reviewed files,
+        so the correction-only module is the evidence AL/X actually runs.
+        """
+        worktree = _worktree(self.root)
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "the repair has no regression",
+                "evidence": "no test covers the corrected helper",
+                "correction": "add a regression module",
+            }]},
+            {"findings": []},
+        ])
+
+        class CorrectingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                if len(self.calls) == 1:
+                    (root / "app.py").write_text(_FIXED, encoding="utf-8")
+                else:
+                    (root / "test_parallel.py").write_text(
+                        "from app import add\n\n\n"
+                        "def test_add():\n"
+                        "    assert add(1, 2) == 3\n",
+                        encoding="utf-8",
+                    )
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        session = CorrectingSession()
+        attempt = self._run(
+            PlanningModel(), session, reviewer=reviewer,
+            task="fix add", worktree=str(worktree),
+        )
+        values = attempt.result.values
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 2)
+        # The correction-only file reaches the reviewed/evidence set...
+        self.assertIn("test_parallel.py", values["files_changed"])
+        # ...and the same set chooses the targeted verification command.
+        self.assertEqual(
+            tuple(values["commands"][0]["argv"]),
+            ("python", "-m", "pytest", "-q", "test_parallel.py"),
+        )
+        self.assertTrue(values["tests_run"])
+        self.assertTrue(values["tests_passed"])
 
     def test_verification_timeout_remains_failed_bounded_evidence(self) -> None:
         """A realistic bound does not turn a genuine timeout into success."""
@@ -406,6 +683,22 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("unrelated.py", values["preexisting_dirty"])
         self.assertNotIn("unrelated.py", values["files_changed"])
         self.assertIn("app.py", values["files_changed"])
+
+    def test_local_reviewer_does_not_receive_unmodified_preexisting_dirt(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "unrelated.py").write_text("private dirty work\n", encoding="utf-8")
+        reviewer = PlanningModel(reviews=[{"findings": []}])
+        model = PlanningModel(plan=_plan(
+            inspection_targets=["app.py", "unrelated.py"]
+        ))
+        attempt = self._run(
+            model, RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=reviewer, task="fix add", worktree=str(worktree),
+        )
+
+        payload = json.loads(reviewer.requests[0].messages[-1].content)
+        self.assertNotIn("unrelated.py", payload["changed_file_context"])
+        self.assertNotIn("unrelated.py", attempt.result.values["git_diff"])
 
     def test_capability_is_unregistered_without_a_session(self) -> None:
         """A plan with nothing to execute it is honest absence, not a failure."""
@@ -580,6 +873,8 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_ENABLED": "true",
                 "ALX_CODING_PROVIDER": "grok_subscription",
                 "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+                "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
                 "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1800",
             }
@@ -612,6 +907,8 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_ENABLED": "true",
                 "ALX_CODING_PROVIDER": "grok_subscription",
                 "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+                "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
                 "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1500",
             }
@@ -648,7 +945,8 @@ class SessionTimeoutTests(unittest.TestCase):
             raises=CodingError("session_failed", reason_code="session_timeout")
         )
         runtime = build_coding_runtime(
-            True, PlanningModel(), lambda: "call-1", session=session
+            True, PlanningModel(), lambda: "call-1", session=session,
+            reviewer=PlanningModel(),
         )
         attempt = CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
@@ -679,7 +977,8 @@ class SessionTimeoutTests(unittest.TestCase):
             raises=CodingError("session_failed", reason_code="session_timeout")
         )
         runtime = build_coding_runtime(
-            True, PlanningModel(), lambda: "call-1", session=session
+            True, PlanningModel(), lambda: "call-1", session=session,
+            reviewer=PlanningModel(),
         )
         CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
@@ -778,7 +1077,9 @@ class SupersededExecutionPathTests(unittest.TestCase):
 
     def test_the_agent_cannot_execute_a_model_chosen_operation(self) -> None:
         module = coding_agent_module
-        agent = module.CodingAgent(PlanningModel(), RecordingSession())
+        agent = module.CodingAgent(
+            PlanningModel(), RecordingSession(), PlanningModel()
+        )
         for removed in ("_act", "_ask"):
             self.assertFalse(
                 hasattr(agent, removed),
@@ -938,6 +1239,8 @@ class LiveCoreCatalogueTests(unittest.TestCase):
                 "ALX_CODING_ENABLED": "true",
                 "ALX_CODING_PROVIDER": "grok_subscription",
                 "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+                "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
             }
         )
         ids = captured["ids"]

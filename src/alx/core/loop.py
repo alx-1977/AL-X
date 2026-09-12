@@ -21,6 +21,7 @@ from alx.contracts import (
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
     ContentOrigin, ContentProvenance, RetentionPolicy,
+    history_evidence_ids,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -356,6 +357,29 @@ class CoreAgent:
                 )
                 if decision.response_requires_goal_commit or decision.finish_silently:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_proposal_invalid")
+                # The reason reaches the Core, exactly as an approval or memory
+                # rejection already does. It used to go only to the log and the
+                # rejection record, so a proposal refused here was invisible to
+                # the next step: on 2026-09-11 an update mutation offered with
+                # no goal was rejected as goal_missing, the Core was told only
+                # that dispatch required an active goal, and it proposed the
+                # same update again. Both steps were spent and the session
+                # ended without the deletion it had decided to make.
+                #
+                # Subject is the mutation kind rather than the capability: the
+                # fault is which mutation was offered, and a later call for the
+                # same capability is a different refusal.
+                if self._already_refused(
+                    refused_calls, proposal_error, decision.goal_proposal.kind.value
+                ):
+                    return CoreOutcome(
+                        CoreState.ERROR, snapshot, reason="goal_proposal_invalid",
+                    )
+                refused_calls = (*refused_calls, {
+                    "reason": proposal_error,
+                    "subject": decision.goal_proposal.kind.value,
+                    "mutation_kind": decision.goal_proposal.kind.value,
+                })
             # The goal a call would run under: the reduced proposal when it was
             # accepted, otherwise the attached goal exactly as it stands.
             effective = (
@@ -1162,10 +1186,7 @@ class CoreAgent:
             proposed_ids = [getattr(item, attribute) for item in proposed]
             if len(proposed_ids) != len(set(proposed_ids)) or existing_ids.intersection(proposed_ids):
                 return "durable_record_id_reused"
-        evidence_ids = {
-            *(item.evidence_id for item in state.evidence),
-            *(item.evidence_id for item in proposal.new_evidence),
-        }
+        evidence_ids = history_evidence_ids(state.evidence, proposal.new_evidence)
         for record in (
             *proposal.new_decisions,
             *proposal.new_corrections,
@@ -1190,7 +1211,7 @@ class CoreAgent:
             if len(identifiers) != len(set(identifiers)):
                 return "durable_record_id_reused"
         evidence_ids = set() if existing_evidence_ids is None else set(existing_evidence_ids)
-        evidence_ids.update(item.evidence_id for item in proposal.new_evidence)
+        evidence_ids.update(history_evidence_ids(proposal.new_evidence))
         for record in (
             *proposal.new_decisions,
             *proposal.new_corrections,
@@ -1412,11 +1433,21 @@ class CoreAgent:
         references: list[str] = []
         for item in proposal.new_evidence:
             references.extend(item.source_references)
+        history_references = [
+            reference
+            for record in (
+                *proposal.new_decisions,
+                *proposal.new_corrections,
+                *proposal.new_progress,
+            )
+            for reference in record.evidence_refs
+        ]
         try:
             self._record_goal_rejection({
                 "conversation_id": conversation.conversation_id,
                 "reason": reason,
                 "source_references": references,
+                "history_evidence_references": history_references,
                 "evidence_ids": [item.evidence_id for item in proposal.new_evidence],
                 "mutation_kind": proposal.kind.value,
                 "recorded_at": now.isoformat(),
@@ -1585,6 +1616,14 @@ class CoreAgent:
     # is the once-per-instruction rule, and bypassing it on a fresh approval
     # is exactly the double-send it exists to prevent.
     _CORRECTABLE_REJECTION_REASONS = frozenset({
+        # The ordinary first-time refusal of a consequential action: the call
+        # carried no approval because none had been given yet. Asking Friedl
+        # and retrying with what he then granted is the whole point of that
+        # refusal, so it must not also be the thing that forbids the retry.
+        # On 2026-09-11 he answered "yes please" to a draft-bill deletion and
+        # the turn died without a word, exactly as the approval_invalid case
+        # below had died the day before.
+        "approval_required",
         "approval_invalid",
         "approval_call_id_mismatch",
         "approval_scope_mismatch",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -48,6 +49,59 @@ XERO_SCOPES = (
 def _raise_clean(code: str) -> None:
     """Raise after handlers exit so request-bearing exceptions aren't chained."""
     raise XeroAccessError(code)
+
+
+def _json_attachment_envelope(raw: bytes) -> Any | None:
+    """A Xero attachment-list envelope, never arbitrary JSON file content."""
+    stripped = bytes(raw).lstrip()
+    if not stripped.startswith((b"{", b"[")):
+        return None
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return None
+    # A standalone attachment record is also valid JSON file content. Xero's
+    # list response is the only response shape this binary read needs to
+    # decode, and it has this explicit envelope.
+    if isinstance(body, Mapping) and "Attachments" in body:
+        return body
+    return None
+
+
+def _attachment_entries(body: Any) -> tuple[Mapping[str, Any], ...]:
+    if isinstance(body, Mapping):
+        values = body["Attachments"] if "Attachments" in body else (body,)
+    elif isinstance(body, (list, tuple)):
+        values = body
+    else:
+        values = ()
+    if isinstance(values, Mapping):
+        values = (values,)
+    elif not isinstance(values, (list, tuple)):
+        values = ()
+    return tuple(item for item in values if isinstance(item, Mapping))
+
+
+def _attachment_for_identity(body: Any, identity: str) -> Mapping[str, Any]:
+    """The attachment Xero identified, never the first entry on a multi-file bill."""
+    wanted = str(identity or "")
+    if not wanted:
+        _raise_clean("response_invalid")
+    entries = _attachment_entries(body)
+    for item in entries:
+        if str(item.get("AttachmentID") or "") == wanted:
+            return item
+    _raise_clean("response_invalid")
+
+
+def _base64_content_from_json(body: Any, identity: str) -> bytes:
+    content = _attachment_for_identity(body, identity).get("Content")
+    if not isinstance(content, str) or not content.strip():
+        _raise_clean("response_invalid")
+    try:
+        return base64.b64decode(content.strip(), validate=True)
+    except Exception:
+        _raise_clean("response_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,7 +460,16 @@ class XeroAccountingAdapter:
         if response.status_code >= 400:
             _raise_clean("request_rejected")
         if binary:
-            return bytes(response.content)
+            content_type = response.headers.get("content-type", "")
+            # Test doubles and a few HTTP shims expose no usable header. Xero
+            # metadata is JSON by contract; raw bytes still remain raw unless
+            # their body is the explicit Attachments envelope below.
+            if not isinstance(content_type, str):
+                content_type = "application/json"
+            return (
+                bytes(response.content),
+                content_type.split(";", 1)[0].lower(),
+            )
         body: Any = None
         try:
             body = response.json()
@@ -537,12 +600,26 @@ class XeroAccountingAdapter:
     def read_bill_attachment(
         self, invoice_id: str, attachment_id: str, media_type: str
     ) -> bytes:
-        return self._request(
+        raw, response_media_type = self._request(
             "GET",
             f"/Invoices/{quote(invoice_id, safe='')}/Attachments/{quote(attachment_id, safe='')}",
             media_type=media_type,
             binary=True,
         )
+        # JSON is a legitimate attachment media type. Only an API JSON
+        # response to a non-JSON attachment request can be Xero metadata.
+        body = (
+            _json_attachment_envelope(raw)
+            if response_media_type == "application/json"
+            and media_type.lower() != "application/json"
+            else None
+        )
+        if body is None:
+            return bytes(raw)
+        # Xero's JSON lists every file on the bill. The requested identity
+        # must be matched; the first FileName or Content is a different
+        # document when two PDFs share the invoice.
+        return _base64_content_from_json(body, attachment_id)
 
     def delete_draft_bill(self, invoice_id: str) -> Mapping[str, Any]:
         """Discard one draft bill. Xero records DELETED, it does not remove."""

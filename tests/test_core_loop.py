@@ -18,7 +18,7 @@ from alx.contracts import (  # noqa: E402
     ConversationTurn, DecisionValidationError, Evidence, GoalMutationKind,
     GoalProposal, GoalState, GoalStatus, Objective, SideEffect,
     MemoryKind, MemoryProposal, StructuredSchema, SuccessCriterion, ValueKind,
-    GoalStopReason,
+    GoalStopReason, ProgressRecord,
     WorkItem,
 )
 from alx.contracts import ApprovalProposal, ApprovalScope  # noqa: E402
@@ -441,6 +441,45 @@ class CoreTests(unittest.TestCase):
         )).process(conversation(), RETENTION, 1)
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
+
+    def test_history_record_cannot_cite_an_unoffered_evidence_identifier(self) -> None:
+        """A progress record cannot turn a guessed evidence ID into history."""
+        self.store.create(goal(), "conversation-1", RETENTION)
+        proposal = GoalProposal(
+            GoalMutationKind.UPDATE,
+            new_progress=(
+                ProgressRecord("progress-1", "claimed deletion", ("evidence-mail-59093",)),
+            ),
+        )
+        outcome = self.agent(Queued(
+            AgentDecision(response="Deletion completed.", goal_proposal=proposal,
+                          response_requires_goal_commit=True),
+            selects="goal-1",
+        )).process(conversation(), RETENTION, 1)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+
+    def test_history_record_accepts_an_existing_offered_evidence_identifier(self) -> None:
+        existing = Evidence(
+            "evidence-mail-59093", "mail_observation",
+            source_references=("turn:turn-1",),
+        )
+        self.store.create(goal(evidence=(existing,)), "conversation-1", RETENTION)
+        proposal = GoalProposal(
+            GoalMutationKind.UPDATE,
+            new_progress=(
+                ProgressRecord("progress-1", "mail handled", (existing.evidence_id,)),
+            ),
+        )
+        outcome = self.agent(Queued(
+            AgentDecision(response="Recorded.", goal_proposal=proposal,
+                          response_requires_goal_commit=True),
+            selects="goal-1",
+        )).process(conversation(), RETENTION, 1)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(
+            outcome.snapshot.state.progress[-1].evidence_refs, (existing.evidence_id,)
+        )
 
     def test_core_creates_goal_only_from_optional_proposal(self) -> None:
         proposal = GoalProposal(

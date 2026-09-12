@@ -166,6 +166,11 @@ class Evidence:
         object.__setattr__(self, "attributes", freeze_data(self.attributes))
 
 
+def history_evidence_ids(*groups: tuple[Evidence, ...]) -> frozenset[str]:
+    """The bare evidence identifiers history records may cite."""
+    return frozenset(item.evidence_id for group in groups for item in group)
+
+
 @dataclass(frozen=True, slots=True)
 class ProgressRecord:
     record_id: str

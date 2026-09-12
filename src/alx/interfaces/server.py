@@ -325,6 +325,12 @@ class LiveVoiceServer:
                         )
                     )
                     continue
+                if event.kind is VoiceEventKind.ACTIVITY:
+                    assert event.activity is not None
+                    await connection.send(
+                        json.dumps({"type": "activity", "value": event.activity})
+                    )
+                    continue
                 if event.kind is VoiceEventKind.TEXT:
                     await connection.send(
                         json.dumps(
