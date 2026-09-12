@@ -189,15 +189,31 @@ def _one_identifier(pattern: str, joined: str, code: str) -> str:
     return values[0]
 
 
+_WORKSHEET_WAYBILL = re.compile(
+    r"\bWAYBILL(?:\s*(?:NO\.?|NUMBER))?\b[^0-9]{0,25}(\d{10})\b",
+    re.IGNORECASE,
+)
+
+
+def _worksheet_waybill(joined: str) -> str:
+    """Select the uniquely labelled waybill from an otherwise ambiguous worksheet."""
+    values = tuple(dict.fromkeys(_WORKSHEET_WAYBILL.findall(joined)))
+    if len(values) != 1:
+        raise DhlDocumentError("worksheet_identity_ambiguous")
+    return values[0]
+
+
 def _worksheet_from_pages(pages: Sequence[Sequence[_Run]]) -> Worksheet:
     runs = [run for page in pages for run in page]
     joined = " ".join(run.text for run in runs)
     declaration = _one_identifier(
         r"\b([A-Z]{3}\d{15,})\b", joined, "worksheet_identity_ambiguous"
     )
-    waybill = _one_identifier(
-        r"\b(\d{10})\b", joined, "worksheet_identity_ambiguous"
-    )
+    waybills = tuple(dict.fromkeys(re.findall(r"\b(\d{10})\b", joined)))
+    if len(waybills) == 1:
+        waybill = waybills[0]
+    else:
+        waybill = _worksheet_waybill(joined)
     duty = _first_value(pages, "TOTAL DUTY")
     vat = _first_value(pages, "TOTAL VAT")
     if duty is None or vat is None:

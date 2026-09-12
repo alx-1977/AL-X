@@ -35,6 +35,7 @@ def worksheet_pdf(
     vat: str = "1100.55",
     total: str = "1116.15",
     waybill: str = "1234567890",
+    extra_lines: tuple[str, ...] = (),
 ) -> bytes:
     writer = PdfWriter()
     page = writer.add_blank_page(width=612, height=792)
@@ -48,10 +49,14 @@ def worksheet_pdf(
     page[NameObject("/Resources")] = DictionaryObject(
         {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
     )
+    extra_content = "".join(
+        f"0 -20 Td ({line}) Tj\n" for line in extra_lines
+    )
     content = f"""BT /F1 10 Tf
 1 0 0 1 100 760 Tm (CUSTOMS WORKSHEET) Tj
 0 -20 Td (DFM202604215028901) Tj
 0 -20 Td ({waybill}) Tj
+{extra_content}
 1 0 0 1 458 700 Tm (TOTAL DUTY 15.60) Tj
 0 -20 Td (TOTAL VAT {vat}) Tj
 1 0 0 1 344 660 Tm (TotalTotal) Tj
@@ -245,6 +250,44 @@ class DhlAnalyzerTests(unittest.TestCase):
         self.assertEqual(result["total"], "1116.15")
         self.assertEqual(result["waybill"], "1234567890")
         self.assertEqual(result["errors"], ())
+
+    def test_a_labelled_worksheet_waybill_beats_an_unrelated_ten_digit_number(self) -> None:
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [
+                worksheet_pdf(extra_lines=(
+                    "Customer reference 9999999999",
+                    "WAYBILL: 1234567890",
+                )),
+                sad500_pdf(),
+            ]
+        )
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["waybill"], "1234567890")
+
+    def test_unlabelled_multiple_worksheet_waybills_remain_ambiguous(self) -> None:
+        from alx.providers.dhl import _parse_worksheet
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_worksheet(worksheet_pdf(extra_lines=(
+                "Customer reference 9999999999",
+                "Other reference 8888888888",
+            )))
+        self.assertEqual(captured.exception.code, "worksheet_identity_ambiguous")
+
+    def test_conflicting_labelled_worksheet_waybills_remain_ambiguous(self) -> None:
+        from alx.providers.dhl import _parse_worksheet
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_worksheet(worksheet_pdf(extra_lines=(
+                "WAYBILL: 1234567890",
+                "WAYBILL NUMBER: 9999999999",
+            )))
+        self.assertEqual(captured.exception.code, "worksheet_identity_ambiguous")
+
+    def test_a_single_worksheet_waybill_remains_unchanged(self) -> None:
+        from alx.providers.dhl import _parse_worksheet
+
+        self.assertEqual(_parse_worksheet(worksheet_pdf()).waybill, "1234567890")
 
     def test_the_committed_invoice_fixture_parses_to_recorded_values(self) -> None:
         """The sanitized equivalent of the live CPTIR00273840 invoice.
