@@ -541,6 +541,57 @@ class NativeExecutionTests(unittest.TestCase):
             ("python", "-m", "pytest", "-q", "test_app.py"),
         )
 
+    def test_a_correction_only_file_selects_the_targeted_verification(self) -> None:
+        """A file only the reviewer correction touched still chooses the tests.
+
+        The initial session changes `app.py` alone. The correction cycle adds
+        `test_parallel.py`, which never appeared in the original session's file
+        set. Targeted verification selects from the job's final reviewed files,
+        so the correction-only module is the evidence AL/X actually runs.
+        """
+        worktree = _worktree(self.root)
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "the repair has no regression",
+                "evidence": "no test covers the corrected helper",
+                "correction": "add a regression module",
+            }]},
+            {"findings": []},
+        ])
+
+        class CorrectingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                if len(self.calls) == 1:
+                    (root / "app.py").write_text(_FIXED, encoding="utf-8")
+                else:
+                    (root / "test_parallel.py").write_text(
+                        "from app import add\n\n\n"
+                        "def test_add():\n"
+                        "    assert add(1, 2) == 3\n",
+                        encoding="utf-8",
+                    )
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        session = CorrectingSession()
+        attempt = self._run(
+            PlanningModel(), session, reviewer=reviewer,
+            task="fix add", worktree=str(worktree),
+        )
+        values = attempt.result.values
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 2)
+        # The correction-only file reaches the reviewed/evidence set...
+        self.assertIn("test_parallel.py", values["files_changed"])
+        # ...and the same set chooses the targeted verification command.
+        self.assertEqual(
+            tuple(values["commands"][0]["argv"]),
+            ("python", "-m", "pytest", "-q", "test_parallel.py"),
+        )
+        self.assertTrue(values["tests_run"])
+        self.assertTrue(values["tests_passed"])
+
     def test_verification_timeout_remains_failed_bounded_evidence(self) -> None:
         """A realistic bound does not turn a genuine timeout into success."""
         worktree = _worktree(self.root)

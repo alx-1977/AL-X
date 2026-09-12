@@ -308,11 +308,13 @@ class CodingAgent:
 
         # Verification is AL/X's, not the session's. The agent has no terminal,
         # so every command below is chosen here and refused unless the
-        # allowlist already permits it.
+        # allowlist already permits it. The scope is `reviewed_files`, the job's
+        # final file set: a reviewer correction can touch a file the initial
+        # session never did, and that file must select tests like any other.
         self._report_activity("reasoning")
         tests_run = False
         tests_passed: bool | None = None
-        for argv in self._verification_commands(request, plan, session_files):
+        for argv in self._verification_commands(request, plan, reviewed_files):
             try:
                 record = run_permitted_command(
                     list(argv), workspace.root,
