@@ -58,8 +58,10 @@ printed. Report only what the document states.
 
 An invoice carries several numbers. The invoice number is the supplier's own
 reference for this document, not an order number, account number, customer
-reference or line-item code. Where the context line names a number that also
-appears in the document, prefer that one.
+reference or line-item code. When the document contains more than one plausible
+invoice-number candidate and the supplier's actual invoice number cannot be
+distinguished reliably from the document alone, return an empty invoice_number.
+Do not guess.
 
 Amounts are decimal strings without currency symbols or thousands separators.
 Dates are ISO 8601, yyyy-mm-dd. Use an empty string for a field the document
@@ -98,9 +100,9 @@ ANSWER_SCHEMA = json_schema(
 def invoice_question(document_text: str, context_line: str = "") -> SpecialistQuestion:
     """Build the bounded question for one document.
 
-    `context_line` is the email subject and filename. A number appearing both
-    there and in the document is almost certainly the invoice number, and an
-    unstable choice would create duplicate bills.
+    `context_line` is untrusted mail metadata. It may appear as document
+    material on the generic specialist path; it is never an identity hint
+    and must not be treated as a second source of the invoice number.
     """
     material = document_text
     if context_line.strip():
