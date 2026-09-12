@@ -1058,10 +1058,16 @@ history rewriting; operation outside the assigned worktree; or staging a
 pre-existing dirty file the job did not itself change.
 
 These are refused by enumeration rather than by a denylist. `_WRITE_SHAPES`
-lists the eleven argv forms that may run; nothing else can be constructed, so a
+lists the exact argv forms that may run; nothing else can be constructed, so a
 forbidden operation is impossible rather than merely discouraged. A test
-asserts the size of that enumeration, so widening the authority cannot happen
-without a visible change to this boundary.
+asserts the size and subcommand set of that enumeration, so widening the
+authority cannot happen without a visible change to this boundary.
+
+The count is deliberately not repeated here. Stating it in two places let them
+drift: this record said eleven while the code had thirteen, which is a
+governance record understating granted authority — found in the PR #31
+re-review. The test is the authority on the number, and it fails on any
+change.
 
 ### The index-rollback exception
 
@@ -1111,6 +1117,56 @@ Raised by the PR #31 review as a possible Law 2 violation (one tool hiding a
 workflow). It is recorded rather than dismissed because the rule it cites is
 the right rule; what it lacked was this repository's precedent that a named
 deterministic sequence is permitted.
+
+### Repository-supplied code
+
+No hook and no attribute filter contributes to a coding job's commit. Two
+mechanisms let a repository execute its own code inside an ordinary git
+command, both demonstrated on 2026-09-12, and both run with AL/X's privileges
+rather than the coding session's sandboxed ones:
+
+- a `pre-commit` hook runs after the index is authorised and can stage
+  anything. Suppressed by pointing `core.hooksPath` at a directory that does
+  not exist, which `--no-verify` does not achieve;
+- a `.gitattributes` clean filter runs during `git add` and rewrites the bytes
+  entering the index. It cannot be suppressed — filter names are arbitrary and
+  an in-tree `.gitattributes` overrides no configuration — so a path carrying
+  one is refused instead, detected with `git check-attr`, which reports the
+  filter without running it.
+
+A repository legitimately depending on a clean filter, Git LFS being the
+common case, therefore cannot be committed to by a coding job. That is the
+correct default for an authority this narrow. Supporting it would mean running
+arbitrary repository code, which is a change to this decision rather than a
+default to loosen.
+
+**Stated plainly:** refusing a filtered path prevents tampered content
+entering a commit. It does not prevent the filter from *executing*: `git
+status` and `git diff` run a clean filter to decide whether a path is
+modified, so any inspection of a filtered worktree runs it — including the
+read-only inspection that predates this decision. That is git's behaviour, not
+this capability's, and it is recorded here rather than left for a later
+reviewer to rediscover.
+
+### The residual concurrency window
+
+A coding job runs in a worktree it does not own, so another writer may stage
+something between the index readback and the commit. The PR #31 re-review
+raised this and it was reproduced by staging inside that window.
+
+The consequence is bounded but not eliminated. The committed tree is read back
+and compared against the authorised set, so such a commit is always detected
+and the job fails with `commit_contains_unauthorised_paths` naming the SHA. It
+is detected *after* the commit exists, and the commit is left in place: undoing
+it means moving a ref, which is history rewriting this decision withholds.
+What returns to AL/X is therefore the truth — a commit exists, it contains
+something the job did not authorise, and here is its SHA — and deciding what to
+do about it is hers.
+
+Eliminating the window entirely would require building the tree through an
+isolated temporary index and updating the ref by compare-and-swap. That is a
+larger mechanism than this authority currently justifies, and it is recorded
+here as a known bound rather than left for a later reviewer to rediscover.
 
 ### Verification precedes the commit
 

@@ -107,7 +107,9 @@ CODING_EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "coding_process.py"
 #   allowlist there is read-only git plus tests and must stay that way, and
 #   this one can create a branch and a commit but cannot run a test. Neither is
 #   a second route to the other's outcome. Its argv come from a closed
-#   enumeration of eleven shapes, so no model output selects an operation.
+#   closed enumeration of argv shapes, so no model output selects an
+#   operation. The count lives in tests/test_coding_git_workspace.py, which
+#   asserts it; repeating it here let the two drift once already.
 #
 # All three stay inside the generic absence scans for promotion paths. What they
 # are admitted for is starting a process at all.

@@ -33,6 +33,7 @@ from alx.contracts.coding import (
     MAX_PLANNING_ATTEMPTS,
     MAX_REPORTED_COMMANDS,
     MAX_REPORTED_FILES,
+    MAX_STAGED_FILES,
     MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS,
     MAX_LOCAL_REVIEW_CYCLES,
     MAX_VERIFICATION_COMMANDS,
@@ -245,6 +246,15 @@ class CodingAgent:
         # asked for a commit still works in a directory that is not a
         # repository, so the baseline is simply absent.
         baseline = self._read_baseline(workspace)
+        # `preexisting_dirty` above comes from the bounded evidence path, which
+        # clips status at 16,000 characters. It is fine for reporting. It is
+        # not fine for deciding what a job may stage: a clipped inherited path
+        # that later reappears in status reads as job-owned. The baseline
+        # reader has the complete listing, so authorisation uses that and falls
+        # back only when git could not answer at all.
+        baseline_dirty = (
+            baseline.inherited_dirty if baseline is not None else preexisting_dirty
+        )
         # The branch is created before the session so its edits land on the
         # branch rather than on whatever was checked out. A branch that cannot
         # be created fails the job closed: the alternative is a session that
@@ -423,6 +433,20 @@ class CodingAgent:
         # does not get is a commit asserting it was checked.
         commit: CodingCommit | None = None
         wanted_commit = status == "succeeded" and request.commit_message.strip()
+        # `files` is clipped to MAX_REPORTED_FILES for reporting. Committing
+        # from a clipped set would stage the first fifty and present the
+        # result as a complete repair, so the untruncated count decides
+        # whether a commit is possible at all. Found in review on 2026-09-12:
+        # the bound inside `commit_job_changes` compared an already-truncated
+        # tuple against the same number and so could never fire.
+        complete_files = self._files_changed(
+            (), git_status, preexisting_dirty,
+            self._modified_preexisting(workspace, preexisting_fingerprints),
+            limit=None,
+        )
+        if wanted_commit and len(complete_files) > MAX_STAGED_FILES:
+            issues.append("too_many_files_to_commit")
+            wanted_commit = False
         if wanted_commit and not (tests_run and tests_passed):
             issues.append("unverified_not_committed")
         elif wanted_commit:
@@ -431,8 +455,8 @@ class CodingAgent:
                     workspace.root,
                     request.repair_branch.strip(),
                     request.commit_message.strip(),
-                    files,
-                    preexisting_dirty,
+                    complete_files,
+                    baseline_dirty,
                     workspace.blocked_paths,
                 )
             except CodingError as error:
@@ -848,7 +872,13 @@ class CodingAgent:
         git_status: str,
         preexisting_dirty: tuple[str, ...],
         modified_preexisting: tuple[str, ...] = (),
+        limit: int | None = MAX_REPORTED_FILES,
     ) -> tuple[str, ...]:
+        """The job's own changed files. `limit=None` returns the whole set.
+
+        Reporting is clipped; authorisation is not. A clipped set reaching the
+        commit would stage its prefix and call the result a finished repair.
+        """
         preexisting = set(preexisting_dirty)
         modified = set(modified_preexisting)
         names = list(written)
@@ -857,7 +887,7 @@ class CodingAgent:
                 continue
             if item not in names:
                 names.append(item)
-        return tuple(names[:MAX_REPORTED_FILES])
+        return tuple(names if limit is None else names[:limit])
 
     @staticmethod
     def _file_fingerprints(

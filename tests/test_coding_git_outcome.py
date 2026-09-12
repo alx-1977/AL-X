@@ -275,6 +275,58 @@ class CommittingIsRefusedRatherThanWidened(GitOutcome):
         self.assertNotIn("commit_sha", result.values)
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
 
+    def test_a_job_changing_more_files_than_the_bound_is_not_committed(self) -> None:
+        """Finding 2 of the 2026-09-12 re-review, confirmed by inspection.
+
+        `_files_changed` clipped to MAX_REPORTED_FILES and `_authorised_paths`
+        then tested for more than MAX_STAGED_FILES — the same number — so the
+        bound could never fire. A job changing sixty files staged the first
+        fifty and reported a complete repair. The untruncated count now
+        decides whether a commit is possible at all.
+        """
+        from alx.contracts.coding import MAX_STAGED_FILES
+
+        # app.py is repaired too, so the job's own tests pass and the file
+        # bound is what this test exercises rather than a test failure.
+        edits = {"app.py": _FIXED}
+        edits.update({
+            f"generated_{index:03d}.py": f"value = {index}\n"
+            for index in range(MAX_STAGED_FILES + 10)
+        })
+        before = self.git("rev-parse", "HEAD").strip()
+
+        result = self.run_job(
+            RecordingSession(edits=edits),
+            task="generate many modules",
+            worktree=str(self.root),
+            repair_branch="repair/many",
+            commit_message="generate modules",
+        )
+
+        self.assertNotIn("commit_sha", result.values)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
+        self.assertIn(
+            "too_many_files_to_commit", result.values["unresolved_issues"]
+        )
+
+    def test_commit_authorisation_uses_the_complete_inherited_dirt(self) -> None:
+        """Finding 1: the bounded status path must not decide what may stage.
+
+        `preexisting_dirty` comes from evidence clipped at 16,000 characters.
+        A clipped inherited path that reappears in the post-session status
+        would read as job-owned. Authorisation now uses the baseline reader's
+        complete listing.
+        """
+        import inspect
+
+        from alx.providers.coding_agent import CodingAgent
+
+        source = inspect.getsource(CodingAgent._run)
+        self.assertIn("baseline_dirty", source)
+        # The commit call takes the complete sets, not the reporting ones.
+        self.assertIn("complete_files,", source)
+        self.assertIn("baseline_dirty,", source)
+
     def test_a_branch_that_cannot_be_created_fails_before_the_session(self) -> None:
         """A session must never write to a branch nobody asked for."""
         session = RecordingSession(edits={"app.py": _FIXED})

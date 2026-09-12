@@ -73,8 +73,8 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("status", "--porcelain=v1", "-z"): "none",
     ("diff", "--cached", "--name-only", "-z"): "none",
     ("show", "--name-only", "--pretty=format:", "-z", "HEAD"): "none",
+    ("check-attr", "-z", "filter", "--"): "paths",
     ("switch", "-c"): "value",
-    ("switch",): "value",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
     ("commit", "--quiet", "-m"): "value",
@@ -188,6 +188,20 @@ COMMIT_AUTHOR_EMAIL = "coding-agent@alx.invalid"
 _NO_HOOKS = Path("/nonexistent/alx-coding-agent-no-hooks")
 
 
+def _configure(environment: dict[str, str], values: dict[str, str]) -> None:
+    """Force these git settings for one command, overriding every config file.
+
+    `GIT_CONFIG_*` takes precedence over system, global and repository config,
+    so a repository cannot restore what is suppressed here by setting it
+    itself. Written as a helper because the count and the indices have to stay
+    consistent, and an off-by-one silently drops the last setting.
+    """
+    environment["GIT_CONFIG_COUNT"] = str(len(values))
+    for index, (key, value) in enumerate(values.items()):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = value
+
+
 def _clean_environment() -> dict[str, str]:
     """PATH and locale only, plus an explicit committer identity.
 
@@ -200,15 +214,35 @@ def _clean_environment() -> dict[str, str]:
     environment = {name: os.environ[name] for name in allowed if name in os.environ}
     environment["GIT_TERMINAL_PROMPT"] = "0"
     environment["GIT_OPTIONAL_LOCKS"] = "0"
-    # No hook runs for a coding job. A pre-commit hook executes arbitrary
-    # repository-supplied code *after* the index has been authorised and can
-    # stage anything it likes: Qodo demonstrated one on 2026-09-12 that added
-    # a file to the commit while `committed_files` still reported the
-    # pre-hook listing, so the evidence returned to Core was false. An empty
-    # `core.hooksPath` suppresses every hook, which `--no-verify` does not.
-    environment["GIT_CONFIG_COUNT"] = "1"
-    environment["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-    environment["GIT_CONFIG_VALUE_0"] = str(_NO_HOOKS)
+    # No repository-supplied code runs for a coding job. Two mechanisms let a
+    # repository execute its own code inside an ordinary git command, and both
+    # were demonstrated on 2026-09-12:
+    #
+    # - a `pre-commit` hook runs *after* the index has been authorised and can
+    #   stage anything it likes. One added a file to the commit while
+    #   `committed_files` still reported the pre-hook listing, so the evidence
+    #   returned to Core was false. `core.hooksPath` pointed at a directory
+    #   that does not exist suppresses every hook, which `--no-verify` does
+    #   not;
+    # - a `.gitattributes` clean filter runs during `git add` and rewrites the
+    #   bytes that enter the index. One committed "TAMPERED change" while the
+    #   worktree still read "job change", and a filter body of `sh -c ...`
+    #   executed arbitrary code outside the worktree. The file set stayed
+    #   authorised, which is exactly why this is worth closing: path-level
+    #   authorisation says nothing about content.
+    #
+    # These run with AL/X's privileges, not the coding session's sandboxed
+    # ones, so the kernel profile that contains the session does not contain
+    # them. Disabling both is the boundary.
+    #
+    # Hooks are suppressed here. Clean filters cannot be: they are selected by
+    # an in-tree `.gitattributes`, which no configuration overrides, and filter
+    # names are arbitrary so there is no list to blank. A path carrying one is
+    # therefore *refused* before it is staged, in `_refuse_attribute_filters`.
+    _configure(environment, {
+        "core.hooksPath": str(_NO_HOOKS),
+        "core.fsmonitor": "false",
+    })
     environment["GIT_AUTHOR_NAME"] = COMMIT_AUTHOR_NAME
     environment["GIT_AUTHOR_EMAIL"] = COMMIT_AUTHOR_EMAIL
     environment["GIT_COMMITTER_NAME"] = COMMIT_AUTHOR_NAME
@@ -223,7 +257,7 @@ def _run(
 
     `bounded=False` returns stdout whole. It is for the NUL-delimited listings
     that authorisation is decided from: truncating one silently drops entries,
-    and an entry the check never sees is an entry it cannot refuse. Qodo found
+    and an entry the check never sees is an entry it cannot refuse. Review found
     exactly that on 2026-09-12 — a 2000-file index was compared against the 334
     paths that fitted in 16,000 characters, and the rest would have been
     committed unexamined. Diagnostic output stays bounded; structural output
@@ -382,7 +416,7 @@ def create_repair_branch(worktree: Path, branch: str) -> GitWorkspaceState:
 
     A name that already exists is refused rather than adopted. The first
     version fell back to a plain switch so that re-running a job against its
-    own branch was not a failure, and Qodo showed on 2026-09-12 what that
+    own branch was not a failure, and review showed on 2026-09-12 what that
     actually buys: an older or unrelated branch of the same name silently
     becomes the base, so the job's edits and its commit sit on a history
     nobody checked. Core picking a name that is already taken is ambiguous —
@@ -427,7 +461,7 @@ def _authorised_paths(
         )
     inherited = {item for item in inherited_dirty}
     authorised: list[str] = []
-    for item in files:
+    for item in _expand_directories(root, files):
         lexical = lexical_worktree_path(item)
         if not lexical:
             raise CodingError("git_refused", reason_code="path_is_worktree_root")
@@ -497,6 +531,8 @@ def commit_job_changes(
             unrelated_count=len(unauthorised_before),
         )
 
+    _refuse_attribute_filters(root, authorised)
+
     staged = _run(root, ["git", "add", "--", *authorised])
     if staged.exit_status != 0:
         raise CodingError(
@@ -565,6 +601,18 @@ def commit_job_changes(
     committed = _committed_paths(root)
     escaped = tuple(item for item in committed if item not in set(authorised))
     if escaped:
+        # The commit exists on the branch at this point. It is the only window
+        # in which an unauthorised path can reach history: another writer
+        # staging between the index readback and the commit. Review raised the
+        # race on 2026-09-12 and it was reproduced by staging inside that
+        # window — this check caught it, but only after the commit was made.
+        #
+        # The commit is therefore named rather than hidden. Removing it would
+        # mean moving a ref, which is history rewriting and authority D-029
+        # explicitly withholds, so what is reported is the truth: a commit
+        # exists, it contains something this job did not authorise, and its
+        # SHA is here for AL/X to act on. She has the authority to decide what
+        # to do about it; this code does not.
         raise CodingError(
             "unrelated_changes_staged",
             reason_code="commit_contains_unauthorised_paths",
@@ -577,6 +625,102 @@ def commit_job_changes(
         committed_files=committed,
         worktree_clean=after.clean,
     )
+
+
+def _expand_directories(root: Path, files: tuple[str, ...]) -> tuple[str, ...]:
+    """Replace an untracked-directory entry with the files inside it.
+
+    Porcelain status reports a wholly untracked directory as one entry ending
+    in `/` rather than listing its contents, so a job that creates a directory
+    arrives here authorising `newdir/` while `git add` stages `newdir/a.py`
+    and `newdir/b.py`. The readback then finds two paths it never authorised
+    and refuses the commit as if the job had staged somebody else's work.
+
+    Qodo found this on 2026-09-12 and it was reproduced before being changed:
+    creating a directory is ordinary coding, so the previous behaviour refused
+    routine jobs while reporting a misleading cause. Expanding here keeps the
+    authorised set and the index describing the same thing, and every expanded
+    path is still held to the full worktree, blocked-path and `.git` checks by
+    the caller — expansion widens what is named, never what is permitted.
+    """
+    expanded: list[str] = []
+    for item in files:
+        if not item.endswith("/"):
+            expanded.append(item)
+            continue
+        lexical = lexical_worktree_path(item)
+        directory = (root / lexical).resolve()
+        try:
+            directory.relative_to(root)
+        except ValueError as error:
+            raise CodingError("path_outside_worktree") from error
+        if not directory.is_dir() or directory.is_symlink():
+            # Not a directory after all, or a symlink that could point out of
+            # the worktree. Keep the original name and let the caller's checks
+            # rule on it rather than walking it here.
+            expanded.append(item)
+            continue
+        for child in sorted(directory.rglob("*")):
+            if child.is_file() and not child.is_symlink():
+                expanded.append(child.relative_to(root).as_posix())
+    return tuple(dict.fromkeys(expanded))
+
+
+def _refuse_attribute_filters(worktree: Path, paths: tuple[str, ...]) -> None:
+    """Refuse to stage a path whose content a clean filter would rewrite.
+
+    A `.gitattributes` clean filter runs arbitrary repository-supplied code
+    during `git add` and replaces the bytes that enter the index. Demonstrated
+    on 2026-09-12: a filter committed "TAMPERED change" while the worktree
+    still read "job change", and a filter body of `sh -c ...` executed code
+    outside the worktree. The file set stayed authorised throughout, which is
+    the point — path-level authorisation says nothing about content, so a
+    commit could be authorised and still not contain what the job wrote.
+
+    Hooks are suppressed by configuration; filters cannot be. They are
+    selected by an in-tree `.gitattributes` that no config overrides, and
+    filter names are arbitrary, so there is no set of keys to blank. What is
+    available is detection: `git check-attr` reports the filter that would
+    apply without running it. A path carrying one is refused, and the job
+    returns to AL/X rather than committing content it did not write.
+
+    What this does **not** do is prevent the filter from executing. `git
+    status` and `git diff` run a clean filter to decide whether a path is
+    modified, so any inspection of a filtered worktree runs it — including the
+    read-only inspection `coding_process.py` has performed since before this
+    capability existed. That is git's behaviour, not this capability's, and
+    the honest statement of the boundary is: a filtered path cannot enter a
+    commit, and a filtered worktree is refused at the baseline before this
+    capability inspects it. A repository that arrives already filtered has
+    executed its own code the moment anything reads it.
+
+    The cost is that a repository legitimately using a clean filter — Git LFS
+    is the common case — cannot be committed to by a coding job. That is the
+    correct default for an authority this narrow: running arbitrary
+    repository code to support it would be a change to D-029, not a default to
+    loosen quietly.
+    """
+    if not paths:
+        return
+    listed = _require(
+        worktree,
+        ["git", "check-attr", "-z", "filter", "--", *paths],
+        "attributes_unreadable",
+        bounded=False,
+    )
+    fields = _nul_paths(listed)
+    # `-z` emits repeating <path> <attribute> <value> triples.
+    filtered = tuple(
+        fields[index]
+        for index in range(0, len(fields) - 2, 3)
+        if fields[index + 2] not in ("unspecified", "unset")
+    )
+    if filtered:
+        raise CodingError(
+            "git_refused",
+            reason_code="attribute_filter_would_rewrite_content",
+            filtered_count=len(filtered),
+        )
 
 
 def _unstage(worktree: Path, paths: tuple[str, ...]) -> None:

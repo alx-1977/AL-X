@@ -192,6 +192,11 @@ class CreatingARepairBranch(Worktree):
         branches = git(self.root, "branch", "--format=%(refname:short)")
         self.assertIn("main", branches.split())
 
+    def test_switching_to_an_existing_branch_is_not_an_available_shape(self) -> None:
+        """Dead authority is removed, not documented."""
+        self.assertFalse(git_write_permitted(["git", "switch", "main"]))
+        self.assertTrue(git_write_permitted(["git", "switch", "-c", "repair/x"]))
+
     def test_a_branch_name_that_could_be_read_as_a_flag_is_refused(self) -> None:
         for name in ("--force", "-D", "--all"):
             with self.assertRaises(CodingError, msg=name) as caught:
@@ -414,6 +419,116 @@ class AuthorisationReadsTheWholeTruth(Worktree):
             git(self.root, "show", "--name-only", "--pretty=", "HEAD"),
         )
 
+    def test_a_clean_filter_cannot_rewrite_committed_content(self) -> None:
+        """Found while attacking question 2 of the 2026-09-12 re-review.
+
+        A `.gitattributes` clean filter runs arbitrary repository code during
+        `git add` and replaces the bytes entering the index. Reproduced: the
+        commit read "TAMPERED change" while the worktree read "job change",
+        and a filter body of `sh -c ...` executed code outside the worktree.
+        The file set stayed authorised throughout, which is the point —
+        path-level authorisation says nothing about content.
+        """
+        (self.root / ".gitattributes").write_text("target.py filter=rewrite\n")
+        git(self.root, "config", "filter.rewrite.clean", "sed s/repaired/TAMPERED/")
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair target", ("target.py",)
+            )
+
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "attribute_filter_would_rewrite_content",
+        )
+        # Nothing was committed, so no tampered content reached history.
+        self.assertEqual(
+            git(self.root, "rev-parse", "HEAD").strip(),
+            git(self.root, "rev-parse", "main").strip(),
+        )
+
+    def test_an_unfiltered_path_is_unaffected_by_the_check(self) -> None:
+        """The check refuses filtered paths, not every repository with attributes."""
+        (self.root / ".gitattributes").write_text("*.md text\n")
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+        commit = commit_job_changes(
+            self.root, "repair/target", "repair target", ("target.py",)
+        )
+        self.assertEqual(commit.committed_files, ("target.py",))
+
+    def test_a_new_directory_is_expanded_to_its_files(self) -> None:
+        """Porcelain reports an untracked directory as one `dir/` entry.
+
+        `git add` then stages its files, so the readback found paths the job
+        never authorised and refused the commit as if somebody else's work had
+        been staged. Creating a directory is ordinary coding, so this refused
+        routine jobs while reporting a misleading cause.
+        """
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "newdir").mkdir()
+        (self.root / "newdir" / "a.py").write_text("a\n")
+        (self.root / "newdir" / "b.py").write_text("b\n")
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "add a package", ("newdir/",)
+        )
+
+        self.assertEqual(commit.committed_files, ("newdir/a.py", "newdir/b.py"))
+
+    def test_expansion_still_refuses_a_blocked_file_inside_a_directory(self) -> None:
+        """Expansion widens what is named, never what is permitted."""
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "newdir").mkdir()
+        (self.root / "newdir" / "a.py").write_text("a\n")
+        (self.root / "newdir" / "secret.key").write_text("k\n")
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "add a package", ("newdir/",),
+                (), ("newdir/secret.key",),
+            )
+        self.assertEqual(caught.exception.code, "path_not_permitted")
+
+    def test_a_commit_racing_with_another_writer_is_detected(self) -> None:
+        """The residual window: staging between readback and commit.
+
+        Detected, not prevented. The commit exists when this fires, and it is
+        named rather than hidden: undoing it means moving a ref, which is
+        history rewriting D-029 withholds.
+        """
+        from alx.providers import coding_git
+
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+        self.write("unrelated.py", "somebody else was here\n")
+
+        real = coding_git._staged_paths
+        calls = {"n": 0}
+
+        def racing(worktree):
+            result = real(worktree)
+            calls["n"] += 1
+            if calls["n"] == 2:
+                git(worktree, "add", "unrelated.py")
+            return result
+
+        with unittest.mock.patch.object(coding_git, "_staged_paths", racing):
+            with self.assertRaises(CodingError) as caught:
+                commit_job_changes(
+                    self.root, "repair/target", "repair target", ("target.py",)
+                )
+
+        self.assertEqual(caught.exception.code, "unrelated_changes_staged")
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "commit_contains_unauthorised_paths",
+        )
+        # The SHA is reported so AL/X can act on a commit that does exist.
+        self.assertTrue(caught.exception.details["commit_sha"])
+
     def test_the_committed_tree_is_verified_not_assumed(self) -> None:
         """Defence in depth: the report is read out of the commit itself.
 
@@ -534,7 +649,6 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
             ["git", "status", "--porcelain=v1", "-z"],
             ["git", "diff", "--cached", "--name-only", "-z"],
             ["git", "switch", "-c", "repair/target"],
-            ["git", "switch", "repair/target"],
             ["git", "add", "--", "target.py"],
             ["git", "add", "--", "a.py", "b.py"],
             ["git", "commit", "--quiet", "-m", "repair target"],
@@ -596,8 +710,14 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         two reads of what is changed (`status`, `diff --cached`);
         one read of what a commit contains (`show`), added 2026-09-12 to verify
         the committed tree against the authorised set rather than trusting the
-        index snapshot; two branch operations (`switch` with and without -c);
-        one staging (`add`); one index rollback (`reset`); one commit.
+        index snapshot; one read of which attribute filter applies to a path
+        (`check-attr`), added 2026-09-12 to refuse a path whose content a clean
+        filter would rewrite; one branch creation (`switch -c`); one staging
+        (`add`); one index rollback (`reset`); one commit.
+
+        The plain `switch` shape was removed on 2026-09-12: once an existing
+        branch name is refused, nothing called it, and a dead shape is granted
+        authority nobody uses.
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
@@ -605,11 +725,13 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
-            {"rev-parse", "symbolic-ref", "status", "diff", "show", "switch",
-             "add", "reset", "commit"},
+            {"rev-parse", "symbolic-ref", "status", "diff", "show",
+             "check-attr", "switch", "add", "reset", "commit"},
         )
-        # Every read-shaped addition must stay a read: none may take a value
-        # or a path, so none can be pointed somewhere by an argument.
+        # Every read-shaped addition must stay a read. `check-attr` takes
+        # paths because it is asked about specific paths, but it only reports;
+        # the rest may take neither a value nor a path, so none can be pointed
+        # somewhere by an argument.
         for prefix, remainder in _WRITE_SHAPES.items():
             if prefix[0] in ("rev-parse", "symbolic-ref", "status", "diff", "show"):
                 self.assertEqual(remainder, "none", " ".join(prefix))
