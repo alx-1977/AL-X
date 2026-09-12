@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from alx.contracts.coding import (
+    MAX_INSPECTED_ENTRIES,
     MAX_BRANCH_NAME_CHARACTERS,
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_COMMAND_OUTPUT_CHARACTERS,
@@ -71,6 +72,7 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("symbolic-ref", "--quiet", "--short", "HEAD"): "none",
     ("status", "--porcelain=v1", "-z"): "none",
     ("diff", "--cached", "--name-only", "-z"): "none",
+    ("show", "--name-only", "--pretty=format:", "-z", "HEAD"): "none",
     ("switch", "-c"): "value",
     ("switch",): "value",
     ("add", "--"): "paths",
@@ -179,6 +181,12 @@ def branch_name_permitted(name: str) -> bool:
 COMMIT_AUTHOR_NAME = "AL/X Coding Agent"
 COMMIT_AUTHOR_EMAIL = "coding-agent@alx.invalid"
 
+# A directory that does not exist, pointed at by core.hooksPath so git finds
+# no hook to run. Named rather than empty because an empty value is read as
+# "unset" by some git versions and would silently restore the repository's own
+# hooks.
+_NO_HOOKS = Path("/nonexistent/alx-coding-agent-no-hooks")
+
 
 def _clean_environment() -> dict[str, str]:
     """PATH and locale only, plus an explicit committer identity.
@@ -192,6 +200,15 @@ def _clean_environment() -> dict[str, str]:
     environment = {name: os.environ[name] for name in allowed if name in os.environ}
     environment["GIT_TERMINAL_PROMPT"] = "0"
     environment["GIT_OPTIONAL_LOCKS"] = "0"
+    # No hook runs for a coding job. A pre-commit hook executes arbitrary
+    # repository-supplied code *after* the index has been authorised and can
+    # stage anything it likes: Qodo demonstrated one on 2026-09-12 that added
+    # a file to the commit while `committed_files` still reported the
+    # pre-hook listing, so the evidence returned to Core was false. An empty
+    # `core.hooksPath` suppresses every hook, which `--no-verify` does not.
+    environment["GIT_CONFIG_COUNT"] = "1"
+    environment["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+    environment["GIT_CONFIG_VALUE_0"] = str(_NO_HOOKS)
     environment["GIT_AUTHOR_NAME"] = COMMIT_AUTHOR_NAME
     environment["GIT_AUTHOR_EMAIL"] = COMMIT_AUTHOR_EMAIL
     environment["GIT_COMMITTER_NAME"] = COMMIT_AUTHOR_NAME
@@ -199,8 +216,20 @@ def _clean_environment() -> dict[str, str]:
     return environment
 
 
-def _run(worktree: Path, argv: list[str]) -> _GitResult:
-    """Run one enumerated git command bound to this worktree."""
+def _run(
+    worktree: Path, argv: list[str], *, bounded: bool = True
+) -> _GitResult:
+    """Run one enumerated git command bound to this worktree.
+
+    `bounded=False` returns stdout whole. It is for the NUL-delimited listings
+    that authorisation is decided from: truncating one silently drops entries,
+    and an entry the check never sees is an entry it cannot refuse. Qodo found
+    exactly that on 2026-09-12 — a 2000-file index was compared against the 334
+    paths that fitted in 16,000 characters, and the rest would have been
+    committed unexamined. Diagnostic output stays bounded; structural output
+    is read whole and bounded by entry count instead, where exceeding the
+    bound fails closed rather than silently shortening the answer.
+    """
     if not git_write_permitted(argv):
         raise CodingError("git_refused", reason_code="operation_not_permitted")
     try:
@@ -218,21 +247,24 @@ def _run(worktree: Path, argv: list[str]) -> _GitResult:
         raise CodingError("git_unavailable", reason_code="timeout") from error
     except OSError as error:
         raise CodingError("git_unavailable", reason_code="git_not_runnable") from error
+    stdout = completed.stdout or ""
     return _GitResult(
         completed.returncode,
-        (completed.stdout or "")[:MAX_COMMAND_OUTPUT_CHARACTERS],
+        stdout[:MAX_COMMAND_OUTPUT_CHARACTERS] if bounded else stdout,
         (completed.stderr or "")[:MAX_COMMAND_OUTPUT_CHARACTERS],
     )
 
 
-def _require(worktree: Path, argv: list[str], reason_code: str) -> str:
+def _require(
+    worktree: Path, argv: list[str], reason_code: str, *, bounded: bool = True
+) -> str:
     """Run an enumerated command that must succeed, and return raw stdout.
 
     Deliberately unstripped: the NUL-delimited readers below depend on the
     exact bytes git emitted, and stripping one merged the last two entries of
     a `-z` listing into nothing.
     """
-    result = _run(worktree, argv)
+    result = _run(worktree, argv, bounded=bounded)
     if result.exit_status != 0:
         raise CodingError(
             "git_unavailable",
@@ -246,11 +278,33 @@ def _nul_paths(text: str) -> tuple[str, ...]:
     return tuple(item for item in text.split("\0") if item)
 
 
+def _bounded_entries(listed: str, reason_code: str) -> tuple[str, ...]:
+    """NUL-delimited names, refusing rather than shortening an oversized list."""
+    names = _nul_paths(listed)
+    if len(names) > MAX_INSPECTED_ENTRIES:
+        raise CodingError(
+            "git_refused", reason_code=reason_code, entry_count=len(names)
+        )
+    return names
+
+
 def _dirty_paths(worktree: Path) -> tuple[str, ...]:
-    """Every path git reports as modified, staged, or untracked."""
+    """Every path git reports as modified, staged, or untracked.
+
+    Read whole for the same reason the index is: this is the inherited dirt a
+    job is judged against, and a shortened list would silently drop files the
+    job must be told about.
+    """
     status = _require(
-        worktree, ["git", "status", "--porcelain=v1", "-z"], "status_failed"
+        worktree, ["git", "status", "--porcelain=v1", "-z"], "status_failed",
+        bounded=False,
     )
+    if status.count("\0") > MAX_INSPECTED_ENTRIES:
+        raise CodingError(
+            "git_refused",
+            reason_code="worktree_too_dirty",
+            entry_count=status.count("\0"),
+        )
     names: list[str] = []
     entries = iter(status.split("\0"))
     for entry in entries:
@@ -322,23 +376,29 @@ def create_repair_branch(worktree: Path, branch: str) -> GitWorkspaceState:
     """Create and switch to a repair branch inside the assigned worktree.
 
     Switching preserves uncommitted work: a job's own edits, and anybody
-    else's, move to the new branch rather than being discarded. If the branch
-    already exists the switch is plain rather than a creation, so re-running a
-    job against its own branch is not a failure. Nothing is deleted, reset or
-    force-moved, so a wrong branch name costs a branch and never a change.
+    else's, move to the new branch rather than being discarded. Nothing is
+    deleted, reset or force-moved, so a wrong branch name costs a branch and
+    never a change.
+
+    A name that already exists is refused rather than adopted. The first
+    version fell back to a plain switch so that re-running a job against its
+    own branch was not a failure, and Qodo showed on 2026-09-12 what that
+    actually buys: an older or unrelated branch of the same name silently
+    becomes the base, so the job's edits and its commit sit on a history
+    nobody checked. Core picking a name that is already taken is ambiguous —
+    it may mean "continue that work" or "this is a different repair" — and
+    Law 3 sends ambiguity back to her rather than letting this resolve it.
     """
     root = assert_assigned_worktree(worktree)
     if not branch_name_permitted(branch):
         raise CodingError("git_refused", reason_code="branch_name_not_permitted")
     created = _run(root, ["git", "switch", "-c", branch])
     if created.exit_status != 0:
-        existing = _run(root, ["git", "switch", branch])
-        if existing.exit_status != 0:
-            raise CodingError(
-                "git_refused",
-                reason_code="branch_not_switchable",
-                exit_status=existing.exit_status,
-            )
+        raise CodingError(
+            "git_refused",
+            reason_code="branch_already_exists_or_unusable",
+            exit_status=created.exit_status,
+        )
     state = read_workspace_state(root)
     if state.branch != branch:
         raise CodingError("git_refused", reason_code="branch_not_active")
@@ -448,9 +508,11 @@ def commit_job_changes(
     index = _staged_paths(root)
     unrelated = tuple(item for item in index if item not in set(authorised))
     if unrelated:
-        # Fail closed and leave nothing half-prepared behind: the job's own
-        # paths come back out of the index too, so the tree is as it was.
-        _run(root, ["git", "reset", "--quiet", "--", *authorised, *unrelated])
+        # Fail closed and leave nothing half-prepared behind. The pre-flight
+        # check above already refused any index holding an unauthorised path,
+        # so what is staged here can only be this job's own: un-staging it
+        # restores the index to exactly the empty state it was found in.
+        _unstage(root, (*authorised, *unrelated))
         raise CodingError(
             "unrelated_changes_staged",
             reason_code="index_holds_unauthorised_paths",
@@ -459,35 +521,142 @@ def commit_job_changes(
     if not index:
         raise CodingError("git_refused", reason_code="nothing_staged")
 
-    committed = _run(root, ["git", "commit", "--quiet", "-m", text])
+    # From here a commit may already exist whatever happens next. A timeout or
+    # a nonzero status does not prove nothing was written: git can advance the
+    # ref and then fail, and reporting "no commit" when a commit is on the
+    # branch would leave Core acting on a false record. So every exit from
+    # here on reconciles against HEAD before it says anything.
+    try:
+        committed = _run(root, ["git", "commit", "--quiet", "-m", text])
+    except CodingError as error:
+        raise _reconcile_after_commit(root, active.head_sha, error) from error
     if committed.exit_status != 0:
-        raise CodingError(
-            "git_refused",
-            reason_code="commit_failed",
-            exit_status=committed.exit_status,
+        # A commit that did not happen must not leave the job's files staged.
+        # The next operation in this worktree — another job, or Friedl — would
+        # inherit an index it did not create and would be refused by the
+        # pre-flight check for work that was never committed.
+        _unstage(root, authorised)
+        raise _reconcile_after_commit(
+            root,
+            active.head_sha,
+            CodingError(
+                "git_refused",
+                reason_code="commit_failed",
+                exit_status=committed.exit_status,
+            ),
         )
 
     # Read the result out of git rather than assuming it. A commit that did not
     # move HEAD is not a commit, whatever the exit status said.
-    after = read_workspace_state(root, inherited_dirty)
+    try:
+        after = read_workspace_state(root, inherited_dirty)
+    except CodingError as error:
+        raise _reconcile_after_commit(root, active.head_sha, error) from error
     if after.head_sha == active.head_sha:
         raise CodingError("git_refused", reason_code="head_did_not_advance")
+
+    # What the commit actually contains, not what the index held before it.
+    # Hooks are disabled, so this should always equal `index`; it is checked
+    # anyway because the alternative to checking is reporting a file list that
+    # a hook, a git version or a configuration could have made untrue, and a
+    # false `committed_files` is worse than a refusal. Reported as an
+    # unresolved issue would be too quiet: Core is told the commit is not what
+    # was authorised.
+    committed = _committed_paths(root)
+    escaped = tuple(item for item in committed if item not in set(authorised))
+    if escaped:
+        raise CodingError(
+            "unrelated_changes_staged",
+            reason_code="commit_contains_unauthorised_paths",
+            commit_sha=after.head_sha,
+            unrelated_count=len(escaped),
+        )
     return CodingCommit(
         branch=after.branch,
         commit_sha=after.head_sha,
-        committed_files=tuple(index),
+        committed_files=committed,
         worktree_clean=after.clean,
     )
 
 
+def _unstage(worktree: Path, paths: tuple[str, ...]) -> None:
+    """Take named paths back out of the index, leaving their content alone.
+
+    This is D-029's approved index-rollback reset: named job paths only, no
+    `--hard`/`--soft`/`--mixed`, no ref, and no worktree content discarded.
+    Failure is deliberately not raised — it is already unwinding a failure,
+    and the caller's original error is the more useful one to report.
+    """
+    if not paths:
+        return
+    try:
+        _run(worktree, ["git", "reset", "--quiet", "--", *paths])
+    except CodingError:
+        return
+
+
+def _reconcile_after_commit(
+    worktree: Path, before_sha: str, failure: CodingError
+) -> CodingError:
+    """Decide what a post-commit failure actually means, by asking git.
+
+    A timeout or a failed readback does not establish that no commit was
+    created: the ref may already have moved. Reporting an unqualified failure
+    in that case tells Core the branch is unchanged when it is not, and Core
+    would go on to redo or abandon work that is already committed.
+
+    So HEAD is read once more. If it did not move, the original failure stands
+    and is the truth. If it did, the failure is replaced by an explicitly
+    indeterminate one naming the SHA that exists, because "a commit was
+    created and I could not verify it" is a different fact from "no commit was
+    created" and only AL/X can decide what to do about it.
+    """
+    try:
+        current = _require(
+            worktree, ["git", "rev-parse", "HEAD"], "no_head"
+        ).strip()
+    except CodingError:
+        return CodingError(
+            "git_unavailable",
+            reason_code="commit_state_indeterminate",
+            **failure.details,
+        )
+    if current == before_sha:
+        return failure
+    return CodingError(
+        "git_unavailable",
+        reason_code="commit_created_but_unverified",
+        commit_sha=current,
+        **{key: value for key, value in failure.details.items()
+           if key not in ("reason_code", "commit_sha")},
+    )
+
+
+def _committed_paths(worktree: Path) -> tuple[str, ...]:
+    """The paths HEAD's own commit touched, read back after it was created."""
+    listed = _require(
+        worktree,
+        ["git", "show", "--name-only", "--pretty=format:", "-z", "HEAD"],
+        "commit_unreadable",
+        bounded=False,
+    )
+    return _bounded_entries(listed, "commit_too_large")
+
+
 def _staged_paths(worktree: Path) -> tuple[str, ...]:
-    """Exactly what the index holds against HEAD, by name."""
+    """Exactly what the index holds against HEAD, by name.
+
+    Read whole. Authorisation is decided from this list, so an entry that is
+    truncated away is an entry the check cannot refuse. An index larger than
+    the entry bound fails closed rather than being compared in part.
+    """
     listed = _require(
         worktree,
         ["git", "diff", "--cached", "--name-only", "-z"],
         "index_unreadable",
+        bounded=False,
     )
-    return _nul_paths(listed)
+    return _bounded_entries(listed, "index_too_large")
 
 
 __all__ = [

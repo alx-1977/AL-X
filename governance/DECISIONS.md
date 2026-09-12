@@ -1010,7 +1010,8 @@ coding transports. All other D-028 constraints remain unchanged.
 
 - **Date:** 2026-09-12
 - **Decision owner:** Friedl
-- **Status: APPROVED by Friedl, 2026-09-12.** Implemented on `feat/ca-git-workspace`.
+- **Status: APPROVED by Friedl, 2026-09-12.** Implemented on `feat/ca-git-workspace`; reviewed at PR #31.
+- **Approval reference:** Friedl's written instruction to AL/X on 2026-09-12, recorded in the conversation transcript for that date. He stated the approved authority and its exclusions in his own words, approved retaining the scoped index-rollback reset under four named conditions, and directed that this record be updated from PROPOSED to APPROVED with that scope. The authority as built is traceable to PR #31 and to the two commits it carries.
 
 **Why this is a separate record.** D-028 enumerates what the Coding Agent may
 do, and read-only git inspection is the only git it names. Creating a branch
@@ -1065,7 +1066,8 @@ without a visible change to this boundary.
 
 ### The index-rollback exception
 
-Friedl approved on 2026-09-12 the retention of one narrowly scoped reset:
+Friedl approved on 2026-09-12 — in the same written instruction referenced
+above — the retention of one narrowly scoped reset:
 
 ```
 git reset --quiet -- <paths>
@@ -1085,6 +1087,47 @@ conditions hold by construction rather than by convention: a `--hard` form or a
 commit argument is not a shape that can be built. This is not an entry in
 `governance/EXCEPTIONS.md`, which remains empty: it is a bound on an approved
 authority, not a permission to breach a law.
+
+### Deterministic sequence under Law 2
+
+`run_coding_task` may prepare the repair branch before the session and create
+the commit after verification, without returning to AL/X between those steps.
+This extends the deterministic-execution reasoning of D-020
+(`capture_supplier_invoice`) and D-021 (`process_dhl_import`) to this
+capability, and is named here because `docs/LAW_ENFORCEMENT.md` requires a
+deterministic sequence longer than a single external call to be named in an
+approved decision.
+
+The capability was already a sequence before this change — plan, session,
+local review, verification — and the outcome is unchanged: one bounded coding
+job, with evidence returned. What the two new steps add is the *form* that
+evidence takes, not a second outcome. Every step in the sequence has one
+objectively correct result; none decides business meaning. AL/X still decides
+whether to delegate at all, what the branch is called, what the commit says,
+and what the returned evidence means. Both new steps are optional and are
+performed only because she asked for them: omitting `repair_branch` and
+`commit_message` leaves the capability exactly as it was.
+
+Raised by the PR #31 review as a possible Law 2 violation (one tool hiding a
+workflow). It is recorded rather than dismissed because the rule it cites is
+the right rule; what it lacked was this repository's precedent that a named
+deterministic sequence is permitted.
+
+### Verification precedes the commit
+
+A commit is created only after the job has passed its required verification.
+Both halves are required: verification must have *run* and must have passed. A
+job where no candidate command survived the allowlist has not passed
+verification — it skipped it — and is reported with
+`unverified_not_committed` rather than committed. The job still succeeds and
+its work remains in the worktree as a diff; what it does not get is a commit
+asserting it was checked.
+
+This was found during the authority-boundary review of PR #31 and fixed there.
+The original condition failed a job only on `tests_run and tests_passed is
+False`, so an unverified job reached "succeeded" and was committed. An
+unverified commit is indistinguishable downstream from a verified one, which
+is what made the gap consequential rather than cosmetic.
 
 ### Fail closed
 

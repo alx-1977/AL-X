@@ -44,6 +44,13 @@ MAX_COMMIT_MESSAGE_CHARACTERS = 4_000
 # One commit per job. Staging is a named path list, and a job that touched
 # more files than this has outgrown the bounded repair the capability is for.
 MAX_STAGED_FILES = MAX_REPORTED_FILES
+# How many NUL-delimited entries a structural git listing may carry before the
+# reader refuses it. Authorisation is decided from those listings, so they are
+# read whole rather than clipped: an entry truncated away is an entry the check
+# cannot refuse. This bounds memory without ever shortening the answer, because
+# exceeding it fails closed. Well above any real worktree; the live incident
+# that motivated the git capability involved roughly 2,000 dirty paths.
+MAX_INSPECTED_ENTRIES = 10_000
 
 
 CODING_FAILURES = (
@@ -424,6 +431,7 @@ __all__ = [
     "MAX_VERIFICATION_COMMANDS",
     "MAX_BRANCH_NAME_CHARACTERS",
     "MAX_COMMIT_MESSAGE_CHARACTERS",
+    "MAX_INSPECTED_ENTRIES",
     "MAX_STAGED_FILES",
     "MAX_BLOCKED_PATHS",
     "MAX_BLOCKED_PATH_CHARACTERS",

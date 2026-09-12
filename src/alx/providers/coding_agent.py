@@ -412,8 +412,20 @@ class CodingAgent:
         # its work in the worktree for AL/X to read as a diff: committing it
         # would turn evidence Core still has to judge into a branch and a SHA
         # that read as a finished repair.
+        #
+        # `tests_run` is required, not merely `tests_passed is not False`.
+        # D-029 authorises a commit "after the job has passed its required
+        # verification", and a job that ran no verification has not passed it —
+        # it skipped it. That is reachable whenever no candidate command
+        # survives the allowlist, and the difference matters precisely because
+        # an unverified commit reads downstream exactly like a verified one.
+        # The job still succeeds and its work stays in the worktree; what it
+        # does not get is a commit asserting it was checked.
         commit: CodingCommit | None = None
-        if status == "succeeded" and request.commit_message.strip():
+        wanted_commit = status == "succeeded" and request.commit_message.strip()
+        if wanted_commit and not (tests_run and tests_passed):
+            issues.append("unverified_not_committed")
+        elif wanted_commit:
             try:
                 commit = commit_job_changes(
                     workspace.root,

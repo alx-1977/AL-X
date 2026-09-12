@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import unittest.mock
 import tempfile
 import unittest
 from pathlib import Path
@@ -158,10 +159,32 @@ class CreatingARepairBranch(Worktree):
             (self.root / "unrelated.py").read_text(), "somebody else was here\n"
         )
 
-    def test_an_existing_branch_is_switched_to_rather_than_failing(self) -> None:
+    def test_an_existing_branch_name_is_refused_rather_than_adopted(self) -> None:
+        """The job's base must be the baseline, not an unrelated branch's tip.
+
+        This test previously asserted the opposite: that an existing branch
+        was switched to, so re-running a job against its own branch was not a
+        failure. Qodo showed on 2026-09-12 what that permits — an older repair
+        of the same name silently becomes the base, and the job's commit sits
+        on a history nobody checked. A taken name is ambiguous (continue that
+        work, or a different repair?) and goes back to AL/X.
+        """
         git(self.root, "branch", "repair/target")
+        with self.assertRaises(CodingError) as caught:
+            create_repair_branch(self.root, "repair/target")
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "branch_already_exists_or_unusable",
+        )
+        # And the worktree was not moved onto it.
+        self.assertEqual(
+            git(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip(), "main"
+        )
+
+    def test_the_new_branch_starts_at_the_baseline_head(self) -> None:
         state = create_repair_branch(self.root, "repair/target")
-        self.assertEqual(state.branch, "repair/target")
+        self.assertEqual(state.head_sha, self.base_sha)
 
     def test_the_original_branch_still_exists_afterwards(self) -> None:
         """Nothing is deleted or force-moved, so a wrong name costs a branch."""
@@ -324,6 +347,90 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         self.assertEqual(self.status().strip(), "")
 
 
+class AuthorisationReadsTheWholeTruth(Worktree):
+    """Findings 1 and 2 from the 2026-09-12 authority-boundary review.
+
+    Both had the same shape: the check consulted something that was not the
+    whole truth, and the gap between what it saw and what git held was where
+    an unauthorised file fitted.
+    """
+
+    def test_a_large_index_is_refused_rather_than_compared_in_part(self) -> None:
+        """Finding 1: 16,000 characters of a 2,000-file index is 334 paths.
+
+        The other 1,666 were invisible to the authorisation check and would
+        have been committed unexamined. Structural listings are now read whole
+        and bounded by entry count, where exceeding the bound fails closed.
+        """
+        from alx.providers.coding_git import _staged_paths
+
+        for index in range(400):
+            name = f"padding_with_a_deliberately_long_file_name_{index:04d}.py"
+            (self.root / name).write_text("x\n")
+        git(self.root, "add", "-A")
+
+        staged = _staged_paths(self.root)
+        # Every one of them, not the prefix that fitted in a character bound.
+        self.assertEqual(len(staged), 400)
+        self.assertIn("padding_with_a_deliberately_long_file_name_0399.py", staged)
+
+    def test_an_oversized_listing_fails_closed(self) -> None:
+        """Bounding by entries still refuses; it never shortens the answer."""
+        from alx.providers import coding_git
+
+        with unittest.mock.patch.object(coding_git, "MAX_INSPECTED_ENTRIES", 2):
+            self.write("target.py", "a\n")
+            self.write("unrelated.py", "b\n")
+            (self.root / "third.py").write_text("c\n")
+            with self.assertRaises(CodingError) as caught:
+                read_workspace_state(self.root)
+        self.assertEqual(caught.exception.code, "git_refused")
+
+    def test_a_pre_commit_hook_cannot_add_a_file_to_the_commit(self) -> None:
+        """Finding 2: a hook staged a file after authorisation and it committed.
+
+        Worse than the extra file, `committed_files` reported the pre-hook
+        listing, so the evidence returned to Core was false. Hooks are now
+        disabled for every command this capability runs.
+        """
+        hook = self.root / ".git" / "hooks" / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n"
+            "echo hooked > sneaked.py\n"
+            "git add sneaked.py\n"
+            "exit 0\n"
+        )
+        hook.chmod(0o755)
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "repair target", ("target.py",)
+        )
+
+        self.assertEqual(commit.committed_files, ("target.py",))
+        self.assertNotIn(
+            "sneaked.py",
+            git(self.root, "show", "--name-only", "--pretty=", "HEAD"),
+        )
+
+    def test_the_committed_tree_is_verified_not_assumed(self) -> None:
+        """Defence in depth: the report is read out of the commit itself.
+
+        Hooks are disabled, so this should never fire. It exists because the
+        alternative to checking is reporting a file list that a hook, a git
+        version or a configuration could have made untrue, and a false
+        `committed_files` is worse than a refusal.
+        """
+        import inspect
+
+        from alx.providers.coding_git import commit_job_changes as subject
+
+        source = inspect.getsource(subject)
+        self.assertIn("_committed_paths(root)", source)
+        self.assertIn("commit_contains_unauthorised_paths", source)
+
+
 class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
     """Refusal by absence from the enumeration, not by a denylist.
 
@@ -481,16 +588,31 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
 
         The count is asserted rather than the contents so this fails on any
         addition and the author has to state, here, what the new shape is for.
+        It has already earned that: adding the post-commit readback below
+        failed this test rather than slipping in.
+
+        The twelve shapes, and why each exists:
+        four reads of where the worktree is (`rev-parse` x3, `symbolic-ref`);
+        two reads of what is changed (`status`, `diff --cached`);
+        one read of what a commit contains (`show`), added 2026-09-12 to verify
+        the committed tree against the authorised set rather than trusting the
+        index snapshot; two branch operations (`switch` with and without -c);
+        one staging (`add`); one index rollback (`reset`); one commit.
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 11)
+        self.assertEqual(len(_WRITE_SHAPES), 12)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
-            {"rev-parse", "symbolic-ref", "status", "diff", "switch", "add",
-             "reset", "commit"},
+            {"rev-parse", "symbolic-ref", "status", "diff", "show", "switch",
+             "add", "reset", "commit"},
         )
+        # Every read-shaped addition must stay a read: none may take a value
+        # or a path, so none can be pointed somewhere by an argument.
+        for prefix, remainder in _WRITE_SHAPES.items():
+            if prefix[0] in ("rev-parse", "symbolic-ref", "status", "diff", "show"):
+                self.assertEqual(remainder, "none", " ".join(prefix))
 
 
 class OperatingOutsideTheAssignedWorktree(Worktree):
