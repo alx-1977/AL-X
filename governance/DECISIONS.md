@@ -1010,8 +1010,7 @@ coding transports. All other D-028 constraints remain unchanged.
 
 - **Date:** 2026-09-12
 - **Decision owner:** Friedl
-- **Status: APPROVED by Friedl, 2026-09-12.** Implemented on `feat/ca-git-workspace`; reviewed at PR #31.
-- **Approval reference:** Friedl's written instruction to AL/X on 2026-09-12, recorded in the conversation transcript for that date. He stated the approved authority and its exclusions in his own words, approved retaining the scoped index-rollback reset under four named conditions, and directed that this record be updated from PROPOSED to APPROVED with that scope. The authority as built is traceable to PR #31 and to the two commits it carries.
+- **Status: APPROVED by Friedl, 2026-09-12 during the AL/X development session,** explicitly authorising bounded Coding Agent Git workspace writes under this decision, including the path-scoped index-rollback exception. He stated the granted authority and its exclusions in his own words and directed that this record be moved from PROPOSED to APPROVED with that scope. This decision record is the durable governance record of that approval; no external ticket exists and none is required. Implemented on `feat/ca-git-workspace`, reviewed at PR #31.
 
 **Why this is a separate record.** D-028 enumerates what the Coding Agent may
 do, and read-only git inspection is the only git it names. Creating a branch
@@ -1066,8 +1065,8 @@ without a visible change to this boundary.
 
 ### The index-rollback exception
 
-Friedl approved on 2026-09-12 — in the same written instruction referenced
-above — the retention of one narrowly scoped reset:
+Friedl approved on 2026-09-12, in the same session recorded in the status
+above, the retention of one narrowly scoped reset:
 
 ```
 git reset --quiet -- <paths>
