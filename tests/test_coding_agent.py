@@ -1188,6 +1188,8 @@ class LiveCoreCatalogueTests(unittest.TestCase):
                 "ALX_CODING_ENABLED": "true",
                 "ALX_CODING_PROVIDER": "grok_subscription",
                 "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+                "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
             }
         )
         ids = captured["ids"]

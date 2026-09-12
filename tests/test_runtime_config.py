@@ -77,10 +77,20 @@ class RuntimeConfigurationTests(unittest.TestCase):
                     XAI_API_KEY="coding-secret",
                 )
             )
+        missing_reviewer = RuntimeSettings.from_environment(
+            environment(
+                ALX_CODING_ENABLED="true",
+                ALX_CODING_PROVIDER="grok_subscription",
+                XAI_API_KEY="must-not-become-the-coding-credential",
+            )
+        )
+        self.assertFalse(missing_reviewer.coding.is_usable)
         enabled = RuntimeSettings.from_environment(
             environment(
                 ALX_CODING_ENABLED="true",
                 ALX_CODING_PROVIDER="grok_subscription",
+                ALX_CODING_REVIEWER_PROVIDER="grok_subscription",
+                ALX_CODING_REVIEWER_MODEL="grok-4.6",
                 XAI_API_KEY="must-not-become-the-coding-credential",
             )
         )
