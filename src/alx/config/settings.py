@@ -317,6 +317,51 @@ class XeroSettings:
         )
 
 
+LLAMAPARSE_DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
+
+
+@dataclass(frozen=True, slots=True)
+class LlamaParseSettings:
+    """LlamaCloud structured extraction for supplier invoices, not Core cognition.
+
+    Capture is advertised only when this is usable. An empty key leaves the
+    adapter unbuilt: there is no fallback to the Core or the generic specialist.
+    """
+
+    api_key: str
+    base_url: str
+    timeout_seconds: int
+    project_id: str
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> "LlamaParseSettings":
+        api_key = environment.get("ALX_LLAMAPARSE_API_KEY", "").strip()
+        if not api_key:
+            api_key = environment.get("LLAMA_CLOUD_API_KEY", "").strip()
+        return cls(
+            api_key=api_key,
+            base_url=environment.get(
+                "ALX_LLAMAPARSE_BASE_URL", LLAMAPARSE_DEFAULT_BASE_URL
+            ).strip()
+            or LLAMAPARSE_DEFAULT_BASE_URL,
+            timeout_seconds=_positive_integer(
+                environment, "ALX_LLAMAPARSE_TIMEOUT_SECONDS", 60
+            ),
+            project_id=environment.get("ALX_LLAMAPARSE_PROJECT_ID", "").strip(),
+        )
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.api_key)
+
+    def __repr__(self) -> str:
+        return (
+            f"LlamaParseSettings(api_key=<redacted>, base_url={self.base_url!r}, "
+            f"timeout_seconds={self.timeout_seconds!r}, "
+            f"project_id={self.project_id!r})"
+        )
+
+
 
 # The Core reasoner that runs on Friedl's Claude subscription instead of metered
 # API credit. Named here so configuration, the adapter and the tests agree on

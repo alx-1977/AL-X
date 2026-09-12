@@ -2,8 +2,8 @@
 
 Before this, a routine bill was reasoned through one API call at a time: seven
 Core calls and 143,036 estimated input tokens without a bill being created. The
-extraction is now a bounded specialist question, supplier and coding come from
-this organisation's own records, and the Core is asked only where judgment is
+extraction is now a bounded document read, supplier and coding come from this
+organisation's own records, and the Core is asked only where judgment is
 genuinely required.
 """
 
@@ -133,10 +133,31 @@ class FakeXero:
 
 
 class FakeMail:
+    def __init__(
+        self,
+        *,
+        text: str = TEXT,
+        payload: bytes = PDF,
+        filename: str = "invoice.pdf",
+        media_type: str = "application/pdf",
+    ) -> None:
+        self.text = text
+        self.payload = payload
+        self.filename = filename
+        self.media_type = media_type
+        self.digest = hashlib.sha256(payload).hexdigest()
+
     def read_attachment(self, _reference, _attachment_id):
         return (
-            MailAttachment("4", "invoice.pdf", "application/pdf", len(PDF), DIGEST, TEXT),
-            PDF,
+            MailAttachment(
+                "4",
+                self.filename,
+                self.media_type,
+                len(self.payload),
+                self.digest,
+                self.text,
+            ),
+            self.payload,
         )
 
 
@@ -159,8 +180,8 @@ class RoutineCaptureTests(unittest.TestCase):
         self.xero = FakeXero()
         self.calls: list[tuple[str, str]] = []
 
-        def extractor(text: str, context_line: str) -> dict:
-            self.calls.append((text, context_line))
+        def extractor(payload, media_type, filename, context_line) -> dict:
+            self.calls.append((payload, media_type, filename, context_line))
             return extracted()
 
         self.executors = build_xero_executors(
@@ -168,13 +189,31 @@ class RoutineCaptureTests(unittest.TestCase):
         )
         self.capture = self.executors[CAPTURE_SUPPLIER_INVOICE]
 
-    def test_the_specialist_is_actually_used_on_the_live_path(self) -> None:
-        """Proof the wiring reaches the specialist, not a Core reasoning call."""
+    def test_the_extractor_receives_original_bytes_on_the_live_path(self) -> None:
+        """Proof the wiring reaches the document extractor, not a Core call."""
         self.capture(arguments())
         self.assertEqual(len(self.calls), 1)
-        text, context_line = self.calls[0]
-        self.assertEqual(text, TEXT)
+        payload, media_type, filename, context_line = self.calls[0]
+        self.assertEqual(payload, PDF)
+        self.assertEqual(media_type, "application/pdf")
+        self.assertEqual(filename, "invoice.pdf")
         self.assertEqual(context_line, "Invoice 18300777.pdf")
+
+    def test_a_scanned_pdf_with_empty_text_still_reaches_the_extractor(self) -> None:
+        mail = FakeMail(text="")
+        calls = []
+
+        def extractor(payload, media_type, filename, context_line):
+            calls.append((payload, media_type, filename, context_line))
+            return extracted()
+
+        capture = build_xero_executors(
+            FakeXero(), mail, lambda: "call-1", extractor
+        )[CAPTURE_SUPPLIER_INVOICE]
+        result = capture(arguments())
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(calls[0][0], PDF)
+        self.assertEqual(mail.text, "")
 
     def test_a_known_supplier_bill_completes_in_one_capability_call(self) -> None:
         result = self.capture(arguments())
@@ -769,11 +808,28 @@ class ReturnsToCoreTests(unittest.TestCase):
         self.assertEqual(invoice["total"], "180.00")
         self.assertNotIn("SAMTEC INC\nInvoice", str(result.values))
 
-    def test_a_hash_mismatch_never_reaches_the_specialist(self) -> None:
+    def test_a_hash_mismatch_never_reaches_the_extractor(self) -> None:
         calls = []
         capture = self.build(lambda *a: calls.append(a) or extracted())
         result = capture(arguments(expected_sha256="0" * 64))
         self.assertEqual(result.failure["code"], "source_mismatch")
+        self.assertEqual(calls, [])
+
+    def test_a_dhl_document_never_reaches_the_extractor(self) -> None:
+        calls = []
+        capture = build_xero_executors(
+            FakeXero(),
+            FakeMail(),
+            lambda: "call-1",
+            lambda *a: calls.append(a) or extracted(),
+            "",
+            "",
+            lambda _payload: "dhl_invoice",
+        )[CAPTURE_SUPPLIER_INVOICE]
+        result = capture(arguments())
+        self.assertEqual(
+            result.failure["code"], "dhl_import_requires_dedicated_processing"
+        )
         self.assertEqual(calls, [])
 
 
@@ -834,25 +890,38 @@ class NoFallbackTests(unittest.TestCase):
 
         self.assertIn(CAPTURE_SUPPLIER_INVOICE, BILL_TASK_CAPABILITIES)
 
-    def test_the_live_runtime_supplies_the_specialist_extractor(self) -> None:
+    def test_the_live_runtime_supplies_the_llamaparse_extractor(self) -> None:
         source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
-        self.assertIn("ModelSpecialist(providers.specialist)", source)
-        self.assertIn("extract_invoice(", source)
+        self.assertIn("build_supplier_invoice_extractor", source)
+        self.assertIn("LlamaParseSettings.from_environment", source)
+        self.assertNotIn("ModelSpecialist(providers.specialist)", source)
+        self.assertNotIn("extract_invoice(", source)
 
     def test_the_live_runtime_never_extracts_through_the_core_model(self) -> None:
         """A silent fallback to the Core is the cost this exists to avoid."""
         source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
         self.assertNotIn("ModelSpecialist(providers.reasoning)", source)
+        self.assertNotIn("providers.specialist", source)
 
-    def test_an_unavailable_specialist_disables_extraction(self) -> None:
+    def test_an_unavailable_specialist_does_not_disable_llamaparse_capture(self) -> None:
         from alx.bootstrap.providers import _build_reasoning_model
-        from alx.config import ReasoningSettings
+        from alx.bootstrap.xero import build_supplier_invoice_extractor
+        from alx.config import LlamaParseSettings, ReasoningSettings
 
         settings = ReasoningSettings(
             "unknown-vendor", "m", "k", "https://example.test", 10, False,
             "default", "none",
         )
         self.assertIsNone(_build_reasoning_model(settings, None))
+        extractor = build_supplier_invoice_extractor(
+            LlamaParseSettings(
+                api_key="llamacloud-secret",
+                base_url="https://api.cloud.llamaindex.ai",
+                timeout_seconds=60,
+                project_id="",
+            )
+        )
+        self.assertIsNotNone(extractor)
 
     def test_capture_without_an_extractor_refuses_rather_than_planning(self) -> None:
         """A misconfigured runtime must not silently fall back to Core steps."""
@@ -877,7 +946,7 @@ class SupplierCaptureAvailabilityTests(unittest.TestCase):
                 extractor,
             )
 
-    def test_a_configured_specialist_exposes_supplier_capture(self) -> None:
+    def test_a_configured_llamaparse_extractor_exposes_supplier_capture(self) -> None:
         runtime = self._runtime(lambda *_: extracted())
         self.assertIn(
             CAPTURE_SUPPLIER_INVOICE,
@@ -886,13 +955,27 @@ class SupplierCaptureAvailabilityTests(unittest.TestCase):
         self.assertIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
         self.assertIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
 
-    def test_an_absent_specialist_does_not_advertise_supplier_capture(self) -> None:
+    def test_missing_llamaparse_configuration_does_not_advertise_capture(self) -> None:
+        from alx.bootstrap.xero import build_supplier_invoice_extractor
+        from alx.config import LlamaParseSettings
+
+        extractor = build_supplier_invoice_extractor(
+            LlamaParseSettings.from_environment({})
+        )
+        self.assertIsNone(extractor)
+        runtime = self._runtime(extractor)
+        offered = {item.capability_id for item in runtime.definitions}
+        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, offered)
+        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
+        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
+
+    def test_an_absent_extractor_does_not_advertise_supplier_capture(self) -> None:
         runtime = self._runtime()
         offered = {item.capability_id for item in runtime.definitions}
         self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, offered)
         self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
         self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
-        # The specialist gates only ordinary supplier capture. Xero reads and
+        # LlamaParse gates only ordinary supplier capture. Xero reads and
         # draft deletion remain independently callable, and DHL has its own
         # deterministic runtime.
         for capability_id in (FIND_XERO_BILL, READ_XERO_BILL, DELETE_XERO_DRAFT_BILL):

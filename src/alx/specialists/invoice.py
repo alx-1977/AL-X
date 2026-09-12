@@ -67,7 +67,7 @@ does not state; never infer, calculate or invent a value. If the text is not a
 supplier invoice, set document_type to what it appears to be and leave the
 invoice fields empty."""
 
-_ANSWER_SCHEMA = json_schema(
+ANSWER_SCHEMA = json_schema(
     {
         "document_type": "string",
         "supplier_name": "string",
@@ -106,7 +106,7 @@ def invoice_question(document_text: str, context_line: str = "") -> SpecialistQu
     if context_line.strip():
         material = f"Context (email subject / filename): {context_line}\n\n{material}"
     return SpecialistQuestion(
-        EXTRACT_INVOICE, INSTRUCTION, material, _ANSWER_SCHEMA
+        EXTRACT_INVOICE, INSTRUCTION, material, ANSWER_SCHEMA
     )
 
 

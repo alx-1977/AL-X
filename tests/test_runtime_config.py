@@ -8,7 +8,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.providers.gated_transcription import GatedTranscriber  # noqa: E402
 
 from alx.bootstrap import build_runtime_providers  # noqa: E402
-from alx.config import ConfigurationError, LiveVoiceSettings, RuntimeSettings  # noqa: E402
+from alx.config import (  # noqa: E402
+    ConfigurationError,
+    LiveVoiceSettings,
+    LlamaParseSettings,
+    RuntimeSettings,
+)
 from alx.providers import (  # noqa: E402
     CartesiaTranscriber,
     ElevenLabsSynthesizer,
@@ -221,6 +226,26 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(settings.reasoning.api_key, "openai-secret")
         self.assertEqual(settings.reasoning.base_url, "https://api.openai.com")
         self.assertIsInstance(providers.reasoning, OpenAIReasoningModel)
+
+    def test_llamaparse_is_independent_of_core_and_specialist(self) -> None:
+        settings = LlamaParseSettings.from_environment(environment())
+        self.assertFalse(settings.is_usable)
+        configured = LlamaParseSettings.from_environment(
+            environment(
+                ALX_LLAMAPARSE_API_KEY="llamacloud-secret",
+                ALX_LLAMAPARSE_PROJECT_ID="prj-1",
+                ALX_LLAMAPARSE_TIMEOUT_SECONDS="90",
+            )
+        )
+        self.assertTrue(configured.is_usable)
+        self.assertEqual(configured.api_key, "llamacloud-secret")
+        self.assertEqual(configured.project_id, "prj-1")
+        self.assertEqual(configured.timeout_seconds, 90)
+        self.assertEqual(configured.base_url, "https://api.cloud.llamaindex.ai")
+        with self.assertRaises(ConfigurationError):
+            LlamaParseSettings.from_environment(
+                environment(ALX_LLAMAPARSE_TIMEOUT_SECONDS="0")
+            )
 
 
 if __name__ == "__main__":

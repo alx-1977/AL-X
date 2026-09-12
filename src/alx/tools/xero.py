@@ -58,6 +58,10 @@ _FAILURES = (
     "dhl_import_requires_dedicated_processing",
     "source_mismatch",
     "attachment_unavailable",
+    "extraction_timeout",
+    "provider_failed",
+    "unsupported_media_type",
+    "document_too_large",
 )
 
 _STRING = StructuredSchema(ValueKind.STRING)
@@ -655,7 +659,7 @@ def build_xero_executors(
     account: XeroAccountingAccount,
     mail: MailAccount,
     call_id_source: Callable[[], str],
-    extractor: Callable[[str, str], Mapping[str, Any]] | None = None,
+    extractor: Callable[[bytes, str, str, str], Mapping[str, Any]] | None = None,
     default_account_code: str = "",
     default_tax_type: str = "",
     dhl_classifier: Callable[[bytes], str] | None = None,
@@ -930,7 +934,7 @@ def build_xero_executors(
     def capture_invoice(arguments: StructuredData) -> CapabilityResult:
         """Read a document, resolve it against records, and commit if certain.
 
-        Extraction is a bounded specialist question, supplier and accounting
+        Extraction is a bounded document read, supplier and accounting
         treatment come from this organisation's own history, and the commit is
         the same execute path. Nothing here interprets what Friedl wants, and
         anything without one objectively correct answer returns to AL/X rather
@@ -994,7 +998,12 @@ def build_xero_executors(
                 # classifier must not leave evidence of a check in the trail.
                 steps.append("checked_not_a_dhl_document")
 
-            invoice = extractor(attachment.text, context_line)
+            invoice = extractor(
+                content,
+                attachment.media_type,
+                attachment.filename,
+                context_line,
+            )
             steps.append("extracted_invoice")
             if not is_supplier_bill(invoice["document_type"]):
                 return failed(CAPTURE_SUPPLIER_INVOICE, "not_an_invoice")
