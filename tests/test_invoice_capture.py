@@ -294,6 +294,30 @@ class AttachmentToctouTests(unittest.TestCase):
         self.assertEqual(self.authorised, [])
         self.assertNotEqual(self.xero.bills["bill-1"]["Status"], "AUTHORISED")
 
+    def test_attachment_changed_after_authorisation_returns_the_authorised_bill(self) -> None:
+        capture = self.capture_with()
+        original_read = self.xero.read_bill_attachment
+        reads = {"count": 0}
+
+        def read(invoice_id, attachment_id, media_type):
+            payload = original_read(invoice_id, attachment_id, media_type)
+            reads["count"] += 1
+            if reads["count"] >= 3:
+                return b"replaced-after-authorise"
+            return payload
+
+        self.xero.read_bill_attachment = read
+        result = capture(arguments())
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(result.failure)
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "supporting_document_mismatch")
+        self.assertEqual(self.authorised, ["bill-1"])
+        self.assertEqual(result.values["bill"]["status"], "AUTHORISED")
+        self.assertEqual(self.xero.bills["bill-1"]["Status"], "AUTHORISED")
+        self.assertIn("re_verified_before_authorisation", result.values["steps"])
+        self.assertIn("authorised", result.values["steps"])
+
     def test_authorisation_reread_does_not_rediscover_by_filename(self) -> None:
         capture = self.capture_with()
         lists: list[int] = []

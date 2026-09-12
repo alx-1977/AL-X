@@ -965,9 +965,21 @@ def build_xero_executors(
                     account.read_bill(invoice_id),
                 )
             if authorise_requested:
-                for attachment_id, media_type, digest in required_attachments:
-                    _require_attachment_bytes(
-                        account, invoice_id, attachment_id, media_type, digest
+                try:
+                    for attachment_id, media_type, digest in required_attachments:
+                        _require_attachment_bytes(
+                            account, invoice_id, attachment_id, media_type, digest
+                        )
+                except XeroAccessError as error:
+                    # Authorisation already happened. Report the AUTHORISED
+                    # bill; do not collapse this into a pre-authorisation
+                    # failed() that looks like the write never occurred.
+                    if error.code != "supporting_document_mismatch":
+                        raise
+                    return returned(
+                        "supporting_document_mismatch",
+                        "the authorised bill's attachment no longer matches the verified document",
+                        account.read_bill(invoice_id),
                     )
             steps.append("verified")
             return CapabilityResult(
