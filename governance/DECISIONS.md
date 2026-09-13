@@ -1194,7 +1194,14 @@ verify:
 - **an ignored path**. Committing around it would be a subset presented as
   the whole; forcing it would commit what the repository asked to exclude.
   Which the job wants is a judgement, so it returns to AL/X;
-- **a directory, or anything that is not one concrete regular file.**
+- **a directory, or anything that is not one concrete regular file.** This
+  includes a path the job *deleted*: the input must exist, so a repair that
+  removes a file cannot be committed by V1. It refuses rather than committing
+  the rest and reporting success. Recorded as a known bound because Law 0
+  requires superseded paths to be deleted, so a Law 0 compliance repair is
+  exactly the job this cannot commit. Supporting deletions means accepting a
+  second input kind with its own authorisation, which is a change to this
+  decision rather than a default to add quietly.
 
 Nothing is unstaged or altered by any of these refusals: the index and
 worktree are left exactly as found.

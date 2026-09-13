@@ -629,6 +629,54 @@ class NarrowedRefusalsUnderD029V1(Worktree):
 
         self.assertEqual(caught.exception.details["reason_code"], "too_many_files")
 
+    def test_a_filename_containing_glob_characters_stages_literally(self) -> None:
+        """Paths are exact filenames, never patterns.
+
+        Without `GIT_LITERAL_PATHSPECS`, `*`, `?` and bracket expressions in a
+        filename are read as globs. A file legitimately named `weird[1].py`
+        also matched a sibling `weird1.py` the job did not own: the readback
+        caught and refused it, which is correct but penalises a job that did
+        nothing wrong. Found in the PR #31 review on 2026-09-13.
+        """
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "weird[1].py").write_text("owned\n")
+        (self.root / "weird1.py").write_text("not this job's\n")
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "repair", ("weird[1].py",)
+        )
+
+        self.assertEqual(commit.committed_files, ("weird[1].py",))
+        # The sibling the glob would have matched is untouched and untracked.
+        self.assertIn("weird1.py", self.status())
+        self.assertEqual((self.root / "weird1.py").read_text(), "not this job's\n")
+
+    def test_a_deleted_file_cannot_be_committed_in_v1(self) -> None:
+        """A known V1 bound, refused honestly rather than silently omitted.
+
+        The invariant requires every input to be one concrete regular file
+        that exists, so a job that deletes a file names a path that is gone.
+        It refuses rather than committing the rest and reporting success —
+        a partial commit presented as complete is the defect this capability
+        exists to prevent — but it does mean a repair that removes a
+        superseded module cannot be committed by D-029 V1.
+        """
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "unrelated.py").unlink()
+        self.write("target.py", "repaired\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "remove and repair",
+                ("unrelated.py", "target.py"),
+            )
+
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(
+            caught.exception.details["reason_code"], "path_is_not_a_regular_file"
+        )
+        self.assertEqual(caught.exception.details["path"], "unrelated.py")
+
     def test_a_staged_rename_refuses_the_commit(self) -> None:
         """The serious one: a repair commit that deleted an unowned file.
 

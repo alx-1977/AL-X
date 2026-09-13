@@ -258,6 +258,13 @@ def _clean_environment() -> dict[str, str]:
     return environment
 
 
+# Commands that take a path from us and understand literal pathspec magic.
+# `check-ignore` does not support it and refuses outright, so it is absent;
+# its answer is unaffected because it is asked about one path at a time and a
+# wrong glob answer there can only refuse, never widen.
+_LITERAL_PATHSPEC_SUBCOMMANDS = frozenset({"add", "reset", "check-attr"})
+
+
 def _run(
     worktree: Path, argv: list[str], *, bounded: bool = True
 ) -> _GitResult:
@@ -274,11 +281,20 @@ def _run(
     """
     if not git_write_permitted(argv):
         raise CodingError("git_refused", reason_code="operation_not_permitted")
+    environment = _clean_environment()
+    if argv[1] in _LITERAL_PATHSPEC_SUBCOMMANDS:
+        # Every path here is an exact filename read out of git's own status,
+        # never a pattern. Without this, `*`, `?` and bracket expressions in a
+        # filename are read as globs: a file legitimately named `weird[1].py`
+        # also matched a sibling `weird1.py` the job did not own. The readback
+        # caught and refused that, which is correct but penalises a job that
+        # did nothing wrong. Found in the PR #31 review on 2026-09-13.
+        environment["GIT_LITERAL_PATHSPECS"] = "1"
     try:
         completed = subprocess.run(  # noqa: S603 - enumerated argv, never shell
             argv,
             cwd=worktree,
-            env=_clean_environment(),
+            env=environment,
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
