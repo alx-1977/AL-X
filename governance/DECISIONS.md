@@ -1191,16 +1191,37 @@ verify:
   A link's meaning depends on where it points and on what a checkout does with
   it, which is not a fact this code can settle. The previous version dropped
   one silently and reported the commit complete;
-- **an ignored or otherwise uncommittable path inside a job-owned directory**.
-  Committing the rest would be a subset presented as the whole; forcing it
-  would commit what the repository asked to exclude. Which of those the job
-  wants is a judgement, so it returns to AL/X;
-- **more concrete files than the bound**, counted after directory expansion
-  rather than before it. A single directory entry previously passed a bound
-  that sixty equivalent flat paths would have failed.
+- **an ignored path**. Committing around it would be a subset presented as
+  the whole; forcing it would commit what the repository asked to exclude.
+  Which the job wants is a judgement, so it returns to AL/X;
+- **a directory, or anything that is not one concrete regular file.**
 
 Nothing is unstaged or altered by any of these refusals: the index and
 worktree are left exactly as found.
+
+### Concrete files only
+
+Friedl narrowed the capability on 2026-09-13: every path supplied to the
+commit capability must resolve to one concrete regular file that exists inside
+the assigned worktree, is explicitly present in the job-owned changed-file set,
+is not a symlink, is not ignored, and is not part of an inherited staged rename
+or other pre-existing index mutation. **Directories are not valid commit
+inputs.**
+
+This is an implementation simplification, not a lost capability. The first
+version accepted a directory because porcelain status reports a wholly
+untracked one as a single `dir/` entry, and supporting that required walking
+it — which then required deciding about symlinks, ignored files, nested
+directories, and a file bound counted on the wrong side of the walk. Four of
+the five defects in the PR #31 round of 2026-09-13 came from that one
+convenience.
+
+The job already knows which files it wrote. Reading status with `-uall` makes
+git name every untracked file individually, so the concrete paths reach the
+changed-file set without this module discovering anything. Responsibility is
+separated accordingly: the coding job determines which concrete files it owns,
+and this capability verifies and commits exactly those. No path is discovered
+here that the caller did not supply.
 
 ### Ownership of staged state
 

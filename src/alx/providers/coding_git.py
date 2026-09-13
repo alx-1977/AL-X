@@ -67,10 +67,9 @@ GIT_TIMEOUT_SECONDS = 60
 #           none of which may be spelled as a ref
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("rev-parse", "HEAD"): "none",
-    ("rev-parse", "--abbrev-ref", "HEAD"): "none",
     ("rev-parse", "--show-toplevel"): "none",
     ("symbolic-ref", "--quiet", "--short", "HEAD"): "none",
-    ("status", "--porcelain=v1", "-z"): "none",
+    ("status", "--porcelain=v1", "-z", "-uall"): "none",
     ("diff", "--cached", "--name-only", "-z"): "none",
     ("show", "--name-only", "--pretty=format:", "-z", "HEAD"): "none",
     ("check-attr", "-z", "filter", "--"): "paths",
@@ -341,9 +340,14 @@ def _dirty_paths(worktree: Path) -> tuple[str, ...]:
     Read whole for the same reason the index is: this is the inherited dirt a
     job is judged against, and a shortened list would silently drop files the
     job must be told about.
+
+    `-uall` makes git name every untracked file rather than collapsing a new
+    directory to one `dir/` entry. That is what lets D-029 take concrete files
+    only: the expansion this module used to perform is git's own, and a
+    directory never reaches the authorisation set to be walked here.
     """
     status = _require(
-        worktree, ["git", "status", "--porcelain=v1", "-z"], "status_failed",
+        worktree, ["git", "status", "--porcelain=v1", "-z", "-uall"], "status_failed",
         bounded=False,
     )
     if status.count("\0") > MAX_INSPECTED_ENTRIES:
@@ -465,24 +469,27 @@ def _authorised_paths(
     an inherited file only appears here when the job itself rewrote it. That
     is what lets this check stay mechanical — it does not re-derive ownership,
     it enforces that nothing outside the derived set reaches the index.
+
+    Every entry must already name one concrete regular file. D-029 V1 does not
+    take directories: `git add <dir>` discovers files by walking, and the set
+    it discovers is not the set the job was authorised for. Supporting that
+    meant expansion, and expansion meant deciding what to do about symlinks,
+    ignored files, nested directories and a file bound counted on the wrong
+    side of the walk — four defects from one convenience. The job already
+    knows which files it wrote, so it names them: `src/alx/foo/bar.py`, never
+    `src/alx/foo/`. Nothing here discovers a path the caller did not supply.
     """
     if not files:
         raise CodingError("git_refused", reason_code="no_job_owned_changes")
-    # Expand first, then bound. The bound must describe the concrete files that
-    # would actually be staged: checking it against the requested entries let a
-    # single directory holding more than the limit commit in full while an
-    # equivalent flat repair was refused. Found in the PR #31 review on
-    # 2026-09-13.
-    concrete = _expand_directories(root, files)
-    if len(concrete) > MAX_STAGED_FILES:
+    if len(files) > MAX_STAGED_FILES:
         raise CodingError(
             "git_refused",
             reason_code="too_many_files",
-            received_count=len(concrete),
+            received_count=len(files),
         )
     inherited = {item for item in inherited_dirty}
     authorised: list[str] = []
-    for item in concrete:
+    for item in files:
         lexical = lexical_worktree_path(item)
         if not lexical:
             raise CodingError("git_refused", reason_code="path_is_worktree_root")
@@ -495,13 +502,19 @@ def _authorised_paths(
             resolved.relative_to(root)
         except ValueError as error:
             raise CodingError("path_outside_worktree") from error
-        # D-029 V1 does not commit symlinks. A link's meaning depends on where
-        # it points and on what the checkout does with it, which is not a fact
-        # this code can settle; the previous version dropped one silently and
-        # reported the commit complete. Refusing says so instead.
-        if (root / lexical).is_symlink():
+        # One concrete regular file, checked before resolution follows a link.
+        # A directory, a symlink, a device or a missing path each has no single
+        # correct answer about what should be committed, so each is refused by
+        # the same rule rather than by four special cases.
+        target = root / lexical
+        if target.is_symlink():
             raise CodingError(
                 "git_refused", reason_code="path_is_symlink", path=lexical
+            )
+        if not target.is_file():
+            raise CodingError(
+                "git_refused", reason_code="path_is_not_a_regular_file",
+                path=lexical,
             )
         # An inherited dirty path reaching here has been rewritten by the job,
         # so it is the job's to stage. One that was never touched is excluded
@@ -663,54 +676,6 @@ def commit_job_changes(
         committed_files=committed,
         worktree_clean=after.clean,
     )
-
-
-def _expand_directories(root: Path, files: tuple[str, ...]) -> tuple[str, ...]:
-    """Replace an untracked-directory entry with the files inside it.
-
-    Porcelain status reports a wholly untracked directory as one entry ending
-    in `/` rather than listing its contents, so a job that creates a directory
-    arrives here authorising `newdir/` while `git add` stages the files within.
-    Expanding keeps the authorised set and the index describing the same thing.
-
-    Everything ambiguous refuses. A symlink, a nested unreadable directory, or
-    anything that is not a regular file has no single correct answer about what
-    should be committed, and the previous version silently dropped them: a
-    symlink the job created vanished from the commit while the result reported
-    success. Under D-029 V1 the answer is a refusal, never a subset — a partial
-    commit reported as complete is the false evidence this capability exists to
-    prevent.
-
-    Expansion widens what is *named*, never what is *permitted*: every path
-    returned is still held to the worktree, blocked-path and `.git` checks by
-    the caller, and the file-count bound is applied to this concrete set rather
-    than to the directory entries that produced it.
-    """
-    expanded: list[str] = []
-    for item in files:
-        if not item.endswith("/"):
-            expanded.append(item)
-            continue
-        lexical = lexical_worktree_path(item)
-        directory = (root / lexical).resolve()
-        try:
-            directory.relative_to(root)
-        except ValueError as error:
-            raise CodingError("path_outside_worktree") from error
-        if not directory.is_dir() or directory.is_symlink():
-            expanded.append(item)
-            continue
-        for child in sorted(directory.rglob("*")):
-            if child.is_dir() and not child.is_symlink():
-                continue
-            if child.is_symlink() or not child.is_file():
-                raise CodingError(
-                    "git_refused",
-                    reason_code="directory_contains_unsupported_entry",
-                    path=child.relative_to(root).as_posix(),
-                )
-            expanded.append(child.relative_to(root).as_posix())
-    return tuple(dict.fromkeys(expanded))
 
 
 def _refuse_uncommittable(root: Path, paths: tuple[str, ...]) -> None:

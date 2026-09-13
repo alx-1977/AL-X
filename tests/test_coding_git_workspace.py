@@ -460,38 +460,6 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         )
         self.assertEqual(commit.committed_files, ("target.py",))
 
-    def test_a_new_directory_is_expanded_to_its_files(self) -> None:
-        """Porcelain reports an untracked directory as one `dir/` entry.
-
-        `git add` then stages its files, so the readback found paths the job
-        never authorised and refused the commit as if somebody else's work had
-        been staged. Creating a directory is ordinary coding, so this refused
-        routine jobs while reporting a misleading cause.
-        """
-        create_repair_branch(self.root, "repair/target")
-        (self.root / "newdir").mkdir()
-        (self.root / "newdir" / "a.py").write_text("a\n")
-        (self.root / "newdir" / "b.py").write_text("b\n")
-
-        commit = commit_job_changes(
-            self.root, "repair/target", "add a package", ("newdir/",)
-        )
-
-        self.assertEqual(commit.committed_files, ("newdir/a.py", "newdir/b.py"))
-
-    def test_expansion_still_refuses_a_blocked_file_inside_a_directory(self) -> None:
-        """Expansion widens what is named, never what is permitted."""
-        create_repair_branch(self.root, "repair/target")
-        (self.root / "newdir").mkdir()
-        (self.root / "newdir" / "a.py").write_text("a\n")
-        (self.root / "newdir" / "secret.key").write_text("k\n")
-        with self.assertRaises(CodingError) as caught:
-            commit_job_changes(
-                self.root, "repair/target", "add a package", ("newdir/",),
-                (), ("newdir/secret.key",),
-            )
-        self.assertEqual(caught.exception.code, "path_not_permitted")
-
     def test_a_commit_racing_with_another_writer_is_detected(self) -> None:
         """The residual window: staging between readback and commit.
 
@@ -555,36 +523,6 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         # And the commit succeeded, where the misconfiguration used to break it.
         self.assertEqual(commit.committed_files, ("target.py",))
 
-    def test_expansion_refuses_a_symlink_out_of_the_worktree(self) -> None:
-        """It may not read elsewhere, and may not drop it silently either.
-
-        This previously asserted that such a link was excluded and the rest
-        committed. That is the silent-omission defect: nothing outside the
-        worktree leaked, but the result reported a complete repair while
-        having quietly left something out. The refusal covers both.
-        """
-        outside = Path(self.directory.name).parent / "outside_secret.txt"
-        outside.write_text("secret\n")
-        self.addCleanup(outside.unlink, True)
-        create_repair_branch(self.root, "repair/target")
-        (self.root / "newdir").mkdir()
-        (self.root / "newdir" / "a.py").write_text("a\n")
-        (self.root / "newdir" / "link.txt").symlink_to(outside)
-
-        with self.assertRaises(CodingError) as caught:
-            commit_job_changes(
-                self.root, "repair/target", "add a package", ("newdir/",)
-            )
-
-        self.assertEqual(
-            caught.exception.details["reason_code"],
-            "directory_contains_unsupported_entry",
-        )
-        self.assertEqual(
-            git(self.root, "rev-parse", "HEAD").strip(),
-            git(self.root, "rev-parse", "main").strip(),
-        )
-
     def test_the_committed_tree_is_verified_not_assumed(self) -> None:
         """Defence in depth: the report is read out of the commit itself.
 
@@ -613,6 +551,83 @@ class NarrowedRefusalsUnderD029V1(Worktree):
 
     Every test also asserts the index and worktree are left exactly as found.
     """
+
+    def test_a_directory_is_not_a_valid_commit_input(self) -> None:
+        """D-029 V1 takes concrete files. Directories are refused outright.
+
+        `git add <dir>` discovers files by walking, and the set it discovers is
+        not the set the job was authorised for. Supporting it meant expansion,
+        and expansion meant deciding about symlinks, ignored files, nested
+        directories and a bound counted on the wrong side of the walk — four
+        defects from one convenience, all found in the PR #31 review.
+
+        The job already knows which files it wrote, and `git status -uall`
+        names every untracked file rather than collapsing a new directory, so
+        the concrete paths are available without this module discovering
+        anything.
+        """
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "newdir").mkdir()
+        (self.root / "newdir" / "a.py").write_text("a\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("newdir/",)
+            )
+
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(
+            caught.exception.details["reason_code"], "path_is_not_a_regular_file"
+        )
+
+    def test_the_files_inside_a_new_directory_commit_when_named(self) -> None:
+        """The capability is not lost, only the directory shorthand."""
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "newdir" / "nested").mkdir(parents=True)
+        (self.root / "newdir" / "a.py").write_text("a\n")
+        (self.root / "newdir" / "nested" / "b.py").write_text("b\n")
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "add a package",
+            ("newdir/a.py", "newdir/nested/b.py"),
+        )
+
+        self.assertEqual(
+            commit.committed_files, ("newdir/a.py", "newdir/nested/b.py")
+        )
+
+    def test_status_names_untracked_files_individually(self) -> None:
+        """What makes concrete-files-only workable: git does the naming.
+
+        Without `-uall` a wholly untracked directory is one `dir/` entry, and
+        the job's derived file set would name something D-029 must refuse.
+        """
+        (self.root / "newdir" / "nested").mkdir(parents=True)
+        (self.root / "newdir" / "a.py").write_text("a\n")
+        (self.root / "newdir" / "nested" / "b.py").write_text("b\n")
+
+        dirt = read_workspace_state(self.root).inherited_dirty
+
+        self.assertIn("newdir/a.py", dirt)
+        self.assertIn("newdir/nested/b.py", dirt)
+        self.assertNotIn("newdir/", dirt)
+
+    def test_a_bare_file_count_is_bounded(self) -> None:
+        from alx.contracts.coding import MAX_STAGED_FILES
+
+        create_repair_branch(self.root, "repair/target")
+        names = []
+        for index in range(MAX_STAGED_FILES + 5):
+            name = f"f{index:03d}.py"
+            (self.root / name).write_text("x\n")
+            names.append(name)
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", tuple(names)
+            )
+
+        self.assertEqual(caught.exception.details["reason_code"], "too_many_files")
 
     def test_a_staged_rename_refuses_the_commit(self) -> None:
         """The serious one: a repair commit that deleted an unowned file.
@@ -655,75 +670,6 @@ class NarrowedRefusalsUnderD029V1(Worktree):
 
         self.assertEqual(caught.exception.code, "git_refused")
         self.assertEqual(caught.exception.details["reason_code"], "path_is_symlink")
-
-    def test_a_symlink_inside_a_new_directory_refuses(self) -> None:
-        create_repair_branch(self.root, "repair/target")
-        (self.root / "newdir").mkdir()
-        (self.root / "newdir" / "a.py").write_text("a\n")
-        (self.root / "newdir" / "alias.py").symlink_to("a.py")
-
-        with self.assertRaises(CodingError) as caught:
-            commit_job_changes(
-                self.root, "repair/target", "repair", ("newdir/",)
-            )
-
-        self.assertEqual(
-            caught.exception.details["reason_code"],
-            "directory_contains_unsupported_entry",
-        )
-
-    def test_an_ignored_file_in_a_new_directory_refuses(self) -> None:
-        """Refuse rather than commit a subset, and name which path caused it."""
-        (self.root / ".gitignore").write_text("*.log\n")
-        git(self.root, "add", ".gitignore")
-        git(self.root, "commit", "-qm", "ignore logs")
-        create_repair_branch(self.root, "repair/target")
-        (self.root / "newdir").mkdir()
-        (self.root / "newdir" / "a.py").write_text("a\n")
-        (self.root / "newdir" / "debug.log").write_text("noise\n")
-
-        with self.assertRaises(CodingError) as caught:
-            commit_job_changes(
-                self.root, "repair/target", "repair", ("newdir/",)
-            )
-
-        self.assertEqual(caught.exception.details["reason_code"], "path_is_ignored")
-        self.assertEqual(caught.exception.details["path"], "newdir/debug.log")
-
-    def test_the_file_bound_counts_concrete_files_not_directories(self) -> None:
-        """One directory entry used to pass a bound sixty files would fail."""
-        from alx.contracts.coding import MAX_STAGED_FILES
-
-        create_repair_branch(self.root, "repair/target")
-        (self.root / "bigdir").mkdir()
-        for index in range(MAX_STAGED_FILES + 10):
-            (self.root / "bigdir" / f"f{index:03d}.py").write_text("x\n")
-
-        with self.assertRaises(CodingError) as caught:
-            commit_job_changes(
-                self.root, "repair/target", "repair", ("bigdir/",)
-            )
-
-        self.assertEqual(caught.exception.details["reason_code"], "too_many_files")
-        self.assertEqual(
-            caught.exception.details["received_count"], MAX_STAGED_FILES + 10
-        )
-
-    def test_a_directory_within_the_bound_still_commits(self) -> None:
-        """The bound refuses what is too large; it does not refuse everything."""
-        create_repair_branch(self.root, "repair/target")
-        (self.root / "smalldir").mkdir()
-        for index in range(3):
-            (self.root / "smalldir" / f"f{index}.py").write_text("x\n")
-
-        commit = commit_job_changes(
-            self.root, "repair/target", "repair", ("smalldir/",)
-        )
-
-        self.assertEqual(
-            commit.committed_files,
-            ("smalldir/f0.py", "smalldir/f1.py", "smalldir/f2.py"),
-        )
 
     def test_rollback_never_unstages_another_writers_work(self) -> None:
         """The rollback did the very thing the pre-flight check refuses to do.
@@ -859,7 +805,7 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         """The other half: what the capability is actually for still works."""
         for argv in (
             ["git", "rev-parse", "HEAD"],
-            ["git", "status", "--porcelain=v1", "-z"],
+            ["git", "status", "--porcelain=v1", "-z", "-uall"],
             ["git", "diff", "--cached", "--name-only", "-z"],
             ["git", "switch", "-c", "repair/target"],
             ["git", "add", "--", "target.py"],
@@ -918,8 +864,8 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         It has already earned that: adding the post-commit readback below
         failed this test rather than slipping in.
 
-        The twelve shapes, and why each exists:
-        four reads of where the worktree is (`rev-parse` x3, `symbolic-ref`);
+        The shapes, and why each exists:
+        three reads of where the worktree is (`rev-parse` x2, `symbolic-ref`);
         two reads of what is changed (`status`, `diff --cached`);
         one read of what a commit contains (`show`), added 2026-09-12 to verify
         the committed tree against the authorised set rather than trusting the
@@ -938,7 +884,7 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 14)
+        self.assertEqual(len(_WRITE_SHAPES), 13)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,

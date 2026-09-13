@@ -28,7 +28,12 @@ from alx.contracts.coding import (
 
 _GIT_INSPECT = frozenset({"status", "diff", "log"})
 _GIT_FLAGS = {
-    "status": frozenset({"--porcelain", "--porcelain=v1", "-z"}),
+    # `-uall` names every untracked file rather than collapsing a new
+    # directory to one `dir/` entry. The coding job's changed-file set is
+    # derived from this status and is what D-029 stages, and D-029 takes
+    # concrete files only, so a collapsed directory entry would name something
+    # it must refuse.
+    "status": frozenset({"--porcelain", "--porcelain=v1", "-z", "-uall"}),
     "diff": frozenset({"--stat", "--name-only", "--cached", "--no-color"}),
     "log": frozenset({"--oneline", "--no-color"}),
 }
@@ -262,7 +267,7 @@ def inspect_git(
     the whole tree, because what else is dirty is a fact the job needs.
     """
     status = run_permitted_command(
-        ["git", "status", "--porcelain=v1", "-z"], worktree
+        ["git", "status", "--porcelain=v1", "-z", "-uall"], worktree
     )
     argv = ["git", "diff"]
     if paths:
