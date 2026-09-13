@@ -74,6 +74,8 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("diff", "--cached", "--name-only", "-z"): "none",
     ("show", "--name-only", "--pretty=format:", "-z", "HEAD"): "none",
     ("check-attr", "-z", "filter", "--"): "paths",
+    ("check-ignore", "-q", "--"): "paths",
+    ("diff", "--cached", "--name-status", "-z"): "none",
     ("switch", "-c"): "value",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
@@ -297,7 +299,11 @@ def _run(
 
 
 def _require(
-    worktree: Path, argv: list[str], reason_code: str, *, bounded: bool = True
+    worktree: Path,
+    argv: list[str],
+    reason_code: str,
+    *,
+    bounded: bool = True,
 ) -> str:
     """Run an enumerated command that must succeed, and return raw stdout.
 
@@ -462,13 +468,21 @@ def _authorised_paths(
     """
     if not files:
         raise CodingError("git_refused", reason_code="no_job_owned_changes")
-    if len(files) > MAX_STAGED_FILES:
+    # Expand first, then bound. The bound must describe the concrete files that
+    # would actually be staged: checking it against the requested entries let a
+    # single directory holding more than the limit commit in full while an
+    # equivalent flat repair was refused. Found in the PR #31 review on
+    # 2026-09-13.
+    concrete = _expand_directories(root, files)
+    if len(concrete) > MAX_STAGED_FILES:
         raise CodingError(
-            "git_refused", reason_code="too_many_files", received_count=len(files)
+            "git_refused",
+            reason_code="too_many_files",
+            received_count=len(concrete),
         )
     inherited = {item for item in inherited_dirty}
     authorised: list[str] = []
-    for item in _expand_directories(root, files):
+    for item in concrete:
         lexical = lexical_worktree_path(item)
         if not lexical:
             raise CodingError("git_refused", reason_code="path_is_worktree_root")
@@ -481,6 +495,14 @@ def _authorised_paths(
             resolved.relative_to(root)
         except ValueError as error:
             raise CodingError("path_outside_worktree") from error
+        # D-029 V1 does not commit symlinks. A link's meaning depends on where
+        # it points and on what the checkout does with it, which is not a fact
+        # this code can settle; the previous version dropped one silently and
+        # reported the commit complete. Refusing says so instead.
+        if (root / lexical).is_symlink():
+            raise CodingError(
+                "git_refused", reason_code="path_is_symlink", path=lexical
+            )
         # An inherited dirty path reaching here has been rewritten by the job,
         # so it is the job's to stage. One that was never touched is excluded
         # upstream and would not appear in `files` at all.
@@ -521,6 +543,11 @@ def commit_job_changes(
         raise CodingError(
             "git_refused", reason_code="branch_not_active", detail=active.branch
         )
+    # Before anything is examined path by path: a rename in the index is a
+    # state this authority does not cover, whoever staged it. Checked first so
+    # the refusal is about the index rather than about whichever path happened
+    # to be looked at.
+    _refuse_staged_renames(root)
     authorised = _authorised_paths(root, files, inherited_dirty, blocked_paths)
 
     # An index that already holds something is not this job's to rearrange.
@@ -539,6 +566,7 @@ def commit_job_changes(
         )
 
     _refuse_attribute_filters(root, authorised)
+    _refuse_uncommittable(root, authorised)
 
     staged = _run(root, ["git", "add", "--", *authorised])
     if staged.exit_status != 0:
@@ -551,11 +579,14 @@ def commit_job_changes(
     index = _staged_paths(root)
     unrelated = tuple(item for item in index if item not in set(authorised))
     if unrelated:
-        # Fail closed and leave nothing half-prepared behind. The pre-flight
-        # check above already refused any index holding an unauthorised path,
-        # so what is staged here can only be this job's own: un-staging it
-        # restores the index to exactly the empty state it was found in.
-        _unstage(root, (*authorised, *unrelated))
+        # Fail closed, and unstage only what this operation itself added. The
+        # previous version passed `unrelated` too, removing staged state that
+        # belongs to another writer — the same thing the pre-flight check
+        # refuses to do, done by the rollback. Found in the PR #31 review on
+        # 2026-09-13. Ownership is proven rather than assumed: `authorised` is
+        # this operation's own staging, and a path outside it is left exactly
+        # as found, still staged.
+        _unstage(root, authorised)
         raise CodingError(
             "unrelated_changes_staged",
             reason_code="index_holds_unauthorised_paths",
@@ -639,16 +670,21 @@ def _expand_directories(root: Path, files: tuple[str, ...]) -> tuple[str, ...]:
 
     Porcelain status reports a wholly untracked directory as one entry ending
     in `/` rather than listing its contents, so a job that creates a directory
-    arrives here authorising `newdir/` while `git add` stages `newdir/a.py`
-    and `newdir/b.py`. The readback then finds two paths it never authorised
-    and refuses the commit as if the job had staged somebody else's work.
+    arrives here authorising `newdir/` while `git add` stages the files within.
+    Expanding keeps the authorised set and the index describing the same thing.
 
-    Qodo found this on 2026-09-12 and it was reproduced before being changed:
-    creating a directory is ordinary coding, so the previous behaviour refused
-    routine jobs while reporting a misleading cause. Expanding here keeps the
-    authorised set and the index describing the same thing, and every expanded
-    path is still held to the full worktree, blocked-path and `.git` checks by
-    the caller — expansion widens what is named, never what is permitted.
+    Everything ambiguous refuses. A symlink, a nested unreadable directory, or
+    anything that is not a regular file has no single correct answer about what
+    should be committed, and the previous version silently dropped them: a
+    symlink the job created vanished from the commit while the result reported
+    success. Under D-029 V1 the answer is a refusal, never a subset — a partial
+    commit reported as complete is the false evidence this capability exists to
+    prevent.
+
+    Expansion widens what is *named*, never what is *permitted*: every path
+    returned is still held to the worktree, blocked-path and `.git` checks by
+    the caller, and the file-count bound is applied to this concrete set rather
+    than to the directory entries that produced it.
     """
     expanded: list[str] = []
     for item in files:
@@ -662,15 +698,83 @@ def _expand_directories(root: Path, files: tuple[str, ...]) -> tuple[str, ...]:
         except ValueError as error:
             raise CodingError("path_outside_worktree") from error
         if not directory.is_dir() or directory.is_symlink():
-            # Not a directory after all, or a symlink that could point out of
-            # the worktree. Keep the original name and let the caller's checks
-            # rule on it rather than walking it here.
             expanded.append(item)
             continue
         for child in sorted(directory.rglob("*")):
-            if child.is_file() and not child.is_symlink():
-                expanded.append(child.relative_to(root).as_posix())
+            if child.is_dir() and not child.is_symlink():
+                continue
+            if child.is_symlink() or not child.is_file():
+                raise CodingError(
+                    "git_refused",
+                    reason_code="directory_contains_unsupported_entry",
+                    path=child.relative_to(root).as_posix(),
+                )
+            expanded.append(child.relative_to(root).as_posix())
     return tuple(dict.fromkeys(expanded))
+
+
+def _refuse_uncommittable(root: Path, paths: tuple[str, ...]) -> None:
+    """Refuse a path git would decline to stage, rather than commit a subset.
+
+    A gitignored file inside a new directory is the common case: `git add` on
+    the expanded set fails wholesale, which previously surfaced as a bare
+    `staging_failed`, and adding `--force` would commit content the repository
+    asked to exclude. Neither is right. The job is told which paths make the
+    requested commit ambiguous and AL/X decides — narrowing the request,
+    or leaving the directory out — because that is a judgement about what the
+    repair is, not a fact this code can derive.
+    """
+    if not paths:
+        return
+    # `-q` answers with an exit status and takes one path at a time: 0 if it
+    # is ignored, 1 if not. One process per path is the cost of an answer that
+    # cannot be truncated or miscounted, and the set is already bounded by
+    # MAX_STAGED_FILES before this runs.
+    for path in paths:
+        result = _run(root, ["git", "check-ignore", "-q", "--", path])
+        if result.exit_status == 0:
+            raise CodingError(
+                "git_refused", reason_code="path_is_ignored", path=path
+            )
+        if result.exit_status != 1:
+            raise CodingError(
+                "git_unavailable",
+                reason_code="ignore_rules_unreadable",
+                exit_status=result.exit_status,
+            )
+
+
+def _refuse_staged_renames(worktree: Path) -> None:
+    """Refuse while the index holds a rename, whoever staged it.
+
+    A staged rename is two paths that move together, and every listing this
+    capability authorises from reports only the destination: `--name-only`
+    hides the source on the index *and* on the committed tree. So a job that
+    edited an inherited rename destination was authorised on the destination
+    alone and its commit deleted the source — a file it never touched, and one
+    the post-commit verification structurally could not see. Reproduced in the
+    PR #31 review on 2026-09-13.
+
+    D-029 V1 does not authorise rename source/destination pairs. Rather than
+    teach every check to carry two paths, the condition itself is refused:
+    fail-closed simplicity is the design priority, and a rename in the index is
+    a state this authority does not cover. Nothing is unstaged or altered —
+    the index is left exactly as found and the job returns to AL/X.
+    """
+    listed = _require(
+        worktree,
+        ["git", "diff", "--cached", "--name-status", "-z"],
+        "index_unreadable",
+        bounded=False,
+    )
+    fields = _nul_paths(listed)
+    for field in fields:
+        # `--name-status -z` emits the status code as its own field; a rename
+        # or copy carries a similarity score, e.g. `R100`.
+        if field and field[0] in ("R", "C") and field[1:].isdigit():
+            raise CodingError(
+                "git_refused", reason_code="index_contains_staged_rename"
+            )
 
 
 def _refuse_attribute_filters(worktree: Path, paths: tuple[str, ...]) -> None:

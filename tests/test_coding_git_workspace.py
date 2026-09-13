@@ -555,8 +555,14 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         # And the commit succeeded, where the misconfiguration used to break it.
         self.assertEqual(commit.committed_files, ("target.py",))
 
-    def test_expansion_excludes_symlinks_out_of_the_worktree(self) -> None:
-        """Directory expansion may not become a way to read somewhere else."""
+    def test_expansion_refuses_a_symlink_out_of_the_worktree(self) -> None:
+        """It may not read elsewhere, and may not drop it silently either.
+
+        This previously asserted that such a link was excluded and the rest
+        committed. That is the silent-omission defect: nothing outside the
+        worktree leaked, but the result reported a complete repair while
+        having quietly left something out. The refusal covers both.
+        """
         outside = Path(self.directory.name).parent / "outside_secret.txt"
         outside.write_text("secret\n")
         self.addCleanup(outside.unlink, True)
@@ -565,13 +571,18 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         (self.root / "newdir" / "a.py").write_text("a\n")
         (self.root / "newdir" / "link.txt").symlink_to(outside)
 
-        commit = commit_job_changes(
-            self.root, "repair/target", "add a package", ("newdir/",)
-        )
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "add a package", ("newdir/",)
+            )
 
-        self.assertEqual(commit.committed_files, ("newdir/a.py",))
-        self.assertNotIn(
-            "link.txt", git(self.root, "show", "--name-only", "--pretty=", "HEAD")
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "directory_contains_unsupported_entry",
+        )
+        self.assertEqual(
+            git(self.root, "rev-parse", "HEAD").strip(),
+            git(self.root, "rev-parse", "main").strip(),
         )
 
     def test_the_committed_tree_is_verified_not_assumed(self) -> None:
@@ -589,6 +600,163 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         source = inspect.getsource(subject)
         self.assertIn("_committed_paths(root)", source)
         self.assertIn("commit_contains_unauthorised_paths", source)
+
+
+class NarrowedRefusalsUnderD029V1(Worktree):
+    """The 2026-09-13 findings, closed by refusing rather than by cleverness.
+
+    Each of these is a state D-029 V1 does not authorise. The design choice is
+    fail-closed simplicity: rather than teach the authorisation set to model
+    rename pairs, symlinks, ignore rules and partial directories, the
+    conditions themselves are refused and the job returns to AL/X. A refusal
+    she can act on beats a commit nobody can verify.
+
+    Every test also asserts the index and worktree are left exactly as found.
+    """
+
+    def test_a_staged_rename_refuses_the_commit(self) -> None:
+        """The serious one: a repair commit that deleted an unowned file.
+
+        Porcelain reports a rename as destination-plus-source and every
+        listing this authorises from shows only the destination — on the index
+        *and* on the committed tree. A job editing an inherited rename
+        destination was authorised on the destination alone, and its commit
+        deleted the source. The post-commit verification structurally could
+        not see it.
+        """
+        git(self.root, "mv", "unrelated.py", "renamed.py")
+        (self.root / "renamed.py").write_text("job edit\n")
+        create_repair_branch(self.root, "repair/target")
+        before = self.status()
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("renamed.py",)
+            )
+
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "index_contains_staged_rename",
+        )
+        # Nothing was committed and the staged rename is exactly as found.
+        self.assertEqual(self.status(), before)
+        self.assertIn("renamed.py", self.status())
+
+    def test_a_job_owned_symlink_refuses_rather_than_vanishing(self) -> None:
+        """It used to be dropped silently while the result reported success."""
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "alias.py").symlink_to("target.py")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("alias.py",)
+            )
+
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(caught.exception.details["reason_code"], "path_is_symlink")
+
+    def test_a_symlink_inside_a_new_directory_refuses(self) -> None:
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "newdir").mkdir()
+        (self.root / "newdir" / "a.py").write_text("a\n")
+        (self.root / "newdir" / "alias.py").symlink_to("a.py")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("newdir/",)
+            )
+
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "directory_contains_unsupported_entry",
+        )
+
+    def test_an_ignored_file_in_a_new_directory_refuses(self) -> None:
+        """Refuse rather than commit a subset, and name which path caused it."""
+        (self.root / ".gitignore").write_text("*.log\n")
+        git(self.root, "add", ".gitignore")
+        git(self.root, "commit", "-qm", "ignore logs")
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "newdir").mkdir()
+        (self.root / "newdir" / "a.py").write_text("a\n")
+        (self.root / "newdir" / "debug.log").write_text("noise\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("newdir/",)
+            )
+
+        self.assertEqual(caught.exception.details["reason_code"], "path_is_ignored")
+        self.assertEqual(caught.exception.details["path"], "newdir/debug.log")
+
+    def test_the_file_bound_counts_concrete_files_not_directories(self) -> None:
+        """One directory entry used to pass a bound sixty files would fail."""
+        from alx.contracts.coding import MAX_STAGED_FILES
+
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "bigdir").mkdir()
+        for index in range(MAX_STAGED_FILES + 10):
+            (self.root / "bigdir" / f"f{index:03d}.py").write_text("x\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("bigdir/",)
+            )
+
+        self.assertEqual(caught.exception.details["reason_code"], "too_many_files")
+        self.assertEqual(
+            caught.exception.details["received_count"], MAX_STAGED_FILES + 10
+        )
+
+    def test_a_directory_within_the_bound_still_commits(self) -> None:
+        """The bound refuses what is too large; it does not refuse everything."""
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "smalldir").mkdir()
+        for index in range(3):
+            (self.root / "smalldir" / f"f{index}.py").write_text("x\n")
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "repair", ("smalldir/",)
+        )
+
+        self.assertEqual(
+            commit.committed_files,
+            ("smalldir/f0.py", "smalldir/f1.py", "smalldir/f2.py"),
+        )
+
+    def test_rollback_never_unstages_another_writers_work(self) -> None:
+        """The rollback did the very thing the pre-flight check refuses to do.
+
+        Only staging this operation itself introduced is reverted. A path
+        outside the authorised set is another writer's and is left exactly as
+        found, still staged.
+        """
+        from alx.providers import coding_git
+
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+        self.write("unrelated.py", "somebody else was here\n")
+
+        real = coding_git._run
+
+        def racing(worktree, argv, **keywords):
+            result = real(worktree, argv, **keywords)
+            if argv[:2] == ["git", "add"]:
+                git(worktree, "add", "unrelated.py")
+            return result
+
+        with unittest.mock.patch.object(coding_git, "_run", racing):
+            with self.assertRaises(CodingError) as caught:
+                commit_job_changes(
+                    self.root, "repair/target", "repair", ("target.py",)
+                )
+
+        self.assertEqual(caught.exception.code, "unrelated_changes_staged")
+        status = self.status()
+        # Theirs is still staged; ours was taken back out of the index.
+        self.assertIn("M  unrelated.py", status)
+        self.assertIn(" M target.py", status)
 
 
 class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
@@ -757,8 +925,12 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         the committed tree against the authorised set rather than trusting the
         index snapshot; one read of which attribute filter applies to a path
         (`check-attr`), added 2026-09-12 to refuse a path whose content a clean
-        filter would rewrite; one branch creation (`switch -c`); one staging
-        (`add`); one index rollback (`reset`); one commit.
+        filter would rewrite; one read of whether a path is ignored
+        (`check-ignore`) and one of whether the index holds a rename
+        (`diff --cached --name-status`), both added 2026-09-13 so those states
+        are refused rather than committed as a subset; one branch creation
+        (`switch -c`); one staging (`add`); one index rollback (`reset`); one
+        commit.
 
         The plain `switch` shape was removed on 2026-09-12: once an existing
         branch name is refused, nothing called it, and a dead shape is granted
@@ -766,12 +938,12 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 12)
+        self.assertEqual(len(_WRITE_SHAPES), 14)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
             {"rev-parse", "symbolic-ref", "status", "diff", "show",
-             "check-attr", "switch", "add", "reset", "commit"},
+             "check-attr", "check-ignore", "switch", "add", "reset", "commit"},
         )
         # Every read-shaped addition must stay a read. `check-attr` takes
         # paths because it is asked about specific paths, but it only reports;

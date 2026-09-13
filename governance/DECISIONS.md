@@ -1173,6 +1173,45 @@ isolated temporary index and updating the ref by compare-and-swap. That is a
 larger mechanism than this authority currently justifies, and it is recorded
 here as a known bound rather than left for a later reviewer to rediscover.
 
+### What V1 refuses rather than handles
+
+Friedl directed on 2026-09-13 that the PR #31 findings be closed by narrowing
+behaviour rather than by increasing git sophistication, with fail-closed
+simplicity as the design priority. These states are therefore refused, and the
+job returns to AL/X rather than committing something this authority cannot
+verify:
+
+- **a staged rename anywhere in the index**, inherited or not. A rename is two
+  paths moving together and every listing authorisation reads reports only the
+  destination, on the index and on the committed tree alike. A job editing an
+  inherited rename destination was authorised on the destination alone and its
+  commit deleted the source — a file it never touched, invisible to the
+  post-commit verification. V1 does not authorise source/destination pairs;
+- **a symlink the job added or changed**, directly or inside a new directory.
+  A link's meaning depends on where it points and on what a checkout does with
+  it, which is not a fact this code can settle. The previous version dropped
+  one silently and reported the commit complete;
+- **an ignored or otherwise uncommittable path inside a job-owned directory**.
+  Committing the rest would be a subset presented as the whole; forcing it
+  would commit what the repository asked to exclude. Which of those the job
+  wants is a judgement, so it returns to AL/X;
+- **more concrete files than the bound**, counted after directory expansion
+  rather than before it. A single directory entry previously passed a bound
+  that sixty equivalent flat paths would have failed.
+
+Nothing is unstaged or altered by any of these refusals: the index and
+worktree are left exactly as found.
+
+### Ownership of staged state
+
+This capability never alters staging it did not create. The pre-flight check
+refuses an index that already holds an unauthorised path rather than tidying
+it, and the approved path-scoped rollback reverts only the paths this
+operation itself staged. The rollback previously also reverted paths a
+concurrent writer had staged — doing the very thing the pre-flight check
+exists to refuse — and that is corrected: a path outside the authorised set is
+left exactly as found, still staged.
+
 ### Verification precedes the commit
 
 A commit is created only after the job has passed its required verification.
