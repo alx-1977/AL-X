@@ -529,6 +529,51 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         # The SHA is reported so AL/X can act on a commit that does exist.
         self.assertTrue(caught.exception.details["commit_sha"])
 
+    def test_a_configured_signing_program_is_not_executed(self) -> None:
+        """`gpg.program` launches an arbitrary binary during the commit.
+
+        Reproduced on 2026-09-12: a repository-configured program ran despite
+        the closed argv allowlist, because the allowlist bounds which git
+        subcommand runs and not what that subcommand's configuration makes it
+        launch. Signing is not part of this authority and a coding job has no
+        key, so it is disabled rather than left to host configuration.
+        """
+        marker = self.root / "signing_program_ran"
+        program = self.root / "fake_signer"
+        program.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        program.chmod(0o755)
+        git(self.root, "config", "commit.gpgsign", "true")
+        git(self.root, "config", "gpg.program", str(program))
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "repair target", ("target.py",)
+        )
+
+        self.assertFalse(marker.exists(), "a signing program must not run")
+        # And the commit succeeded, where the misconfiguration used to break it.
+        self.assertEqual(commit.committed_files, ("target.py",))
+
+    def test_expansion_excludes_symlinks_out_of_the_worktree(self) -> None:
+        """Directory expansion may not become a way to read somewhere else."""
+        outside = Path(self.directory.name).parent / "outside_secret.txt"
+        outside.write_text("secret\n")
+        self.addCleanup(outside.unlink, True)
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "newdir").mkdir()
+        (self.root / "newdir" / "a.py").write_text("a\n")
+        (self.root / "newdir" / "link.txt").symlink_to(outside)
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "add a package", ("newdir/",)
+        )
+
+        self.assertEqual(commit.committed_files, ("newdir/a.py",))
+        self.assertNotIn(
+            "link.txt", git(self.root, "show", "--name-only", "--pretty=", "HEAD")
+        )
+
     def test_the_committed_tree_is_verified_not_assumed(self) -> None:
         """Defence in depth: the report is read out of the commit itself.
 

@@ -261,7 +261,14 @@ class CodingAgent:
         # writes to the wrong branch and only discovers it at commit time.
         if request.repair_branch.strip():
             try:
-                baseline = create_repair_branch(
+                # The returned state describes the worktree *after* the switch.
+                # It is deliberately discarded: `baseline` means where this job
+                # started, and overwriting it made every branch-enabled outcome
+                # report the branch the job created as the branch it began on.
+                # Found in review on 2026-09-12 and reproduced — a job that
+                # started on `main` reported its baseline branch as
+                # `repair/add`, which is false evidence about the repository.
+                create_repair_branch(
                     workspace.root, request.repair_branch.strip()
                 )
             except CodingError as error:

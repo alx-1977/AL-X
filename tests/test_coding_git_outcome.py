@@ -109,6 +109,28 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
         )
         self.assertIn("app.py", self.git("show", "--name-only", "--pretty=", "HEAD"))
 
+    def test_the_baseline_names_the_branch_the_job_started_on(self) -> None:
+        """Not the branch it created.
+
+        `create_repair_branch` returns the state *after* the switch, and
+        assigning that over `baseline` made every branch-enabled outcome
+        report the repair branch as its starting branch. Reproduced on
+        2026-09-12: a job starting on `main` reported `repair/add`, which is
+        false evidence about the repository.
+        """
+        start = self.git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        result = self.run_job(
+            RecordingSession(edits={"app.py": _FIXED}),
+            task="repair the addition",
+            worktree=str(self.root),
+            repair_branch="repair/add",
+            commit_message="repair addition",
+        )
+        self.assertEqual(result.values["baseline"]["branch"], start)
+        self.assertNotEqual(result.values["baseline"]["branch"], "repair/add")
+        # The commit, by contrast, names the branch it is actually on.
+        self.assertEqual(result.values["commit"]["branch"], "repair/add")
+
     def test_the_baseline_proves_where_the_job_started(self) -> None:
         before = self.git("rev-parse", "HEAD").strip()
         result = self.run_job(

@@ -239,9 +239,16 @@ def _clean_environment() -> dict[str, str]:
     # an in-tree `.gitattributes`, which no configuration overrides, and filter
     # names are arbitrary so there is no list to blank. A path carrying one is
     # therefore *refused* before it is staged, in `_refuse_attribute_filters`.
+    # `commit.gpgsign` with `gpg.program` launches an arbitrary binary during
+    # the commit — reproduced on 2026-09-12, where a repository-configured
+    # program ran despite the closed argv allowlist. Signing is not part of
+    # this authority and a coding job has no key to sign with, so it is
+    # disabled rather than left to whatever the host or repository configured.
     _configure(environment, {
         "core.hooksPath": str(_NO_HOOKS),
         "core.fsmonitor": "false",
+        "commit.gpgsign": "false",
+        "tag.gpgsign": "false",
     })
     environment["GIT_AUTHOR_NAME"] = COMMIT_AUTHOR_NAME
     environment["GIT_AUTHOR_EMAIL"] = COMMIT_AUTHOR_EMAIL

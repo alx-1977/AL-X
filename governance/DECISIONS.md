@@ -1132,7 +1132,12 @@ rather than the coding session's sandboxed ones:
   entering the index. It cannot be suppressed — filter names are arbitrary and
   an in-tree `.gitattributes` overrides no configuration — so a path carrying
   one is refused instead, detected with `git check-attr`, which reports the
-  filter without running it.
+  filter without running it;
+- `commit.gpgsign` with `gpg.program` launches an arbitrary binary during the
+  commit. The argv allowlist does not prevent this: it bounds which git
+  subcommand runs, not what that subcommand's configuration makes it launch.
+  Signing is not part of this authority and a coding job holds no key, so it
+  is disabled. Reproduced in the PR #31 review round on 2026-09-12.
 
 A repository legitimately depending on a clean filter, Git LFS being the
 common case, therefore cannot be committed to by a coding job. That is the
