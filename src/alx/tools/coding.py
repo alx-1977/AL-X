@@ -178,6 +178,23 @@ DEFINITION = CapabilityDefinition(
     ),
 )
 
+# First match wins. Not CODING_FAILURES: sandbox_unusable / session_failed
+# sit late there and would invert this order. task_failed is the fallback
+# for undeclared issues such as no_files_changed, not an entry.
+_OUTCOME_ISSUE_CODES = (
+    "sandbox_unusable",
+    "session_failed",
+    "coding_unavailable",
+    "provider_failed",
+    "plan_unusable",
+    "planning_failed",
+    "review_failed",
+    "local_review_material_findings",
+    "unrelated_changes_staged",
+    "git_refused",
+    "git_unavailable",
+)
+
 
 def build_coding_executors(
     run_job: Callable[[CodingRequest], Any],
@@ -202,26 +219,10 @@ def build_coding_executors(
         values = outcome.as_values()
         if outcome.status != "succeeded":
             issues = outcome.unresolved_issues
-            if "sandbox_unusable" in issues:
-                code = "sandbox_unusable"
-            elif "session_failed" in issues:
-                code = "session_failed"
-            elif "coding_unavailable" in issues:
-                code = "coding_unavailable"
-            elif "provider_failed" in issues:
-                code = "provider_failed"
-            elif "plan_unusable" in issues:
-                code = "plan_unusable"
-            elif "planning_failed" in issues:
-                code = "planning_failed"
-            elif "unrelated_changes_staged" in issues:
-                code = "unrelated_changes_staged"
-            elif "git_refused" in issues:
-                code = "git_refused"
-            elif "git_unavailable" in issues:
-                code = "git_unavailable"
-            else:
-                code = "task_failed"
+            code = next(
+                (item for item in _OUTCOME_ISSUE_CODES if item in issues),
+                "task_failed",
+            )
             return CapabilityResult(
                 call_id,
                 RUN_CODING_TASK,
