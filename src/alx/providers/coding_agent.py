@@ -23,6 +23,7 @@ the repository diff and the test results are what Core is given.
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable
@@ -64,6 +65,8 @@ from alx.providers.coding_workspace import CodingWorkspace
 from alx.providers.errors import ProviderError
 import json
 
+
+LOGGER = logging.getLogger(__name__)
 
 PLAN_INSTRUCTION = (
     "You are a bounded coding worker preparing an implementation plan for one "
@@ -221,10 +224,32 @@ class CodingAgent:
         self._current_activity: str | None = None
 
     def _report_activity(self, activity: str) -> None:
+        """Tell the runtime what this job is doing. Never affect the job.
+
+        The sink is a telemetry transport supplied by the caller, and a
+        transport can fail. It used to fail into the job: an exception here
+        propagated out of `run`, where the `finally` clause reports the final
+        state *after* a valid outcome has already been computed, so a broken
+        status line destroyed a completed repair. The tool layer then reported
+        `coding_unavailable`, telling Core the job failed while the worktree
+        held the finished work.
+
+        Reporting is not part of the outcome, so a failure to report is not a
+        failure of the job. It is logged and swallowed.
+        """
         if self._current_activity == activity:
             return
         self._current_activity = activity
-        self._activity_sink(activity)
+        try:
+            self._activity_sink(activity)
+        except Exception as error:  # noqa: BLE001 - telemetry must not fail a job
+            # The exception type only. D-012 forbids logging a traceback here:
+            # a sink is caller-supplied and its failure can carry private
+            # runtime state.
+            LOGGER.warning(
+                "Coding activity sink failed (%s); the job is unaffected",
+                type(error).__name__,
+            )
 
     def run(self, request: CodingRequest) -> CodingOutcome:
         """Run one job and never leave runtime telemetry at a worker state."""
