@@ -32,6 +32,8 @@ from alx.contracts.coding import (
     MAX_CONTEXT_CHARACTERS,
     MAX_CRITERIA,
     MAX_CRITERION_CHARACTERS,
+    MAX_BRANCH_NAME_CHARACTERS,
+    MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_STEP_BUDGET,
     MAX_TASK_CHARACTERS,
     CodingError,
@@ -63,6 +65,32 @@ _COMMAND = StructuredSchema(
 )
 
 
+_BASELINE = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "branch": _STRING,
+        "head_sha": _STRING,
+        "inherited_dirty": _STRING_ARRAY,
+        "clean": _BOOLEAN,
+        "detached": _BOOLEAN,
+    },
+    ("branch", "head_sha", "inherited_dirty", "clean", "detached"),
+    extra_properties=False,
+)
+
+_COMMIT_RECORD = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "branch": _STRING,
+        "commit_sha": _STRING,
+        "committed_files": _STRING_ARRAY,
+        "worktree_clean": _BOOLEAN,
+    },
+    ("branch", "commit_sha", "committed_files", "worktree_clean"),
+    extra_properties=False,
+)
+
+
 DEFINITION = CapabilityDefinition(
     RUN_CODING_TASK,
     # The two bounds the runtime enforces are stated here because the
@@ -78,7 +106,16 @@ DEFINITION = CapabilityDefinition(
     "an external review. worktree is a filesystem path to an existing "
     "directory, resolved from the runtime's working directory, so \".\" is the "
     "repository the runtime is running in; it is not a project or repository "
-    f"name. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}.",
+    f"name. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}. "
+    "repair_branch is optional: give it to have the work carried out on a new "
+    "branch of that name inside the worktree, created before the job starts. "
+    "commit_message is optional and requires repair_branch: give both to have "
+    "the job's own changed files committed on that branch once its tests pass, "
+    "returning branch and commit_sha. Only files this job changed are "
+    "committed; a worktree already carrying somebody else's modifications "
+    "leaves them untouched and uncommitted, and the commit is refused rather "
+    "than widened if anything unrelated would be included. It still does not "
+    "push, merge, deploy, or request an external review.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -89,6 +126,8 @@ DEFINITION = CapabilityDefinition(
             "test_guidance": _STRING,
             "step_budget": _INTEGER,
             "blocked_paths": _STRING_ARRAY,
+            "repair_branch": _STRING,
+            "commit_message": _STRING,
         },
         ("task", "worktree"),
         extra_properties=False,
@@ -113,6 +152,10 @@ DEFINITION = CapabilityDefinition(
             "unresolved_count": _INTEGER,
             "diff_digest": _STRING,
             "finished_at": _STRING,
+            "baseline": _BASELINE,
+            "commit": _COMMIT_RECORD,
+            "branch": _STRING,
+            "commit_sha": _STRING,
         },
         (
             "status",
@@ -130,7 +173,9 @@ DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     CODING_FAILURES,
-    durable_input_fields=("task", "worktree", "blocked_paths"),
+    durable_input_fields=(
+        "task", "worktree", "blocked_paths", "repair_branch", "commit_message",
+    ),
 )
 
 
@@ -169,6 +214,12 @@ def build_coding_executors(
                 code = "plan_unusable"
             elif "planning_failed" in issues:
                 code = "planning_failed"
+            elif "unrelated_changes_staged" in issues:
+                code = "unrelated_changes_staged"
+            elif "git_refused" in issues:
+                code = "git_refused"
+            elif "git_unavailable" in issues:
+                code = "git_unavailable"
             else:
                 code = "task_failed"
             return CapabilityResult(
@@ -242,6 +293,22 @@ def parse_coding_arguments(
     blocked, error = _optional_blocked_paths(arguments)
     if error is not None:
         return None, error
+    branch, error = _optional_string(
+        arguments, "repair_branch", MAX_BRANCH_NAME_CHARACTERS
+    )
+    if error is not None:
+        return None, error
+    message, error = _optional_string(
+        arguments, "commit_message", MAX_COMMIT_MESSAGE_CHARACTERS
+    )
+    if error is not None:
+        return None, error
+    if message.strip() and not branch.strip():
+        return None, _argument_failure(
+            "repair_branch",
+            "required_with_commit_message",
+            "commit_message requires repair_branch",
+        )
     return (
         CodingRequest(
             task,
@@ -251,6 +318,8 @@ def parse_coding_arguments(
             guidance,
             budget,
             blocked,
+            branch,
+            message,
         ),
         None,
     )

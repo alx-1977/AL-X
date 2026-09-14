@@ -16,11 +16,13 @@ from alx.contracts.repository import (
 )
 from alx.contracts.coding import (
     CODING_FAILURES,
+    CodingCommit,
     CodingError,
     CodingOutcome,
     CodingRequest,
     CodingSession,
     CodingSessionResult,
+    GitWorkspaceState,
 )
 from alx.contracts.continuity import (
     AutonomousResponseTransport,
@@ -210,11 +212,13 @@ __all__ = [
     "MergeOutcome",
     "MergeRequest",
     "CODING_FAILURES",
+    "CodingCommit",
     "CodingError",
     "CodingOutcome",
     "CodingRequest",
     "CodingSession",
     "CodingSessionResult",
+    "GitWorkspaceState",
     "CONNECT_TIMEOUT_SECONDS",
     "TOTAL_DEADLINE_SECONDS",
     "MAX_DURABLE_METADATA_CHARACTERS",

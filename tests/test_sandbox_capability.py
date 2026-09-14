@@ -100,16 +100,27 @@ CODING_EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "coding_process.py"
 #   with its terminal withheld;
 # - `coding_containment.py` reads git metadata locations (`git rev-parse`) so the
 #   real object store can be denied. Its argv is fixed and contains no model
-#   output, and it never executes anything the job chose.
+#   output, and it never executes anything the job chose;
+# - `coding_git.py` (D-029) runs the writing git commands that turn a finished
+#   job into a branch and a commit. It is separate from `coding_process.py`
+#   rather than folded into it because the two grant different authority: the
+#   allowlist there is read-only git plus tests and must stay that way, and
+#   this one can create a branch and a commit but cannot run a test. Neither is
+#   a second route to the other's outcome. Its argv come from a closed
+#   closed enumeration of argv shapes, so no model output selects an
+#   operation. The count lives in tests/test_coding_git_workspace.py, which
+#   asserts it; repeating it here let the two drift once already.
 #
-# Both stay inside the generic absence scans for promotion paths. What they are
-# admitted for is starting a process at all.
+# All three stay inside the generic absence scans for promotion paths. What they
+# are admitted for is starting a process at all.
 CODING_SESSION_SITE = PRODUCTION_ROOT / "providers" / "coding_session.py"
 CODING_CONTAINMENT_SITE = PRODUCTION_ROOT / "providers" / "coding_containment.py"
+CODING_GIT_SITE = PRODUCTION_ROOT / "providers" / "coding_git.py"
 CODING_PROCESS_SITES = {
     CODING_EXECUTION_SITE,
     CODING_SESSION_SITE,
     CODING_CONTAINMENT_SITE,
+    CODING_GIT_SITE,
 }
 
 
