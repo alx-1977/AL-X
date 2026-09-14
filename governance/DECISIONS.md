@@ -1194,14 +1194,8 @@ verify:
 - **an ignored path**. Committing around it would be a subset presented as
   the whole; forcing it would commit what the repository asked to exclude.
   Which the job wants is a judgement, so it returns to AL/X;
-- **a directory, or anything that is not one concrete regular file.** This
-  includes a path the job *deleted*: the input must exist, so a repair that
-  removes a file cannot be committed by V1. It refuses rather than committing
-  the rest and reporting success. Recorded as a known bound because Law 0
-  requires superseded paths to be deleted, so a Law 0 compliance repair is
-  exactly the job this cannot commit. Supporting deletions means accepting a
-  second input kind with its own authorisation, which is a change to this
-  decision rather than a default to add quietly.
+- **a directory, or anything that is not one concrete regular file** — except
+  an explicit job-owned deletion, which is the second input kind below.
 
 Nothing is unstaged or altered by any of these refusals: the index and
 worktree are left exactly as found.
@@ -1229,6 +1223,43 @@ changed-file set without this module discovering anything. Responsibility is
 separated accordingly: the coding job determines which concrete files it owns,
 and this capability verifies and commits exactly those. No path is discovered
 here that the caller did not supply.
+
+### Amendment — explicit job-owned deletions
+
+- **Date:** 2026-09-14
+- **Status: APPROVED by Friedl, 2026-09-14 during the AL/X development
+  session.** A Coding Agent that can create and modify files but cannot commit
+  a legitimate deletion is too constrained for repair work, and Law 0 requires
+  superseded paths to be deleted — so a Law 0 cleanup was exactly the job the
+  first version could not commit.
+
+D-029 therefore accepts **exactly two input kinds and nothing else**:
+
+| Kind | Requirement |
+| --- | --- |
+| regular file | must exist as one concrete regular file and be job-owned |
+| deleted file | must have existed as a regular tracked file at the job baseline and be explicitly job-owned as deleted |
+
+A deletion is authorised only when the job explicitly names it *and* git
+currently reports that exact tracked path as deleted. The proof is git's own
+account, never the job's claim.
+
+**Deliberately excluded.** No directory deletion inputs; no rename or copy
+inference; no discovery of missing paths. A path absent from disk that the job
+did not name is not a deletion here. An inherited or pre-existing deletion —
+one already gone before the job started — can never become job-owned merely
+because the file is still absent; that set is read at the baseline and
+subtracted. Foreign staged state remains untouched and refused exactly as
+before.
+
+**Verification.** The committed tree is read back as it already was, and an
+authorised deletion must additionally be proven *absent* from it: a commit that
+merely named the path would otherwise pass, which is what a rename or a re-add
+would look like. The complete committed change set must contain nothing outside
+the authorised regular-file plus deleted-file set.
+
+The concrete-file invariant for additions and modifications is unchanged, and
+so is every other bound in this decision.
 
 ### Ownership of staged state
 

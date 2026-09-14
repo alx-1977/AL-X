@@ -74,6 +74,7 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("show", "--name-only", "--pretty=format:", "-z", "HEAD"): "none",
     ("check-attr", "-z", "filter", "--"): "paths",
     ("check-ignore", "-q", "--"): "paths",
+    ("ls-files", "-z", "--error-unmatch", "--"): "paths",
     ("diff", "--cached", "--name-status", "-z"): "none",
     ("switch", "-c"): "value",
     ("add", "--"): "paths",
@@ -350,6 +351,33 @@ def _bounded_entries(listed: str, reason_code: str) -> tuple[str, ...]:
     return names
 
 
+def deleted_paths(worktree: Path) -> frozenset[str]:
+    """Tracked paths git currently reports as deleted from the worktree.
+
+    Read from the same status the dirt comes from, so no new git shape and no
+    discovery: a path is deleted because git says it is, never because this
+    module went looking for a missing file. Used twice — once at the baseline
+    to establish which deletions are inherited, and once at commit time to
+    prove the job's claimed deletion is real.
+    """
+    status = _require(
+        worktree, ["git", "status", "--porcelain=v1", "-z", "-uall"],
+        "status_failed", bounded=False,
+    )
+    deleted: set[str] = set()
+    entries = iter(status.split("\0"))
+    for entry in entries:
+        if not entry or len(entry) < 4:
+            continue
+        kind, path = entry[:2], entry[3:]
+        if "R" in kind or "C" in kind:
+            next(entries, None)
+            continue
+        if "D" in kind and path:
+            deleted.add(path)
+    return frozenset(deleted)
+
+
 def _dirty_paths(worktree: Path) -> tuple[str, ...]:
     """Every path git reports as modified, staged, or untracked.
 
@@ -472,6 +500,60 @@ def create_repair_branch(worktree: Path, branch: str) -> GitWorkspaceState:
     return state
 
 
+def _authorised_deletions(
+    root: Path,
+    deleted: tuple[str, ...],
+    inherited_deleted: frozenset[str],
+    blocked_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """The paths this job may stage as deletions, or a refusal naming why.
+
+    The second and only other input kind D-029 accepts. A deletion is
+    authorised only when the job explicitly names it *and* git currently
+    reports that exact tracked path as deleted. Nothing is discovered: a path
+    absent from disk that the job did not name is not a deletion here, and a
+    path the job names that git does not report deleted is refused.
+
+    An inherited deletion — one already gone before the job started — can
+    never become job-owned merely because the file is still absent. That set
+    is read at the baseline and subtracted here.
+
+    No directory semantics and no rename inference: a rename anywhere in the
+    index is already refused outright, so a deletion reaching this point is a
+    deletion and not half of a move.
+    """
+    if not deleted:
+        return ()
+    reported_deleted = deleted_paths(root)
+    authorised: list[str] = []
+    for item in deleted:
+        lexical = lexical_worktree_path(item)
+        if not lexical:
+            raise CodingError("git_refused", reason_code="path_is_worktree_root")
+        if path_matches_blocked(lexical, blocked_paths):
+            raise CodingError("path_not_permitted", path=lexical)
+        if Path(lexical).parts[0] == ".git":
+            raise CodingError("path_not_permitted", path=lexical)
+        if lexical in inherited_deleted:
+            raise CodingError(
+                "git_refused",
+                reason_code="deletion_is_inherited",
+                path=lexical,
+            )
+        # Git's own account is the proof. A path the job claims to have
+        # deleted that git does not report deleted never existed as a tracked
+        # file at the baseline, or is still there.
+        if lexical not in reported_deleted:
+            raise CodingError(
+                "git_refused",
+                reason_code="path_is_not_a_deleted_tracked_file",
+                path=lexical,
+            )
+        if lexical not in authorised:
+            authorised.append(lexical)
+    return tuple(authorised)
+
+
 def _authorised_paths(
     root: Path,
     files: tuple[str, ...],
@@ -496,7 +578,9 @@ def _authorised_paths(
     `src/alx/foo/`. Nothing here discovers a path the caller did not supply.
     """
     if not files:
-        raise CodingError("git_refused", reason_code="no_job_owned_changes")
+        # A delete-only repair is legitimate, so emptiness is judged on both
+        # input kinds together by the caller rather than on this one alone.
+        return ()
     if len(files) > MAX_STAGED_FILES:
         raise CodingError(
             "git_refused",
@@ -548,6 +632,8 @@ def commit_job_changes(
     files: tuple[str, ...],
     inherited_dirty: tuple[str, ...] = (),
     blocked_paths: tuple[str, ...] = (),
+    deleted_files: tuple[str, ...] = (),
+    inherited_deleted: frozenset[str] = frozenset(),
 ) -> CodingCommit:
     """Stage exactly this job's files and commit them, or refuse entirely.
 
@@ -577,7 +663,23 @@ def commit_job_changes(
     # the refusal is about the index rather than about whichever path happened
     # to be looked at.
     _refuse_staged_renames(root)
-    authorised = _authorised_paths(root, files, inherited_dirty, blocked_paths)
+    authorised_files = _authorised_paths(
+        root, files, inherited_dirty, blocked_paths
+    )
+    authorised_deletions = _authorised_deletions(
+        root, deleted_files, inherited_deleted, blocked_paths
+    )
+    # The two input kinds are staged and verified together from here. Both are
+    # named by the job and proven against git; neither is discovered.
+    authorised = tuple(dict.fromkeys((*authorised_files, *authorised_deletions)))
+    if not authorised:
+        raise CodingError("git_refused", reason_code="no_job_owned_changes")
+    if len(authorised) > MAX_STAGED_FILES:
+        raise CodingError(
+            "git_refused",
+            reason_code="too_many_files",
+            received_count=len(authorised),
+        )
 
     # An index that already holds something is not this job's to rearrange.
     # Quietly un-staging it would be a change to somebody else's working state
@@ -594,8 +696,10 @@ def commit_job_changes(
             unrelated_count=len(unauthorised_before),
         )
 
-    _refuse_attribute_filters(root, authorised)
-    _refuse_uncommittable(root, authorised)
+    # Both look at content, which a deleted path no longer has. They apply to
+    # the surviving files only.
+    _refuse_attribute_filters(root, authorised_files)
+    _refuse_uncommittable(root, authorised_files)
 
     staged = _run(root, ["git", "add", "--", *authorised])
     if staged.exit_status != 0:
@@ -667,6 +771,17 @@ def commit_job_changes(
     # was authorised.
     committed = _committed_paths(root)
     escaped = tuple(item for item in committed if item not in set(authorised))
+    # An authorised deletion must actually be gone from the committed tree.
+    # Without this the readback would accept a commit that merely *named* the
+    # path, which is what a rename or a re-add would look like.
+    undeleted = _still_tracked(root, authorised_deletions)
+    if undeleted:
+        raise CodingError(
+            "unrelated_changes_staged",
+            reason_code="authorised_deletion_still_present",
+            commit_sha=after.head_sha,
+            unrelated_count=len(undeleted),
+        )
     if escaped:
         # The commit exists on the branch at this point. It is the only window
         # in which an unauthorised path can reach history: another writer
@@ -868,6 +983,30 @@ def _reconcile_after_commit(
     )
 
 
+def _still_tracked(worktree: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Which of these paths HEAD's tree still tracks, asked about by name.
+
+    Scoped to the paths in question rather than listing the repository: the
+    question is only ever "is this authorised deletion actually gone", and a
+    whole-repository listing would be a large read to answer it. Exit status 1
+    with `--error-unmatch` means none of them is tracked, which is the
+    expected answer after a successful deletion.
+    """
+    if not paths:
+        return ()
+    result = _run(
+        worktree, ["git", "ls-files", "-z", "--error-unmatch", "--", *paths],
+        bounded=False,
+    )
+    if result.exit_status not in (0, 1):
+        raise CodingError(
+            "git_unavailable",
+            reason_code="tracked_paths_unreadable",
+            exit_status=result.exit_status,
+        )
+    return _bounded_entries(result.stdout, "tracked_listing_too_large")
+
+
 def _committed_paths(worktree: Path) -> tuple[str, ...]:
     """The paths HEAD's own commit touched, read back after it was created."""
     listed = _require(
@@ -903,6 +1042,7 @@ __all__ = [
     "branch_name_permitted",
     "commit_job_changes",
     "create_repair_branch",
+    "deleted_paths",
     "git_write_permitted",
     "read_workspace_state",
 ]

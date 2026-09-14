@@ -146,6 +146,58 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
         self.assertEqual(list(baseline["inherited_dirty"]), [])
 
 
+class DeletionsReachTheCommit(GitOutcome):
+    """A Law 0 cleanup is exactly the repair V1 previously could not commit."""
+
+    def test_a_job_that_deletes_a_file_commits_the_deletion(self) -> None:
+        class DeletingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                result = super().run_session(request, briefing)
+                (Path(request.worktree) / "superseded.py").unlink()
+                return result
+
+        (self.root / "superseded.py").write_text("old path\n", encoding="utf-8")
+        _git(self.root, "add", "superseded.py")
+        _git(self.root, "commit", "-m", "add superseded path")
+
+        result = self.run_job(
+            DeletingSession(edits={"app.py": _FIXED}),
+            task="repair and remove the superseded path",
+            worktree=str(self.root),
+            repair_branch="repair/add",
+            commit_message="repair addition and remove superseded path",
+        )
+
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(
+            sorted(result.values["commit"]["committed_files"]),
+            ["app.py", "superseded.py"],
+        )
+        self.assertNotIn(
+            "superseded.py", self.git("ls-tree", "--name-only", "HEAD")
+        )
+
+    def test_an_inherited_deletion_is_not_committed(self) -> None:
+        """Deleted before the job started, so not the job's to remove."""
+        (self.root / "theirs.py").write_text("theirs\n", encoding="utf-8")
+        _git(self.root, "add", "theirs.py")
+        _git(self.root, "commit", "-m", "add theirs")
+        (self.root / "theirs.py").unlink()
+
+        result = self.run_job(
+            RecordingSession(edits={"app.py": _FIXED}),
+            task="repair the addition",
+            worktree=str(self.root),
+            repair_branch="repair/add",
+            commit_message="repair addition",
+        )
+
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(list(result.values["commit"]["committed_files"]), ["app.py"])
+        # Still tracked at HEAD, still missing on disk: untouched either way.
+        self.assertIn("theirs.py", self.git("ls-tree", "--name-only", "HEAD"))
+
+
 class InheritedDirtIsNeverCommitted(GitOutcome):
     """A job runs in a worktree it does not own."""
 

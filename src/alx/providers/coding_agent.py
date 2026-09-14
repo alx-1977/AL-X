@@ -57,6 +57,7 @@ from alx.providers.coding_process import (
 from alx.providers.coding_git import (
     commit_job_changes,
     create_repair_branch,
+    deleted_paths,
     read_workspace_state,
 )
 from alx.providers.coding_workspace import CodingWorkspace
@@ -255,6 +256,10 @@ class CodingAgent:
         baseline_dirty = (
             baseline.inherited_dirty if baseline is not None else preexisting_dirty
         )
+        # Which paths were already deleted before this job touched anything.
+        # Read once, here, so a file missing at the baseline can never become
+        # this job's deletion merely by still being missing afterwards.
+        inherited_deleted = self._deletions(workspace)
         # The branch is created before the session so its edits land on the
         # branch rather than on whatever was checked out. A branch that cannot
         # be created fails the job closed: the alternative is a session that
@@ -451,7 +456,22 @@ class CodingAgent:
             self._modified_preexisting(workspace, preexisting_fingerprints),
             limit=None,
         )
-        if wanted_commit and len(complete_files) > MAX_STAGED_FILES:
+        # D-029 takes two input kinds and they are separated here, not there:
+        # a path in the job's changed set that git now reports deleted is the
+        # job's deletion, and everything else is a surviving file. Inherited
+        # deletions are excluded, so a file somebody else removed before the
+        # job started is neither kind.
+        currently_deleted = self._deletions(workspace)
+        job_deleted = tuple(
+            name for name in complete_files
+            if name in currently_deleted and name not in inherited_deleted
+        )
+        complete_files = tuple(
+            name for name in complete_files if name not in job_deleted
+        )
+        if wanted_commit and (
+            len(complete_files) + len(job_deleted)
+        ) > MAX_STAGED_FILES:
             issues.append("too_many_files_to_commit")
             wanted_commit = False
         if wanted_commit and not (tests_run and tests_passed):
@@ -465,6 +485,8 @@ class CodingAgent:
                     complete_files,
                     baseline_dirty,
                     workspace.blocked_paths,
+                    job_deleted,
+                    inherited_deleted,
                 )
             except CodingError as error:
                 # A refused commit is a failed job, not a succeeded one with a
@@ -831,6 +853,20 @@ class CodingAgent:
                 raise CodingError("provider_failed", reason_code="output_not_object")
             return values
         raise CodingError("provider_failed", **details)
+
+    @staticmethod
+    def _deletions(workspace: CodingWorkspace) -> frozenset[str]:
+        """Paths git reports deleted from the worktree at this moment.
+
+        Read once before the session and once after: the difference is what
+        this job deleted. Absent rather than fatal when git cannot answer, for
+        the same reason the baseline is — a job that was not asked for a commit
+        still works in a directory that is not a repository.
+        """
+        try:
+            return deleted_paths(workspace.root)
+        except CodingError:
+            return frozenset()
 
     @staticmethod
     def _read_baseline(workspace: CodingWorkspace) -> GitWorkspaceState | None:

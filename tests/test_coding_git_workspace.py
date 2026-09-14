@@ -49,6 +49,7 @@ from alx.providers.coding_git import (  # noqa: E402
     branch_name_permitted,
     commit_job_changes,
     create_repair_branch,
+    deleted_paths,
     git_write_permitted,
     read_workspace_state,
 )
@@ -753,6 +754,183 @@ class NarrowedRefusalsUnderD029V1(Worktree):
         self.assertIn(" M target.py", status)
 
 
+class ExplicitJobOwnedDeletions(Worktree):
+    """The second and only other input kind D-029 V1 accepts.
+
+    A capability that can create and modify but not delete is too constrained
+    for repair work, and Law 0 requires superseded paths to be deleted — so a
+    Law 0 cleanup was exactly the job the previous version could not commit.
+
+    The amendment is deliberately narrow: a deletion is authorised only when
+    the job names it *and* git reports that exact tracked path deleted. No
+    directory semantics, no rename inference, and nothing is discovered — a
+    path missing from disk that the job did not name is not a deletion here.
+    """
+
+    def test_a_job_owned_deletion_commits(self) -> None:
+        inherited = deleted_paths(self.root)
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "unrelated.py").unlink()
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "remove superseded module", (),
+            (), (), ("unrelated.py",), inherited,
+        )
+
+        self.assertEqual(commit.committed_files, ("unrelated.py",))
+        self.assertIn(
+            "D\tunrelated.py",
+            git(self.root, "show", "--name-status", "--pretty=", "HEAD"),
+        )
+        # Gone from the tree, not merely named in the commit.
+        self.assertNotIn(
+            "unrelated.py", git(self.root, "ls-tree", "--name-only", "HEAD")
+        )
+
+    def test_a_modification_and_a_deletion_commit_together(self) -> None:
+        inherited = deleted_paths(self.root)
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+        (self.root / "unrelated.py").unlink()
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "repair and remove", ("target.py",),
+            (), (), ("unrelated.py",), inherited,
+        )
+
+        self.assertEqual(
+            sorted(commit.committed_files), ["target.py", "unrelated.py"]
+        )
+        shown = git(self.root, "show", "--name-status", "--pretty=", "HEAD")
+        self.assertIn("M\ttarget.py", shown)
+        self.assertIn("D\tunrelated.py", shown)
+        self.assertTrue(commit.worktree_clean)
+
+    def test_an_inherited_deletion_is_refused(self) -> None:
+        """Absent before the job started is never this job's to commit."""
+        (self.root / "unrelated.py").unlink()
+        inherited = deleted_paths(self.root)
+        self.assertIn("unrelated.py", inherited)
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("target.py",),
+                (), (), ("unrelated.py",), inherited,
+            )
+
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(
+            caught.exception.details["reason_code"], "deletion_is_inherited"
+        )
+        self.assertEqual(
+            git(self.root, "rev-parse", "HEAD").strip(),
+            git(self.root, "rev-parse", "main").strip(),
+        )
+
+    def test_a_path_not_present_at_baseline_is_refused(self) -> None:
+        """Git's own account is the proof, not the job's claim."""
+        inherited = deleted_paths(self.root)
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("target.py",),
+                (), (), ("never_existed.py",), inherited,
+            )
+
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "path_is_not_a_deleted_tracked_file",
+        )
+
+    def test_a_still_present_file_cannot_be_claimed_as_deleted(self) -> None:
+        inherited = deleted_paths(self.root)
+        create_repair_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "repair", ("target.py",),
+                (), (), ("unrelated.py",), inherited,
+            )
+
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "path_is_not_a_deleted_tracked_file",
+        )
+        # And it is still there, tracked and unmodified.
+        self.assertTrue((self.root / "unrelated.py").is_file())
+
+    def test_a_directory_is_not_a_valid_deletion_input(self) -> None:
+        """No directory deletion semantics: git never reports `dir/` deleted."""
+        inherited = deleted_paths(self.root)
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "a.py").write_text("a\n")
+        git(self.root, "add", "pkg/a.py")
+        git(self.root, "commit", "-qm", "add package")
+        (self.root / "pkg" / "a.py").unlink()
+        (self.root / "pkg").rmdir()
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "remove package", (),
+                (), (), ("pkg/",), inherited,
+            )
+
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "path_is_not_a_deleted_tracked_file",
+        )
+
+    def test_an_unrelated_deletion_cannot_enter_the_commit(self) -> None:
+        """Somebody else's removal is not swept in with the job's own."""
+        inherited = deleted_paths(self.root)
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "extra.py").write_text("x\n")
+        git(self.root, "add", "extra.py")
+        git(self.root, "commit", "-qm", "add extra")
+        self.write("target.py", "repaired\n")
+        # A concurrent writer removes a file this job never named.
+        (self.root / "extra.py").unlink()
+
+        commit = commit_job_changes(
+            self.root, "repair/target", "repair", ("target.py",),
+            (), (), (), inherited,
+        )
+
+        self.assertEqual(commit.committed_files, ("target.py",))
+        # Theirs is still tracked in the commit and still missing on disk.
+        self.assertIn(
+            "extra.py", git(self.root, "ls-tree", "--name-only", "HEAD")
+        )
+        self.assertIn("extra.py", self.status())
+
+    def test_a_blocked_path_cannot_be_deleted(self) -> None:
+        inherited = deleted_paths(self.root)
+        create_repair_branch(self.root, "repair/target")
+        (self.root / "unrelated.py").unlink()
+
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(
+                self.root, "repair/target", "remove", (),
+                (), ("unrelated.py",), ("unrelated.py",), inherited,
+            )
+
+        self.assertEqual(caught.exception.code, "path_not_permitted")
+
+    def test_a_job_with_neither_kind_is_refused(self) -> None:
+        create_repair_branch(self.root, "repair/target")
+        with self.assertRaises(CodingError) as caught:
+            commit_job_changes(self.root, "repair/target", "nothing", ())
+        self.assertEqual(
+            caught.exception.details["reason_code"], "no_job_owned_changes"
+        )
+
+
 class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
     """Refusal by absence from the enumeration, not by a denylist.
 
@@ -922,7 +1100,9 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         filter would rewrite; one read of whether a path is ignored
         (`check-ignore`) and one of whether the index holds a rename
         (`diff --cached --name-status`), both added 2026-09-13 so those states
-        are refused rather than committed as a subset; one branch creation
+        are refused rather than committed as a subset; one read of whether a
+        path is still tracked (`ls-files`), added 2026-09-14 to prove an
+        authorised deletion is actually absent from the committed tree; one branch creation
         (`switch -c`); one staging (`add`); one index rollback (`reset`); one
         commit.
 
@@ -932,12 +1112,13 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 13)
+        self.assertEqual(len(_WRITE_SHAPES), 14)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
             {"rev-parse", "symbolic-ref", "status", "diff", "show",
-             "check-attr", "check-ignore", "switch", "add", "reset", "commit"},
+             "check-attr", "check-ignore", "ls-files", "switch", "add",
+             "reset", "commit"},
         )
         # Every read-shaped addition must stay a read. `check-attr` takes
         # paths because it is asked about specific paths, but it only reports;
