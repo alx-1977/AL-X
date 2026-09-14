@@ -236,10 +236,15 @@ class CodingAgent:
 
         Reporting is not part of the outcome, so a failure to report is not a
         failure of the job. It is logged and swallowed.
+
+        The cache is updated only once the sink has accepted the report. Doing
+        it first meant a swallowed transient failure still recorded the
+        activity as current, so the identical terminal report from `run`'s
+        finalizer was suppressed as redundant and the runtime was left showing
+        a worker state for a job that had finished.
         """
         if self._current_activity == activity:
             return
-        self._current_activity = activity
         try:
             self._activity_sink(activity)
         except Exception as error:  # noqa: BLE001 - telemetry must not fail a job
@@ -250,6 +255,8 @@ class CodingAgent:
                 "Coding activity sink failed (%s); the job is unaffected",
                 type(error).__name__,
             )
+            return
+        self._current_activity = activity
 
     def run(self, request: CodingRequest) -> CodingOutcome:
         """Run one job and never leave runtime telemetry at a worker state."""
