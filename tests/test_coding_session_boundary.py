@@ -192,6 +192,43 @@ class MeteredCredentialsNeverReachASession(unittest.TestCase):
             "provider_environment_carries_metered_key",
         )
 
+    def test_a_case_variant_metered_key_is_also_refused(self) -> None:
+        """Environment variable names are case-insensitive on macOS and Windows.
+
+        An exact set-membership test was therefore defeated by spelling the key
+        in lower case: `anthropic_api_key` reached the subprocess as the same
+        variable the check was written to refuse. Found by attacking the check
+        after the PR #33 review had reported the original defect resolved,
+        which is why it is asserted here rather than trusted.
+        """
+        for spelling in (
+            "ANTHROPIC_API_KEY",
+            "anthropic_api_key",
+            "Anthropic_Api_Key",
+            "ANTHROPIC_API_KEY ",
+            " xai_api_key",
+        ):
+            class Variant(SubscriptionCodingSession):
+                provider_name = "variant"
+                key = spelling
+
+                def provider_environment(self, home: Path) -> dict[str, str]:
+                    return {type(self).key: "sk-billed"}
+
+                def default_auth_home(self) -> Path:
+                    return Path("/tmp")
+
+            session = Variant(
+                "m", 60, executable="x", environment={"PATH": "/bin"}
+            )
+            with self.assertRaises(CodingError, msg=spelling) as caught:
+                session.child_environment(Path("/tmp/home"))
+            self.assertEqual(
+                caught.exception.details["reason_code"],
+                "provider_environment_carries_metered_key",
+                spelling,
+            )
+
     def test_an_honest_adapter_environment_is_accepted(self) -> None:
         """The check refuses metered keys, not provider variables generally."""
         class HonestAdapter(SubscriptionCodingSession):

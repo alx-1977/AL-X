@@ -70,6 +70,11 @@ METERED_ENVIRONMENT_KEYS = frozenset({
     "GROK_AUTH_PROVIDER_COMMAND",
 })
 
+# Compared against, rather than iterated: see `child_environment`.
+_METERED_KEYS_FOLDED = frozenset(
+    key.upper() for key in METERED_ENVIRONMENT_KEYS
+)
+
 USAGE_LIMIT_MARKERS = (
     "usage limit", "rate limit", "rate_limit", "quota",
     "too many requests", "resets at", "upgrade to",
@@ -195,7 +200,16 @@ class SubscriptionCodingSession:
             and key not in METERED_ENVIRONMENT_KEYS
         }
         provider = self.provider_environment(home)
-        metered = sorted(set(provider) & METERED_ENVIRONMENT_KEYS)
+        # Compared case-insensitively and whitespace-stripped. Environment
+        # variable names are case-insensitive on macOS and Windows, so an exact
+        # set-membership test is defeated by spelling the key in lower case:
+        # `anthropic_api_key` reached the subprocess as the same variable the
+        # check was written to refuse. Found by attacking this check after the
+        # PR #33 review reported it resolved.
+        metered = sorted(
+            key for key in provider
+            if key.strip().upper() in _METERED_KEYS_FOLDED
+        )
         if metered:
             raise CodingError(
                 "session_failed",
