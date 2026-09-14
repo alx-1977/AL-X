@@ -174,14 +174,35 @@ class SubscriptionCodingSession:
     # --- neutral orchestration ---------------------------------------------
 
     def child_environment(self, home: Path) -> dict[str, str]:
-        """Process basics and this job's own CLI home. Never a metered key."""
+        """Process basics and this job's own CLI home. Never a metered key.
+
+        The adapter's own variables are merged and then held to the same rule
+        as the host's. Filtering only what is copied from the host would make
+        the guarantee depend on every future adapter's restraint: an adapter
+        naming a metered key among its "required" variables would put a billed
+        credential straight back into the subprocess after the host's copy had
+        been stripped. Found in the PR #33 review and reproduced.
+
+        This refuses rather than silently dropping the key. An adapter asking
+        for a metered credential has misunderstood what a subscription session
+        is, and a job that fails closed is a better answer than one that runs
+        with the credential quietly removed and fails somewhere less legible.
+        """
         environment = {
             key: value
             for key, value in self._environment.items()
             if key in ALLOWED_ENVIRONMENT_KEYS
             and key not in METERED_ENVIRONMENT_KEYS
         }
-        environment.update(self.provider_environment(home))
+        provider = self.provider_environment(home)
+        metered = sorted(set(provider) & METERED_ENVIRONMENT_KEYS)
+        if metered:
+            raise CodingError(
+                "session_failed",
+                reason_code="provider_environment_carries_metered_key",
+                metered_count=len(metered),
+            )
+        environment.update(provider)
         return environment
 
     def run_session(

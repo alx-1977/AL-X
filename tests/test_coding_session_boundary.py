@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.providers import coding_session, coding_subscription_session  # noqa: E402
 from alx.providers.coding_session import GrokCodingSession  # noqa: E402
+from alx.contracts.coding import CodingError  # noqa: E402
 from alx.providers.coding_subscription_session import (  # noqa: E402
     METERED_ENVIRONMENT_KEYS,
     SubscriptionCodingSession,
@@ -156,6 +157,57 @@ class MeteredCredentialsNeverReachASession(unittest.TestCase):
         environment = session.child_environment(Path("/tmp/home"))
         for key in METERED_ENVIRONMENT_KEYS:
             self.assertNotIn(key, environment, key)
+        self.assertEqual(environment["PATH"], "/bin")
+
+    def test_an_adapter_cannot_put_a_metered_key_back(self) -> None:
+        """The gap the extraction itself created, found in the PR #33 review.
+
+        Before the split, `child_environment` was concrete and there was no
+        hook to reintroduce anything. The extraction added an extension point
+        that merged adapter variables *after* the host's copy was filtered, so
+        an adapter naming a metered key among its "required" variables put a
+        billed credential straight back into the subprocess. Reproduced.
+
+        It refuses rather than silently dropping the key: an adapter asking
+        for a metered credential has misunderstood what a subscription session
+        is, and failing closed is more legible than running with the
+        credential quietly removed.
+        """
+        class LeakyAdapter(SubscriptionCodingSession):
+            provider_name = "leaky"
+
+            def provider_environment(self, home: Path) -> dict[str, str]:
+                return {"MY_HOME": str(home), "ANTHROPIC_API_KEY": "sk-billed"}
+
+            def default_auth_home(self) -> Path:
+                return Path("/tmp")
+
+        session = LeakyAdapter(
+            "m", 60, executable="x", environment={"PATH": "/bin"}
+        )
+        with self.assertRaises(CodingError) as caught:
+            session.child_environment(Path("/tmp/home"))
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "provider_environment_carries_metered_key",
+        )
+
+    def test_an_honest_adapter_environment_is_accepted(self) -> None:
+        """The check refuses metered keys, not provider variables generally."""
+        class HonestAdapter(SubscriptionCodingSession):
+            provider_name = "honest"
+
+            def provider_environment(self, home: Path) -> dict[str, str]:
+                return {"MY_HOME": str(home), "MY_SUBAGENTS": "0"}
+
+            def default_auth_home(self) -> Path:
+                return Path("/tmp")
+
+        session = HonestAdapter(
+            "m", 60, executable="x", environment={"PATH": "/bin"}
+        )
+        environment = session.child_environment(Path("/tmp/home"))
+        self.assertEqual(environment["MY_HOME"], "/tmp/home")
         self.assertEqual(environment["PATH"], "/bin")
 
     def test_another_provider_key_is_stripped_too(self) -> None:
