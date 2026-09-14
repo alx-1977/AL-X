@@ -534,11 +534,20 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         """
         import inspect
 
-        from alx.providers.coding_git import commit_job_changes as subject
+        from alx.providers.coding_git import (
+            _verify_committed_tree,
+            commit_job_changes,
+        )
 
-        source = inspect.getsource(subject)
+        source = inspect.getsource(_verify_committed_tree)
         self.assertIn("_committed_paths(root)", source)
         self.assertIn("commit_contains_unauthorised_paths", source)
+        # And the phase is actually reached: a helper nothing calls proves
+        # nothing. Asserted here because this check is the last thing standing
+        # between a bad commit and a CodingCommit that vouches for it.
+        self.assertIn(
+            "_verify_committed_tree(", inspect.getsource(commit_job_changes)
+        )
 
 
 class NarrowedRefusalsUnderD029V1(Worktree):

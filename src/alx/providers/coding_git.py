@@ -625,190 +625,6 @@ def _authorised_paths(
     return tuple(authorised)
 
 
-def commit_job_changes(
-    worktree: Path,
-    branch: str,
-    message: str,
-    files: tuple[str, ...],
-    inherited_dirty: tuple[str, ...] = (),
-    blocked_paths: tuple[str, ...] = (),
-    deleted_files: tuple[str, ...] = (),
-    inherited_deleted: frozenset[str] = frozenset(),
-) -> CodingCommit:
-    """Stage exactly this job's files and commit them, or refuse entirely.
-
-    The verification is the point. Staging by name is not enough on its own:
-    the index may already hold something staged before the job began, and a
-    path added by name can expand to more than the caller expected. So the
-    index is read back and compared against the authorised set, and one
-    unauthorised entry aborts before any commit exists. `unrelated_changes_staged`
-    is a refusal, never a partial commit.
-    """
-    root = assert_assigned_worktree(worktree)
-    if not branch_name_permitted(branch):
-        raise CodingError("git_refused", reason_code="branch_name_not_permitted")
-    text = message.strip() if isinstance(message, str) else ""
-    if not text:
-        raise CodingError("git_refused", reason_code="commit_message_blank")
-    if len(text) > MAX_COMMIT_MESSAGE_CHARACTERS:
-        raise CodingError("git_refused", reason_code="commit_message_too_long")
-
-    active = read_workspace_state(root)
-    if active.branch != branch:
-        raise CodingError(
-            "git_refused", reason_code="branch_not_active", detail=active.branch
-        )
-    # Before anything is examined path by path: a rename in the index is a
-    # state this authority does not cover, whoever staged it. Checked first so
-    # the refusal is about the index rather than about whichever path happened
-    # to be looked at.
-    _refuse_staged_renames(root)
-    authorised_files = _authorised_paths(
-        root, files, inherited_dirty, blocked_paths
-    )
-    authorised_deletions = _authorised_deletions(
-        root, deleted_files, inherited_deleted, blocked_paths
-    )
-    # The two input kinds are staged and verified together from here. Both are
-    # named by the job and proven against git; neither is discovered.
-    authorised = tuple(dict.fromkeys((*authorised_files, *authorised_deletions)))
-    if not authorised:
-        raise CodingError("git_refused", reason_code="no_job_owned_changes")
-    if len(authorised) > MAX_STAGED_FILES:
-        raise CodingError(
-            "git_refused",
-            reason_code="too_many_files",
-            received_count=len(authorised),
-        )
-
-    # An index that already holds something is not this job's to rearrange.
-    # Quietly un-staging it would be a change to somebody else's working state
-    # made without being asked, and the reason they staged it is exactly the
-    # kind of thing this code cannot know. Refuse before touching anything.
-    already_staged = _staged_paths(root)
-    unauthorised_before = tuple(
-        item for item in already_staged if item not in set(authorised)
-    )
-    if unauthorised_before:
-        raise CodingError(
-            "unrelated_changes_staged",
-            reason_code="index_dirty_before_job",
-            unrelated_count=len(unauthorised_before),
-        )
-
-    # Both look at content, which a deleted path no longer has. They apply to
-    # the surviving files only.
-    _refuse_attribute_filters(root, authorised_files)
-    _refuse_uncommittable(root, authorised_files)
-
-    staged = _run(root, ["git", "add", "--", *authorised])
-    if staged.exit_status != 0:
-        raise CodingError(
-            "git_refused",
-            reason_code="staging_failed",
-            exit_status=staged.exit_status,
-        )
-
-    index = _staged_paths(root)
-    unrelated = tuple(item for item in index if item not in set(authorised))
-    if unrelated:
-        # Fail closed, and unstage only what this operation itself added. The
-        # previous version passed `unrelated` too, removing staged state that
-        # belongs to another writer — the same thing the pre-flight check
-        # refuses to do, done by the rollback. Found in the PR #31 review on
-        # 2026-09-13. Ownership is proven rather than assumed: `authorised` is
-        # this operation's own staging, and a path outside it is left exactly
-        # as found, still staged.
-        _unstage(root, authorised)
-        raise CodingError(
-            "unrelated_changes_staged",
-            reason_code="index_holds_unauthorised_paths",
-            unrelated_count=len(unrelated),
-        )
-    if not index:
-        raise CodingError("git_refused", reason_code="nothing_staged")
-
-    # From here a commit may already exist whatever happens next. A timeout or
-    # a nonzero status does not prove nothing was written: git can advance the
-    # ref and then fail, and reporting "no commit" when a commit is on the
-    # branch would leave Core acting on a false record. So every exit from
-    # here on reconciles against HEAD before it says anything.
-    try:
-        committed = _run(root, ["git", "commit", "--quiet", "-m", text])
-    except CodingError as error:
-        raise _reconcile_after_commit(root, active.head_sha, error) from error
-    if committed.exit_status != 0:
-        # A commit that did not happen must not leave the job's files staged.
-        # The next operation in this worktree — another job, or Friedl — would
-        # inherit an index it did not create and would be refused by the
-        # pre-flight check for work that was never committed.
-        _unstage(root, authorised)
-        raise _reconcile_after_commit(
-            root,
-            active.head_sha,
-            CodingError(
-                "git_refused",
-                reason_code="commit_failed",
-                exit_status=committed.exit_status,
-            ),
-        )
-
-    # Read the result out of git rather than assuming it. A commit that did not
-    # move HEAD is not a commit, whatever the exit status said.
-    try:
-        after = read_workspace_state(root, inherited_dirty)
-    except CodingError as error:
-        raise _reconcile_after_commit(root, active.head_sha, error) from error
-    if after.head_sha == active.head_sha:
-        raise CodingError("git_refused", reason_code="head_did_not_advance")
-
-    # What the commit actually contains, not what the index held before it.
-    # Hooks are disabled, so this should always equal `index`; it is checked
-    # anyway because the alternative to checking is reporting a file list that
-    # a hook, a git version or a configuration could have made untrue, and a
-    # false `committed_files` is worse than a refusal. Reported as an
-    # unresolved issue would be too quiet: Core is told the commit is not what
-    # was authorised.
-    committed = _committed_paths(root)
-    escaped = tuple(item for item in committed if item not in set(authorised))
-    # An authorised deletion must actually be gone from the committed tree.
-    # Without this the readback would accept a commit that merely *named* the
-    # path, which is what a rename or a re-add would look like.
-    undeleted = _still_tracked(root, authorised_deletions)
-    if undeleted:
-        raise CodingError(
-            "unrelated_changes_staged",
-            reason_code="authorised_deletion_still_present",
-            commit_sha=after.head_sha,
-            unrelated_count=len(undeleted),
-        )
-    if escaped:
-        # The commit exists on the branch at this point. It is the only window
-        # in which an unauthorised path can reach history: another writer
-        # staging between the index readback and the commit. Review raised the
-        # race on 2026-09-12 and it was reproduced by staging inside that
-        # window — this check caught it, but only after the commit was made.
-        #
-        # The commit is therefore named rather than hidden. Removing it would
-        # mean moving a ref, which is history rewriting and authority D-029
-        # explicitly withholds, so what is reported is the truth: a commit
-        # exists, it contains something this job did not authorise, and its
-        # SHA is here for AL/X to act on. She has the authority to decide what
-        # to do about it; this code does not.
-        raise CodingError(
-            "unrelated_changes_staged",
-            reason_code="commit_contains_unauthorised_paths",
-            commit_sha=after.head_sha,
-            unrelated_count=len(escaped),
-        )
-    return CodingCommit(
-        branch=after.branch,
-        commit_sha=after.head_sha,
-        committed_files=committed,
-        worktree_clean=after.clean,
-    )
-
-
 def _refuse_uncommittable(root: Path, paths: tuple[str, ...]) -> None:
     """Refuse a path git would decline to stage, rather than commit a subset.
 
@@ -838,7 +654,6 @@ def _refuse_uncommittable(root: Path, paths: tuple[str, ...]) -> None:
                 reason_code="ignore_rules_unreadable",
                 exit_status=result.exit_status,
             )
-
 
 def _refuse_staged_renames(worktree: Path) -> None:
     """Refuse while the index holds a rename, whoever staged it.
@@ -871,7 +686,6 @@ def _refuse_staged_renames(worktree: Path) -> None:
             raise CodingError(
                 "git_refused", reason_code="index_contains_staged_rename"
             )
-
 
 def _refuse_attribute_filters(worktree: Path, paths: tuple[str, ...]) -> None:
     """Refuse to stage a path whose content a clean filter would rewrite.
@@ -928,6 +742,255 @@ def _refuse_attribute_filters(worktree: Path, paths: tuple[str, ...]) -> None:
             reason_code="attribute_filter_would_rewrite_content",
             filtered_count=len(filtered),
         )
+
+
+def _validated_request(
+    worktree: Path, branch: str, message: str
+) -> tuple[Path, str, GitWorkspaceState]:
+    """The worktree, the commit text and the state this commit starts from.
+
+    Everything here is about the request rather than the repository's content:
+    is this a worktree we may act on, is the branch the one actually checked
+    out, is there a message. It returns the pre-commit state because every
+    later phase needs the HEAD to reconcile against.
+    """
+    root = assert_assigned_worktree(worktree)
+    if not branch_name_permitted(branch):
+        raise CodingError("git_refused", reason_code="branch_name_not_permitted")
+    text = message.strip() if isinstance(message, str) else ""
+    if not text:
+        raise CodingError("git_refused", reason_code="commit_message_blank")
+    if len(text) > MAX_COMMIT_MESSAGE_CHARACTERS:
+        raise CodingError("git_refused", reason_code="commit_message_too_long")
+    active = read_workspace_state(root)
+    if active.branch != branch:
+        raise CodingError(
+            "git_refused", reason_code="branch_not_active", detail=active.branch
+        )
+    return root, text, active
+
+
+def _authorised_change_set(
+    root: Path,
+    files: tuple[str, ...],
+    deleted_files: tuple[str, ...],
+    inherited_dirty: tuple[str, ...],
+    inherited_deleted: frozenset[str],
+    blocked_paths: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """The two input kinds, authorised separately and returned together.
+
+    A rename in the index is refused before any path is examined, because it
+    is a state this authority does not cover whoever staged it, and the
+    refusal should be about the index rather than about whichever path
+    happened to be looked at first.
+
+    Returns the surviving files, the deletions, and their union. The union is
+    what staging and verification compare against; the two halves stay
+    separate because the content checks apply only to files that still have
+    content, and the absence check only to deletions.
+    """
+    _refuse_staged_renames(root)
+    authorised_files = _authorised_paths(
+        root, files, inherited_dirty, blocked_paths
+    )
+    authorised_deletions = _authorised_deletions(
+        root, deleted_files, inherited_deleted, blocked_paths
+    )
+    authorised = tuple(dict.fromkeys((*authorised_files, *authorised_deletions)))
+    if not authorised:
+        raise CodingError("git_refused", reason_code="no_job_owned_changes")
+    if len(authorised) > MAX_STAGED_FILES:
+        raise CodingError(
+            "git_refused",
+            reason_code="too_many_files",
+            received_count=len(authorised),
+        )
+    return authorised_files, authorised_deletions, authorised
+
+
+def _refuse_foreign_staged_state(root: Path, authorised: tuple[str, ...]) -> None:
+    """Refuse an index that already holds something this job did not authorise.
+
+    Quietly un-staging it would be a change to somebody else's working state
+    made without being asked, and the reason they staged it is exactly the
+    kind of thing this code cannot know. Refuse before touching anything.
+    """
+    already_staged = _staged_paths(root)
+    unauthorised_before = tuple(
+        item for item in already_staged if item not in set(authorised)
+    )
+    if unauthorised_before:
+        raise CodingError(
+            "unrelated_changes_staged",
+            reason_code="index_dirty_before_job",
+            unrelated_count=len(unauthorised_before),
+        )
+
+
+def _stage_authorised(
+    root: Path, authorised_files: tuple[str, ...], authorised: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Stage exactly the authorised set, then prove the index holds only it.
+
+    The content checks run first and on the surviving files only: a deleted
+    path has no content for a filter to rewrite or an ignore rule to exclude.
+
+    Staging by name is not enough on its own, so the index is read back and
+    compared. One unauthorised entry aborts before any commit exists, and the
+    rollback takes back only what this operation itself staged — a path
+    outside the authorised set belongs to another writer and is left exactly
+    as found.
+    """
+    _refuse_attribute_filters(root, authorised_files)
+    _refuse_uncommittable(root, authorised_files)
+
+    staged = _run(root, ["git", "add", "--", *authorised])
+    if staged.exit_status != 0:
+        raise CodingError(
+            "git_refused",
+            reason_code="staging_failed",
+            exit_status=staged.exit_status,
+        )
+
+    index = _staged_paths(root)
+    unrelated = tuple(item for item in index if item not in set(authorised))
+    if unrelated:
+        _unstage(root, authorised)
+        raise CodingError(
+            "unrelated_changes_staged",
+            reason_code="index_holds_unauthorised_paths",
+            unrelated_count=len(unrelated),
+        )
+    if not index:
+        raise CodingError("git_refused", reason_code="nothing_staged")
+    return index
+
+
+def _create_commit(
+    root: Path,
+    text: str,
+    authorised: tuple[str, ...],
+    before: GitWorkspaceState,
+    inherited_dirty: tuple[str, ...],
+) -> GitWorkspaceState:
+    """Create the commit and return the state it produced.
+
+    From the moment `git commit` is invoked a commit may exist whatever
+    happens next. A timeout or a nonzero status does not prove nothing was
+    written: git can advance the ref and then fail, and reporting "no commit"
+    when one is on the branch would leave Core acting on a false record. So
+    every exit from here reconciles against HEAD before it says anything.
+
+    A commit that did not happen must also not leave the job's files staged:
+    the next operation in this worktree would inherit an index it did not
+    create and be refused for work that was never committed.
+    """
+    try:
+        committed = _run(root, ["git", "commit", "--quiet", "-m", text])
+    except CodingError as error:
+        raise _reconcile_after_commit(root, before.head_sha, error) from error
+    if committed.exit_status != 0:
+        _unstage(root, authorised)
+        raise _reconcile_after_commit(
+            root,
+            before.head_sha,
+            CodingError(
+                "git_refused",
+                reason_code="commit_failed",
+                exit_status=committed.exit_status,
+            ),
+        )
+    try:
+        after = read_workspace_state(root, inherited_dirty)
+    except CodingError as error:
+        raise _reconcile_after_commit(root, before.head_sha, error) from error
+    # A commit that did not move HEAD is not a commit, whatever the status said.
+    if after.head_sha == before.head_sha:
+        raise CodingError("git_refused", reason_code="head_did_not_advance")
+    return after
+
+
+def _verify_committed_tree(
+    root: Path,
+    authorised: tuple[str, ...],
+    authorised_deletions: tuple[str, ...],
+    after: GitWorkspaceState,
+) -> tuple[str, ...]:
+    """Prove the commit contains the authorised set and nothing else.
+
+    What the commit actually contains, not what the index held before it.
+    Hooks are disabled, so this should always agree with the index; it is
+    checked anyway because the alternative is reporting a file list that a
+    hook, a git version or a configuration could have made untrue, and a false
+    `committed_files` is worse than a refusal.
+
+    An authorised deletion must additionally be proven *absent*: a commit that
+    merely named the path would otherwise pass, which is what a rename or a
+    re-add would look like.
+
+    The commit exists by the time either check can fail. That is the known
+    concurrency window — another writer staging between the index readback and
+    the commit — and the commit is named rather than hidden, because removing
+    it means moving a ref, which is history rewriting D-029 withholds. What
+    returns to AL/X is the truth: a commit exists, it contains something this
+    job did not authorise, and its SHA is here for her to act on.
+    """
+    committed = _committed_paths(root)
+    undeleted = _still_tracked(root, authorised_deletions)
+    if undeleted:
+        raise CodingError(
+            "unrelated_changes_staged",
+            reason_code="authorised_deletion_still_present",
+            commit_sha=after.head_sha,
+            unrelated_count=len(undeleted),
+        )
+    escaped = tuple(item for item in committed if item not in set(authorised))
+    if escaped:
+        raise CodingError(
+            "unrelated_changes_staged",
+            reason_code="commit_contains_unauthorised_paths",
+            commit_sha=after.head_sha,
+            unrelated_count=len(escaped),
+        )
+    return committed
+
+
+def commit_job_changes(
+    worktree: Path,
+    branch: str,
+    message: str,
+    files: tuple[str, ...],
+    inherited_dirty: tuple[str, ...] = (),
+    blocked_paths: tuple[str, ...] = (),
+    deleted_files: tuple[str, ...] = (),
+    inherited_deleted: frozenset[str] = frozenset(),
+) -> CodingCommit:
+    """Stage exactly this job's changes and commit them, or refuse entirely.
+
+    The phases below are the whole of it, in order, each refusing rather than
+    narrowing: validate the request, authorise the two input kinds, refuse a
+    foreign index, stage and prove the index, commit, prove the committed
+    tree. `unrelated_changes_staged` is always a refusal, never a partial
+    commit.
+    """
+    root, text, before = _validated_request(worktree, branch, message)
+    authorised_files, authorised_deletions, authorised = _authorised_change_set(
+        root, files, deleted_files, inherited_dirty, inherited_deleted,
+        blocked_paths,
+    )
+    _refuse_foreign_staged_state(root, authorised)
+    _stage_authorised(root, authorised_files, authorised)
+    after = _create_commit(root, text, authorised, before, inherited_dirty)
+    committed = _verify_committed_tree(
+        root, authorised, authorised_deletions, after
+    )
+    return CodingCommit(
+        branch=after.branch,
+        commit_sha=after.head_sha,
+        committed_files=committed,
+        worktree_clean=after.clean,
+    )
 
 
 def _unstage(worktree: Path, paths: tuple[str, ...]) -> None:
