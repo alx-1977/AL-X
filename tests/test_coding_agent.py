@@ -244,6 +244,52 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertEqual(activities, ["coding", "reviewing", "reasoning"])
 
+    def test_a_failing_activity_sink_does_not_destroy_the_outcome(self) -> None:
+        """Telemetry is not part of the outcome, so it cannot fail the job.
+
+        The sink is a transport supplied by the caller, and a transport can
+        fail. It used to fail into the job: the exception propagated out of
+        `run`, whose `finally` clause reports the final state *after* a valid
+        outcome has been computed, so a broken status line destroyed a
+        finished repair. The tool layer then returned `coding_unavailable`,
+        telling Core the job failed while the worktree held the completed work.
+        """
+        worktree = _worktree(self.root)
+
+        def exploding(activity: str) -> None:
+            raise RuntimeError("telemetry transport died")
+
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(), activity_sink=exploding,
+            task="fix add", worktree=str(worktree),
+        )
+
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIn("app.py", attempt.result.values["files_changed"])
+        # And the repair really is on disk, not merely reported.
+        self.assertEqual((worktree / "app.py").read_text(), _FIXED)
+
+    def test_a_failing_activity_sink_is_logged_rather_than_silent(self) -> None:
+        """Swallowed is not the same as hidden: the failure is still evidence."""
+        worktree = _worktree(self.root)
+
+        def exploding(activity: str) -> None:
+            raise RuntimeError("telemetry transport died")
+
+        with self.assertLogs(
+            "alx.providers.coding_agent", level="WARNING"
+        ) as captured:
+            self._run(
+                PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+                reviewer=PlanningModel(), activity_sink=exploding,
+                task="fix add", worktree=str(worktree),
+            )
+
+        self.assertTrue(
+            any("activity sink failed" in line for line in captured.output)
+        )
+
     def test_correction_cycle_reports_reviewing_coding_reviewing(self) -> None:
         worktree = _worktree(self.root)
         activities: list[str] = []
@@ -296,6 +342,29 @@ class NativeExecutionTests(unittest.TestCase):
             activity_sink=activities.append, task="fix add", worktree=str(worktree),
         )
         self.assertEqual(activities[-1], "reasoning")
+
+    def test_transient_activity_sink_failure_retries_terminal_reasoning(self) -> None:
+        worktree = _worktree(self.root)
+        activities: list[str] = []
+        reasoning_attempts = 0
+
+        def sink(activity: str) -> None:
+            nonlocal reasoning_attempts
+            if activity == "reasoning":
+                reasoning_attempts += 1
+                if reasoning_attempts == 1:
+                    raise RuntimeError("transient sink failure")
+            activities.append(activity)
+
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(), activity_sink=sink,
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(reasoning_attempts, 2)
+        self.assertEqual(activities, ["coding", "reviewing", "reasoning"])
+        self.assertEqual(activities[-1], "reasoning")
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
 
     def test_a_failed_plan_never_reaches_the_session(self) -> None:
         model = PlanningModel(plan=_plan(problem_understanding="   "))
