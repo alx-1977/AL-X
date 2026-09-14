@@ -53,6 +53,8 @@ MAX_STAGED_FILES = MAX_REPORTED_FILES
 MAX_INSPECTED_ENTRIES = 10_000
 
 
+# Broker-accepted CapabilityResult failure codes. Review outcomes must be
+# listed here or the broker rewrites them to result_failure_invalid.
 CODING_FAILURES = (
     "arguments_unusable",
     "coding_unavailable",
@@ -66,6 +68,7 @@ CODING_FAILURES = (
     "plan_unusable",
     "planning_failed",
     "review_failed",
+    "local_review_material_findings",
     "git_refused",
     "git_unavailable",
     "unrelated_changes_staged",
