@@ -94,10 +94,14 @@ CODING_EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "coding_process.py"
 # coding-agent session rather than by AL/X replaying one operation at a time,
 # so two further modules start a process and neither is a Sandbox experiment:
 #
-# - `coding_session.py` launches the coding CLI as an agent in the assigned
-#   worktree. It runs no AL/X-authored program and takes no source; the agent
-#   edits the repository Core named, under a kernel-enforced sandbox profile,
-#   with its terminal withheld;
+# - `coding_subscription_session.py` launches the coding CLI as an agent in the
+#   assigned worktree. It runs no AL/X-authored program and takes no source;
+#   the agent edits the repository Core named, under containment its adapter
+#   installs, with its terminal withheld. The launch lives here rather than in
+#   `coding_session.py` because the orchestration is shared by every
+#   subscription CLI adapter; that it is one site and not one per provider is
+#   the point of the extraction, so a second adapter cannot bring a second
+#   execution route with it;
 # - `coding_containment.py` reads git metadata locations (`git rev-parse`) so the
 #   real object store can be denied. Its argv is fixed and contains no model
 #   output, and it never executes anything the job chose;
@@ -113,7 +117,9 @@ CODING_EXECUTION_SITE = PRODUCTION_ROOT / "providers" / "coding_process.py"
 #
 # All three stay inside the generic absence scans for promotion paths. What they
 # are admitted for is starting a process at all.
-CODING_SESSION_SITE = PRODUCTION_ROOT / "providers" / "coding_session.py"
+CODING_SESSION_SITE = (
+    PRODUCTION_ROOT / "providers" / "coding_subscription_session.py"
+)
 CODING_CONTAINMENT_SITE = PRODUCTION_ROOT / "providers" / "coding_containment.py"
 CODING_GIT_SITE = PRODUCTION_ROOT / "providers" / "coding_git.py"
 CODING_PROCESS_SITES = {
