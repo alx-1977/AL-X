@@ -43,6 +43,7 @@ from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 
 from alx.contracts.coding import (  # noqa: E402
+    CODING_FAILURES,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
     MAX_STEP_BUDGET,
     MAX_TASK_CHARACTERS,
@@ -62,7 +63,11 @@ from alx.providers.coding_workspace import CodingWorkspace  # noqa: E402
 from alx.providers.errors import ProviderError  # noqa: E402
 from alx.providers import coding_agent as coding_agent_module  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
+from alx.tools.coding import (  # noqa: E402
+    DEFINITION,
+    RUN_CODING_TASK,
+    _OUTCOME_ISSUE_CODES,
+)
 
 
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
@@ -378,6 +383,7 @@ class NativeExecutionTests(unittest.TestCase):
         )
 
     def test_local_reviewer_failure_never_accepts_the_job(self) -> None:
+        """An unusable local review fails as review_failed, not task_failed."""
         worktree = _worktree(self.root)
         reviewer = PlanningModel(reviews=[{"findings": "not-a-list"}])
         attempt = self._run(
@@ -385,9 +391,12 @@ class NativeExecutionTests(unittest.TestCase):
             reviewer=reviewer, task="fix add", worktree=str(worktree),
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["code"], "task_failed")
+        self.assertEqual(attempt.result.failure["code"], "review_failed")
+        self.assertIn("review_failed", attempt.result.values["unresolved_issues"])
+        self.assertNotEqual(attempt.result.failure["code"], "task_failed")
 
     def test_unavailable_local_reviewer_fails_closed(self) -> None:
+        """An unavailable local reviewer fails as review_failed, not task_failed."""
         class UnavailableReviewer(PlanningModel):
             def complete(self, request):
                 if request.output_schema_name == "alx_coding_local_review":
@@ -402,14 +411,51 @@ class NativeExecutionTests(unittest.TestCase):
             task="fix add", worktree=str(worktree),
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["code"], "task_failed")
+        self.assertEqual(attempt.result.failure["code"], "review_failed")
         self.assertIn("review_failed", attempt.result.values["unresolved_issues"])
+        self.assertNotEqual(attempt.result.failure["code"], "task_failed")
         self.assertEqual(
             [item.output_schema_name for item in planner.requests],
             ["alx_coding_plan"],
         )
 
+    def test_review_status_codes_are_declared_on_the_coding_contract(self) -> None:
+        declared = DEFINITION.possible_failure_codes
+        self.assertEqual(declared, CODING_FAILURES)
+        self.assertIn("review_failed", declared)
+        self.assertIn("local_review_material_findings", declared)
+        self.assertIn("task_failed", declared)
+        self.assertEqual(
+            CODING_FAILURES[CODING_FAILURES.index("planning_failed") + 1],
+            "review_failed",
+        )
+        self.assertEqual(
+            CODING_FAILURES[CODING_FAILURES.index("review_failed") + 1],
+            "local_review_material_findings",
+        )
+        self.assertEqual(
+            CODING_FAILURES[
+                CODING_FAILURES.index("local_review_material_findings") + 1
+            ],
+            "git_refused",
+        )
+        self.assertLess(
+            _OUTCOME_ISSUE_CODES.index("planning_failed"),
+            _OUTCOME_ISSUE_CODES.index("review_failed"),
+        )
+        self.assertEqual(
+            _OUTCOME_ISSUE_CODES.index("review_failed") + 1,
+            _OUTCOME_ISSUE_CODES.index("local_review_material_findings"),
+        )
+        self.assertLess(
+            _OUTCOME_ISSUE_CODES.index("local_review_material_findings"),
+            _OUTCOME_ISSUE_CODES.index("git_refused"),
+        )
+        self.assertNotIn("task_failed", _OUTCOME_ISSUE_CODES)
+        self.assertNotIn("no_files_changed", _OUTCOME_ISSUE_CODES)
+
     def test_reviewer_has_one_correction_and_one_recheck_bound(self) -> None:
+        """Material findings after one correction and recheck are named."""
         worktree = _worktree(self.root)
         model = PlanningModel()
         reviewer = PlanningModel(reviews=[
@@ -438,6 +484,10 @@ class NativeExecutionTests(unittest.TestCase):
             model, session, reviewer=reviewer, task="fix add", worktree=str(worktree)
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(
+            attempt.result.failure["code"], "local_review_material_findings"
+        )
+        self.assertNotEqual(attempt.result.failure["code"], "task_failed")
         self.assertEqual(len(session.calls), 2)
         self.assertEqual(
             [item.output_schema_name for item in reviewer.requests],
@@ -445,6 +495,10 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertIn(
             "local_review_material_findings",
+            attempt.result.values["unresolved_issues"],
+        )
+        self.assertNotIn(
+            "task_failed",
             attempt.result.values["unresolved_issues"],
         )
 
@@ -672,13 +726,16 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertTrue(command_permitted(list(argv), worktree))
 
     def test_a_session_that_changes_nothing_is_not_a_success(self) -> None:
+        """Undeclared issues such as no_files_changed still surface as task_failed."""
         worktree = _worktree(self.root)
         session = RecordingSession(edits={}, report="nothing needed")
         attempt = self._run(
             PlanningModel(), session, task="fix add", worktree=str(worktree)
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "task_failed")
         self.assertIn("no_files_changed", attempt.result.values["unresolved_issues"])
+        self.assertNotIn("no_files_changed", DEFINITION.possible_failure_codes)
 
     def test_a_session_failure_is_reported_not_swallowed(self) -> None:
         worktree = _worktree(self.root)
