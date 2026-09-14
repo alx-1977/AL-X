@@ -292,6 +292,29 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertEqual(activities[-1], "reasoning")
 
+    def test_transient_activity_sink_failure_retries_terminal_reasoning(self) -> None:
+        worktree = _worktree(self.root)
+        activities: list[str] = []
+        reasoning_attempts = 0
+
+        def sink(activity: str) -> None:
+            nonlocal reasoning_attempts
+            if activity == "reasoning":
+                reasoning_attempts += 1
+                if reasoning_attempts == 1:
+                    raise RuntimeError("transient sink failure")
+            activities.append(activity)
+
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(), activity_sink=sink,
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(reasoning_attempts, 2)
+        self.assertEqual(activities, ["coding", "reviewing", "reasoning"])
+        self.assertEqual(activities[-1], "reasoning")
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+
     def test_a_failed_plan_never_reaches_the_session(self) -> None:
         model = PlanningModel(plan=_plan(problem_understanding="   "))
         session = RecordingSession(edits={"app.py": _FIXED})

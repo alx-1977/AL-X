@@ -223,8 +223,13 @@ class CodingAgent:
     def _report_activity(self, activity: str) -> None:
         if self._current_activity == activity:
             return
+        try:
+            self._activity_sink(activity)
+        except Exception:
+            # A sink failure must not fail the job. Leave the cache unchanged
+            # so run()'s finally can still retry terminal reasoning.
+            return
         self._current_activity = activity
-        self._activity_sink(activity)
 
     def run(self, request: CodingRequest) -> CodingOutcome:
         """Run one job and never leave runtime telemetry at a worker state."""
