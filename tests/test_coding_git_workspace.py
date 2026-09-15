@@ -171,6 +171,18 @@ class CreatingARepairBranch(Worktree):
             git(self.root, "rev-parse", "repair/target").strip(), original_ref
         )
 
+    def test_a_non_c_host_locale_still_retries_a_branch_collision(self) -> None:
+        from alx.providers import coding_git
+
+        git(self.root, "branch", "repair/target")
+        with unittest.mock.patch.dict(
+            coding_git.os.environ, {"LC_ALL": "fr_FR.UTF-8"}, clear=False
+        ):
+            self.assertEqual(coding_git._clean_environment()["LC_ALL"], "C")
+            state = create_repair_branch(self.root, "repair/target")
+
+        self.assertEqual(state.branch, "repair/target-2")
+
     def test_multiple_collisions_select_the_first_available_suffix(self) -> None:
         for name in ("repair/target", "repair/target-2", "repair/target-3"):
             git(self.root, "branch", name)
