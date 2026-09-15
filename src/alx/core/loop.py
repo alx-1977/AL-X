@@ -355,6 +355,21 @@ class CoreAgent:
                 self._record_rejection(
                     conversation, decision.goal_proposal, proposal_error, now,
                 )
+                # A proposal's evidence is independently reducible from its
+                # requested mutation.  For example, a real completed attempt
+                # remains a durable fact even if the Core asks to complete the
+                # goal before all criteria are supported.  The reducer returns
+                # that evidence-only state with the mutation error; persist it
+                # before returning the refusal to the Core.  No other rejected
+                # mutation field is present in this candidate.
+                if (
+                    candidate is not None
+                    and (previous is None or candidate != previous.state)
+                ):
+                    snapshot = self._persist_goal(
+                        candidate, previous, conversation, retention_until,
+                        decision_provenance,
+                    )
                 if decision.response_requires_goal_commit or decision.finish_silently:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_proposal_invalid")
                 # The reason reaches the Core, exactly as an approval or memory
@@ -381,9 +396,10 @@ class CoreAgent:
                     "mutation_kind": decision.goal_proposal.kind.value,
                 })
             # The goal a call would run under: the reduced proposal when it was
-            # accepted, otherwise the attached goal exactly as it stands.
+            # accepted, or the evidence-only state when its requested mutation
+            # was refused.
             effective = (
-                candidate if proposal_error is None
+                candidate if candidate is not None
                 else (None if snapshot is None else snapshot.state)
             )
             if decision.call is not None:
@@ -869,9 +885,20 @@ class CoreAgent:
         state = snapshot.state
         if state.status in (GoalStatus.COMPLETED, GoalStatus.CANCELLED):
             return state, "goal_inactive"
+        proposal, replay_error = self._without_replayed_evidence(state, proposal)
+        if replay_error:
+            return state, replay_error
+        evidence_only = replace(
+            state, evidence=(*state.evidence, *proposal.new_evidence),
+        )
+        error = self._evidence_grounding_error(
+            conversation, evidence_only, state.evidence, proposal.new_evidence,
+        )
+        if error:
+            return state, error
         history_error = self._history_proposal_error(state, proposal)
         if history_error:
-            return state, history_error
+            return evidence_only, history_error
         try:
             updated = replace(
                 state,
@@ -887,14 +914,33 @@ class CoreAgent:
                 evidence=(*state.evidence, *proposal.new_evidence),
                 status=GoalStatus.ACTIVE, stop_reason=None,
             )
-            error = self._evidence_grounding_error(
-                conversation, updated, state.evidence, proposal.new_evidence)
-            if error:
-                return state, error
             updated = self._derive_goal_status(updated, proposal.kind)
         except (TypeError, ValueError) as error_value:
-            return state, str(error_value)
+            # The evidence was grounded above.  A mutation-specific failure
+            # must not erase it, but none of the requested state mutation is
+            # allowed to survive this return.
+            return evidence_only, str(error_value)
         return updated, None
+
+    @staticmethod
+    def _without_replayed_evidence(
+        state: GoalState, proposal: GoalProposal,
+    ) -> tuple[GoalProposal, str | None]:
+        """Make an identical retry of already durable evidence idempotent.
+
+        A correction may repeat the evidence that was accepted while its prior
+        mutation was refused.  It is not a second durable record.  Reusing an
+        identifier for changed content remains a rejected history collision.
+        """
+        existing = {item.evidence_id: item for item in state.evidence}
+        retained = []
+        for item in proposal.new_evidence:
+            prior = existing.get(item.evidence_id)
+            if prior is None:
+                retained.append(item)
+            elif prior != item:
+                return proposal, "durable_record_id_reused"
+        return replace(proposal, new_evidence=tuple(retained)), None
 
     def _create_goal(self, proposal: GoalProposal,
                      conversation: ConversationSnapshot,
@@ -1242,7 +1288,9 @@ class CoreAgent:
                     and reference not in succeeded_attempts
                     for reference in item.source_references
                 ):
-                    raise ValueError("completion_lacks_sourced_evidence")
+                    # A failed attempt remains durable historical evidence,
+                    # but cannot prove any completion criterion.
+                    continue
                 supported.update(item.supports)
             required = {item.criterion_id for item in state.success_criteria}
             if not required.issubset(supported):
