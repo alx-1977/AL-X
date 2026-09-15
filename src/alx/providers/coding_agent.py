@@ -262,6 +262,10 @@ class CodingAgent:
             self._telemetry_sink(telemetry)
         except Exception as error:  # noqa: BLE001 - diagnostic transport only
             LOGGER.warning("Coding telemetry sink failed (%s); the job is unaffected", type(error).__name__)
+            # The transport missed this observation, but the Coding Agent did
+            # not. Preserve its local lifecycle anchor so a later successful
+            # publication reports the job's real elapsed time.
+            self._telemetry = telemetry
             return
         self._telemetry = telemetry
 

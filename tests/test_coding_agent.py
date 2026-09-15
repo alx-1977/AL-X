@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -263,6 +263,34 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertTrue(telemetry[-1].terminal)
         self.assertEqual(telemetry[-1].outcome, "succeeded")
         self.assertTrue(any(item.in_flight for item in telemetry if item.phase == "execution"))
+
+    def test_failed_telemetry_delivery_keeps_the_original_elapsed_anchor(self) -> None:
+        worktree = _worktree(self.root)
+        delivered = []
+        attempts = 0
+        tick = 0
+
+        def clock():
+            nonlocal tick
+            value = NOW + timedelta(seconds=tick)
+            tick += 1
+            return value
+
+        def sink(item):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transport unavailable")
+            delivered.append(item)
+
+        agent = coding_agent_module.CodingAgent(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            PlanningModel(), telemetry_sink=sink, clock=clock,
+        )
+        agent.run(CodingRequest(task="fix add", worktree=str(worktree)))
+
+        self.assertEqual(delivered[0].phase, "execution")
+        self.assertEqual(delivered[0].started_at, NOW)
 
     def test_a_failing_activity_sink_does_not_destroy_the_outcome(self) -> None:
         """Telemetry is not part of the outcome, so it cannot fail the job.
