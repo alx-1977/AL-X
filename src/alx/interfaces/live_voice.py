@@ -478,6 +478,14 @@ class VoiceSession:
                 async def run_turn() -> Any:
                     """Keep one Core lock while forwarding worker activity."""
                     async with self._core_turn_lock:
+                        # Bind a coding job to this turn only once this turn
+                        # owns the shared Core lock. A queued later turn
+                        # cannot replace the callback before this turn's first
+                        # CodingTelemetry publication.
+                        assert core_task is not None
+                        self._activity.set_coding_owner_alive(
+                            lambda task=core_task: not task.done()
+                        )
                         self._turn_origin_sink(kind != "background")
                         try:
                             if kind == "background":
@@ -525,12 +533,7 @@ class VoiceSession:
                     lambda value: loop.call_soon_threadsafe(updates.put_nowait, value)
                 )
                 self._activity.set("reasoning")
-                core_task = asyncio.create_task(run_turn())
-                # `run_core_worker` does not become done on cancellation until
-                # its worker thread has finished. It is therefore the existing
-                # lifecycle owner of a synchronous `run_coding_task`, not an
-                # age-based guess about a quiet provider call.
-                self._activity.set_coding_owner_alive(lambda: not core_task.done())
+                core_task: asyncio.Task[Any] | None = asyncio.create_task(run_turn())
                 try:
                     while not core_task.done():
                         update_task = asyncio.create_task(updates.get())

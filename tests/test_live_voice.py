@@ -394,6 +394,77 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(dead_snapshot["unresponsive"])
         self.assertTrue(dead_snapshot["stalled"])
 
+    async def test_queued_turn_cannot_claim_first_turn_coding_owner(self) -> None:
+        """A waiting exchange cannot bind telemetry before it owns Core's lock."""
+        activity = VoiceActivityStatus()
+        core_lock = asyncio.Lock()
+        a_started = threading.Event()
+        a_release = threading.Event()
+        b_started = threading.Event()
+        b_release = threading.Event()
+
+        class TwoTurnGateway(FakeGateway):
+            def __init__(self):
+                super().__init__((outcome(GoalStatus.ACTIVE), outcome(GoalStatus.ACTIVE)))
+                self.calls = 0
+
+            def receive_conversation_turn(self, turn, step_budget, retention_until):
+                self.calls += 1
+                if self.calls == 1:
+                    a_started.set()
+                    if not a_release.wait(timeout=1):
+                        raise RuntimeError("test did not release turn A")
+                else:
+                    b_started.set()
+                    if not b_release.wait(timeout=1):
+                        raise RuntimeError("test did not release turn B")
+                return super().receive_conversation_turn(
+                    turn, step_budget, retention_until
+                )
+
+        gateway = TwoTurnGateway()
+        session = VoiceSession(
+            gateway,
+            FakeTranscriber((transcription("a", TranscriptionState.FINAL, "A"),)),
+            FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: "turn",
+            activity=activity, core_turn_lock=core_lock,
+        )
+        first = session.exchange("conversation-a", incoming_audio())
+        self.assertIs((await first.__anext__()).kind, VoiceEventKind.THINKING)
+        first_update = asyncio.create_task(first.__anext__())
+        await asyncio.wait_for(asyncio.to_thread(a_started.wait, 1), timeout=1)
+
+        # B starts and waits for the lock while A remains its owner. Its
+        # transport reaches THINKING, but cannot install an owner callback.
+        second = session.exchange("conversation-b", incoming_audio())
+        self.assertIs((await second.__anext__()).kind, VoiceEventKind.THINKING)
+        second_update = asyncio.create_task(second.__anext__())
+        await asyncio.sleep(0)
+
+        telemetry = CodingTelemetry(
+            job_id="case-a", phase="execution", started_at=NOW,
+            phase_started_at=NOW, last_activity_at=NOW,
+            in_flight=True, transition="EXECUTION started",
+        )
+        activity.publish_coding(telemetry)
+        self.assertIs((await first_update).kind, VoiceEventKind.DIAGNOSTIC)
+        self.assertIs((await second_update).kind, VoiceEventKind.DIAGNOSTIC)
+        self.assertTrue(activity.coding_snapshot(NOW)["owner_alive"])
+
+        # A exits without terminal telemetry. B may now acquire the lock, but
+        # the captured A owner is complete and cannot be replaced by B.
+        a_release.set()
+        await asyncio.wait_for(asyncio.to_thread(b_started.wait, 1), timeout=1)
+        stale = activity.coding_snapshot(NOW)
+        self.assertFalse(stale["owner_alive"])
+        self.assertTrue(stale["unresponsive"])
+        self.assertTrue(stale["stalled"])
+
+        b_release.set()
+        [event async for event in first]
+        [event async for event in second]
+
     async def test_websocket_forwards_activity_transitions_in_the_active_exchange(self) -> None:
         """No second user turn or polling request is needed for terminal state."""
         class Session:
