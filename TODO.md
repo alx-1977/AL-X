@@ -71,27 +71,24 @@ inadequate.
      codebase** — confirmed absent, not just unconfirmed.
   3. Goal/step-level retry and provider-spend limits, not merely per-job
      planning limits.
-  4. Automatically unique CA branch names — `create_repair_branch` today
-     refuses an existing branch name rather than generating a fresh one,
-     which is what caused yesterday's collisions and wasted jobs.
-  5. Explicit PLAN vs EXECUTION runtime telemetry, including start/end
+  4. Explicit PLAN vs EXECUTION runtime telemetry, including start/end
      events.
-  6. Bounded GitHub workflow authority so verified work can be pushed to
+  5. Bounded GitHub workflow authority so verified work can be pushed to
      branches, PRs opened/updated, checks/reviews read, and Qodo requested
      without manual Git intervention. No automatic merge authority.
-  7. Coding execution must occur in isolated job worktrees rather than
+  6. Coding execution must occur in isolated job worktrees rather than
      risking edits in the live main repository.
-  8. Simplify the coding reasoning loop so Core does not micromanage CA/
+  7. Simplify the coding reasoning loop so Core does not micromanage CA/
      reviewer work. Core should provide scope/authority once and re-enter
      only for genuine judgment, blockers, authority escalation, exhausted
      budgets, or completion.
-  9. Reassess review layering. Coding Agent + Core + internal reviewer +
+  8. Reassess review layering. Coding Agent + Core + internal reviewer +
      external Qodo currently all participate; review should become
      risk-based so multiple expensive reasoning models are not all
      commenting on every routine change.
-  10. Background/asynchronous coding jobs so Core remains available
+  9. Background/asynchronous coding jobs so Core remains available
       conversationally while CA work continues.
-  11. Usage-aware scheduling/budgeting so AL/X can avoid beginning work that
+  10. Usage-aware scheduling/budgeting so AL/X can avoid beginning work that
       cannot be completed with available provider capacity.
 
 ## Planned
@@ -162,6 +159,8 @@ Kept visible for a while even though done.
   (merged).
 - [x] PR #31 — Give the Coding Agent bounded Git workspace authority
   (D-029) (merged).
+- [x] D-029 amendment — deterministically create the first available repair
+  branch suffix (`-2`, `-3`, …) without touching existing branches.
 - [x] Dirty-path progress-evidence issue investigated and confirmed already
   correct; no code change required.
 - Current `main` after the above merges: `795b23e`.
