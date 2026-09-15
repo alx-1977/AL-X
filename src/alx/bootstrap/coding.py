@@ -19,7 +19,7 @@ from alx.contracts import (
     ReasoningModel,
     StructuredData,
 )
-from alx.contracts.coding import CodingRequest
+from alx.contracts.coding import CodingRequest, CodingTelemetry
 from alx.providers.coding_agent import CodingAgent
 from alx.safety import AuthorityPolicy
 from alx.tools.coding import (
@@ -58,6 +58,8 @@ def build_coding_runtime(
     session: CodingSession | None = None,
     reviewer: ReasoningModel | None = None,
     activity_sink: Callable[[str], None] | None = None,
+    telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
+    job_id_source: Callable[[], str] | None = None,
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
 
@@ -78,7 +80,9 @@ def build_coding_runtime(
     if agent is None and session is None:
         LOGGER.info("Coding agent has no session: no coding capability")
         return None
-    selected = agent or CodingAgent(model, session, reviewer, activity_sink)
+    selected = agent or CodingAgent(
+        model, session, reviewer, activity_sink, telemetry_sink, job_id_source
+    )
 
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)

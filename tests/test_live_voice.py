@@ -7,7 +7,7 @@ import unittest
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +30,7 @@ from alx.contracts import (  # noqa: E402
     TranscriptionEvent,
     TranscriptionState,
 )
+from alx.contracts.coding import CodingTelemetry  # noqa: E402
 from alx.interfaces import (  # noqa: E402
     VoiceActivityStatus,
     VoiceDiagnosticBuffer,
@@ -172,6 +173,65 @@ class VoiceDiagnosticBufferTests(unittest.TestCase):
         )
 
 
+class CodingTelemetryPresentationTests(unittest.TestCase):
+    def _telemetry(self, **changes):
+        values = {
+            "job_id": "case-7", "phase": "execution", "started_at": NOW - timedelta(minutes=4),
+            "phase_started_at": NOW - timedelta(minutes=2),
+            "last_activity_at": NOW - timedelta(minutes=3), "provider": "grok",
+        }
+        values.update(changes)
+        return CodingTelemetry(**values)
+
+    def test_snapshot_uses_runtime_timestamps_not_console_text(self) -> None:
+        activity = VoiceActivityStatus()
+        activity.publish_coding(self._telemetry(last_activity_at=NOW - timedelta(seconds=7)))
+        snapshot = activity.coding_snapshot(NOW)
+        self.assertEqual(snapshot["elapsed_seconds"], 240)
+        self.assertEqual(snapshot["last_activity_seconds"], 7)
+        self.assertFalse(snapshot["stalled"])
+
+    def test_silent_running_owner_remains_healthy_beyond_stall_threshold(self) -> None:
+        async def running_owner_snapshot():
+            activity = VoiceActivityStatus()
+            activity.publish_coding(self._telemetry(in_flight=True))
+            owner = asyncio.create_task(asyncio.Event().wait())
+            activity.set_coding_owner_alive(lambda: not owner.done())
+            snapshot = activity.coding_snapshot(NOW)
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+            return snapshot
+
+        self.assertFalse(asyncio.run(running_owner_snapshot())["stalled"])
+
+    def test_terminated_execution_owner_without_terminal_telemetry_is_unresponsive(self) -> None:
+        async def terminated_owner_snapshot():
+            activity = VoiceActivityStatus()
+            activity.publish_coding(self._telemetry(in_flight=True))
+            owner = asyncio.create_task(asyncio.sleep(0))
+            await owner
+            activity.set_coding_owner_alive(lambda: not owner.done())
+            return activity.coding_snapshot(NOW)
+
+        snapshot = asyncio.run(terminated_owner_snapshot())
+        self.assertTrue(snapshot["stalled"])
+        self.assertTrue(snapshot["unresponsive"])
+
+    def test_non_in_flight_inactivity_still_stalls(self) -> None:
+        activity = VoiceActivityStatus()
+        activity.publish_coding(self._telemetry(in_flight=False))
+        activity.set_coding_owner_alive(lambda: True)
+        self.assertTrue(activity.coding_snapshot(NOW)["stalled"])
+
+    def test_terminal_result_remains_authoritative(self) -> None:
+        activity = VoiceActivityStatus()
+        activity.publish_coding(self._telemetry(phase="failed", terminal=True, outcome="failed"))
+        snapshot = activity.coding_snapshot(NOW)
+        self.assertTrue(snapshot["terminal"])
+        self.assertEqual(snapshot["outcome"], "failed")
+        self.assertFalse(snapshot["stalled"])
+
+
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_activity_is_forwarded_while_the_same_core_turn_is_running(self) -> None:
         """The terminal sees explicit worker activity before Core returns."""
@@ -202,6 +262,78 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         events = [event async for event in iterator]
         self.assertIn(VoiceEventKind.LISTENING, [event.kind for event in events])
+
+    async def test_stream_wires_the_real_core_task_into_coding_liveness(self) -> None:
+        """`_stream` must attach the actual `core_task`, not a stand-in.
+
+        The unit-level `CodingTelemetryPresentationTests` prove the liveness
+        formula is correct given some `owner_alive` callable. They do not
+        prove `VoiceSession._stream` hands that callable the real
+        `core_task` it created. This drives an actual Core turn on a real
+        worker thread, blocked on a `threading.Event`, so `core_task.done()`
+        reflects a genuine pending-then-completed lifecycle rather than a
+        boolean the test supplies directly.
+        """
+        activity = VoiceActivityStatus()
+        release = threading.Event()
+
+        class BlockingGateway(FakeGateway):
+            def receive_conversation_turn(self, turn, step_budget, retention_until):
+                # Forces an ACTIVITY event onto the same queue `_stream`
+                # already reads from, so the test can await proof that
+                # `core_task` exists and `set_coding_owner_alive` has run
+                # before it publishes telemetry, without guessing a delay.
+                activity.set("coding")
+                if not release.wait(timeout=1):
+                    raise RuntimeError("test did not release the Core worker")
+                return super().receive_conversation_turn(
+                    turn, step_budget, retention_until
+                )
+
+        session = VoiceSession(
+            BlockingGateway((outcome(GoalStatus.ACTIVE),)),
+            FakeTranscriber((transcription("one", TranscriptionState.FINAL, "Hi"),)),
+            FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: "turn-1",
+            activity=activity,
+        )
+        iterator = session.exchange("conversation-1", incoming_audio())
+        self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.THINKING)
+        current = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+        self.assertIs(current.kind, VoiceEventKind.ACTIVITY)
+
+        # `_stream` has now created its own `core_task` and called
+        # `set_coding_owner_alive(lambda: not core_task.done())` (proven
+        # by the ACTIVITY event above, which only reaches the queue after
+        # that wiring runs). The coding provider reports mid-flight while
+        # that real task is still pending on the blocked worker thread.
+        telemetry = CodingTelemetry(
+            job_id="case-1", phase="execution",
+            started_at=NOW - timedelta(minutes=1),
+            phase_started_at=NOW - timedelta(seconds=30),
+            last_activity_at=NOW - timedelta(seconds=200),
+            in_flight=True,
+        )
+        activity.publish_coding(telemetry)
+        running_snapshot = activity.coding_snapshot(NOW)
+        self.assertTrue(running_snapshot["owner_alive"])
+        self.assertFalse(running_snapshot["unresponsive"])
+        self.assertFalse(running_snapshot["stalled"])
+
+        # Let the real worker thread return, so the real `core_task`
+        # genuinely completes, without publishing any terminal telemetry
+        # first: the exact case where the coding job vanished.
+        release.set()
+        events = [event async for event in iterator]
+        self.assertIn(VoiceEventKind.LISTENING, [event.kind for event in events])
+
+        # The backend, not the browser, re-derives liveness from the same
+        # nonterminal, still in_flight telemetry against the now-completed
+        # real core_task.
+        dead_snapshot = activity.coding_snapshot(NOW)
+        self.assertFalse(dead_snapshot["owner_alive"])
+        self.assertTrue(dead_snapshot["unresponsive"])
+        self.assertTrue(dead_snapshot["stalled"])
 
     async def test_websocket_forwards_activity_transitions_in_the_active_exchange(self) -> None:
         """No second user turn or polling request is needed for terminal state."""
@@ -235,6 +367,42 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             if json.loads(frame).get("type") == "activity"
         ]
         self.assertEqual(activities, ["coding", "reviewing"])
+
+    async def test_websocket_forwards_backend_coding_liveness_without_inference(self) -> None:
+        status = {
+            "code": "coding.status", "job_id": "case-1", "phase": "execution",
+            "in_flight": True, "owner_alive": False, "unresponsive": True,
+            "stalled": True,
+        }
+
+        class Session:
+            async def exchange(self, *_args, **_kwargs):
+                yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=status)
+                yield VoiceEvent(VoiceEventKind.LISTENING)
+
+        sent: list[str] = []
+
+        class Connection:
+            async def send(self, payload):
+                sent.append(payload)
+
+        server = LiveVoiceServer.__new__(LiveVoiceServer)
+        server._session = Session()
+        server._await_audio_confirmation = False
+        server._delivery_queues = {}
+        server._typed_queues = {}
+
+        async def audio():
+            if False:
+                yield AudioChunk("mic", 0, b"", "audio/pcm", 16000)
+
+        server._audio = lambda _connection, _conversation: audio()
+        await server._exchange_once(Connection(), "conversation-1")
+        forwarded = next(
+            json.loads(frame) for frame in sent
+            if json.loads(frame).get("code") == "coding.status"
+        )
+        self.assertEqual(forwarded, {"type": "diagnostic", **status})
 
     async def test_background_event_enters_same_gateway_and_only_core_response_is_spoken(self) -> None:
         event = BackgroundEvent(

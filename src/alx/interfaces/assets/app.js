@@ -43,6 +43,7 @@ let heardThisTurn = false;
 let audioByteCount = 0;
 let audioChunkCount = 0;
 let ttsStartedAt;
+let lastCodingTransition = "";
 // Each external task keeps its own clock. A single global row caused one
 // concurrent review to overwrite another and made the display untrue.
 const runningTasks = new Map();
@@ -83,6 +84,34 @@ function elapsedText(milliseconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
   const seconds = (totalSeconds % 60).toFixed(1).padStart(4, "0");
   return `${minutes}:${seconds}`;
+}
+
+function codingSeconds(value) {
+  const seconds = Math.max(0, Number(value ?? 0));
+  return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+}
+
+function showCodingStatus(message) {
+  const phase = String(message.phase ?? "").toUpperCase();
+  const provider = String(message.provider ?? "");
+  const model = String(message.model ?? "");
+  const mode = message.terminal
+    ? (String(message.outcome ?? "").toUpperCase() || "COMPLETE")
+    : message.stalled ? "STALLED?"
+      : message.in_flight ? "ACTIVE"
+        : message.waiting ? "WAITING" : "WORKING";
+  const details = ["CODING", phase, [provider, model].filter(Boolean).join(" / "), mode,
+    `${codingSeconds(message.elapsed_seconds)} elapsed`,
+    `last activity ${codingSeconds(message.last_activity_seconds)} ago`]
+    .filter(Boolean).join(" · ");
+  diagnosticStage.textContent = details;
+  stageStartedAt = performance.now() - Number(message.phase_elapsed_seconds ?? 0) * 1000;
+  const transition = String(message.transition ?? "");
+  const key = `${message.job_id ?? ""}:${transition}`;
+  if (transition && key !== lastCodingTransition) {
+    diagnostic(`${message.job_id ?? "CASE"} · ${transition}`, message.terminal || message.stalled ? "error" : "active", "CODING");
+    lastCodingTransition = key;
+  }
 }
 
 function ttsElapsed() {
@@ -349,7 +378,9 @@ function handleControl(message) {
     return;
   }
   if (message.type === "diagnostic") {
-    if (message.code === "microphone.audio_received") {
+    if (message.code === "coding.status") {
+      showCodingStatus(message);
+    } else if (message.code === "microphone.audio_received") {
       diagnostic("AL/X server received microphone audio", "ok");
     } else if (message.code === "reasoning.completed") {
       const seconds = (value) => `${(Number(value ?? 0) / 1000).toFixed(2)} s`;

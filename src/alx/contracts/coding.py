@@ -51,6 +51,7 @@ MAX_STAGED_FILES = MAX_REPORTED_FILES
 # exceeding it fails closed. Well above any real worktree; the live incident
 # that motivated the git capability involved roughly 2,000 dirty paths.
 MAX_INSPECTED_ENTRIES = 10_000
+CODING_STALL_SECONDS = 120
 
 
 # Broker-accepted CapabilityResult failure codes. Review outcomes must be
@@ -91,6 +92,39 @@ class CodingError(Exception):
             if value is not None
         }
         super().__init__(code)
+
+
+@dataclass(frozen=True, slots=True)
+class CodingTelemetry:
+    """One authoritative, transient observation of a bounded coding job.
+
+    This is runtime telemetry, not durable goal state and not job evidence.
+    The Coding Agent emits it at real lifecycle boundaries; the diagnostic
+    transport only presents it.
+    """
+
+    job_id: str
+    phase: str
+    started_at: datetime
+    phase_started_at: datetime
+    last_activity_at: datetime
+    provider: str = ""
+    model: str = ""
+    attempt: int = 1
+    correction_cycle: int = 0
+    in_flight: bool = False
+    waiting: bool = False
+    terminal: bool = False
+    outcome: str = ""
+    transition: str = ""
+
+    def __post_init__(self) -> None:
+        _required(self.job_id, "job_id")
+        _required(self.phase, "phase")
+        for name in ("started_at", "phase_started_at", "last_activity_at"):
+            _aware(getattr(self, name), name)
+        if self.attempt < 1 or self.correction_cycle < 0:
+            raise ValueError("telemetry attempt and correction cycle are bounded")
 
 
 def lexical_worktree_path(relative: str) -> str:

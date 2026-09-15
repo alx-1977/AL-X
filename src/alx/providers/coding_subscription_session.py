@@ -152,6 +152,11 @@ class SubscriptionCodingSession:
         self._environment = os.environ if environment is None else environment
         self._effort = effort.strip()
 
+    @property
+    def model_name(self) -> str:
+        """Configured session model, for runtime diagnostics only."""
+        return self._model
+
     # --- provider-specific hooks -------------------------------------------
 
     def command(self, prompt_path: Path, worktree: Path) -> list[str]:

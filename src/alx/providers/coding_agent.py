@@ -47,6 +47,7 @@ from alx.contracts.coding import (
     CodingCommit,
     CodingSession,
     CodingSessionResult,
+    CodingTelemetry,
     GitWorkspaceState,
 )
 from alx.providers.coding_process import (
@@ -217,12 +218,52 @@ class CodingAgent:
     def __init__(
         self, model: ReasoningModel, session: CodingSession | None,
         reviewer: ReasoningModel, activity_sink: Callable[[str], None] | None = None,
+        telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
+        job_id_source: Callable[[], str] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._model = model
         self._session = session
         self._reviewer = reviewer
         self._activity_sink = activity_sink or (lambda _activity: None)
         self._current_activity: str | None = None
+        self._telemetry_sink = telemetry_sink or (lambda _telemetry: None)
+        self._job_id_source = job_id_source or (lambda: "coding-job")
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._telemetry: CodingTelemetry | None = None
+
+    def _report_telemetry(
+        self, phase: str, *, in_flight: bool = False, waiting: bool = False,
+        terminal: bool = False, outcome: str = "", transition: str = "",
+        correction_cycle: int | None = None,
+    ) -> None:
+        """Publish a lifecycle fact; telemetry failure never changes the job."""
+        now = self._clock()
+        previous = self._telemetry
+        started = previous.started_at if previous is not None else now
+        phase_started = (
+            previous.phase_started_at
+            if previous is not None and previous.phase == phase
+            else now
+        )
+        provider = str(getattr(self._session, "provider_name", "") or "")
+        model = str(getattr(self._session, "model_name", "") or "")
+        telemetry = CodingTelemetry(
+            job_id=self._job_id_source() or "coding-job", phase=phase,
+            started_at=started, phase_started_at=phase_started,
+            last_activity_at=now, provider=provider, model=model,
+            attempt=1,
+            correction_cycle=(previous.correction_cycle if previous is not None else 0)
+            if correction_cycle is None else correction_cycle,
+            in_flight=in_flight, waiting=waiting, terminal=terminal,
+            outcome=outcome, transition=transition,
+        )
+        try:
+            self._telemetry_sink(telemetry)
+        except Exception as error:  # noqa: BLE001 - diagnostic transport only
+            LOGGER.warning("Coding telemetry sink failed (%s); the job is unaffected", type(error).__name__)
+            return
+        self._telemetry = telemetry
 
     def _report_activity(self, activity: str) -> None:
         """Tell the runtime what this job is doing. Never affect the job.
@@ -261,9 +302,19 @@ class CodingAgent:
 
     def run(self, request: CodingRequest) -> CodingOutcome:
         """Run one job and never leave runtime telemetry at a worker state."""
+        outcome: CodingOutcome | None = None
+        self._telemetry = None
+        self._report_telemetry("plan", in_flight=True, transition="CASE started")
         try:
-            return self._run(request)
+            outcome = self._run(request)
+            return outcome
         finally:
+            self._report_telemetry(
+                "complete" if outcome is not None and outcome.status == "succeeded" else "failed",
+                terminal=True,
+                outcome=outcome.status if outcome is not None else "failed",
+                transition="COMPLETE" if outcome is not None and outcome.status == "succeeded" else "FAILED",
+            )
             self._report_activity("reasoning")
 
     def _run(self, request: CodingRequest) -> CodingOutcome:
@@ -341,6 +392,7 @@ class CodingAgent:
                 baseline=baseline,
             )
         plan_summary = str(plan["problem_understanding"])
+        self._report_telemetry("execution", transition="PLAN completed")
 
         if self._session is None:
             git_status, git_diff = self._git_evidence(workspace)
@@ -356,6 +408,7 @@ class CodingAgent:
             )
 
         self._report_activity("coding")
+        self._report_telemetry("execution", in_flight=True, transition="EXECUTION started")
         try:
             session = self._session.run_session(
                 request, build_briefing(request, plan)
@@ -378,6 +431,8 @@ class CodingAgent:
                 diagnostics={"phase": "execution", **error.details},
                 baseline=baseline,
             )
+
+        self._report_telemetry("execution", transition="EXECUTION completed")
 
         post_session_status, _ = self._git_evidence(workspace)
         session_files = self._files_changed(
@@ -416,6 +471,7 @@ class CodingAgent:
         # final file set: a reviewer correction can touch a file the initial
         # session never did, and that file must select tests like any other.
         self._report_activity("reasoning")
+        self._report_telemetry("test", transition="TEST started")
         tests_run = False
         tests_passed: bool | None = None
         for argv in self._verification_commands(request, plan, reviewed_files):
@@ -441,6 +497,8 @@ class CodingAgent:
                     tests_passed = False
                 elif tests_passed is None:
                     tests_passed = True
+
+        self._report_telemetry("verify", transition="TEST completed")
 
         git_status, git_diff = self._git_evidence(workspace, reviewed_files)
         files = self._files_changed(
@@ -589,6 +647,7 @@ class CodingAgent:
                 *reviewed_files, *inspection_targets,
             )))
             self._report_activity("reviewing")
+            self._report_telemetry("review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
             try:
                 findings = self._review(request, workspace, plan, files, git_diff)
             except CodingError:
@@ -597,6 +656,7 @@ class CodingAgent:
                     ("review_failed",), reviewed_files,
                 )
             material = [item for item in findings if item["severity"] in _MATERIAL_REVIEW_SEVERITIES]
+            self._report_telemetry("review", transition="REVIEW completed", correction_cycle=cycle)
             if not material:
                 return None, (), reviewed_files
             if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
@@ -610,6 +670,7 @@ class CodingAgent:
                 for item in material
             )
             self._report_activity("coding")
+            self._report_telemetry("correction", in_flight=True, transition="CORRECTION cycle", correction_cycle=cycle + 1)
             try:
                 correction = self._session.run_session(request, briefing)
             except CodingError:
@@ -622,6 +683,7 @@ class CodingAgent:
                     "the coding session could not correct local review findings",
                     (correction.failure_code or "session_failed",), reviewed_files,
                 )
+            self._report_telemetry("correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
             # whole-worktree one would never match, so a correction that
             # changed nothing would read as progress.

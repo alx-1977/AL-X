@@ -23,6 +23,7 @@ from alx.contracts import (
     SpeechTranscriber,
     TranscriptionState,
 )
+from alx.contracts.coding import CODING_STALL_SECONDS, CodingTelemetry
 from alx.conversation import ConversationGateway
 
 
@@ -148,7 +149,9 @@ class VoiceActivityStatus:
 
     def __init__(self) -> None:
         self._value = "reasoning"
-        self._listeners: set[Callable[[str], None]] = set()
+        self._listeners: set[Callable[[str | CodingTelemetry], None]] = set()
+        self._coding: CodingTelemetry | None = None
+        self._coding_owner_alive: Callable[[], bool] | None = None
         self._lock = Lock()
 
     def set(self, value: str) -> None:
@@ -162,7 +165,53 @@ class VoiceActivityStatus:
         for listener in listeners:
             listener(value)
 
-    def subscribe(self, listener: Callable[[str], None]) -> Callable[[], None]:
+    def publish_coding(self, telemetry: CodingTelemetry) -> None:
+        """Record the coding worker's own lifecycle observation."""
+        with self._lock:
+            self._coding = telemetry
+            listeners = tuple(self._listeners)
+        for listener in listeners:
+            listener(telemetry)
+
+    def set_coding_owner_alive(self, owner_alive: Callable[[], bool]) -> None:
+        """Attach the existing Core worker task that owns a coding call."""
+        with self._lock:
+            self._coding_owner_alive = owner_alive
+
+    def coding_snapshot(self, now: datetime) -> dict[str, Any] | None:
+        """A present-tense diagnostic derived from state, never console text."""
+        with self._lock:
+            telemetry = self._coding
+            owner_alive = self._coding_owner_alive
+        if telemetry is None:
+            return None
+        age = max(0, int((now - telemetry.last_activity_at).total_seconds()))
+        elapsed = max(0, int((now - telemetry.started_at).total_seconds()))
+        phase_elapsed = max(0, int((now - telemetry.phase_started_at).total_seconds()))
+        owner_running = owner_alive() if owner_alive is not None else False
+        unresponsive = (
+            not telemetry.terminal and telemetry.in_flight and not owner_running
+        )
+        stalled = unresponsive or (
+            not telemetry.terminal and not telemetry.in_flight and not telemetry.waiting
+            and age >= CODING_STALL_SECONDS
+        )
+        return {
+            "code": "coding.status", "job_id": telemetry.job_id,
+            "phase": telemetry.phase, "provider": telemetry.provider,
+            "model": telemetry.model,
+            "elapsed_seconds": elapsed, "phase_elapsed_seconds": phase_elapsed,
+            "last_activity_seconds": age, "attempt": telemetry.attempt,
+            "correction_cycle": telemetry.correction_cycle,
+            "in_flight": telemetry.in_flight, "waiting": telemetry.waiting,
+            "terminal": telemetry.terminal, "outcome": telemetry.outcome,
+            "owner_alive": owner_running, "unresponsive": unresponsive,
+            "stalled": stalled, "transition": telemetry.transition,
+        }
+
+    def subscribe(
+        self, listener: Callable[[str | CodingTelemetry], None]
+    ) -> Callable[[], None]:
         with self._lock:
             self._listeners.add(listener)
 
@@ -445,34 +494,53 @@ class VoiceSession:
                         finally:
                             self._turn_origin_sink(False)
 
-                updates: asyncio.Queue[str] = asyncio.Queue()
+                updates: asyncio.Queue[str | CodingTelemetry] = asyncio.Queue()
                 loop = asyncio.get_running_loop()
                 unsubscribe = self._activity.subscribe(
                     lambda value: loop.call_soon_threadsafe(updates.put_nowait, value)
                 )
                 self._activity.set("reasoning")
                 core_task = asyncio.create_task(run_turn())
+                # `run_core_worker` does not become done on cancellation until
+                # its worker thread has finished. It is therefore the existing
+                # lifecycle owner of a synchronous `run_coding_task`, not an
+                # age-based guess about a quiet provider call.
+                self._activity.set_coding_owner_alive(lambda: not core_task.done())
                 try:
                     while not core_task.done():
                         update_task = asyncio.create_task(updates.get())
                         done, _ = await asyncio.wait(
                             (core_task, update_task),
-                            return_when=asyncio.FIRST_COMPLETED,
+                            timeout=1.0, return_when=asyncio.FIRST_COMPLETED,
                         )
                         if update_task in done:
-                            yield VoiceEvent(
-                                VoiceEventKind.ACTIVITY,
-                                activity=update_task.result(),
-                            )
+                            update = update_task.result()
+                            if isinstance(update, CodingTelemetry):
+                                yield VoiceEvent(
+                                    VoiceEventKind.DIAGNOSTIC,
+                                    diagnostic=self._activity.coding_snapshot(self._clock()) or {},
+                                )
+                            else:
+                                yield VoiceEvent(VoiceEventKind.ACTIVITY, activity=update)
                         else:
                             update_task.cancel()
                             await asyncio.gather(update_task, return_exceptions=True)
+                            snapshot = self._activity.coding_snapshot(self._clock())
+                            if snapshot is not None and not snapshot["terminal"]:
+                                yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=snapshot)
+                    snapshot = self._activity.coding_snapshot(self._clock())
+                    if snapshot is not None and not snapshot["terminal"]:
+                        yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=snapshot)
                     outcome = await core_task
                     while not updates.empty():
-                        yield VoiceEvent(
-                            VoiceEventKind.ACTIVITY,
-                            activity=updates.get_nowait(),
-                        )
+                        update = updates.get_nowait()
+                        if isinstance(update, CodingTelemetry):
+                            yield VoiceEvent(
+                                VoiceEventKind.DIAGNOSTIC,
+                                diagnostic=self._activity.coding_snapshot(self._clock()) or {},
+                            )
+                        else:
+                            yield VoiceEvent(VoiceEventKind.ACTIVITY, activity=update)
                 except Exception:
                     yield VoiceEvent(
                         VoiceEventKind.ERROR, reason="conversation_gateway_error"
