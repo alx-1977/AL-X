@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -192,9 +192,10 @@ class NativeExecutionTests(unittest.TestCase):
     def _run(self, model, session, reviewer=None, **arguments):
         reviewer = reviewer or PlanningModel()
         activity_sink = arguments.pop("activity_sink", None)
+        telemetry_sink = arguments.pop("telemetry_sink", None)
         runtime = build_coding_runtime(
             True, model, lambda: "call-1", session=session, reviewer=reviewer,
-            activity_sink=activity_sink,
+            activity_sink=activity_sink, telemetry_sink=telemetry_sink,
         )
         self.assertIsNotNone(runtime)
         broker = CapabilityBroker(
@@ -243,6 +244,53 @@ class NativeExecutionTests(unittest.TestCase):
             task="fix add", worktree=str(worktree),
         )
         self.assertEqual(activities, ["coding", "reviewing", "reasoning"])
+
+    def test_authoritative_telemetry_reports_real_job_lifecycle(self) -> None:
+        worktree = _worktree(self.root)
+        telemetry = []
+        self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(), telemetry_sink=telemetry.append,
+            task="fix add", worktree=str(worktree),
+        )
+        phases = [item.phase for item in telemetry]
+        self.assertEqual(phases[0], "plan")
+        self.assertIn("execution", phases)
+        self.assertIn("review", phases)
+        self.assertIn("test", phases)
+        self.assertIn("verify", phases)
+        self.assertEqual(phases[-1], "complete")
+        self.assertTrue(telemetry[-1].terminal)
+        self.assertEqual(telemetry[-1].outcome, "succeeded")
+        self.assertTrue(any(item.in_flight for item in telemetry if item.phase == "execution"))
+
+    def test_failed_telemetry_delivery_keeps_the_original_elapsed_anchor(self) -> None:
+        worktree = _worktree(self.root)
+        delivered = []
+        attempts = 0
+        tick = 0
+
+        def clock():
+            nonlocal tick
+            value = NOW + timedelta(seconds=tick)
+            tick += 1
+            return value
+
+        def sink(item):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transport unavailable")
+            delivered.append(item)
+
+        agent = coding_agent_module.CodingAgent(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            PlanningModel(), telemetry_sink=sink, clock=clock,
+        )
+        agent.run(CodingRequest(task="fix add", worktree=str(worktree)))
+
+        self.assertEqual(delivered[0].phase, "execution")
+        self.assertEqual(delivered[0].started_at, NOW)
 
     def test_a_failing_activity_sink_does_not_destroy_the_outcome(self) -> None:
         """Telemetry is not part of the outcome, so it cannot fail the job.
