@@ -135,8 +135,8 @@ class ConsistencyGateTests(unittest.TestCase):
         for relative_path, anchor, replacement in (
             (
                 "TODO.md",
-                "A candidate for AL/X's own sandbox capability invention",
-                "A candidate for AL/X's own sandbox work under Law 19",
+                "## Planned",
+                "## Planned\n\nLaw 19 applies here.",
             ),
             (
                 "docs/PERSISTENT_RESEARCH_NOTEBOOK_BRIEF.md",
@@ -154,7 +154,7 @@ class ConsistencyGateTests(unittest.TestCase):
 
     def test_naming_a_law_that_does_exist_still_passes(self) -> None:
         """The check must not simply forbid mentioning laws."""
-        self.rewrite("TODO.md", "## Retention", "## Retention\n\nLaw 3 applies here.")
+        self.rewrite("TODO.md", "## Planned", "## Planned\n\nLaw 3 applies here.")
         self.assertEqual(self.violations(), [])
 
     def test_every_law_in_the_canonical_text_is_enforced(self) -> None:
