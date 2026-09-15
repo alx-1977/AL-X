@@ -77,6 +77,23 @@ class GitOutcome(unittest.TestCase):
 class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
     """The capability's reason for existing."""
 
+    def test_a_collision_commits_on_the_suffix_selected_branch(self) -> None:
+        self.git("branch", "repair/add")
+        occupied_ref = self.git("rev-parse", "repair/add").strip()
+
+        result = self.run_job(
+            RecordingSession(edits={"app.py": _FIXED}),
+            task="repair the addition",
+            worktree=str(self.root),
+            repair_branch="repair/add",
+            commit_message="repair addition",
+        )
+
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(result.values["branch"], "repair/add-2")
+        self.assertEqual(result.values["commit"]["branch"], "repair/add-2")
+        self.assertEqual(self.git("rev-parse", "repair/add").strip(), occupied_ref)
+
     def test_the_outcome_carries_branch_commit_sha_and_files(self) -> None:
         result = self.run_job(
             RecordingSession(edits={"app.py": _FIXED}),
