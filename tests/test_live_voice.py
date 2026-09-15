@@ -194,9 +194,9 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
     def test_silent_running_owner_remains_healthy_beyond_stall_threshold(self) -> None:
         async def running_owner_snapshot():
             activity = VoiceActivityStatus()
-            activity.publish_coding(self._telemetry(in_flight=True))
             owner = asyncio.create_task(asyncio.Event().wait())
             activity.set_coding_owner_alive(lambda: not owner.done())
+            activity.publish_coding(self._telemetry(in_flight=True))
             snapshot = activity.coding_snapshot(NOW)
             owner.cancel()
             await asyncio.gather(owner, return_exceptions=True)
@@ -207,10 +207,10 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
     def test_terminated_execution_owner_without_terminal_telemetry_is_unresponsive(self) -> None:
         async def terminated_owner_snapshot():
             activity = VoiceActivityStatus()
-            activity.publish_coding(self._telemetry(in_flight=True))
             owner = asyncio.create_task(asyncio.sleep(0))
             await owner
             activity.set_coding_owner_alive(lambda: not owner.done())
+            activity.publish_coding(self._telemetry(in_flight=True))
             return activity.coding_snapshot(NOW)
 
         snapshot = asyncio.run(terminated_owner_snapshot())
@@ -219,8 +219,8 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
 
     def test_non_in_flight_inactivity_still_stalls(self) -> None:
         activity = VoiceActivityStatus()
-        activity.publish_coding(self._telemetry(in_flight=False))
         activity.set_coding_owner_alive(lambda: True)
+        activity.publish_coding(self._telemetry(in_flight=False))
         self.assertTrue(activity.coding_snapshot(NOW)["stalled"])
 
     def test_terminal_result_remains_authoritative(self) -> None:
@@ -231,8 +231,67 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
         self.assertEqual(snapshot["outcome"], "failed")
         self.assertFalse(snapshot["stalled"])
 
+    def test_later_task_cannot_revive_stale_coding_owner(self) -> None:
+        async def stale_owner_snapshot():
+            activity = VoiceActivityStatus()
+            owner_a = asyncio.create_task(asyncio.sleep(0))
+            await owner_a
+            activity.set_coding_owner_alive(lambda: not owner_a.done())
+            activity.publish_coding(self._telemetry(in_flight=True))
+
+            owner_b = asyncio.create_task(asyncio.Event().wait())
+            activity.set_coding_owner_alive(lambda: not owner_b.done())
+            snapshot = activity.coding_snapshot(NOW)
+            owner_b.cancel()
+            await asyncio.gather(owner_b, return_exceptions=True)
+            return snapshot
+
+        snapshot = asyncio.run(stale_owner_snapshot())
+        self.assertFalse(snapshot["owner_alive"])
+        self.assertTrue(snapshot["unresponsive"])
+        self.assertTrue(snapshot["stalled"])
+
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_coding_transitions_are_emitted_in_order(self) -> None:
+        activity = VoiceActivityStatus()
+        release = threading.Event()
+
+        class TransitionGateway(FakeGateway):
+            def receive_conversation_turn(self, turn, step_budget, retention_until):
+                for phase, transition in (
+                    ("plan", "PLAN completed"),
+                    ("execution", "EXECUTION started"),
+                    ("test", "TEST started"),
+                ):
+                    activity.publish_coding(CodingTelemetry(
+                        job_id="case-ordered", phase=phase, started_at=NOW,
+                        phase_started_at=NOW, last_activity_at=NOW,
+                        in_flight=phase == "execution", transition=transition,
+                    ))
+                if not release.wait(timeout=1):
+                    raise RuntimeError("test did not release the Core worker")
+                return super().receive_conversation_turn(
+                    turn, step_budget, retention_until
+                )
+
+        session = VoiceSession(
+            TransitionGateway((outcome(GoalStatus.ACTIVE),)),
+            FakeTranscriber((transcription("one", TranscriptionState.FINAL, "Hi"),)),
+            FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: "turn-1", activity=activity,
+        )
+        iterator = session.exchange("conversation-1", incoming_audio())
+        self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.THINKING)
+        events = [await asyncio.wait_for(iterator.__anext__(), timeout=0.2) for _ in range(3)]
+        self.assertEqual(
+            [event.diagnostic["transition"] for event in events],
+            ["PLAN completed", "EXECUTION started", "TEST started"],
+        )
+        self.assertEqual(activity.coding_snapshot(NOW)["phase"], "test")
+        release.set()
+        [event async for event in iterator]
+
     async def test_activity_is_forwarded_while_the_same_core_turn_is_running(self) -> None:
         """The terminal sees explicit worker activity before Core returns."""
         activity = VoiceActivityStatus()

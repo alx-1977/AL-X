@@ -151,6 +151,7 @@ class VoiceActivityStatus:
         self._value = "reasoning"
         self._listeners: set[Callable[[str | CodingTelemetry], None]] = set()
         self._coding: CodingTelemetry | None = None
+        self._next_coding_owner_alive: Callable[[], bool] | None = None
         self._coding_owner_alive: Callable[[], bool] | None = None
         self._lock = Lock()
 
@@ -169,6 +170,10 @@ class VoiceActivityStatus:
         """Record the coding worker's own lifecycle observation."""
         with self._lock:
             self._coding = telemetry
+            # Capture the task that owned this job when the job reports. A
+            # later Core turn may install a different pending task, but it
+            # cannot make this telemetry's owner alive again.
+            self._coding_owner_alive = self._next_coding_owner_alive
             listeners = tuple(self._listeners)
         for listener in listeners:
             listener(telemetry)
@@ -176,13 +181,33 @@ class VoiceActivityStatus:
     def set_coding_owner_alive(self, owner_alive: Callable[[], bool]) -> None:
         """Attach the existing Core worker task that owns a coding call."""
         with self._lock:
-            self._coding_owner_alive = owner_alive
+            self._next_coding_owner_alive = owner_alive
 
     def coding_snapshot(self, now: datetime) -> dict[str, Any] | None:
         """A present-tense diagnostic derived from state, never console text."""
         with self._lock:
             telemetry = self._coding
             owner_alive = self._coding_owner_alive
+        return self._snapshot(telemetry, owner_alive, now)
+
+    def coding_snapshot_for(
+        self, telemetry: CodingTelemetry, now: datetime
+    ) -> dict[str, Any]:
+        """Render one queued transition without replacing current state."""
+        with self._lock:
+            owner_alive = (
+                self._coding_owner_alive
+                if self._coding is not None and self._coding.job_id == telemetry.job_id
+                else None
+            )
+        return self._snapshot(telemetry, owner_alive, now)
+
+    @staticmethod
+    def _snapshot(
+        telemetry: CodingTelemetry | None,
+        owner_alive: Callable[[], bool] | None,
+        now: datetime,
+    ) -> dict[str, Any] | None:
         if telemetry is None:
             return None
         age = max(0, int((now - telemetry.last_activity_at).total_seconds()))
@@ -518,7 +543,9 @@ class VoiceSession:
                             if isinstance(update, CodingTelemetry):
                                 yield VoiceEvent(
                                     VoiceEventKind.DIAGNOSTIC,
-                                    diagnostic=self._activity.coding_snapshot(self._clock()) or {},
+                                    diagnostic=self._activity.coding_snapshot_for(
+                                        update, self._clock()
+                                    ),
                                 )
                             else:
                                 yield VoiceEvent(VoiceEventKind.ACTIVITY, activity=update)
@@ -537,7 +564,9 @@ class VoiceSession:
                         if isinstance(update, CodingTelemetry):
                             yield VoiceEvent(
                                 VoiceEventKind.DIAGNOSTIC,
-                                diagnostic=self._activity.coding_snapshot(self._clock()) or {},
+                                diagnostic=self._activity.coding_snapshot_for(
+                                    update, self._clock()
+                                ),
                             )
                         else:
                             yield VoiceEvent(VoiceEventKind.ACTIVITY, activity=update)
