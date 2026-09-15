@@ -1308,3 +1308,49 @@ Revisit if a coding job commits a file it did not change; if it reaches a
 repository other than its assigned worktree; if the enumerated shapes grow to
 include a network or history-rewriting operation; or before push or
 pull-request authority is considered.
+
+### Amendment — deterministic branch-name collision handling
+
+- **Date:** 2026-09-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-15.**
+
+`create_repair_branch` previously refused to create a branch when Core's
+chosen name already existed, and returned that refusal to Core as an
+ambiguity under Law 3 — the codebase's own prior reasoning was that a
+colliding name has no single correct resolution, so only Core may choose one.
+In practice this routed a purely mechanical collision back through a full
+Core reasoning turn on every occurrence, and repeated collisions in the
+2026-09-14 control test wasted jobs and provider budget for a case that has
+one objectively correct outcome once a naming scheme is fixed.
+
+Once Core has authorised a repair branch base name, the bounded Coding Agent
+Git workflow may, if that exact branch name already exists, deterministically
+select the first available numeric-suffixed name by trying `-2`, `-3`, `-4`,
+and so on in order, and creating the first one that does not already exist:
+
+```
+fix/example → fix/example-2 → fix/example-3
+```
+
+This is a Law 2 mechanical step, not a Law 3 judgment: the scheme is fixed in
+advance, produces one deterministic result for any given base name and set of
+existing branches, and involves no interpretation of what the name should
+mean. It extends the "Deterministic sequence under Law 2" reasoning recorded
+above to this one additional step in the same sequence.
+
+This amendment authorises creating and switching to a not-yet-existing,
+suffix-selected branch only. It does not authorise modifying, deleting,
+resetting, reusing, or renaming any existing branch, and it does not widen
+`_WRITE_SHAPES` beyond branch creation already permitted under "What the
+capability may do" above. All constraints under "What it must not do" and
+"Not authorised by this decision" remain unchanged and unaffected — in
+particular, no push, fetch, pull, merge, rebase, reset beyond the existing
+index-rollback exception, branch deletion, or history rewriting is granted by
+this amendment. A bounded retry limit applies so the search cannot run
+unbounded; the exact limit is a property of the implementation, not of this
+decision, and remains subject to the existing test-enumerated authority
+boundary described above.
+
+This amendment supersedes only the prior refuse-on-collision behaviour for
+repair branch creation. All other D-029 constraints remain unchanged.
