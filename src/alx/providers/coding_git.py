@@ -220,6 +220,10 @@ def _clean_environment() -> dict[str, str]:
     """
     allowed = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "HOME")
     environment = {name: os.environ[name] for name in allowed if name in os.environ}
+    # D-029 classifies the exact Git collision diagnostic. Keep that
+    # diagnostic deterministic inside the already-sanitised subprocess
+    # environment without changing the host process locale.
+    environment["LC_ALL"] = "C"
     environment["GIT_TERMINAL_PROMPT"] = "0"
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     # No repository-supplied code runs for a coding job. Two mechanisms let a
