@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable
@@ -298,16 +299,17 @@ class CodingAgent:
         # writes to the wrong branch and only discovers it at commit time.
         if request.repair_branch.strip():
             try:
-                # The returned state describes the worktree *after* the switch.
-                # It is deliberately discarded: `baseline` means where this job
-                # started, and overwriting it made every branch-enabled outcome
-                # report the branch the job created as the branch it began on.
-                # Found in review on 2026-09-12 and reproduced — a job that
-                # started on `main` reported its baseline branch as
-                # `repair/add`, which is false evidence about the repository.
-                create_repair_branch(
+                # The returned state describes the worktree after creation.
+                # Keep `baseline` intact: it records where the job started,
+                # rather than the branch this job subsequently created.
+                branch_state = create_repair_branch(
                     workspace.root, request.repair_branch.strip()
                 )
+                # D-029 may mechanically suffix Core's requested base name.
+                # All subsequent deterministic steps must use the branch Git
+                # actually created, never retry naming through Core or adopt
+                # the pre-existing requested branch.
+                request = replace(request, repair_branch=branch_state.branch)
             except CodingError as error:
                 git_status, git_diff = self._git_evidence(workspace)
                 return self._outcome(

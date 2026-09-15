@@ -143,7 +143,7 @@ class ReadingTheAssignedWorktree(Worktree):
 class CreatingARepairBranch(Worktree):
     """A job works on its own branch, created before it starts."""
 
-    def test_a_repair_branch_is_created_and_becomes_active(self) -> None:
+    def test_a_free_requested_branch_name_is_used_unchanged(self) -> None:
         state = create_repair_branch(self.root, "repair/target")
         self.assertEqual(state.branch, "repair/target")
         self.assertEqual(state.head_sha, self.base_sha)
@@ -160,25 +160,61 @@ class CreatingARepairBranch(Worktree):
             (self.root / "unrelated.py").read_text(), "somebody else was here\n"
         )
 
-    def test_an_existing_branch_name_is_refused_rather_than_adopted(self) -> None:
-        """The job's base must be the baseline, not an unrelated branch's tip.
-
-        This test previously asserted the opposite: that an existing branch
-        was switched to, so re-running a job against its own branch was not a
-        failure. Qodo showed on 2026-09-12 what that permits — an older repair
-        of the same name silently becomes the base, and the job's commit sits
-        on a history nobody checked. A taken name is ambiguous (continue that
-        work, or a different repair?) and goes back to AL/X.
-        """
+    def test_one_collision_creates_the_second_numeric_suffix(self) -> None:
         git(self.root, "branch", "repair/target")
-        with self.assertRaises(CodingError) as caught:
-            create_repair_branch(self.root, "repair/target")
+        original_ref = git(self.root, "rev-parse", "repair/target").strip()
+
+        state = create_repair_branch(self.root, "repair/target")
+
+        self.assertEqual(state.branch, "repair/target-2")
+        self.assertEqual(
+            git(self.root, "rev-parse", "repair/target").strip(), original_ref
+        )
+
+    def test_multiple_collisions_select_the_first_available_suffix(self) -> None:
+        for name in ("repair/target", "repair/target-2", "repair/target-3"):
+            git(self.root, "branch", name)
+
+        state = create_repair_branch(self.root, "repair/target")
+
+        self.assertEqual(state.branch, "repair/target-4")
+
+    def test_occupied_suffixes_are_ref_for_ref_untouched(self) -> None:
+        for name in ("repair/target", "repair/target-2"):
+            git(self.root, "branch", name)
+        before = {
+            name: git(self.root, "rev-parse", name).strip()
+            for name in ("main", "repair/target", "repair/target-2")
+        }
+
+        state = create_repair_branch(self.root, "repair/target")
+
+        self.assertEqual(state.branch, "repair/target-3")
+        after = {
+            name: git(self.root, "rev-parse", name).strip()
+            for name in before
+        }
+        self.assertEqual(after, before)
+
+    def test_suffix_search_exhaustion_fails_closed(self) -> None:
+        from alx.providers import coding_git
+
+        with unittest.mock.patch.object(
+            coding_git, "MAX_REPAIR_BRANCH_ATTEMPTS", 3
+        ):
+            for name in ("repair/target", "repair/target-2", "repair/target-3"):
+                git(self.root, "branch", name)
+            before = git(self.root, "for-each-ref", "refs/heads/")
+            with self.assertRaises(CodingError) as caught:
+                create_repair_branch(self.root, "repair/target")
+
         self.assertEqual(caught.exception.code, "git_refused")
         self.assertEqual(
             caught.exception.details["reason_code"],
-            "branch_already_exists_or_unusable",
+            "branch_name_attempts_exhausted",
         )
-        # And the worktree was not moved onto it.
+        self.assertEqual(git(self.root, "for-each-ref", "refs/heads/"), before)
+        # Every failed creation left the worktree on its original branch.
         self.assertEqual(
             git(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip(), "main"
         )

@@ -56,6 +56,12 @@ from alx.contracts.coding import (
 
 GIT_TIMEOUT_SECONDS = 60
 
+# D-029 fixes the suffix order; this bound fixes the maximum local work the
+# capability may spend looking for an unused name.  It counts the requested
+# name as the first attempt, then -2 through -100.  Exhaustion is a refusal,
+# never a reason to widen the git authority or ask git to reuse a ref.
+MAX_REPAIR_BRANCH_ATTEMPTS = 100
+
 # Every argv the Coding Agent may run against its worktree's git, as a fixed
 # prefix plus how the remainder is checked. A shape absent from this mapping
 # cannot be built, which is what makes push, merge, rebase, reset, stash and
@@ -475,29 +481,32 @@ def create_repair_branch(worktree: Path, branch: str) -> GitWorkspaceState:
     deleted, reset or force-moved, so a wrong branch name costs a branch and
     never a change.
 
-    A name that already exists is refused rather than adopted. The first
-    version fell back to a plain switch so that re-running a job against its
-    own branch was not a failure, and review showed on 2026-09-12 what that
-    actually buys: an older or unrelated branch of the same name silently
-    becomes the base, so the job's edits and its commit sit on a history
-    nobody checked. Core picking a name that is already taken is ambiguous —
-    it may mean "continue that work" or "this is a different repair" — and
-    Law 3 sends ambiguity back to her rather than letting this resolve it.
+    D-029 fixes a mechanical collision scheme: try the Core-authorised name,
+    then `-2`, `-3`, and so on, creating the first name Git accepts.  Each
+    attempt uses only the existing `switch -c` shape, so a taken branch is
+    never checked out, moved, reused, or otherwise changed.
     """
     root = assert_assigned_worktree(worktree)
     if not branch_name_permitted(branch):
         raise CodingError("git_refused", reason_code="branch_name_not_permitted")
-    created = _run(root, ["git", "switch", "-c", branch])
-    if created.exit_status != 0:
-        raise CodingError(
-            "git_refused",
-            reason_code="branch_already_exists_or_unusable",
-            exit_status=created.exit_status,
-        )
-    state = read_workspace_state(root)
-    if state.branch != branch:
-        raise CodingError("git_refused", reason_code="branch_not_active")
-    return state
+    for attempt in range(1, MAX_REPAIR_BRANCH_ATTEMPTS + 1):
+        candidate = branch if attempt == 1 else f"{branch}-{attempt}"
+        # The requested name was validated above; suffixes are still held to
+        # the same narrow branch grammar before they reach git.
+        if not branch_name_permitted(candidate):
+            raise CodingError("git_refused", reason_code="branch_name_not_permitted")
+        created = _run(root, ["git", "switch", "-c", candidate])
+        if created.exit_status != 0:
+            continue
+        state = read_workspace_state(root)
+        if state.branch != candidate:
+            raise CodingError("git_refused", reason_code="branch_not_active")
+        return state
+    raise CodingError(
+        "git_refused",
+        reason_code="branch_name_attempts_exhausted",
+        attempts=MAX_REPAIR_BRANCH_ATTEMPTS,
+    )
 
 
 def _authorised_deletions(
