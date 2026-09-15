@@ -179,6 +179,38 @@ class CreatingARepairBranch(Worktree):
 
         self.assertEqual(state.branch, "repair/target-4")
 
+    def test_a_non_collision_git_failure_stops_after_one_attempt(self) -> None:
+        from alx.providers import coding_git
+
+        failure = coding_git._GitResult(
+            128, "", "fatal: Unable to create '.git/index.lock': File exists\n"
+        )
+        real_run = coding_git._run
+
+        def fail_switch(root, argv, **kwargs):
+            if argv == ["git", "switch", "-c", "repair/target"]:
+                return failure
+            return real_run(root, argv, **kwargs)
+
+        with unittest.mock.patch.object(coding_git, "_run", side_effect=fail_switch) as run:
+            with self.assertRaises(CodingError) as caught:
+                create_repair_branch(self.root, "repair/target")
+
+        self.assertEqual(caught.exception.code, "git_refused")
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "branch_already_exists_or_unusable",
+        )
+        self.assertEqual(caught.exception.details["exit_status"], 128)
+        switch_calls = [
+            call for call in run.call_args_list
+            if call.args[1][:3] == ["git", "switch", "-c"]
+        ]
+        self.assertEqual(len(switch_calls), 1)
+        self.assertEqual(
+            switch_calls[0].args[1], ["git", "switch", "-c", "repair/target"]
+        )
+
     def test_occupied_suffixes_are_ref_for_ref_untouched(self) -> None:
         for name in ("repair/target", "repair/target-2"):
             git(self.root, "branch", name)
