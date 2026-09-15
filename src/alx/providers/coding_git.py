@@ -497,7 +497,13 @@ def create_repair_branch(worktree: Path, branch: str) -> GitWorkspaceState:
             raise CodingError("git_refused", reason_code="branch_name_not_permitted")
         created = _run(root, ["git", "switch", "-c", candidate])
         if created.exit_status != 0:
-            continue
+            if _branch_name_already_exists(created.stderr, candidate):
+                continue
+            raise CodingError(
+                "git_refused",
+                reason_code="branch_already_exists_or_unusable",
+                exit_status=created.exit_status,
+            )
         state = read_workspace_state(root)
         if state.branch != candidate:
             raise CodingError("git_refused", reason_code="branch_not_active")
@@ -506,6 +512,19 @@ def create_repair_branch(worktree: Path, branch: str) -> GitWorkspaceState:
         "git_refused",
         reason_code="branch_name_attempts_exhausted",
         attempts=MAX_REPAIR_BRANCH_ATTEMPTS,
+    )
+
+
+def _branch_name_already_exists(stderr: str, branch: str) -> bool:
+    """Whether Git's failed `switch -c` diagnostic is this exact collision.
+
+    D-029 authorises retrying only an occupied local branch name.  Any other
+    failure — a lock, permission problem, or repository failure — must retain
+    the normal refusal rather than being hidden by suffix retries.  A changed
+    or unrecognised diagnostic fails closed in that same normal refusal path.
+    """
+    return stderr.rstrip().endswith(
+        f"fatal: a branch named '{branch}' already exists"
     )
 
 
