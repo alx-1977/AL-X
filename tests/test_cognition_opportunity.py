@@ -282,11 +282,24 @@ class SingleIngressTests(unittest.TestCase):
         self.assertEqual(definitions, ["contracts/continuity.py"])
 
     def test_mail_still_reaches_the_core_through_the_same_ingress(self) -> None:
+        """And now through the occasion protocol every other origin uses.
+
+        Mail used to reach the Core through the voice transport, which meant
+        it could only reach her while somebody was connected. It now produces
+        a `CognitionOpportunity` like a matured request or a finished task, so
+        the ingress is the same one and the transport is out of it entirely.
+        """
+        mail_source = (self.SOURCE / "continuity" / "mail_source.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CognitionOpportunity", mail_source)
+        self.assertIn("CognitionOrigin.EXTERNAL_EVENT", mail_source)
+
         transport = (self.SOURCE / "interfaces" / "live_voice.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("CognitionOpportunitySource", transport)
-        self.assertIn("receive_background_event", transport)
+        for removed in ("CognitionOpportunitySource", "receive_background_event"):
+            self.assertNotIn(removed, transport, removed)
 
     def test_the_source_cannot_reach_alx_state(self) -> None:
         source = (self.SOURCE / "continuity" / "source.py").read_text(

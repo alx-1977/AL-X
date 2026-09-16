@@ -343,17 +343,25 @@ class SQLiteMailObservationState:
     """Persist only IMAP references, headers, and presentation state—never bodies.
 
     One concurrent state machine. The process poller writes from its worker
-    thread while a voice session reads context, delivers and acknowledges from
-    another, over one shared connection, so every transition states the value
-    it expects to replace and is applied under `_lock`. A transition that
+    thread while a Core turn reads context, records delivery and acknowledges
+    from another, over one shared connection, so every transition states the
+    value it expects to replace and is applied under `_lock`. A transition that
     matches nothing has been overtaken; it is re-read rather than forced,
     because the later state is the true one.
 
-        pending ──current()──> current ──record_delivery()──> presented
-           │                      │                              │
-           │                      └───────── acknowledge() ──────>│
-           └──────────────── acknowledge() ─────────────────> done <┘
+        pending ──unclaimed_arrivals()──> … ──record_delivery()──> presented
+           │                                                          │
+           │                        ──── acknowledge() ──────────────>│
+           └──────────────── acknowledge() ─────────────────> done <──┘
            └── reconcile(), never exposed ──────────────────> done
+
+    This store no longer decides which observation may be carried. A single
+    `current` slot used to promote one row at a time and refuse to offer
+    another until it had been marked `presented`, which made the mailbox an
+    exactly-once queue that only worked while one transport drained it in a
+    loop. That guarantee belongs to the shared cognition-opportunity ledger,
+    which provides it for mail exactly as for every other occasion, so this
+    reports what is durably true and claims nothing.
 
     Two orthogonal facts travel beside `state` and never move backwards:
 
@@ -585,6 +593,60 @@ class SQLiteMailObservationState:
                     announced += 1
             return announced
 
+    def mark_claimed(self, event_id: str) -> bool:
+        """Record that an occasion has been raised for this observation.
+
+        A claimed occasion is owed an answer, so from here on the observation's
+        disappearance is hers to account for rather than something
+        reconciliation may settle quietly. This is the same durable fact
+        `context_exposed` already records when she is shown a waiting item, and
+        it is deliberately the same column: being given an occasion about a
+        message and being shown it are the same claim on her attention, and a
+        second flag would be a second answer to one question.
+
+        Written when the occasion is claimed, before anything is spent on it,
+        because the window this closes is exactly the one between the claim and
+        the turn. A poll cycle that reconciles in that window used to settle the
+        observation silently: the turn then ran with no mail event in context at
+        all, reasoning about a synthetic occasion for a message it could not
+        see, and the disappearance was never reported.
+
+        Answers one question only: is there a live observation now carrying
+        this mark. True when the row is live and marked, whether this call set
+        the mark or an earlier one did -- being shown a waiting item marks it
+        too, and a claim after that is still a claim on a message that exists.
+        False means there is no live observation left to mark at all, which is
+        the caller's signal that the occasion is stale and must be refused.
+
+        The two are deliberately not collapsed. Writing the mark only when it
+        changes is idempotent and fine; reporting *that* as failure would refuse
+        every occasion for a message she had already been shown, which is most
+        of them.
+        """
+        parts = event_id.split(":")
+        if len(parts) >= 3 and parts[0] == "mail" and parts[2].isdigit():
+            uid_validity, uid = parts[1], int(parts[2])
+        else:
+            raise MailAccessError("observation_unavailable")
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE mail_observations SET context_exposed = 1 "
+                "WHERE uid_validity = ? AND uid = ? "
+                "AND state IN ('pending', 'current', 'presented') "
+                "AND context_exposed = 0",
+                (uid_validity, uid),
+            )
+            # Read back rather than trusting the update's rowcount, so an
+            # already-marked live row and a row that is gone are told apart.
+            row = self._connection.execute(
+                "SELECT 1 FROM mail_observations "
+                "WHERE uid_validity = ? AND uid = ? "
+                "AND state IN ('pending', 'current', 'presented') "
+                "AND context_exposed = 1",
+                (uid_validity, uid),
+            ).fetchone()
+        return row is not None
+
     def _settle_silently(
         self, mailbox_id: str, uid_validity: str, uid: int
     ) -> bool:
@@ -664,6 +726,36 @@ class SQLiteMailObservationState:
             ).fetchall()
         return tuple(self._vanished_event(row) for row in rows)
 
+    def unclaimed_arrivals(self) -> tuple[BackgroundEvent, ...]:
+        """Every arrival that has not been settled, oldest first.
+
+        The counterpart of `pending_vanished` for messages that arrived rather
+        than disappeared, and deliberately shaped the same way: it reports what
+        is durably true and claims nothing.
+
+        This replaced a single-slot reader that promoted one observation to
+        `current`, returned it, and refused to return another until that one
+        had been marked `presented`. That slot was an exactly-once mechanism
+        built into the mailbox, and it only worked while one transport drained
+        it in a loop. Exactly-once is now the shared opportunity ledger's job,
+        for mail exactly as for every other occasion, so the mailbox reports
+        the whole queue and the ledger decides what has already been taken.
+
+        Ordered by uid, which is arrival order for a mailbox. No ranking, no
+        limit and no judgement about which message deserves attention: what to
+        do with any of them is AL/X's to decide.
+        """
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references "
+                "FROM mail_observations "
+                "WHERE state IN ('pending', 'current', 'presented') "
+                "AND COALESCE(reported_vanished, 0) = ? ORDER BY uid",
+                (self._NOT_VANISHED,),
+            ).fetchall()
+        return tuple(self._event(row) for row in rows)
+
     def record_vanished_delivery(self, event_id: str) -> bool:
         """Mark one vanished fact as carried. True when it moved.
 
@@ -703,64 +795,6 @@ class SQLiteMailObservationState:
             data,
             provenance=provenance_from_storage(*row[4:8]),
         )
-
-    def current(self) -> BackgroundEvent | None:
-        """Return the one observation eligible for delivery.
-
-        A successfully delivered observation remains `presented` until the
-        Core releases it through a structured acknowledgement or Trash action.
-        While it is presented, later pending observations stay queued and do
-        not enter the conversation behind Friedl's back.
-
-        A message found gone is never offered here, whatever its state. The
-        two facts are recorded independently on purpose — a disappearance is
-        queued without overwriting the state, so it still reaches her after a
-        reconnect — but that leaves a row which satisfies both selectors at
-        once. Without this, a message that vanished after being promoted and
-        before being spoken was reported gone, met with silence because she
-        had never mentioned it, and then announced as though it had just
-        arrived. She told Friedl about mail that was no longer there, and
-        could not act on it because it did not exist.
-
-        The row is excluded, not cleared: `pending_vanished` must still find
-        it until the disappearance itself has been carried.
-        """
-        with self._lock:
-            presented = self._connection.execute(
-                "SELECT 1 FROM mail_observations WHERE state = 'presented' LIMIT 1"
-            ).fetchone()
-            if presented is not None:
-                return None
-            row = self._connection.execute(
-                "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
-                "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-                "WHERE state = 'current' AND COALESCE(reported_vanished, 0) = ? "
-                "ORDER BY uid LIMIT 1",
-                (self._NOT_VANISHED,),
-            ).fetchone()
-            if row is None:
-                row = self._connection.execute(
-                    "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
-                    "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-                    "WHERE state = 'pending' AND COALESCE(reported_vanished, 0) = ? "
-                    "ORDER BY uid LIMIT 1",
-                    (self._NOT_VANISHED,),
-                ).fetchone()
-                if row is None:
-                    return None
-                with self._connection:
-                    promoted = self._connection.execute(
-                        "UPDATE mail_observations SET state = 'current' "
-                        "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ? "
-                        "AND state = 'pending' "
-                        "AND COALESCE(reported_vanished, 0) = ?",
-                        (*row[:3], self._NOT_VANISHED),
-                    ).rowcount
-                if not promoted:
-                    # Settled or promoted between the read and the write.
-                    # Nothing is eligible on this pass; the next one re-reads.
-                    return None
-        return self._event(row)
 
     @staticmethod
     def _event(row) -> BackgroundEvent:
@@ -857,12 +891,17 @@ class SQLiteMailObservationState:
     def record_delivery(self, event_id: str) -> bool:
         """Mark a delivered observation `presented`. True when it moved.
 
-        False means the observation was no longer `current` and there was
-        nothing to record: AL/X may have acknowledged or trashed it during the
-        very turn that announced it, or a later scan reconciled it away. That
-        is a benign race, not a fault -- the announcement already reached
+        False means the observation was no longer awaiting delivery and there
+        was nothing to record: AL/X may have acknowledged or trashed it during
+        the very turn that announced it, or a later scan reconciled it away.
+        That is a benign race, not a fault -- the announcement already reached
         Friedl -- so it is reported rather than raised. It killed two live
         voice sessions on 2026-09-04 when raised.
+
+        An observation is carried straight from `pending` now that nothing
+        promotes it to `current` first. Both are accepted, because a row left
+        `current` by an earlier version of this runtime is still awaiting the
+        same delivery and must not be stranded by the change.
 
         A vanished report announces no mail, so it presents nothing and the
         observation keeps its own state until AL/X releases it. Its delivery is
@@ -881,7 +920,8 @@ class SQLiteMailObservationState:
         with self._lock, self._connection:
             updated = self._connection.execute(
                 "UPDATE mail_observations SET state = 'presented' "
-                "WHERE uid_validity = ? AND uid = ? AND state = 'current'",
+                "WHERE uid_validity = ? AND uid = ? "
+                "AND state IN ('pending', 'current')",
                 (parts[1], int(parts[2])),
             ).rowcount
         return bool(updated)
@@ -991,7 +1031,14 @@ class ICloudMailAdapter:
                     "mailbox_id": "INBOX",
                     "uid_validity": validity,
                     "uid": str(uid),
-                    "message_id": str(parsed.get("Message-ID", "")),
+                    "message_id": _identifier(parsed.get("Message-ID")),
+                    # RFC 5322 threading headers, recorded because the durable
+                    # conversation a message belongs to is derived from them.
+                    # Without these a reply could not be linked to what it
+                    # replies to, and every message would be its own thread or
+                    # all of them would share one.
+                    "in_reply_to": _identifier(parsed.get("In-Reply-To")),
+                    "references": list(_identifiers(parsed.get("References"))),
                     "subject": _decoded(parsed.get("Subject")),
                     "sender": _decoded(parsed.get("From")),
                     "received_at": str(parsed.get("Date", "")),
@@ -1002,48 +1049,6 @@ class ICloudMailAdapter:
             )
         finally:
             self._close(connection)
-
-    async def events(self):
-        """Carry durable observations to AL/X. This does not scan.
-
-        Scanning owns the mailbox and runs for the life of the process; this
-        owns delivery and lives only as long as a transport that can carry a
-        fact to her. Separating them means mail found while nobody was
-        connected is still waiting here when a session returns, and that a
-        poll cycle costs nothing merely because it ran.
-        """
-        emitted_event_id: str | None = None
-        while True:
-            # Found gone while nobody was connected, or during this session.
-            # Reported before any new arrival so AL/X settles what she already
-            # told Friedl about before taking on the next thing.
-            for event in await asyncio.to_thread(self._observations.pending_vanished):
-                yield event
-            current = self._observations.current()
-            if current is not None and current.event_id != emitted_event_id:
-                emitted_event_id = current.event_id
-                reference = MailReference(
-                    current.data["mailbox_id"],
-                    current.data["uid_validity"],
-                    current.data["uid"],
-                )
-                try:
-                    content = await asyncio.to_thread(self.read, reference)
-                    transient_data = {
-                        "body": content.body,
-                        "has_attachments": content.has_attachments,
-                    }
-                except MailAccessError as error:
-                    transient_data = {"content_unavailable": error.code}
-                yield BackgroundEvent(
-                    current.event_id,
-                    current.kind,
-                    current.occurred_at,
-                    current.data,
-                    transient_data,
-                    current.provenance,
-                )
-            await asyncio.sleep(self._poll_seconds)
 
     def _read_parsed(self, reference: MailReference):
         connection = self._open()
@@ -1322,5 +1327,80 @@ class ICloudMailAdapter:
     def record_delivery(self, event_id: str) -> bool:
         return self._observations.record_delivery(event_id)
 
+    def unclaimed_arrivals(self) -> tuple[BackgroundEvent, ...]:
+        return self._observations.unclaimed_arrivals()
+
+    def pending_vanished(self) -> tuple[BackgroundEvent, ...]:
+        return self._observations.pending_vanished()
+
+    def mark_claimed(self, event_id: str) -> bool:
+        return self._observations.mark_claimed(event_id)
+
+    def read_transient(self, event: BackgroundEvent) -> BackgroundEvent:
+        """The same observation with the message body attached.
+
+        Read at the moment an occasion is raised rather than stored, so a body
+        never sits in durable observation state. A message that has gone since
+        it was observed reports why instead of failing the occasion: that it
+        cannot be read is itself a fact AL/X may need to account for.
+        """
+        reference = MailReference(
+            event.data["mailbox_id"],
+            event.data["uid_validity"],
+            event.data["uid"],
+        )
+        try:
+            content = self.read(reference)
+            transient_data = {
+                "body": content.body,
+                "has_attachments": content.has_attachments,
+            }
+        except MailAccessError as error:
+            transient_data = {"content_unavailable": error.code}
+        except Exception as error:  # noqa: BLE001 - an unreadable body is a fact
+            # Anything the account could not answer. A message that vanished
+            # between the occasion being claimed and the turn running is the
+            # case this exists for, and it must not fail the turn: the occasion
+            # is already owed an answer, and she needs the observation in
+            # context to give one. What she is told is that it could not be
+            # read, which is true and is hers to account for.
+            LOGGER.warning(
+                "Mail body unavailable for %s (%s)",
+                event.event_id,
+                type(error).__name__,
+            )
+            transient_data = {"content_unavailable": "message_unavailable"}
+        return BackgroundEvent(
+            event.event_id,
+            event.kind,
+            event.occurred_at,
+            event.data,
+            transient_data,
+            event.provenance,
+        )
+
     def contextual_events(self) -> tuple[BackgroundEvent, ...]:
-        return self._observations.contextual_events()
+        """What she is holding and what is waiting, bodies attached.
+
+        The body is read here rather than stored, so it never enters durable
+        observation state and never outlives the turn it was read for. It is
+        attached to arrivals only: a disappearance has no message left to read,
+        and a waiting item is a queue she is being shown rather than given.
+
+        This is where the body used to be attached by the delivery generator a
+        voice session drained. Reading it here instead means the message
+        reaches her through the same context every turn already receives,
+        whether or not anyone is connected.
+
+        Waiting items carry their body too. They did not need to before,
+        because a waiting item was one she would be handed later by a stream
+        that would read it then; now there is no later hand-off, and an
+        occasion is raised for the observation as it stands. Omitting the body
+        here would offer her a message she cannot read.
+        """
+        return tuple(
+            self.read_transient(event)
+            if event.kind in ("mail.message_arrived", "mail.message_waiting")
+            else event
+            for event in self._observations.contextual_events()
+        )

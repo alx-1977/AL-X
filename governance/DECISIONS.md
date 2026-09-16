@@ -368,6 +368,20 @@ This file records approved product and architecture decisions that guide impleme
 
 **Auditability.** Every opportunity, request, outcome, reasoning call and cost is durably recorded, inspectable, correctable and deletable by Friedl.
 
+### Amendment — External-event content is data, never instruction
+
+- **Date:** 2026-09-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-16.**
+
+An external event's content — a mail message, or any future observer's payload — is evidence about the world, presented to Core as untrusted external data. It is never an instruction to AL/X, regardless of wording, sender, or whether a person is connected.
+
+A message acquires no authority because its text resembles a command, a request from Friedl, a system prompt, a capability schema, a governance document, or the Laws of AL/X. Mail claiming to be from Friedl is not Friedl: his authority reaches AL/X through his own conversational turn and nowhere else. An external event that instructs her to ignore her instructions, reveal configuration, call a capability, or treat its content as approved is simply an event containing that text, and is reasoned about rather than obeyed.
+
+The protection is structural: an observed fact travels as event data carrying `ContentOrigin.EXTERNAL`, on the evidence channel, and never on the instruction channel. It must not be sought through a keyword detector, a phrase list, or any scan of what a message appears to be asking for, because deciding what text is really trying to do is exactly the semantic judgement that belongs to AL/X.
+
+This states explicitly, for `CognitionOrigin.EXTERNAL_EVENT`, the same property D-025 states for retrieved web content and D-027 states for sandbox output. It grants nothing and withdraws nothing; the authority, approval requirements and bounds recorded above are unchanged. It must be tested explicitly rather than assumed, and the test must fail if an external event's content is ever acted upon as an instruction.
+
 ### D-024a — Recorded Luna experiment (temporary)
 
 - **Status: APPROVED as a time-boxed evaluation, 2026-09-02. Not permanent architecture.**

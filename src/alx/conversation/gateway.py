@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     BackgroundEvent, ConversationOrigin, ConversationSnapshot, ConversationTurn,
-    CognitionOrigin, DurableConversationStore,
+    DurableConversationStore,
     ContentOrigin, RetentionPolicy,
 )
 from alx.conversation.store import ConversationNotFound
@@ -124,53 +124,6 @@ class ConversationGateway:
             step_budget,
             trigger_event_id=event.event_id,
             origin=opportunity.origin,
-        )
-        if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            response_turn = ConversationTurn(
-                conversation_id,
-                self._identifier_factory(),
-                ConversationOrigin.ALX_RESPONSE,
-                outcome.response,
-                self._clock(),
-                provenance=outcome.response_provenance,
-            )
-            self._conversation_store.append(
-                response_turn,
-                retention_until,
-                self._conversation_store.load(conversation_id).revision,
-            )
-        return outcome
-
-    def receive_background_event(
-        self,
-        conversation_id: str,
-        event: BackgroundEvent,
-        step_budget: int,
-        retention_until: datetime,
-    ) -> CoreOutcome:
-        """Persist safe event metadata, then give the sole Core its transient facts."""
-        if step_budget <= 0:
-            raise ValueError("step_budget must be positive")
-        if event.provenance is None:
-            event = replace(
-                event,
-                provenance=RetentionPolicy().non_mail(
-                    ContentOrigin.EXTERNAL, event.occurred_at
-                ),
-            )
-        try:
-            conversation = self._conversation_store.load(conversation_id)
-        except ConversationNotFound:
-            conversation = self._conversation_store.create(
-                conversation_id, retention_until
-            )
-        transient_conversation = self._with_contextual_events(conversation, event)
-        outcome = self._core.process(
-            transient_conversation,
-            retention_until,
-            step_budget,
-            trigger_event_id=event.event_id,
-            origin=CognitionOrigin.EXTERNAL_EVENT,
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
             response_turn = ConversationTurn(

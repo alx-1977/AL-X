@@ -226,6 +226,17 @@ BOOTSTRAP_SOURCE = REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py"
 SESSION_SOURCE = REPOSITORY_ROOT / "src/alx/interfaces/live_voice.py"
 
 
+def _definition_starts(text: str, name: str) -> list[int]:
+    """Every offset where a method of this name is defined."""
+    marker = f"    def {name}(self"
+    starts: list[int] = []
+    position = text.find(marker)
+    while position != -1:
+        starts.append(position)
+        position = text.find(marker, position + 1)
+    return starts
+
+
 def scan_call_sites(text: str) -> list[str]:
     """Every line that actually invokes the mailbox scan."""
     return [
@@ -252,25 +263,44 @@ class OneMailScannerTest(unittest.TestCase):
             "the voice session must not invoke the scanner",
         )
 
-    def test_the_delivery_stream_does_not_scan(self) -> None:
-        """`events` carries durable facts; it must not poll the mailbox."""
+    def test_the_delivery_readers_do_not_scan(self) -> None:
+        """The readers carry durable facts; they must not poll the mailbox."""
         text = MAIL_SOURCE.read_text()
-        events = text[text.index("    async def events(self):"):]
-        events = events[: events.index("\n    def ")]
-        self.assertNotIn(".scan", events)
+        for name in ("unclaimed_arrivals", "pending_vanished", "contextual_events"):
+            for start in _definition_starts(text, name):
+                body = text[start:]
+                boundary = body.find("\n    def ", 1)
+                if boundary != -1:
+                    body = body[:boundary]
+                self.assertNotIn(".scan", body, name)
 
     def test_restoring_the_session_scanner_is_caught(self) -> None:
         """The mutation the enforcement specification requires."""
         mutated = MAIL_SOURCE.read_text().replace(
-            "        emitted_event_id: str | None = None",
-            "        emitted_event_id: str | None = None\n"
-            "        await asyncio.to_thread(self.scan())",
+            "    def unclaimed_arrivals(self) -> tuple[BackgroundEvent, ...]:",
+            "    def unclaimed_arrivals(self) -> tuple[BackgroundEvent, ...]:\n"
+            "        self.scan()",
             1,
         )
         sites = scan_call_sites(mutated) + scan_call_sites(
             MAIL_POLLER_SOURCE.read_text()
         )
         self.assertEqual(len(sites), 2, "a second scan loop must be visible")
+
+    def test_mail_reaches_core_through_one_occasion_producer(self) -> None:
+        """Law 0 for mail cognition: one route from an observation to a turn.
+
+        The voice session used to drain a delivery generator of its own, so an
+        observation could reach the Core either through a live session or not
+        at all. That path is gone: the one producer is the mail cognition
+        source, and it feeds the same runner every other origin does.
+        """
+        session = SESSION_SOURCE.read_text()
+        for removed in ("receive_background_event", "event_source", ".events()"):
+            self.assertNotIn(removed, session, removed)
+        gateway = (REPOSITORY_ROOT / "src/alx/conversation/gateway.py").read_text()
+        self.assertNotIn("def receive_background_event", gateway)
+        self.assertNotIn("async def events", MAIL_SOURCE.read_text())
 
 
 if __name__ == "__main__":

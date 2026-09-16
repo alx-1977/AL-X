@@ -64,6 +64,7 @@ from alx.config import (
     XeroSettings,
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
+from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity import (
     DueCognitionSource,
@@ -744,7 +745,6 @@ async def run(repository_root: Path) -> None:
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
         diagnostics=diagnostics,
-        event_source=mail_runtime.source,
         core_turn_lock=core_turn_lock,
         turn_origin_sink=lambda person: person_turn_in_progress.__setitem__(0, person),
         activity=activity,
@@ -789,7 +789,33 @@ async def run(repository_root: Path) -> None:
     # runner and one tick. A finished external task joins the matured requests
     # here rather than bringing a second tick, which would be a competing
     # production path to the same outcome.
-    occasion_source: Any = cognition_source
+    occasion_sources: list[Any] = [cognition_source]
+    # Observed mail joins them for the same reason, and to end the same
+    # coupling the due-cognition tick was built to avoid. Mail used to reach
+    # the Core only through a generator a live voice session drained, so
+    # whether AL/X could think about a message depended on whether a browser
+    # was open. Watching the mailbox was already a property of the process;
+    # now thinking about what it found is too.
+    # Each message continues the thread its own identifier headers name, so
+    # unrelated correspondence does not share a history, unfinished goals or
+    # autonomous responses. The producer derives that per observation; nothing
+    # here chooses a thread.
+    mail_cognition_source = MailCognitionSource(
+        mail_runtime.source,
+        opportunity_ledger,
+        enabled=providers.autonomous is not None,
+    )
+    # The same restart-safe recovery its siblings get. A claim left behind by a
+    # stopped run would hide an observation that had already arrived, and
+    # nothing would ever raise it again. Done before the runner starts, so no
+    # occasion is offered from a half-recovered ledger.
+    reclaimed_mail = mail_cognition_source.recover(autonomous_budget)
+    if reclaimed_mail:
+        LOGGER.info(
+            "Reclaimed %d mail occasion(s) left claimed by a stopped run",
+            len(reclaimed_mail),
+        )
+    occasion_sources.append(mail_cognition_source)
     if task_runtime is not None:
         completed_work_source = CompletedWorkSource(
             task_runtime.store,
@@ -808,9 +834,12 @@ async def run(repository_root: Path) -> None:
                 " by a stopped run",
                 len(reclaimed_work),
             )
-        occasion_source = CombinedOccasionSource(
-            cognition_source, completed_work_source
-        )
+        occasion_sources.append(completed_work_source)
+    occasion_source: Any = (
+        occasion_sources[0]
+        if len(occasion_sources) == 1
+        else CombinedOccasionSource(*occasion_sources)
+    )
 
     autonomous_runner = AutonomousCognitionRunner(
         occasion_source,

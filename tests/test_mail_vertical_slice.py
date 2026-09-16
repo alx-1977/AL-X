@@ -212,6 +212,12 @@ class Queued:
         return self.decisions.pop(0)
 
 
+def next_arrival(state):
+    """The oldest arrival still awaiting delivery, or None."""
+    awaiting = state.unclaimed_arrivals()
+    return awaiting[0] if awaiting else None
+
+
 class MailProviderTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -234,30 +240,34 @@ class MailProviderTests(unittest.TestCase):
 
     def test_first_scan_is_a_baseline_and_only_later_mail_is_announced(self) -> None:
         self.adapter.scan()
-        self.assertIsNone(self.state.current())
+        self.assertIsNone(next_arrival(self.state))
         self.imap.items[2] = message("New quote", "The quote is R2,000")
         self.adapter.scan()
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.assertIsNotNone(event)
         self.assertEqual(event.data["uid"], "2")
         self.assertNotIn("body", event.data)
 
-    async def _next_event(self):
-        stream = self.adapter.events()
-        try:
-            return await anext(stream)
-        finally:
-            await stream.aclose()
+    def _announced_event(self):
+        """The arrival as a turn receives it, body attached.
+
+        Context is where the body is read now. The delivery generator that
+        used to attach it lived only as long as a voice session, so a message
+        could be observed and never read; building turn context does it for
+        every turn instead, whether or not anyone is connected.
+        """
+        for event in self.adapter.contextual_events():
+            if event.kind in ("mail.message_arrived", "mail.message_waiting"):
+                return event
+        return None
 
     def test_announced_event_carries_body_transiently_without_persisting_it(self) -> None:
-        import asyncio
-
         self.adapter.scan()
         self.imap.items[2] = message("New quote", "The quote is R2,000")
-        # Discovery is the process poller's job now, so the delivery stream is
-        # asked only to carry what scanning has already made durable.
+        # Discovery is the process poller's job, so reading context only
+        # carries what scanning has already made durable.
         self.adapter.scan()
-        event = asyncio.run(self._next_event())
+        event = self._announced_event()
         self.assertEqual(event.transient_data["body"], "The quote is R2,000")
         self.assertNotIn("body", event.data)
         retained = self.state._connection.execute(
@@ -310,7 +320,7 @@ class MailProviderTests(unittest.TestCase):
         self.adapter.scan()
         self.imap.items[2] = message("Handled", "Done")
         self.adapter.scan()
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.adapter.record_delivery(event.event_id)
         self.adapter.mark_seen(MailReference("INBOX", "777", "2"))
         stores = [item for item in self.imap.commands
@@ -321,14 +331,16 @@ class MailProviderTests(unittest.TestCase):
         )
         self.assertFalse(any(item[0:2] == ("UID", "MOVE")
                              for item in self.imap.commands))
-        self.assertIsNone(self.state.current())
+        # Marking seen is not settling: the observation is still hers to
+        # release, so it remains both eligible and in context.
+        self.assertEqual(next_arrival(self.state).data["uid"], "2")
         self.assertEqual(self.state.contextual_events()[0].data["uid"], "2")
 
     def test_mark_seen_failure_is_structured_and_does_not_release_attention(self) -> None:
         self.adapter.scan()
         self.imap.items[2] = message("Handled", "Done")
         self.adapter.scan()
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.adapter.record_delivery(event.event_id)
         self.imap.store_status = "NO"
         current = ["seen-1"]
@@ -344,26 +356,31 @@ class MailProviderTests(unittest.TestCase):
         self.adapter.scan()
         self.imap.items[2] = message("Later", "Come back to this")
         self.adapter.scan()
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.adapter.record_delivery(event.event_id)
         self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
         self.assertFalse(any(item[0:2] == ("UID", "STORE")
                              for item in self.imap.commands))
 
-    def test_unconfirmed_event_is_offered_again_to_a_new_voice_session(self) -> None:
-        import asyncio
+    def test_an_unsettled_observation_is_offered_again(self) -> None:
+        """Reading it does not consume it; only settling does.
 
+        The re-offer used to depend on a new voice session asking the delivery
+        stream again. It is now a property of the durable observation itself,
+        so an unsettled message is still there whether or not anyone connected
+        in between, and the ledger is what stops it becoming a second turn.
+        """
         self.adapter.scan()
         self.imap.items[2] = message("Retry me", "Transient body")
-        # The process poller discovers; each session then carries what is
+        # The process poller discovers; reading context carries what is
         # already durable, which is what makes the re-offer possible.
         self.adapter.scan()
-        first = asyncio.run(self._next_event())
-        second = asyncio.run(self._next_event())
+        first = self._announced_event()
+        second = self._announced_event()
         self.assertEqual(first.event_id, second.event_id)
         self.assertEqual(first.transient_data["body"], "Transient body")
         self.assertEqual(second.transient_data["body"], "Transient body")
-        self.assertEqual(self.state.current().data["uid"], "2")
+        self.assertEqual(next_arrival(self.state).data["uid"], "2")
 
     def test_the_cursor_advances_across_non_contiguous_identifiers(self) -> None:
         """Regression: the cursor required the next identifier to be last + 1.
@@ -402,7 +419,7 @@ class MailProviderTests(unittest.TestCase):
         self.adapter.scan()
         self.imap.items[2] = message("Provenance", "private body")
         self.adapter.scan()
-        current = self.state.current()
+        current = next_arrival(self.state)
         self.assertEqual(
             current.provenance.mail_references,
             (MailReference("INBOX", "777", "2"),),
@@ -410,20 +427,25 @@ class MailProviderTests(unittest.TestCase):
         deadline = current.provenance.content_expires_at
         self.state.close()
         self.state = SQLiteMailObservationState(self.path)
-        recovered = self.state.current()
+        recovered = next_arrival(self.state)
         self.assertEqual(recovered.provenance.content_expires_at, deadline)
 
-    def test_later_mail_stays_queued_until_the_presented_item_is_released(self) -> None:
+    def test_a_burst_is_reported_whole_rather_than_one_at_a_time(self) -> None:
         self.adapter.scan()
         self.imap.items[2] = message("Promotion", "Promo body")
         self.imap.items[3] = message("Parts order", "When do the parts arrive?")
         self.adapter.scan()
-        first = self.state.current()
+        first = next_arrival(self.state)
         self.adapter.record_delivery(first.event_id)
-        self.assertIsNone(self.state.current())
-        # Only "Promotion" has been announced. "Parts order" is visible to her
-        # as waiting -- that is how a burst is judged in one turn -- but it is
-        # not delivered and does not become current on its own.
+        # The store no longer holds one observation at a time: exactly-once is
+        # the opportunity ledger's job, so both are reported and the ledger
+        # decides which has already been taken. A delivered item stays until
+        # she settles it, because delivery is not the same as being finished.
+        self.assertEqual(
+            [item.data["subject"] for item in self.state.unclaimed_arrivals()],
+            ["Promotion", "Parts order"],
+        )
+        # She still sees what she is holding and what is waiting behind it.
         self.assertEqual(
             [
                 (item.kind, item.data["subject"])
@@ -435,8 +457,7 @@ class MailProviderTests(unittest.TestCase):
             ],
         )
         self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
-        second = self.state.current()
-        self.assertEqual(second.data["subject"], "Parts order")
+        self.assertEqual(next_arrival(self.state).data["subject"], "Parts order")
 
     def test_contextual_events_stay_bounded(self) -> None:
         from alx.providers import SQLiteMailObservationState
@@ -446,7 +467,7 @@ class MailProviderTests(unittest.TestCase):
             self.imap.items[uid] = message(f"Subject {uid}", "body")
         self.adapter.scan()
         for _ in range(10):
-            item = self.state.current()
+            item = next_arrival(self.state)
             if item is None:
                 break
             self.adapter.record_delivery(item.event_id)
@@ -460,37 +481,39 @@ class MailProviderTests(unittest.TestCase):
             len(waiting), SQLiteMailObservationState.WAITING_EVENT_LIMIT
         )
 
-    def test_delivered_item_stays_context_and_blocks_later_delivery(self) -> None:
+    def test_a_delivered_item_stays_context_without_holding_the_queue(self) -> None:
         """Delivery confirmation does not mean Friedl finished with the mail."""
         self.adapter.scan()
         self.imap.items[2] = message("First", "First body")
         self.imap.items[3] = message("Second", "Second body")
         self.adapter.scan()
-        first = self.state.current()
+        first = next_arrival(self.state)
         self.assertEqual(first.data["uid"], "2")
         self.adapter.record_delivery(first.event_id)
         # Still the referent for "reply to that".
         self.assertEqual(self.adapter.contextual_events()[0].data["subject"], "First")
-        # The later item remains queued rather than being announced back-to-back.
-        self.assertIsNone(self.state.current())
+        # And the later item is reported alongside it rather than held behind.
+        self.assertEqual(
+            [item.data["uid"] for item in self.state.unclaimed_arrivals()],
+            ["2", "3"],
+        )
         self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
-        self.assertEqual(self.state.current().data["uid"], "3")
+        self.assertEqual(next_arrival(self.state).data["uid"], "3")
         retained = self.state._connection.execute(
             "SELECT event_json FROM mail_observations WHERE uid = 2"
         ).fetchone()[0]
         self.assertNotIn("subject", retained)
         self.assertNotIn("sender", retained)
 
-    def test_presented_item_still_blocks_after_restart(self) -> None:
+    def test_a_presented_item_survives_restart_as_context(self) -> None:
         self.adapter.scan()
         self.imap.items[2] = message("First", "First body")
         self.imap.items[3] = message("Second", "Second body")
         self.adapter.scan()
-        first = self.state.current()
+        first = next_arrival(self.state)
         self.adapter.record_delivery(first.event_id)
         self.state.close()
         self.state = SQLiteMailObservationState(self.path)
-        self.assertIsNone(self.state.current())
         self.assertEqual(
             self.state.contextual_events()[0].data["subject"], "First"
         )
@@ -499,32 +522,36 @@ class MailProviderTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(pending, 1)
 
-    def test_legacy_presented_item_blocks_an_already_current_later_item(self) -> None:
-        """Upgrading must not announce a pre-promoted item behind an open one."""
+    def test_a_legacy_current_row_is_still_deliverable(self) -> None:
+        """Upgrading must not strand a row an earlier runtime had promoted."""
         self.adapter.scan()
         self.imap.items[2] = message("First", "First body")
         self.imap.items[3] = message("Second", "Second body")
         self.adapter.scan()
-        first = self.state.current()
+        first = next_arrival(self.state)
         self.adapter.record_delivery(first.event_id)
         with self.state._connection:
             self.state._connection.execute(
                 "UPDATE mail_observations SET state = 'current' WHERE uid = 3"
             )
-        self.assertIsNone(self.state.current())
+        # A row an earlier runtime promoted is reported, not stranded.
+        self.assertIn(
+            "Second",
+            [item.data["subject"] for item in self.state.unclaimed_arrivals()],
+        )
         self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
-        self.assertEqual(self.state.current().data["subject"], "Second")
+        self.assertEqual(next_arrival(self.state).data["subject"], "Second")
 
     def test_successful_trash_releases_the_next_item(self) -> None:
         self.adapter.scan()
         self.imap.items[2] = message("First", "First body")
         self.imap.items[3] = message("Second", "Second body")
         self.adapter.scan()
-        first = self.state.current()
+        first = next_arrival(self.state)
         self.adapter.record_delivery(first.event_id)
         trash = self.adapter.move_to_trash(MailReference("INBOX", "777", "2"))
         self.assertEqual(trash, "Deleted Messages")
-        self.assertEqual(self.state.current().data["subject"], "Second")
+        self.assertEqual(next_arrival(self.state).data["subject"], "Second")
 
     def test_read_uses_peek_and_trash_is_discovered_then_moved(self) -> None:
         self.adapter.scan()
@@ -645,6 +672,21 @@ class MailPrimitiveTests(unittest.TestCase):
             directory.cleanup()
 
 
+def mail_occasion(event, conversation_id="conversation-1"):
+    """The occasion an observed message raises, as MailCognitionSource makes it."""
+    from alx.contracts import CognitionOpportunity
+    from alx.continuity.mail_source import MailCognitionSource
+
+    return CognitionOpportunity(
+        opportunity_id=MailCognitionSource.opportunity_id_for(event.event_id),
+        origin=CognitionOrigin.EXTERNAL_EVENT,
+        arose_at=event.occurred_at,
+        conversation_id=conversation_id,
+        references=(f"mail_observation:{event.event_id}",),
+        provenance=event.provenance,
+    )
+
+
 class BackgroundEventBoundaryTests(unittest.TestCase):
     def test_gateway_keeps_event_transient_and_core_owns_response(self) -> None:
         directory = tempfile.TemporaryDirectory()
@@ -657,6 +699,7 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             conversations,
             identifier_factory=lambda: "response-1",
             clock=lambda: NOW,
+            contextual_events=lambda: (event,),
         )
         event = BackgroundEvent(
             "mail:777:2",
@@ -669,12 +712,24 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             ),
         )
         try:
-            outcome = gateway.receive_background_event(
-                "conversation-1", event, 1, RETENTION
+            outcome = gateway.receive_cognition_opportunity(
+                "conversation-1", mail_occasion(event), 1, RETENTION
             )
             self.assertEqual(outcome.response, "A supplier sent a quote.")
-            self.assertEqual(reasoner.contexts[0].events[0].transient_data["body"], "private body")
-            self.assertEqual(reasoner.contexts[0].trigger_event_id, event.event_id)
+            # The observation reaches the turn as context, carrying the body
+            # transiently. The occasion itself is a separate event beside it.
+            observed = [
+                item for item in reasoner.contexts[0].events
+                if item.kind == "mail.message_arrived"
+            ]
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0].transient_data["body"], "private body")
+            # The trigger is the occasion, which is a different identity from
+            # the observation so that both survive the gateway's event merge.
+            self.assertEqual(
+                reasoner.contexts[0].trigger_event_id,
+                mail_occasion(event).opportunity_id,
+            )
             self.assertIs(reasoner.contexts[0].origin, CognitionOrigin.EXTERNAL_EVENT)
             recovered = conversations.load("conversation-1")
             self.assertEqual(recovered.events, ())
@@ -717,17 +772,23 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             conversations,
             identifier_factory=lambda: "response-1",
             clock=lambda: NOW,
+            contextual_events=lambda: (event,),
         )
         event = BackgroundEvent(
             "mail:777:2", "mail.message_arrived", NOW,
             {"mailbox_id": "INBOX", "uid": "2"},
         )
         try:
-            gateway.receive_background_event("conversation-1", event, 1, RETENTION)
+            gateway.receive_cognition_opportunity(
+                "conversation-1", mail_occasion(event), 1, RETENTION
+            )
             self.assertEqual(person.contexts, [])
             self.assertEqual(len(external.contexts), 1)
             self.assertIs(external.contexts[0].origin, CognitionOrigin.EXTERNAL_EVENT)
-            self.assertEqual(external.contexts[0].trigger_event_id, event.event_id)
+            self.assertEqual(
+                external.contexts[0].trigger_event_id,
+                mail_occasion(event).opportunity_id,
+            )
         finally:
             conversations.close()
             goals.close()
@@ -757,14 +818,15 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             conversations,
             identifier_factory=lambda: "response-1",
             clock=lambda: NOW,
+            contextual_events=lambda: (event,),
         )
         event = BackgroundEvent(
             "mail:777:2", "mail.message_arrived", NOW,
             {"mailbox_id": "INBOX", "uid": "2"},
         )
         try:
-            result = gateway.receive_background_event(
-                "conversation-1", event, 1, RETENTION
+            result = gateway.receive_cognition_opportunity(
+                "conversation-1", mail_occasion(event), 1, RETENTION
             )
             self.assertIs(result.state, CoreState.FINISHED_SILENTLY)
             self.assertEqual(result.reason, "autonomous_reasoning_disabled")
@@ -803,14 +865,15 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             conversations,
             identifier_factory=lambda: "response-1",
             clock=lambda: NOW,
+            contextual_events=lambda: (event,),
         )
         event = BackgroundEvent(
             "mail:777:2", "mail.message_arrived", NOW,
             {"mailbox_id": "INBOX", "uid": "2"},
         )
         try:
-            result = gateway.receive_background_event(
-                "conversation-1", event, 1, RETENTION
+            result = gateway.receive_cognition_opportunity(
+                "conversation-1", mail_occasion(event), 1, RETENTION
             )
             self.assertIs(result.state, CoreState.ERROR)
             self.assertEqual(result.reason, "reasoner_error")
