@@ -6,6 +6,7 @@ import subprocess
 import sys
 import unittest
 import ast
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -76,6 +77,31 @@ class RepositoryRuntimeTests(unittest.TestCase):
             self.assertFalse(kwargs["shell"])
             self.assertFalse(kwargs["check"])
             self.assertEqual(kwargs["timeout"], 7)
+
+    def test_lifecycle_git_calls_use_only_fixed_safe_configuration(self):
+        provider, runner = self._provider(answers(origin=SHA_A))
+        provider.synchronize()
+        for _, kwargs in runner.calls:
+            environment = kwargs["env"]
+            self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+            self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+            self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+            self.assertEqual(environment["GIT_ASKPASS"], os.devnull)
+            self.assertEqual(environment["SSH_ASKPASS"], os.devnull)
+            values = {
+                environment[f"GIT_CONFIG_KEY_{index}"]:
+                environment[f"GIT_CONFIG_VALUE_{index}"]
+                for index in range(int(environment["GIT_CONFIG_COUNT"]))
+            }
+            self.assertEqual(values, {
+                "core.hooksPath": os.devnull,
+                "core.fsmonitor": "false",
+                "credential.helper": "",
+                "core.askPass": "",
+                "remote.origin.uploadpack": "git-upload-pack",
+            })
+            self.assertNotIn("GIT_SSH_COMMAND", environment)
+            self.assertNotIn("GIT_CONFIG_PARAMETERS", environment)
 
     def test_already_current_does_not_merge(self):
         provider, runner = self._provider(answers(origin=SHA_A))

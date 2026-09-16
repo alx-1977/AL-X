@@ -615,6 +615,22 @@ class SingleExecutionSiteTest(unittest.TestCase):
                  or (node.value.id == "asyncio" and node.attr in self.ASYNCIO_EXECUTION_NAMES))
         ]
         self.assertEqual([(node.value.id, node.attr) for node in process_references], [("subprocess", "run")])
+        dynamic_process_references = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and (
+                (node.args[0].id in {"subprocess", "os", "multiprocessing"}
+                 and node.args[1].value in self.EXECUTION_NAMES | {"Process", "Pool"})
+                or (node.args[0].id == "asyncio"
+                    and node.args[1].value in self.ASYNCIO_EXECUTION_NAMES)
+            )
+        ]
+        self.assertEqual(dynamic_process_references, [])
         runner_calls = [
             node for node in ast.walk(tree)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -787,6 +803,10 @@ class SingleExecutionSiteTest(unittest.TestCase):
             "\nsubprocess.Popen(['git'])\n",
             "\nimport os\nos.system('git status')\n",
             "\nimport asyncio\nasyncio.create_subprocess_exec('git')\n",
+            "\ngetattr(subprocess, 'Popen')(['git'])\n",
+            "\nimport os\ngetattr(os, 'system')('git status')\n",
+            "\nimport multiprocessing\ngetattr(multiprocessing, 'Process')()\n",
+            "\nimport asyncio\ngetattr(asyncio, 'create_subprocess_exec')('git')\n",
         ):
             with self.subTest(mutation=mutation):
                 with self.assertRaises(AssertionError):

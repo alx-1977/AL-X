@@ -8,6 +8,7 @@ enumerated literal argv tuple rooted at the checkout supplied at construction.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import subprocess
 from threading import Lock, RLock
@@ -27,6 +28,24 @@ _TRACKING_COMMIT = ("git", "rev-parse", "--verify", "refs/remotes/origin/main^{c
 _LOCAL_ANCESTOR = ("git", "merge-base", "--is-ancestor", "refs/heads/main", "refs/remotes/origin/main")
 _REMOTE_ANCESTOR = ("git", "merge-base", "--is-ancestor", "refs/remotes/origin/main", "refs/heads/main")
 _MERGE = ("git", "merge", "--ff-only", "refs/remotes/origin/main")
+
+# These lifecycle commands read a configured checkout, but they must not let
+# that checkout (or the service account) choose code to execute.  This is a
+# command-local boundary: it neither accepts configuration from Core nor
+# changes the enumerated Git argv authority above.
+_NO_HOOKS = "/dev/null"
+_SAFE_GIT_CONFIG = {
+    "core.hooksPath": _NO_HOOKS,
+    "core.fsmonitor": "false",
+    # An empty helper resets helpers inherited from configuration.  Prompting
+    # is independently disabled below, so an unavailable credential fails
+    # closed rather than invoking an askpass program.
+    "credential.helper": "",
+    "core.askPass": "",
+    # `remote.origin.uploadpack` can name an executable.  The permitted
+    # fetch uses the ordinary built-in upload-pack only.
+    "remote.origin.uploadpack": "git-upload-pack",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +81,34 @@ _LIFECYCLE_LOCKS_GUARD = Lock()
 def _lifecycle_lock(root: Path) -> RLock:
     with _LIFECYCLE_LOCKS_GUARD:
         return _LIFECYCLE_LOCKS.setdefault(root, RLock())
+
+
+def _git_environment() -> dict[str, str]:
+    """Return the small, fixed environment for canonical Git lifecycle calls.
+
+    User and system configuration are not read.  The remaining checkout
+    configuration cannot restore the explicitly forced values below, and no
+    inherited Git helper, SSH command, askpass program, or config injection is
+    passed through to the child process.
+    """
+    environment = {
+        name: os.environ[name]
+        for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
+        if name in os.environ
+    }
+    environment.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": os.devnull,
+        "SSH_ASKPASS": os.devnull,
+        # Prevent an inherited environment from adding its own -c values.
+        "GIT_CONFIG_COUNT": str(len(_SAFE_GIT_CONFIG)),
+    })
+    for index, (key, value) in enumerate(_SAFE_GIT_CONFIG.items()):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    return environment
 
 
 class CanonicalRepositoryRuntime:
@@ -169,7 +216,8 @@ class CanonicalRepositoryRuntime:
     def _run(self, argv: tuple[str, ...], phase: str) -> subprocess.CompletedProcess[str]:
         try:
             return self._runner(argv, cwd=self._root, shell=False, check=False,
-                                capture_output=True, text=True, timeout=self._timeout)
+                                capture_output=True, text=True, timeout=self._timeout,
+                                env=_git_environment())
         except OSError as error:
             raise RepositoryRuntimeError("git_unavailable", phase) from error
         except subprocess.TimeoutExpired as error:
