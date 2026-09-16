@@ -771,6 +771,12 @@ class CoreAgent:
                 # identifiers, is the retry identity.  This occurs before a
                 # checkpoint, broker call, or approval claim, so exhaustion
                 # cannot create a pending job or consume authority.
+                if self._coding_retry_already_exhausted(snapshot.state):
+                    return CoreOutcome(
+                        CoreState.CHECKPOINTED,
+                        snapshot,
+                        reason="coding_retry_exhausted",
+                    )
                 refusal = CapabilityAttempt(
                     decision.call,
                     CapabilityAttemptDisposition.REJECTED,
@@ -1809,6 +1815,16 @@ class CoreAgent:
             and item.implementation_invoked is True
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
+        )
+
+    @staticmethod
+    def _coding_retry_already_exhausted(state: GoalState) -> bool:
+        """Whether this durable goal already recorded the fixed refusal."""
+        return any(
+            item.call is not None
+            and item.call.capability_id == _RUN_CODING_TASK
+            and item.reason_code == "coding_retry_exhausted"
+            for item in state.attempts
         )
 
     @staticmethod

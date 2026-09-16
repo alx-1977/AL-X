@@ -129,6 +129,12 @@ CODING_PROCESS_SITES = {
     CODING_GIT_SITE,
 }
 
+# D-030 has its own fixed, configured canonical-main transition. It is neither
+# a Sandbox experiment nor Coding Agent authority. The generic execution-site
+# scan admits this one source only; its literal argv and no-generic-surface
+# assertions live with the repository-runtime contract tests.
+REPOSITORY_RUNTIME_SITE = PRODUCTION_ROOT / "providers" / "repository_runtime.py"
+
 
 def _sandbox_modules() -> list[Path]:
     named = set(PRODUCTION_ROOT.rglob("*sandbox*.py"))
@@ -586,7 +592,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES:
+            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES or path == REPOSITORY_RUNTIME_SITE:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -612,7 +618,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES:
+            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES or path == REPOSITORY_RUNTIME_SITE:
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):

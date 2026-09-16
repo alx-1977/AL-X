@@ -1375,7 +1375,9 @@ repair branch creation. All other D-029 constraints remain unchanged.
 
 - **Date:** 2026-09-16
 - **Decision owner:** Friedl
-- **Status: APPROVED by Friedl, 2026-09-16.**
+- **Status: APPROVED by Friedl, 2026-09-16.** Approval source: the approved
+  design and implementation conversation in this AL/X development thread,
+  2026-09-16.
 
 **Purpose.** Allow AL/X, through one bounded repository-runtime capability, to
 inspect the configured canonical checkout and, when deterministic preconditions

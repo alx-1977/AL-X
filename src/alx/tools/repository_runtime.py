@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import logging
 from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, CapabilityResultState, SideEffect, StructuredSchema, ValueKind
 from alx.contracts.repository_runtime import REPOSITORY_RUNTIME_FAILURES, RepositoryRuntimeError
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 INSPECT_REPOSITORY_STATE = "inspect_repository_state"
@@ -34,9 +38,13 @@ def build_repository_runtime_executors(inspect: Callable[[], Any], synchronize: 
         except RepositoryRuntimeError as error:
             return CapabilityResult(call_id, capability_id, CapabilityResultState.FAILED,
                                     failure={"code": error.code, "phase": error.phase})
-        except Exception:
+        except (AttributeError, TypeError, ValueError) as error:
+            # The provider contract is the only expected failure surface. A
+            # malformed adapter must remain visible as its own declared fact,
+            # without leaking command output or exception text into Core.
+            LOGGER.warning("Repository runtime adapter failed: %s", type(error).__name__)
             return CapabilityResult(call_id, capability_id, CapabilityResultState.FAILED,
-                                    failure={"code": "repository_root_unusable"})
+                                    failure={"code": "repository_runtime_unavailable"})
         return CapabilityResult(call_id, capability_id, CapabilityResultState.SUCCEEDED, state.as_values())
 
     return {

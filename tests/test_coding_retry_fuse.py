@@ -83,6 +83,32 @@ class CodingRetryFuseTests(unittest.TestCase):
             self.assertIsNot(attempts[-1].disposition, CapabilityAttemptDisposition.PENDING)
             self.assertEqual(len(reasoner.contexts[1].active_goal.attempts), 3)
 
+    def test_reworded_attempt_after_exhaustion_does_not_append_another_refusal(self):
+        now = datetime(2026, 9, 16, tzinfo=UTC)
+        retention = now + timedelta(days=1)
+
+        class Reasoner:
+            def __init__(self):
+                self.decisions = [
+                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first wording", "worktree": "."}), goal_id="goal-a"),
+                    AgentDecision(call=CapabilityCall("reworded", "run_coding_task", {"task": "different wording", "worktree": "."}), goal_id="goal-a"),
+                ]
+            def decide(self, context):
+                return self.decisions.pop(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            self.addCleanup(store.close)
+            store.create(state(attempt("first"), attempt("second")), "conversation", retention)
+            schema = StructuredSchema(ValueKind.OBJECT)
+            capability = CapabilityDefinition("run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL)
+            agent = CoreAgent(store, Reasoner(), lambda *_: self.fail("must not dispatch"), (capability,), clock=lambda: now)
+            conversation = ConversationSnapshot("conversation", (ConversationTurn("conversation", "t", ConversationOrigin.TYPED, "continue", now, "friedl"),), 1, retention)
+            outcome = agent.process(conversation, retention, 3)
+            refusals = [item for item in store.load("goal-a").state.attempts if item.reason_code == "coding_retry_exhausted"]
+            self.assertEqual(len(refusals), 1)
+            self.assertEqual(outcome.reason, "coding_retry_exhausted")
+
 
 if __name__ == "__main__":
     unittest.main()

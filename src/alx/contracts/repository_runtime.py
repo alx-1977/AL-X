@@ -5,7 +5,9 @@ REPOSITORY_RUNTIME_FAILURES = (
     "origin_mismatch", "head_detached", "branch_not_main", "local_main_invalid",
     "worktree_dirty", "worktree_untracked", "git_unavailable", "git_timeout",
     "fetch_failed", "tracking_ref_missing", "tracking_ref_invalid", "local_ahead",
-    "history_diverged", "fast_forward_refused",
+    "history_diverged", "ancestry_failed", "repository_state_changed",
+    "repository_runtime_unavailable",
+    "tracking_ref_changed", "fast_forward_refused",
 )
 
 

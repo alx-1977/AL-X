@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
+from threading import Lock, RLock
 from typing import Callable
 
 from alx.contracts.repository_runtime import REPOSITORY_RUNTIME_FAILURES, RepositoryRuntimeError
@@ -51,6 +52,18 @@ class RepositoryState:
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+# Every configured runtime for the same checkout shares this lock.  It covers
+# inspection and the complete synchronization transition so AL/X never
+# interleaves its own lifecycle operations on a canonical checkout.
+_LIFECYCLE_LOCKS: dict[Path, RLock] = {}
+_LIFECYCLE_LOCKS_GUARD = Lock()
+
+
+def _lifecycle_lock(root: Path) -> RLock:
+    with _LIFECYCLE_LOCKS_GUARD:
+        return _LIFECYCLE_LOCKS.setdefault(root, RLock())
+
+
 class CanonicalRepositoryRuntime:
     """Inspect and fast-forward only the checkout fixed at construction."""
 
@@ -65,29 +78,40 @@ class CanonicalRepositoryRuntime:
         self._origin = _normalised_origin(origin_url)
         self._timeout = timeout_seconds
         self._runner = runner
+        self._lifecycle_lock = _lifecycle_lock(self._root)
 
     def inspect(self) -> RepositoryState:
-        return self._preflight()
+        with self._lifecycle_lock:
+            return self._preflight()
 
     def synchronize(self) -> RepositoryState:
-        before = self._preflight()
-        self._must_succeed(_FETCH, "fetch", "fetch_failed")
-        if not self._ok(_TRACKING_EXISTS, "tracking_ref"):
-            raise RepositoryRuntimeError("tracking_ref_missing", "tracking_ref")
-        origin_main = self._commit(_TRACKING_COMMIT, "tracking_ref", "tracking_ref_invalid")
-        if origin_main == before.local_before:
-            return RepositoryState(before.repository_identity, before.branch,
-                                   before.local_before, origin_main,
-                                   before.local_before, "already_current")
-        if self._ok(_LOCAL_ANCESTOR, "ancestry"):
-            self._must_succeed(_MERGE, "fast_forward", "fast_forward_refused")
-            after = self._commit(_HEAD_COMMIT, "post_merge", "fast_forward_refused")
-            return RepositoryState(before.repository_identity, before.branch,
-                                   before.local_before, origin_main, after,
-                                   "fast_forwarded")
-        if self._ok(_REMOTE_ANCESTOR, "ancestry"):
-            raise RepositoryRuntimeError("local_ahead", "ancestry")
-        raise RepositoryRuntimeError("history_diverged", "ancestry")
+        with self._lifecycle_lock:
+            before = self._preflight()
+            self._must_succeed(_FETCH, "fetch", "fetch_failed")
+            if not self._ok(_TRACKING_EXISTS, "tracking_ref"):
+                raise RepositoryRuntimeError("tracking_ref_missing", "tracking_ref")
+            origin_main = self._commit(_TRACKING_COMMIT, "tracking_ref", "tracking_ref_invalid")
+            if origin_main == before.local_before:
+                return RepositoryState(before.repository_identity, before.branch,
+                                       before.local_before, origin_main,
+                                       before.local_before, "already_current")
+            if self._ancestry(_LOCAL_ANCESTOR):
+                # Fetch and ancestry are facts only while this checkout remains
+                # exactly the verified canonical main. Recheck immediately
+                # before the effect and refuse if either relevant ref changed.
+                current = self._preflight()
+                if current.local_before != before.local_before:
+                    raise RepositoryRuntimeError("repository_state_changed", "pre_merge")
+                if self._commit(_TRACKING_COMMIT, "pre_merge", "tracking_ref_invalid") != origin_main:
+                    raise RepositoryRuntimeError("tracking_ref_changed", "pre_merge")
+                self._must_succeed(_MERGE, "fast_forward", "fast_forward_refused")
+                after = self._commit(_HEAD_COMMIT, "post_merge", "fast_forward_refused")
+                return RepositoryState(before.repository_identity, before.branch,
+                                       before.local_before, origin_main, after,
+                                       "fast_forwarded")
+            if self._ancestry(_REMOTE_ANCESTOR):
+                raise RepositoryRuntimeError("local_ahead", "ancestry")
+            raise RepositoryRuntimeError("history_diverged", "ancestry")
 
     def _preflight(self) -> RepositoryState:
         if not self._root.is_dir():
@@ -133,6 +157,14 @@ class CanonicalRepositoryRuntime:
 
     def _ok(self, argv: tuple[str, ...], phase: str) -> bool:
         return self._run(argv, phase).returncode == 0
+
+    def _ancestry(self, argv: tuple[str, ...]) -> bool:
+        completed = self._run(argv, "ancestry")
+        if completed.returncode == 0:
+            return True
+        if completed.returncode == 1:
+            return False
+        raise RepositoryRuntimeError("ancestry_failed", "ancestry")
 
     def _run(self, argv: tuple[str, ...], phase: str) -> subprocess.CompletedProcess[str]:
         try:
