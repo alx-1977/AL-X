@@ -2,7 +2,7 @@
 
 Status ledger for AL/X. Reorganized 2026-09-15 to separate proven capability
 from MVP, known problems, and plans. Evidence: code inspection at HEAD
-`795b23e`.
+`02e730e`.
 
 ## Working
 
@@ -25,6 +25,17 @@ Implemented and proven in real use.
 - [x] **Web search** — Brave-backed search wired into a capability
   (`ASK_WEB_SEARCH`, `providers/web_search.py`, `BraveWebSearchProvider`),
   fails closed if unusable. Live-tested per Friedl.
+- [x] **Coding Agent stabilization** — the existing debug console shows live
+  PLAN, EXECUTION, REVIEW, TEST, and COMPLETE progress; unique repair-branch
+  collision handling is proven. An end-to-end Coding Agent job completed:
+  CASE → PLAN → EXECUTION → REVIEW → TEST → COMPLETE → durable goal
+  completion → normal final response.
+- [x] **Coding-result durability and external-event recovery** — grounded
+  evidence persists despite a rejected goal mutation; failed historical
+  attempt evidence cannot poison a later successful completion; semantic
+  memory identity conflicts no longer become `memory_persistence_error`.
+  Background facts enter as `EXTERNAL_EVENT`; disabled autonomous reasoning
+  handles them silently and records delivery rather than replaying an error.
 
 ## Partial / MVP
 
@@ -64,32 +75,36 @@ inadequate.
   actually invoked from Core's main reasoning loop or only registered as
   available.
 - [ ] **Coding/autonomous-work orchestration** needs:
-  1. Progress visibility during long-running jobs (partial today via
-     `_report_activity`; not confirmed sufficient for a human watching live).
-  2. Immediate Pause / Stop-after-current-job control that does not depend
+  1. Immediate Pause / Stop-after-current-job control that does not depend
      on waiting for normal Core conversation processing. **Not found in the
      codebase** — confirmed absent, not just unconfirmed.
-  3. Goal/step-level retry and provider-spend limits, not merely per-job
+  2. Goal/job-level retry and provider-spend limits, not merely per-job
      planning limits.
-  4. Explicit PLAN vs EXECUTION runtime telemetry, including start/end
-     events.
-  5. Bounded GitHub workflow authority so verified work can be pushed to
+  3. Bounded GitHub workflow authority so verified work can be pushed to
      branches, PRs opened/updated, checks/reviews read, and Qodo requested
      without manual Git intervention. No automatic merge authority.
-  6. Coding execution must occur in isolated job worktrees rather than
-     risking edits in the live main repository.
-  7. Simplify the coding reasoning loop so Core does not micromanage CA/
+  4. General hardening and proof of AL/X-owned isolated job
+     workspaces/worktrees.
+  5. Reduce repeated whole-job redispatch and simplify the coding reasoning
+     loop so Core does not micromanage CA/
      reviewer work. Core should provide scope/authority once and re-enter
      only for genuine judgment, blockers, authority escalation, exhausted
      budgets, or completion.
-  8. Reassess review layering. Coding Agent + Core + internal reviewer +
+  6. Reassess review layering. Coding Agent + Core + internal reviewer +
      external Qodo currently all participate; review should become
      risk-based so multiple expensive reasoning models are not all
      commenting on every routine change.
-  9. Background/asynchronous coding jobs so Core remains available
-      conversationally while CA work continues.
-  10. Usage-aware scheduling/budgeting so AL/X can avoid beginning work that
+  7. Background/asynchronous coding jobs so Core remains available
+     conversationally while CA work continues.
+  8. Usage-aware scheduling/provider capacity/budgeting so AL/X can avoid
+      beginning work that
       cannot be completed with available provider capacity.
+
+  Non-blocking follow-ups:
+  - Final spoken Coding Agent reporting should distinguish review completion
+    from no correction being required.
+  - Reasoning-usage telemetry still has duplicate/invalid values such as
+    `input 4`, `total 0`, and `undefined tier`.
 
 ## Planned
 
@@ -163,7 +178,9 @@ Kept visible for a while even though done.
   branch suffix (`-2`, `-3`, …) without touching existing branches.
 - [x] Dirty-path progress-evidence issue investigated and confirmed already
   correct; no code change required.
-- Current `main` after the above merges: `795b23e`.
+- [x] PR #37 — Stabilize Coding Agent evidence, memory-conflict handling,
+  and background-event recovery (merged).
+- Current `main` after the above merges: `02e730e`.
 
 **Control-test resource baseline** (observed benchmark, not a permanent
 cost estimate):
