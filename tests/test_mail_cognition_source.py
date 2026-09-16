@@ -909,6 +909,262 @@ class ReconciliationCannotStrandAClaimedOccasion(unittest.TestCase):
         self.assertEqual(state, "done")
 
 
+class AStaleOpportunityNeverReachesTheLedger(unittest.TestCase):
+    """The mark is the precondition, not a courtesy.
+
+    `claim` marked the observation and then threw the answer away. A snapshot
+    taken before reconciliation and claimed after it therefore still got a
+    ledger row: the observation was already settled, so the turn would have run
+    on the synthetic occasion alone, and the row it left behind had to be
+    reclaimed by a later recovery pass for a message that no longer existed.
+
+    The order is now load-bearing. The observation must be durably marked
+    before the ledger takes ownership, and a mark that reports no live
+    observation refuses the claim outright. A stale occasion is not a failure
+    needing replay -- it is an occasion that no longer exists -- so it leaves
+    no row at all.
+    """
+
+    def setUp(self) -> None:
+        from alx.providers import ICloudMailAdapter, SQLiteMailObservationState
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_mail_vertical_slice import FakeImap, message
+
+        self.message = message
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.state = SQLiteMailObservationState(root / "observations.sqlite3")
+        self.addCleanup(self.state.close)
+        self.imap = FakeImap()
+        self.adapter = ICloudMailAdapter(
+            "imap.example.test", 993, "friedl@example.test", "secret",
+            self.state, 1, connection_factory=lambda *a, **k: self.imap,
+        )
+        self.ledger = SQLiteOpportunityLedger(root / "opportunities.sqlite3")
+        self.addCleanup(self.ledger.close)
+        self.source = MailCognitionSource(self.adapter, self.ledger, enabled=True)
+
+    def _stale_snapshot(self):
+        """A due occasion whose observation is settled before it is claimed."""
+        self.adapter.scan()
+        self.imap.items[2] = self.message("Quote", "R2,000 for the parts")
+        self.adapter.scan()
+        occasion = self.source.due_opportunities()[0]
+        # Reconciliation settles it silently: nothing was ever shown, so under
+        # the store's own rule nothing is owed.
+        del self.imap.items[2]
+        self.adapter.scan()
+        return occasion
+
+    def test_the_observation_reports_that_it_is_gone(self) -> None:
+        self._stale_snapshot()
+
+        self.assertFalse(self.state.mark_claimed("mail:777:2"))
+
+    def test_the_claim_is_refused(self) -> None:
+        occasion = self._stale_snapshot()
+
+        self.assertFalse(self.source.claim(occasion))
+
+    def test_no_ledger_row_is_written(self) -> None:
+        """Nothing to reclaim later, because nothing was ever owned."""
+        occasion = self._stale_snapshot()
+
+        self.source.claim(occasion)
+
+        self.assertFalse(self.ledger.exists(occasion.opportunity_id))
+
+    def test_the_core_is_never_invoked(self) -> None:
+        """The runner stops at the refused claim, before any dispatch."""
+        from alx.bootstrap.autonomous import AutonomousCognitionRunner
+
+        class NeverCalled:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def receive_cognition_opportunity(self, *arguments):
+                self.calls.append(arguments)
+                raise AssertionError("the Core ran on a stale occasion")
+
+        gateway = NeverCalled()
+        occasion = self._stale_snapshot()
+        runner = AutonomousCognitionRunner(
+            self.source, self.ledger, gateway, 4, 3650, clock=lambda: NOW
+        )
+
+        ran = runner.run_one(occasion)
+
+        self.assertFalse(ran, "a refused claim does not run")
+        self.assertEqual(gateway.calls, [])
+
+    def test_no_synthetic_only_turn_is_possible(self) -> None:
+        """The whole point: a turn either has its observation or does not run."""
+        occasion = self._stale_snapshot()
+
+        claimed = self.source.claim(occasion)
+
+        self.assertFalse(claimed)
+        observed = [
+            item for item in self.adapter.contextual_events()
+            if item.kind.startswith("mail.message")
+        ]
+        self.assertEqual(
+            observed, [],
+            "the observation is genuinely gone, so no turn should have been "
+            "claimed for it",
+        )
+
+    def test_a_live_observation_is_still_claimable(self) -> None:
+        """The refusal must not catch ordinary occasions."""
+        self.adapter.scan()
+        self.imap.items[2] = self.message("Quote", "R2,000")
+        self.adapter.scan()
+
+        occasion = self.source.due_opportunities()[0]
+
+        self.assertTrue(self.source.claim(occasion))
+        self.assertTrue(self.ledger.exists(occasion.opportunity_id))
+
+    def test_an_already_shown_observation_is_still_claimable(self) -> None:
+        """Being shown a waiting item marks it too; that is not staleness.
+
+        Reporting "already marked" as failure would refuse an occasion for
+        every message she had already been shown, which is most of them.
+        """
+        self.adapter.scan()
+        self.imap.items[2] = self.message("Quote", "R2,000")
+        self.adapter.scan()
+        self.adapter.contextual_events()  # a turn builds context, marking it
+
+        occasion = self.source.due_opportunities()[0]
+
+        self.assertFalse(
+            self.state.mark_claimed("mail:777:2") is None,
+            "the observation is live",
+        )
+        self.assertTrue(self.source.claim(occasion))
+
+    def test_a_mark_that_raises_still_fails_closed(self) -> None:
+        """Preserved: an unrecordable claim is refused, not taken."""
+        class Exploding:
+            def unclaimed_arrivals(self):
+                return (arrival(),)
+
+            def pending_vanished(self):
+                return ()
+
+            def mark_claimed(self, event_id):
+                raise RuntimeError("observation store unavailable")
+
+        source = MailCognitionSource(Exploding(), self.ledger, enabled=True)
+        occasion = source.due_opportunities()[0]
+
+        self.assertFalse(source.claim(occasion))
+        self.assertFalse(self.ledger.exists(occasion.opportunity_id))
+
+
+class AHeaderlessMessageKeepsOneConversation(Fixture):
+    """An arrival and its disappearance are one message, so one thread.
+
+    The fallback used the event id, and one message produces two events. The
+    disappearance therefore landed in a conversation that had never heard of
+    the message, while the thread that raised it waited for an answer that
+    arrived somewhere else.
+    """
+
+    def _headerless(self, uid: str, *, gone: bool = False) -> BackgroundEvent:
+        data = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": uid}
+        if gone:
+            return BackgroundEvent(
+                f"mail:777:{uid}:vanished", "mail.message_vanished", NOW, data
+            )
+        return BackgroundEvent(
+            f"mail:777:{uid}", "mail.message_arrived", NOW, data
+        )
+
+    def test_arrival_and_disappearance_share_one_conversation(self) -> None:
+        arrived = self._headerless("2")
+        gone = self._headerless("2", gone=True)
+
+        self.assertEqual(
+            mail_conversation_id(arrived), mail_conversation_id(gone)
+        )
+
+    def test_the_identity_names_the_observation_not_the_variant(self) -> None:
+        gone = self._headerless("2", gone=True)
+
+        self.assertEqual(mail_conversation_id(gone), "mail-thread:mail:777:2")
+
+    def test_different_headerless_messages_stay_separate(self) -> None:
+        """Normalising the variant must not merge unrelated messages."""
+        first = self._headerless("2")
+        second = self._headerless("3")
+
+        self.assertNotEqual(
+            mail_conversation_id(first), mail_conversation_id(second)
+        )
+        self.assertNotEqual(
+            mail_conversation_id(self._headerless("2", gone=True)),
+            mail_conversation_id(self._headerless("3", gone=True)),
+        )
+
+    def test_identity_survives_restart_and_reconciliation(self) -> None:
+        """Rebuilt from the mailbox coordinates, which the row keeps."""
+        before = mail_conversation_id(self._headerless("2"))
+        after = mail_conversation_id(self._headerless("2", gone=True))
+
+        self.assertEqual(before, after)
+        # And again from a freshly constructed event, as a restart would.
+        self.assertEqual(before, mail_conversation_id(self._headerless("2")))
+
+    def test_rfc_threading_is_unchanged(self) -> None:
+        """The hierarchy above the fallback still decides when it can."""
+        root = arrival("2", "<a@example.test>")
+        reply = arrival(
+            "3", "<b@example.test>",
+            in_reply_to="<a@example.test>",
+            references=["<a@example.test>"],
+        )
+
+        self.assertEqual(mail_conversation_id(root), "mail-thread:<a@example.test>")
+        self.assertEqual(mail_conversation_id(reply), mail_conversation_id(root))
+
+    def test_a_threaded_disappearance_still_uses_its_headers(self) -> None:
+        """The fallback applies only when there are no identifiers at all."""
+        gone = vanished("2", "<a@example.test>")
+
+        self.assertEqual(mail_conversation_id(gone), "mail-thread:<a@example.test>")
+
+    def test_the_producer_keeps_both_facts_in_one_thread(self) -> None:
+        mail = FakeMailSource(
+            [self._headerless("2")], [self._headerless("2", gone=True)]
+        )
+        source = self.source(mail)
+
+        conversations = {
+            occasion.conversation_id
+            for occasion in source.due_opportunities()
+        }
+
+        self.assertEqual(len(conversations), 1)
+
+    def test_they_remain_two_occasions_in_that_one_thread(self) -> None:
+        """Sharing a conversation must not merge the occasions themselves."""
+        mail = FakeMailSource(
+            [self._headerless("2")], [self._headerless("2", gone=True)]
+        )
+        source = self.source(mail)
+
+        identities = {
+            occasion.opportunity_id
+            for occasion in source.due_opportunities()
+        }
+
+        self.assertEqual(len(identities), 2)
+
+
 class TheComposedRuntimeIncludesMail(unittest.TestCase):
     """The composition root actually wires mail into the process-lifetime tick.
 

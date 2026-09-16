@@ -35,6 +35,11 @@ LOGGER = logging.getLogger(__name__)
 # once here rather than spelled out at each site.
 OBSERVATION_PREFIX = "mail_observation:"
 
+# How the observation store names the disappearance of a message, as opposed to
+# its arrival. One message produces both, so stripping this is what recovers the
+# message an event is about.
+VANISHED_SUFFIX = ":vanished"
+
 
 # What an occasion raised from an observation is called. The observation keeps
 # its own identity; this names the occasion to think about it, so the gateway's
@@ -65,10 +70,17 @@ def mail_conversation_id(event: Any) -> str:
     than to this function. Identifier headers are mechanical: either the
     message names its parent or it does not.
 
-    A message carrying no usable identifier at all falls back to its own
-    durable observation identity, so it gets its own thread rather than joining
+    A message carrying no usable identifier at all falls back to the identity
+    of the observation itself, so it gets its own thread rather than joining
     somebody else's. That is the safe direction: a thread too narrow costs
     continuity, a thread too wide leaks one conversation into another.
+
+    The fallback names the observation, never the event variant. One message
+    produces two events -- it arrived, and later it is gone -- and using the
+    event id put the disappearance in a different conversation from the arrival
+    it settles. She would have been told a message was gone in a thread that
+    had never heard of it, while the thread that raised it waited for an answer
+    that arrived somewhere else.
     """
     data = getattr(event, "data", None) or {}
     references = data.get("references") or ()
@@ -77,9 +89,29 @@ def mail_conversation_id(event: Any) -> str:
     for candidate in (*references, data.get("in_reply_to"), data.get("message_id")):
         if isinstance(candidate, str) and candidate.strip():
             return f"mail-thread:{candidate.strip()}"
-    # No identifier headers. The observation's own identity is stable across
-    # restart and unique to this message, so it becomes a thread of one.
-    return f"mail-thread:{getattr(event, 'event_id', '')}".rstrip(":") or "mail-thread"
+    return f"mail-thread:{observation_identity(event)}"
+
+
+def observation_identity(event: Any) -> str:
+    """The durable message an event is about, without its variant suffix.
+
+    `mail:<uid_validity>:<uid>` for both `mail:<uid_validity>:<uid>` and
+    `mail:<uid_validity>:<uid>:vanished`, because those are two facts about one
+    message rather than two messages. Derived from the mailbox coordinates when
+    they are present, and from the event id otherwise, so it is stable across
+    restart and reconciliation exactly as the observation row is.
+    """
+    data = getattr(event, "data", None) or {}
+    uid_validity = str(data.get("uid_validity") or "").strip()
+    uid = str(data.get("uid") or "").strip()
+    if uid_validity and uid:
+        return f"mail:{uid_validity}:{uid}"
+    # No coordinates to rebuild from. The event id is the only identity left,
+    # so the variant suffix is removed from it instead.
+    event_id = str(getattr(event, "event_id", "") or "").strip()
+    if event_id.endswith(VANISHED_SUFFIX):
+        event_id = event_id[: -len(VANISHED_SUFFIX)]
+    return event_id or "unidentified"
 
 
 class MailCognitionSource:
@@ -91,11 +123,6 @@ class MailCognitionSource:
     nothing, which matters because a replayed occasion is a second paid Core
     call for one message.
     """
-
-    # An arrival and a disappearance of the same message are different facts,
-    # so they are different occasions. The suffix that keeps them apart is the
-    # observation store's own, carried through rather than reinvented.
-    _VANISHED_SUFFIX = ":vanished"
 
     def __init__(
         self,
@@ -225,18 +252,40 @@ class MailCognitionSource:
         that window, because the mark is written before anything is spent and
         reconciliation reads the same durable fact.
 
-        The mark is best effort in one direction only. If it cannot be written
-        the claim is refused rather than taken, because a claimed occasion whose
-        observation may vanish silently is the state this exists to prevent.
+        The mark is the precondition, not a courtesy. The observation must be
+        durably marked before the ledger takes ownership, so the order here is
+        the whole property: mark, then claim, and refuse if the mark did not
+        happen.
+
+        False from `mark_claimed` means there is no live observation left to
+        mark. The snapshot this occasion came from is stale: reconciliation
+        settled the message between `due_opportunities` and here. Taking the
+        claim anyway wrote a ledger row for a message the turn could no longer
+        see, and the Core was dispatched on the synthetic occasion alone. It is
+        refused instead, and deliberately without a ledger row: a stale
+        opportunity is not a failure needing replay, it is an occasion that no
+        longer exists, and leaving no row means nothing has to be reclaimed.
+
+        A mark that raises is refused the same way, because a claimed occasion
+        whose observation may vanish silently is exactly the state this exists
+        to prevent.
         """
         for reference in opportunity.references:
             if not reference.startswith(OBSERVATION_PREFIX):
                 continue
             try:
-                self._source.mark_claimed(reference[len(OBSERVATION_PREFIX):])
+                marked = self._source.mark_claimed(
+                    reference[len(OBSERVATION_PREFIX):]
+                )
             except Exception:  # noqa: BLE001 - an unrecordable claim is refused
                 LOGGER.warning(
                     "Refusing %s: its observation could not be marked claimed",
+                    opportunity.opportunity_id,
+                )
+                return False
+            if not marked:
+                LOGGER.info(
+                    "Skipping %s: its observation is no longer live",
                     opportunity.opportunity_id,
                 )
                 return False

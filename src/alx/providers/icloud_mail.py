@@ -611,9 +611,17 @@ class SQLiteMailObservationState:
         all, reasoning about a synthetic occasion for a message it could not
         see, and the disappearance was never reported.
 
-        True when it moved. False when the row was already exposed or is no
-        longer live, which is benign: the fact it records is already true, or
-        there is no longer an observation to record it against.
+        Answers one question only: is there a live observation now carrying
+        this mark. True when the row is live and marked, whether this call set
+        the mark or an earlier one did -- being shown a waiting item marks it
+        too, and a claim after that is still a claim on a message that exists.
+        False means there is no live observation left to mark at all, which is
+        the caller's signal that the occasion is stale and must be refused.
+
+        The two are deliberately not collapsed. Writing the mark only when it
+        changes is idempotent and fine; reporting *that* as failure would refuse
+        every occasion for a message she had already been shown, which is most
+        of them.
         """
         parts = event_id.split(":")
         if len(parts) >= 3 and parts[0] == "mail" and parts[2].isdigit():
@@ -621,15 +629,23 @@ class SQLiteMailObservationState:
         else:
             raise MailAccessError("observation_unavailable")
         with self._lock, self._connection:
-            return bool(
-                self._connection.execute(
-                    "UPDATE mail_observations SET context_exposed = 1 "
-                    "WHERE uid_validity = ? AND uid = ? "
-                    "AND state IN ('pending', 'current', 'presented') "
-                    "AND context_exposed = 0",
-                    (uid_validity, uid),
-                ).rowcount
+            self._connection.execute(
+                "UPDATE mail_observations SET context_exposed = 1 "
+                "WHERE uid_validity = ? AND uid = ? "
+                "AND state IN ('pending', 'current', 'presented') "
+                "AND context_exposed = 0",
+                (uid_validity, uid),
             )
+            # Read back rather than trusting the update's rowcount, so an
+            # already-marked live row and a row that is gone are told apart.
+            row = self._connection.execute(
+                "SELECT 1 FROM mail_observations "
+                "WHERE uid_validity = ? AND uid = ? "
+                "AND state IN ('pending', 'current', 'presented') "
+                "AND context_exposed = 1",
+                (uid_validity, uid),
+            ).fetchone()
+        return row is not None
 
     def _settle_silently(
         self, mailbox_id: str, uid_validity: str, uid: int
