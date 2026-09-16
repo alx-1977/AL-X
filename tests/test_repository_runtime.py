@@ -124,6 +124,26 @@ class RepositoryRuntimeTests(unittest.TestCase):
         attempt = broker.dispatch(CapabilityCall("call", INSPECT_REPOSITORY_STATE, {}), AuthorityContext("alx", frozenset({REPOSITORY_INSPECT_PERMISSION}), datetime.now(UTC)))
         self.assertEqual(attempt.result.failure["code"], "repository_runtime_unavailable")
 
+    def test_malformed_provider_results_are_declared_unavailable(self):
+        class Malformed:
+            def __init__(self, value):
+                self._value = value
+            def inspect(self):
+                return self._value
+            def synchronize(self):
+                return self._value
+
+        class InvalidState:
+            def as_values(self):
+                return {"branch": "main"}
+
+        for value in (None, InvalidState()):
+            with self.subTest(value=type(value).__name__):
+                runtime = build_canonical_repository_runtime(True, ROOT, "owner/repo", "git@github.com:owner/repo.git", 7, lambda: "call", Malformed(value))
+                broker = CapabilityBroker(CapabilityRegistry(runtime.definitions), SafetyGate(runtime.policies), runtime.executors)
+                attempt = broker.dispatch(CapabilityCall("call", INSPECT_REPOSITORY_STATE, {}), AuthorityContext("alx", frozenset({REPOSITORY_INSPECT_PERMISSION}), datetime.now(UTC)))
+                self.assertEqual(attempt.result.failure["code"], "repository_runtime_unavailable")
+
     def test_fixed_repository_process_site_has_no_generic_command_surface(self):
         source = (REPOSITORY_ROOT / "src/alx/providers/repository_runtime.py").read_text()
         tree = ast.parse(source)

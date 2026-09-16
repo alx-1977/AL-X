@@ -130,9 +130,8 @@ CODING_PROCESS_SITES = {
 }
 
 # D-030 has its own fixed, configured canonical-main transition. It is neither
-# a Sandbox experiment nor Coding Agent authority. The generic execution-site
-# scan admits this one source only; its literal argv and no-generic-surface
-# assertions live with the repository-runtime contract tests.
+# a Sandbox experiment nor Coding Agent authority. Its exact process boundary
+# is asserted below before the generic scans skip its separately governed site.
 REPOSITORY_RUNTIME_SITE = PRODUCTION_ROOT / "providers" / "repository_runtime.py"
 
 
@@ -589,7 +588,50 @@ class SingleExecutionSiteTest(unittest.TestCase):
         self.assertIs(keywords["shell"].value, False)
         self.assertIs(keywords["check"].value, False)
 
+    def _assert_repository_runtime_process_boundary(self, source: str) -> None:
+        """D-030 permits one fixed Git runner, not a module-wide exemption."""
+        tree = ast.parse(source)
+        process_imports = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Import) and any(
+                alias.name in {"subprocess", "multiprocessing", "pty"}
+                for alias in node.names
+            )
+            or isinstance(node, ast.ImportFrom) and (
+                (node.module or "") in {"subprocess", "multiprocessing", "pty"}
+                or (node.module == "os" and {alias.name for alias in node.names} & self.EXECUTION_NAMES)
+                or (node.module == "asyncio" and {alias.name for alias in node.names} & self.ASYNCIO_EXECUTION_NAMES)
+            )
+        ]
+        self.assertEqual(len(process_imports), 1)
+        imported = process_imports[0]
+        self.assertIsInstance(imported, ast.Import)
+        self.assertEqual([(alias.name, alias.asname) for alias in imported.names], [("subprocess", None)])
+
+        process_references = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and ((node.value.id in {"subprocess", "os"} and node.attr in self.EXECUTION_NAMES)
+                 or (node.value.id == "asyncio" and node.attr in self.ASYNCIO_EXECUTION_NAMES))
+        ]
+        self.assertEqual([(node.value.id, node.attr) for node in process_references], [("subprocess", "run")])
+        runner_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"
+            and node.func.attr == "_runner"
+        ]
+        self.assertEqual(len(runner_calls), 1)
+        keywords = {item.arg: item.value for item in runner_calls[0].keywords}
+        for name in ("cwd", "shell", "check", "capture_output", "text", "timeout"):
+            self.assertIn(name, keywords)
+        self.assertIs(keywords["shell"].value, False)
+        self.assertIs(keywords["check"].value, False)
+        self.assertIs(keywords["capture_output"].value, True)
+        self.assertIs(keywords["text"].value, True)
+
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
+        self._assert_repository_runtime_process_boundary(REPOSITORY_RUNTIME_SITE.read_text())
         offenders = []
         for path in self._production_modules():
             if path in EXECUTION_SITES or path in CODING_PROCESS_SITES or path == REPOSITORY_RUNTIME_SITE:
@@ -737,6 +779,18 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 self.test_no_production_module_calls_a_process_execution_function()
         finally:
             planted.unlink()
+
+    def test_repository_runtime_forbidden_process_paths_are_detected(self) -> None:
+        source = REPOSITORY_RUNTIME_SITE.read_text()
+        for mutation in (
+            "\nimport multiprocessing\n",
+            "\nsubprocess.Popen(['git'])\n",
+            "\nimport os\nos.system('git status')\n",
+            "\nimport asyncio\nasyncio.create_subprocess_exec('git')\n",
+        ):
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(AssertionError):
+                    self._assert_repository_runtime_process_boundary(source + mutation)
 
     def test_the_reasoning_transport_has_one_approved_runner_site(self) -> None:
         for site, model_class_name in (

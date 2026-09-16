@@ -757,12 +757,6 @@ class CoreAgent:
                     snapshot,
                     reason="approval_capability_already_dispatched",
                 )
-            if self._repeats_rejected_call(snapshot.state, decision.call, now):
-                return CoreOutcome(
-                    CoreState.ERROR,
-                    snapshot,
-                    reason="repeated_rejected_call",
-                )
             if (
                 decision.call.capability_id == _RUN_CODING_TASK
                 and self._failed_coding_executions(snapshot.state) >= _MAX_FAILED_CODING_EXECUTIONS
@@ -790,6 +784,12 @@ class CoreAgent:
                     decision_provenance,
                 )
                 continue
+            if self._repeats_rejected_call(snapshot.state, decision.call, now):
+                return CoreOutcome(
+                    CoreState.ERROR,
+                    snapshot,
+                    reason="repeated_rejected_call",
+                )
             authority_state = snapshot.state
             pending = CapabilityAttempt(decision.call, CapabilityAttemptDisposition.PENDING,
                                         None, reason_code="dispatch_pending")
@@ -1815,6 +1815,7 @@ class CoreAgent:
             and item.implementation_invoked is True
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
+            and (item.result.failure or {}).get("code") != "arguments_unusable"
         )
 
     @staticmethod

@@ -35,6 +35,9 @@ def build_repository_runtime_executors(inspect: Callable[[], Any], synchronize: 
         call_id = call_id_source()
         try:
             state = operation()
+            values = state.as_values()
+            if not _OUTPUT.accepts(values):
+                raise ValueError("repository runtime result is malformed")
         except RepositoryRuntimeError as error:
             return CapabilityResult(call_id, capability_id, CapabilityResultState.FAILED,
                                     failure={"code": error.code, "phase": error.phase})
@@ -45,7 +48,7 @@ def build_repository_runtime_executors(inspect: Callable[[], Any], synchronize: 
             LOGGER.warning("Repository runtime adapter failed: %s", type(error).__name__)
             return CapabilityResult(call_id, capability_id, CapabilityResultState.FAILED,
                                     failure={"code": "repository_runtime_unavailable"})
-        return CapabilityResult(call_id, capability_id, CapabilityResultState.SUCCEEDED, state.as_values())
+        return CapabilityResult(call_id, capability_id, CapabilityResultState.SUCCEEDED, values)
 
     return {
         INSPECT_REPOSITORY_STATE: lambda arguments: execute(INSPECT_REPOSITORY_STATE, inspect),
