@@ -114,10 +114,9 @@ DEFINITION = CapabilityDefinition(
     "commit_message is optional and requires repair_branch: give both to have "
     "the job's own changed files committed on that branch once its tests pass, "
     "returning branch and commit_sha. Only files this job changed are "
-    "committed; a worktree already carrying somebody else's modifications "
-    "leaves them untouched and uncommitted, and the commit is refused rather "
-    "than widened if anything unrelated would be included. It still does not "
-    "push, merge, deploy, or request an external review.",
+    "committed: the commit is refused rather than widened if the index or the "
+    "resulting tree holds any path outside that authorised set. It still does "
+    "not push, merge, deploy, or request an external review.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
