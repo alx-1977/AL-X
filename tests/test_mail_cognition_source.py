@@ -1040,8 +1040,8 @@ class AStaleOpportunityNeverReachesTheLedger(unittest.TestCase):
 
         occasion = self.source.due_opportunities()[0]
 
-        self.assertFalse(
-            self.state.mark_claimed("mail:777:2") is None,
+        self.assertTrue(
+            self.state.mark_claimed("mail:777:2"),
             "the observation is live",
         )
         self.assertTrue(self.source.claim(occasion))
