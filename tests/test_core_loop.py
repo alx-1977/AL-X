@@ -590,14 +590,159 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(outcome.snapshot.state.status, GoalStatus.COMPLETED)
         self.assertEqual(outcome.snapshot.state.evidence, (evidence,))
 
-    def test_a_failed_action_cannot_be_cited_as_evidence_it_happened(self) -> None:
-        """Evidence must point at something that actually worked.
+    def test_grounded_evidence_persists_when_completion_is_rejected_then_completes(self) -> None:
+        """A capability fact outlives a premature completion mutation."""
+        call = CapabilityCall("call-1", "inspect", {})
+        attempt = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-1", "inspect", CapabilityResultState.SUCCEEDED,
+                             {"value": 7}),
+        )
+        criteria = (
+            SuccessCriterion("criterion-1", "inspection recorded"),
+            SuccessCriterion("criterion-2", "result verified"),
+        )
+        self.store.create(
+            goal(success_criteria=criteria, attempts=(attempt,)),
+            "conversation-1", RETENTION,
+        )
+        recorded = Evidence(
+            "evidence-inspection", "inspection_result",
+            supports=("criterion-1",), source_references=("attempt:call-1",),
+        )
+        premature = GoalProposal(
+            GoalMutationKind.REQUEST_COMPLETION, new_evidence=(recorded,),
+        )
+        rejected = self.agent(Queued(AgentDecision(
+            response="The inspection is recorded.", goal_proposal=premature,
+            response_requires_goal_commit=True,
+        ), selects="goal-1")).process(conversation(), RETENTION, 1)
 
-        The grounding check confirmed an attempt existed but never that it
-        succeeded, so a failed save could be cited as proof the save happened
-        and the goal would close as complete. AL/X would report work finished
-        that no store ever received.
-        """
+        self.assertEqual(rejected.state, CoreState.ERROR)
+        self.assertEqual(rejected.reason, "goal_proposal_invalid")
+        self.assertEqual(rejected.snapshot.state.evidence, (recorded,))
+        self.assertEqual(self.store.load("goal-1").state.evidence, (recorded,))
+
+        verified = Evidence(
+            "evidence-verification", "verification_result",
+            supports=("criterion-2",), source_references=("turn:turn-1",),
+        )
+        correction = Queued(
+            AgentDecision(goal_id="goal-1"),
+            AgentDecision(
+                response="The result is verified.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.REQUEST_COMPLETION, new_evidence=(verified,),
+                ),
+                response_requires_goal_commit=True,
+            ),
+        )
+        completed = self.agent(correction).process(conversation(), RETENTION, 2)
+
+        self.assertEqual(correction.contexts[1].active_goal.evidence, (recorded,))
+        self.assertEqual(completed.state, CoreState.RESPONDED)
+        self.assertIs(completed.snapshot.state.status, GoalStatus.COMPLETED)
+        self.assertEqual(completed.snapshot.state.evidence, (recorded, verified))
+
+    def test_replayed_evidence_identifier_is_idempotent_on_completion_correction(self) -> None:
+        call = CapabilityCall("call-1", "inspect", {})
+        attempt = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-1", "inspect", CapabilityResultState.SUCCEEDED,
+                             {"value": 7}),
+        )
+        criteria = (
+            SuccessCriterion("criterion-1", "inspection recorded"),
+            SuccessCriterion("criterion-2", "result verified"),
+        )
+        self.store.create(
+            goal(success_criteria=criteria, attempts=(attempt,)),
+            "conversation-1", RETENTION,
+        )
+        recorded = Evidence(
+            "evidence-inspection", "inspection_result",
+            supports=("criterion-1",), source_references=("attempt:call-1",),
+        )
+        first = GoalProposal(GoalMutationKind.REQUEST_COMPLETION,
+                             new_evidence=(recorded,))
+        self.agent(Queued(AgentDecision(
+            response="Recorded.", goal_proposal=first,
+            response_requires_goal_commit=True,
+        ), selects="goal-1")).process(conversation(), RETENTION, 1)
+        verified = Evidence(
+            "evidence-verification", "verification_result",
+            supports=("criterion-2",), source_references=("turn:turn-1",),
+        )
+        completed = self.agent(Queued(AgentDecision(
+            response="Verified.",
+            goal_proposal=GoalProposal(
+                GoalMutationKind.REQUEST_COMPLETION,
+                new_evidence=(recorded, verified),
+            ),
+            response_requires_goal_commit=True,
+        ), selects="goal-1")).process(conversation(), RETENTION, 1)
+
+        self.assertIs(completed.snapshot.state.status, GoalStatus.COMPLETED)
+        self.assertEqual(completed.snapshot.state.evidence, (recorded, verified))
+
+    def test_ungrounded_attempt_evidence_is_not_persisted(self) -> None:
+        call = CapabilityCall("call-1", "inspect", {})
+        cases = (
+            ("pending", CapabilityAttempt(
+                call, CapabilityAttemptDisposition.PENDING, None,
+                reason_code="dispatch_pending",
+            ), "attempt:call-1"),
+            ("failed_before_invocation", CapabilityAttempt(
+                call, CapabilityAttemptDisposition.REJECTED, False, None,
+                reason_code="input_invalid",
+            ), "attempt:call-1"),
+            ("nonexistent", None, "attempt:not-real"),
+        )
+        for name, attempt, source in cases:
+            with self.subTest(name=name):
+                attempts = () if attempt is None else (attempt,)
+                state = goal(goal_id=f"goal-{name}", attempts=attempts)
+                snapshot = self.store.create(state, "conversation-1", RETENTION)
+                candidate = Evidence(
+                    "evidence-1", "unsupported",
+                    supports=("criterion-1",), source_references=(source,),
+                )
+                reduced, error = self.agent(Queued())._reduce_goal_proposal(
+                    snapshot,
+                    GoalProposal(
+                        GoalMutationKind.REQUEST_COMPLETION,
+                        new_evidence=(candidate,),
+                    ),
+                    conversation(),
+                )
+                self.assertEqual(error, "evidence_source_unknown")
+                self.assertEqual(reduced, state)
+                self.assertEqual(self.store.load(state.goal_id).state.evidence, ())
+
+    def test_repeated_completion_refusal_keeps_its_one_correction_budget(self) -> None:
+        self.store.create(goal(), "conversation-1", RETENTION)
+        call = CapabilityCall("call-1", "inspect", {})
+        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
+        reasoner = Queued(
+            AgentDecision(call=call, goal_proposal=proposal),
+            AgentDecision(response="Complete.", goal_proposal=proposal),
+            selects="goal-1",
+        )
+        attempt = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-1", "inspect", CapabilityResultState.SUCCEEDED,
+                             {"value": 7}),
+        )
+        outcome = self.agent(reasoner, lambda proposed, state: attempt).process(
+            conversation(), RETENTION, 3,
+        )
+
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertEqual(len(reasoner.contexts), 2)
+
+    def test_false_success_claim_citing_failed_attempt_cannot_complete(self) -> None:
+        """A completed failure is durable history, never criterion support."""
         self.store.create(goal(), "conversation-1", RETENTION)
         call = CapabilityCall("call-1", "inspect", {})
         failed = CapabilityAttempt(
@@ -623,7 +768,162 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         stored = self.store.load("goal-1").state
         self.assertEqual(stored.status, GoalStatus.ACTIVE)
-        self.assertEqual(stored.evidence, (), "a false claim must not persist")
+        self.assertEqual(stored.evidence, claim.new_evidence)
+
+    def test_failed_and_successful_evidence_for_only_some_criteria_cannot_complete(self) -> None:
+        failed_call = CapabilityCall("call-failed", "inspect", {})
+        succeeded_call = CapabilityCall("call-succeeded", "inspect", {})
+        failed = CapabilityAttempt(
+            failed_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-failed", "inspect", CapabilityResultState.FAILED,
+                             failure={"code": "failed"}),
+        )
+        succeeded = CapabilityAttempt(
+            succeeded_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-succeeded", "inspect", CapabilityResultState.SUCCEEDED,
+                             {"value": 7}),
+        )
+        state = goal(
+            success_criteria=(
+                SuccessCriterion("criterion-1", "first fact"),
+                SuccessCriterion("criterion-2", "second fact"),
+            ),
+            attempts=(failed, succeeded),
+            evidence=(
+                Evidence("failed-fact", "failure", supports=("criterion-2",),
+                         source_references=("attempt:call-failed",)),
+                Evidence("succeeded-fact", "success", supports=("criterion-1",),
+                         source_references=("attempt:call-succeeded",)),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "completion_lacks_sourced_evidence"):
+            CoreAgent._derive_goal_status(state, GoalMutationKind.REQUEST_COMPLETION)
+
+    def test_succeeded_evidence_completes_while_failed_history_remains_durable(self) -> None:
+        failed_call = CapabilityCall("call-failed", "inspect", {})
+        succeeded_call = CapabilityCall("call-succeeded", "inspect", {})
+        failed = CapabilityAttempt(
+            failed_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-failed", "inspect", CapabilityResultState.FAILED,
+                             failure={"code": "failed"}),
+        )
+        succeeded = CapabilityAttempt(
+            succeeded_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-succeeded", "inspect", CapabilityResultState.SUCCEEDED,
+                             {"value": 7}),
+        )
+        failed_fact = Evidence(
+            "failed-fact", "failure", supports=("criterion-1",),
+            source_references=("attempt:call-failed",),
+        )
+        succeeded_facts = (
+            Evidence("succeeded-first", "success", supports=("criterion-1",),
+                     source_references=("attempt:call-succeeded",)),
+            Evidence("succeeded-second", "success", supports=("criterion-2",),
+                     source_references=("attempt:call-succeeded",)),
+        )
+        state = goal(
+            success_criteria=(
+                SuccessCriterion("criterion-1", "first fact"),
+                SuccessCriterion("criterion-2", "second fact"),
+            ),
+            attempts=(failed, succeeded), evidence=(failed_fact, *succeeded_facts),
+        )
+
+        completed = CoreAgent._derive_goal_status(
+            state, GoalMutationKind.REQUEST_COMPLETION,
+        )
+
+        self.assertIs(completed.status, GoalStatus.COMPLETED)
+        self.assertEqual(completed.evidence, (failed_fact, *succeeded_facts))
+
+    def test_one_evidence_item_citing_both_a_succeeded_and_a_failed_attempt_cannot_complete(self) -> None:
+        """One bad citation excludes the whole item, not just the bad half.
+
+        A single evidence item can name more than one attempt: reference.
+        The exclusion in _derive_goal_status must apply to the item as a
+        whole: if any of its attempt citations is not SUCCEEDED, none of what
+        it claims to support may count, even though one of its citations
+        does point at a real success.
+        """
+        succeeded_call = CapabilityCall("call-succeeded", "inspect", {})
+        failed_call = CapabilityCall("call-failed", "inspect", {})
+        succeeded = CapabilityAttempt(
+            succeeded_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-succeeded", "inspect", CapabilityResultState.SUCCEEDED,
+                             {"value": 7}),
+        )
+        failed = CapabilityAttempt(
+            failed_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-failed", "inspect", CapabilityResultState.FAILED,
+                             failure={"code": "failed"}),
+        )
+        mixed_fact = Evidence(
+            "mixed-fact", "combined", supports=("criterion-1",),
+            source_references=("attempt:call-succeeded", "attempt:call-failed"),
+        )
+        state = goal(
+            success_criteria=(SuccessCriterion("criterion-1", "the fact"),),
+            attempts=(succeeded, failed), evidence=(mixed_fact,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "completion_lacks_sourced_evidence"):
+            CoreAgent._derive_goal_status(state, GoalMutationKind.REQUEST_COMPLETION)
+
+    def test_failed_evidence_persists_then_later_successful_attempt_completes(self) -> None:
+        failed_call = CapabilityCall("call-failed", "inspect", {})
+        failed_attempt = CapabilityAttempt(
+            failed_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-failed", "inspect", CapabilityResultState.FAILED,
+                             failure={"code": "failed"}),
+        )
+        failed_fact = Evidence(
+            "failed-fact", "failure", supports=("criterion-1",),
+            source_references=("attempt:call-failed",),
+        )
+        self.store.create(goal(), "conversation-1", RETENTION)
+        first = self.agent(Queued(
+            AgentDecision(call=failed_call),
+            AgentDecision(
+                response="The first attempt failed.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.REQUEST_COMPLETION,
+                    new_evidence=(failed_fact,),
+                ),
+                response_requires_goal_commit=True,
+            ),
+            selects="goal-1",
+        ), lambda proposed, state: failed_attempt).process(conversation(), RETENTION, 2)
+        self.assertEqual(first.reason, "goal_proposal_invalid")
+        self.assertEqual(self.store.load("goal-1").state.evidence, (failed_fact,))
+
+        succeeded_call = CapabilityCall("call-succeeded", "inspect", {})
+        succeeded_attempt = CapabilityAttempt(
+            succeeded_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-succeeded", "inspect", CapabilityResultState.SUCCEEDED,
+                             {"value": 7}),
+        )
+        success_fact = Evidence(
+            "succeeded-fact", "success", supports=("criterion-1",),
+            source_references=("attempt:call-succeeded",),
+        )
+        recovered = self.agent(Queued(
+            AgentDecision(call=succeeded_call),
+            AgentDecision(
+                response="The second attempt succeeded.",
+                goal_proposal=GoalProposal(
+                    GoalMutationKind.REQUEST_COMPLETION,
+                    new_evidence=(success_fact,),
+                ),
+                response_requires_goal_commit=True,
+            ),
+            selects="goal-1",
+        ), lambda proposed, state: succeeded_attempt).process(conversation(), RETENTION, 2)
+
+        self.assertEqual(recovered.state, CoreState.RESPONDED)
+        self.assertIs(recovered.snapshot.state.status, GoalStatus.COMPLETED)
+        self.assertEqual(recovered.snapshot.state.evidence, (failed_fact, success_fact))
 
     def test_a_partial_action_cannot_prove_completion_either(self) -> None:
         """Half of an action having happened does not make it done."""
@@ -808,7 +1108,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(outcome.snapshot.state.status, GoalStatus.ACTIVE)
 
     def test_failed_capability_result_cannot_complete_goal_as_evidence(self) -> None:
-        """A failed notebook write cannot prove that persistence succeeded."""
+        """A failed notebook write remains a durable failure, not success."""
         self.store.create(goal(), "conversation-1", RETENTION)
         call = CapabilityCall("call-1", "inspect", {})
         failed = CapabilityResult(
@@ -844,7 +1144,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         recovered = self.store.load("goal-1").state
         self.assertEqual(recovered.status, GoalStatus.ACTIVE)
-        self.assertEqual(recovered.evidence, ())
+        self.assertEqual(recovered.evidence, (false_evidence,))
 
     def test_read_only_tool_can_serve_ordinary_conversation_without_goal(self) -> None:
         call = CapabilityCall("call-1", "inspect", {})

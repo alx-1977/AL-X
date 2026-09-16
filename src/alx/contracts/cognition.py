@@ -15,6 +15,10 @@ from __future__ import annotations
 from enum import Enum
 
 
+class AutonomousReasoningDisabled(Exception):
+    """An autonomous turn was refused because that reasoning path is off."""
+
+
 class Cognition(str, Enum):
     """How much reasoning capability one bounded question is worth."""
 

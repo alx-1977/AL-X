@@ -343,6 +343,8 @@ class LiveVoiceServer:
                     )
                     continue
                 message = {"type": "phase", "value": event.kind.value}
+                if event.input_origin is not None:
+                    message["input_origin"] = event.input_origin
                 if event.kind is VoiceEventKind.ERROR:
                     message["reason"] = event.reason
                     LOGGER.error("Voice session failed: %s", event.reason)

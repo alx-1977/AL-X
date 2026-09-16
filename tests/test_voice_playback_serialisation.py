@@ -143,6 +143,31 @@ def run_js(body: str) -> dict:
 class PlaybackSerialisationTests(unittest.TestCase):
     """The invariant: one audible utterance at a time, whatever arrives."""
 
+    def test_only_backend_confirmed_speech_gets_a_transcription_diagnostic(self) -> None:
+        result = run_js(textwrap.dedent("""
+            const messages = [];
+            diagnostic = (message) => messages.push(message);
+            handleControl({type: "phase", value: "thinking", input_origin: "background_event"});
+            const background = messages.slice();
+            messages.length = 0;
+            handleControl({type: "phase", value: "thinking", input_origin: "speech_transcript"});
+            console.log(JSON.stringify({background, speech: messages}));
+        """))
+        self.assertNotIn("Final transcription received", result["background"])
+        self.assertIn("Authoritative Core reasoning in progress", result["background"])
+        self.assertIn("Final transcription received", result["speech"])
+
+    def test_disabled_autonomous_event_has_a_neutral_diagnostic(self) -> None:
+        result = run_js(textwrap.dedent("""
+            const messages = [];
+            diagnostic = (message) => messages.push(message);
+            handleControl({type: "diagnostic", code: "autonomous.reasoning_disabled"});
+            console.log(JSON.stringify({messages}));
+        """))
+        self.assertEqual(
+            result["messages"], ["External event skipped · autonomous reasoning disabled"],
+        )
+
     def test_a_second_utterance_does_not_play_over_the_first(self) -> None:
         """The reported bug: mail speech starting over a Core response."""
         result = run_js(textwrap.dedent("""

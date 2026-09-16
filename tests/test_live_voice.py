@@ -253,6 +253,67 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
 
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_background_event_after_recovery_is_not_a_synthetic_speech_turn(self) -> None:
+        """Recovery keeps the exchange alive without reclassifying mail as speech."""
+        released = asyncio.Event()
+        event = BackgroundEvent(
+            "mail:777:2", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid": "2"},
+        )
+
+        class Source:
+            def __init__(self) -> None:
+                self.delivered = []
+
+            async def events(self):
+                await released.wait()
+                yield event
+                await asyncio.Future()
+
+            def record_delivery(self, event_id):
+                self.delivered.append(event_id)
+                return True
+
+        class OpenTranscriber:
+            async def transcribe(self, audio):
+                async for _chunk in audio:
+                    pass
+                yield transcription("one", TranscriptionState.FINAL, "Hello")
+                await asyncio.Future()
+
+        source = Source()
+        gateway = FakeGateway((
+            outcome(
+                GoalStatus.ACTIVE, None, reason="memory_persistence_error",
+                core_state=CoreState.ERROR,
+            ),
+            outcome(GoalStatus.ACTIVE, "Mail observed."),
+        ))
+        session = VoiceSession(
+            gateway, OpenTranscriber(), None, "friedl", 8, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: "turn-1",
+            event_source=source,
+        )
+        iterator = session.exchange("conversation-1", incoming_audio())
+
+        speech_thinking = await iterator.__anext__()
+        self.assertEqual(speech_thinking.input_origin, "speech_transcript")
+        self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.ERROR)
+        self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.LISTENING)
+
+        released.set()
+        background_thinking = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+        self.assertIs(background_thinking.kind, VoiceEventKind.THINKING)
+        self.assertEqual(background_thinking.input_origin, "background_event")
+        self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.TEXT)
+        self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.LISTENING)
+        self.assertEqual([turn.content for turn, *_ in gateway.calls], ["Hello"])
+        self.assertEqual(
+            [item.event_id for _conversation, item, *_ in gateway.background_calls],
+            [event.event_id],
+        )
+        await iterator.aclose()
+
     async def test_queued_coding_transitions_are_emitted_in_order(self) -> None:
         activity = VoiceActivityStatus()
         release = threading.Event()
@@ -534,6 +595,41 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(forwarded, {"type": "diagnostic", **status})
 
+    async def test_websocket_forwards_thinking_input_origin(self) -> None:
+        class Session:
+            async def exchange(self, *_args, **_kwargs):
+                yield VoiceEvent(
+                    VoiceEventKind.THINKING, input_origin="background_event",
+                )
+                yield VoiceEvent(VoiceEventKind.LISTENING)
+
+        sent: list[str] = []
+
+        class Connection:
+            async def send(self, payload):
+                sent.append(payload)
+
+        server = LiveVoiceServer.__new__(LiveVoiceServer)
+        server._session = Session()
+        server._await_audio_confirmation = False
+        server._delivery_queues = {}
+        server._typed_queues = {}
+
+        async def audio():
+            if False:
+                yield AudioChunk("mic", 0, b"", "audio/pcm", 16000)
+
+        server._audio = lambda _connection, _conversation: audio()
+        await server._exchange_once(Connection(), "conversation-1")
+        thinking = next(
+            json.loads(frame) for frame in sent
+            if json.loads(frame).get("value") == "thinking"
+        )
+        self.assertEqual(
+            thinking,
+            {"type": "phase", "value": "thinking", "input_origin": "background_event"},
+        )
+
     async def test_background_event_enters_same_gateway_and_only_core_response_is_spoken(self) -> None:
         event = BackgroundEvent(
             "mail:777:2",
@@ -788,6 +884,57 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             [VoiceEventKind.THINKING, VoiceEventKind.LISTENING],
         )
         self.assertEqual(synthesizer.responses, [])
+
+    async def test_disabled_autonomous_background_is_recorded_without_pipeline_error(self) -> None:
+        event = BackgroundEvent(
+            "mail:777:2", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid": "2"},
+        )
+
+        class Source:
+            def __init__(self) -> None:
+                self.delivered = []
+
+            async def events(self):
+                yield event
+
+            def record_delivery(self, event_id):
+                self.delivered.append(event_id)
+                return True
+
+        source = Source()
+        gateway = FakeGateway((outcome(
+            GoalStatus.ACTIVE,
+            response=None,
+            reason="autonomous_reasoning_disabled",
+            core_state=CoreState.FINISHED_SILENTLY,
+        ),))
+        session = VoiceSession(
+            gateway, FakeTranscriber(()), None, "friedl", 8, 3650,
+            clock=lambda: NOW, event_source=source,
+        )
+        iterator = session.exchange("conversation-1", incoming_audio())
+        events = [await iterator.__anext__() for _ in range(3)]
+        self.assertEqual(
+            [item.kind for item in events],
+            [
+                VoiceEventKind.THINKING,
+                VoiceEventKind.DIAGNOSTIC,
+                VoiceEventKind.LISTENING,
+            ],
+        )
+        self.assertEqual(events[1].diagnostic, {"code": "autonomous.reasoning_disabled"})
+        next_event = asyncio.create_task(iterator.__anext__())
+        for _ in range(20):
+            if source.delivered:
+                break
+            await asyncio.sleep(0.01)
+        next_event.cancel()
+        await asyncio.gather(next_event, return_exceptions=True)
+        self.assertEqual(source.delivered, [event.event_id])
+        self.assertEqual(len(gateway.background_calls), 1)
+        self.assertEqual(gateway.calls, [])
+        await iterator.aclose()
 
     async def test_missing_response_is_still_an_error_not_silence(self) -> None:
         session = VoiceSession(

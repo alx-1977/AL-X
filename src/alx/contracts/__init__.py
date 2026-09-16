@@ -1,6 +1,10 @@
 """Provider-neutral, immutable contracts shared by AL/X boundaries."""
 
-from alx.contracts.cognition import Cognition, CognitionOrigin
+from alx.contracts.cognition import (
+    AutonomousReasoningDisabled,
+    Cognition,
+    CognitionOrigin,
+)
 from alx.contracts.task import ExternalTask, TaskObservation, TaskState
 from alx.contracts.review import (
     REVIEW_FAILURES,
