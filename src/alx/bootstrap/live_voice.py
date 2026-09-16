@@ -64,7 +64,7 @@ from alx.config import (
     XeroSettings,
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
-from alx.continuity.mail_source import MailCognitionSource, mail_conversation_id
+from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity import (
     DueCognitionSource,
@@ -796,10 +796,13 @@ async def run(repository_root: Path) -> None:
     # whether AL/X could think about a message depended on whether a browser
     # was open. Watching the mailbox was already a property of the process;
     # now thinking about what it found is too.
+    # Each message continues the thread its own identifier headers name, so
+    # unrelated correspondence does not share a history, unfinished goals or
+    # autonomous responses. The producer derives that per observation; nothing
+    # here chooses a thread.
     mail_cognition_source = MailCognitionSource(
         mail_runtime.source,
         opportunity_ledger,
-        mail_conversation_id(voice_settings.primary_person_id),
         enabled=providers.autonomous is not None,
     )
     # The same restart-safe recovery its siblings get. A claim left behind by a

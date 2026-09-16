@@ -22,10 +22,18 @@ with separate identities, because settling one says nothing about the other.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
+
+LOGGER = logging.getLogger(__name__)
+
+# How an occasion names the observation it was raised from. The reference is
+# what ties the two together for settling and for claiming, so it is stated
+# once here rather than spelled out at each site.
+OBSERVATION_PREFIX = "mail_observation:"
 
 
 # What an occasion raised from an observation is called. The observation keeps
@@ -34,21 +42,44 @@ from alx.contracts.continuity import CognitionOpportunity
 OCCASION_PREFIX = "mail-occasion:"
 
 
-def mail_conversation_id(person_id: str) -> str:
-    """The durable thread AL/X's thinking about the mailbox continues in.
+def mail_conversation_id(event: Any) -> str:
+    """The durable thread one observed message's cognition continues in.
 
-    Derived rather than generated, so it is the same thread after a restart.
-    A fresh identifier each time would give every observed message its own
-    private history, and she would meet the mailbox for the first time on every
-    occasion.
+    Derived from RFC 5322 identifier headers, which are the only confirmed
+    threading evidence a message carries. The root of the chain names the
+    thread: `References` first, because its first entry is the original
+    message of the conversation; then `In-Reply-To` for a reply whose client
+    sent no chain; and finally the message's own `Message-ID`, which is correct
+    for a message that starts one.
 
-    Scoped by person because relationship context is, under
-    `IDENTITY_AND_MEMORY.md`: one person's mail must not accumulate in a thread
-    another person's turns can reach.
+    This replaced a single mailbox-wide thread keyed on the person. That put
+    every correspondent, every subject and every unfinished goal in one
+    history: AL/X reasoning about one supplier's quote could see, and continue,
+    a goal belonging to an unrelated conversation. A thread boundary is not a
+    presentation detail — it is what keeps one piece of work from silently
+    becoming evidence in another.
+
+    Never inferred from subject similarity. Two unrelated messages can share a
+    subject, a reply can change one, and deciding that two subjects "mean" the
+    same conversation is a semantic judgement that would belong to AL/X rather
+    than to this function. Identifier headers are mechanical: either the
+    message names its parent or it does not.
+
+    A message carrying no usable identifier at all falls back to its own
+    durable observation identity, so it gets its own thread rather than joining
+    somebody else's. That is the safe direction: a thread too narrow costs
+    continuity, a thread too wide leaks one conversation into another.
     """
-    if not person_id.strip():
-        raise ValueError("person_id must not be blank")
-    return f"mail:{person_id.strip()}"
+    data = getattr(event, "data", None) or {}
+    references = data.get("references") or ()
+    if isinstance(references, str):
+        references = (references,)
+    for candidate in (*references, data.get("in_reply_to"), data.get("message_id")):
+        if isinstance(candidate, str) and candidate.strip():
+            return f"mail-thread:{candidate.strip()}"
+    # No identifier headers. The observation's own identity is stable across
+    # restart and unique to this message, so it becomes a thread of one.
+    return f"mail-thread:{getattr(event, 'event_id', '')}".rstrip(":") or "mail-thread"
 
 
 class MailCognitionSource:
@@ -70,19 +101,10 @@ class MailCognitionSource:
         self,
         source: Any,
         ledger: Any,
-        conversation_id: str,
         enabled: bool = False,
     ) -> None:
-        if not conversation_id.strip():
-            raise ValueError("conversation_id must not be blank")
         self._source = source
         self._ledger = ledger
-        # The thread mail belongs to. Unlike a matured request, an observation
-        # has no originating conversation to return to: nobody asked for it, so
-        # there is no turn it arose in. One durable thread is named for it, so
-        # her thinking about the mailbox accumulates in one history rather than
-        # scattering across whichever browser session happened to be open.
-        self._conversation_id = conversation_id
         # Off by default, for the same reason its siblings are: a runtime never
         # told it may think unprompted does not, and observed mail simply waits
         # to be looked at.
@@ -136,12 +158,16 @@ class MailCognitionSource:
                     opportunity_id=opportunity_id,
                     origin=CognitionOrigin.EXTERNAL_EVENT,
                     arose_at=event.occurred_at,
-                    conversation_id=self._conversation_id,
+                    # The thread this message belongs to, from its own
+                    # identifier headers. Unrelated correspondence therefore
+                    # accumulates in unrelated histories, and a reply continues
+                    # the one it replies to.
+                    conversation_id=mail_conversation_id(event),
                     # What the observation is, in the mailbox's own terms.
                     # Never the subject, the sender or the body: AL/X reads
                     # the message herself, through the capabilities that
                     # already exist.
-                    references=(f"mail_observation:{event.event_id}",),
+                    references=(f"{OBSERVATION_PREFIX}{event.event_id}",),
                     provenance=event.provenance,
                 )
             )
@@ -183,12 +209,37 @@ class MailCognitionSource:
     def owns(self, opportunity: CognitionOpportunity) -> bool:
         """Whether this producer made the occasion."""
         return any(
-            reference.startswith("mail_observation:")
+            reference.startswith(OBSERVATION_PREFIX)
             for reference in opportunity.references
         )
 
     def claim(self, opportunity: CognitionOpportunity) -> bool:
-        """Take an occasion exactly once, before anything is spent on it."""
+        """Take an occasion exactly once, before anything is spent on it.
+
+        Taking it also records that the observation behind it is owed an
+        answer. Reconciliation settles an observation nobody has been shown
+        without reporting its disappearance, and a poll cycle between this
+        claim and the turn used to do exactly that: the turn ran with no mail
+        event in context, reasoning about a synthetic occasion for a message it
+        could not see, and the disappearance was lost. Marking it here closes
+        that window, because the mark is written before anything is spent and
+        reconciliation reads the same durable fact.
+
+        The mark is best effort in one direction only. If it cannot be written
+        the claim is refused rather than taken, because a claimed occasion whose
+        observation may vanish silently is the state this exists to prevent.
+        """
+        for reference in opportunity.references:
+            if not reference.startswith(OBSERVATION_PREFIX):
+                continue
+            try:
+                self._source.mark_claimed(reference[len(OBSERVATION_PREFIX):])
+            except Exception:  # noqa: BLE001 - an unrecordable claim is refused
+                LOGGER.warning(
+                    "Refusing %s: its observation could not be marked claimed",
+                    opportunity.opportunity_id,
+                )
+                return False
         return self._ledger.record_created(opportunity)
 
     def release(self, opportunity: CognitionOpportunity) -> None:
@@ -205,6 +256,6 @@ class MailCognitionSource:
         occasion arising again.
         """
         for reference in opportunity.references:
-            if not reference.startswith("mail_observation:"):
+            if not reference.startswith(OBSERVATION_PREFIX):
                 continue
-            self._source.record_delivery(reference[len("mail_observation:"):])
+            self._source.record_delivery(reference[len(OBSERVATION_PREFIX):])

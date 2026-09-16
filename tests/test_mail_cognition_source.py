@@ -43,26 +43,42 @@ from alx.continuity.mail_source import (  # noqa: E402
 from alx.continuity.occasions import CombinedOccasionSource  # noqa: E402
 
 NOW = datetime(2026, 9, 16, 9, 0, tzinfo=UTC)
-CONVERSATION = mail_conversation_id("friedl")
 
 
-def arrival(uid: str = "2") -> BackgroundEvent:
+def arrival(uid: str = "2", message_id: str = "", **threading) -> BackgroundEvent:
+    data = {
+        "mailbox_id": "INBOX",
+        "uid_validity": "777",
+        "uid": uid,
+        "message_id": message_id or f"<m{uid}@example.test>",
+    }
+    data.update(threading)
     return BackgroundEvent(
         f"mail:777:{uid}",
         "mail.message_arrived",
         NOW,
-        {"mailbox_id": "INBOX", "uid_validity": "777", "uid": uid},
+        data,
         {"body": f"body {uid}"},
     )
 
 
-def vanished(uid: str = "1") -> BackgroundEvent:
+def vanished(uid: str = "1", message_id: str = "") -> BackgroundEvent:
     return BackgroundEvent(
         f"mail:777:{uid}:vanished",
         "mail.message_vanished",
         NOW,
-        {"mailbox_id": "INBOX", "uid_validity": "777", "uid": uid},
+        {
+            "mailbox_id": "INBOX",
+            "uid_validity": "777",
+            "uid": uid,
+            "message_id": message_id or f"<m{uid}@example.test>",
+        },
     )
+
+
+# The thread the default arrival fixture belongs to, derived the way the
+# producer derives it.
+CONVERSATION = mail_conversation_id(arrival())
 
 
 class FakeMailSource:
@@ -72,6 +88,7 @@ class FakeMailSource:
         self.arrivals = list(arrivals)
         self.disappearances = list(disappearances)
         self.delivered: list[str] = []
+        self.claimed: list[str] = []
 
     def unclaimed_arrivals(self):
         return tuple(self.arrivals)
@@ -81,6 +98,10 @@ class FakeMailSource:
 
     def record_delivery(self, event_id: str) -> bool:
         self.delivered.append(event_id)
+        return True
+
+    def mark_claimed(self, event_id: str) -> bool:
+        self.claimed.append(event_id)
         return True
 
 
@@ -94,7 +115,7 @@ class Fixture(unittest.TestCase):
         self.addCleanup(self.ledger.close)
 
     def source(self, mail, enabled: bool = True) -> MailCognitionSource:
-        return MailCognitionSource(mail, self.ledger, CONVERSATION, enabled=enabled)
+        return MailCognitionSource(mail, self.ledger, enabled=enabled)
 
 
 class MailBecomesAnOrdinaryOccasion(Fixture):
@@ -596,27 +617,362 @@ class ExistingBoundsApplyToMail(Fixture):
         self.assertEqual(len(source.due_opportunities()), 1)
 
 
-class TheConversationIsStableAndScoped(unittest.TestCase):
-    """Where mail thinking accumulates."""
+class EachThreadHasItsOwnDurableConversation(Fixture):
+    """Unrelated correspondence must not share a history.
 
-    def test_the_thread_is_derived_not_generated(self) -> None:
-        self.assertEqual(
-            mail_conversation_id("friedl"), mail_conversation_id("friedl")
-        )
+    The runtime keyed every message on `mail:<primary_person_id>`, so one
+    mailbox was one conversation. Every correspondent, subject and unfinished
+    goal accumulated there together: AL/X reasoning about a supplier's quote
+    could see, select and continue a goal belonging to an unrelated thread.
 
-    def test_it_is_scoped_by_person(self) -> None:
+    A thread is now named by RFC 5322 identifier headers -- the root of the
+    References chain, else In-Reply-To, else the message's own Message-ID.
+    Mechanical, restart-stable, and never inferred from what a subject line
+    appears to mean.
+    """
+
+    def test_two_unrelated_threads_get_different_conversations(self) -> None:
+        quote = arrival("2", "<quote@example.test>")
+        invoice = arrival("3", "<invoice@example.test>")
+
         self.assertNotEqual(
-            mail_conversation_id("friedl"), mail_conversation_id("someone-else")
+            mail_conversation_id(quote), mail_conversation_id(invoice)
         )
 
-    def test_a_blank_person_is_refused(self) -> None:
-        for value in ("", "   "):
-            with self.assertRaises(ValueError):
-                mail_conversation_id(value)
+    def test_a_reply_continues_the_thread_it_replies_to(self) -> None:
+        original = arrival("2", "<quote@example.test>")
+        reply = arrival(
+            "3",
+            "<reply@example.test>",
+            in_reply_to="<quote@example.test>",
+            references=["<quote@example.test>"],
+        )
 
-    def test_a_blank_conversation_is_refused(self) -> None:
-        with self.assertRaises(ValueError):
-            MailCognitionSource(FakeMailSource(), None, "   ")
+        self.assertEqual(
+            mail_conversation_id(original), mail_conversation_id(reply)
+        )
+
+    def test_a_deep_thread_resolves_to_its_root(self) -> None:
+        """Every message in one real thread, however long, is one conversation."""
+        root = arrival("2", "<a@example.test>")
+        second = arrival(
+            "3", "<b@example.test>",
+            in_reply_to="<a@example.test>",
+            references=["<a@example.test>"],
+        )
+        third = arrival(
+            "4", "<c@example.test>",
+            in_reply_to="<b@example.test>",
+            references=["<a@example.test>", "<b@example.test>"],
+        )
+
+        identities = {
+            mail_conversation_id(item) for item in (root, second, third)
+        }
+
+        self.assertEqual(len(identities), 1)
+
+    def test_a_reply_without_a_chain_still_finds_its_parent(self) -> None:
+        """Some clients send In-Reply-To and no References."""
+        original = arrival("2", "<quote@example.test>")
+        reply = arrival("3", "<reply@example.test>", in_reply_to="<quote@example.test>")
+
+        self.assertEqual(
+            mail_conversation_id(original), mail_conversation_id(reply)
+        )
+
+    def test_identity_is_not_inferred_from_the_subject(self) -> None:
+        """Two unrelated messages can share a subject; that means nothing."""
+        first = arrival("2", "<one@example.test>", subject="Invoice")
+        second = arrival("3", "<two@example.test>", subject="Invoice")
+
+        self.assertNotEqual(
+            mail_conversation_id(first), mail_conversation_id(second)
+        )
+
+    def test_a_message_with_no_identifiers_gets_its_own_thread(self) -> None:
+        """The safe direction: a thread too narrow, never one too wide."""
+        first = BackgroundEvent(
+            "mail:777:9", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "9"},
+        )
+        second = BackgroundEvent(
+            "mail:777:10", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "10"},
+        )
+
+        self.assertNotEqual(
+            mail_conversation_id(first), mail_conversation_id(second)
+        )
+
+    def test_a_disappearance_settles_in_its_own_thread(self) -> None:
+        """The vanished fact belongs where the arrival did."""
+        original = arrival("2", "<quote@example.test>")
+        gone = vanished("2", "<quote@example.test>")
+
+        self.assertEqual(
+            mail_conversation_id(original), mail_conversation_id(gone)
+        )
+
+    def test_the_producer_gives_each_thread_its_own_conversation(self) -> None:
+        mail = FakeMailSource([
+            arrival("2", "<quote@example.test>"),
+            arrival("3", "<reply@example.test>",
+                    references=["<quote@example.test>"]),
+            arrival("4", "<invoice@example.test>"),
+        ])
+        source = self.source(mail)
+
+        by_conversation: dict[str, list[str]] = {}
+        for occasion in source.due_opportunities():
+            by_conversation.setdefault(occasion.conversation_id, []).append(
+                occasion.opportunity_id
+            )
+
+        self.assertEqual(len(by_conversation), 2, "two real threads")
+        sizes = sorted(len(items) for items in by_conversation.values())
+        self.assertEqual(sizes, [1, 2])
+
+    def test_identity_survives_a_restart(self) -> None:
+        """A new producer over the same observation derives the same thread."""
+        event = arrival("2", "<quote@example.test>")
+
+        first = self.source(FakeMailSource([event])).due_opportunities()[0]
+        second = self.source(FakeMailSource([event])).due_opportunities()[0]
+
+        self.assertEqual(first.conversation_id, second.conversation_id)
+
+    def test_one_threads_goals_are_not_the_other_threads_state(self) -> None:
+        """The property the mailbox-wide key broke, proved through the store."""
+        from alx.contracts import (
+            GoalState, Objective, SuccessCriterion,
+        )
+        from alx.goals import SQLiteGoalStore
+
+        store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
+        self.addCleanup(store.close)
+        quote = mail_conversation_id(arrival("2", "<quote@example.test>"))
+        invoice = mail_conversation_id(arrival("3", "<invoice@example.test>"))
+        store.create(
+            GoalState(
+                "goal-1",
+                Objective("event:mail:777:2", "Answer the quote"),
+                (SuccessCriterion("criterion-1", "answered"),),
+            ),
+            quote,
+            NOW.replace(year=2027),
+        )
+
+        self.assertEqual(
+            [item.goal_id for item in store.list_unfinished(quote)], ["goal-1"]
+        )
+        self.assertEqual(
+            store.list_unfinished(invoice), (),
+            "an unrelated thread must not see this goal as its own",
+        )
+
+
+class ReconciliationCannotStrandAClaimedOccasion(unittest.TestCase):
+    """The window between the due snapshot and the turn, against real storage.
+
+    `DueCognitionSource` snapshots what is due, claims it, and only then runs
+    the turn. `MailPoller` reconciles on its own schedule, and a poll landing
+    in that window used to settle the observation silently: it had never been
+    shown to anyone, so nothing was owed. The already-issued occasion then ran
+    with no mail event in context at all -- a synthetic `cognition.opportunity`
+    for a message the Core could not see -- and the disappearance was never
+    reported, leaving the observation settled while the ledger row stood
+    claimed.
+
+    Claiming now records the same durable `context_exposed` fact being shown a
+    waiting item records, because both are a claim on her attention. Everything
+    else follows from rules that already existed.
+    """
+
+    def setUp(self) -> None:
+        from alx.providers import ICloudMailAdapter, SQLiteMailObservationState
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_mail_vertical_slice import FakeImap, message
+
+        self.message = message
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.state = SQLiteMailObservationState(root / "observations.sqlite3")
+        self.addCleanup(self.state.close)
+        self.imap = FakeImap()
+        self.adapter = ICloudMailAdapter(
+            "imap.example.test", 993, "friedl@example.test", "secret",
+            self.state, 1, connection_factory=lambda *a, **k: self.imap,
+        )
+        self.ledger = SQLiteOpportunityLedger(root / "opportunities.sqlite3")
+        self.addCleanup(self.ledger.close)
+        self.source = MailCognitionSource(self.adapter, self.ledger, enabled=True)
+
+    def _observe(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = self.message("Quote", "R2,000 for the parts")
+        self.adapter.scan()
+
+    def _reconcile_away(self) -> None:
+        """Exactly the poll that used to land in the window."""
+        del self.imap.items[2]
+        self.adapter.scan()
+
+    def test_the_real_mail_event_still_reaches_the_core(self) -> None:
+        self._observe()
+        occasion = self.source.due_opportunities()[0]
+        self.assertTrue(self.source.claim(occasion))
+
+        self._reconcile_away()
+
+        events = self.adapter.contextual_events()
+        observed = [
+            item for item in events if item.kind.startswith("mail.message")
+        ]
+        self.assertEqual(len(observed), 1, "the observation survived the race")
+        self.assertEqual(observed[0].data["uid"], "2")
+
+    def test_no_synthetic_only_turn_occurs(self) -> None:
+        """A turn with no mail event is a turn reasoning about nothing."""
+        self._observe()
+        self.source.claim(self.source.due_opportunities()[0])
+
+        self._reconcile_away()
+
+        self.assertNotEqual(
+            self.adapter.contextual_events(), (),
+            "the turn would have seen only the synthetic occasion",
+        )
+
+    def test_the_disappearance_is_not_lost(self) -> None:
+        self._observe()
+        self.source.claim(self.source.due_opportunities()[0])
+
+        self._reconcile_away()
+
+        reported = self.state.pending_vanished()
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(reported[0].kind, "mail.message_vanished")
+        self.assertEqual(reported[0].data["uid"], "2")
+
+    def test_the_observation_is_not_settled_behind_the_claim(self) -> None:
+        self._observe()
+        self.source.claim(self.source.due_opportunities()[0])
+
+        self._reconcile_away()
+
+        state = self.state._connection.execute(
+            "SELECT state FROM mail_observations WHERE uid = 2"
+        ).fetchone()[0]
+        self.assertNotEqual(state, "done", "it was settled behind her back")
+
+    def test_observation_and_ledger_agree_afterwards(self) -> None:
+        """Neither is left describing a message the other has forgotten."""
+        self._observe()
+        occasion = self.source.due_opportunities()[0]
+        self.source.claim(occasion)
+
+        self._reconcile_away()
+
+        self.assertTrue(self.ledger.exists(occasion.opportunity_id))
+        live = self.state._connection.execute(
+            "SELECT COUNT(*) FROM mail_observations WHERE uid = 2 "
+            "AND state IN ('pending', 'current', 'presented')"
+        ).fetchone()[0]
+        self.assertEqual(live, 1, "the claim still has an observation behind it")
+
+    def test_an_unreadable_body_does_not_fail_the_turn(self) -> None:
+        """The message is gone, so why it cannot be read is the fact she gets."""
+        self._observe()
+        self.source.claim(self.source.due_opportunities()[0])
+
+        self._reconcile_away()
+
+        observed = [
+            item for item in self.adapter.contextual_events()
+            if item.kind.startswith("mail.message")
+        ]
+        self.assertIn("content_unavailable", observed[0].transient_data)
+
+    def test_an_unclaimed_observation_is_still_settled_silently(self) -> None:
+        """Nothing is owed for a message no occasion was ever raised about."""
+        self._observe()
+
+        self._reconcile_away()
+
+        self.assertEqual(self.state.pending_vanished(), ())
+        state = self.state._connection.execute(
+            "SELECT state FROM mail_observations WHERE uid = 2"
+        ).fetchone()[0]
+        self.assertEqual(state, "done")
+
+
+class TheComposedRuntimeIncludesMail(unittest.TestCase):
+    """The composition root actually wires mail into the process-lifetime tick.
+
+    Every other test here builds the producer directly. This one reads the
+    composition root itself, because a correct producer nothing composes is a
+    correct producer that never runs.
+    """
+
+    SOURCE = Path(__file__).resolve().parents[1] / "src" / "alx"
+
+    def test_mail_joins_the_combined_occasion_source(self) -> None:
+        composition = (self.SOURCE / "bootstrap" / "live_voice.py").read_text()
+
+        self.assertIn("MailCognitionSource(", composition)
+        self.assertIn("occasion_sources.append(mail_cognition_source)", composition)
+        self.assertIn("CombinedOccasionSource(*occasion_sources)", composition)
+
+    def test_the_combined_source_feeds_the_one_process_lifetime_tick(self) -> None:
+        composition = (self.SOURCE / "bootstrap" / "live_voice.py").read_text()
+
+        self.assertIn("DueCognitionSource(\n        occasion_source,", composition)
+        self.assertIn("runtime_tasks.create_task(due_cognition.run())", composition)
+
+    def test_mail_recovery_runs_before_the_tick_starts(self) -> None:
+        """No occasion may be offered from a half-recovered ledger."""
+        composition = (self.SOURCE / "bootstrap" / "live_voice.py").read_text()
+
+        recovery = composition.index("mail_cognition_source.recover(")
+        tick = composition.index("runtime_tasks.create_task(due_cognition.run())")
+        self.assertLess(recovery, tick)
+
+    def test_the_voice_session_is_not_given_an_event_source(self) -> None:
+        """Presentation only: mail no longer enters through the transport."""
+        composition = (self.SOURCE / "bootstrap" / "live_voice.py").read_text()
+
+        self.assertNotIn("event_source=", composition)
+
+    def test_mail_is_gated_by_the_same_master_switch(self) -> None:
+        composition = (self.SOURCE / "bootstrap" / "live_voice.py").read_text()
+        block = composition[composition.index("mail_cognition_source = "):]
+        block = block[: block.index(")")]
+
+        self.assertIn("enabled=providers.autonomous is not None", block)
+
+    def test_the_composed_source_really_produces_mail_occasions(self) -> None:
+        """Not only wired: the combined source yields what mail found."""
+        from alx.continuity.occasions import CombinedOccasionSource
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ledger = SQLiteOpportunityLedger(
+            Path(directory.name) / "opportunities.sqlite3"
+        )
+        self.addCleanup(ledger.close)
+        mail = FakeMailSource([arrival()])
+        combined = CombinedOccasionSource(
+            MailCognitionSource(mail, ledger, enabled=True)
+        )
+
+        occasions = combined.due_opportunities()
+
+        self.assertEqual(len(occasions), 1)
+        self.assertIs(occasions[0].origin, CognitionOrigin.EXTERNAL_EVENT)
+        self.assertTrue(combined.claim(occasions[0]))
 
 
 if __name__ == "__main__":

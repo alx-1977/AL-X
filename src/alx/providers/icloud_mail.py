@@ -593,6 +593,44 @@ class SQLiteMailObservationState:
                     announced += 1
             return announced
 
+    def mark_claimed(self, event_id: str) -> bool:
+        """Record that an occasion has been raised for this observation.
+
+        A claimed occasion is owed an answer, so from here on the observation's
+        disappearance is hers to account for rather than something
+        reconciliation may settle quietly. This is the same durable fact
+        `context_exposed` already records when she is shown a waiting item, and
+        it is deliberately the same column: being given an occasion about a
+        message and being shown it are the same claim on her attention, and a
+        second flag would be a second answer to one question.
+
+        Written when the occasion is claimed, before anything is spent on it,
+        because the window this closes is exactly the one between the claim and
+        the turn. A poll cycle that reconciles in that window used to settle the
+        observation silently: the turn then ran with no mail event in context at
+        all, reasoning about a synthetic occasion for a message it could not
+        see, and the disappearance was never reported.
+
+        True when it moved. False when the row was already exposed or is no
+        longer live, which is benign: the fact it records is already true, or
+        there is no longer an observation to record it against.
+        """
+        parts = event_id.split(":")
+        if len(parts) >= 3 and parts[0] == "mail" and parts[2].isdigit():
+            uid_validity, uid = parts[1], int(parts[2])
+        else:
+            raise MailAccessError("observation_unavailable")
+        with self._lock, self._connection:
+            return bool(
+                self._connection.execute(
+                    "UPDATE mail_observations SET context_exposed = 1 "
+                    "WHERE uid_validity = ? AND uid = ? "
+                    "AND state IN ('pending', 'current', 'presented') "
+                    "AND context_exposed = 0",
+                    (uid_validity, uid),
+                ).rowcount
+            )
+
     def _settle_silently(
         self, mailbox_id: str, uid_validity: str, uid: int
     ) -> bool:
@@ -977,7 +1015,14 @@ class ICloudMailAdapter:
                     "mailbox_id": "INBOX",
                     "uid_validity": validity,
                     "uid": str(uid),
-                    "message_id": str(parsed.get("Message-ID", "")),
+                    "message_id": _identifier(parsed.get("Message-ID")),
+                    # RFC 5322 threading headers, recorded because the durable
+                    # conversation a message belongs to is derived from them.
+                    # Without these a reply could not be linked to what it
+                    # replies to, and every message would be its own thread or
+                    # all of them would share one.
+                    "in_reply_to": _identifier(parsed.get("In-Reply-To")),
+                    "references": list(_identifiers(parsed.get("References"))),
                     "subject": _decoded(parsed.get("Subject")),
                     "sender": _decoded(parsed.get("From")),
                     "received_at": str(parsed.get("Date", "")),
@@ -1272,6 +1317,9 @@ class ICloudMailAdapter:
     def pending_vanished(self) -> tuple[BackgroundEvent, ...]:
         return self._observations.pending_vanished()
 
+    def mark_claimed(self, event_id: str) -> bool:
+        return self._observations.mark_claimed(event_id)
+
     def read_transient(self, event: BackgroundEvent) -> BackgroundEvent:
         """The same observation with the message body attached.
 
@@ -1293,6 +1341,19 @@ class ICloudMailAdapter:
             }
         except MailAccessError as error:
             transient_data = {"content_unavailable": error.code}
+        except Exception as error:  # noqa: BLE001 - an unreadable body is a fact
+            # Anything the account could not answer. A message that vanished
+            # between the occasion being claimed and the turn running is the
+            # case this exists for, and it must not fail the turn: the occasion
+            # is already owed an answer, and she needs the observation in
+            # context to give one. What she is told is that it could not be
+            # read, which is true and is hers to account for.
+            LOGGER.warning(
+                "Mail body unavailable for %s (%s)",
+                event.event_id,
+                type(error).__name__,
+            )
+            transient_data = {"content_unavailable": "message_unavailable"}
         return BackgroundEvent(
             event.event_id,
             event.kind,
