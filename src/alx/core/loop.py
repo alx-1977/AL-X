@@ -11,7 +11,8 @@ import logging
 from uuid import uuid4
 
 from alx.contracts import (
-    AgentDecision, Approval, ApprovalLifecycle, CapabilityAttempt, CapabilityAttemptDisposition,
+    AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled,
+    CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityDispatch, CapabilityResult,
     ConversationOrigin,
     CapabilityResultState, CognitionOrigin, ConversationSnapshot, ConversationTurn,
@@ -277,6 +278,13 @@ class CoreAgent:
                     continuation_notices=continuation_notices,
                     refused_goal_selections=refused_goal_selections,
                 ))
+            except AutonomousReasoningDisabled as error:
+                LOGGER.info("Autonomous reasoning is disabled: %s", error)
+                return CoreOutcome(
+                    CoreState.FINISHED_SILENTLY,
+                    snapshot,
+                    reason="autonomous_reasoning_disabled",
+                )
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")

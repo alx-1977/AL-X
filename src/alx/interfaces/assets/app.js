@@ -410,6 +410,8 @@ function handleControl(message) {
         `Reasoning provider failed after ${(Number(message.duration_ms ?? 0) / 1000).toFixed(2)} s · ${message.error_type ?? "unknown"}${cause}`,
         "error",
       );
+    } else if (message.code === "autonomous.reasoning_disabled") {
+      diagnostic("External event skipped · autonomous reasoning disabled");
     } else if (message.code === "tts.request_sent") {
       diagnostic(`TTS request sent · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "active");
     } else if (message.code === "tts.text_sent") {

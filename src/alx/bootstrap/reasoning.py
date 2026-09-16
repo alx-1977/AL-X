@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from alx.contracts import CognitionOrigin, ReasoningModel
+from alx.contracts import AutonomousReasoningDisabled, CognitionOrigin, ReasoningModel
 from alx.core import ModelReasoner
 
 
@@ -33,7 +33,7 @@ def build_model_reasoner(
     )
 
 
-class AutonomousReasonerUnavailable(Exception):
+class AutonomousReasonerUnavailable(AutonomousReasoningDisabled):
     """An autonomous turn arrived with no autonomous Core configured.
 
     Refused before any provider call. Answering it with the conversational

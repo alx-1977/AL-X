@@ -733,6 +733,93 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             goals.close()
             directory.cleanup()
 
+    def test_disabled_autonomous_mail_is_silently_handled_without_a_model_call(self) -> None:
+        """A disabled autonomous slot is not a conversational fallback or error."""
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        conversations = SQLiteConversationStore(root / "conversations.sqlite3")
+        goals = SQLiteGoalStore(root / "goals.sqlite3")
+
+        class PersonReasoner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def decide(self, context):
+                self.calls += 1
+                raise AssertionError("external mail must not reach the person reasoner")
+
+        person = PersonReasoner()
+        gateway = ConversationGateway(
+            CoreAgent(
+                goals, OriginSelectedReasoner(person, None),
+                lambda call, state: None, (),
+            ),
+            conversations,
+            identifier_factory=lambda: "response-1",
+            clock=lambda: NOW,
+        )
+        event = BackgroundEvent(
+            "mail:777:2", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid": "2"},
+        )
+        try:
+            result = gateway.receive_background_event(
+                "conversation-1", event, 1, RETENTION
+            )
+            self.assertIs(result.state, CoreState.FINISHED_SILENTLY)
+            self.assertEqual(result.reason, "autonomous_reasoning_disabled")
+            self.assertEqual(person.calls, 0)
+            self.assertEqual(conversations.load("conversation-1").turns, ())
+        finally:
+            conversations.close()
+            goals.close()
+            directory.cleanup()
+
+    def test_enabled_autonomous_reasoner_failure_remains_an_error(self) -> None:
+        """Only deliberate disabled configuration receives the silent outcome."""
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        conversations = SQLiteConversationStore(root / "conversations.sqlite3")
+        goals = SQLiteGoalStore(root / "goals.sqlite3")
+
+        class PersonReasoner:
+            def decide(self, context):
+                raise AssertionError("external mail must not reach the person reasoner")
+
+        class FailingAutonomousReasoner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def decide(self, context):
+                self.calls += 1
+                raise RuntimeError("provider failed")
+
+        autonomous = FailingAutonomousReasoner()
+        gateway = ConversationGateway(
+            CoreAgent(
+                goals, OriginSelectedReasoner(PersonReasoner(), autonomous),
+                lambda call, state: None, (),
+            ),
+            conversations,
+            identifier_factory=lambda: "response-1",
+            clock=lambda: NOW,
+        )
+        event = BackgroundEvent(
+            "mail:777:2", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid": "2"},
+        )
+        try:
+            result = gateway.receive_background_event(
+                "conversation-1", event, 1, RETENTION
+            )
+            self.assertIs(result.state, CoreState.ERROR)
+            self.assertEqual(result.reason, "reasoner_error")
+            self.assertEqual(autonomous.calls, 1)
+        finally:
+            conversations.close()
+            goals.close()
+            directory.cleanup()
+
     def test_exact_current_turn_approval_is_consumed_by_matching_trash_call(self) -> None:
         directory = tempfile.TemporaryDirectory()
         root = Path(directory.name)

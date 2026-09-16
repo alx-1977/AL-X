@@ -885,6 +885,57 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(synthesizer.responses, [])
 
+    async def test_disabled_autonomous_background_is_recorded_without_pipeline_error(self) -> None:
+        event = BackgroundEvent(
+            "mail:777:2", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid": "2"},
+        )
+
+        class Source:
+            def __init__(self) -> None:
+                self.delivered = []
+
+            async def events(self):
+                yield event
+
+            def record_delivery(self, event_id):
+                self.delivered.append(event_id)
+                return True
+
+        source = Source()
+        gateway = FakeGateway((outcome(
+            GoalStatus.ACTIVE,
+            response=None,
+            reason="autonomous_reasoning_disabled",
+            core_state=CoreState.FINISHED_SILENTLY,
+        ),))
+        session = VoiceSession(
+            gateway, FakeTranscriber(()), None, "friedl", 8, 3650,
+            clock=lambda: NOW, event_source=source,
+        )
+        iterator = session.exchange("conversation-1", incoming_audio())
+        events = [await iterator.__anext__() for _ in range(3)]
+        self.assertEqual(
+            [item.kind for item in events],
+            [
+                VoiceEventKind.THINKING,
+                VoiceEventKind.DIAGNOSTIC,
+                VoiceEventKind.LISTENING,
+            ],
+        )
+        self.assertEqual(events[1].diagnostic, {"code": "autonomous.reasoning_disabled"})
+        next_event = asyncio.create_task(iterator.__anext__())
+        for _ in range(20):
+            if source.delivered:
+                break
+            await asyncio.sleep(0)
+        next_event.cancel()
+        await asyncio.gather(next_event, return_exceptions=True)
+        self.assertEqual(source.delivered, [event.event_id])
+        self.assertEqual(len(gateway.background_calls), 1)
+        self.assertEqual(gateway.calls, [])
+        await iterator.aclose()
+
     async def test_missing_response_is_still_an_error_not_silence(self) -> None:
         session = VoiceSession(
             FakeGateway((outcome(

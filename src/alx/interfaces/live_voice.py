@@ -660,6 +660,11 @@ class VoiceSession:
             # Silence is an explicit authoritative Core result, not a missing
             # response and not a transport inference. No conversation turn or
             # speech synthesis is created for it.
+            if outcome.reason == "autonomous_reasoning_disabled":
+                yield VoiceEvent(
+                    VoiceEventKind.DIAGNOSTIC,
+                    diagnostic={"code": "autonomous.reasoning_disabled"},
+                )
             yield VoiceEvent(VoiceEventKind.LISTENING)
             return
         if outcome.response is None:

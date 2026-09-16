@@ -157,6 +157,17 @@ class PlaybackSerialisationTests(unittest.TestCase):
         self.assertIn("Authoritative Core reasoning in progress", result["background"])
         self.assertIn("Final transcription received", result["speech"])
 
+    def test_disabled_autonomous_event_has_a_neutral_diagnostic(self) -> None:
+        result = run_js(textwrap.dedent("""
+            const messages = [];
+            diagnostic = (message) => messages.push(message);
+            handleControl({type: "diagnostic", code: "autonomous.reasoning_disabled"});
+            console.log(JSON.stringify({messages}));
+        """))
+        self.assertEqual(
+            result["messages"], ["External event skipped · autonomous reasoning disabled"],
+        )
+
     def test_a_second_utterance_does_not_play_over_the_first(self) -> None:
         """The reported bug: mail speech starting over a Core response."""
         result = run_js(textwrap.dedent("""
