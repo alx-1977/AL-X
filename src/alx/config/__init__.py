@@ -28,6 +28,7 @@ from alx.config.settings import (
 
 from alx.config.settings import SandboxSettings, sandbox_settings
 from alx.config.settings import MergeSettings, merge_settings
+from alx.config.settings import RepositoryRuntimeSettings, repository_runtime_settings
 from alx.config.settings import ReviewSettings, review_settings
 
 __all__ = [
@@ -35,6 +36,8 @@ __all__ = [
     "review_settings",
     "MergeSettings",
     "merge_settings",
+    "RepositoryRuntimeSettings",
+    "repository_runtime_settings",
     "WebSearchSettings",
     "AUTONOMOUS_MAX_INPUT_TOKENS",
     "AUTONOMOUS_MAX_OUTPUT_TOKENS",

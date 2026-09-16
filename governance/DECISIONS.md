@@ -1368,3 +1368,64 @@ boundary described above.
 
 This amendment supersedes only the prior refuse-on-collision behaviour for
 repair branch creation. All other D-029 constraints remain unchanged.
+
+---
+
+## D-030 — Deterministic canonical-main synchronization
+
+- **Date:** 2026-09-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-16.**
+
+**Purpose.** Allow AL/X, through one bounded repository-runtime capability, to
+inspect the configured canonical checkout and, when deterministic preconditions
+hold, fast-forward local `main` to fetched canonical remote `main`. This is
+repository lifecycle plumbing, not Coding Agent work and not merge authority.
+
+**One outcome, one path.** The sole production path is `Core → repository
+registry → Safety Gate → CapabilityBroker → inspect_repository_state |
+synchronize_local_main → dedicated fixed-command repository-runtime provider`.
+`merge_pull_request`, `run_coding_task`, Coding Agent Git facilities, sandbox
+execution, and generic command execution are not alternate routes to this
+outcome.
+
+**Authority.** `repository.inspect` authorizes read-only inspection and
+`repository.synchronize` authorizes the exact fixed synchronization transition
+only. `repository.merge` remains separate. `coding.execute` grants neither new
+permission. Core supplies no repository path, remote, branch, ref, refspec,
+flags, working directory, command, or argv.
+
+**Fixed transition.** After deterministic validation of the configured root,
+identity, origin, attached `HEAD`, branch `main`, clean worktree and ancestry,
+the provider may run only `git fetch origin
+refs/heads/main:refs/remotes/origin/main` followed, when required, by `git
+merge --ff-only refs/remotes/origin/main`. It verifies the fetched tracking ref
+is a commit before merging and returns structured before/after state.
+
+**Not authorised.** Pull, reset, rebase, force, push, prune, deletion, stash
+operations, remote mutation, or arbitrary fetches, remotes, branches, refs,
+refspecs, flags, commands, shells, or working directories. Synchronization
+failure returns structured evidence only and does not authorize Coding Agent
+fallback. Revisit before authorizing any lifecycle transition beyond this exact
+configured canonical-main fast-forward.
+
+### Amendment to D-028 — bounded failed Coding Agent redispatch
+
+For each durable goal, `run_coding_task` has a fixed failed-execution allowance
+keyed only by `(goal_id, capability_id=run_coding_task)`. At most two
+implementation-reaching failed executions are permitted. Before pending
+checkpoint creation or Coding Agent invocation, Core counts durable qualifying
+failures. At count `>= 2`, it creates no checkpoint, broker dispatch, or
+executor invocation; it records non-invoked `coding_retry_exhausted` and returns
+that refusal plus prior failure evidence to Core.
+
+Pre-effect validation and authority rejections do not count.
+Implementation-reaching broker/provider failures do count. Successful attempts
+do not consume the allowance and restart does not reset it. This is not a
+monetary spend ledger and does not reuse D-024 cognition budgeting. All other
+D-028 constraints remain unchanged.
+
+Multiple independent Coding Agent jobs under one durable goal intentionally
+share this conservative allowance because current contracts have no stable
+per-job objective identity. A future finer-grained identity must be generated
+and governed by Core, never supplied by the model.

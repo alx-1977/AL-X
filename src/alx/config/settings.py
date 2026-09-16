@@ -1382,6 +1382,33 @@ def merge_settings(environment: Mapping[str, str]) -> MergeSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RepositoryRuntimeSettings:
+    """Fixed local canonical checkout authority, off unless complete."""
+
+    enabled: bool
+    root: Path | None
+    repository_identity: str
+    origin_url: str
+    timeout_seconds: int
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.enabled and self.root is not None and self.root.is_absolute()
+                    and self.repository_identity and self.origin_url and self.timeout_seconds > 0)
+
+
+def repository_runtime_settings(environment: Mapping[str, str]) -> RepositoryRuntimeSettings:
+    root = environment.get("ALX_REPOSITORY_RUNTIME_ROOT", "").strip()
+    return RepositoryRuntimeSettings(
+        enabled=_boolean(environment, "ALX_REPOSITORY_RUNTIME_ENABLED", False),
+        root=Path(root).expanduser() if root else None,
+        repository_identity=environment.get("ALX_REPOSITORY_RUNTIME_IDENTITY", "").strip(),
+        origin_url=environment.get("ALX_REPOSITORY_RUNTIME_ORIGIN", "").strip(),
+        timeout_seconds=_positive_integer(environment, "ALX_REPOSITORY_RUNTIME_TIMEOUT_SECONDS", 30),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewSettings:
     """Requesting an external review, off until it is configured."""
 

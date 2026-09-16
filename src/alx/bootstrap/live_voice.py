@@ -21,7 +21,7 @@ from alx.bootstrap.mail import (
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.coding import build_coding_runtime
-from alx.bootstrap.repository import build_repository_runtime
+from alx.bootstrap.repository import build_repository_runtime, build_canonical_repository_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
 from alx.contracts.cognition import CognitionOrigin
@@ -49,6 +49,7 @@ from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     merge_settings,
+    repository_runtime_settings,
     review_settings,
     AUTONOMOUS_MAX_INPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
@@ -206,6 +207,7 @@ async def run(repository_root: Path) -> None:
     provider_settings = RuntimeSettings.from_environment(environment)
     voice_settings = LiveVoiceSettings.from_environment(environment)
     merge_configuration = merge_settings(environment)
+    repository_runtime_configuration = repository_runtime_settings(environment)
     review_configuration = review_settings(environment)
     storage_root = voice_settings.storage_root
     if not storage_root.is_absolute():
@@ -516,6 +518,21 @@ async def run(repository_root: Path) -> None:
         policies.update(merge_runtime.policies)
         executors.update(merge_runtime.executors)
         permissions.update(merge_runtime.permissions)
+
+    repository_runtime = build_canonical_repository_runtime(
+        repository_runtime_configuration.is_usable,
+        repository_runtime_configuration.root,
+        repository_runtime_configuration.repository_identity,
+        repository_runtime_configuration.origin_url,
+        repository_runtime_configuration.timeout_seconds,
+        lambda: current_call_id[0],
+    )
+    if repository_runtime is not None:
+        for definition in repository_runtime.definitions:
+            registry.register(definition)
+        policies.update(repository_runtime.policies)
+        executors.update(repository_runtime.executors)
+        permissions.update(repository_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
