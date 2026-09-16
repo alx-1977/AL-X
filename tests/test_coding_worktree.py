@@ -73,8 +73,27 @@ class Repository(unittest.TestCase):
         git(self.repository, "commit", "-qm", "base")
         self.base_sha = git(self.repository, "rev-parse", "HEAD").strip()
 
-    def allocator(self) -> CodingWorktreeAllocator:
-        return CodingWorktreeAllocator(self.root, self.repository)
+    def allocator(self, outcomes: dict[str, str] | None = None):
+        """An allocator whose durable outcomes live outside the worktree root.
+
+        `self.outcomes` stands in for the broker's own record of what each
+        capability call returned. It is deliberately *not* a file under the
+        allocator's root: the point of D-030's terminal-success check is that
+        editing anything in that directory cannot make a failed job releasable.
+        """
+        if outcomes is not None:
+            self.outcomes = outcomes
+        elif not hasattr(self, "outcomes"):
+            self.outcomes = {}
+        return CodingWorktreeAllocator(
+            self.root, self.repository, lambda job_id: self.outcomes.get(job_id, "")
+        )
+
+    def finished(self, job_id: str, status: str = "succeeded") -> None:
+        """Record what the durable capability outcome says about a job."""
+        if not hasattr(self, "outcomes"):
+            self.outcomes = {}
+        self.outcomes[job_id] = status
 
     def worktrees(self) -> str:
         return git(self.repository, "worktree", "list")
@@ -531,6 +550,7 @@ class ReleaseRequiresAnExplicitCoreDecision(Repository):
         allocator = self.allocator()
         allocated = allocator.allocate("job-1")
         allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
 
         result = self._release(allocator, "job-1")
 
@@ -543,6 +563,7 @@ class ReleaseRequiresAnExplicitCoreDecision(Repository):
         allocator = self.allocator()
         allocated = allocator.allocate("job-1")
         allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
 
         self.assertTrue(allocated.path.is_dir())
         self.assertIn("job-1", allocator.stale_job_ids())
@@ -551,6 +572,7 @@ class ReleaseRequiresAnExplicitCoreDecision(Repository):
         allocator = self.allocator()
         allocated = allocator.allocate("job-1")
         allocator.record_outcome("job-1", "failed")
+        self.finished("job-1", "failed")
 
         result = self._release(allocator, "job-1")
 
@@ -564,8 +586,12 @@ class ReleaseRequiresAnExplicitCoreDecision(Repository):
 
         result = self._release(allocator, "job-1")
 
+        # No durable outcome exists for a job that never finished, so there is
+        # nothing to prove success with and the release refuses.
         self.assertEqual(result.failure["code"], "job_not_successful")
-        self.assertEqual(result.failure["status"], "unfinished")
+        self.assertEqual(
+            result.failure["reason_code"], "durable_outcome_missing"
+        )
         self.assertTrue(allocated.path.is_dir())
 
     def test_an_unknown_job_releases_nothing(self) -> None:
@@ -592,6 +618,7 @@ class ReleaseRequiresAnExplicitCoreDecision(Repository):
         allocator = self.allocator()
         allocated = allocator.allocate("job-1")
         allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
 
         result = self._release(allocator, "job-1")
 
@@ -643,7 +670,9 @@ class ATamperedRecordCannotRedirectRelease(Repository):
         first = allocator.allocate("job-a")
         second = allocator.allocate("job-b")
         allocator.record_outcome("job-a", "succeeded")
+        self.finished("job-a", "succeeded")
         allocator.record_outcome("job-b", "succeeded")
+        self.finished("job-b", "succeeded")
         return allocator, first, second
 
     def test_a_record_pointing_at_another_job_releases_nothing(self) -> None:
@@ -744,6 +773,7 @@ class ATamperedRecordCannotRedirectRelease(Repository):
         allocator = self.allocator()
         allocated = allocator.allocate("job-c")
         allocator.record_outcome("job-c", "succeeded")
+        self.finished("job-c", "succeeded")
         self.assertEqual(allocated.slot, "job-c-2")
 
         released = allocator.release_authorised("job-c")
@@ -1062,6 +1092,359 @@ class AnUnrecordedWorktreeIsAuditable(Repository):
         self.assertEqual(allocated.slot, "job-1-2")
         self.assertTrue((allocator.root / "job-1").is_dir())
         self.assertEqual(len(allocator.orphan_worktrees()), 1)
+
+
+class TerminalSuccessComesFromTheDurableOutcome(Repository):
+    """Editing the sidecar's status must not make a failed job releasable.
+
+    The allocation record's `status` is audit metadata written beside the
+    workspace. It used to be what `release_authorised` consulted, so changing
+    `failed` to `succeeded` in that file released a failed job's worktree —
+    destroying exactly the evidence D-030 retains it for.
+
+    Terminal success is now established from the durable capability outcome the
+    broker recorded when the job returned, which lives in the goal store rather
+    than in the coding-worktree root. The sidecar stays descriptive.
+    """
+
+    def test_tampering_failed_to_succeeded_releases_nothing(self) -> None:
+        """The exact reported defect."""
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1")
+        allocator.record_outcome("job-1", "failed")
+        self.finished("job-1", "failed")
+
+        path = allocator.root / "job-1.allocation.json"
+        record = json.loads(path.read_text())
+        record["status"] = "succeeded"
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-1")
+
+        self.assertEqual(caught.exception.code, "job_not_successful")
+        self.assertEqual(
+            caught.exception.details["reason_code"], "job_did_not_succeed"
+        )
+        self.assertEqual(caught.exception.details["status"], "failed")
+        # The failed job's evidence is still there.
+        self.assertTrue(allocated.path.is_dir())
+        self.assertIn(str(allocated.path), self.worktrees())
+
+    def test_a_sidecar_disagreeing_with_a_success_also_refuses(self) -> None:
+        """Disagreement is refused rather than resolved in either direction."""
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1")
+        allocator.record_outcome("job-1", "failed")
+        self.finished("job-1", "succeeded")
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-1")
+
+        self.assertEqual(
+            caught.exception.details["reason_code"], "outcome_record_conflicts"
+        )
+        self.assertTrue(allocated.path.is_dir())
+
+    def test_no_durable_outcome_refuses(self) -> None:
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1")
+        allocator.record_outcome("job-1", "succeeded")
+        # Nothing recorded in the durable store for this job.
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-1")
+
+        self.assertEqual(
+            caught.exception.details["reason_code"], "durable_outcome_missing"
+        )
+        self.assertTrue(allocated.path.is_dir())
+
+    def test_no_outcome_source_at_all_refuses(self) -> None:
+        """Fail closed: an allocator that cannot ask does not release."""
+        from alx.providers.coding_worktree import CodingWorktreeAllocator
+
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1")
+        allocator.record_outcome("job-1", "succeeded")
+        unwired = CodingWorktreeAllocator(self.root, self.repository)
+
+        with self.assertRaises(CodingError) as caught:
+            unwired.release_authorised("job-1")
+
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "durable_outcome_unavailable",
+        )
+        self.assertTrue(allocated.path.is_dir())
+
+    def test_an_unreadable_outcome_source_refuses(self) -> None:
+        from alx.providers.coding_worktree import CodingWorktreeAllocator
+
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1")
+        allocator.record_outcome("job-1", "succeeded")
+
+        def explode(_job_id: str) -> str:
+            raise RuntimeError("goal store unavailable")
+
+        broken = CodingWorktreeAllocator(self.root, self.repository, explode)
+        with self.assertRaises(CodingError) as caught:
+            broken.release_authorised("job-1")
+
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "durable_outcome_unreadable",
+        )
+        self.assertTrue(allocated.path.is_dir())
+
+    def test_a_genuine_success_still_releases(self) -> None:
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1")
+        allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
+
+        released = allocator.release_authorised("job-1")
+
+        self.assertTrue(released["released"])
+        self.assertFalse(allocated.path.exists())
+
+
+class BranchNamesEndingInDigitsStayReleasable(Repository):
+    """D-029 naming is unchanged; only how it is checked afterwards changed.
+
+    The previous check parsed a trailing `-N` off the final branch name to
+    recover the allocation attempt. That is ambiguous by construction: `fix-2`
+    is a perfectly good base name Core may choose on the first attempt, and it
+    is indistinguishable by inspection from `fix` suffixed on the second. The
+    first case was refused as a suffix mismatch even though nothing was wrong.
+
+    The attempt is now recorded at allocation time, so both cases are exact.
+    """
+
+    def test_a_base_branch_ending_in_two_releases_on_the_first_attempt(
+        self,
+    ) -> None:
+        """`fix-2` chosen by Core, no collision. The reported defect."""
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1", "fix-2")
+        allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
+
+        self.assertEqual(allocated.branch, "fix-2")
+        self.assertEqual(allocated.slot, "job-1")
+        self.assertEqual(allocated.attempt, 1)
+
+        released = allocator.release_authorised("job-1")
+
+        self.assertTrue(released["released"])
+        self.assertFalse(allocated.path.exists())
+
+    def test_a_collision_producing_the_same_name_also_releases(self) -> None:
+        """`fix` suffixed to `fix-2` on the second attempt."""
+        git(self.repository, "branch", "fix")
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1", "fix")
+        allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
+
+        self.assertEqual(allocated.branch, "fix-2")
+        self.assertEqual(allocated.slot, "job-1-2")
+        self.assertEqual(allocated.attempt, 2)
+
+        released = allocator.release_authorised("job-1")
+
+        self.assertTrue(released["released"])
+        self.assertFalse(allocated.path.exists())
+
+    def test_the_two_cases_are_distinguished_by_recorded_attempt(self) -> None:
+        """Identical branch names, different allocations, both provable."""
+        first = self.allocator().allocate("job-a", "fix-2")
+        git(self.repository, "branch", "other")
+        second = self.allocator().allocate("job-b", "other")
+
+        self.assertEqual(first.branch, "fix-2")
+        self.assertEqual(first.attempt, 1)
+        self.assertEqual(second.branch, "other-2")
+        self.assertEqual(second.attempt, 2)
+
+        allocator = self.allocator()
+        first_record = allocator.read_record("job-a")
+        second_record = allocator.read_record("job-b")
+        # The stored base name plus the attempt rebuild each branch exactly,
+        # with no parsing of the final name.
+        self.assertEqual(first_record["base_branch"], "fix-2")
+        self.assertEqual(first_record["attempt"], 1)
+        self.assertEqual(second_record["base_branch"], "other")
+        self.assertEqual(second_record["attempt"], 2)
+
+    def test_other_numeric_endings_release_normally(self) -> None:
+        for job_id, branch in (
+            ("job-a", "release-10"),
+            ("job-b", "v1-3"),
+            ("job-c", "fix-99"),
+        ):
+            with self.subTest(branch=branch):
+                allocator = self.allocator()
+                allocated = allocator.allocate(job_id, branch)
+                allocator.record_outcome(job_id, "succeeded")
+                self.finished(job_id, "succeeded")
+
+                self.assertEqual(allocated.branch, branch)
+                self.assertTrue(
+                    allocator.release_authorised(job_id)["released"]
+                )
+
+    def test_a_tampered_attempt_still_refuses(self) -> None:
+        """Recording the attempt must not become a way around the check."""
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1", "fix-2")
+        allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
+
+        path = allocator.root / "job-1.allocation.json"
+        record = json.loads(path.read_text())
+        record["attempt"] = 2
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-1")
+
+        self.assertEqual(
+            caught.exception.details["detail"], "branch_slot"
+        )
+        self.assertTrue(allocated.path.is_dir())
+
+
+class ForeignWorktreesAreNotAlxOrphans(Repository):
+    """Orphan discovery needs positive provenance, not circumstantial fit.
+
+    "Linked worktree of this repository, under the configured root, with no
+    allocation record" described a manually created worktree just as well as an
+    AL/X one. Reporting somebody else's directory as an AL/X orphan invites
+    acting on a directory D-030 grants no authority over.
+
+    AL/X now claims each slot before git creates anything in it, and only a
+    claimed slot can be an orphan. The claim is written first and the record
+    last, so the record-write-failure gap this exists to expose stays visible.
+    """
+
+    def _foreign_worktree(self, name: str, branch: str) -> Path:
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / name
+        git(self.repository, "worktree", "add", "-q", "-b", branch, str(path))
+        return path
+
+    def test_a_manually_created_worktree_is_not_an_orphan(self) -> None:
+        """The exact reported defect."""
+        allocator = self.allocator()
+        foreign = self._foreign_worktree("someones-work", "their-branch")
+
+        self.assertEqual(allocator.orphan_worktrees(), ())
+        # Still there, untouched: not reporting it is not the same as hiding it.
+        self.assertTrue(foreign.is_dir())
+        self.assertIn(str(foreign), self.worktrees())
+
+    def test_a_foreign_worktree_named_like_a_job_is_still_not_an_orphan(
+        self,
+    ) -> None:
+        """Right shape, right place, no claim."""
+        allocator = self.allocator()
+        self._foreign_worktree("job-1", "looks-official")
+
+        self.assertEqual(allocator.orphan_worktrees(), ())
+
+    def test_a_foreign_worktree_is_not_released_either(self) -> None:
+        allocator = self.allocator()
+        foreign = self._foreign_worktree("job-1", "their-branch")
+        self.finished("job-1", "succeeded")
+
+        with self.assertRaises(CodingError):
+            allocator.release_authorised("job-1")
+
+        self.assertTrue(foreign.is_dir())
+
+    def test_an_alx_orphan_is_still_discovered(self) -> None:
+        """The claim makes the record-write-failure case findable."""
+        from alx.providers import coding_worktree as module
+
+        allocator = self.allocator()
+        with unittest.mock.patch.object(
+            module.CodingWorktreeAllocator, "_write_record",
+            lambda self, allocated: (_ for _ in ()).throw(OSError("full")),
+        ):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+
+        orphans = allocator.orphan_worktrees()
+
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0]["slot"], "job-1")
+        self.assertEqual(orphans[0]["job_id"], "job-1")
+        self.assertTrue(orphans[0]["claimed_at"])
+
+    def test_alx_and_foreign_worktrees_are_distinguished(self) -> None:
+        """Both present; only ours is reported."""
+        from alx.providers import coding_worktree as module
+
+        allocator = self.allocator()
+        self._foreign_worktree("not-ours", "theirs")
+        with unittest.mock.patch.object(
+            module.CodingWorktreeAllocator, "_write_record",
+            lambda self, allocated: (_ for _ in ()).throw(OSError("full")),
+        ):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+
+        orphans = allocator.orphan_worktrees()
+
+        self.assertEqual([item["slot"] for item in orphans], ["job-1"])
+
+    def test_a_claim_does_not_authorise_release(self) -> None:
+        """Provenance says AL/X made it, never that a job succeeded in it."""
+        from alx.providers import coding_worktree as module
+
+        allocator = self.allocator()
+        with unittest.mock.patch.object(
+            module.CodingWorktreeAllocator, "_write_record",
+            lambda self, allocated: (_ for _ in ()).throw(OSError("full")),
+        ):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+        # Even with a durable success, a claimed-but-unrecorded worktree has no
+        # allocation record and cannot be released.
+        self.finished("job-1", "succeeded")
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-1")
+
+        self.assertEqual(
+            caught.exception.details["reason_code"], "allocation_record_missing"
+        )
+        self.assertTrue((allocator.root / "job-1").is_dir())
+
+    def test_a_released_worktree_leaves_no_claim_behind(self) -> None:
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-1")
+        allocator.record_outcome("job-1", "succeeded")
+        self.finished("job-1", "succeeded")
+
+        allocator.release_authorised("job-1")
+
+        self.assertIsNone(allocator.read_claim("job-1"))
+        self.assertEqual(allocator.orphan_worktrees(), ())
+        self.assertFalse(allocated.path.exists())
+
+    def test_a_withdrawn_claim_does_not_block_the_next_attempt(self) -> None:
+        """A collision withdraws its claim so the slot is not lost."""
+        git(self.repository, "branch", "alx/coding/job-1")
+
+        allocated = self.allocator().allocate("job-1")
+
+        self.assertEqual(allocated.slot, "job-1-2")
+        # The first attempt claimed job-1, failed to create it, and withdrew.
+        self.assertIsNone(self.allocator().read_claim("job-1"))
+        self.assertFalse((self.root / "job-1").exists())
 
 
 class TheGitAuthorityThisNeeds(unittest.TestCase):

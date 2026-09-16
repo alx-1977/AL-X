@@ -133,7 +133,37 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
     return values
 
 
-def _build_coding_allocator(root: Path, repository_root: Path):
+def _coding_outcome_source(goal_store: SQLiteGoalStore):
+    """Answer what the broker durably recorded for one coding job.
+
+    D-030 requires release to establish terminal success from the durable
+    execution outcome rather than from the allocation record, which is a file
+    beside the workspace that anything able to write there can edit. The job's
+    identity *is* its capability call id, so the durable result is found by
+    matching that against the recorded attempts.
+
+    Returns the job's status, or "" when no durable outcome exists for it —
+    which the allocator treats as a refusal, not as permission.
+    """
+    from alx.tools.coding import RUN_CODING_TASK
+
+    def status_of(job_id: str) -> str:
+        if not job_id:
+            return ""
+        for goal in goal_store.list_goals():
+            for result in goal.completed_actions:
+                if result.capability_id != RUN_CODING_TASK:
+                    continue
+                if result.call_id != job_id:
+                    continue
+                values = result.durable_values or {}
+                return str(values.get("status") or "")
+        return ""
+
+    return status_of
+
+
+def _build_coding_allocator(root: Path, repository_root: Path, outcome_source=None):
     """The D-030 worktree allocator, or none if its root cannot be used.
 
     A root that resolves inside the canonical repository is a configuration
@@ -146,7 +176,7 @@ def _build_coding_allocator(root: Path, repository_root: Path):
     from alx.providers.coding_worktree import CodingWorktreeAllocator
 
     try:
-        return CodingWorktreeAllocator(root, repository_root)
+        return CodingWorktreeAllocator(root, repository_root, outcome_source)
     except CodingError as error:
         LOGGER.warning(
             "Coding worktree root unusable (%s): no coding capability",
@@ -487,6 +517,7 @@ async def run(repository_root: Path) -> None:
     coding_allocator = _build_coding_allocator(
         voice_settings.coding_worktree_root or (storage_root / "coding-worktrees"),
         repository_root,
+        _coding_outcome_source(goal_store),
     )
     coding_runtime = build_coding_runtime(
         provider_settings.coding.enabled,

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,6 +87,13 @@ OWNERSHIP_SUFFIX = ".allocation.json"
 # cannot be authorised must not become the thing that authorises it.
 ORPHAN_SUFFIX = ".orphan.json"
 
+# AL/X's provenance for a slot, written before git creates anything there. A
+# directory under the root is AL/X's only if this file says it was about to be
+# created; a worktree somebody added by hand has no claim and is not ours to
+# report, let alone to remove. Never read by release: it records an intention
+# to create, not a job that succeeded.
+CLAIM_SUFFIX = ".claim.json"
+
 
 def job_id_permitted(job_id: str) -> bool:
     """Whether a job identity may become a path segment and a branch element."""
@@ -121,6 +129,12 @@ class CodingWorktree:
     branch: str
     base: str
     slot: str = ""
+    # Which pass of the D-029 collision search produced this allocation: 1 for
+    # the requested names, 2 for the first `-2` retry, and so on. Recorded
+    # because it cannot be recovered from the names afterwards — `fix-2` is a
+    # legitimate base name Core may choose on attempt 1, and it is
+    # indistinguishable by inspection from `fix` suffixed on attempt 2.
+    attempt: int = 1
 
     def __post_init__(self) -> None:
         if not self.slot:
@@ -191,18 +205,17 @@ def _slot_owners(slot: str) -> tuple[str, ...]:
     return tuple(owners)
 
 
-def _has_allocation_suffix(branch: str) -> bool:
-    """Whether a branch name ends in one of `allocate`'s collision suffixes.
+def _unsuffixed(branch: str, attempt: int) -> str:
+    """The base name `allocate` suffixed to reach this branch on this attempt.
 
-    Only the suffixes this allocator can actually produce count: `-2` through
-    `-<MAX_REPAIR_BRANCH_ATTEMPTS>`. A branch legitimately named `fix-2` by
-    Core is indistinguishable from a suffixed one by inspection, which is why
-    this is used only to check a first-attempt slot and never to derive a name.
+    Applied only to a name this allocator just built, where the attempt is a
+    known fact rather than something inferred from the text — so removing the
+    suffix here is exact, and the stored result rebuilds the branch exactly.
     """
-    for attempt in range(2, MAX_REPAIR_BRANCH_ATTEMPTS + 1):
-        if branch.endswith(f"-{attempt}"):
-            return True
-    return False
+    if attempt <= 1:
+        return branch
+    marker = f"-{attempt}"
+    return branch[: -len(marker)] if branch.endswith(marker) else branch
 
 
 def _is_descendant(candidate: Path, ancestor: Path) -> bool:
@@ -222,9 +235,20 @@ class CodingWorktreeAllocator:
     when somebody comes back to it.
     """
 
-    def __init__(self, root: Path, repository: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        repository: Path,
+        outcome_source: Callable[[str], str] | None = None,
+    ) -> None:
         self._repository = canonical_repository_root(repository)
         self._root = resolve_worktree_root(root, self._repository)
+        # What the broker durably recorded for a job, by job id: "succeeded",
+        # another status, or "" when it has no record of one. Injected rather
+        # than reached for, because the allocator has no business knowing how
+        # the goal store is shaped — and because the point of it is that the
+        # answer comes from outside anything this module writes.
+        self._outcome_source = outcome_source
 
     @property
     def root(self) -> Path:
@@ -267,6 +291,58 @@ class CodingWorktreeAllocator:
         except OSError:
             return
 
+    def _claim_path(self, slot: str) -> Path:
+        return self._root / f"{slot}{CLAIM_SUFFIX}"
+
+    def _claim_slot(self, slot: str, job_id: str, branch: str) -> None:
+        """Record that this allocator is about to create this exact directory.
+
+        The claim is AL/X's positive provenance for a slot, and it is the only
+        thing that makes a directory under this root *ours*. Being a linked
+        worktree of this repository in the right place is not enough: somebody
+        can run `git worktree add` there by hand, and D-030 grants no authority
+        over a directory AL/X did not create.
+
+        Deliberately not release authority. It says a directory was going to
+        exist, not that a job succeeded in it, and `release_authorised` never
+        reads it.
+        """
+        claim = {
+            "slot": slot,
+            "job_id": job_id,
+            "branch": branch,
+            "claimed_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            self._claim_path(slot).write_text(
+                json.dumps(claim, indent=2, sort_keys=True) + "\n"
+            )
+        except OSError as error:
+            # Without a claim the directory about to be created could not
+            # later be recognised as AL/X's, which is the state this exists to
+            # prevent. Refuse before git creates anything.
+            raise CodingError(
+                "worktree_unusable",
+                reason_code="allocation_claim_not_written",
+                slot=slot,
+            ) from error
+
+    def _withdraw_claim(self, slot: str) -> None:
+        """Drop a claim for a directory that was never created."""
+        try:
+            self._claim_path(slot).unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning(
+                "Coding worktree claim for %s could not be withdrawn; it names "
+                "a directory that does not exist", slot,
+            )
+
+    def read_claim(self, slot: str) -> dict[str, object] | None:
+        """AL/X's provenance for a slot, or None if it never claimed one."""
+        if not job_id_permitted(slot):
+            return None
+        return self._read_json(self._claim_path(slot))
+
     def _note_orphan(self, allocated: CodingWorktree, error: OSError) -> None:
         """Leave a marker naming a worktree whose record could not be written.
 
@@ -306,15 +382,27 @@ class CodingWorktreeAllocator:
         return self._root / f"{slot}{ORPHAN_SUFFIX}"
 
     def orphan_worktrees(self) -> tuple[dict[str, object], ...]:
-        """Worktrees under this root that no allocation record accounts for.
+        """Worktrees AL/X created that no allocation record accounts for.
 
-        Derived from the filesystem and git, not from the markers: a directory
-        is an orphan because it is a linked worktree of this repository with no
-        readable record, whether or not anything managed to write a note about
-        it. The marker, when present, supplies the explanation.
+        Three things must all hold, and the first is the one that matters:
 
-        Reported only. D-030 grants no pruning authority and this does not
-        remove, repair or reuse anything.
+        - **AL/X claimed the slot.** The claim is written before git creates
+          anything, so it is positive provenance that this allocator made the
+          directory. Without it a worktree is somebody else's — a manually
+          created one under this root is not an AL/X orphan, and reporting it
+          as one would invite acting on a directory D-030 gives no authority
+          over;
+        - it is a linked worktree of the canonical repository;
+        - no readable allocation record accounts for it.
+
+        Discovery therefore survives the record-write failure it exists for:
+        the claim is written first and the record last, so the gap between them
+        is exactly the state reported here. The orphan marker, when one was
+        written, supplies the explanation but is never what makes a directory
+        discoverable.
+
+        Reported only. D-030 grants no pruning authority; this removes,
+        repairs and reuses nothing, and a claim confers no release authority.
         """
         if not self._root.is_dir():
             return ()
@@ -322,14 +410,19 @@ class CodingWorktreeAllocator:
         for child in sorted(self._root.iterdir()):
             if not child.is_dir() or not job_id_permitted(child.name):
                 continue
+            claim = self.read_claim(child.name)
+            if claim is None or str(claim.get("slot") or "") != child.name:
+                continue
             if not worktree_belongs_to_repository(child, self._repository):
                 continue
             if self._record_for_slot(child.name) is not None:
                 continue
             entry: dict[str, object] = {
                 "slot": child.name,
+                "job_id": str(claim.get("job_id") or ""),
                 "worktree": str(child),
                 "branch": worktree_branch(child),
+                "claimed_at": str(claim.get("claimed_at") or ""),
             }
             marker = self._read_json(self._orphan_path(child.name))
             if marker is not None:
@@ -362,6 +455,11 @@ class CodingWorktreeAllocator:
             "job_id": allocated.job_id,
             "slot": allocated.slot,
             "branch": allocated.branch,
+            # The two facts that make the branch checkable later without
+            # parsing it: which attempt produced it, and the base name that
+            # attempt suffixed. Together they reconstruct `branch` exactly.
+            "attempt": allocated.attempt,
+            "base_branch": _unsuffixed(allocated.branch, allocated.attempt),
             "base": allocated.base,
             "worktree": str(allocated.path),
             "allocated_at": datetime.now(UTC).isoformat(),
@@ -490,6 +588,14 @@ class CodingWorktreeAllocator:
         # refused here, so the invariant holds per allocation and not merely
         # per process.
         root = resolve_worktree_root(self._root, self._repository)
+        # The claim below is written into this directory before git creates
+        # anything, so it has to exist first.
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise CodingError(
+                "worktree_unusable", reason_code="worktree_root_not_writable"
+            ) from error
         base_branch = self.branch_for(job_id, requested_branch)
         base_commit = read_head_sha(self._repository)
         for attempt in range(1, MAX_REPAIR_BRANCH_ATTEMPTS + 1):
@@ -501,14 +607,34 @@ class CodingWorktreeAllocator:
                     "git_refused", reason_code="branch_name_not_permitted"
                 )
             path = root / candidate_id
-            if path.exists():
-                # A retained worktree from an earlier job of this identity.
-                # D-030 keeps it, so this attempt yields to it rather than
-                # reusing or removing it.
+            if path.exists() or self._claim_path(candidate_id).exists():
+                # A retained worktree from an earlier job of this identity, or
+                # a slot an earlier attempt already claimed. D-030 keeps both,
+                # so this attempt yields rather than reusing or removing them.
                 continue
-            created = allocate_job_worktree(
-                self._repository, path, candidate_branch, base_commit
-            )
+            # Claim the slot *before* git creates anything. This is the
+            # provenance orphan discovery reads: a directory is AL/X's only if
+            # this allocator said it was about to create it. Written first so
+            # it survives the record-write failure it exists to explain, and
+            # so a crash between the two leaves a claim rather than a
+            # directory nothing can account for.
+            self._claim_slot(candidate_id, job_id, candidate_branch)
+            try:
+                created = allocate_job_worktree(
+                    self._repository, path, candidate_branch, base_commit
+                )
+            except CodingError:
+                # git refused for a reason that is not a name collision. The
+                # claim describes a directory that was never created, so it is
+                # withdrawn: leaving it would make the next allocation skip a
+                # free slot and would name an orphan that does not exist.
+                self._withdraw_claim(candidate_id)
+                raise
+            if not created:
+                # The branch or path was taken. Same reasoning: nothing was
+                # created under this claim, so it is withdrawn before the
+                # collision scheme moves to the next attempt.
+                self._withdraw_claim(candidate_id)
             if created:
                 allocated = CodingWorktree(
                     job_id=job_id,
@@ -516,6 +642,7 @@ class CodingWorktreeAllocator:
                     branch=candidate_branch,
                     base=base_commit,
                     slot=candidate_id,
+                    attempt=attempt,
                 )
                 try:
                     self._write_record(allocated)
@@ -627,30 +754,90 @@ class CodingWorktreeAllocator:
             )
         release_job_worktree(self._repository, resolved)
         # Only after git removed the worktree. A record deleted first would
-        # leave an unreleasable directory behind if removal then refused.
+        # leave an unreleasable directory behind if removal then refused, and a
+        # claim deleted first would leave a directory AL/X no longer recognises
+        # as its own.
         self._record_path(job_id).unlink(missing_ok=True)
+        self._withdraw_claim(resolved.name)
+
+    def _require_durable_success(
+        self, job_id: str, record: dict[str, object]
+    ) -> None:
+        """Refuse unless the durable outcome says this job succeeded.
+
+        The authority is `outcome_source`, supplied by the runtime and reading
+        the broker's own record of what the capability returned. That record
+        lives in the durable goal store, is written when the job finished, and
+        is not a file in the coding-worktree root — so it is not editable by
+        whatever can edit the allocation sidecar.
+
+        Fails closed in both directions: no source configured, no durable
+        outcome found, or an outcome that is not `succeeded` all refuse. A
+        release that cannot prove success does not happen.
+        """
+        if self._outcome_source is None:
+            raise CodingError(
+                "job_not_successful",
+                reason_code="durable_outcome_unavailable",
+            )
+        try:
+            durable = self._outcome_source(job_id)
+        except Exception as error:  # noqa: BLE001 - an unreadable answer is a refusal
+            raise CodingError(
+                "job_not_successful",
+                reason_code="durable_outcome_unreadable",
+            ) from error
+        if not durable:
+            raise CodingError(
+                "job_not_successful",
+                reason_code="durable_outcome_missing",
+            )
+        if str(durable) != "succeeded":
+            raise CodingError(
+                "job_not_successful",
+                reason_code="job_did_not_succeed",
+                status=str(durable),
+            )
+        # The sidecar stays descriptive, but it may not *contradict* the
+        # durable outcome: disagreement means one of the two is wrong about
+        # this job, and D-030 refuses rather than choosing which to believe.
+        recorded = str(record.get("status") or "")
+        if recorded and recorded != "succeeded":
+            raise CodingError(
+                "job_not_successful",
+                reason_code="outcome_record_conflicts",
+                status=recorded,
+            )
 
     def _branch_matches_slot(
         self, record: dict[str, object], branch: str
     ) -> bool:
-        """Whether this branch carries the same collision suffix as the slot.
+        """Whether the branch is the one this recorded allocation produced.
 
-        `allocate` suffixes the slot and the branch together in one attempt, so
-        a job that landed in `job-1-3` is on a branch ending `-3`. Core names
-        the branch stem, so the stem itself cannot be re-derived — but the
-        suffix can, and it is what a tampered record has to get wrong in order
-        to name another job's branch.
+        Reconstructed, never parsed. `allocate` suffixes the slot and the
+        branch together on the same pass, so the recorded attempt number plus
+        the recorded base branch name rebuild both names exactly — and they
+        must match the slot the record survived the slot check with and the
+        branch git reports for the directory.
+
+        Parsing a trailing `-N` off the final branch name is what this
+        replaces, and it was wrong in both directions: `fix-2` is a legitimate
+        base name on attempt 1, indistinguishable by inspection from `fix`
+        suffixed on attempt 2. D-029's naming and collision semantics are
+        untouched; only the way the result is checked afterwards changed.
         """
         slot = str(record.get("slot") or "")
         job_id = str(record.get("job_id") or "")
-        if not slot or not job_id:
+        base_branch = str(record.get("base_branch") or "")
+        attempt = record.get("attempt")
+        if not slot or not job_id or not base_branch:
             return False
-        if slot == job_id:
-            # First attempt: the branch carries no allocation suffix, so any
-            # permitted stem is consistent.
-            return not _has_allocation_suffix(branch)
-        suffix = slot[len(job_id):]
-        return branch.endswith(suffix)
+        if not isinstance(attempt, int) or isinstance(attempt, bool):
+            return False
+        if not 1 <= attempt <= MAX_REPAIR_BRANCH_ATTEMPTS:
+            return False
+        suffix = "" if attempt == 1 else f"-{attempt}"
+        return slot == f"{job_id}{suffix}" and branch == f"{base_branch}{suffix}"
 
     def _base_is_known(self, record: dict[str, object]) -> bool:
         """Whether the recorded start point is a real commit in the repository.
@@ -670,6 +857,13 @@ class CodingWorktreeAllocator:
         is removed. The job must have finished successfully: a failed,
         cancelled or still-running job keeps its worktree, because that
         worktree is the evidence of what went wrong.
+
+        Whether it succeeded is asked of the durable capability outcome, not of
+        the allocation record. The record's `status` is audit metadata written
+        beside the workspace, and editing `failed` to `succeeded` in it used to
+        be enough to release a failed job's evidence. What a job did is
+        recorded by the broker when the capability returned, outside anything
+        this module writes, and that is what is consulted.
         """
         if not job_id_permitted(job_id):
             raise CodingError("worktree_unusable", reason_code="job_id_not_permitted")
@@ -678,13 +872,7 @@ class CodingWorktreeAllocator:
             raise CodingError(
                 "worktree_unusable", reason_code="allocation_record_missing"
             )
-        status = str(record.get("status", ""))
-        if status != "succeeded":
-            raise CodingError(
-                "job_not_successful",
-                reason_code="job_did_not_succeed",
-                status=status or "unfinished",
-            )
+        self._require_durable_success(job_id, record)
         path = self.worktree_of(job_id)
         if path is None:
             raise CodingError(
