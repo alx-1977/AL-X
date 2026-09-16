@@ -928,7 +928,7 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(20):
             if source.delivered:
                 break
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
         next_event.cancel()
         await asyncio.gather(next_event, return_exceptions=True)
         self.assertEqual(source.delivered, [event.event_id])
