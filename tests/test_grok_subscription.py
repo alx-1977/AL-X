@@ -258,8 +258,24 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
     def test_scripted_cli_json_drives_a_coding_job(self) -> None:
         work = tempfile.TemporaryDirectory()
         self.addCleanup(work.cleanup)
-        root = Path(work.name)
+        parent = Path(work.name)
+        # D-030 cuts the job's worktree from a real repository, so the fixture
+        # is one rather than a bare directory.
+        root = parent / "repo"
+        root.mkdir()
         (root / "app.py").write_text("ok\n", encoding="utf-8")
+        for argv in (
+            ("init", "-q", "-b", "main"),
+            ("config", "user.email", "test@example.invalid"),
+            ("config", "user.name", "test"),
+            ("add", "-A"),
+            ("commit", "-qm", "fixture"),
+        ):
+            subprocess.run(
+                ["git", *argv], cwd=root, check=True, capture_output=True
+            )
+        from alx.providers.coding_worktree import CodingWorktreeAllocator
+
         runner = _Recorder(_envelope(DECISION))
         model = GrokSubscriptionReasoningModel(
             "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
@@ -268,6 +284,9 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             True, model, lambda: "call-1", session=_StubSession(root),
             reviewer=GrokSubscriptionReasoningModel(
                 "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
+            ),
+            allocator=CodingWorktreeAllocator(
+                parent / "coding-worktrees", root
             ),
         )
         broker = CapabilityBroker(
@@ -279,7 +298,7 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             CapabilityCall(
                 "call-1",
                 RUN_CODING_TASK,
-                {"task": "inspect", "worktree": str(root)},
+                {"task": "inspect"},
             ),
             AuthorityContext("friedl", runtime.permissions, NOW),
         )

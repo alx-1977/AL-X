@@ -1354,3 +1354,386 @@ boundary described above.
 
 This amendment supersedes only the prior refuse-on-collision behaviour for
 repair branch creation. All other D-029 constraints remain unchanged.
+
+## D-030 — AL/X-owned Coding Agent worktree isolation
+
+- **Date:** 2026-09-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-16.** Drafted following an
+  architecture trace of the Coding Agent's sandbox, worktree, and branch
+  handling, requested before any further coding-agent implementation work,
+  and approved with the worktree-root and atomic branch/worktree-creation
+  clarifications incorporated below. Implementation has not yet begun.
+
+**Why this is a separate record.** D-028 grants execution inside "an assigned
+worktree" and D-029 grants branch and commit authority inside "its assigned
+isolated worktree." Both name the worktree as a precondition and neither
+grants, nor examines, the authority to create one. Today nothing does: the
+worktree is a caller-supplied filesystem path, and `run_coding_task`'s own
+schema names `"."` — the live AL/X checkout — as a valid value. Creating and
+destroying a `git worktree` against the canonical repository is authority
+distinct from anything D-028 or D-029 enumerate, so it is stated here rather
+than read into either.
+
+**Purpose.** Guarantee that a coding job always executes inside an isolated,
+AL/X-created git worktree, never inside the live AL/X checkout and never
+inside a directory an arbitrary caller named. This closes the gap the existing
+sandbox cannot close on its own: the sandbox correctly restricts writes to
+whatever path it is given, but nothing today guarantees that path is isolated.
+
+**One outcome, one path.** The production outcome is: assign one isolated git
+worktree and branch to one coding job, atomically, before execution, and
+remove or retain the worktree afterward according to the job's outcome. The
+authoritative path is a new `alx.providers.coding_worktree` module, called
+from the same deterministic sequence in `CodingAgent._run()` that previously
+called D-029's standalone `create_repair_branch` step. For Coding Agent jobs,
+that standalone step is superseded by this module's `git worktree add -b`
+call — see "Git operations newly authorised" below — so there is exactly one
+mechanism that creates a job's branch and exactly one that creates its
+worktree, and they are the same git invocation. There is no second path: the
+existing free-text `worktree` argument on `run_coding_task` is removed, not
+retained alongside the new one, and `create_repair_branch`'s bare `switch -c`
+form does not run alongside `worktree add -b` for these jobs. A caller cannot
+supply a filesystem path for the Coding Agent to execute in, under any
+argument name.
+
+### Who may create a Coding Agent worktree
+
+Only this capability's own deterministic pre-step, invoked exclusively from
+`CodingAgent._run()` under the existing `coding.execute` permission. Core does
+not call worktree creation directly, does not name a filesystem path, and
+cannot request execution against a path of its choosing. This mirrors D-029's
+repair-branch creation: Core decides *whether* a coding job runs and what it
+is for; the mechanical step of where it runs is not a decision with more than
+one correct answer once a job is authorised, so it belongs in code under Law
+2, not in a Core-supplied argument.
+
+### Canonical repository
+
+A worktree may be created only as a linked worktree of the single AL/X
+repository this runtime is running from (the repository whose root contains
+`AGENTS.md`, `LAWS_OF_ALX.md`, and `governance/DECISIONS.md`). No other
+repository, remote, or clone is a valid source. This is the same repository
+D-028 and D-029 already assume is being worked on; this decision does not
+widen that to any repository a caller might name.
+
+### Core supplies no filesystem path
+
+`run_coding_task`'s `worktree` argument is removed. Core supplies the task,
+the relevant context, and the acceptance criteria, exactly as D-028 already
+describes; it never supplies, and after this decision cannot supply, a
+directory for execution. The capability assigns the path itself and returns
+it to Core only as part of the structured evidence already returned today
+(branch, commit SHA, changed files, worktree state) — as a report of where the
+work happened, not as an input Core chose.
+
+### The live AL/X checkout is never the execution cwd
+
+The assigned worktree's git-common-dir must resolve to this repository, and
+the assigned worktree's own path must never equal this repository's working
+directory. A linked worktree created by `git worktree add` cannot equal the
+main checkout by construction, so this is enforced by using only that
+mechanism to create the directory — never a copy, never a bare path handed in
+by a caller, and never the main checkout used directly. `CodingWorkspace`
+gains one additional assertion as defense in depth: the resolved root's
+`.git` must be a file (a linked worktree's pointer), not a directory (the main
+checkout), and initialisation refuses otherwise.
+
+### Deterministic naming
+
+Both the worktree's filesystem location and its branch name are generated by
+this capability from `CodingRequest.job_id`, using one fixed, deterministic
+scheme with no interpretation of task content:
+
+- worktree path: `<job_id>` under one single, configured, AL/X-controlled
+  worktree root. The root's exact location is configuration, not fixed by
+  this decision, but its **resolved filesystem path must lie outside the
+  canonical repository and must not be a descendant of it** — not inside the
+  working tree, not inside `.git`, and not inside any path that resolves
+  (following symlinks) into either. Startup and every worktree allocation
+  must resolve the configured root and fail closed — refusing to start or to
+  allocate — if that resolution lands inside the canonical repository. This
+  is a mechanical, verifiable check performed before any `git worktree add`
+  is issued, not a convention;
+- branch name: the same repair-branch base name and collision-suffix scheme
+  D-029's amendment already authorises (`fix/example`, `fix/example-2`, ...),
+  unchanged by this decision.
+
+Requiring the configured root to resolve outside the repository, rather than
+merely recommending it, keeps worktree state fully separable from the
+repository's own metadata: it can be inspected, backed up, or migrated
+independently, and an operation on the repository (a clone, a `git gc`, a
+migration, or an accidental relative-path misconfiguration) cannot silently
+place job state inside the very tree this decision exists to isolate jobs
+from.
+
+This is a Law 2 mechanical step for the same reason D-029's branch-suffix
+scheme is: the scheme is fixed in advance and produces one deterministic
+result for a given job identifier and existing worktree/branch set.
+
+### One logical job, one worktree
+
+The worktree and branch assigned at the start of `CodingAgent._run()` are
+threaded unchanged through PLAN, EXECUTION, REVIEW, CORRECTION, and TEST. No
+step in the sequence may create, switch, or reassign a different worktree for
+the same job. This is not new behaviour: `CodingAgent._run()` already threads
+one `request.worktree` value through planning, session execution, the local
+review/correction loop, verification, and commit. This decision only removes
+the possibility that value was ever a caller-supplied, non-isolated path.
+
+### Retry and correction reuse
+
+A correction cycle within the same job's local review loop reuses the same
+worktree and branch already assigned; it does not request or receive a new
+one. A genuinely new job — a new call to `run_coding_task`, even one
+addressing the same underlying task after a prior job concluded — is assigned
+a new worktree under a new `job_id`. This decision introduces no second
+identifier; see the job-identity clarification below for where `job_id`
+comes from.
+
+### Collision handling
+
+D-029's branch naming, collision classification, suffix policy, and retry
+bound (`MAX_REPAIR_BRANCH_ATTEMPTS`) remain entirely authoritative and are not
+redefined here. What changes is only the mechanical form the retry is
+applied to: because branch and worktree are now created together by one
+`git worktree add -b <branch> <path> <base>` call rather than by a separate
+`switch -c`, a collision on either the branch name or the generated worktree
+path is classified and retried by that same D-029 scheme against `job_id`,
+trying `<job_id>-2`, `<job_id>-3`, and so on until an attempt succeeds or the
+existing bound is reached. Any failure other than the exact collision
+diagnostic D-029 already recognises fails closed and is returned to Core as a
+declared failure code, exactly as D-029 already fails closed on any other git
+diagnostic.
+
+### Concurrency
+
+Two jobs may never be assigned the same worktree. Because the path is
+generated from the job identifier rather than supplied by a caller, and job
+identifiers are not reused for concurrently running jobs, this holds by
+construction rather than by a lock — the same reasoning D-029 already applies
+to why two jobs cannot collide on a branch name it generates. This decision
+does not introduce a locking or coordination mechanism, and does not claim to
+solve concurrent access to a worktree from outside this capability (for
+example, a human editing the same path by hand); that risk is unchanged from
+today and out of scope here, as D-029's "residual concurrency window" already
+records for git writes.
+
+### Sandbox boundary
+
+`coding_containment.py`'s generated profile continues to set `read_write` to
+exactly the assigned worktree, unchanged. This decision does not modify the
+sandbox mechanism. It changes only what value that boundary is ever given:
+after this decision, the value is always an AL/X-created linked worktree,
+never a caller-supplied path and never the live checkout. No deficiency in
+`coding_containment.py`, `coding_process.py`, or D-029's `_WRITE_SHAPES`
+allowlist was found during the trace that motivated this decision, and none
+of the three is changed by it.
+
+### Retention on success
+
+A successful Coding Agent worktree may be removed only after the job has
+reached a successful terminal state **and** Core explicitly authorises
+workspace release, having determined that no review, publication, recovery,
+or other authorised continuation of that job remains pending. "Commit
+succeeded" or "TEST finished" is not by itself sufficient and does not remove
+the worktree.
+
+The release authorisation must be durable and auditable: it is a recorded
+decision, not an inferred or implicit consequence of a job's status. Absence
+of an explicit release authorisation means the worktree is retained. This is
+a terminal lifecycle action performed once, on Core's explicit say-so — it is
+not a new orchestration state machine, and it does not require the worktree
+lifecycle to gain intermediate states beyond "assigned," "retained," and
+"released."
+
+The branch and its commit are never removed by this capability regardless of
+when the worktree is released — they remain in the repository's ordinary ref
+namespace exactly as D-029 already leaves them. Releasing the worktree does
+not touch the branch, the commit, or any ref.
+
+### Retention on failure, cancellation, or crash
+
+A job that does not reach a successful terminal state — including a declared
+failure, a cancellation, or a crash that prevents the normal completion path
+from running — leaves its worktree in place, unmodified, as recoverable stale
+state. D-030 grants no automatic pruning or deletion authority; any later
+stale-worktree cleanup mechanism requires separate explicit authority. This
+follows D-029's existing principle of returning the truth rather than hiding
+it: a failed or interrupted job's partial state is evidence, not litter, and
+remains available for Core, Friedl, or a later recovery step to examine.
+
+### Recovery of stale worktrees after restart
+
+On the runtime's startup, any worktree matching this decision's naming scheme
+that is not associated with a currently active job is left exactly as found
+and reported as recoverable stale state, consistent with "Retention on
+failure, cancellation, or crash" above. D-030 grants no automatic pruning or
+deletion authority for this state, under any policy or age bound; any later
+stale-worktree cleanup mechanism requires separate explicit authority.
+Deciding what to do with accumulated stale worktrees — inspecting them,
+resuming a job against one, or deleting one — is a separate, later decision
+if and when it is needed.
+
+### Git operations newly authorised
+
+Exactly two, both scoped to this repository's own git-common directory and to
+paths this capability itself generated:
+
+- `git worktree add -b <branch> <generated-path> <base>` — this is now **the
+  single branch-creation mechanism for Coding Agent jobs**. D-029's separate
+  `git switch -c <branch>` step (`create_repair_branch`, run inside a
+  caller-supplied directory) must not also run for these jobs: branch and
+  worktree are allocated together, in one atomic git operation, not as two
+  sequential steps that could diverge or leave one created without the
+  other. D-029's branch **naming** scheme, collision **classification**,
+  suffix **policy**, and retry **bound** remain entirely authoritative and
+  unchanged — this decision changes only the mechanical creation path
+  (`worktree add -b` instead of a bare directory plus `switch -c`), not what
+  name is chosen, when a collision is declared, or how it is resolved. For
+  any Coding Agent job, `create_repair_branch`'s standalone `switch -c` form
+  is superseded and is not a second way to create that job's branch;
+- `git worktree remove <generated-path>` — only against a worktree this
+  capability itself created, only for a job that reached a successful
+  terminal state, and only once Core has recorded an explicit, durable,
+  auditable release authorisation for that job's worktree, per "Retention on
+  success" above. It is never invoked automatically for a failed, cancelled,
+  or crashed job, never invoked merely because TEST or commit completed, and
+  never invoked in the absence of that recorded authorisation.
+
+`git worktree prune` is not authorised by this decision. Automatic deletion
+of a failed, cancelled, or crashed job's worktree is not authorised by this
+decision, at any time. If accumulated stale worktrees need pruning, that is a
+future, separately authorised decision, not an implicit extension of
+`remove`.
+
+### Not authorised by this decision
+
+Everything D-028 and D-029 already withhold remains withheld and is not
+reopened here: push, fetch, pull, merge, rebase, reset beyond D-029's existing
+path-scoped index-rollback exception, branch deletion, history rewriting,
+stash operations, remote modification, tag creation, GitHub interaction of any
+kind, and any change to D-026's merge authority. This decision grants no
+broader git authority than the two `git worktree` forms named above, and does
+not widen `_WRITE_SHAPES`. It does not authorise a Core-supplied filesystem
+path under any argument name, present or future, and does not introduce a
+second coding-orchestration state machine: worktree assignment and teardown
+are two additional deterministic steps in the existing single sequence, not a
+parallel one.
+
+### Audit evidence
+
+The structured evidence `run_coding_task` already returns to Core gains four
+facts, recorded for every job regardless of outcome:
+
+- the assigned worktree path and branch name, at creation;
+- whether an existing worktree was reused for a correction cycle within the
+  same job (always, for corrections; never across jobs);
+- for a job retained as stale state (failure, cancellation, or crash), that
+  it is retained and why, so it is reported as recoverable rather than
+  silently persisting unexplained;
+- for a job whose worktree is released under "Retention on success", the
+  durable, auditable release authorisation itself — who or what authorised
+  release (Core, via its ordinary reasoning path) and on what basis (no
+  review, publication, recovery, or continuation remained pending) — recorded
+  before removal, not merely the fact that removal occurred afterward.
+
+This is a report of what already happened in the deterministic sequence, not
+a new judgement the capability makes; it extends the existing evidence
+contract rather than adding a new one.
+
+### Minimal lifecycle state
+
+No new orchestration state machine is introduced. The only new state is a
+record of which worktrees exist and which job identifier created each one —
+the minimum needed to make retention, collision handling, and stale-worktree
+reporting possible. This can be the filesystem itself (the set of directories
+under the fixed location, named by job identifier) plus the structured
+evidence already returned per job; it does not require a new persistent store,
+database, or service. `CodingAgent._run()`'s existing phase sequence
+(PLAN → EXECUTION → REVIEW → CORRECTION → TEST) is unchanged; worktree
+assignment is a step before PLAN and teardown is a step after TEST, in the
+same function, not a new phase visible to Core.
+
+### Review condition
+
+Revisit if a coding job's assigned worktree is ever found to resolve to the
+live AL/X checkout; if two concurrently running jobs are ever found sharing
+one worktree; if stale-worktree accumulation requires pruning authority
+beyond `remove`; if worktree creation is ever invoked from anywhere other than
+`CodingAgent._run()`; or before any push, merge, or pull-request authority
+beyond D-028/D-029 is considered.
+
+### Decisions incorporated
+
+Friedl has settled every point this proposal previously left open, and this
+text reflects the settled version:
+
+1. Worktree root is one single, configured, AL/X-controlled location whose
+   resolved filesystem path is required to lie outside the canonical
+   repository and not be a descendant of it; startup and allocation fail
+   closed if resolution ever lands inside the repository — see "Deterministic
+   naming" above.
+2. Worktree identity is sourced from the existing durable `CodingRequest.job_id`
+   — no new identifier is introduced.
+3. Collision classification, naming, suffix policy, and retry bound remain
+   D-029's, unchanged; only the mechanical creation form changes — see
+   "Collision handling" above.
+4. Failed/cancelled/crashed worktrees remain as recoverable stale state.
+   D-030 grants no automatic pruning or deletion authority; any later
+   stale-worktree cleanup mechanism requires separate explicit authority.
+5. A successful worktree may be removed only after the job has reached a
+   successful terminal state and Core explicitly authorises workspace release,
+   having determined that no review, publication, recovery, or other
+   authorised continuation remains pending. The release authorisation must be
+   durable and auditable. Absence of explicit release means the worktree is
+   retained. This is a terminal lifecycle action, not a new orchestration
+   state machine.
+6. For Coding Agent jobs, `git worktree add -b <branch> <path> <base>` is the
+   single branch-creation mechanism; D-029's standalone `switch -c` step
+   (`create_repair_branch`) does not also run for these jobs. Branch and
+   worktree are allocated atomically — see "Git operations newly authorised"
+   above.
+
+### Clarification — job identity and release authorisation
+
+- **Date:** 2026-09-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-16**, recorded before implementation
+  began.
+
+Two mechanisms this decision depends on were left unspecified above. Both are
+settled here; neither widens the authority D-030 grants.
+
+**Job identity.** `CodingRequest` carries no job identifier today — the
+identifier that exists is on `CodingTelemetry`, which is transient diagnostic
+state and not suitable as workspace identity. The Coding Agent job identity is
+therefore the **broker-generated durable capability call ID**, injected
+executor-side into a new non-model-supplied `CodingRequest.job_id`. Core and
+the reasoning model never generate, choose, supply or see this value: it is not
+a schema field, so a model cannot set it, and the executor populates it from
+the same call-ID source that already labels the capability result. That one
+injected value is authoritative for the whole logical job, across PLAN,
+EXECUTION, REVIEW, CORRECTION and TEST. No second workspace or job identifier
+is introduced.
+
+**Release authorisation.** The explicit, durable, auditable Core authorisation
+required by "Retention on success" above is represented by a separate narrow
+Core capability, `release_coding_workspace(job_id)`. The durable invocation of
+that capability — recorded as an ordinary capability call and result, like
+every other — *is* the release authorisation; no separate release ledger,
+lifecycle state machine, or goal-record architecture is introduced for it. The
+capability accepts `job_id` only and never a filesystem path.
+
+Before removing anything, deterministic execution must verify all of: the
+referenced job reached a successful terminal state; the worktree was created
+by the D-030 allocator for that exact `job_id`; it lies beneath the configured
+AL/X-controlled coding-worktree root; that root resolves outside the canonical
+repository and is not a descendant of it, including through symlinks; the
+worktree is not the canonical or live checkout; it is not owned by another
+job; and no contradictory retained state makes release invalid. Any failed
+verification fails closed and removes nothing. Absence of the release
+invocation — including after failure, cancellation, or crash — leaves the
+worktree intact as recoverable stale state.
+
+No open design questions remain in this proposal.

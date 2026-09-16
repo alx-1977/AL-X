@@ -133,6 +133,28 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
     return values
 
 
+def _build_coding_allocator(root: Path, repository_root: Path):
+    """The D-030 worktree allocator, or none if its root cannot be used.
+
+    A root that resolves inside the canonical repository is a configuration
+    error, not a runtime condition to work around: it would put every coding
+    job back inside the checkout this decision exists to keep them out of. The
+    capability is therefore left unregistered and the reason is logged, which
+    is the same shape as a missing coding model.
+    """
+    from alx.contracts.coding import CodingError
+    from alx.providers.coding_worktree import CodingWorktreeAllocator
+
+    try:
+        return CodingWorktreeAllocator(root, repository_root)
+    except CodingError as error:
+        LOGGER.warning(
+            "Coding worktree root unusable (%s): no coding capability",
+            error.details.get("reason_code", error.code),
+        )
+        return None
+
+
 def _completed(attempt) -> bool:
     """True only when a capture actually finished its work."""
     result = getattr(attempt, "result", None)
@@ -458,6 +480,14 @@ async def run(repository_root: Path) -> None:
     # D-028 authorises one bounded coding job in an assigned worktree. It is
     # a separate authority from sandbox.execute: the sandbox cannot touch a
     # repository, and this cannot merge, push, deploy or request a review.
+    # D-030 requires one AL/X-controlled worktree root that resolves outside
+    # the canonical repository. It defaults beside the runtime storage root,
+    # which is already outside the checkout, and a configured root that
+    # resolves back inside refuses rather than being silently accepted.
+    coding_allocator = _build_coding_allocator(
+        voice_settings.coding_worktree_root or (storage_root / "coding-worktrees"),
+        repository_root,
+    )
     coding_runtime = build_coding_runtime(
         provider_settings.coding.enabled,
         providers.coding,
@@ -467,6 +497,7 @@ async def run(repository_root: Path) -> None:
         activity_sink=activity.set,
         telemetry_sink=activity.publish_coding,
         job_id_source=lambda: current_call_id[0],
+        allocator=coding_allocator,
     )
     if coding_runtime is not None:
         for definition in coding_runtime.definitions:

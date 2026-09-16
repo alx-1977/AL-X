@@ -1,0 +1,478 @@
+"""Allocate and release one isolated worktree per coding job, under D-030.
+
+D-028 and D-029 both grant authority *inside* "an assigned worktree" and
+neither says who assigns it. Nothing did: the worktree was a path Core handed
+in as a string, and the capability description named `"."` — the live AL/X
+checkout — as a valid value. The kernel sandbox then faithfully made whatever
+that path resolved to writable, so the confinement was only ever as isolated
+as a value nothing validated.
+
+This module is where that value comes from instead. Core supplies no path at
+all; the allocator derives one from the job's own identity, creates it as a
+linked worktree of the canonical repository, and hands back a directory the
+live checkout can never be.
+
+Three properties carry the decision:
+
+- **The root resolves outside the repository.** Configuration chooses where
+  coding worktrees live, but a root that resolves inside the canonical
+  repository — directly, or through a symlink — refuses at startup and again
+  at every allocation. A misconfiguration cannot quietly put job state back
+  inside the tree this exists to isolate jobs from.
+
+- **Branch and worktree are one command.** `git worktree add -b` creates both
+  atomically, so there is no window where a branch exists without its worktree
+  or the reverse, and no second branch-creation mechanism for these jobs.
+  D-029's naming, collision classification, suffix order and retry bound are
+  reused exactly; only the argv that applies them changed.
+
+- **Release proves ownership before removing anything.** Removal is not a
+  consequence of success. It happens when Core explicitly asks, and only after
+  this module has re-derived the path from the job identity and confirmed the
+  directory it is about to remove is the one it created for that job.
+
+Nothing here interprets Friedl or decides whether a job is finished. It turns
+a job identity into an isolated directory, and an explicit release into an
+empty one.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from alx.contracts.coding import CodingError
+from alx.providers.coding_git import (
+    MAX_REPAIR_BRANCH_ATTEMPTS,
+    allocate_job_worktree,
+    branch_name_permitted,
+    canonical_repository_root,
+    read_head_sha,
+    release_job_worktree,
+    worktree_belongs_to_repository,
+)
+
+
+# A job identity reaching the filesystem becomes one path segment, so it is
+# held to a narrower grammar than the broker's call IDs happen to use. No
+# separator, no dot segment, no leading dash: a `..` or an absolute-looking
+# identity cannot climb out of the root, and a dash-led one cannot be read as
+# an option by the git command it is interpolated into.
+_JOB_ID_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+MAX_JOB_ID_CHARACTERS = 128
+
+# The branch a job's work lands on. D-029 owns the collision scheme applied to
+# this base name; D-030 only fixes how the base name is derived when Core did
+# not name one, so that a job always has a branch to be isolated on.
+JOB_BRANCH_PREFIX = "alx/coding"
+
+# What this allocator created, recorded beside the worktree rather than inside
+# it. Beside, because a record inside a job's own worktree is a file the coding
+# session could edit: ownership would then be the agent's claim rather than
+# AL/X's. The `.json` sits in the root, which only AL/X writes.
+OWNERSHIP_SUFFIX = ".allocation.json"
+
+
+def job_id_permitted(job_id: str) -> bool:
+    """Whether a job identity may become a path segment and a branch element."""
+    if not isinstance(job_id, str):
+        return False
+    candidate = job_id.strip()
+    if not candidate or candidate != job_id:
+        return False
+    if len(candidate) > MAX_JOB_ID_CHARACTERS:
+        return False
+    if any(character not in _JOB_ID_ALLOWED for character in candidate):
+        return False
+    if candidate.startswith("-"):
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class CodingWorktree:
+    """One isolated worktree allocated to one coding job.
+
+    `job_id` is the job's identity — the broker call ID — and never changes.
+    `slot` is the directory name actually used, which may carry a collision
+    suffix the identity does not: a taken branch name or a retained worktree
+    from an earlier job moves the *directory*, not the job it belongs to.
+    Keeping these separate matters because everything downstream looks the job
+    up by identity, and a job whose identity shifted under it would not be
+    findable by the capability that allocated it.
+    """
+
+    job_id: str
+    path: Path
+    branch: str
+    base: str
+    slot: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.slot:
+            object.__setattr__(self, "slot", self.path.name)
+
+    def as_values(self) -> dict[str, object]:
+        return {
+            "job_id": self.job_id,
+            "worktree": str(self.path),
+            "branch": self.branch,
+            "base": self.base,
+        }
+
+
+def resolve_worktree_root(root: Path, repository: Path) -> Path:
+    """Resolve the configured coding-worktree root, or refuse it.
+
+    D-030 requires the resolved path to lie outside the canonical repository
+    and not be a descendant of it, including through symlinks. Both sides are
+    fully resolved before the comparison, so a symlinked root pointing back
+    into the repository is caught by the same check as a literal one.
+
+    The root is not created here. Refusing first and creating second means a
+    misconfigured root never has a directory made for it.
+    """
+    if not isinstance(root, Path):
+        raise CodingError("worktree_unusable", reason_code="root_not_configured")
+    try:
+        resolved_repository = Path(repository).expanduser().resolve()
+    except OSError as error:
+        raise CodingError(
+            "worktree_unusable", reason_code="repository_unresolvable"
+        ) from error
+    try:
+        # `strict=False`: the root legitimately may not exist yet. Symlinks in
+        # the parts that do exist are still followed, which is what the
+        # containment check depends on.
+        resolved_root = Path(root).expanduser().resolve()
+    except OSError as error:
+        raise CodingError(
+            "worktree_unusable", reason_code="root_unresolvable"
+        ) from error
+    if not resolved_root.is_absolute():
+        raise CodingError("worktree_unusable", reason_code="root_not_absolute")
+    if resolved_root == resolved_repository or _is_descendant(
+        resolved_root, resolved_repository
+    ):
+        raise CodingError(
+            "worktree_unusable", reason_code="root_inside_repository"
+        )
+    return resolved_root
+
+
+def _is_descendant(candidate: Path, ancestor: Path) -> bool:
+    try:
+        candidate.relative_to(ancestor)
+    except ValueError:
+        return False
+    return True
+
+
+class CodingWorktreeAllocator:
+    """Assign one isolated worktree per job, and release it when told to.
+
+    Holds no lifecycle state of its own. Ownership is re-derived from the job
+    identity and confirmed against git's own account of the repository, so a
+    restart loses nothing and a stale worktree is still recognisably the job's
+    when somebody comes back to it.
+    """
+
+    def __init__(self, root: Path, repository: Path) -> None:
+        self._repository = canonical_repository_root(repository)
+        self._root = resolve_worktree_root(root, self._repository)
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def repository(self) -> Path:
+        return self._repository
+
+    def path_for(self, job_id: str) -> Path:
+        """Where this job's worktree lives. Deterministic, never guessed."""
+        if not job_id_permitted(job_id):
+            raise CodingError("worktree_unusable", reason_code="job_id_not_permitted")
+        return self._root / job_id
+
+    def _record_path(self, job_id: str) -> Path:
+        return self._root / f"{job_id}{OWNERSHIP_SUFFIX}"
+
+    def record_outcome(self, job_id: str, status: str) -> None:
+        """Note how a job ended, beside its worktree.
+
+        Release needs to know whether the job succeeded, and the job that knows
+        has already finished by the time Core decides to release. Recorded here
+        rather than reconstructed later: a worktree's contents cannot say
+        whether the job that filled it passed its verification.
+
+        Failure to record never fails the job. The consequence of an absent
+        outcome is a workspace that refuses release, which is the safe
+        direction — retained state rather than a removal on an unproven fact.
+        """
+        record = self.read_record(job_id)
+        if record is None:
+            return
+        record["status"] = str(status)
+        record["finished_at"] = datetime.now(UTC).isoformat()
+        try:
+            self._record_path(job_id).write_text(
+                json.dumps(record, indent=2, sort_keys=True) + "\n"
+            )
+        except OSError:
+            return
+
+    def _write_record(self, allocated: CodingWorktree) -> None:
+        """Record what was allocated, for a reader that comes back later.
+
+        Deliberately not authority on its own: `owns` asks git whether the
+        directory is a linked worktree of this repository, and this file only
+        adds what git cannot say — which job it was allocated to, and when.
+        A missing or unreadable record therefore refuses a release rather than
+        being reconstructed from the filesystem.
+        """
+        record = {
+            "job_id": allocated.job_id,
+            "slot": allocated.slot,
+            "branch": allocated.branch,
+            "base": allocated.base,
+            "worktree": str(allocated.path),
+            "allocated_at": datetime.now(UTC).isoformat(),
+        }
+        self._record_path(allocated.job_id).write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n"
+        )
+
+    def read_record(self, job_id: str) -> dict[str, object] | None:
+        """What this allocator recorded for a job, or None if nothing did."""
+        if not job_id_permitted(job_id):
+            return None
+        path = self._record_path(job_id)
+        try:
+            raw = path.read_text()
+        except (OSError, ValueError):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def worktree_of(self, job_id: str) -> Path | None:
+        """The directory allocated to this job, from its own record.
+
+        Not `path_for`: a collision moves the directory without moving the
+        job, so the slot the record names is the authority on where the job
+        ended up. Returns None when nothing was recorded for the job, which
+        refuses a release rather than guessing at a path.
+        """
+        record = self.read_record(job_id)
+        if record is None:
+            return None
+        slot = str(record.get("slot") or job_id)
+        if not job_id_permitted(slot):
+            return None
+        return self._root / slot
+
+    def stale_job_ids(self) -> tuple[str, ...]:
+        """Every job whose worktree is still on disk, newest name order aside.
+
+        Reported so retained state is visible rather than merely present.
+        Nothing here removes or repairs anything: D-030 grants no pruning
+        authority, and a stale worktree is evidence until somebody decides
+        otherwise.
+        """
+        if not self._root.is_dir():
+            return ()
+        found: list[str] = []
+        for child in sorted(self._root.iterdir()):
+            if child.is_dir() and job_id_permitted(child.name):
+                found.append(child.name)
+        return tuple(found)
+
+    def branch_for(self, job_id: str, requested: str = "") -> str:
+        """The base branch name for this job, before D-029's collision scheme.
+
+        Core may name the repair branch, as D-029 already allows. It is a
+        judgement about what the repair is, so it is kept. When Core named
+        nothing, the job still needs a branch to be isolated on, and that name
+        is mechanical rather than meaningful.
+        """
+        chosen = requested.strip()
+        if chosen:
+            if not branch_name_permitted(chosen):
+                raise CodingError(
+                    "git_refused", reason_code="branch_name_not_permitted"
+                )
+            return chosen
+        if not job_id_permitted(job_id):
+            raise CodingError("worktree_unusable", reason_code="job_id_not_permitted")
+        derived = f"{JOB_BRANCH_PREFIX}/{job_id}"
+        if not branch_name_permitted(derived):
+            raise CodingError("git_refused", reason_code="branch_name_not_permitted")
+        return derived
+
+    def allocate(self, job_id: str, requested_branch: str = "") -> CodingWorktree:
+        """Create this job's branch and worktree in one command.
+
+        The suffix search is D-029's, applied to both names together: a job's
+        worktree path and its branch are allocated by the same attempt, so the
+        two can never disagree about which suffix won.
+        """
+        if not job_id_permitted(job_id):
+            raise CodingError("worktree_unusable", reason_code="job_id_not_permitted")
+        # Re-resolve rather than trusting the value proved at construction. A
+        # root that became a symlink into the repository after startup is
+        # refused here, so the invariant holds per allocation and not merely
+        # per process.
+        root = resolve_worktree_root(self._root, self._repository)
+        base_branch = self.branch_for(job_id, requested_branch)
+        base_commit = read_head_sha(self._repository)
+        for attempt in range(1, MAX_REPAIR_BRANCH_ATTEMPTS + 1):
+            suffix = "" if attempt == 1 else f"-{attempt}"
+            candidate_id = f"{job_id}{suffix}"
+            candidate_branch = f"{base_branch}{suffix}"
+            if not branch_name_permitted(candidate_branch):
+                raise CodingError(
+                    "git_refused", reason_code="branch_name_not_permitted"
+                )
+            path = root / candidate_id
+            if path.exists():
+                # A retained worktree from an earlier job of this identity.
+                # D-030 keeps it, so this attempt yields to it rather than
+                # reusing or removing it.
+                continue
+            created = allocate_job_worktree(
+                self._repository, path, candidate_branch, base_commit
+            )
+            if created:
+                allocated = CodingWorktree(
+                    job_id=job_id,
+                    path=path,
+                    branch=candidate_branch,
+                    base=base_commit,
+                    slot=candidate_id,
+                )
+                self._write_record(allocated)
+                return allocated
+        raise CodingError(
+            "git_refused",
+            reason_code="worktree_attempts_exhausted",
+            attempts=MAX_REPAIR_BRANCH_ATTEMPTS,
+        )
+
+    def owns(self, path: Path) -> bool:
+        """Whether this path is a worktree this allocator would have created.
+
+        Structural only: it says the path sits directly under the configured
+        root and is a linked worktree of the canonical repository. Whether the
+        *job* may release it is a separate question the release capability
+        answers from the job's own record.
+        """
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        if resolved.parent != self._root:
+            return False
+        if not resolved.is_dir():
+            return False
+        return worktree_belongs_to_repository(resolved, self._repository)
+
+    def release(self, job_id: str, path: Path) -> None:
+        """Remove one job's worktree, having proved it is that job's.
+
+        Every check fails closed and removes nothing. The path is re-derived
+        from the job identity rather than taken on trust, so a release can only
+        ever remove the directory this allocator would itself have allocated
+        for that job.
+        """
+        if not job_id_permitted(job_id):
+            raise CodingError("worktree_unusable", reason_code="job_id_not_permitted")
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except OSError as error:
+            raise CodingError(
+                "worktree_unusable", reason_code="worktree_unresolvable"
+            ) from error
+        # The directory this job actually got, which a collision may have
+        # suffixed. Re-derived from the record rather than taken from the
+        # caller, so the path is still this allocator's answer and not theirs.
+        expected = self.worktree_of(job_id)
+        if expected is None or resolved != expected:
+            raise CodingError(
+                "worktree_unusable", reason_code="worktree_not_owned_by_job"
+            )
+        if resolved == self._repository or _is_descendant(resolved, self._repository):
+            raise CodingError(
+                "worktree_unusable", reason_code="worktree_inside_repository"
+            )
+        if not self.owns(resolved):
+            raise CodingError(
+                "worktree_unusable", reason_code="worktree_not_allocated_here"
+            )
+        record = self.read_record(job_id)
+        if record is None:
+            raise CodingError(
+                "worktree_unusable", reason_code="allocation_record_missing"
+            )
+        # The record has to agree with the directory about which job and which
+        # branch this is. A record naming a different worktree is contradictory
+        # retained state, and D-030 refuses rather than choosing one to trust.
+        if record.get("job_id") != job_id or record.get("worktree") != str(resolved):
+            raise CodingError(
+                "worktree_unusable", reason_code="allocation_record_conflicts"
+            )
+        release_job_worktree(self._repository, resolved)
+        # Only after git removed the worktree. A record deleted first would
+        # leave an unreleasable directory behind if removal then refused.
+        self._record_path(job_id).unlink(missing_ok=True)
+
+    def release_authorised(self, job_id: str) -> dict[str, object]:
+        """Release one job's workspace on Core's explicit instruction.
+
+        Every D-030 release check runs here, and each refuses before anything
+        is removed. The job must have finished successfully: a failed,
+        cancelled or still-running job keeps its worktree, because that
+        worktree is the evidence of what went wrong.
+        """
+        if not job_id_permitted(job_id):
+            raise CodingError("worktree_unusable", reason_code="job_id_not_permitted")
+        record = self.read_record(job_id)
+        if record is None:
+            raise CodingError(
+                "worktree_unusable", reason_code="allocation_record_missing"
+            )
+        status = str(record.get("status", ""))
+        if status != "succeeded":
+            raise CodingError(
+                "job_not_successful",
+                reason_code="job_did_not_succeed",
+                status=status or "unfinished",
+            )
+        path = self.worktree_of(job_id)
+        if path is None:
+            raise CodingError(
+                "worktree_unusable", reason_code="allocation_record_missing"
+            )
+        self.release(job_id, path)
+        return {
+            "job_id": job_id,
+            "worktree": str(path),
+            "branch": str(record.get("branch", "")),
+            "released": True,
+        }
+
+
+__all__ = [
+    "CodingWorktree",
+    "CodingWorktreeAllocator",
+    "JOB_BRANCH_PREFIX",
+    "MAX_JOB_ID_CHARACTERS",
+    "job_id_permitted",
+    "resolve_worktree_root",
+]

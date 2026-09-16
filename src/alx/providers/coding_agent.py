@@ -57,9 +57,12 @@ from alx.providers.coding_process import (
     is_test_command,
     run_permitted_command,
 )
+from alx.providers.coding_worktree import (
+    CodingWorktree,
+    CodingWorktreeAllocator,
+)
 from alx.providers.coding_git import (
     commit_job_changes,
-    create_repair_branch,
     deleted_paths,
     read_workspace_state,
 )
@@ -221,6 +224,7 @@ class CodingAgent:
         telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
         job_id_source: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        allocator: CodingWorktreeAllocator | None = None,
     ) -> None:
         self._model = model
         self._session = session
@@ -231,6 +235,11 @@ class CodingAgent:
         self._job_id_source = job_id_source or (lambda: "coding-job")
         self._clock = clock or (lambda: datetime.now(UTC))
         self._telemetry: CodingTelemetry | None = None
+        # D-030. Without an allocator there is no isolated worktree to run in,
+        # and running somewhere else is the thing that decision exists to
+        # prevent, so a job fails closed rather than falling back to a path.
+        self._allocator = allocator
+        self._allocated: CodingWorktree | None = None
 
     def _report_telemetry(
         self, phase: str, *, in_flight: bool = False, waiting: bool = False,
@@ -308,11 +317,17 @@ class CodingAgent:
         """Run one job and never leave runtime telemetry at a worker state."""
         outcome: CodingOutcome | None = None
         self._telemetry = None
+        self._allocated = None
         self._report_telemetry("plan", in_flight=True, transition="CASE started")
         try:
             outcome = self._run(request)
             return outcome
         finally:
+            # D-030. How the job ended is recorded beside its worktree, from the
+            # one place that runs for every ending: success, declared failure,
+            # and the exception path a crash takes. An unrecorded outcome leaves
+            # a workspace that refuses release, which is the safe direction.
+            self._record_worktree_outcome(outcome)
             self._report_telemetry(
                 "complete" if outcome is not None and outcome.status == "succeeded" else "failed",
                 terminal=True,
@@ -321,8 +336,45 @@ class CodingAgent:
             )
             self._report_activity("reasoning")
 
+    def _record_worktree_outcome(self, outcome: CodingOutcome | None) -> None:
+        """Note the job's ending on its allocation record. Never fail the job."""
+        allocated = self._allocated
+        if allocated is None or self._allocator is None:
+            return
+        status = outcome.status if outcome is not None else "failed"
+        try:
+            self._allocator.record_outcome(allocated.job_id, status)
+        except Exception as error:  # noqa: BLE001 - bookkeeping, not the job
+            LOGGER.warning(
+                "Coding worktree outcome not recorded (%s); the job is unaffected",
+                type(error).__name__,
+            )
+
     def _run(self, request: CodingRequest) -> CodingOutcome:
-        workspace = CodingWorkspace(request.worktree, request.blocked_paths)
+        # D-030: branch and worktree are allocated together, before anything
+        # else touches a filesystem, from the job's own identity. This replaces
+        # both the Core-supplied path and the separate `create_repair_branch`
+        # step: one command creates both, so they cannot disagree about which
+        # collision suffix won.
+        if self._allocator is None:
+            raise CodingError(
+                "worktree_unusable", reason_code="allocator_not_configured"
+            )
+        allocated = self._allocator.allocate(
+            request.job_id, request.repair_branch.strip()
+        )
+        self._allocated = allocated
+        # The branch git actually created is authoritative: D-029's scheme may
+        # have suffixed the requested base name, and every later step must use
+        # the name that exists rather than the one that was asked for. The
+        # worktree is written here for the same reason — the session needs a
+        # directory, and this is the only place one can come from.
+        request = replace(
+            request,
+            repair_branch=allocated.branch,
+            worktree=str(allocated.path),
+        )
+        workspace = CodingWorkspace(str(allocated.path), request.blocked_paths)
         commands: list[CodingCommandRecord] = []
         preexisting_status, _ = self._git_evidence(workspace)
         preexisting_dirty = files_from_git_status(preexisting_status)
@@ -348,35 +400,10 @@ class CodingAgent:
         # Read once, here, so a file missing at the baseline can never become
         # this job's deletion merely by still being missing afterwards.
         inherited_deleted = self._deletions(workspace)
-        # The branch is created before the session so its edits land on the
-        # branch rather than on whatever was checked out. A branch that cannot
-        # be created fails the job closed: the alternative is a session that
-        # writes to the wrong branch and only discovers it at commit time.
-        if request.repair_branch.strip():
-            try:
-                # The returned state describes the worktree after creation.
-                # Keep `baseline` intact: it records where the job started,
-                # rather than the branch this job subsequently created.
-                branch_state = create_repair_branch(
-                    workspace.root, request.repair_branch.strip()
-                )
-                # D-029 may mechanically suffix Core's requested base name.
-                # All subsequent deterministic steps must use the branch Git
-                # actually created, never retry naming through Core or adopt
-                # the pre-existing requested branch.
-                request = replace(request, repair_branch=branch_state.branch)
-            except CodingError as error:
-                git_status, git_diff = self._git_evidence(workspace)
-                return self._outcome(
-                    status="failed",
-                    summary="the repair branch could not be prepared",
-                    files=(), preexisting_dirty=preexisting_dirty,
-                    commands=commands, tests_run=False, tests_passed=None,
-                    git_status=git_status, git_diff=git_diff,
-                    issues=(error.code,), review=False, failure_status=True,
-                    baseline=baseline,
-                    diagnostics={"phase": "git_branch", **error.details},
-                )
+        # No separate branch-creation step remains. `git worktree add -b`
+        # above created the branch and checked it out in the same command, so
+        # the session's edits already land on the job's own branch and there is
+        # no window in which a branch exists without its worktree.
 
         plan, planning_failure = self._planning_phase(request, workspace)
         if plan is None:
@@ -749,6 +776,7 @@ class CodingAgent:
         request: CodingRequest,
         plan: Mapping[str, Any],
         changed_files: tuple[str, ...] = (),
+        root: Path | None = None,
     ) -> tuple[tuple[str, ...], ...]:
         """The bounded checks AL/X runs after the session finishes.
 
@@ -760,12 +788,13 @@ class CodingAgent:
         """
         chosen: list[tuple[str, ...]] = []
         seen: set[tuple[str, ...]] = set()
+        worktree = root if root is not None else self._root(request)
 
         def choose(argv: tuple[str, ...]) -> bool:
             if argv in seen:
                 return False
             if not command_permitted(
-                list(argv), self._root(request), tuple(request.blocked_paths)
+                list(argv), worktree, tuple(request.blocked_paths)
             ):
                 return False
             seen.add(argv)
@@ -776,7 +805,7 @@ class CodingAgent:
             for argv in self._candidate_arguments(text):
                 if choose(argv):
                     return tuple(chosen)
-        derived = self._changed_test_modules(request, changed_files)
+        derived = self._changed_test_modules(request, changed_files, worktree)
         if derived and choose(("python", "-m", "pytest", "-q", *derived)):
             return tuple(chosen)
         if not chosen:
@@ -785,7 +814,10 @@ class CodingAgent:
         return tuple(chosen)
 
     def _changed_test_modules(
-        self, request: CodingRequest, changed_files: tuple[str, ...]
+        self,
+        request: CodingRequest,
+        changed_files: tuple[str, ...],
+        root: Path | None = None,
     ) -> tuple[str, ...]:
         """Test files changed by the job or mechanically adjacent to its source.
 
@@ -793,7 +825,7 @@ class CodingAgent:
         conventional test candidates derived from its path, and a candidate is
         returned only when it already exists inside the assigned worktree.
         """
-        root = self._root(request)
+        root = root if root is not None else self._root(request)
         tests: list[str] = []
         for relative in changed_files:
             path = Path(relative)
@@ -820,9 +852,17 @@ class CodingAgent:
                     tests.append(name)
         return tuple(tests)
 
-    @staticmethod
-    def _root(request: CodingRequest):
-        return Path(request.worktree).expanduser().resolve()
+    def _root(self, request: CodingRequest) -> Path:
+        """The worktree allocated to this job.
+
+        Kept as a lookup rather than a field on the request: under D-030 the
+        request carries the job's identity and the allocator turns that into a
+        directory, so there is one place a worktree can come from.
+        """
+        allocated = self._allocated
+        if allocated is None or allocated.job_id != request.job_id:
+            raise CodingError("worktree_unusable", reason_code="worktree_not_allocated")
+        return allocated.path
 
     @staticmethod
     def _candidate_arguments(text: str) -> tuple[tuple[str, ...], ...]:
@@ -1101,4 +1141,10 @@ class CodingAgent:
             plan_summary,
             baseline,
             commit,
+            # D-030. Reported for every job: the worktree is retained until an
+            # explicit release, so `worktree_retained` is true whenever a job
+            # ends. Release is a later, separate capability call.
+            allocated.job_id if (allocated := self._allocated) is not None else "",
+            str(allocated.path) if allocated is not None else "",
+            True,
         )
