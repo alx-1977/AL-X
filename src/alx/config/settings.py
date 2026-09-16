@@ -1278,7 +1278,7 @@ class LiveVoiceSettings:
     # to read without being authorised to spend on discovery.
     web_search: "WebSearchSettings"
     sandbox: "SandboxSettings"
-    # D-030 coding-worktree root. Optional: unset, it defaults beside the
+    # D-031 coding-worktree root. Optional: unset, it defaults beside the
     # runtime storage root, which already sits outside the checkout. Set, it
     # must still resolve outside the canonical repository, which the allocator
     # enforces rather than this setting — a path is only a path until it is
@@ -1393,6 +1393,33 @@ def merge_settings(environment: Mapping[str, str]) -> MergeSettings:
         enabled=_boolean(environment, "ALX_MERGE_ENABLED", False),
         repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
         token=environment.get("GITHUB_TOKEN", "").strip(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryRuntimeSettings:
+    """Fixed local canonical checkout authority, off unless complete."""
+
+    enabled: bool
+    root: Path | None
+    repository_identity: str
+    origin_url: str
+    timeout_seconds: int
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.enabled and self.root is not None and self.root.is_absolute()
+                    and self.repository_identity and self.origin_url and self.timeout_seconds > 0)
+
+
+def repository_runtime_settings(environment: Mapping[str, str]) -> RepositoryRuntimeSettings:
+    root = environment.get("ALX_REPOSITORY_RUNTIME_ROOT", "").strip()
+    return RepositoryRuntimeSettings(
+        enabled=_boolean(environment, "ALX_REPOSITORY_RUNTIME_ENABLED", False),
+        root=Path(root).expanduser() if root else None,
+        repository_identity=environment.get("ALX_REPOSITORY_RUNTIME_IDENTITY", "").strip(),
+        origin_url=environment.get("ALX_REPOSITORY_RUNTIME_ORIGIN", "").strip(),
+        timeout_seconds=_positive_integer(environment, "ALX_REPOSITORY_RUNTIME_TIMEOUT_SECONDS", 30),
     )
 
 

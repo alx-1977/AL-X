@@ -249,7 +249,7 @@ class CodingAgent:
         self._activity_sink = activity_sink or (lambda _activity: None)
         self._telemetry_sink = telemetry_sink or (lambda _telemetry: None)
         self._clock = clock or (lambda: datetime.now(UTC))
-        # D-030. Without an allocator there is no isolated worktree to run in,
+        # D-031. Without an allocator there is no isolated worktree to run in,
         # and running somewhere else is the thing that decision exists to
         # prevent, so a job fails closed rather than falling back to a path.
         self._allocator = allocator
@@ -351,7 +351,7 @@ class CodingAgent:
             outcome = self._run(request, state)
             return outcome
         finally:
-            # D-030. How the job ended is recorded beside its worktree, from the
+            # D-031. How the job ended is recorded beside its worktree, from the
             # one place that runs for every ending: success, declared failure,
             # and the exception path a crash takes. An unrecorded outcome leaves
             # a workspace that refuses release, which is the safe direction.
@@ -382,7 +382,7 @@ class CodingAgent:
             )
 
     def _run(self, request: CodingRequest, state: "_JobState") -> CodingOutcome:
-        # D-030: branch and worktree are allocated together, before anything
+        # D-031: branch and worktree are allocated together, before anything
         # else touches a filesystem, from the job's own identity. This replaces
         # both the Core-supplied path and the separate `create_repair_branch`
         # step: one command creates both, so they cannot disagree about which
@@ -1181,7 +1181,7 @@ class CodingAgent:
             plan_summary,
             baseline,
             commit,
-            # D-030. Reported for every job: the worktree is retained until an
+            # D-031. Reported for every job: the worktree is retained until an
             # explicit release, so `worktree_retained` is true whenever a job
             # ends. Release is a later, separate capability call. Passed in
             # from the run that owns it rather than read off the agent, which

@@ -62,7 +62,7 @@ class TheStepBudgetCeilingIsVisible(unittest.TestCase):
 
 
 class TheWorktreeIsNotSomethingCoreNames(unittest.TestCase):
-    """D-030 removed the path field rather than constraining it.
+    """D-031 removed the path field rather than constraining it.
 
     This class previously asserted the opposite: that the catalogue described
     `worktree` as a filesystem path and named `"."` as the value that works.
@@ -132,7 +132,7 @@ class InvalidValuesStillFailClosed(unittest.TestCase):
 
 class ExistingValidCallsAreUnchanged(unittest.TestCase):
     def test_the_input_schema_carries_no_path(self) -> None:
-        """D-030 removed one field; the rest of the contract is unchanged.
+        """D-031 removed one field; the rest of the contract is unchanged.
 
         `worktree` is gone rather than optional. An optional path field would
         still be a path a model could supply, which is the thing that made the

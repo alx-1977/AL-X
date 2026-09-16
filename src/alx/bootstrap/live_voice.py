@@ -21,7 +21,7 @@ from alx.bootstrap.mail import (
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.coding import build_coding_runtime
-from alx.bootstrap.repository import build_repository_runtime
+from alx.bootstrap.repository import build_repository_runtime, build_canonical_repository_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
 from alx.contracts.cognition import CognitionOrigin
@@ -49,6 +49,7 @@ from alx.bootstrap.dhl import build_dhl_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     merge_settings,
+    repository_runtime_settings,
     review_settings,
     AUTONOMOUS_MAX_INPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
@@ -64,6 +65,7 @@ from alx.config import (
     XeroSettings,
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
+from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity import (
     DueCognitionSource,
@@ -136,7 +138,7 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
 def _coding_outcome_source(goal_store: SQLiteGoalStore):
     """Answer what the broker durably recorded for one coding job.
 
-    D-030 requires release to establish terminal success from the durable
+    D-031 requires release to establish terminal success from the durable
     execution outcome rather than from the allocation record, which is a file
     beside the workspace that anything able to write there can edit. The job's
     identity *is* its capability call id, so the durable result is found by
@@ -177,11 +179,11 @@ def _coding_outcome_source(goal_store: SQLiteGoalStore):
 def default_coding_worktree_root(storage_root: Path, repository_root: Path) -> Path:
     """Where coding worktrees live when nothing configured a location.
 
-    D-030 requires the resolved root to lie outside the canonical repository.
+    D-031 requires the resolved root to lie outside the canonical repository.
     The runtime storage root is the natural neighbour for it, but that setting
     is commonly relative — the shipped `.env` uses `.alx/runtime` — and a
     relative storage root resolves against the repository, which would put
-    every coding worktree back inside the checkout D-030 exists to keep them
+    every coding worktree back inside the checkout D-031 exists to keep them
     out of. The containment check would then refuse and the capability would
     never register at all.
 
@@ -210,7 +212,7 @@ def _within(candidate: Path, ancestor: Path) -> bool:
 
 
 def _build_coding_allocator(root: Path, repository_root: Path, outcome_source=None):
-    """The D-030 worktree allocator, or none if its root cannot be used.
+    """The D-031 worktree allocator, or none if its root cannot be used.
 
     A root that resolves inside the canonical repository is a configuration
     error, not a runtime condition to work around: it would put every coding
@@ -303,6 +305,7 @@ async def run(repository_root: Path) -> None:
     provider_settings = RuntimeSettings.from_environment(environment)
     voice_settings = LiveVoiceSettings.from_environment(environment)
     merge_configuration = merge_settings(environment)
+    repository_runtime_configuration = repository_runtime_settings(environment)
     review_configuration = review_settings(environment)
     storage_root = voice_settings.storage_root
     if not storage_root.is_absolute():
@@ -556,7 +559,7 @@ async def run(repository_root: Path) -> None:
     # D-028 authorises one bounded coding job in an assigned worktree. It is
     # a separate authority from sandbox.execute: the sandbox cannot touch a
     # repository, and this cannot merge, push, deploy or request a review.
-    # D-030 requires one AL/X-controlled worktree root that resolves outside
+    # D-031 requires one AL/X-controlled worktree root that resolves outside
     # the canonical repository. It defaults beside the runtime storage root,
     # which is already outside the checkout, and a configured root that
     # resolves back inside refuses rather than being silently accepted.
@@ -623,6 +626,21 @@ async def run(repository_root: Path) -> None:
         policies.update(merge_runtime.policies)
         executors.update(merge_runtime.executors)
         permissions.update(merge_runtime.permissions)
+
+    repository_runtime = build_canonical_repository_runtime(
+        repository_runtime_configuration.is_usable,
+        repository_runtime_configuration.root,
+        repository_runtime_configuration.repository_identity,
+        repository_runtime_configuration.origin_url,
+        repository_runtime_configuration.timeout_seconds,
+        lambda: current_call_id[0],
+    )
+    if repository_runtime is not None:
+        for definition in repository_runtime.definitions:
+            registry.register(definition)
+        policies.update(repository_runtime.policies)
+        executors.update(repository_runtime.executors)
+        permissions.update(repository_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
@@ -852,7 +870,6 @@ async def run(repository_root: Path) -> None:
         voice_settings.core_step_budget,
         voice_settings.goal_retention_days,
         diagnostics=diagnostics,
-        event_source=mail_runtime.source,
         core_turn_lock=core_turn_lock,
         turn_origin_sink=lambda person: person_turn_in_progress.__setitem__(0, person),
         activity=activity,
@@ -897,7 +914,33 @@ async def run(repository_root: Path) -> None:
     # runner and one tick. A finished external task joins the matured requests
     # here rather than bringing a second tick, which would be a competing
     # production path to the same outcome.
-    occasion_source: Any = cognition_source
+    occasion_sources: list[Any] = [cognition_source]
+    # Observed mail joins them for the same reason, and to end the same
+    # coupling the due-cognition tick was built to avoid. Mail used to reach
+    # the Core only through a generator a live voice session drained, so
+    # whether AL/X could think about a message depended on whether a browser
+    # was open. Watching the mailbox was already a property of the process;
+    # now thinking about what it found is too.
+    # Each message continues the thread its own identifier headers name, so
+    # unrelated correspondence does not share a history, unfinished goals or
+    # autonomous responses. The producer derives that per observation; nothing
+    # here chooses a thread.
+    mail_cognition_source = MailCognitionSource(
+        mail_runtime.source,
+        opportunity_ledger,
+        enabled=providers.autonomous is not None,
+    )
+    # The same restart-safe recovery its siblings get. A claim left behind by a
+    # stopped run would hide an observation that had already arrived, and
+    # nothing would ever raise it again. Done before the runner starts, so no
+    # occasion is offered from a half-recovered ledger.
+    reclaimed_mail = mail_cognition_source.recover(autonomous_budget)
+    if reclaimed_mail:
+        LOGGER.info(
+            "Reclaimed %d mail occasion(s) left claimed by a stopped run",
+            len(reclaimed_mail),
+        )
+    occasion_sources.append(mail_cognition_source)
     if task_runtime is not None:
         completed_work_source = CompletedWorkSource(
             task_runtime.store,
@@ -916,9 +959,12 @@ async def run(repository_root: Path) -> None:
                 " by a stopped run",
                 len(reclaimed_work),
             )
-        occasion_source = CombinedOccasionSource(
-            cognition_source, completed_work_source
-        )
+        occasion_sources.append(completed_work_source)
+    occasion_source: Any = (
+        occasion_sources[0]
+        if len(occasion_sources) == 1
+        else CombinedOccasionSource(*occasion_sources)
+    )
 
     autonomous_runner = AutonomousCognitionRunner(
         occasion_source,

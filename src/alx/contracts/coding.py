@@ -76,7 +76,7 @@ CODING_FAILURES = (
     "sandbox_unusable",
     "session_failed",
     "task_failed",
-    # D-030. A workspace release refuses when the job it names did not finish
+    # D-031. A workspace release refuses when the job it names did not finish
     # successfully, which is a different fact from the workspace being
     # unusable: the directory is fine, the job is not.
     "job_not_successful",
@@ -217,7 +217,7 @@ def _aware(value: datetime, name: str) -> None:
 class CodingRequest:
     """One bounded coding job Core has decided to delegate.
 
-    `job_id` is not a model-supplied field. Under D-030 the executor injects
+    `job_id` is not a model-supplied field. Under D-031 the executor injects
     the broker's durable capability call ID, and the worktree that identity
     allocates is where the job runs. Core names no filesystem path at all:
     the field it used to supply resolved against the runtime's own working
@@ -438,7 +438,7 @@ class CodingOutcome:
     plan_summary: str = ""
     baseline: "GitWorkspaceState | None" = None
     commit: "CodingCommit | None" = None
-    # D-030 audit evidence: where this job ran, and whether that directory is
+    # D-031 audit evidence: where this job ran, and whether that directory is
     # still there afterwards. Reported for every job regardless of outcome, so
     # retained stale state is visible rather than merely present.
     job_id: str = ""

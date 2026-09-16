@@ -71,15 +71,15 @@ MAX_REPAIR_BRANCH_ATTEMPTS = 100
 # "value"  - exactly one further argument, checked by the caller that built it
 # "paths"  - a `--` separator followed by one or more worktree-relative paths,
 #            none of which may be spelled as a ref
-# "triple" - exactly three further arguments, none option-shaped: the D-030
+# "triple" - exactly three further arguments, none option-shaped: the D-031
 #            worktree allocation `-b <branch> <path> <base>`. Checked by the
 #            allocator that built it, which holds the branch to
 #            `branch_name_permitted` and the path to its own generated root.
 #            This is the only shape that creates a branch. The `switch -c`
-#            shape was removed on 2026-09-16 when D-030 made branch and
+#            shape was removed on 2026-09-16 when D-031 made branch and
 #            worktree one allocation: nothing built it afterwards, and a dead
 #            shape is granted authority nobody uses.
-# "single" - exactly one further argument, not option-shaped: the D-030
+# "single" - exactly one further argument, not option-shaped: the D-031
 #            worktree path to release. The allocator proves ownership of that
 #            path before the shape is ever built.
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
@@ -101,10 +101,10 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
     ("commit", "--quiet", "-m"): "value",
-    # D-030. Branch and worktree are allocated by one command, so a Coding
+    # D-031. Branch and worktree are allocated by one command, so a Coding
     # Agent job's branch is never created by the `switch -c` shape above.
     # `worktree remove` carries no `--force`: a worktree holding uncommitted
-    # work refuses to be removed, which is the retention behaviour D-030
+    # work refuses to be removed, which is the retention behaviour D-031
     # requires rather than something this code has to implement itself.
     ("worktree", "add", "-b"): "triple",
     ("worktree", "remove"): "single",
@@ -597,7 +597,7 @@ def allocate_job_worktree(
     """Create one linked worktree and its branch in a single git command.
 
     Returns False when the branch name or the path was already taken, which is
-    the one condition D-030 retries under D-029's suffix scheme. Every other
+    the one condition D-031 retries under D-029's suffix scheme. Every other
     failure raises: a lock, a permission problem or an unrecognised diagnostic
     must not be hidden behind a suffix search.
 
@@ -635,7 +635,7 @@ def allocate_job_worktree(
 
 
 def _worktree_name_already_exists(stderr: str, branch: str, path: Path) -> bool:
-    """Whether a failed `worktree add` is the collision D-030 may retry.
+    """Whether a failed `worktree add` is the collision D-031 may retry.
 
     D-029's classification principle applies unchanged: only an occupied name
     is retried, and the diagnostic is matched rather than guessed at. Two
@@ -653,7 +653,7 @@ def release_job_worktree(repository: Path, path: Path) -> None:
     """Remove one worktree this capability allocated.
 
     No `--force`. A worktree still holding uncommitted work refuses to be
-    removed, and that refusal is the retention D-030 asks for: work nobody has
+    removed, and that refusal is the retention D-031 asks for: work nobody has
     accounted for is not discarded because a release was requested.
     """
     root = Path(repository).expanduser().resolve()

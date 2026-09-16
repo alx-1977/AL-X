@@ -12,6 +12,7 @@ from pathlib import Path
 from alx.contracts import (
     AgentDecision,
     BackgroundEvent,
+    CognitionOpportunity,
     ContentOrigin,
     GoalMutationKind,
     GoalProposal,
@@ -23,6 +24,7 @@ from alx.contracts import (
     RetentionPolicy,
     SuccessCriterion,
 )
+from alx.contracts.cognition import CognitionOrigin
 from alx.conversation import ConversationGateway, SQLiteConversationStore
 from alx.core import CoreAgent, CoreState
 from alx.goals import SQLiteGoalStore
@@ -94,12 +96,6 @@ class AuthoritativePathTests(unittest.TestCase):
                 clock=lambda: CORE_TIME,
                 identifier_factory=lambda: "goal-1",
             )
-            gateway = ConversationGateway(
-                core,
-                conversations,
-                identifier_factory=lambda: "response-1",
-                clock=lambda: CORE_TIME,
-            )
             source = RetentionPolicy().direct_mail(NOW, (REFERENCE,))
             event = BackgroundEvent(
                 "mail:777:42",
@@ -109,8 +105,30 @@ class AuthoritativePathTests(unittest.TestCase):
                 {"body": "private quote"},
                 source,
             )
-            outcome = gateway.receive_background_event(
-                "conversation-1", event, 1, CONTAINER_RETENTION
+            gateway = ConversationGateway(
+                core,
+                conversations,
+                identifier_factory=lambda: "response-1",
+                clock=lambda: CORE_TIME,
+                # Where the observation itself reaches the turn, exactly as the
+                # mail adapter supplies it in the composed runtime.
+                contextual_events=lambda: (event,),
+            )
+            # The occasion an observed message now raises. Mail no longer
+            # enters through the transport, so the provenance it carries has to
+            # survive the same journey from here.
+            outcome = gateway.receive_cognition_opportunity(
+                "conversation-1",
+                CognitionOpportunity(
+                    opportunity_id="mail:777:42",
+                    origin=CognitionOrigin.EXTERNAL_EVENT,
+                    arose_at=NOW,
+                    conversation_id="conversation-1",
+                    references=("mail_observation:mail:777:42",),
+                    provenance=source,
+                ),
+                1,
+                CONTAINER_RETENTION,
             )
             self.assertEqual(outcome.state, CoreState.RESPONDED)
             conversations.close()

@@ -65,7 +65,7 @@ def git(repository: Path, *argv: str) -> str:
 def checkout_branch(repository: Path, branch: str) -> None:
     """Put a test repository on a branch, the way a job's worktree arrives.
 
-    Plain git, deliberately. D-030 moved branch creation into the worktree
+    Plain git, deliberately. D-031 moved branch creation into the worktree
     allocator, and the commit tests below are about what may be committed once
     a job is on its branch — not about how it got there. Using the production
     allocator here would make every commit test depend on worktree allocation
@@ -152,9 +152,9 @@ class ReadingTheAssignedWorktree(Worktree):
 
 
 class BranchNamesTheCapabilityMayUse(Worktree):
-    """The branch grammar, unchanged by D-030.
+    """The branch grammar, unchanged by D-031.
 
-    D-030 moved branch *creation* into the worktree allocator, where the
+    D-031 moved branch *creation* into the worktree allocator, where the
     collision behaviour D-029 fixed is exercised against the allocator itself
     in `tests/test_coding_worktree.py`. What stays here is the name grammar,
     which is shared by both and belongs beside the other git-authority checks.
@@ -1087,7 +1087,7 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         branch name is refused, nothing called it, and a dead shape is granted
         authority nobody uses.
 
-        D-030 changed the branch half of this on 2026-09-16. It added one read
+        D-031 changed the branch half of this on 2026-09-16. It added one read
         of where the repository's common git directory is (`rev-parse
         --git-common-dir`), used to prove a linked worktree belongs to the
         canonical repository, and the two worktree shapes that allocate and
@@ -1118,7 +1118,7 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         )
         # Branch creation has exactly one shape, and it is the atomic one.
         self.assertNotIn(("switch", "-c"), _WRITE_SHAPES)
-        # D-030 grants add and remove only. `prune`, `move`, `lock`, `repair`
+        # D-031 grants add and remove only. `prune`, `move`, `lock`, `repair`
         # and every flag-bearing variant are absent, so they cannot be built.
         worktree_shapes = {
             prefix for prefix in _WRITE_SHAPES if prefix[0] == "worktree"

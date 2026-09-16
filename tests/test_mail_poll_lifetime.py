@@ -32,6 +32,12 @@ from alx.providers.mail_poller import MailPoller  # noqa: E402
 from test_mail_vertical_slice import FakeImap, message  # noqa: E402
 
 
+def next_arrival(state):
+    """The oldest arrival still awaiting delivery, or None."""
+    awaiting = state.unclaimed_arrivals()
+    return awaiting[0] if awaiting else None
+
+
 class CountingCore:
     """Stands in for everything a scan must never touch."""
 
@@ -106,7 +112,7 @@ class MailPollLifetimeTest(unittest.IsolatedAsyncioTestCase):
         await self.poller().tick()
         self.imap.items[2] = message("Will vanish", "body")
         await self.poller().tick()
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.state.record_delivery(event.event_id)
 
         del self.imap.items[2]
@@ -129,42 +135,35 @@ class MailPollLifetimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state.pending_vanished(), ())
         self.assertEqual(self.core.calls, 0)
 
-    # -- C. a session connects later -------------------------------------
+    # -- C. what was found while nobody was connected --------------------
 
-    async def test_a_later_session_sees_what_was_found_without_it(self) -> None:
+    async def test_what_was_found_unattended_is_still_waiting(self) -> None:
         await self.poller().tick()
         self.imap.items[2] = message("Found first", "body")
         await self.poller().tick()
 
-        stream = self.adapter.events()
-        try:
-            event = await asyncio.wait_for(anext(stream), timeout=5)
-        finally:
-            await stream.aclose()
-        self.assertEqual(event.data["uid"], "2")
+        awaiting = self.adapter.unclaimed_arrivals()
+        self.assertEqual([item.data["uid"] for item in awaiting], ["2"])
 
-    async def test_a_vanished_fact_found_alone_reaches_a_later_session(self) -> None:
+    async def test_a_vanished_fact_found_alone_is_still_waiting(self) -> None:
         await self.poller().tick()
         self.imap.items[2] = message("Will vanish", "body")
         await self.poller().tick()
-        delivered = self.state.current()
+        delivered = next_arrival(self.state)
         self.state.record_delivery(delivered.event_id)
         del self.imap.items[2]
         await self.poller().tick()
 
-        stream = self.adapter.events()
-        try:
-            event = await asyncio.wait_for(anext(stream), timeout=5)
-        finally:
-            await stream.aclose()
-        self.assertEqual(event.kind, "mail.message_vanished")
-        self.assertEqual(event.data["uid"], "2")
+        reported = self.adapter.pending_vanished()
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(reported[0].kind, "mail.message_vanished")
+        self.assertEqual(reported[0].data["uid"], "2")
 
     async def test_a_carried_vanished_fact_is_not_carried_again(self) -> None:
         await self.poller().tick()
         self.imap.items[2] = message("Will vanish", "body")
         await self.poller().tick()
-        delivered = self.state.current()
+        delivered = next_arrival(self.state)
         self.state.record_delivery(delivered.event_id)
         del self.imap.items[2]
         await self.poller().tick()
@@ -173,23 +172,19 @@ class MailPollLifetimeTest(unittest.IsolatedAsyncioTestCase):
         self.state.record_delivery(event.event_id)
         self.assertEqual(
             self.state.pending_vanished(), (),
-            "a second session does not repeat what the first carried",
+            "a carried disappearance is not repeated",
         )
 
-    async def test_a_session_does_not_discover_anything_itself(self) -> None:
+    async def test_reading_observations_discovers_nothing_itself(self) -> None:
         """Law 0: delivery must not become a second scanner."""
         await self.poller().tick()
         self.imap.items[2] = message("Only the poller finds this", "body")
         before = len(self.imap.commands)
 
-        stream = self.adapter.events()
-        try:
-            with self.assertRaises(asyncio.TimeoutError):
-                await asyncio.wait_for(anext(stream), timeout=0.2)
-        finally:
-            await stream.aclose()
+        self.assertEqual(self.adapter.unclaimed_arrivals(), ())
+        self.assertEqual(self.adapter.pending_vanished(), ())
 
-        self.assertEqual(self.states(), {}, "the session discovered nothing")
+        self.assertEqual(self.states(), {}, "reading discovered nothing")
         self.assertNotIn(
             ("UID", "search", None), self.imap.commands[before:],
             "and it never searched the mailbox",
@@ -241,7 +236,7 @@ class MailPollLifetimeTest(unittest.IsolatedAsyncioTestCase):
                 "SELECT uid, state FROM mail_observations")),
             {2: "done"},
         )
-        self.assertIsNone(restarted.current())
+        self.assertEqual(restarted.unclaimed_arrivals(), ())
 
     # -- F. shutdown and cancellation -------------------------------------
     #

@@ -33,6 +33,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from alx.contracts import MailAccessError, MailReference  # noqa: E402
 from alx.providers.icloud_mail import SQLiteMailObservationState  # noqa: E402
 
+def next_arrival(state):
+    """The oldest arrival still awaiting delivery, or None.
+
+    What the removed single-slot reader returned, over the reader that
+    replaced it. Exactly-once is the opportunity ledger's job now, so the
+    store reports the whole queue and "the next one" is the caller's question.
+    """
+    awaiting = state.unclaimed_arrivals()
+    return awaiting[0] if awaiting else None
+
+
 VALIDITY = "777"
 SOURCE = (
     Path(__file__).resolve().parents[1] / "src" / "alx" / "providers" / "icloud_mail.py"
@@ -124,7 +135,7 @@ class ExposedPendingAuthorityTest(Harness):
         self.discover(1, 2)
         self.state.contextual_events()
         self.assertEqual(self.rows()[2][0], "pending")
-        self.assertEqual(self.state.current().data["uid"], "1")
+        self.assertEqual(next_arrival(self.state).data["uid"], "1")
 
     def test_exposure_is_recorded_before_the_turn_runs(self) -> None:
         """A deliberate direction to err in, not an oversight.
@@ -173,7 +184,7 @@ class ReconciliationRaceTest(Harness):
         # Reconciliation observed uid 1 as `pending` and unexposed. Before its
         # write lands, a session promotes and announces it.
         observed_state = "pending"
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.state.record_delivery(event.event_id)
         self.assertEqual(self.rows()[1][0], "presented")
 
@@ -188,17 +199,17 @@ class ReconciliationRaceTest(Harness):
 
     def test_a_stale_vanished_mark_does_not_resurrect_a_released_row(self) -> None:
         self.discover(1)
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.state.record_delivery(event.event_id)
         self.state.acknowledge(MailReference("INBOX", VALIDITY, "1"))
         marked = self.state._mark_vanished("INBOX", VALIDITY, 1, "presented")
         self.assertFalse(marked)
         self.assertEqual(self.state.pending_vanished(), ())
 
-    def test_current_does_not_promote_a_row_settled_meanwhile(self) -> None:
+    def test_a_row_settled_meanwhile_is_not_offered(self) -> None:
         self.discover(1)
         self.state.acknowledge(MailReference("INBOX", VALIDITY, "1"))
-        self.assertIsNone(self.state.current())
+        self.assertIsNone(next_arrival(self.state))
         self.assertEqual(self.rows()[1][0], "done")
 
     def test_acknowledging_twice_reports_the_second_as_unavailable(self) -> None:
@@ -223,7 +234,7 @@ class ReconciliationRaceTest(Harness):
         def deliver() -> None:
             try:
                 for _ in range(30):
-                    item = self.state.current()
+                    item = next_arrival(self.state)
                     if item is not None:
                         self.state.record_delivery(item.event_id)
                     self.state.contextual_events()
@@ -272,7 +283,7 @@ class WaitingOrderTest(Harness):
     def test_the_oldest_pending_are_shown_not_the_newest(self) -> None:
         uids = tuple(range(1, 21))
         self.discover(*uids)
-        holding = self.state.current()
+        holding = next_arrival(self.state)
         self.state.record_delivery(holding.event_id)
         waiting = [
             int(event.data["uid"])
@@ -287,7 +298,7 @@ class WaitingOrderTest(Harness):
     def test_what_she_is_shown_is_what_she_will_be_given_next(self) -> None:
         uids = tuple(range(1, 21))
         self.discover(*uids)
-        holding = self.state.current()
+        holding = next_arrival(self.state)
         self.state.record_delivery(holding.event_id)
         waiting = [
             int(event.data["uid"])
@@ -295,7 +306,7 @@ class WaitingOrderTest(Harness):
             if event.kind == "mail.message_waiting"
         ]
         self.state.acknowledge(MailReference("INBOX", VALIDITY, "1"))
-        self.assertEqual(int(self.state.current().data["uid"]), waiting[0])
+        self.assertEqual(int(next_arrival(self.state).data["uid"]), waiting[0])
 
 
 class VanishedIdentifierTest(Harness):
@@ -303,7 +314,7 @@ class VanishedIdentifierTest(Harness):
 
     def test_a_valid_vanished_identifier_is_accepted(self) -> None:
         self.discover(1)
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.state.record_delivery(event.event_id)
         self.state.reconcile("INBOX", VALIDITY, ())
         vanished = self.state.pending_vanished()[0]

@@ -68,7 +68,7 @@ def build_coding_runtime(
     """Compose coding-job authority, or leave it unregistered.
 
     Three halves are required now: a model to plan with, a session to carry the
-    plan out, and under D-030 an allocator to give it somewhere isolated to do
+    plan out, and under D-031 an allocator to give it somewhere isolated to do
     that. Without the session the capability is registered but every job fails
     at execution, which is a worse answer than the capability being honestly
     absent. Without the allocator there is nowhere a job may safely run, and

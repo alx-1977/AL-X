@@ -53,7 +53,7 @@ class GitOutcome(unittest.TestCase):
         self.root = _worktree(self.parent)
 
     def run_job(self, session, **arguments):
-        # D-030: the job is allocated an isolated worktree cut from `self.root`,
+        # D-031: the job is allocated an isolated worktree cut from `self.root`,
         # which is the canonical repository here. `worktree` is no longer an
         # argument, so a test that still passes one is naming the repository.
         arguments.pop("worktree", None)
@@ -143,7 +143,7 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
             commit_message="repair addition",
         )
         # The job's own worktree is the one on the repair branch; the
-        # canonical checkout stayed where it was, which is the D-030 property.
+        # canonical checkout stayed where it was, which is the D-031 property.
         self.assertEqual(
             self.job_git("rev-parse", "--abbrev-ref", "HEAD").strip(), "repair/add"
         )
@@ -160,14 +160,14 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
         )
 
     def test_the_baseline_names_the_commit_the_job_started_from(self) -> None:
-        """What "where the job started" means changed with D-030.
+        """What "where the job started" means changed with D-031.
 
         Under D-029 the job switched branches inside a worktree it inherited,
         so its starting branch was a fact about somebody else's checkout, and
         reporting the repair branch there was false evidence — reproduced on
         2026-09-12.
 
-        A D-030 job has no such prior branch: its worktree is created already
+        A D-031 job has no such prior branch: its worktree is created already
         on its own branch, cut from the repository's HEAD. The branch in the
         baseline is therefore the job's own, which is the truth about the
         worktree being described. The commit it starts from is the fact that
@@ -262,7 +262,7 @@ class DeletionsReachTheCommit(GitOutcome):
 
 
 class InheritedDirtNeverReachesTheJob(GitOutcome):
-    """D-030 turned this from a staging rule into structural isolation.
+    """D-031 turned this from a staging rule into structural isolation.
 
     These tests used to describe a job running in a worktree it did not own,
     where somebody else's uncommitted work sat in the same directory and the
@@ -342,7 +342,7 @@ class CommittingIsRefusedRatherThanWidened(GitOutcome):
     """Fail closed: no commit is better than the wrong commit."""
 
     def test_someone_elses_staged_file_cannot_reach_the_job_s_commit(self) -> None:
-        """D-030 moved this from a refusal to an impossibility.
+        """D-031 moved this from a refusal to an impossibility.
 
         Staging an unrelated file used to poison the job's own index, because
         the job shared it. `_refuse_foreign_staged_state` caught that and

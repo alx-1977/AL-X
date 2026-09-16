@@ -368,6 +368,20 @@ This file records approved product and architecture decisions that guide impleme
 
 **Auditability.** Every opportunity, request, outcome, reasoning call and cost is durably recorded, inspectable, correctable and deletable by Friedl.
 
+### Amendment — External-event content is data, never instruction
+
+- **Date:** 2026-09-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-16.**
+
+An external event's content — a mail message, or any future observer's payload — is evidence about the world, presented to Core as untrusted external data. It is never an instruction to AL/X, regardless of wording, sender, or whether a person is connected.
+
+A message acquires no authority because its text resembles a command, a request from Friedl, a system prompt, a capability schema, a governance document, or the Laws of AL/X. Mail claiming to be from Friedl is not Friedl: his authority reaches AL/X through his own conversational turn and nowhere else. An external event that instructs her to ignore her instructions, reveal configuration, call a capability, or treat its content as approved is simply an event containing that text, and is reasoned about rather than obeyed.
+
+The protection is structural: an observed fact travels as event data carrying `ContentOrigin.EXTERNAL`, on the evidence channel, and never on the instruction channel. It must not be sought through a keyword detector, a phrase list, or any scan of what a message appears to be asking for, because deciding what text is really trying to do is exactly the semantic judgement that belongs to AL/X.
+
+This states explicitly, for `CognitionOrigin.EXTERNAL_EVENT`, the same property D-025 states for retrieved web content and D-027 states for sandbox output. It grants nothing and withdraws nothing; the authority, approval requirements and bounds recorded above are unchanged. It must be tested explicitly rather than assumed, and the test must fail if an external event's content is ever acted upon as an instruction.
+
 ### D-024a — Recorded Luna experiment (temporary)
 
 - **Status: APPROVED as a time-boxed evaluation, 2026-09-02. Not permanent architecture.**
@@ -1355,7 +1369,70 @@ boundary described above.
 This amendment supersedes only the prior refuse-on-collision behaviour for
 repair branch creation. All other D-029 constraints remain unchanged.
 
-## D-030 — AL/X-owned Coding Agent worktree isolation
+---
+
+## D-030 — Deterministic canonical-main synchronization
+
+- **Date:** 2026-09-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-16.** Approval source: the approved
+  design and implementation conversation in this AL/X development thread,
+  2026-09-16.
+
+**Purpose.** Allow AL/X, through one bounded repository-runtime capability, to
+inspect the configured canonical checkout and, when deterministic preconditions
+hold, fast-forward local `main` to fetched canonical remote `main`. This is
+repository lifecycle plumbing, not Coding Agent work and not merge authority.
+
+**One outcome, one path.** The sole production path is `Core → repository
+registry → Safety Gate → CapabilityBroker → inspect_repository_state |
+synchronize_local_main → dedicated fixed-command repository-runtime provider`.
+`merge_pull_request`, `run_coding_task`, Coding Agent Git facilities, sandbox
+execution, and generic command execution are not alternate routes to this
+outcome.
+
+**Authority.** `repository.inspect` authorizes read-only inspection and
+`repository.synchronize` authorizes the exact fixed synchronization transition
+only. `repository.merge` remains separate. `coding.execute` grants neither new
+permission. Core supplies no repository path, remote, branch, ref, refspec,
+flags, working directory, command, or argv.
+
+**Fixed transition.** After deterministic validation of the configured root,
+identity, origin, attached `HEAD`, branch `main`, clean worktree and ancestry,
+the provider may run only `git fetch origin
+refs/heads/main:refs/remotes/origin/main` followed, when required, by `git
+merge --ff-only refs/remotes/origin/main`. It verifies the fetched tracking ref
+is a commit before merging and returns structured before/after state.
+
+**Not authorised.** Pull, reset, rebase, force, push, prune, deletion, stash
+operations, remote mutation, or arbitrary fetches, remotes, branches, refs,
+refspecs, flags, commands, shells, or working directories. Synchronization
+failure returns structured evidence only and does not authorize Coding Agent
+fallback. Revisit before authorizing any lifecycle transition beyond this exact
+configured canonical-main fast-forward.
+
+### Amendment to D-028 — bounded failed Coding Agent redispatch
+
+For each durable goal, `run_coding_task` has a fixed failed-execution allowance
+keyed only by `(goal_id, capability_id=run_coding_task)`. At most two
+implementation-reaching failed executions are permitted. Before pending
+checkpoint creation or Coding Agent invocation, Core counts durable qualifying
+failures. At count `>= 2`, it creates no checkpoint, broker dispatch, or
+executor invocation; it records non-invoked `coding_retry_exhausted` and returns
+that refusal plus prior failure evidence to Core.
+
+Pre-effect validation and authority rejections do not count.
+Implementation-reaching broker/provider failures do count. Successful attempts
+do not consume the allowance and restart does not reset it. This is not a
+monetary spend ledger and does not reuse D-024 cognition budgeting. All other
+D-028 constraints remain unchanged.
+
+Multiple independent Coding Agent jobs under one durable goal intentionally
+share this conservative allowance because current contracts have no stable
+per-job objective identity. A future finer-grained identity must be generated
+and governed by Core, never supplied by the model.
+
+## D-031 — AL/X-owned Coding Agent worktree isolation
 
 - **Date:** 2026-09-16
 - **Decision owner:** Friedl
@@ -1557,7 +1634,7 @@ not touch the branch, the commit, or any ref.
 A job that does not reach a successful terminal state — including a declared
 failure, a cancellation, or a crash that prevents the normal completion path
 from running — leaves its worktree in place, unmodified, as recoverable stale
-state. D-030 grants no automatic pruning or deletion authority; any later
+state. D-031 grants no automatic pruning or deletion authority; any later
 stale-worktree cleanup mechanism requires separate explicit authority. This
 follows D-029's existing principle of returning the truth rather than hiding
 it: a failed or interrupted job's partial state is evidence, not litter, and
@@ -1568,7 +1645,7 @@ remains available for Core, Friedl, or a later recovery step to examine.
 On the runtime's startup, any worktree matching this decision's naming scheme
 that is not associated with a currently active job is left exactly as found
 and reported as recoverable stale state, consistent with "Retention on
-failure, cancellation, or crash" above. D-030 grants no automatic pruning or
+failure, cancellation, or crash" above. D-031 grants no automatic pruning or
 deletion authority for this state, under any policy or age bound; any later
 stale-worktree cleanup mechanism requires separate explicit authority.
 Deciding what to do with accumulated stale worktrees — inspecting them,
@@ -1680,7 +1757,7 @@ text reflects the settled version:
    D-029's, unchanged; only the mechanical creation form changes — see
    "Collision handling" above.
 4. Failed/cancelled/crashed worktrees remain as recoverable stale state.
-   D-030 grants no automatic pruning or deletion authority; any later
+   D-031 grants no automatic pruning or deletion authority; any later
    stale-worktree cleanup mechanism requires separate explicit authority.
 5. A successful worktree may be removed only after the job has reached a
    successful terminal state and Core explicitly authorises workspace release,
@@ -1703,7 +1780,7 @@ text reflects the settled version:
   began.
 
 Two mechanisms this decision depends on were left unspecified above. Both are
-settled here; neither widens the authority D-030 grants.
+settled here; neither widens the authority D-031 grants.
 
 **Job identity.** `CodingRequest` carries no job identifier today — the
 identifier that exists is on `CodingTelemetry`, which is transient diagnostic
@@ -1727,7 +1804,7 @@ capability accepts `job_id` only and never a filesystem path.
 
 Before removing anything, deterministic execution must verify all of: the
 referenced job reached a successful terminal state; the worktree was created
-by the D-030 allocator for that exact `job_id`; it lies beneath the configured
+by the D-031 allocator for that exact `job_id`; it lies beneath the configured
 AL/X-controlled coding-worktree root; that root resolves outside the canonical
 repository and is not a descendant of it, including through symlinks; the
 worktree is not the canonical or live checkout; it is not owned by another

@@ -259,7 +259,7 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         work = tempfile.TemporaryDirectory()
         self.addCleanup(work.cleanup)
         parent = Path(work.name)
-        # D-030 cuts the job's worktree from a real repository, so the fixture
+        # D-031 cuts the job's worktree from a real repository, so the fixture
         # is one rather than a bare directory.
         root = parent / "repo"
         root.mkdir()

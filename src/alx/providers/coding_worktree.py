@@ -1,4 +1,4 @@
-"""Allocate and release one isolated worktree per coding job, under D-030.
+"""Allocate and release one isolated worktree per coding job, under D-031.
 
 D-028 and D-029 both grant authority *inside* "an assigned worktree" and
 neither says who assigns it. Nothing did: the worktree was a path Core handed
@@ -71,7 +71,7 @@ from alx.providers.coding_git import (
 # identity cannot climb out of the root, and a dash-led one cannot be read as
 # an option by the git command it is interpolated into.
 # The branch a job's work lands on. D-029 owns the collision scheme applied to
-# this base name; D-030 only fixes how the base name is derived when Core did
+# this base name; D-031 only fixes how the base name is derived when Core did
 # not name one, so that a job always has a branch to be isolated on.
 JOB_BRANCH_PREFIX = "alx/coding"
 
@@ -135,7 +135,7 @@ class CodingWorktree:
 def resolve_worktree_root(root: Path, repository: Path) -> Path:
     """Resolve the configured coding-worktree root, or refuse it.
 
-    D-030 requires the resolved path to lie outside the canonical repository
+    D-031 requires the resolved path to lie outside the canonical repository
     and not be a descendant of it, including through symlinks. Both sides are
     fully resolved before the comparison, so a symlinked root pointing back
     into the repository is caught by the same check as a literal one.
@@ -283,7 +283,7 @@ class CodingWorktreeAllocator:
         The claim is AL/X's positive provenance for a slot, and it is the only
         thing that makes a directory under this root *ours*. Being a linked
         worktree of this repository in the right place is not enough: somebody
-        can run `git worktree add` there by hand, and D-030 grants no authority
+        can run `git worktree add` there by hand, and D-031 grants no authority
         over a directory AL/X did not create.
 
         Deliberately not release authority. It says a directory was going to
@@ -373,7 +373,7 @@ class CodingWorktreeAllocator:
           anything, so it is positive provenance that this allocator made the
           directory. Without it a worktree is somebody else's — a manually
           created one under this root is not an AL/X orphan, and reporting it
-          as one would invite acting on a directory D-030 gives no authority
+          as one would invite acting on a directory D-031 gives no authority
           over;
         - it is a linked worktree of the canonical repository;
         - no readable allocation record accounts for it.
@@ -384,7 +384,7 @@ class CodingWorktreeAllocator:
         written, supplies the explanation but is never what makes a directory
         discoverable.
 
-        Reported only. D-030 grants no pruning authority; this removes,
+        Reported only. D-031 grants no pruning authority; this removes,
         repairs and reuses nothing, and a claim confers no release authority.
         """
         if not self._root.is_dir():
@@ -523,7 +523,7 @@ class CodingWorktreeAllocator:
         """Every job whose worktree is still on disk, newest name order aside.
 
         Reported so retained state is visible rather than merely present.
-        Nothing here removes or repairs anything: D-030 grants no pruning
+        Nothing here removes or repairs anything: D-031 grants no pruning
         authority, and a stale worktree is evidence until somebody decides
         otherwise.
         """
@@ -592,7 +592,7 @@ class CodingWorktreeAllocator:
             path = root / candidate_id
             if path.exists() or self._claim_path(candidate_id).exists():
                 # A retained worktree from an earlier job of this identity, or
-                # a slot an earlier attempt already claimed. D-030 keeps both,
+                # a slot an earlier attempt already claimed. D-031 keeps both,
                 # so this attempt yields rather than reusing or removing them.
                 continue
             # Claim the slot *before* git creates anything. This is the
@@ -630,7 +630,7 @@ class CodingWorktreeAllocator:
                 try:
                     self._write_record(allocated)
                 except OSError as error:
-                    # The worktree exists and its record does not. D-030 does
+                    # The worktree exists and its record does not. D-031 does
                     # not authorise deleting it — removal needs an explicit
                     # Core release, and there is now no record to prove this
                     # one is releasable — so it is kept and made findable
@@ -783,7 +783,7 @@ class CodingWorktreeAllocator:
             )
         # The sidecar stays descriptive, but it may not *contradict* the
         # durable outcome: disagreement means one of the two is wrong about
-        # this job, and D-030 refuses rather than choosing which to believe.
+        # this job, and D-031 refuses rather than choosing which to believe.
         recorded = str(record.get("status") or "")
         if recorded and recorded != "succeeded":
             raise CodingError(
@@ -836,7 +836,7 @@ class CodingWorktreeAllocator:
     def release_authorised(self, job_id: str) -> dict[str, object]:
         """Release one job's workspace on Core's explicit instruction.
 
-        Every D-030 release check runs here, and each refuses before anything
+        Every D-031 release check runs here, and each refuses before anything
         is removed. The job must have finished successfully: a failed,
         cancelled or still-running job keeps its worktree, because that
         worktree is the evidence of what went wrong.

@@ -67,7 +67,7 @@ def diagnose_worktree(worktree: str) -> dict[str, object] | None:
             "resolved": _safe_resolved(root),
             **_safe_received(worktree),
         }
-    # D-030 defence in depth. A linked worktree's `.git` is a *file* pointing
+    # D-031 defence in depth. A linked worktree's `.git` is a *file* pointing
     # at the parent repository; a main checkout's is a directory. Refusing the
     # directory form is what stops the canonical checkout being used as a
     # workspace even if a caller regression ever put it here again — the

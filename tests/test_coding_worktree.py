@@ -1,4 +1,4 @@
-"""D-030: every coding job runs in an isolated worktree AL/X created.
+"""D-031: every coding job runs in an isolated worktree AL/X created.
 
 The sandbox was never the gap. It restricts writes to whatever directory it is
 told to restrict them to, and it did that correctly. What nothing guaranteed
@@ -78,7 +78,7 @@ class Repository(unittest.TestCase):
 
         `self.outcomes` stands in for the broker's own record of what each
         capability call returned. It is deliberately *not* a file under the
-        allocator's root: the point of D-030's terminal-success check is that
+        allocator's root: the point of D-031's terminal-success check is that
         editing anything in that directory cannot make a failed job releasable.
         """
         if outcomes is not None:
@@ -530,7 +530,7 @@ class ReleasingAWorkspace(Repository):
 
 
 class ReleaseRequiresAnExplicitCoreDecision(Repository):
-    """D-030: success is not release. Core has to ask, and it is recorded."""
+    """D-031: success is not release. Core has to ask, and it is recorded."""
 
     def _runtime(self, allocator):
         from alx.bootstrap.coding import build_coding_runtime
@@ -612,7 +612,7 @@ class ReleaseRequiresAnExplicitCoreDecision(Repository):
         self.assertEqual(RELEASE_DEFINITION.input_schema.required, ("job_id",))
 
     def test_the_release_is_durable_and_auditable(self) -> None:
-        """The invocation record is the authorisation D-030 requires."""
+        """The invocation record is the authorisation D-031 requires."""
         from alx.tools.coding import RELEASE_DEFINITION
 
         allocator = self.allocator()
@@ -975,7 +975,7 @@ class OverlappingJobsShareNothing(Repository):
 class AnUnrecordedWorktreeIsAuditable(Repository):
     """`git worktree add` succeeded and the record write did not.
 
-    The worktree exists, on a real branch, and nothing names it. D-030 does not
+    The worktree exists, on a real branch, and nothing names it. D-031 does not
     authorise deleting it — removal requires an explicit Core release, and
     there is now no record to prove this one is releasable — so the smallest
     design consistent with the decision keeps it and makes it *findable*: an
@@ -1100,7 +1100,7 @@ class TerminalSuccessComesFromTheDurableOutcome(Repository):
     The allocation record's `status` is audit metadata written beside the
     workspace. It used to be what `release_authorised` consulted, so changing
     `failed` to `succeeded` in that file released a failed job's worktree —
-    destroying exactly the evidence D-030 retains it for.
+    destroying exactly the evidence D-031 retains it for.
 
     Terminal success is now established from the durable capability outcome the
     broker recorded when the job returned, which lives in the goal store rather
@@ -1322,7 +1322,7 @@ class ForeignWorktreesAreNotAlxOrphans(Repository):
     "Linked worktree of this repository, under the configured root, with no
     allocation record" described a manually created worktree just as well as an
     AL/X one. Reporting somebody else's directory as an AL/X orphan invites
-    acting on a directory D-030 grants no authority over.
+    acting on a directory D-031 grants no authority over.
 
     AL/X now claims each slot before git creates anything in it, and only a
     claimed slot can be an orphan. The claim is written first and the record
@@ -1448,7 +1448,7 @@ class ForeignWorktreesAreNotAlxOrphans(Repository):
 
 
 class TheGitAuthorityThisNeeds(unittest.TestCase):
-    """D-030 grants two worktree shapes and nothing adjacent to them."""
+    """D-031 grants two worktree shapes and nothing adjacent to them."""
 
     def test_the_two_granted_shapes_are_permitted(self) -> None:
         self.assertTrue(git_write_permitted(
@@ -1487,7 +1487,7 @@ class TheGitAuthorityThisNeeds(unittest.TestCase):
 class TheWorkspaceRefusesAMainCheckout(Repository):
     """`CodingWorkspace` proves the directory is a *linked* worktree.
 
-    D-030 promised this as defence in depth and it was never implemented: the
+    D-031 promised this as defence in depth and it was never implemented: the
     workspace checked existence, directory-ness and readability, so the live
     AL/X checkout satisfied every test it applied. The allocator cannot produce
     the canonical checkout, but the workspace is the boundary that opens the
@@ -1566,7 +1566,7 @@ class TheDefaultWorktreeRootIsAlwaysExternal(unittest.TestCase):
     `ALX_RUNTIME_STORAGE_ROOT` is relative in the shipped `.env` (`.alx/runtime`),
     and a relative storage root resolves against the repository. Defaulting the
     coding-worktree root to `storage_root / "coding-worktrees"` therefore landed
-    it inside the checkout, where D-030's containment check refuses it — so the
+    it inside the checkout, where D-031's containment check refuses it — so the
     capability would never have registered at all.
     """
 

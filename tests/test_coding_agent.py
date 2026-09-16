@@ -105,7 +105,7 @@ def _worktree(parent: Path, name: str = "job") -> Path:
     # The initial branch is named explicitly rather than inherited. A bare
     # `git init` takes the host's `init.defaultBranch`, which is `main` on this
     # workstation and `master` in CI, so tests that name the starting branch
-    # passed locally and failed there. Nothing about D-030 depends on the name;
+    # passed locally and failed there. Nothing about D-031 depends on the name;
     # what the fixtures need is for it not to vary by machine.
     _git(root, "init", "-q", "-b", FIXTURE_BRANCH)
     _git(root, "config", "user.email", "test@example.invalid")
@@ -116,7 +116,7 @@ def _worktree(parent: Path, name: str = "job") -> Path:
 
 
 def _allocator(parent: Path, repository: Path):
-    """A D-030 allocator whose root is outside the fixture repository."""
+    """A D-031 allocator whose root is outside the fixture repository."""
     from alx.providers.coding_worktree import CodingWorktreeAllocator
 
     return CodingWorktreeAllocator(parent / "coding-worktrees", repository)
@@ -210,13 +210,13 @@ class NativeExecutionTests(unittest.TestCase):
         reviewer = reviewer or PlanningModel()
         activity_sink = arguments.pop("activity_sink", None)
         telemetry_sink = arguments.pop("telemetry_sink", None)
-        # D-030: the job no longer names a directory. What used to be passed as
+        # D-031: the job no longer names a directory. What used to be passed as
         # `worktree` is now the canonical repository the allocator cuts an
         # isolated worktree from, so the fixture repository moves here.
         repository = arguments.pop("worktree", None) or str(_worktree(self.root))
         allocator = _allocator(self.root, Path(repository))
         # Kept so a test can assert against the directory the job actually
-        # edited, which under D-030 is never the repository it was cut from.
+        # edited, which under D-031 is never the repository it was cut from.
         self.allocator = allocator
         runtime = build_coding_runtime(
             True, model, lambda: "call-1", session=session, reviewer=reviewer,
@@ -343,7 +343,7 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertIn("app.py", attempt.result.values["files_changed"])
         # And the repair really is on disk, not merely reported — in the job's
-        # own worktree under D-030, which is where the session was told to work.
+        # own worktree under D-031, which is where the session was told to work.
         job_root = Path(attempt.result.values["worktree"])
         self.assertEqual((job_root / "app.py").read_text(), _FIXED)
         # The repository it was cut from is untouched.
@@ -667,7 +667,7 @@ class NativeExecutionTests(unittest.TestCase):
             acceptance_criteria=["add returns the sum"],
         )
         request, briefing = session.calls[0]
-        # D-030: the session works in the allocated worktree, never in the
+        # D-031: the session works in the allocated worktree, never in the
         # repository it was cut from. Previously these were the same directory,
         # which is exactly what the decision removed.
         session_root = Path(request.worktree).resolve()
@@ -885,7 +885,7 @@ class NativeExecutionTests(unittest.TestCase):
     def test_outcome_separates_job_changes_from_preexisting_dirt(self) -> None:
         """15. Work already in the tree is not claimed as this job's.
 
-        D-030 strengthened this from a reporting property into a structural
+        D-031 strengthened this from a reporting property into a structural
         one. The dirt used to sit in the same directory the job worked in, so
         the job had to distinguish it; now the job is cut from the repository's
         committed HEAD and never sees it at all. Both halves are asserted: the
@@ -1193,7 +1193,7 @@ class SessionTimeoutTests(unittest.TestCase):
         values = attempt.result.values
         self.assertTrue(values["plan_summary"])
         self.assertEqual(tuple(values["files_changed"]), ())
-        # D-030: the checkout's dirt never reached the job, and the job's own
+        # D-031: the checkout's dirt never reached the job, and the job's own
         # worktree survives the failure as recoverable stale state.
         self.assertEqual(tuple(values["preexisting_dirty"]), ())
         self.assertTrue(values["worktree_retained"])

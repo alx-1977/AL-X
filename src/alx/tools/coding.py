@@ -157,7 +157,7 @@ DEFINITION = CapabilityDefinition(
             "commit": _COMMIT_RECORD,
             "branch": _STRING,
             "commit_sha": _STRING,
-            # D-030 audit evidence. Reported so Core can see where the work
+            # D-031 audit evidence. Reported so Core can see where the work
             # happened and, later, name the job whose workspace it is
             # releasing. Reported, never accepted: there is no input field.
             "job_id": _STRING,
@@ -205,7 +205,7 @@ _OUTCOME_ISSUE_CODES = (
 
 RELEASE_CODING_WORKSPACE = "release_coding_workspace"
 
-# D-030 makes releasing a workspace an explicit, separate decision rather than
+# D-031 makes releasing a workspace an explicit, separate decision rather than
 # a consequence of a job succeeding. The failure codes are the verification it
 # performs: each one names a check that refused, so a refusal tells Core which
 # fact was wrong rather than only that removal did not happen.
@@ -256,7 +256,7 @@ def build_release_executors(
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Wire the explicit workspace release to its capability result.
 
-    The durable record of this invocation is the release authorisation D-030
+    The durable record of this invocation is the release authorisation D-031
     requires. There is no separate ledger: a capability call and its result are
     already recorded, already attributable, and already inspectable.
     """
@@ -309,7 +309,7 @@ def build_coding_executors(
 
     def run(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
-        # D-030: the job's identity is the broker's durable call ID, injected
+        # D-031: the job's identity is the broker's durable call ID, injected
         # here. It is not a schema field, so the reasoning model cannot supply,
         # influence or observe it before the job runs, and the worktree it
         # allocates is therefore not a value Core chose either.
@@ -395,7 +395,7 @@ def parse_coding_arguments(
             "job_id", "missing", "job_id was not assigned"
         )
     # The broker's call id is authoritative, but it becomes a directory name
-    # and a git argument under D-030, so it is held to the same grammar the
+    # and a git argument under D-031, so it is held to the same grammar the
     # allocator applies before it can influence any of that. The broker's own
     # ids are UUID-shaped and pass unchanged — that is a property of today's
     # broker, not a contract this module may assume, so it is checked here
