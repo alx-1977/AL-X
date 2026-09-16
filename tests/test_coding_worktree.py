@@ -1508,15 +1508,21 @@ class TheWorkspaceRefusesAMainCheckout(Repository):
             caught.exception.details["reason_code"], "not_a_linked_worktree"
         )
 
-    def test_the_live_alx_checkout_is_refused(self) -> None:
-        """The real repository this suite runs in, not a fixture."""
+    def test_a_main_checkout_is_refused_by_diagnosis_too(self) -> None:
+        """The same refusal, read straight off the diagnosis.
+
+        Deliberately the fixture repository rather than the checkout this suite
+        happens to run from: reaching for the real one made the result depend
+        on the developer's working copy, and would report the wrong thing
+        entirely if the suite were ever run from a linked worktree.
+        """
         from alx.providers.coding_workspace import diagnose_worktree
 
-        live = Path(__file__).resolve().parents[1]
-        failure = diagnose_worktree(str(live))
+        failure = diagnose_worktree(str(self.repository))
 
         self.assertIsNotNone(failure)
         self.assertEqual(failure["reason_code"], "not_a_linked_worktree")
+        self.assertTrue((self.repository / ".git").is_dir())
 
     def test_a_genuine_linked_worktree_is_accepted(self) -> None:
         from alx.providers.coding_workspace import CodingWorkspace
