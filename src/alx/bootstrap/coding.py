@@ -63,7 +63,6 @@ def build_coding_runtime(
     reviewer: ReasoningModel | None = None,
     activity_sink: Callable[[str], None] | None = None,
     telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
-    job_id_source: Callable[[], str] | None = None,
     allocator: CodingWorktreeAllocator | None = None,
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
@@ -92,7 +91,7 @@ def build_coding_runtime(
         LOGGER.info("Coding agent has no worktree root: no coding capability")
         return None
     selected = agent or CodingAgent(
-        model, session, reviewer, activity_sink, telemetry_sink, job_id_source,
+        model, session, reviewer, activity_sink, telemetry_sink,
         allocator=allocator,
     )
 

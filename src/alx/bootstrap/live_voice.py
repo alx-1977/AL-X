@@ -496,7 +496,6 @@ async def run(repository_root: Path) -> None:
         reviewer=providers.coding_reviewer,
         activity_sink=activity.set,
         telemetry_sink=activity.publish_coding,
-        job_id_source=lambda: current_call_id[0],
         allocator=coding_allocator,
     )
     if coding_runtime is not None:

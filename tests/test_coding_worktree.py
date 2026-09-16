@@ -26,6 +26,7 @@ repository, and a mock cannot be wrong about it in the way that matters.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -609,6 +610,458 @@ class ReleaseRequiresAnExplicitCoreDecision(Repository):
             sorted(runtime.executors),
             ["release_coding_workspace", "run_coding_task"],
         )
+
+
+class ATamperedRecordCannotRedirectRelease(Repository):
+    """The allocation record is a claim to be checked, never authority.
+
+    It is an ordinary JSON file in an ordinary directory, so anything that can
+    write there can edit it. Before this was closed, `release` resolved the
+    worktree by reading `slot` straight out of the record: editing job A's
+    record to name job B's slot and worktree made
+    `release_coding_workspace("job-a")` remove **job B's** worktree, which is
+    both the wrong directory and one whose own job never authorised anything.
+
+    Every identity fact is now re-derived or read from git, and the record is
+    compared against that: the slot must be one job A's own deterministic
+    sequence could produce, the branch must be the branch git reports for the
+    directory and must carry the same collision suffix as the slot, and the
+    base must be a commit the canonical repository actually has.
+    """
+
+    def _record_path(self, allocator, job_id: str) -> Path:
+        return allocator.root / f"{job_id}.allocation.json"
+
+    def _tamper(self, allocator, whose: str, **fields) -> None:
+        path = self._record_path(allocator, whose)
+        record = json.loads(path.read_text())
+        record.update(fields)
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+    def _two_jobs(self):
+        allocator = self.allocator()
+        first = allocator.allocate("job-a")
+        second = allocator.allocate("job-b")
+        allocator.record_outcome("job-a", "succeeded")
+        allocator.record_outcome("job-b", "succeeded")
+        return allocator, first, second
+
+    def test_a_record_pointing_at_another_job_releases_nothing(self) -> None:
+        """The exact reported defect."""
+        allocator, first, second = self._two_jobs()
+        self._tamper(
+            allocator, "job-a",
+            slot=second.slot, worktree=str(second.path),
+        )
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-a")
+
+        self.assertEqual(caught.exception.code, "worktree_unusable")
+        # Neither worktree was touched.
+        self.assertTrue(second.path.is_dir())
+        self.assertTrue(first.path.is_dir())
+        self.assertIn(str(second.path), self.worktrees())
+        self.assertIn(str(first.path), self.worktrees())
+
+    def test_matching_the_branch_too_still_releases_nothing(self) -> None:
+        """Tampering consistently is still tampering."""
+        allocator, first, second = self._two_jobs()
+        self._tamper(
+            allocator, "job-a",
+            slot=second.slot, worktree=str(second.path), branch=second.branch,
+        )
+
+        with self.assertRaises(CodingError):
+            allocator.release_authorised("job-a")
+
+        self.assertTrue(second.path.is_dir())
+        self.assertTrue(first.path.is_dir())
+
+    def test_a_record_naming_another_jobs_worktree_alone_refuses(self) -> None:
+        allocator, first, second = self._two_jobs()
+        self._tamper(allocator, "job-a", worktree=str(second.path))
+
+        with self.assertRaises(CodingError):
+            allocator.release_authorised("job-a")
+
+        self.assertTrue(second.path.is_dir())
+        self.assertTrue(first.path.is_dir())
+
+    def test_a_slot_outside_the_jobs_own_sequence_refuses(self) -> None:
+        """`job-a` can only ever be `job-a`, `job-a-2`, `job-a-3`, ..."""
+        allocator, first, _second = self._two_jobs()
+        self._tamper(allocator, "job-a", slot="job-elsewhere")
+
+        with self.assertRaises(CodingError):
+            allocator.release_authorised("job-a")
+
+        self.assertTrue(first.path.is_dir())
+
+    def test_a_branch_the_worktree_is_not_on_refuses(self) -> None:
+        allocator, first, _second = self._two_jobs()
+        self._tamper(allocator, "job-a", branch="alx/coding/something-else")
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-a")
+
+        self.assertEqual(caught.exception.details["detail"], "branch")
+        self.assertTrue(first.path.is_dir())
+
+    def test_a_base_the_repository_does_not_have_refuses(self) -> None:
+        allocator, first, _second = self._two_jobs()
+        self._tamper(allocator, "job-a", base="0" * 40)
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-a")
+
+        self.assertEqual(caught.exception.details["detail"], "base")
+        self.assertTrue(first.path.is_dir())
+
+    def test_a_forged_job_id_refuses(self) -> None:
+        allocator, first, _second = self._two_jobs()
+        self._tamper(allocator, "job-a", job_id="job-b")
+
+        with self.assertRaises(CodingError):
+            allocator.release_authorised("job-a")
+
+        self.assertTrue(first.path.is_dir())
+
+    def test_an_untampered_record_still_releases(self) -> None:
+        """The checks refuse tampering, not ordinary use."""
+        allocator, first, second = self._two_jobs()
+
+        released = allocator.release_authorised("job-a")
+
+        self.assertTrue(released["released"])
+        self.assertFalse(first.path.exists())
+        # The other job is unaffected by its neighbour's release.
+        self.assertTrue(second.path.is_dir())
+
+    def test_a_collision_suffixed_job_still_releases(self) -> None:
+        """Re-derivation must not break the slot a collision actually gave."""
+        git(self.repository, "branch", "alx/coding/job-c")
+        allocator = self.allocator()
+        allocated = allocator.allocate("job-c")
+        allocator.record_outcome("job-c", "succeeded")
+        self.assertEqual(allocated.slot, "job-c-2")
+
+        released = allocator.release_authorised("job-c")
+
+        self.assertTrue(released["released"])
+        self.assertFalse(allocated.path.exists())
+
+
+class OverlappingJobsShareNothing(Repository):
+    """Two concurrent runs on one agent must not see each other's job.
+
+    One runtime builds one `CodingAgent` and dispatches every coding job
+    through it, so instance attributes are shared by every job that agent ever
+    runs. `_allocated`, `_telemetry` and `_current_activity` were exactly that:
+    the second job to start overwrote all three, after which the first could
+    resolve the second's worktree, report under its identity and elapsed time,
+    and write its terminal outcome onto the second's allocation record.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # These jobs run to a real terminal outcome, so the repository needs
+        # the module the session edits and a test AL/X's verification can run.
+        (self.repository / "app.py").write_text(
+            "def add(a, b):\n    return a - b\n", encoding="utf-8"
+        )
+        (self.repository / "test_app.py").write_text(
+            "import unittest\nfrom app import add\n\n\n"
+            "class AddTests(unittest.TestCase):\n"
+            "    def test_add(self):\n"
+            "        self.assertEqual(add(1, 2), 3)\n",
+            encoding="utf-8",
+        )
+        git(self.repository, "add", "-A")
+        git(self.repository, "commit", "-qm", "app under test")
+
+    def _agent(self, allocator, sink=None, barrier=None):
+        from test_coding_agent import PlanningModel, RecordingSession, _FIXED
+        from alx.providers import coding_agent as module
+
+        class Overlapping(RecordingSession):
+            """Holds inside the session so the two runs genuinely overlap."""
+
+            def run_session(self, request, briefing):
+                if barrier is not None:
+                    barrier.wait(timeout=10)
+                return super().run_session(request, briefing)
+
+        class ConcurrentReviewer(PlanningModel):
+            """A reviewer stub two overlapping jobs can share.
+
+            `PlanningModel` scripts its review answers in a list it pops from,
+            which suits one job and empties under two. That is the stub's
+            limitation, not the agent's: the agent under test is the production
+            one, and what these tests prove is that two runs through it stay
+            bound to their own job. Reviews are re-answered rather than
+            consumed so the stub is not the thing that fails.
+            """
+
+            def complete(self, request):
+                if request.output_schema_name == "alx_coding_local_review":
+                    from alx.contracts import ModelCompletion
+
+                    self.requests.append(request)
+                    return ModelCompletion("xai", "scripted", {"findings": []})
+                return super().complete(request)
+
+        return module.CodingAgent(
+            ConcurrentReviewer(), Overlapping(edits={"app.py": _FIXED}),
+            ConcurrentReviewer(), telemetry_sink=sink, allocator=allocator,
+        )
+
+    def test_two_overlapping_runs_keep_their_own_worktrees(self) -> None:
+        import threading
+
+        from alx.contracts.coding import CodingRequest
+
+        allocator = self.allocator()
+        barrier = threading.Barrier(2)
+        telemetry: list = []
+        lock = threading.Lock()
+
+        def sink(item):
+            with lock:
+                telemetry.append(item)
+
+        agent = self._agent(allocator, sink=sink, barrier=barrier)
+        outcomes: dict[str, object] = {}
+
+        def run(job_id: str) -> None:
+            outcomes[job_id] = agent.run(
+                CodingRequest(task="fix add", job_id=job_id)
+            )
+
+        threads = [
+            threading.Thread(target=run, args=(job_id,))
+            for job_id in ("job-one", "job-two")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        first = outcomes["job-one"]
+        second = outcomes["job-two"]
+        # Each outcome reports its own job and its own directory.
+        self.assertEqual(first.job_id, "job-one")
+        self.assertEqual(second.job_id, "job-two")
+        self.assertNotEqual(first.worktree, second.worktree)
+        self.assertTrue(first.worktree.endswith("job-one"))
+        self.assertTrue(second.worktree.endswith("job-two"))
+        # And each worktree really is its own, on its own branch.
+        for outcome, job_id in ((first, "job-one"), (second, "job-two")):
+            self.assertEqual(
+                git(Path(outcome.worktree), "rev-parse", "--abbrev-ref", "HEAD").strip(),
+                f"alx/coding/{job_id}",
+            )
+
+    def test_each_job_writes_its_own_terminal_bookkeeping(self) -> None:
+        import threading
+
+        from alx.contracts.coding import CodingRequest
+
+        allocator = self.allocator()
+        barrier = threading.Barrier(2)
+        agent = self._agent(allocator, barrier=barrier)
+
+        threads = [
+            threading.Thread(
+                target=agent.run,
+                args=(CodingRequest(task="fix add", job_id=job_id),),
+            )
+            for job_id in ("job-one", "job-two")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        # Each job's own record carries its own outcome, slot and branch.
+        for job_id in ("job-one", "job-two"):
+            record = allocator.read_record(job_id)
+            self.assertIsNotNone(record, job_id)
+            self.assertEqual(record["job_id"], job_id)
+            self.assertEqual(record["slot"], job_id)
+            self.assertEqual(record["branch"], f"alx/coding/{job_id}")
+            self.assertEqual(record["status"], "succeeded")
+            self.assertTrue(record["worktree"].endswith(job_id))
+
+    def test_telemetry_is_attributed_per_job(self) -> None:
+        import threading
+
+        from alx.contracts.coding import CodingRequest
+
+        allocator = self.allocator()
+        barrier = threading.Barrier(2)
+        telemetry: list = []
+        lock = threading.Lock()
+
+        def sink(item):
+            with lock:
+                telemetry.append(item)
+
+        agent = self._agent(allocator, sink=sink, barrier=barrier)
+        threads = [
+            threading.Thread(
+                target=agent.run,
+                args=(CodingRequest(task="fix add", job_id=job_id),),
+            )
+            for job_id in ("job-one", "job-two")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        reported = {item.job_id for item in telemetry}
+        self.assertEqual(reported, {"job-one", "job-two"})
+        # Each job reaches its own terminal observation exactly once.
+        for job_id in ("job-one", "job-two"):
+            terminal = [
+                item for item in telemetry
+                if item.job_id == job_id and item.terminal
+            ]
+            self.assertEqual(len(terminal), 1, job_id)
+            self.assertEqual(terminal[0].outcome, "succeeded")
+
+    def test_the_agent_holds_no_per_job_attributes(self) -> None:
+        """A structural check, so the shape cannot quietly regress."""
+        allocator = self.allocator()
+        agent = self._agent(allocator)
+        for name in ("_allocated", "_telemetry", "_current_activity"):
+            self.assertFalse(
+                hasattr(agent, name),
+                f"{name} is per-job state and must not live on the agent",
+            )
+
+
+class AnUnrecordedWorktreeIsAuditable(Repository):
+    """`git worktree add` succeeded and the record write did not.
+
+    The worktree exists, on a real branch, and nothing names it. D-030 does not
+    authorise deleting it — removal requires an explicit Core release, and
+    there is now no record to prove this one is releasable — so the smallest
+    design consistent with the decision keeps it and makes it *findable*: an
+    orphan marker explains it, and `orphan_worktrees` discovers it from git
+    even if that marker could not be written either.
+    """
+
+    def _fail_record_write(self, allocator):
+        from alx.providers import coding_worktree as module
+
+        def refuse(self, allocated):
+            raise OSError("no space left on device")
+
+        return unittest.mock.patch.object(
+            module.CodingWorktreeAllocator, "_write_record", refuse
+        )
+
+    def test_allocation_fails_closed_when_the_record_cannot_be_written(
+        self,
+    ) -> None:
+        allocator = self.allocator()
+
+        with self._fail_record_write(allocator):
+            with self.assertRaises(CodingError) as caught:
+                allocator.allocate("job-1")
+
+        self.assertEqual(caught.exception.code, "worktree_unusable")
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "allocation_record_not_written",
+        )
+        # The failure names the directory it could not account for.
+        self.assertTrue(caught.exception.details["worktree"].endswith("job-1"))
+
+    def test_the_worktree_is_kept_rather_than_silently_deleted(self) -> None:
+        allocator = self.allocator()
+
+        with self._fail_record_write(allocator):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+
+        path = allocator.root / "job-1"
+        self.assertTrue(path.is_dir())
+        self.assertIn(str(path), self.worktrees())
+        # And its branch survives with it.
+        self.assertEqual(
+            git(self.repository, "rev-parse", "--abbrev-ref", "alx/coding/job-1").strip(),
+            "alx/coding/job-1",
+        )
+
+    def test_the_orphan_is_discoverable_and_explained(self) -> None:
+        allocator = self.allocator()
+
+        with self._fail_record_write(allocator):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+
+        orphans = allocator.orphan_worktrees()
+
+        self.assertEqual(len(orphans), 1)
+        entry = orphans[0]
+        self.assertEqual(entry["slot"], "job-1")
+        self.assertEqual(entry["branch"], "alx/coding/job-1")
+        self.assertTrue(entry["worktree"].endswith("job-1"))
+        self.assertEqual(entry["noted"]["job_id"], "job-1")
+        self.assertIn("could not be written", entry["noted"]["reason"])
+
+    def test_an_orphan_is_still_found_without_its_marker(self) -> None:
+        """Discovery asks git, so it does not depend on the marker landing."""
+        allocator = self.allocator()
+
+        with self._fail_record_write(allocator):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+        (allocator.root / "job-1.orphan.json").unlink()
+
+        orphans = allocator.orphan_worktrees()
+
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0]["slot"], "job-1")
+        self.assertNotIn("noted", orphans[0])
+
+    def test_an_orphan_cannot_be_released(self) -> None:
+        """A marker explains the orphan; it must not authorise removing it."""
+        allocator = self.allocator()
+
+        with self._fail_record_write(allocator):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("job-1")
+
+        self.assertEqual(
+            caught.exception.details["reason_code"], "allocation_record_missing"
+        )
+        self.assertTrue((allocator.root / "job-1").is_dir())
+
+    def test_a_properly_recorded_worktree_is_not_an_orphan(self) -> None:
+        allocator = self.allocator()
+        allocator.allocate("job-1")
+
+        self.assertEqual(allocator.orphan_worktrees(), ())
+
+    def test_a_later_job_does_not_reuse_the_orphans_slot(self) -> None:
+        """The orphan is retained, so the next job yields to it."""
+        allocator = self.allocator()
+        with self._fail_record_write(allocator):
+            with self.assertRaises(CodingError):
+                allocator.allocate("job-1")
+
+        allocated = allocator.allocate("job-1")
+
+        self.assertEqual(allocated.slot, "job-1-2")
+        self.assertTrue((allocator.root / "job-1").is_dir())
+        self.assertEqual(len(allocator.orphan_worktrees()), 1)
 
 
 class TheGitAuthorityThisNeeds(unittest.TestCase):

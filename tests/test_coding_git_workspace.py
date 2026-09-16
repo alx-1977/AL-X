@@ -1094,16 +1094,27 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         release a coding job's isolated worktree. `worktree add -b` creates the
         branch and the worktree in one command, so `switch -c` was removed for
         the same reason plain `switch` was: nothing built it afterwards.
+
+        One further read was added the same day when release verification was
+        hardened: `cat-file -e` asks whether a recorded start point is a commit
+        this repository actually has, so a persisted claim is checked against
+        git rather than against the file making the claim.
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 16)
+        self.assertEqual(len(_WRITE_SHAPES), 17)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
             {"rev-parse", "symbolic-ref", "status", "diff", "show",
              "check-attr", "check-ignore", "ls-files", "add",
-             "reset", "commit", "worktree"},
+             "reset", "commit", "worktree", "cat-file"},
+        )
+        # `cat-file` may only test for existence. The shapes that print an
+        # object's contents (`-p`, `blob`, a `rev:path`) are not entries.
+        self.assertEqual(
+            {prefix for prefix in _WRITE_SHAPES if prefix[0] == "cat-file"},
+            {("cat-file", "-e")},
         )
         # Branch creation has exactly one shape, and it is the atomic one.
         self.assertNotIn(("switch", "-c"), _WRITE_SHAPES)

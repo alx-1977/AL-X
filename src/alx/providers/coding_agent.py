@@ -215,6 +215,24 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+class _JobState:
+    """Everything one `run` owns, so two overlapping runs own nothing jointly.
+
+    Created per call and passed explicitly. A mutable attribute on the agent
+    would be shared by every job the agent runs, and the agent is long-lived:
+    one runtime builds one `CodingAgent` and dispatches every coding job
+    through it.
+    """
+
+    __slots__ = ("job_id", "allocated", "telemetry", "activity")
+
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id or "coding-job"
+        self.allocated: CodingWorktree | None = None
+        self.telemetry: CodingTelemetry | None = None
+        self.activity: str | None = None
+
+
 class CodingAgent:
     """One coding job: AL/X plans it, a native session does it, AL/X verifies it."""
 
@@ -222,7 +240,6 @@ class CodingAgent:
         self, model: ReasoningModel, session: CodingSession | None,
         reviewer: ReasoningModel, activity_sink: Callable[[str], None] | None = None,
         telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
-        job_id_source: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
         allocator: CodingWorktreeAllocator | None = None,
     ) -> None:
@@ -230,25 +247,28 @@ class CodingAgent:
         self._session = session
         self._reviewer = reviewer
         self._activity_sink = activity_sink or (lambda _activity: None)
-        self._current_activity: str | None = None
         self._telemetry_sink = telemetry_sink or (lambda _telemetry: None)
-        self._job_id_source = job_id_source or (lambda: "coding-job")
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._telemetry: CodingTelemetry | None = None
         # D-030. Without an allocator there is no isolated worktree to run in,
         # and running somewhere else is the thing that decision exists to
         # prevent, so a job fails closed rather than falling back to a path.
         self._allocator = allocator
-        self._allocated: CodingWorktree | None = None
+        # Per-run state lives in `_JobState`, created by `run` and threaded
+        # explicitly from there. It used to live here, as three instance
+        # attributes, which meant two overlapping jobs on one agent shared a
+        # worktree pointer, a telemetry anchor and an activity cache: whichever
+        # ran second overwrote the first, so the first could resolve the
+        # second's worktree, report its elapsed time, and write its outcome.
+        # Nothing job-authoritative belongs on the agent itself.
 
     def _report_telemetry(
-        self, phase: str, *, in_flight: bool = False, waiting: bool = False,
-        terminal: bool = False, outcome: str = "", transition: str = "",
-        correction_cycle: int | None = None,
+        self, state: "_JobState", phase: str, *, in_flight: bool = False,
+        waiting: bool = False, terminal: bool = False, outcome: str = "",
+        transition: str = "", correction_cycle: int | None = None,
     ) -> None:
         """Publish a lifecycle fact; telemetry failure never changes the job."""
         now = self._clock()
-        previous = self._telemetry
+        previous = state.telemetry
         started = previous.started_at if previous is not None else now
         phase_started = (
             previous.phase_started_at
@@ -257,8 +277,13 @@ class CodingAgent:
         )
         provider = str(getattr(self._session, "provider_name", "") or "")
         model = str(getattr(self._session, "model_name", "") or "")
+        # This job's own identity, carried on its state. Telemetry used to read
+        # a shared `job_id_source` callable — the runtime's in-flight call ID —
+        # which a concurrent job moves, so two overlapping jobs both reported
+        # under whichever had dispatched most recently. The request carries the
+        # identity the broker assigned to *this* job, and that is what is used.
         telemetry = CodingTelemetry(
-            job_id=self._job_id_source() or "coding-job", phase=phase,
+            job_id=state.job_id, phase=phase,
             started_at=started, phase_started_at=phase_started,
             last_activity_at=now, provider=provider, model=model,
             attempt=1,
@@ -274,11 +299,11 @@ class CodingAgent:
             # The transport missed this observation, but the Coding Agent did
             # not. Preserve its local lifecycle anchor so a later successful
             # publication reports the job's real elapsed time.
-            self._telemetry = telemetry
+            state.telemetry = telemetry
             return
-        self._telemetry = telemetry
+        state.telemetry = telemetry
 
-    def _report_activity(self, activity: str) -> None:
+    def _report_activity(self, state: "_JobState", activity: str) -> None:
         """Tell the runtime what this job is doing. Never affect the job.
 
         The sink is a telemetry transport supplied by the caller, and a
@@ -298,7 +323,7 @@ class CodingAgent:
         finalizer was suppressed as redundant and the runtime was left showing
         a worker state for a job that had finished.
         """
-        if self._current_activity == activity:
+        if state.activity == activity:
             return
         try:
             self._activity_sink(activity)
@@ -311,34 +336,40 @@ class CodingAgent:
                 type(error).__name__,
             )
             return
-        self._current_activity = activity
+        state.activity = activity
 
     def run(self, request: CodingRequest) -> CodingOutcome:
         """Run one job and never leave runtime telemetry at a worker state."""
         outcome: CodingOutcome | None = None
-        self._telemetry = None
-        self._allocated = None
-        self._report_telemetry("plan", in_flight=True, transition="CASE started")
+        # One state object per call, so nothing this run touches is reachable
+        # from another run on the same agent.
+        state = _JobState(request.job_id)
+        self._report_telemetry(
+            state, "plan", in_flight=True, transition="CASE started"
+        )
         try:
-            outcome = self._run(request)
+            outcome = self._run(request, state)
             return outcome
         finally:
             # D-030. How the job ended is recorded beside its worktree, from the
             # one place that runs for every ending: success, declared failure,
             # and the exception path a crash takes. An unrecorded outcome leaves
             # a workspace that refuses release, which is the safe direction.
-            self._record_worktree_outcome(outcome)
+            self._record_worktree_outcome(state, outcome)
             self._report_telemetry(
+                state,
                 "complete" if outcome is not None and outcome.status == "succeeded" else "failed",
                 terminal=True,
                 outcome=outcome.status if outcome is not None else "failed",
                 transition="COMPLETE" if outcome is not None and outcome.status == "succeeded" else "FAILED",
             )
-            self._report_activity("reasoning")
+            self._report_activity(state, "reasoning")
 
-    def _record_worktree_outcome(self, outcome: CodingOutcome | None) -> None:
+    def _record_worktree_outcome(
+        self, state: "_JobState", outcome: CodingOutcome | None
+    ) -> None:
         """Note the job's ending on its allocation record. Never fail the job."""
-        allocated = self._allocated
+        allocated = state.allocated
         if allocated is None or self._allocator is None:
             return
         status = outcome.status if outcome is not None else "failed"
@@ -350,7 +381,7 @@ class CodingAgent:
                 type(error).__name__,
             )
 
-    def _run(self, request: CodingRequest) -> CodingOutcome:
+    def _run(self, request: CodingRequest, state: "_JobState") -> CodingOutcome:
         # D-030: branch and worktree are allocated together, before anything
         # else touches a filesystem, from the job's own identity. This replaces
         # both the Core-supplied path and the separate `create_repair_branch`
@@ -363,7 +394,7 @@ class CodingAgent:
         allocated = self._allocator.allocate(
             request.job_id, request.repair_branch.strip()
         )
-        self._allocated = allocated
+        state.allocated = allocated
         # The branch git actually created is authoritative: D-029's scheme may
         # have suffixed the requested base name, and every later step must use
         # the name that exists rather than the one that was asked for. The
@@ -421,9 +452,10 @@ class CodingAgent:
                 git_diff=git_diff, issues=(issue,), review=False,
                 failure_status=True, diagnostics=planning_failure,
                 baseline=baseline,
+                allocated=state.allocated,
             )
         plan_summary = str(plan["problem_understanding"])
-        self._report_telemetry("execution", transition="PLAN completed")
+        self._report_telemetry(state, "execution", transition="PLAN completed")
 
         if self._session is None:
             git_status, git_diff = self._git_evidence(workspace)
@@ -436,10 +468,11 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "execution", "reason_code": "no_session"},
                 baseline=baseline,
+                allocated=state.allocated,
             )
 
-        self._report_activity("coding")
-        self._report_telemetry("execution", in_flight=True, transition="EXECUTION started")
+        self._report_activity(state, "coding")
+        self._report_telemetry(state, "execution", in_flight=True, transition="EXECUTION started")
         try:
             session = self._session.run_session(
                 request, build_briefing(request, plan)
@@ -461,9 +494,10 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "execution", **error.details},
                 baseline=baseline,
+                allocated=state.allocated,
             )
 
-        self._report_telemetry("execution", transition="EXECUTION completed")
+        self._report_telemetry(state, "execution", transition="EXECUTION completed")
 
         post_session_status, _ = self._git_evidence(workspace)
         session_files = self._files_changed(
@@ -478,7 +512,7 @@ class CodingAgent:
         if session.completed and session_files:
             review_failure, review_issues, reviewed_files = self._local_review_loop(
                 request, workspace, plan, session_files, preexisting_dirty,
-                preexisting_fingerprints,
+                preexisting_fingerprints, state,
             )
         if review_failure is not None:
             git_status, git_diff = self._git_evidence(workspace, reviewed_files)
@@ -494,6 +528,7 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "local_review"},
                 baseline=baseline,
+                allocated=state.allocated,
             )
 
         # Verification is AL/X's, not the session's. The agent has no terminal,
@@ -501,8 +536,8 @@ class CodingAgent:
         # allowlist already permits it. The scope is `reviewed_files`, the job's
         # final file set: a reviewer correction can touch a file the initial
         # session never did, and that file must select tests like any other.
-        self._report_activity("reasoning")
-        self._report_telemetry("test", transition="TEST started")
+        self._report_activity(state, "reasoning")
+        self._report_telemetry(state, "test", transition="TEST started")
         tests_run = False
         tests_passed: bool | None = None
         for argv in self._verification_commands(request, plan, reviewed_files):
@@ -529,7 +564,7 @@ class CodingAgent:
                 elif tests_passed is None:
                     tests_passed = True
 
-        self._report_telemetry("verify", transition="TEST completed")
+        self._report_telemetry(state, "verify", transition="TEST completed")
 
         git_status, git_diff = self._git_evidence(workspace, reviewed_files)
         files = self._files_changed(
@@ -650,6 +685,7 @@ class CodingAgent:
                     if key != "unresolved_issues"
                 },
             },
+            allocated=state.allocated,
         )
 
     def _local_review_loop(
@@ -657,6 +693,7 @@ class CodingAgent:
         plan: Mapping[str, Any], initial_files: tuple[str, ...],
         preexisting_dirty: tuple[str, ...],
         preexisting_fingerprints: Mapping[str, str | None],
+        state: "_JobState",
     ) -> tuple[str | None, tuple[str, ...], tuple[str, ...]]:
         """Review a candidate once, then re-review one bounded correction."""
         reviewed_files = initial_files
@@ -677,8 +714,8 @@ class CodingAgent:
             files = tuple(dict.fromkeys((
                 *reviewed_files, *inspection_targets,
             )))
-            self._report_activity("reviewing")
-            self._report_telemetry("review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
+            self._report_activity(state, "reviewing")
+            self._report_telemetry(state, "review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
             try:
                 findings = self._review(request, workspace, plan, files, git_diff)
             except CodingError:
@@ -687,7 +724,7 @@ class CodingAgent:
                     ("review_failed",), reviewed_files,
                 )
             material = [item for item in findings if item["severity"] in _MATERIAL_REVIEW_SEVERITIES]
-            self._report_telemetry("review", transition="REVIEW completed", correction_cycle=cycle)
+            self._report_telemetry(state, "review", transition="REVIEW completed", correction_cycle=cycle)
             if not material:
                 return None, (), reviewed_files
             if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
@@ -700,8 +737,8 @@ class CodingAgent:
                 f"- [{item['severity']}] {item['title']}: {item['evidence']} Correction: {item['correction']}"
                 for item in material
             )
-            self._report_activity("coding")
-            self._report_telemetry("correction", in_flight=True, transition="CORRECTION cycle", correction_cycle=cycle + 1)
+            self._report_activity(state, "coding")
+            self._report_telemetry(state, "correction", in_flight=True, transition="CORRECTION cycle", correction_cycle=cycle + 1)
             try:
                 correction = self._session.run_session(request, briefing)
             except CodingError:
@@ -714,7 +751,7 @@ class CodingAgent:
                     "the coding session could not correct local review findings",
                     (correction.failure_code or "session_failed",), reviewed_files,
                 )
-            self._report_telemetry("correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
+            self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
             # whole-worktree one would never match, so a correction that
             # changed nothing would read as progress.
@@ -852,17 +889,19 @@ class CodingAgent:
                     tests.append(name)
         return tuple(tests)
 
-    def _root(self, request: CodingRequest) -> Path:
+    @staticmethod
+    def _root(request: CodingRequest) -> Path:
         """The worktree allocated to this job.
 
-        Kept as a lookup rather than a field on the request: under D-030 the
-        request carries the job's identity and the allocator turns that into a
-        directory, so there is one place a worktree can come from.
+        Read from the request, which `_run` rewrote with the allocated path
+        before anything else saw it. The request is a frozen value local to one
+        `run`, so two overlapping jobs cannot resolve to each other's worktree;
+        this used to consult a mutable attribute on the agent, which they
+        could.
         """
-        allocated = self._allocated
-        if allocated is None or allocated.job_id != request.job_id:
+        if not request.worktree.strip():
             raise CodingError("worktree_unusable", reason_code="worktree_not_allocated")
-        return allocated.path
+        return Path(request.worktree).expanduser().resolve()
 
     @staticmethod
     def _candidate_arguments(text: str) -> tuple[tuple[str, ...], ...]:
@@ -1118,6 +1157,7 @@ class CodingAgent:
         plan_summary: str = "",
         baseline: GitWorkspaceState | None = None,
         commit: CodingCommit | None = None,
+        allocated: CodingWorktree | None = None,
     ) -> CodingOutcome:
         if status not in ("succeeded", "failed", "blocked"):
             status = "failed"
@@ -1143,8 +1183,10 @@ class CodingAgent:
             commit,
             # D-030. Reported for every job: the worktree is retained until an
             # explicit release, so `worktree_retained` is true whenever a job
-            # ends. Release is a later, separate capability call.
-            allocated.job_id if (allocated := self._allocated) is not None else "",
+            # ends. Release is a later, separate capability call. Passed in
+            # from the run that owns it rather than read off the agent, which
+            # a concurrent job would have moved.
+            allocated.job_id if allocated is not None else "",
             str(allocated.path) if allocated is not None else "",
             True,
         )

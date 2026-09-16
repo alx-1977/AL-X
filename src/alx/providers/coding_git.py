@@ -94,6 +94,10 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("check-ignore", "-q", "--"): "paths",
     ("ls-files", "-z", "--error-unmatch", "--"): "paths",
     ("diff", "--cached", "--name-status", "-z"): "none",
+    # Whether one commit object exists. A read: it resolves no ref, writes
+    # nothing, and its argument is held to hexadecimal by its caller before
+    # the shape is built.
+    ("cat-file", "-e"): "value",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
     ("commit", "--quiet", "-m"): "value",
@@ -555,6 +559,36 @@ def worktree_belongs_to_repository(worktree: Path, repository: Path) -> bool:
     if expected is None:
         return False
     return common == expected
+
+
+def commit_exists(repository: Path, commit: str) -> bool:
+    """Whether this exact commit object is in the canonical repository.
+
+    Used to check a persisted start point against the repository rather than
+    against the file that claims it. The SHA is held to hexadecimal before it
+    reaches git, so nothing option-shaped or revision-shaped can be passed
+    through this, and `cat-file -e` neither writes nor resolves a ref.
+    """
+    candidate = str(commit).strip()
+    if not candidate or len(candidate) > 64:
+        return False
+    if any(character not in "0123456789abcdefABCDEF" for character in candidate):
+        return False
+    root = Path(repository).expanduser().resolve()
+    return _run(root, ["git", "cat-file", "-e", candidate]).exit_status == 0
+
+
+def worktree_branch(worktree: Path) -> str:
+    """The branch checked out in this worktree, or "" if it is detached.
+
+    Read from git rather than from anything this capability wrote down, so it
+    can be used to check a persisted claim instead of restating it.
+    """
+    root = Path(worktree).expanduser().resolve()
+    reference = _run(root, ["git", "symbolic-ref", "--quiet", "--short", "HEAD"])
+    if reference.exit_status != 0:
+        return ""
+    return reference.stdout.strip()
 
 
 def allocate_job_worktree(
@@ -1265,6 +1299,7 @@ __all__ = [
     "assert_assigned_worktree",
     "branch_name_permitted",
     "canonical_repository_root",
+    "commit_exists",
     "commit_job_changes",
     "deleted_paths",
     "git_write_permitted",
@@ -1272,4 +1307,5 @@ __all__ = [
     "read_workspace_state",
     "release_job_worktree",
     "worktree_belongs_to_repository",
+    "worktree_branch",
 ]
