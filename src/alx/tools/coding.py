@@ -38,6 +38,7 @@ from alx.contracts.coding import (
     MAX_TASK_CHARACTERS,
     CodingError,
     CodingRequest,
+    job_id_permitted,
 )
 
 
@@ -100,27 +101,26 @@ DEFINITION = CapabilityDefinition(
     # disk, both discovered only by rejection. MAX_STEP_BUDGET is interpolated
     # rather than written out, so the stated ceiling cannot drift from the one
     # the executor applies.
-    "Execute one bounded software-engineering job in an assigned worktree: "
-    "inspect and edit files there, run permitted tests and git inspection, "
-    "and return structured evidence. Does not merge, push, deploy, or request "
-    "an external review. worktree is a filesystem path to an existing "
-    "directory, resolved from the runtime's working directory, so \".\" is the "
-    "repository the runtime is running in; it is not a project or repository "
-    f"name. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}. "
-    "repair_branch is optional: give it to have the work carried out on a new "
-    "branch of that name inside the worktree, created before the job starts. "
+    "Execute one bounded software-engineering job in an isolated worktree AL/X "
+    "creates for it: inspect and edit files there, run permitted tests and git "
+    "inspection, and return structured evidence. Does not merge, push, deploy, "
+    "or request an external review. The worktree is allocated automatically and "
+    "is never the live repository; there is no argument for it and no filesystem "
+    "path is accepted. The worktree is kept after the job so its work can be "
+    "reviewed, and is removed only by a later explicit release_coding_workspace "
+    f"call. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}. "
+    "repair_branch is optional: give it to name the branch the work is carried "
+    "out on. Left unset, a branch is named automatically. "
     "commit_message is optional and requires repair_branch: give both to have "
     "the job's own changed files committed on that branch once its tests pass, "
     "returning branch and commit_sha. Only files this job changed are "
-    "committed; a worktree already carrying somebody else's modifications "
-    "leaves them untouched and uncommitted, and the commit is refused rather "
-    "than widened if anything unrelated would be included. It still does not "
-    "push, merge, deploy, or request an external review.",
+    "committed: the commit is refused rather than widened if the index or the "
+    "resulting tree holds any path outside that authorised set. It still does "
+    "not push, merge, deploy, or request an external review.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
             "task": _STRING,
-            "worktree": _STRING,
             "acceptance_criteria": _STRING_ARRAY,
             "context": _STRING,
             "test_guidance": _STRING,
@@ -129,7 +129,7 @@ DEFINITION = CapabilityDefinition(
             "repair_branch": _STRING,
             "commit_message": _STRING,
         },
-        ("task", "worktree"),
+        ("task",),
         extra_properties=False,
     ),
     StructuredSchema(
@@ -156,6 +156,12 @@ DEFINITION = CapabilityDefinition(
             "commit": _COMMIT_RECORD,
             "branch": _STRING,
             "commit_sha": _STRING,
+            # D-031 audit evidence. Reported so Core can see where the work
+            # happened and, later, name the job whose workspace it is
+            # releasing. Reported, never accepted: there is no input field.
+            "job_id": _STRING,
+            "worktree": _STRING,
+            "worktree_retained": _BOOLEAN,
         },
         (
             "status",
@@ -174,7 +180,7 @@ DEFINITION = CapabilityDefinition(
     SideEffect.EFFECTFUL,
     CODING_FAILURES,
     durable_input_fields=(
-        "task", "worktree", "blocked_paths", "repair_branch", "commit_message",
+        "task", "blocked_paths", "repair_branch", "commit_message",
     ),
 )
 
@@ -196,6 +202,104 @@ _OUTCOME_ISSUE_CODES = (
 )
 
 
+RELEASE_CODING_WORKSPACE = "release_coding_workspace"
+
+# D-031 makes releasing a workspace an explicit, separate decision rather than
+# a consequence of a job succeeding. The failure codes are the verification it
+# performs: each one names a check that refused, so a refusal tells Core which
+# fact was wrong rather than only that removal did not happen.
+RELEASE_FAILURES = (
+    "arguments_unusable",
+    "coding_unavailable",
+    "worktree_unusable",
+    "job_not_successful",
+    "git_refused",
+    "git_unavailable",
+)
+
+RELEASE_DEFINITION = CapabilityDefinition(
+    RELEASE_CODING_WORKSPACE,
+    "Release the isolated worktree of one finished coding job, identified by "
+    "the job_id that job reported. Use it only once nothing further is needed "
+    "from that workspace: no review to run against it, no publication, no "
+    "recovery, and no other continuation of the same job. Its branch and "
+    "commits are kept; only the working directory is removed. A job that did "
+    "not finish successfully cannot be released, and a workspace that still "
+    "holds uncommitted work refuses rather than discarding it.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"job_id": _STRING},
+        ("job_id",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {
+            "job_id": _STRING,
+            "worktree": _STRING,
+            "branch": _STRING,
+            "released": _BOOLEAN,
+        },
+        ("job_id", "released"),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
+    RELEASE_FAILURES,
+    durable_input_fields=("job_id",),
+)
+
+
+def build_release_executors(
+    release: Callable[[str], Mapping[str, Any]],
+    call_id_source: Callable[[], str],
+) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
+    """Wire the explicit workspace release to its capability result.
+
+    The durable record of this invocation is the release authorisation D-031
+    requires. There is no separate ledger: a capability call and its result are
+    already recorded, already attributable, and already inspectable.
+    """
+
+    def run(arguments: Mapping[str, Any]) -> CapabilityResult:
+        call_id = call_id_source()
+        if not isinstance(arguments, Mapping):
+            return _failed(
+                call_id,
+                "arguments_unusable",
+                capability=RELEASE_CODING_WORKSPACE,
+                **_argument_failure(None, "not_object", "arguments must be an object"),
+            )
+        job_id, error = _required_string(arguments, "job_id", 200)
+        if error is not None:
+            return _failed(
+                call_id, "arguments_unusable",
+                capability=RELEASE_CODING_WORKSPACE, **error,
+            )
+        try:
+            released = release(job_id)
+        except CodingError as failure:
+            return _failed(
+                call_id, failure.code,
+                capability=RELEASE_CODING_WORKSPACE, **failure.details,
+            )
+        except Exception:  # noqa: BLE001 - unclassified is still a fact
+            LOGGER.warning("Coding workspace release failed")
+            return _failed(
+                call_id, "coding_unavailable",
+                capability=RELEASE_CODING_WORKSPACE,
+            )
+        values = dict(released)
+        return CapabilityResult(
+            call_id,
+            RELEASE_CODING_WORKSPACE,
+            CapabilityResultState.SUCCEEDED,
+            values,
+            durable_values=values,
+        )
+
+    return {RELEASE_CODING_WORKSPACE: run}
+
+
 def build_coding_executors(
     run_job: Callable[[CodingRequest], Any],
     call_id_source: Callable[[], str],
@@ -204,7 +308,11 @@ def build_coding_executors(
 
     def run(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
-        request, argument_failure = parse_coding_arguments(arguments)
+        # D-031: the job's identity is the broker's durable call ID, injected
+        # here. It is not a schema field, so the reasoning model cannot supply,
+        # influence or observe it before the job runs, and the worktree it
+        # allocates is therefore not a value Core chose either.
+        request, argument_failure = parse_coding_arguments(arguments, call_id)
         if argument_failure is not None:
             return _failed(call_id, "arguments_unusable", **argument_failure)
 
@@ -258,21 +366,48 @@ def build_coding_executors(
 
 def parse_coding_arguments(
     arguments: Mapping[str, Any],
+    job_id: str,
 ) -> tuple[CodingRequest | None, dict[str, object] | None]:
     """Validate run_coding_task arguments field by field.
 
     The schema already rejects the wrong JSON kinds. These checks name the
     field and bound that CodingRequest would otherwise swallow as a bare
     arguments_unusable, so Core can correct the call.
+
+    `job_id` is supplied by the executor, never by the caller. An argument
+    spelled `job_id` or `worktree` is refused rather than ignored: silently
+    dropping it would let a model believe it had chosen where the job runs.
     """
     if not isinstance(arguments, Mapping):
         return None, _argument_failure(
             None, "not_object", "arguments must be an object"
         )
+    for reserved in ("worktree", "job_id"):
+        if reserved in arguments:
+            return None, _argument_failure(
+                reserved,
+                "not_accepted",
+                f"{reserved} is assigned by AL/X and cannot be supplied",
+            )
+    if not isinstance(job_id, str) or not job_id.strip():
+        return None, _argument_failure(
+            "job_id", "missing", "job_id was not assigned"
+        )
+    # The broker's call id is authoritative, but it becomes a directory name
+    # and a git argument under D-031, so it is held to the same grammar the
+    # allocator applies before it can influence any of that. The broker's own
+    # ids are UUID-shaped and pass unchanged — that is a property of today's
+    # broker, not a contract this module may assume, so it is checked here
+    # rather than trusted. Validated, never rewritten: the job identity stays
+    # one-to-one with the call id it came from, and no second identifier is
+    # introduced.
+    if not job_id_permitted(job_id):
+        return None, _argument_failure(
+            "job_id",
+            "unsafe",
+            "the assigned job_id cannot be used as a workspace identity",
+        )
     task, error = _required_string(arguments, "task", MAX_TASK_CHARACTERS)
-    if error is not None:
-        return None, error
-    worktree, error = _required_string(arguments, "worktree", None)
     if error is not None:
         return None, error
     context, error = _optional_string(
@@ -312,15 +447,15 @@ def parse_coding_arguments(
         )
     return (
         CodingRequest(
-            task,
-            worktree,
-            criteria,
-            context,
-            guidance,
-            budget,
-            blocked,
-            branch,
-            message,
+            task=task,
+            job_id=job_id,
+            acceptance_criteria=criteria,
+            context=context,
+            test_guidance=guidance,
+            step_budget=budget,
+            blocked_paths=blocked,
+            repair_branch=branch,
+            commit_message=message,
         ),
         None,
     )
@@ -494,11 +629,12 @@ def _argument_failure(
 
 
 def _failed(call_id: str, code: str, **fields: object) -> CapabilityResult:
+    capability = str(fields.pop("capability", RUN_CODING_TASK))
     failure = {"code": code}
     failure.update(fields)
     return CapabilityResult(
         call_id,
-        RUN_CODING_TASK,
+        capability,
         CapabilityResultState.FAILED,
         failure=failure,
     )

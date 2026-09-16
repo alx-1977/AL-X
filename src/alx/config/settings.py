@@ -19,6 +19,12 @@ def _required(environment: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _optional_path(environment: Mapping[str, str], name: str) -> Path | None:
+    """A configured filesystem path, or None when the default should apply."""
+    value = environment.get(name, "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def _credential(
     environment: Mapping[str, str],
     generic_name: str,
@@ -1272,6 +1278,12 @@ class LiveVoiceSettings:
     # to read without being authorised to spend on discovery.
     web_search: "WebSearchSettings"
     sandbox: "SandboxSettings"
+    # D-031 coding-worktree root. Optional: unset, it defaults beside the
+    # runtime storage root, which already sits outside the checkout. Set, it
+    # must still resolve outside the canonical repository, which the allocator
+    # enforces rather than this setting — a path is only a path until it is
+    # resolved against a repository.
+    coding_worktree_root: Path | None = None
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> LiveVoiceSettings:
@@ -1289,6 +1301,9 @@ class LiveVoiceSettings:
             web_read_enabled=_boolean(environment, "ALX_WEB_READ_ENABLED", False),
             web_search=_web_search_settings(environment),
             sandbox=sandbox_settings(environment),
+            coding_worktree_root=_optional_path(
+                environment, "ALX_CODING_WORKTREE_ROOT"
+            ),
         )
 
 

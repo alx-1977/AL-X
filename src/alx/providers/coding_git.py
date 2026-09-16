@@ -67,13 +67,25 @@ MAX_REPAIR_BRANCH_ATTEMPTS = 100
 # cannot be built, which is what makes push, merge, rebase, reset, stash and
 # remote manipulation impossible rather than merely discouraged.
 #
-# "none"  - no further arguments at all
-# "value" - exactly one further argument, checked by the caller that built it
-# "paths" - a `--` separator followed by one or more worktree-relative paths,
-#           none of which may be spelled as a ref
+# "none"   - no further arguments at all
+# "value"  - exactly one further argument, checked by the caller that built it
+# "paths"  - a `--` separator followed by one or more worktree-relative paths,
+#            none of which may be spelled as a ref
+# "triple" - exactly three further arguments, none option-shaped: the D-031
+#            worktree allocation `-b <branch> <path> <base>`. Checked by the
+#            allocator that built it, which holds the branch to
+#            `branch_name_permitted` and the path to its own generated root.
+#            This is the only shape that creates a branch. The `switch -c`
+#            shape was removed on 2026-09-16 when D-031 made branch and
+#            worktree one allocation: nothing built it afterwards, and a dead
+#            shape is granted authority nobody uses.
+# "single" - exactly one further argument, not option-shaped: the D-031
+#            worktree path to release. The allocator proves ownership of that
+#            path before the shape is ever built.
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("rev-parse", "HEAD"): "none",
     ("rev-parse", "--show-toplevel"): "none",
+    ("rev-parse", "--git-common-dir"): "none",
     ("symbolic-ref", "--quiet", "--short", "HEAD"): "none",
     ("status", "--porcelain=v1", "-z", "-uall"): "none",
     ("diff", "--cached", "--name-only", "-z"): "none",
@@ -82,10 +94,20 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("check-ignore", "-q", "--"): "paths",
     ("ls-files", "-z", "--error-unmatch", "--"): "paths",
     ("diff", "--cached", "--name-status", "-z"): "none",
-    ("switch", "-c"): "value",
+    # Whether one commit object exists. A read: it resolves no ref, writes
+    # nothing, and its argument is held to hexadecimal by its caller before
+    # the shape is built.
+    ("cat-file", "-e"): "value",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
     ("commit", "--quiet", "-m"): "value",
+    # D-031. Branch and worktree are allocated by one command, so a Coding
+    # Agent job's branch is never created by the `switch -c` shape above.
+    # `worktree remove` carries no `--force`: a worktree holding uncommitted
+    # work refuses to be removed, which is the retention behaviour D-031
+    # requires rather than something this code has to implement itself.
+    ("worktree", "add", "-b"): "triple",
+    ("worktree", "remove"): "single",
 }
 
 # A branch name this capability may create or switch to. Deliberately narrower
@@ -134,6 +156,10 @@ def git_write_permitted(argv: list[str] | tuple[str, ...]) -> bool:
             return len(tail) == 1 and not tail[0].startswith("-")
         if remainder == "paths":
             return bool(tail) and all(_pathspec_permitted(item) for item in tail)
+        if remainder == "triple":
+            return len(tail) == 3 and not any(item.startswith("-") for item in tail)
+        if remainder == "single":
+            return len(tail) == 1 and not tail[0].startswith("-")
     return False
 
 
@@ -451,6 +477,196 @@ def assert_assigned_worktree(worktree: Path) -> Path:
     return root
 
 
+def canonical_repository_root(repository: Path) -> Path:
+    """Resolve the repository a coding job's worktrees are linked to.
+
+    The canonical repository is the one the runtime is running from, not a
+    path a caller chose. Proving git agrees it is a top level keeps a
+    misconfigured subdirectory from silently becoming the base of every job.
+    """
+    root = Path(repository).expanduser().resolve()
+    if not root.is_dir():
+        raise CodingError("worktree_unusable", reason_code="repository_missing")
+    toplevel = _require(
+        root, ["git", "rev-parse", "--show-toplevel"], "not_a_repository"
+    ).strip()
+    try:
+        reported = Path(toplevel).resolve()
+    except OSError as error:
+        raise CodingError(
+            "git_unavailable", reason_code="toplevel_unresolvable"
+        ) from error
+    if reported != root:
+        raise CodingError(
+            "git_refused", reason_code="repository_is_not_root"
+        )
+    return root
+
+
+def read_head_sha(worktree: Path) -> str:
+    """The commit at HEAD, used as the base a job's branch is cut from."""
+    root = Path(worktree).expanduser().resolve()
+    return _require(root, ["git", "rev-parse", "HEAD"], "no_head").strip()
+
+
+def _common_git_dir(worktree: Path) -> Path | None:
+    """Where this worktree's shared git metadata lives, or None if unreadable.
+
+    A linked worktree reports the *main* repository's git directory here,
+    which is what makes this the question to ask when proving a directory
+    belongs to the canonical repository rather than to some other one.
+    """
+    result = _run(worktree, ["git", "rev-parse", "--git-common-dir"])
+    if result.exit_status != 0:
+        return None
+    reported = result.stdout.strip()
+    if not reported:
+        return None
+    candidate = Path(reported)
+    if not candidate.is_absolute():
+        candidate = Path(worktree) / candidate
+    try:
+        return candidate.resolve()
+    except OSError:
+        return None
+
+
+def worktree_belongs_to_repository(worktree: Path, repository: Path) -> bool:
+    """Whether this directory is a linked worktree of that repository.
+
+    Two facts together, both read from git rather than inferred from the
+    filesystem: the directory is its own git top level, and its shared git
+    directory is the canonical repository's. A directory that merely sits in
+    the right place, or a checkout of an unrelated repository, satisfies
+    neither.
+    """
+    try:
+        root = Path(worktree).expanduser().resolve()
+        target = Path(repository).expanduser().resolve()
+    except OSError:
+        return False
+    if not root.is_dir():
+        return False
+    if root == target:
+        return False
+    toplevel = _run(root, ["git", "rev-parse", "--show-toplevel"])
+    if toplevel.exit_status != 0 or Path(toplevel.stdout.strip() or ".") != root:
+        return False
+    common = _common_git_dir(root)
+    if common is None:
+        return False
+    expected = _common_git_dir(target)
+    if expected is None:
+        return False
+    return common == expected
+
+
+def commit_exists(repository: Path, commit: str) -> bool:
+    """Whether this exact commit object is in the canonical repository.
+
+    Used to check a persisted start point against the repository rather than
+    against the file that claims it. The SHA is held to hexadecimal before it
+    reaches git, so nothing option-shaped or revision-shaped can be passed
+    through this, and `cat-file -e` neither writes nor resolves a ref.
+    """
+    candidate = str(commit).strip()
+    if not candidate or len(candidate) > 64:
+        return False
+    if any(character not in "0123456789abcdefABCDEF" for character in candidate):
+        return False
+    root = Path(repository).expanduser().resolve()
+    return _run(root, ["git", "cat-file", "-e", candidate]).exit_status == 0
+
+
+def worktree_branch(worktree: Path) -> str:
+    """The branch checked out in this worktree, or "" if it is detached.
+
+    Read from git rather than from anything this capability wrote down, so it
+    can be used to check a persisted claim instead of restating it.
+    """
+    root = Path(worktree).expanduser().resolve()
+    reference = _run(root, ["git", "symbolic-ref", "--quiet", "--short", "HEAD"])
+    if reference.exit_status != 0:
+        return ""
+    return reference.stdout.strip()
+
+
+def allocate_job_worktree(
+    repository: Path, path: Path, branch: str, base: str
+) -> bool:
+    """Create one linked worktree and its branch in a single git command.
+
+    Returns False when the branch name or the path was already taken, which is
+    the one condition D-031 retries under D-029's suffix scheme. Every other
+    failure raises: a lock, a permission problem or an unrecognised diagnostic
+    must not be hidden behind a suffix search.
+
+    The command runs from the canonical repository because that is the
+    repository the new worktree is linked to. It is the only command in this
+    module whose `cwd` is not the worktree being operated on, and it cannot
+    reach anywhere else: the path is generated by the allocator, the branch is
+    held to `branch_name_permitted`, and no global option is a permitted shape.
+    """
+    if not branch_name_permitted(branch):
+        raise CodingError("git_refused", reason_code="branch_name_not_permitted")
+    root = Path(repository).expanduser().resolve()
+    target = Path(path)
+    if not target.is_absolute():
+        raise CodingError("worktree_unusable", reason_code="worktree_not_absolute")
+    parent = target.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise CodingError(
+            "worktree_unusable", reason_code="worktree_root_not_writable"
+        ) from error
+    created = _run(
+        root, ["git", "worktree", "add", "-b", branch, str(target), base]
+    )
+    if created.exit_status == 0:
+        return True
+    if _worktree_name_already_exists(created.stderr, branch, target):
+        return False
+    raise CodingError(
+        "git_refused",
+        reason_code="worktree_not_created",
+        exit_status=created.exit_status,
+    )
+
+
+def _worktree_name_already_exists(stderr: str, branch: str, path: Path) -> bool:
+    """Whether a failed `worktree add` is the collision D-031 may retry.
+
+    D-029's classification principle applies unchanged: only an occupied name
+    is retried, and the diagnostic is matched rather than guessed at. Two
+    names can collide here because one command allocates both, so both of
+    git's diagnostics are recognised and nothing else is.
+    """
+    if stderr.rstrip().endswith(
+        f"fatal: a branch named '{branch}' already exists"
+    ):
+        return True
+    return stderr.rstrip().endswith(f"fatal: '{path}' already exists")
+
+
+def release_job_worktree(repository: Path, path: Path) -> None:
+    """Remove one worktree this capability allocated.
+
+    No `--force`. A worktree still holding uncommitted work refuses to be
+    removed, and that refusal is the retention D-031 asks for: work nobody has
+    accounted for is not discarded because a release was requested.
+    """
+    root = Path(repository).expanduser().resolve()
+    target = Path(path).expanduser().resolve()
+    removed = _run(root, ["git", "worktree", "remove", str(target)])
+    if removed.exit_status != 0:
+        raise CodingError(
+            "git_refused",
+            reason_code="worktree_not_removed",
+            exit_status=removed.exit_status,
+        )
+
+
 def read_workspace_state(
     worktree: Path, inherited_dirty: tuple[str, ...] | None = None
 ) -> GitWorkspaceState:
@@ -474,61 +690,6 @@ def read_workspace_state(
         inherited_dirty=tuple(dirty if inherited_dirty is None else inherited_dirty),
         clean=not dirty,
         detached=detached,
-    )
-
-
-def create_repair_branch(worktree: Path, branch: str) -> GitWorkspaceState:
-    """Create and switch to a repair branch inside the assigned worktree.
-
-    Switching preserves uncommitted work: a job's own edits, and anybody
-    else's, move to the new branch rather than being discarded. Nothing is
-    deleted, reset or force-moved, so a wrong branch name costs a branch and
-    never a change.
-
-    D-029 fixes a mechanical collision scheme: try the Core-authorised name,
-    then `-2`, `-3`, and so on, creating the first name Git accepts.  Each
-    attempt uses only the existing `switch -c` shape, so a taken branch is
-    never checked out, moved, reused, or otherwise changed.
-    """
-    root = assert_assigned_worktree(worktree)
-    if not branch_name_permitted(branch):
-        raise CodingError("git_refused", reason_code="branch_name_not_permitted")
-    for attempt in range(1, MAX_REPAIR_BRANCH_ATTEMPTS + 1):
-        candidate = branch if attempt == 1 else f"{branch}-{attempt}"
-        # The requested name was validated above; suffixes are still held to
-        # the same narrow branch grammar before they reach git.
-        if not branch_name_permitted(candidate):
-            raise CodingError("git_refused", reason_code="branch_name_not_permitted")
-        created = _run(root, ["git", "switch", "-c", candidate])
-        if created.exit_status != 0:
-            if _branch_name_already_exists(created.stderr, candidate):
-                continue
-            raise CodingError(
-                "git_refused",
-                reason_code="branch_already_exists_or_unusable",
-                exit_status=created.exit_status,
-            )
-        state = read_workspace_state(root)
-        if state.branch != candidate:
-            raise CodingError("git_refused", reason_code="branch_not_active")
-        return state
-    raise CodingError(
-        "git_refused",
-        reason_code="branch_name_attempts_exhausted",
-        attempts=MAX_REPAIR_BRANCH_ATTEMPTS,
-    )
-
-
-def _branch_name_already_exists(stderr: str, branch: str) -> bool:
-    """Whether Git's failed `switch -c` diagnostic is this exact collision.
-
-    D-029 authorises retrying only an occupied local branch name.  Any other
-    failure — a lock, permission problem, or repository failure — must retain
-    the normal refusal rather than being hidden by suffix retries.  A changed
-    or unrecognised diagnostic fails closed in that same normal refusal path.
-    """
-    return stderr.rstrip().endswith(
-        f"fatal: a branch named '{branch}' already exists"
     )
 
 
@@ -1133,11 +1294,18 @@ __all__ = [
     "COMMIT_AUTHOR_EMAIL",
     "COMMIT_AUTHOR_NAME",
     "GIT_TIMEOUT_SECONDS",
+    "MAX_REPAIR_BRANCH_ATTEMPTS",
+    "allocate_job_worktree",
     "assert_assigned_worktree",
     "branch_name_permitted",
+    "canonical_repository_root",
+    "commit_exists",
     "commit_job_changes",
-    "create_repair_branch",
     "deleted_paths",
     "git_write_permitted",
+    "read_head_sha",
     "read_workspace_state",
+    "release_job_worktree",
+    "worktree_belongs_to_repository",
+    "worktree_branch",
 ]

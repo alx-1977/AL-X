@@ -61,25 +61,25 @@ class TheStepBudgetCeilingIsVisible(unittest.TestCase):
         self.assertIn("MAX_STEP_BUDGET", source)
 
 
-class TheWorktreeIsDescribedAsAPath(unittest.TestCase):
-    """There is no canonical worktree identifier, and none is invented.
+class TheWorktreeIsNotSomethingCoreNames(unittest.TestCase):
+    """D-031 removed the path field rather than constraining it.
 
-    D-028 assigns a worktree per job, so the runtime's only rule is that the
-    value resolves to a directory that exists. The catalogue therefore states
-    what the field is rather than naming one repository.
+    This class previously asserted the opposite: that the catalogue described
+    `worktree` as a filesystem path and named `"."` as the value that works.
+    That description was accurate and was the defect — `"."` is the live AL/X
+    checkout, so the capability was documenting the way to point a coding job
+    at the repository it runs from.
     """
 
-    def test_the_catalogue_says_worktree_is_an_existing_path(self) -> None:
+    def test_the_catalogue_offers_no_path_at_all(self) -> None:
         purpose = catalogue_entry()["purpose"]
-        self.assertIn("filesystem path to an existing directory", purpose)
-        self.assertIn("not a project or repository name", purpose)
+        self.assertNotIn("filesystem path to an existing directory", purpose)
+        self.assertNotIn('"."', purpose)
 
-    def test_the_catalogue_names_the_relative_root(self) -> None:
-        """The value that actually works, stated rather than guessed."""
-        self.assertIn(
-            'so "." is the repository the runtime is running in',
-            catalogue_entry()["purpose"],
-        )
+    def test_the_catalogue_says_the_worktree_is_allocated(self) -> None:
+        purpose = catalogue_entry()["purpose"]
+        self.assertIn("allocated automatically", purpose)
+        self.assertIn("never the live repository", purpose)
 
     def test_no_repository_name_is_hard_coded_as_canonical(self) -> None:
         """No alias, no fuzzy match, no single blessed identifier."""
@@ -97,14 +97,14 @@ class InvalidValuesStillFailClosed(unittest.TestCase):
 
     def test_a_step_budget_over_the_maximum_is_still_refused(self) -> None:
         result = self._run({
-            "task": "x", "worktree": ".", "step_budget": MAX_STEP_BUDGET + 1,
+            "task": "x", "step_budget": MAX_STEP_BUDGET + 1,
         })
         self.assertEqual(result.state.value, "failed")
         self.assertEqual(result.failure["code"], "arguments_unusable")
         self.assertEqual(result.failure["invalid_field"], "step_budget")
 
     def test_a_step_budget_of_zero_is_still_refused(self) -> None:
-        result = self._run({"task": "x", "worktree": ".", "step_budget": 0})
+        result = self._run({"task": "x", "step_budget": 0})
         self.assertEqual(result.state.value, "failed")
         self.assertEqual(result.failure["invalid_field"], "step_budget")
 
@@ -126,25 +126,30 @@ class InvalidValuesStillFailClosed(unittest.TestCase):
         """The boundary the catalogue states is usable, not off by one."""
         from alx.contracts.coding import CodingRequest
 
-        request = CodingRequest("x", ".", step_budget=MAX_STEP_BUDGET)
+        request = CodingRequest("x", "job-1", step_budget=MAX_STEP_BUDGET)
         self.assertEqual(request.step_budget, MAX_STEP_BUDGET)
 
 
 class ExistingValidCallsAreUnchanged(unittest.TestCase):
-    def test_the_input_schema_is_untouched(self) -> None:
-        """Only the purpose text changed; the contract shape did not."""
+    def test_the_input_schema_carries_no_path(self) -> None:
+        """D-031 removed one field; the rest of the contract is unchanged.
+
+        `worktree` is gone rather than optional. An optional path field would
+        still be a path a model could supply, which is the thing that made the
+        live checkout reachable.
+        """
         entry = catalogue_entry()
         schema = entry["input_schema"]
-        self.assertEqual(sorted(schema["required"]), ["task", "worktree"])
+        self.assertEqual(sorted(schema["required"]), ["task"])
         self.assertIn("step_budget", schema["properties"])
         self.assertEqual(schema["properties"]["step_budget"]["kind"], "integer")
-        self.assertEqual(schema["properties"]["worktree"]["kind"], "string")
+        self.assertNotIn("worktree", schema["properties"])
 
     def test_a_call_without_a_step_budget_keeps_the_default(self) -> None:
         """Omitting it is valid and unchanged: the default still applies."""
         from alx.contracts.coding import DEFAULT_STEP_BUDGET, CodingRequest
 
-        request = CodingRequest("x", ".")
+        request = CodingRequest("x", "job-1")
         self.assertEqual(request.step_budget, DEFAULT_STEP_BUDGET)
         self.assertLessEqual(request.step_budget, MAX_STEP_BUDGET)
 

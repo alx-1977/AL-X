@@ -76,6 +76,10 @@ CODING_FAILURES = (
     "sandbox_unusable",
     "session_failed",
     "task_failed",
+    # D-031. A workspace release refuses when the job it names did not finish
+    # successfully, which is a different fact from the workspace being
+    # unusable: the directory is fine, the job is not.
+    "job_not_successful",
 )
 
 
@@ -125,6 +129,38 @@ class CodingTelemetry:
             _aware(getattr(self, name), name)
         if self.attempt < 1 or self.correction_cycle < 0:
             raise ValueError("telemetry attempt and correction cycle are bounded")
+
+
+# A job identity reaching the filesystem becomes one path segment and part of
+# a branch name, so it is held to a narrower grammar than the broker's call ids
+# happen to use. No separator, no dot segment, no leading dash: a `..` or an
+# absolute-looking identity cannot climb out of the worktree root, and a
+# dash-led one cannot be read as an option by a git command it reaches.
+#
+# Stated here rather than in the allocator because both the capability boundary
+# that receives the broker's call id and the allocator that turns it into a
+# directory have to agree about it, and a contract is the one place both may
+# depend on.
+_JOB_ID_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+MAX_JOB_ID_CHARACTERS = 128
+
+
+def job_id_permitted(job_id: str) -> bool:
+    """Whether a job identity may become a path segment and a branch element."""
+    if not isinstance(job_id, str):
+        return False
+    candidate = job_id.strip()
+    if not candidate or candidate != job_id:
+        return False
+    if len(candidate) > MAX_JOB_ID_CHARACTERS:
+        return False
+    if any(character not in _JOB_ID_ALLOWED for character in candidate):
+        return False
+    if candidate.startswith("-"):
+        return False
+    return True
 
 
 def lexical_worktree_path(relative: str) -> str:
@@ -179,10 +215,25 @@ def _aware(value: datetime, name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class CodingRequest:
-    """One bounded coding job Core has decided to delegate."""
+    """One bounded coding job Core has decided to delegate.
+
+    `job_id` is not a model-supplied field. Under D-031 the executor injects
+    the broker's durable capability call ID, and the worktree that identity
+    allocates is where the job runs. Core names no filesystem path at all:
+    the field it used to supply resolved against the runtime's own working
+    directory, so `"."` was the live AL/X checkout and the kernel sandbox
+    faithfully made the whole repository writable.
+
+    `worktree` remains on this record because the session has to be told where
+    to work, but it is no longer an input: it is written here by the Coding
+    Agent after the allocator created it, so the only value it can hold is one
+    AL/X generated. It is absent from the capability schema entirely, and an
+    argument spelled `worktree` is refused rather than ignored.
+    """
 
     task: str
-    worktree: str
+    job_id: str
+    worktree: str = ""
     acceptance_criteria: tuple[str, ...] = ()
     context: str = ""
     test_guidance: str = ""
@@ -198,7 +249,7 @@ class CodingRequest:
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
-        _required(self.worktree, "worktree")
+        _required(self.job_id, "job_id")
         if len(self.task) > MAX_TASK_CHARACTERS:
             raise ValueError("task exceeds the permitted size")
         if len(self.context) > MAX_CONTEXT_CHARACTERS:
@@ -387,6 +438,12 @@ class CodingOutcome:
     plan_summary: str = ""
     baseline: "GitWorkspaceState | None" = None
     commit: "CodingCommit | None" = None
+    # D-031 audit evidence: where this job ran, and whether that directory is
+    # still there afterwards. Reported for every job regardless of outcome, so
+    # retained stale state is visible rather than merely present.
+    job_id: str = ""
+    worktree: str = ""
+    worktree_retained: bool = True
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "failed", "blocked"):
@@ -428,6 +485,9 @@ class CodingOutcome:
             "finished_at": self.finished_at.isoformat(),
             "plan_summary": self.plan_summary,
             "commands": [item.durable_values() for item in self.commands],
+            "job_id": self.job_id,
+            "worktree": self.worktree,
+            "worktree_retained": self.worktree_retained,
         }
         if self.tests_passed is not None:
             values["tests_passed"] = self.tests_passed
@@ -472,6 +532,8 @@ __all__ = [
     "MAX_STAGED_FILES",
     "MAX_BLOCKED_PATHS",
     "MAX_BLOCKED_PATH_CHARACTERS",
+    "MAX_JOB_ID_CHARACTERS",
+    "job_id_permitted",
     "lexical_worktree_path",
     "path_matches_blocked",
 ]

@@ -48,7 +48,6 @@ from alx.providers.coding_git import (  # noqa: E402
     assert_assigned_worktree,
     branch_name_permitted,
     commit_job_changes,
-    create_repair_branch,
     deleted_paths,
     git_write_permitted,
     read_workspace_state,
@@ -61,6 +60,18 @@ def git(repository: Path, *argv: str) -> str:
         capture_output=True, text=True,
     )
     return completed.stdout
+
+
+def checkout_branch(repository: Path, branch: str) -> None:
+    """Put a test repository on a branch, the way a job's worktree arrives.
+
+    Plain git, deliberately. D-031 moved branch creation into the worktree
+    allocator, and the commit tests below are about what may be committed once
+    a job is on its branch — not about how it got there. Using the production
+    allocator here would make every commit test depend on worktree allocation
+    it is not exercising.
+    """
+    git(repository, "switch", "-q", "-c", branch)
 
 
 class Worktree(unittest.TestCase):
@@ -140,152 +151,30 @@ class ReadingTheAssignedWorktree(Worktree):
         )
 
 
-class CreatingARepairBranch(Worktree):
-    """A job works on its own branch, created before it starts."""
+class BranchNamesTheCapabilityMayUse(Worktree):
+    """The branch grammar, unchanged by D-031.
 
-    def test_a_free_requested_branch_name_is_used_unchanged(self) -> None:
-        state = create_repair_branch(self.root, "repair/target")
-        self.assertEqual(state.branch, "repair/target")
-        self.assertEqual(state.head_sha, self.base_sha)
-        self.assertEqual(
-            git(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip(),
-            "repair/target",
-        )
+    D-031 moved branch *creation* into the worktree allocator, where the
+    collision behaviour D-029 fixed is exercised against the allocator itself
+    in `tests/test_coding_worktree.py`. What stays here is the name grammar,
+    which is shared by both and belongs beside the other git-authority checks.
+    """
 
-    def test_switching_preserves_uncommitted_work(self) -> None:
-        """A branch switch may never be a way to discard changes."""
-        self.write("unrelated.py", "somebody else was here\n")
-        create_repair_branch(self.root, "repair/target")
-        self.assertEqual(
-            (self.root / "unrelated.py").read_text(), "somebody else was here\n"
-        )
+    def test_switching_is_not_an_available_shape_at_all(self) -> None:
+        """Dead authority is removed, not documented.
 
-    def test_one_collision_creates_the_second_numeric_suffix(self) -> None:
-        git(self.root, "branch", "repair/target")
-        original_ref = git(self.root, "rev-parse", "repair/target").strip()
-
-        state = create_repair_branch(self.root, "repair/target")
-
-        self.assertEqual(state.branch, "repair/target-2")
-        self.assertEqual(
-            git(self.root, "rev-parse", "repair/target").strip(), original_ref
-        )
-
-    def test_a_non_c_host_locale_still_retries_a_branch_collision(self) -> None:
-        from alx.providers import coding_git
-
-        git(self.root, "branch", "repair/target")
-        with unittest.mock.patch.dict(
-            coding_git.os.environ, {"LC_ALL": "fr_FR.UTF-8"}, clear=False
-        ):
-            self.assertEqual(coding_git._clean_environment()["LC_ALL"], "C")
-            state = create_repair_branch(self.root, "repair/target")
-
-        self.assertEqual(state.branch, "repair/target-2")
-
-    def test_multiple_collisions_select_the_first_available_suffix(self) -> None:
-        for name in ("repair/target", "repair/target-2", "repair/target-3"):
-            git(self.root, "branch", name)
-
-        state = create_repair_branch(self.root, "repair/target")
-
-        self.assertEqual(state.branch, "repair/target-4")
-
-    def test_a_non_collision_git_failure_stops_after_one_attempt(self) -> None:
-        from alx.providers import coding_git
-
-        failure = coding_git._GitResult(
-            128, "", "fatal: Unable to create '.git/index.lock': File exists\n"
-        )
-        real_run = coding_git._run
-
-        def fail_switch(root, argv, **kwargs):
-            if argv == ["git", "switch", "-c", "repair/target"]:
-                return failure
-            return real_run(root, argv, **kwargs)
-
-        with unittest.mock.patch.object(coding_git, "_run", side_effect=fail_switch) as run:
-            with self.assertRaises(CodingError) as caught:
-                create_repair_branch(self.root, "repair/target")
-
-        self.assertEqual(caught.exception.code, "git_refused")
-        self.assertEqual(
-            caught.exception.details["reason_code"],
-            "branch_already_exists_or_unusable",
-        )
-        self.assertEqual(caught.exception.details["exit_status"], 128)
-        switch_calls = [
-            call for call in run.call_args_list
-            if call.args[1][:3] == ["git", "switch", "-c"]
-        ]
-        self.assertEqual(len(switch_calls), 1)
-        self.assertEqual(
-            switch_calls[0].args[1], ["git", "switch", "-c", "repair/target"]
-        )
-
-    def test_occupied_suffixes_are_ref_for_ref_untouched(self) -> None:
-        for name in ("repair/target", "repair/target-2"):
-            git(self.root, "branch", name)
-        before = {
-            name: git(self.root, "rev-parse", name).strip()
-            for name in ("main", "repair/target", "repair/target-2")
-        }
-
-        state = create_repair_branch(self.root, "repair/target")
-
-        self.assertEqual(state.branch, "repair/target-3")
-        after = {
-            name: git(self.root, "rev-parse", name).strip()
-            for name in before
-        }
-        self.assertEqual(after, before)
-
-    def test_suffix_search_exhaustion_fails_closed(self) -> None:
-        from alx.providers import coding_git
-
-        with unittest.mock.patch.object(
-            coding_git, "MAX_REPAIR_BRANCH_ATTEMPTS", 3
-        ):
-            for name in ("repair/target", "repair/target-2", "repair/target-3"):
-                git(self.root, "branch", name)
-            before = git(self.root, "for-each-ref", "refs/heads/")
-            with self.assertRaises(CodingError) as caught:
-                create_repair_branch(self.root, "repair/target")
-
-        self.assertEqual(caught.exception.code, "git_refused")
-        self.assertEqual(
-            caught.exception.details["reason_code"],
-            "branch_name_attempts_exhausted",
-        )
-        self.assertEqual(git(self.root, "for-each-ref", "refs/heads/"), before)
-        # Every failed creation left the worktree on its original branch.
-        self.assertEqual(
-            git(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip(), "main"
-        )
-
-    def test_the_new_branch_starts_at_the_baseline_head(self) -> None:
-        state = create_repair_branch(self.root, "repair/target")
-        self.assertEqual(state.head_sha, self.base_sha)
-
-    def test_the_original_branch_still_exists_afterwards(self) -> None:
-        """Nothing is deleted or force-moved, so a wrong name costs a branch."""
-        create_repair_branch(self.root, "repair/target")
-        branches = git(self.root, "branch", "--format=%(refname:short)")
-        self.assertIn("main", branches.split())
-
-    def test_switching_to_an_existing_branch_is_not_an_available_shape(self) -> None:
-        """Dead authority is removed, not documented."""
+        Plain `switch` went on 2026-09-12 and `switch -c` on 2026-09-16: once
+        `worktree add -b` creates the branch, nothing builds either.
+        """
         self.assertFalse(git_write_permitted(["git", "switch", "main"]))
-        self.assertTrue(git_write_permitted(["git", "switch", "-c", "repair/x"]))
-
-    def test_a_branch_name_that_could_be_read_as_a_flag_is_refused(self) -> None:
-        for name in ("--force", "-D", "--all"):
-            with self.assertRaises(CodingError, msg=name) as caught:
-                create_repair_branch(self.root, name)
-            self.assertEqual(caught.exception.code, "git_refused")
+        self.assertFalse(git_write_permitted(["git", "switch", "-c", "repair/x"]))
 
     def test_a_branch_name_reaching_another_ref_namespace_is_refused(self) -> None:
         for name in ("refs/heads/main", "HEAD", "main@{1}", "a/../b"):
+            self.assertFalse(branch_name_permitted(name), name)
+
+    def test_a_branch_name_that_could_be_read_as_a_flag_is_refused(self) -> None:
+        for name in ("--force", "-D", "--all"):
             self.assertFalse(branch_name_permitted(name), name)
 
     def test_ordinary_repair_branch_names_are_permitted(self) -> None:
@@ -297,7 +186,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
     """The property the whole capability exists to guarantee."""
 
     def test_a_job_owned_change_is_committed_and_reported(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         commit = commit_job_changes(
@@ -321,7 +210,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         """The live defect: somebody else's work swept into the repair."""
         self.write("unrelated.py", "somebody else was here\n")
         baseline = read_workspace_state(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         commit = commit_job_changes(
@@ -343,7 +232,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
 
     def test_an_unrelated_staged_file_refuses_the_commit(self) -> None:
         """Fail closed: refuse entirely rather than commit somebody's work."""
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         self.write("unrelated.py", "somebody else was here\n")
         # Pretend the job's file set wrongly claims a file it does not own by
@@ -367,7 +256,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         self.assertEqual((self.root / "sneaked.py").read_text(), "not this job's\n")
 
     def test_a_commit_with_no_job_owned_changes_is_refused(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         with self.assertRaises(CodingError) as caught:
             commit_job_changes(self.root, "repair/target", "nothing", ())
         self.assertEqual(caught.exception.code, "git_refused")
@@ -377,7 +266,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
 
     def test_committing_on_a_branch_that_is_not_active_is_refused(self) -> None:
         """The branch argument must describe the worktree, not redirect it."""
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         with self.assertRaises(CodingError) as caught:
             commit_job_changes(
@@ -387,7 +276,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         self.assertEqual(caught.exception.details["reason_code"], "branch_not_active")
 
     def test_a_path_outside_the_worktree_cannot_be_staged(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         for escape in ("../outside.py", "/etc/passwd"):
             with self.assertRaises(CodingError, msg=escape):
@@ -397,7 +286,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         self.assertEqual(git(self.root, "rev-parse", "HEAD").strip(), self.base_sha)
 
     def test_a_blocked_path_cannot_be_staged(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "secrets.txt").write_text("token\n")
         with self.assertRaises(CodingError) as caught:
             commit_job_changes(
@@ -407,7 +296,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         self.assertEqual(caught.exception.code, "path_not_permitted")
 
     def test_git_metadata_cannot_be_staged(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         with self.assertRaises(CodingError) as caught:
             commit_job_changes(
                 self.root, "repair/target", "metadata", (".git/config",)
@@ -415,7 +304,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         self.assertEqual(caught.exception.code, "path_not_permitted")
 
     def test_a_blank_commit_message_is_refused(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         with self.assertRaises(CodingError) as caught:
             commit_job_changes(
@@ -424,7 +313,7 @@ class CommittingOnlyJobOwnedChanges(Worktree):
         self.assertEqual(caught.exception.code, "git_refused")
 
     def test_cleanliness_is_reported_from_the_worktree_after_committing(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         clean = commit_job_changes(
             self.root, "repair/target", "repair", ("target.py",)
@@ -487,7 +376,7 @@ class AuthorisationReadsTheWholeTruth(Worktree):
             "exit 0\n"
         )
         hook.chmod(0o755)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         commit = commit_job_changes(
@@ -512,7 +401,7 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         """
         (self.root / ".gitattributes").write_text("target.py filter=rewrite\n")
         git(self.root, "config", "filter.rewrite.clean", "sed s/repaired/TAMPERED/")
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         with self.assertRaises(CodingError) as caught:
@@ -534,7 +423,7 @@ class AuthorisationReadsTheWholeTruth(Worktree):
     def test_an_unfiltered_path_is_unaffected_by_the_check(self) -> None:
         """The check refuses filtered paths, not every repository with attributes."""
         (self.root / ".gitattributes").write_text("*.md text\n")
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         commit = commit_job_changes(
             self.root, "repair/target", "repair target", ("target.py",)
@@ -550,7 +439,7 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         """
         from alx.providers import coding_git
 
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         self.write("unrelated.py", "somebody else was here\n")
 
@@ -593,7 +482,7 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         program.chmod(0o755)
         git(self.root, "config", "commit.gpgsign", "true")
         git(self.root, "config", "gpg.program", str(program))
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         commit = commit_job_changes(
@@ -656,7 +545,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
         the concrete paths are available without this module discovering
         anything.
         """
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "newdir").mkdir()
         (self.root / "newdir" / "a.py").write_text("a\n")
 
@@ -672,7 +561,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
 
     def test_the_files_inside_a_new_directory_commit_when_named(self) -> None:
         """The capability is not lost, only the directory shorthand."""
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "newdir" / "nested").mkdir(parents=True)
         (self.root / "newdir" / "a.py").write_text("a\n")
         (self.root / "newdir" / "nested" / "b.py").write_text("b\n")
@@ -705,7 +594,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
     def test_a_bare_file_count_is_bounded(self) -> None:
         from alx.contracts.coding import MAX_STAGED_FILES
 
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         names = []
         for index in range(MAX_STAGED_FILES + 5):
             name = f"f{index:03d}.py"
@@ -728,7 +617,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
         caught and refused it, which is correct but penalises a job that did
         nothing wrong. Found in the PR #31 review on 2026-09-13.
         """
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "weird[1].py").write_text("owned\n")
         (self.root / "weird1.py").write_text("not this job's\n")
 
@@ -751,7 +640,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
         exists to prevent — but it does mean a repair that removes a
         superseded module cannot be committed by D-029 V1.
         """
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "unrelated.py").unlink()
         self.write("target.py", "repaired\n")
 
@@ -779,7 +668,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
         """
         git(self.root, "mv", "unrelated.py", "renamed.py")
         (self.root / "renamed.py").write_text("job edit\n")
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         before = self.status()
 
         with self.assertRaises(CodingError) as caught:
@@ -798,7 +687,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
 
     def test_a_job_owned_symlink_refuses_rather_than_vanishing(self) -> None:
         """It used to be dropped silently while the result reported success."""
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "alias.py").symlink_to("target.py")
 
         with self.assertRaises(CodingError) as caught:
@@ -818,7 +707,7 @@ class NarrowedRefusalsUnderD029V1(Worktree):
         """
         from alx.providers import coding_git
 
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         self.write("unrelated.py", "somebody else was here\n")
 
@@ -858,7 +747,7 @@ class ExplicitJobOwnedDeletions(Worktree):
 
     def test_a_job_owned_deletion_commits(self) -> None:
         inherited = deleted_paths(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "unrelated.py").unlink()
 
         commit = commit_job_changes(
@@ -878,7 +767,7 @@ class ExplicitJobOwnedDeletions(Worktree):
 
     def test_a_modification_and_a_deletion_commit_together(self) -> None:
         inherited = deleted_paths(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         (self.root / "unrelated.py").unlink()
 
@@ -900,7 +789,7 @@ class ExplicitJobOwnedDeletions(Worktree):
         (self.root / "unrelated.py").unlink()
         inherited = deleted_paths(self.root)
         self.assertIn("unrelated.py", inherited)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         with self.assertRaises(CodingError) as caught:
@@ -921,7 +810,7 @@ class ExplicitJobOwnedDeletions(Worktree):
     def test_a_path_not_present_at_baseline_is_refused(self) -> None:
         """Git's own account is the proof, not the job's claim."""
         inherited = deleted_paths(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         with self.assertRaises(CodingError) as caught:
@@ -937,7 +826,7 @@ class ExplicitJobOwnedDeletions(Worktree):
 
     def test_a_still_present_file_cannot_be_claimed_as_deleted(self) -> None:
         inherited = deleted_paths(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
 
         with self.assertRaises(CodingError) as caught:
@@ -956,7 +845,7 @@ class ExplicitJobOwnedDeletions(Worktree):
     def test_a_directory_is_not_a_valid_deletion_input(self) -> None:
         """No directory deletion semantics: git never reports `dir/` deleted."""
         inherited = deleted_paths(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "pkg").mkdir()
         (self.root / "pkg" / "a.py").write_text("a\n")
         git(self.root, "add", "pkg/a.py")
@@ -978,7 +867,7 @@ class ExplicitJobOwnedDeletions(Worktree):
     def test_an_unrelated_deletion_cannot_enter_the_commit(self) -> None:
         """Somebody else's removal is not swept in with the job's own."""
         inherited = deleted_paths(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "extra.py").write_text("x\n")
         git(self.root, "add", "extra.py")
         git(self.root, "commit", "-qm", "add extra")
@@ -1000,7 +889,7 @@ class ExplicitJobOwnedDeletions(Worktree):
 
     def test_a_blocked_path_cannot_be_deleted(self) -> None:
         inherited = deleted_paths(self.root)
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "unrelated.py").unlink()
 
         with self.assertRaises(CodingError) as caught:
@@ -1012,7 +901,7 @@ class ExplicitJobOwnedDeletions(Worktree):
         self.assertEqual(caught.exception.code, "path_not_permitted")
 
     def test_a_job_with_neither_kind_is_refused(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         with self.assertRaises(CodingError) as caught:
             commit_job_changes(self.root, "repair/target", "nothing", ())
         self.assertEqual(
@@ -1122,7 +1011,6 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
             ["git", "rev-parse", "HEAD"],
             ["git", "status", "--porcelain=v1", "-z", "-uall"],
             ["git", "diff", "--cached", "--name-only", "-z"],
-            ["git", "switch", "-c", "repair/target"],
             ["git", "add", "--", "target.py"],
             ["git", "add", "--", "a.py", "b.py"],
             ["git", "commit", "--quiet", "-m", "repair target"],
@@ -1198,16 +1086,46 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         The plain `switch` shape was removed on 2026-09-12: once an existing
         branch name is refused, nothing called it, and a dead shape is granted
         authority nobody uses.
+
+        D-031 changed the branch half of this on 2026-09-16. It added one read
+        of where the repository's common git directory is (`rev-parse
+        --git-common-dir`), used to prove a linked worktree belongs to the
+        canonical repository, and the two worktree shapes that allocate and
+        release a coding job's isolated worktree. `worktree add -b` creates the
+        branch and the worktree in one command, so `switch -c` was removed for
+        the same reason plain `switch` was: nothing built it afterwards.
+
+        One further read was added the same day when release verification was
+        hardened: `cat-file -e` asks whether a recorded start point is a commit
+        this repository actually has, so a persisted claim is checked against
+        git rather than against the file making the claim.
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 14)
+        self.assertEqual(len(_WRITE_SHAPES), 17)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
             {"rev-parse", "symbolic-ref", "status", "diff", "show",
-             "check-attr", "check-ignore", "ls-files", "switch", "add",
-             "reset", "commit"},
+             "check-attr", "check-ignore", "ls-files", "add",
+             "reset", "commit", "worktree", "cat-file"},
+        )
+        # `cat-file` may only test for existence. The shapes that print an
+        # object's contents (`-p`, `blob`, a `rev:path`) are not entries.
+        self.assertEqual(
+            {prefix for prefix in _WRITE_SHAPES if prefix[0] == "cat-file"},
+            {("cat-file", "-e")},
+        )
+        # Branch creation has exactly one shape, and it is the atomic one.
+        self.assertNotIn(("switch", "-c"), _WRITE_SHAPES)
+        # D-031 grants add and remove only. `prune`, `move`, `lock`, `repair`
+        # and every flag-bearing variant are absent, so they cannot be built.
+        worktree_shapes = {
+            prefix for prefix in _WRITE_SHAPES if prefix[0] == "worktree"
+        }
+        self.assertEqual(
+            worktree_shapes,
+            {("worktree", "add", "-b"), ("worktree", "remove")},
         )
         # Every read-shaped addition must stay a read. `check-attr` takes
         # paths because it is asked about specific paths, but it only reports;
@@ -1235,7 +1153,7 @@ class OperatingOutsideTheAssignedWorktree(Worktree):
         self.their_sha = git(self.elsewhere, "rev-parse", "HEAD").strip()
 
     def test_a_commit_cannot_reach_another_repository_through_a_path(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         self.write("target.py", "repaired\n")
         with self.assertRaises(CodingError):
             commit_job_changes(
@@ -1249,7 +1167,7 @@ class OperatingOutsideTheAssignedWorktree(Worktree):
         self.assertEqual(git(self.elsewhere, "status", "--porcelain").strip(), "")
 
     def test_a_symlink_out_of_the_worktree_cannot_be_staged(self) -> None:
-        create_repair_branch(self.root, "repair/target")
+        checkout_branch(self.root, "repair/target")
         (self.root / "escape").symlink_to(self.elsewhere / "theirs.py")
         with self.assertRaises(CodingError):
             commit_job_changes(

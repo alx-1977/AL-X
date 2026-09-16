@@ -135,6 +135,104 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
     return values
 
 
+def _coding_outcome_source(goal_store: SQLiteGoalStore):
+    """Answer what the broker durably recorded for one coding job.
+
+    D-031 requires release to establish terminal success from the durable
+    execution outcome rather than from the allocation record, which is a file
+    beside the workspace that anything able to write there can edit. The job's
+    identity *is* its capability call id, so the durable result is found by
+    matching that against the recorded attempts.
+
+    Returns the job's status, or "" when no durable outcome exists for it —
+    which the allocator treats as a refusal, not as permission.
+    """
+    from alx.contracts import CapabilityResultState
+    from alx.tools.coding import RUN_CODING_TASK
+
+    def status_of(job_id: str) -> str:
+        if not job_id:
+            return ""
+        for snapshot in goal_store.list_goals():
+            # `completed_actions` is on the goal *state*, not the snapshot that
+            # wraps it. Reading it off the snapshot raised AttributeError,
+            # which the allocator caught as `durable_outcome_unreadable`, so
+            # no release could ever succeed — a fail-closed bug, but a bug.
+            for result in snapshot.state.completed_actions:
+                if result.capability_id != RUN_CODING_TASK:
+                    continue
+                if result.call_id != job_id:
+                    continue
+                # Both halves must agree. The broker's own state is what it
+                # decided about the call; the recorded status is what the job
+                # reported about itself. A job is releasable only when the
+                # result succeeded *and* says so.
+                if result.state is not CapabilityResultState.SUCCEEDED:
+                    return str(result.state.value)
+                values = result.durable_values or {}
+                return str(values.get("status") or "")
+        return ""
+
+    return status_of
+
+
+def default_coding_worktree_root(storage_root: Path, repository_root: Path) -> Path:
+    """Where coding worktrees live when nothing configured a location.
+
+    D-031 requires the resolved root to lie outside the canonical repository.
+    The runtime storage root is the natural neighbour for it, but that setting
+    is commonly relative — the shipped `.env` uses `.alx/runtime` — and a
+    relative storage root resolves against the repository, which would put
+    every coding worktree back inside the checkout D-031 exists to keep them
+    out of. The containment check would then refuse and the capability would
+    never register at all.
+
+    So the default is taken from the storage root only when that resolves
+    outside the repository. Otherwise it is placed beside the repository, as a
+    sibling directory named for it, which is deterministic, absolute, and
+    outside by construction. `ALX_CODING_WORKTREE_ROOT` overrides this
+    entirely; nothing here invents a second setting.
+    """
+    repository = Path(repository_root).expanduser().resolve()
+    resolved_storage = Path(storage_root).expanduser()
+    if not resolved_storage.is_absolute():
+        resolved_storage = (repository / resolved_storage)
+    resolved_storage = resolved_storage.resolve()
+    if resolved_storage != repository and not _within(resolved_storage, repository):
+        return resolved_storage / "coding-worktrees"
+    return repository.parent / f"{repository.name}-coding-worktrees"
+
+
+def _within(candidate: Path, ancestor: Path) -> bool:
+    try:
+        candidate.relative_to(ancestor)
+    except ValueError:
+        return False
+    return True
+
+
+def _build_coding_allocator(root: Path, repository_root: Path, outcome_source=None):
+    """The D-031 worktree allocator, or none if its root cannot be used.
+
+    A root that resolves inside the canonical repository is a configuration
+    error, not a runtime condition to work around: it would put every coding
+    job back inside the checkout this decision exists to keep them out of. The
+    capability is therefore left unregistered and the reason is logged, which
+    is the same shape as a missing coding model.
+    """
+    from alx.contracts.coding import CodingError
+    from alx.providers.coding_worktree import CodingWorktreeAllocator
+
+    try:
+        return CodingWorktreeAllocator(root, repository_root, outcome_source)
+    except CodingError as error:
+        LOGGER.warning(
+            "Coding worktree root unusable (%s): no coding capability",
+            error.details.get("reason_code", error.code),
+        )
+        return None
+
+
 def _completed(attempt) -> bool:
     """True only when a capture actually finished its work."""
     result = getattr(attempt, "result", None)
@@ -461,6 +559,16 @@ async def run(repository_root: Path) -> None:
     # D-028 authorises one bounded coding job in an assigned worktree. It is
     # a separate authority from sandbox.execute: the sandbox cannot touch a
     # repository, and this cannot merge, push, deploy or request a review.
+    # D-031 requires one AL/X-controlled worktree root that resolves outside
+    # the canonical repository. It defaults beside the runtime storage root,
+    # which is already outside the checkout, and a configured root that
+    # resolves back inside refuses rather than being silently accepted.
+    coding_allocator = _build_coding_allocator(
+        voice_settings.coding_worktree_root
+        or default_coding_worktree_root(storage_root, repository_root),
+        repository_root,
+        _coding_outcome_source(goal_store),
+    )
     coding_runtime = build_coding_runtime(
         provider_settings.coding.enabled,
         providers.coding,
@@ -469,7 +577,7 @@ async def run(repository_root: Path) -> None:
         reviewer=providers.coding_reviewer,
         activity_sink=activity.set,
         telemetry_sink=activity.publish_coding,
-        job_id_source=lambda: current_call_id[0],
+        allocator=coding_allocator,
     )
     if coding_runtime is not None:
         for definition in coding_runtime.definitions:

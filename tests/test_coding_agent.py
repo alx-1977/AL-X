@@ -76,6 +76,11 @@ PRODUCTION_ROOT = REPOSITORY_ROOT / "src" / "alx"
 CODING_PROCESS = PRODUCTION_ROOT / "providers" / "coding_process.py"
 
 
+# The branch every fixture repository starts on. Named here so a test that
+# asserts where a job began does not have to guess what git called it.
+FIXTURE_BRANCH = "main"
+
+
 def _git(root: Path, *args: str) -> None:
     subprocess.run(
         ["git", *args],
@@ -97,12 +102,24 @@ def _worktree(parent: Path, name: str = "job") -> Path:
         "        self.assertEqual(add(1, 2), 3)\n",
         encoding="utf-8",
     )
-    _git(root, "init")
+    # The initial branch is named explicitly rather than inherited. A bare
+    # `git init` takes the host's `init.defaultBranch`, which is `main` on this
+    # workstation and `master` in CI, so tests that name the starting branch
+    # passed locally and failed there. Nothing about D-031 depends on the name;
+    # what the fixtures need is for it not to vary by machine.
+    _git(root, "init", "-q", "-b", FIXTURE_BRANCH)
     _git(root, "config", "user.email", "test@example.invalid")
     _git(root, "config", "user.name", "test")
     _git(root, "add", ".")
     _git(root, "commit", "-m", "fixture")
     return root
+
+
+def _allocator(parent: Path, repository: Path):
+    """A D-031 allocator whose root is outside the fixture repository."""
+    from alx.providers.coding_worktree import CodingWorktreeAllocator
+
+    return CodingWorktreeAllocator(parent / "coding-worktrees", repository)
 
 
 def _plan(**changes) -> dict:
@@ -193,9 +210,18 @@ class NativeExecutionTests(unittest.TestCase):
         reviewer = reviewer or PlanningModel()
         activity_sink = arguments.pop("activity_sink", None)
         telemetry_sink = arguments.pop("telemetry_sink", None)
+        # D-031: the job no longer names a directory. What used to be passed as
+        # `worktree` is now the canonical repository the allocator cuts an
+        # isolated worktree from, so the fixture repository moves here.
+        repository = arguments.pop("worktree", None) or str(_worktree(self.root))
+        allocator = _allocator(self.root, Path(repository))
+        # Kept so a test can assert against the directory the job actually
+        # edited, which under D-031 is never the repository it was cut from.
+        self.allocator = allocator
         runtime = build_coding_runtime(
             True, model, lambda: "call-1", session=session, reviewer=reviewer,
             activity_sink=activity_sink, telemetry_sink=telemetry_sink,
+            allocator=allocator,
         )
         self.assertIsNotNone(runtime)
         broker = CapabilityBroker(
@@ -286,8 +312,9 @@ class NativeExecutionTests(unittest.TestCase):
         agent = coding_agent_module.CodingAgent(
             PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
             PlanningModel(), telemetry_sink=sink, clock=clock,
+            allocator=_allocator(self.root, worktree),
         )
-        agent.run(CodingRequest(task="fix add", worktree=str(worktree)))
+        agent.run(CodingRequest(task="fix add", job_id="job-1"))
 
         self.assertEqual(delivered[0].phase, "execution")
         self.assertEqual(delivered[0].started_at, NOW)
@@ -315,8 +342,12 @@ class NativeExecutionTests(unittest.TestCase):
 
         self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertIn("app.py", attempt.result.values["files_changed"])
-        # And the repair really is on disk, not merely reported.
-        self.assertEqual((worktree / "app.py").read_text(), _FIXED)
+        # And the repair really is on disk, not merely reported — in the job's
+        # own worktree under D-031, which is where the session was told to work.
+        job_root = Path(attempt.result.values["worktree"])
+        self.assertEqual((job_root / "app.py").read_text(), _FIXED)
+        # The repository it was cut from is untouched.
+        self.assertNotEqual((worktree / "app.py").read_text(), _FIXED)
 
     def test_a_failing_activity_sink_is_logged_rather_than_silent(self) -> None:
         """Swallowed is not the same as hidden: the failure is still evidence."""
@@ -636,7 +667,12 @@ class NativeExecutionTests(unittest.TestCase):
             acceptance_criteria=["add returns the sum"],
         )
         request, briefing = session.calls[0]
-        self.assertEqual(Path(request.worktree), worktree)
+        # D-031: the session works in the allocated worktree, never in the
+        # repository it was cut from. Previously these were the same directory,
+        # which is exactly what the decision removed.
+        session_root = Path(request.worktree).resolve()
+        self.assertNotEqual(session_root, worktree.resolve())
+        self.assertTrue((session_root / ".git").is_file())
         self.assertIn("fix the add helper", briefing)
         self.assertIn("add returns the sum", briefing)
         self.assertIn("Inspect the assigned task", briefing)
@@ -678,9 +714,10 @@ class NativeExecutionTests(unittest.TestCase):
             PlanningModel(), RecordingSession(), PlanningModel()
         )
         commands = agent._verification_commands(
-            CodingRequest(task="fix add", worktree=str(worktree)),
+            CodingRequest(task="fix add", job_id="job-1", worktree=str(worktree)),
             _plan(),
             ("app.py", "test_app.py"),
+            root=worktree,
         )
         self.assertEqual(
             commands,
@@ -846,7 +883,14 @@ class NativeExecutionTests(unittest.TestCase):
         )
 
     def test_outcome_separates_job_changes_from_preexisting_dirt(self) -> None:
-        """15. Work already in the tree is not claimed as this job's."""
+        """15. Work already in the tree is not claimed as this job's.
+
+        D-031 strengthened this from a reporting property into a structural
+        one. The dirt used to sit in the same directory the job worked in, so
+        the job had to distinguish it; now the job is cut from the repository's
+        committed HEAD and never sees it at all. Both halves are asserted: the
+        dirt stays where it was, and the job's own change is still reported.
+        """
         worktree = _worktree(self.root)
         (worktree / "unrelated.py").write_text("already dirty\n", encoding="utf-8")
         session = RecordingSession(edits={"app.py": _FIXED})
@@ -854,9 +898,14 @@ class NativeExecutionTests(unittest.TestCase):
             PlanningModel(), session, task="fix add", worktree=str(worktree)
         )
         values = attempt.result.values
-        self.assertIn("unrelated.py", values["preexisting_dirty"])
         self.assertNotIn("unrelated.py", values["files_changed"])
         self.assertIn("app.py", values["files_changed"])
+        # The job never inherited the dirt, so it has none to report.
+        self.assertEqual(tuple(values["preexisting_dirty"]), ())
+        # And the dirt is still in the checkout, untouched by the job.
+        self.assertEqual(
+            (worktree / "unrelated.py").read_text(), "already dirty\n"
+        )
 
     def test_local_reviewer_does_not_receive_unmodified_preexisting_dirt(self) -> None:
         worktree = _worktree(self.root)
@@ -971,7 +1020,7 @@ class SessionLaunchTests(unittest.TestCase):
             )
 
         session = self._session(runner=refuse)
-        request = CodingRequest(task="t", worktree=str(self.root))
+        request = CodingRequest(task="t", job_id="job-1", worktree=str(self.root))
         with self.assertRaises(CodingError) as raised:
             session.run_session(request, "briefing")
         self.assertEqual(raised.exception.code, "sandbox_unusable")
@@ -988,7 +1037,7 @@ class SessionLaunchTests(unittest.TestCase):
 
         session = self._session(runner=truncated)
         result = session.run_session(
-            CodingRequest(task="t", worktree=str(self.root)), "briefing"
+            CodingRequest(task="t", job_id="job-1", worktree=str(self.root)), "briefing"
         )
         self.assertFalse(result.completed)
         self.assertEqual(result.failure_code, "session_failed")
@@ -1002,7 +1051,7 @@ class SessionLaunchTests(unittest.TestCase):
 
         session = self._session(runner=completed)
         result = session.run_session(
-            CodingRequest(task="t", worktree=str(self.root)), "briefing"
+            CodingRequest(task="t", job_id="job-1", worktree=str(self.root)), "briefing"
         )
         self.assertTrue(result.completed)
         self.assertEqual(result.failure_code, "")
@@ -1104,7 +1153,7 @@ class SessionTimeoutTests(unittest.TestCase):
         session = GrokCodingSession("grok-4.6", 1200, runner=expire)
         with self.assertRaises(CodingError) as raised:
             session.run_session(
-                CodingRequest(task="t", worktree=str(self.root)), "briefing"
+                CodingRequest(task="t", job_id="job-1", worktree=str(self.root)), "briefing"
             )
         self.assertEqual(raised.exception.code, "session_failed")
         self.assertEqual(
@@ -1121,6 +1170,7 @@ class SessionTimeoutTests(unittest.TestCase):
         runtime = build_coding_runtime(
             True, PlanningModel(), lambda: "call-1", session=session,
             reviewer=PlanningModel(),
+            allocator=_allocator(self.root, worktree),
         )
         attempt = CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
@@ -1129,7 +1179,7 @@ class SessionTimeoutTests(unittest.TestCase):
         ).dispatch(
             CapabilityCall(
                 "call-1", RUN_CODING_TASK,
-                {"task": "fix add", "worktree": str(worktree)},
+                {"task": "fix add"},
             ),
             AuthorityContext(
                 "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
@@ -1141,9 +1191,14 @@ class SessionTimeoutTests(unittest.TestCase):
             attempt.result.failure["reason_code"], "session_timeout"
         )
         values = attempt.result.values
-        self.assertIn("already.py", values["preexisting_dirty"])
         self.assertTrue(values["plan_summary"])
         self.assertEqual(tuple(values["files_changed"]), ())
+        # D-031: the checkout's dirt never reached the job, and the job's own
+        # worktree survives the failure as recoverable stale state.
+        self.assertEqual(tuple(values["preexisting_dirty"]), ())
+        self.assertTrue(values["worktree_retained"])
+        self.assertTrue(Path(values["worktree"]).is_dir())
+        self.assertEqual((worktree / "already.py").read_text(), "dirty\n")
 
     def test_a_timeout_is_not_retried(self) -> None:
         worktree = _worktree(self.root)
@@ -1153,6 +1208,7 @@ class SessionTimeoutTests(unittest.TestCase):
         runtime = build_coding_runtime(
             True, PlanningModel(), lambda: "call-1", session=session,
             reviewer=PlanningModel(),
+            allocator=_allocator(self.root, worktree),
         )
         CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
@@ -1161,7 +1217,7 @@ class SessionTimeoutTests(unittest.TestCase):
         ).dispatch(
             CapabilityCall(
                 "call-1", RUN_CODING_TASK,
-                {"task": "fix add", "worktree": str(worktree)},
+                {"task": "fix add"},
             ),
             AuthorityContext(
                 "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW

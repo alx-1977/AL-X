@@ -32,10 +32,12 @@ from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
 
 from test_coding_agent import (  # noqa: E402
+    FIXTURE_BRANCH,
     NOW,
     PlanningModel,
     RecordingSession,
     _FIXED,
+    _allocator,
     _git,
     _worktree,
 )
@@ -51,25 +53,44 @@ class GitOutcome(unittest.TestCase):
         self.root = _worktree(self.parent)
 
     def run_job(self, session, **arguments):
+        # D-031: the job is allocated an isolated worktree cut from `self.root`,
+        # which is the canonical repository here. `worktree` is no longer an
+        # argument, so a test that still passes one is naming the repository.
+        arguments.pop("worktree", None)
+        self.allocator = _allocator(self.parent, self.root)
         runtime = build_coding_runtime(
             True, PlanningModel(), lambda: "call-1",
             session=session, reviewer=PlanningModel(),
+            allocator=self.allocator,
         )
         broker = CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
             SafetyGate(runtime.policies),
             runtime.executors,
         )
-        return broker.dispatch(
+        result = broker.dispatch(
             CapabilityCall("call-1", RUN_CODING_TASK, arguments),
             AuthorityContext(
                 "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
             ),
         ).result
+        # Where the job actually worked, for the assertions that read a file or
+        # a branch back out of it.
+        reported = (result.values or {}).get("worktree", "")
+        self.job_root = Path(reported) if reported else None
+        return result
 
     def git(self, *argv: str) -> str:
+        """Git in the canonical repository: refs are shared with the worktree."""
         return subprocess.run(
             ["git", *argv], cwd=self.root, check=True,
+            capture_output=True, text=True,
+        ).stdout
+
+    def job_git(self, *argv: str) -> str:
+        """Git in the job's own worktree, where its HEAD and status live."""
+        return subprocess.run(
+            ["git", *argv], cwd=self.job_root, check=True,
             capture_output=True, text=True,
         ).stdout
 
@@ -106,7 +127,10 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
         values = result.values
         self.assertEqual(values["branch"], "repair/add")
-        self.assertEqual(values["commit_sha"], self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(
+            values["commit_sha"],
+            self.git("rev-parse", "repair/add").strip(),
+        )
         self.assertEqual(list(values["commit"]["committed_files"]), ["app.py"])
         self.assertTrue(values["commit"]["worktree_clean"])
 
@@ -118,24 +142,38 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
             repair_branch="repair/add",
             commit_message="repair addition",
         )
+        # The job's own worktree is the one on the repair branch; the
+        # canonical checkout stayed where it was, which is the D-031 property.
         self.assertEqual(
-            self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "repair/add"
+            self.job_git("rev-parse", "--abbrev-ref", "HEAD").strip(), "repair/add"
         )
         self.assertEqual(
-            self.git("log", "-1", "--pretty=%s").strip(), "repair addition"
+            self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), FIXTURE_BRANCH
         )
-        self.assertIn("app.py", self.git("show", "--name-only", "--pretty=", "HEAD"))
+        self.assertEqual(
+            self.git("log", "-1", "--pretty=%s", "repair/add").strip(),
+            "repair addition",
+        )
+        self.assertIn(
+            "app.py",
+            self.git("show", "--name-only", "--pretty=", "repair/add"),
+        )
 
-    def test_the_baseline_names_the_branch_the_job_started_on(self) -> None:
-        """Not the branch it created.
+    def test_the_baseline_names_the_commit_the_job_started_from(self) -> None:
+        """What "where the job started" means changed with D-031.
 
-        `create_repair_branch` returns the state *after* the switch, and
-        assigning that over `baseline` made every branch-enabled outcome
-        report the repair branch as its starting branch. Reproduced on
-        2026-09-12: a job starting on `main` reported `repair/add`, which is
-        false evidence about the repository.
+        Under D-029 the job switched branches inside a worktree it inherited,
+        so its starting branch was a fact about somebody else's checkout, and
+        reporting the repair branch there was false evidence — reproduced on
+        2026-09-12.
+
+        A D-031 job has no such prior branch: its worktree is created already
+        on its own branch, cut from the repository's HEAD. The branch in the
+        baseline is therefore the job's own, which is the truth about the
+        worktree being described. The commit it starts from is the fact that
+        still ties the job to the repository, and that is asserted here.
         """
-        start = self.git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        start_sha = self.git("rev-parse", "HEAD").strip()
         result = self.run_job(
             RecordingSession(edits={"app.py": _FIXED}),
             task="repair the addition",
@@ -143,10 +181,13 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
             repair_branch="repair/add",
             commit_message="repair addition",
         )
-        self.assertEqual(result.values["baseline"]["branch"], start)
-        self.assertNotEqual(result.values["baseline"]["branch"], "repair/add")
-        # The commit, by contrast, names the branch it is actually on.
+        self.assertEqual(result.values["baseline"]["head_sha"], start_sha)
+        self.assertEqual(result.values["baseline"]["branch"], "repair/add")
         self.assertEqual(result.values["commit"]["branch"], "repair/add")
+        # The canonical checkout never moved.
+        self.assertEqual(
+            self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), FIXTURE_BRANCH
+        )
 
     def test_the_baseline_proves_where_the_job_started(self) -> None:
         before = self.git("rev-parse", "HEAD").strip()
@@ -190,7 +231,12 @@ class DeletionsReachTheCommit(GitOutcome):
             sorted(result.values["commit"]["committed_files"]),
             ["app.py", "superseded.py"],
         )
+        # Gone from the branch the job committed on. The canonical checkout
+        # still has it, because nothing merged the repair.
         self.assertNotIn(
+            "superseded.py", self.git("ls-tree", "--name-only", "repair/add")
+        )
+        self.assertIn(
             "superseded.py", self.git("ls-tree", "--name-only", "HEAD")
         )
 
@@ -215,16 +261,28 @@ class DeletionsReachTheCommit(GitOutcome):
         self.assertIn("theirs.py", self.git("ls-tree", "--name-only", "HEAD"))
 
 
-class InheritedDirtIsNeverCommitted(GitOutcome):
-    """A job runs in a worktree it does not own."""
+class InheritedDirtNeverReachesTheJob(GitOutcome):
+    """D-031 turned this from a staging rule into structural isolation.
 
-    def test_an_inherited_dirty_file_is_not_in_the_commit(self) -> None:
+    These tests used to describe a job running in a worktree it did not own,
+    where somebody else's uncommitted work sat in the same directory and the
+    commit logic had to be careful not to sweep it in. That care is still
+    there and still tested in `test_coding_git_workspace.py`, against the
+    staging code directly.
+
+    What changed is that a job no longer starts from a dirty tree at all. Its
+    worktree is cut from the repository's committed HEAD, so the dirt it used
+    to have to step around is not present to step around. Both halves are
+    asserted: the job commits only its own file, and the other work is still
+    sitting untouched in the checkout afterwards.
+    """
+
+    def test_dirt_in_the_checkout_is_not_visible_to_the_job(self) -> None:
         # Deliberately not a test module: dirtying one would make AL/X's own
         # verification fail and the job would be failed for that reason
         # instead of the one under test.
-        (self.root / "notes.txt").write_text(
-            "# somebody else was working here\n", encoding="utf-8"
-        )
+        theirs = "# somebody else was working here\n"
+        (self.root / "notes.txt").write_text(theirs, encoding="utf-8")
 
         result = self.run_job(
             RecordingSession(edits={"app.py": _FIXED}),
@@ -237,13 +295,14 @@ class InheritedDirtIsNeverCommitted(GitOutcome):
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(list(result.values["commit"]["committed_files"]), ["app.py"])
         self.assertNotIn(
-            "notes.txt", self.git("show", "--name-only", "--pretty=", "HEAD")
+            "notes.txt",
+            self.git("show", "--name-only", "--pretty=", "repair/add"),
         )
-        # Reported, so Core knows the tree is not clean and why.
-        self.assertIn("notes.txt", result.values["baseline"]["inherited_dirty"])
-        self.assertFalse(result.values["commit"]["worktree_clean"])
+        # There was no dirt to inherit, and the job's own tree ends clean.
+        self.assertEqual(tuple(result.values["baseline"]["inherited_dirty"]), ())
+        self.assertTrue(result.values["commit"]["worktree_clean"])
 
-    def test_the_inherited_file_is_left_exactly_as_it_was_found(self) -> None:
+    def test_the_other_work_is_left_exactly_as_it_was_found(self) -> None:
         theirs = "# somebody else was working here\n"
         (self.root / "notes.txt").write_text(theirs, encoding="utf-8")
 
@@ -258,9 +317,10 @@ class InheritedDirtIsNeverCommitted(GitOutcome):
         self.assertEqual((self.root / "notes.txt").read_text(), theirs)
         self.assertIn("notes.txt", self.git("status", "--porcelain"))
 
-    def test_an_inherited_file_the_job_itself_rewrites_is_committed(self) -> None:
-        """Ownership is by what the job wrote, not by what was dirty."""
-        (self.root / "app.py").write_text("# stale edit\n", encoding="utf-8")
+    def test_a_stale_edit_in_the_checkout_does_not_become_the_job_s(self) -> None:
+        """The job commits what it wrote, from the committed baseline."""
+        stale = "# stale edit\n"
+        (self.root / "app.py").write_text(stale, encoding="utf-8")
 
         result = self.run_job(
             RecordingSession(edits={"app.py": _FIXED}),
@@ -270,15 +330,30 @@ class InheritedDirtIsNeverCommitted(GitOutcome):
             commit_message="repair addition",
         )
 
-        self.assertIn("app.py", result.values["baseline"]["inherited_dirty"])
+        self.assertEqual(tuple(result.values["baseline"]["inherited_dirty"]), ())
         self.assertEqual(list(result.values["commit"]["committed_files"]), ["app.py"])
-        self.assertEqual((self.root / "app.py").read_text(), _FIXED)
+        # The job's own worktree holds the repair; the checkout still holds the
+        # stale edit its owner left there.
+        self.assertEqual((self.job_root / "app.py").read_text(), _FIXED)
+        self.assertEqual((self.root / "app.py").read_text(), stale)
 
 
 class CommittingIsRefusedRatherThanWidened(GitOutcome):
     """Fail closed: no commit is better than the wrong commit."""
 
-    def test_a_pre_staged_unrelated_file_refuses_the_commit(self) -> None:
+    def test_someone_elses_staged_file_cannot_reach_the_job_s_commit(self) -> None:
+        """D-031 moved this from a refusal to an impossibility.
+
+        Staging an unrelated file used to poison the job's own index, because
+        the job shared it. `_refuse_foreign_staged_state` caught that and
+        failed the job closed, and still does — proved directly against the
+        staging code in `test_coding_git_workspace.py`.
+
+        A linked worktree has its own index, so the checkout's staged file is
+        not in the job's index to be caught. The job succeeds, its commit
+        contains only its own file, and the staged work is left exactly as its
+        owner left it.
+        """
         (self.root / "theirs.py").write_text("not this job's\n", encoding="utf-8")
         _git(self.root, "add", "theirs.py")
         before = self.git("rev-parse", "HEAD").strip()
@@ -291,9 +366,13 @@ class CommittingIsRefusedRatherThanWidened(GitOutcome):
             commit_message="repair addition",
         )
 
-        self.assertEqual(result.state, CapabilityResultState.FAILED)
-        self.assertEqual(result.failure["code"], "unrelated_changes_staged")
-        # No commit was created, and their staged file is still staged.
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(list(result.values["commit"]["committed_files"]), ["app.py"])
+        self.assertNotIn(
+            "theirs.py",
+            self.git("show", "--name-only", "--pretty=", "repair/add"),
+        )
+        # The checkout did not move, and their staged file is still staged.
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
         self.assertIn("A  theirs.py", self.git("status", "--porcelain"))
 
