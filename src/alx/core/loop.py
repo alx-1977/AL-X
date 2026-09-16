@@ -27,6 +27,9 @@ from alx.contracts import (
 
 LOGGER = logging.getLogger(__name__)
 
+_RUN_CODING_TASK = "run_coding_task"
+_MAX_FAILED_CODING_EXECUTIONS = 2
+
 
 class CoreState(str, Enum):
     RESPONDED = "responded"
@@ -754,6 +757,33 @@ class CoreAgent:
                     snapshot,
                     reason="approval_capability_already_dispatched",
                 )
+            if (
+                decision.call.capability_id == _RUN_CODING_TASK
+                and self._failed_coding_executions(snapshot.state) >= _MAX_FAILED_CODING_EXECUTIONS
+            ):
+                # The durable goal, not model-authored task wording or call
+                # identifiers, is the retry identity.  This occurs before a
+                # checkpoint, broker call, or approval claim, so exhaustion
+                # cannot create a pending job or consume authority.
+                if self._coding_retry_already_exhausted(snapshot.state):
+                    return CoreOutcome(
+                        CoreState.CHECKPOINTED,
+                        snapshot,
+                        reason="coding_retry_exhausted",
+                    )
+                refusal = CapabilityAttempt(
+                    decision.call,
+                    CapabilityAttemptDisposition.REJECTED,
+                    False,
+                    reason_code="coding_retry_exhausted",
+                )
+                snapshot = self._store.replace(
+                    replace(snapshot.state, attempts=(*snapshot.state.attempts, refusal)),
+                    snapshot.retention_until,
+                    snapshot.revision,
+                    decision_provenance,
+                )
+                continue
             if self._repeats_rejected_call(snapshot.state, decision.call, now):
                 return CoreOutcome(
                     CoreState.ERROR,
@@ -1772,6 +1802,30 @@ class CoreAgent:
             approval.approval_id == call.approval_id
             and approval.permits(call, at)
             for approval in state.approvals
+        )
+
+    @staticmethod
+    def _failed_coding_executions(state: GoalState) -> int:
+        """Count only durable Coding Agent runs that reached implementation."""
+        return sum(
+            1
+            for item in state.attempts
+            if item.call is not None
+            and item.call.capability_id == _RUN_CODING_TASK
+            and item.implementation_invoked is True
+            and item.result is not None
+            and item.result.state is CapabilityResultState.FAILED
+            and (item.result.failure or {}).get("code") != "arguments_unusable"
+        )
+
+    @staticmethod
+    def _coding_retry_already_exhausted(state: GoalState) -> bool:
+        """Whether this durable goal already recorded the fixed refusal."""
+        return any(
+            item.call is not None
+            and item.call.capability_id == _RUN_CODING_TASK
+            and item.reason_code == "coding_retry_exhausted"
+            for item in state.attempts
         )
 
     @staticmethod

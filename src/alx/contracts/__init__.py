@@ -18,6 +18,7 @@ from alx.contracts.repository import (
     MergeOutcome,
     MergeRequest,
 )
+from alx.contracts.repository_runtime import REPOSITORY_RUNTIME_FAILURES, RepositoryRuntimeError
 from alx.contracts.coding import (
     CODING_FAILURES,
     CodingCommit,
@@ -215,6 +216,8 @@ __all__ = [
     "MergeError",
     "MergeOutcome",
     "MergeRequest",
+    "REPOSITORY_RUNTIME_FAILURES",
+    "RepositoryRuntimeError",
     "CODING_FAILURES",
     "CodingCommit",
     "CodingError",
