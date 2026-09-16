@@ -5,11 +5,16 @@ On 2026-09-04 UID 58781 -- a Woolworths order confirmation -- had been
 probe showed the message was no longer in INBOX at all: Friedl had cleared it
 in a mail client. Three further observations queued behind it were also gone.
 
-The deadlock was structural. `current()` yields nothing while anything is
-`presented`, and the only exits -- `acknowledge_mail_message` and a successful
-Trash -- both act on a message IMAP could no longer resolve. Nothing
-reconciled observation state against the mailbox, so nothing could ever
-release it.
+The deadlock was structural. The single-slot reader yielded nothing while
+anything was `presented`, and the only exits -- `acknowledge_mail_message` and
+a successful Trash -- both acted on a message IMAP could no longer resolve.
+Nothing reconciled observation state against the mailbox, so nothing could
+ever release it.
+
+That slot is gone: exactly-once is the shared opportunity ledger's job now, and
+the store reports the whole queue. Reconciliation still matters for exactly the
+reason it always did -- a message handled elsewhere must not strand her -- so
+these tests keep proving it against the reader that replaced it.
 
 Whether a tracked identifier is still in the mailbox has one correct answer, so
 detection is deterministic (Law 2). What its disappearance means does not, so
@@ -36,6 +41,20 @@ from alx.providers.icloud_mail import (  # noqa: E402
 from test_mail_vertical_slice import FakeImap, message  # noqa: E402
 
 VALIDITY = "777"
+
+
+def next_arrival(state):
+    """The oldest arrival still awaiting delivery, or None.
+
+    What the removed single-slot reader returned, expressed over the reader
+    that replaced it. The store no longer holds one observation at a time, so
+    "the next one" is a question the caller asks rather than a state the store
+    keeps; these tests ask it because the properties they prove -- that a
+    vanished message is not offered as an arrival, that a settled one is not
+    re-offered -- are about which observations are eligible at all.
+    """
+    awaiting = state.unclaimed_arrivals()
+    return awaiting[0] if awaiting else None
 
 
 def observed(uid: int) -> tuple[int, dict[str, str]]:
@@ -70,7 +89,7 @@ class MailReconciliationTest(unittest.TestCase):
 
     def present(self, uid: int) -> None:
         """Put an observation through the real delivery path to `presented`."""
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.assertEqual(event.data["uid"], str(uid))
         self.assertTrue(self.state.record_delivery(event.event_id))
 
@@ -121,7 +140,7 @@ class MailReconciliationTest(unittest.TestCase):
         self.state.acknowledge(MailReference("INBOX", VALIDITY, "1"))
         self.assertEqual(self.states()[1], "done")
         self.assertEqual(
-            self.state.current().data["uid"], "2",
+            next_arrival(self.state).data["uid"], "2",
             "releasing the ghost lets the queue behind it move",
         )
 
@@ -153,7 +172,7 @@ class MailReconciliationTest(unittest.TestCase):
             "found before the restart, still undelivered, so still carried",
         )
         self.assertEqual(
-            restarted.current(), None,
+            next_arrival(restarted), None,
             "and the observation is still hers to release",
         )
 
@@ -235,7 +254,7 @@ class BurstContextTest(unittest.TestCase):
             "INBOX", VALIDITY, tuple(observed(uid) for uid in (1, 2, 3, 4)),
             (1, 2, 3, 4),
         )
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.state.record_delivery(event.event_id)
 
     def kinds(self) -> list[tuple[str, str]]:
@@ -271,7 +290,7 @@ class BurstContextTest(unittest.TestCase):
         self.state.acknowledge(MailReference("INBOX", VALIDITY, "3"))
         self.state.acknowledge(MailReference("INBOX", VALIDITY, "1"))
         self.assertEqual(
-            self.state.current().data["uid"], "4",
+            next_arrival(self.state).data["uid"], "4",
             "the queue skips what she already dealt with silently",
         )
 
@@ -314,7 +333,7 @@ class ScanReportsDisappearanceTest(unittest.TestCase):
         self.adapter.scan()
         self.imap.items[2] = message("Order received", "Thanks for your order")
         self.adapter.scan()
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.assertEqual(event.data["uid"], "2")
         self.state.record_delivery(event.event_id)
 
@@ -373,15 +392,21 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
     def test_a_message_that_vanishes_before_she_speaks_is_not_announced(self) -> None:
         """The reported bug, end to end.
 
-        Promoted to `current` by the transport, then deleted from the mailbox
-        before the turn that would have raised it. She is told it is gone, and
-        must never afterwards be handed it as though it had just arrived.
+        Shown to the Core as waiting, then deleted from the mailbox before the
+        turn that would have raised it. She is told it is gone, and must never
+        afterwards be handed it as though it had just arrived.
+
+        Exposure is what makes the disappearance owed. A turn records it by
+        building its context; these tests call the same reader directly, which
+        is the step the removed single-slot reader used to perform as a side
+        effect of promotion.
         """
         self.adapter.scan()
         self.imap.items[2] = message("Order received", "Thanks for your order")
         self.adapter.scan()
 
-        arrival = self.state.current()               # promoted, not yet spoken
+        self.state.contextual_events()               # shown, not yet spoken
+        arrival = next_arrival(self.state)
         self.assertEqual(arrival.data["uid"], "2")
 
         del self.imap.items[2]                       # Friedl deletes it
@@ -392,7 +417,7 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         self.state.record_vanished_delivery(vanished[0].event_id)
 
         self.assertIsNone(
-            self.state.current(),
+            next_arrival(self.state),
             "a message known to be gone was offered as a new arrival",
         )
 
@@ -401,11 +426,11 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         self.adapter.scan()
         self.imap.items[2] = message("Order received", "Thanks")
         self.adapter.scan()
-        self.state.current()
+        self.state.contextual_events()
         del self.imap.items[2]
         self.adapter.scan()
 
-        self.assertIsNone(self.state.current())
+        self.assertIsNone(next_arrival(self.state))
         reported = self.state.pending_vanished()
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0].kind, "mail.message_vanished")
@@ -418,7 +443,7 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         del self.imap.items[2]
         self.adapter.scan()
 
-        self.assertIsNone(self.state.current())
+        self.assertIsNone(next_arrival(self.state))
 
     def test_no_observation_satisfies_both_selectors(self) -> None:
         """The invariant itself, whatever the state.
@@ -430,12 +455,12 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         self.adapter.scan()
         self.imap.items[2] = message("Order received", "Thanks")
         self.adapter.scan()
-        self.state.current()
+        self.state.contextual_events()
         del self.imap.items[2]
         self.adapter.scan()
 
         vanished = {item.data["uid"] for item in self.state.pending_vanished()}
-        arrival = self.state.current()
+        arrival = next_arrival(self.state)
         if arrival is not None:
             self.assertNotIn(arrival.data["uid"], vanished)
 
@@ -445,7 +470,7 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         self.imap.items[2] = message("Order received", "Thanks")
         self.adapter.scan()
 
-        arrival = self.state.current()
+        arrival = next_arrival(self.state)
         self.assertIsNotNone(arrival, "a present message was withheld")
         self.assertEqual(arrival.data["uid"], "2")
         self.assertEqual(self.state.pending_vanished(), ())
@@ -455,7 +480,7 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         self.adapter.scan()
         self.imap.items[2] = message("First", "gone soon")
         self.adapter.scan()
-        self.state.current()
+        self.state.contextual_events()
         del self.imap.items[2]
         self.adapter.scan()
         self.state.record_vanished_delivery(
@@ -464,7 +489,7 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
 
         self.imap.items[3] = message("Second", "still here")
         self.adapter.scan()
-        arrival = self.state.current()
+        arrival = next_arrival(self.state)
         self.assertIsNotNone(arrival, "the next message never arrived")
         self.assertEqual(arrival.data["uid"], "3")
 
@@ -493,6 +518,6 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
             connection.close()
 
         self.assertIsNone(
-            self.state.current(),
+            next_arrival(self.state),
             "a pending row already known gone was promoted and offered",
         )

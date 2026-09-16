@@ -48,6 +48,17 @@ TRASH = CapabilityDefinition(
 MAIL_EVENT_ID = "mail:777:3"
 
 
+def next_arrival(state):
+    """The oldest arrival still awaiting delivery, or None.
+
+    What the removed single-slot reader returned, over the reader that
+    replaced it. Exactly-once is the opportunity ledger's job now, so the
+    store reports the whole queue and "the next one" is the caller's question.
+    """
+    awaiting = state.unclaimed_arrivals()
+    return awaiting[0] if awaiting else None
+
+
 def conversation() -> ConversationSnapshot:
     turn = ConversationTurn(
         "c1", "t1", ConversationOrigin.TYPED,
@@ -343,7 +354,7 @@ class DeliveryBookkeepingTest(unittest.TestCase):
         self.addCleanup(self.state.close)
 
     def test_normal_delivery_recording_still_works(self) -> None:
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.assertEqual(event.event_id, MAIL_EVENT_ID)
         self.assertTrue(
             self.state.record_delivery(event.event_id),
@@ -356,7 +367,7 @@ class DeliveryBookkeepingTest(unittest.TestCase):
         Reported as "nothing to record", not raised. The announcement already
         reached Friedl; the bookkeeping simply has nothing left to do.
         """
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.state.acknowledge(MailReference("INBOX", "777", "3"))
         self.assertFalse(
             self.state.record_delivery(event.event_id),
@@ -364,7 +375,7 @@ class DeliveryBookkeepingTest(unittest.TestCase):
         )
 
     def test_a_second_recording_is_benign(self) -> None:
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.assertTrue(self.state.record_delivery(event.event_id))
         self.assertFalse(
             self.state.record_delivery(event.event_id),
@@ -372,11 +383,11 @@ class DeliveryBookkeepingTest(unittest.TestCase):
         )
 
     def test_it_does_not_resurrect_a_done_observation(self) -> None:
-        event = self.state.current()
+        event = next_arrival(self.state)
         self.state.acknowledge(MailReference("INBOX", "777", "3"))
         self.state.record_delivery(event.event_id)
         self.assertIsNone(
-            self.state.current(),
+            next_arrival(self.state),
             "a reconciled observation must not return to the conversation",
         )
 
