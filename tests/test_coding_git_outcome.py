@@ -32,6 +32,7 @@ from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
 
 from test_coding_agent import (  # noqa: E402
+    FIXTURE_BRANCH,
     NOW,
     PlanningModel,
     RecordingSession,
@@ -147,7 +148,7 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
             self.job_git("rev-parse", "--abbrev-ref", "HEAD").strip(), "repair/add"
         )
         self.assertEqual(
-            self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "main"
+            self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), FIXTURE_BRANCH
         )
         self.assertEqual(
             self.git("log", "-1", "--pretty=%s", "repair/add").strip(),
@@ -185,7 +186,7 @@ class ASuccessfulJobReturnsABranchAndASha(GitOutcome):
         self.assertEqual(result.values["commit"]["branch"], "repair/add")
         # The canonical checkout never moved.
         self.assertEqual(
-            self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "main"
+            self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), FIXTURE_BRANCH
         )
 
     def test_the_baseline_proves_where_the_job_started(self) -> None:

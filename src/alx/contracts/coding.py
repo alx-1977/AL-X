@@ -131,6 +131,38 @@ class CodingTelemetry:
             raise ValueError("telemetry attempt and correction cycle are bounded")
 
 
+# A job identity reaching the filesystem becomes one path segment and part of
+# a branch name, so it is held to a narrower grammar than the broker's call ids
+# happen to use. No separator, no dot segment, no leading dash: a `..` or an
+# absolute-looking identity cannot climb out of the worktree root, and a
+# dash-led one cannot be read as an option by a git command it reaches.
+#
+# Stated here rather than in the allocator because both the capability boundary
+# that receives the broker's call id and the allocator that turns it into a
+# directory have to agree about it, and a contract is the one place both may
+# depend on.
+_JOB_ID_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+MAX_JOB_ID_CHARACTERS = 128
+
+
+def job_id_permitted(job_id: str) -> bool:
+    """Whether a job identity may become a path segment and a branch element."""
+    if not isinstance(job_id, str):
+        return False
+    candidate = job_id.strip()
+    if not candidate or candidate != job_id:
+        return False
+    if len(candidate) > MAX_JOB_ID_CHARACTERS:
+        return False
+    if any(character not in _JOB_ID_ALLOWED for character in candidate):
+        return False
+    if candidate.startswith("-"):
+        return False
+    return True
+
+
 def lexical_worktree_path(relative: str) -> str:
     """Collapse . and .. without leaving the worktree. Absolute paths refuse.
 
@@ -500,6 +532,8 @@ __all__ = [
     "MAX_STAGED_FILES",
     "MAX_BLOCKED_PATHS",
     "MAX_BLOCKED_PATH_CHARACTERS",
+    "MAX_JOB_ID_CHARACTERS",
+    "job_id_permitted",
     "lexical_worktree_path",
     "path_matches_blocked",
 ]

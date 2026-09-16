@@ -38,6 +38,7 @@ from alx.contracts.coding import (
     MAX_TASK_CHARACTERS,
     CodingError,
     CodingRequest,
+    job_id_permitted,
 )
 
 
@@ -392,6 +393,20 @@ def parse_coding_arguments(
     if not isinstance(job_id, str) or not job_id.strip():
         return None, _argument_failure(
             "job_id", "missing", "job_id was not assigned"
+        )
+    # The broker's call id is authoritative, but it becomes a directory name
+    # and a git argument under D-030, so it is held to the same grammar the
+    # allocator applies before it can influence any of that. The broker's own
+    # ids are UUID-shaped and pass unchanged — that is a property of today's
+    # broker, not a contract this module may assume, so it is checked here
+    # rather than trusted. Validated, never rewritten: the job identity stays
+    # one-to-one with the call id it came from, and no second identifier is
+    # introduced.
+    if not job_id_permitted(job_id):
+        return None, _argument_failure(
+            "job_id",
+            "unsafe",
+            "the assigned job_id cannot be used as a workspace identity",
         )
     task, error = _required_string(arguments, "task", MAX_TASK_CHARACTERS)
     if error is not None:

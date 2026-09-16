@@ -45,7 +45,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from alx.contracts.coding import CodingError
+from alx.contracts.coding import (
+    MAX_JOB_ID_CHARACTERS,
+    CodingError,
+    job_id_permitted,
+)
 
 LOGGER = logging.getLogger(__name__)
 from alx.providers.coding_git import (
@@ -66,11 +70,6 @@ from alx.providers.coding_git import (
 # separator, no dot segment, no leading dash: a `..` or an absolute-looking
 # identity cannot climb out of the root, and a dash-led one cannot be read as
 # an option by the git command it is interpolated into.
-_JOB_ID_ALLOWED = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-)
-MAX_JOB_ID_CHARACTERS = 128
-
 # The branch a job's work lands on. D-029 owns the collision scheme applied to
 # this base name; D-030 only fixes how the base name is derived when Core did
 # not name one, so that a job always has a branch to be isolated on.
@@ -93,22 +92,6 @@ ORPHAN_SUFFIX = ".orphan.json"
 # report, let alone to remove. Never read by release: it records an intention
 # to create, not a job that succeeded.
 CLAIM_SUFFIX = ".claim.json"
-
-
-def job_id_permitted(job_id: str) -> bool:
-    """Whether a job identity may become a path segment and a branch element."""
-    if not isinstance(job_id, str):
-        return False
-    candidate = job_id.strip()
-    if not candidate or candidate != job_id:
-        return False
-    if len(candidate) > MAX_JOB_ID_CHARACTERS:
-        return False
-    if any(character not in _JOB_ID_ALLOWED for character in candidate):
-        return False
-    if candidate.startswith("-"):
-        return False
-    return True
 
 
 @dataclass(frozen=True, slots=True)

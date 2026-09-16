@@ -76,6 +76,11 @@ PRODUCTION_ROOT = REPOSITORY_ROOT / "src" / "alx"
 CODING_PROCESS = PRODUCTION_ROOT / "providers" / "coding_process.py"
 
 
+# The branch every fixture repository starts on. Named here so a test that
+# asserts where a job began does not have to guess what git called it.
+FIXTURE_BRANCH = "main"
+
+
 def _git(root: Path, *args: str) -> None:
     subprocess.run(
         ["git", *args],
@@ -97,7 +102,12 @@ def _worktree(parent: Path, name: str = "job") -> Path:
         "        self.assertEqual(add(1, 2), 3)\n",
         encoding="utf-8",
     )
-    _git(root, "init")
+    # The initial branch is named explicitly rather than inherited. A bare
+    # `git init` takes the host's `init.defaultBranch`, which is `main` on this
+    # workstation and `master` in CI, so tests that name the starting branch
+    # passed locally and failed there. Nothing about D-030 depends on the name;
+    # what the fixtures need is for it not to vary by machine.
+    _git(root, "init", "-q", "-b", FIXTURE_BRANCH)
     _git(root, "config", "user.email", "test@example.invalid")
     _git(root, "config", "user.name", "test")
     _git(root, "add", ".")

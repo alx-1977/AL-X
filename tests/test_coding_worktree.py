@@ -1484,5 +1484,413 @@ class TheGitAuthorityThisNeeds(unittest.TestCase):
         ))
 
 
+class TheWorkspaceRefusesAMainCheckout(Repository):
+    """`CodingWorkspace` proves the directory is a *linked* worktree.
+
+    D-030 promised this as defence in depth and it was never implemented: the
+    workspace checked existence, directory-ness and readability, so the live
+    AL/X checkout satisfied every test it applied. The allocator cannot produce
+    the canonical checkout, but the workspace is the boundary that opens the
+    directory, and it should not depend on its caller for that.
+
+    A linked worktree's `.git` is a file pointing at the parent repository; a
+    main checkout's is a directory.
+    """
+
+    def test_the_canonical_checkout_is_refused(self) -> None:
+        from alx.providers.coding_workspace import CodingWorkspace
+
+        with self.assertRaises(CodingError) as caught:
+            CodingWorkspace(str(self.repository))
+
+        self.assertEqual(caught.exception.code, "worktree_unusable")
+        self.assertEqual(
+            caught.exception.details["reason_code"], "not_a_linked_worktree"
+        )
+
+    def test_the_live_alx_checkout_is_refused(self) -> None:
+        """The real repository this suite runs in, not a fixture."""
+        from alx.providers.coding_workspace import diagnose_worktree
+
+        live = Path(__file__).resolve().parents[1]
+        failure = diagnose_worktree(str(live))
+
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["reason_code"], "not_a_linked_worktree")
+
+    def test_a_genuine_linked_worktree_is_accepted(self) -> None:
+        from alx.providers.coding_workspace import CodingWorkspace
+
+        allocated = self.allocator().allocate("job-1")
+
+        workspace = CodingWorkspace(str(allocated.path))
+
+        self.assertEqual(workspace.root, allocated.path)
+        self.assertTrue((allocated.path / ".git").is_file())
+
+    def test_a_plain_directory_is_refused(self) -> None:
+        from alx.providers.coding_workspace import diagnose_worktree
+
+        plain = Path(self.directory.name) / "not-a-repo"
+        plain.mkdir()
+
+        failure = diagnose_worktree(str(plain))
+
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["reason_code"], "not_a_linked_worktree")
+
+    def test_the_existing_path_checks_are_preserved(self) -> None:
+        from alx.providers.coding_workspace import diagnose_worktree
+
+        missing = Path(self.directory.name) / "nowhere"
+        self.assertEqual(
+            diagnose_worktree(str(missing))["reason_code"], "missing"
+        )
+        self.assertEqual(diagnose_worktree("")["reason_code"], "blank")
+        file_path = Path(self.directory.name) / "a-file"
+        file_path.write_text("x\n")
+        self.assertEqual(
+            diagnose_worktree(str(file_path))["reason_code"], "not_directory"
+        )
+
+
+class TheDefaultWorktreeRootIsAlwaysExternal(unittest.TestCase):
+    """The shipped configuration must not put worktrees inside the repository.
+
+    `ALX_RUNTIME_STORAGE_ROOT` is relative in the shipped `.env` (`.alx/runtime`),
+    and a relative storage root resolves against the repository. Defaulting the
+    coding-worktree root to `storage_root / "coding-worktrees"` therefore landed
+    it inside the checkout, where D-030's containment check refuses it — so the
+    capability would never have registered at all.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        enclosing = Path(self.directory.name).resolve()
+        self.repository = enclosing / "repo"
+        self.repository.mkdir()
+
+    def _default(self, storage_root: Path) -> Path:
+        from alx.bootstrap.live_voice import default_coding_worktree_root
+
+        return default_coding_worktree_root(storage_root, self.repository)
+
+    def _inside(self, path: Path) -> bool:
+        return path == self.repository or str(path).startswith(
+            str(self.repository) + "/"
+        )
+
+    def test_a_relative_storage_root_does_not_land_inside(self) -> None:
+        """The shipped `.env` case."""
+        root = self._default(Path(".alx/runtime"))
+
+        self.assertTrue(root.is_absolute())
+        self.assertFalse(self._inside(root))
+
+    def test_a_storage_root_resolving_inside_does_not_land_inside(self) -> None:
+        root = self._default(self.repository / ".alx" / "runtime")
+
+        self.assertTrue(root.is_absolute())
+        self.assertFalse(self._inside(root))
+
+    def test_an_external_absolute_storage_root_is_used(self) -> None:
+        external = Path(self.directory.name).resolve() / "runtime"
+        root = self._default(external)
+
+        self.assertEqual(root, external / "coding-worktrees")
+        self.assertFalse(self._inside(root))
+
+    def test_a_symlinked_storage_root_resolving_inside_is_rejected(self) -> None:
+        inside = self.repository / "runtime"
+        inside.mkdir(parents=True)
+        link = Path(self.directory.name).resolve() / "linked-runtime"
+        link.symlink_to(inside)
+
+        root = self._default(link)
+
+        self.assertFalse(self._inside(root))
+
+    def test_the_derived_default_passes_the_containment_check(self) -> None:
+        """The property that actually matters: the allocator accepts it."""
+        git(self.repository, "init", "-q", "-b", "main")
+        git(self.repository, "config", "user.email", "t@example.test")
+        git(self.repository, "config", "user.name", "t")
+        (self.repository / "f.py").write_text("x\n")
+        git(self.repository, "add", "-A")
+        git(self.repository, "commit", "-qm", "base")
+
+        root = self._default(Path(".alx/runtime"))
+        allocator = CodingWorktreeAllocator(root, self.repository)
+
+        self.assertEqual(allocator.root, root.resolve())
+
+    def test_the_default_is_deterministic(self) -> None:
+        first = self._default(Path(".alx/runtime"))
+        second = self._default(Path(".alx/runtime"))
+
+        self.assertEqual(first, second)
+
+
+class TheDurableOutcomeIsReadFromTheGoalStore(Repository):
+    """The release precondition, wired to the store the runtime actually uses.
+
+    `_coding_outcome_source` reads the broker's own record of what a coding
+    call returned. It read `snapshot.completed_actions`, which does not exist —
+    that lives on `snapshot.state` — so every lookup raised AttributeError, the
+    allocator caught it as `durable_outcome_unreadable`, and no release could
+    ever succeed. Fail-closed, so nothing was destroyed, but the capability was
+    unusable and the tests that covered release all supplied their own stub
+    source rather than this function.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from alx.goals import SQLiteGoalStore
+
+        self.store = SQLiteGoalStore(
+            Path(self.directory.name) / "goals.sqlite3"
+        )
+        self.addCleanup(self.store.close)
+
+    def _record_job(
+        self,
+        job_id: str,
+        *,
+        state=None,
+        status: str = "succeeded",
+        capability: str = "run_coding_task",
+        goal_id: str = "goal-1",
+    ) -> None:
+        """Record one completed capability attempt the way the broker does."""
+        from datetime import UTC, datetime
+
+        from alx.contracts import (
+            CapabilityAttempt,
+            CapabilityAttemptDisposition,
+            CapabilityCall,
+            CapabilityResult,
+            CapabilityResultState,
+            GoalState,
+            Objective,
+            SuccessCriterion,
+        )
+
+        resolved = state if state is not None else CapabilityResultState.SUCCEEDED
+        result = CapabilityResult(
+            job_id,
+            capability,
+            resolved,
+            {"status": status},
+            durable_values={"status": status},
+            # The contract requires a failed result to carry structured
+            # failure details, exactly as the real executor supplies.
+            failure=(
+                None
+                if resolved is not CapabilityResultState.FAILED
+                else {"code": "task_failed", "status": status}
+            ),
+        )
+        attempt = CapabilityAttempt(
+            CapabilityCall(job_id, capability, {"task": "fix"}),
+            CapabilityAttemptDisposition.EXECUTED,
+            True,
+            result=result,
+        )
+        self.store.create(
+            GoalState(
+                goal_id=goal_id,
+                objective=Objective("turn:turn-1", "Repair the thing"),
+                success_criteria=(SuccessCriterion("criterion-1", "verified"),),
+                attempts=(attempt,),
+            ),
+            "conversation-1",
+            datetime(2027, 9, 16, tzinfo=UTC),
+        )
+
+    def _source(self):
+        from alx.bootstrap.live_voice import _coding_outcome_source
+
+        return _coding_outcome_source(self.store)
+
+    def test_a_successful_coding_result_is_found(self) -> None:
+        """Would have raised AttributeError under the old lookup."""
+        self._record_job("call-1")
+
+        self.assertEqual(self._source()("call-1"), "succeeded")
+
+    def test_a_failed_coding_result_is_not_success(self) -> None:
+        from alx.contracts import CapabilityResultState
+
+        self._record_job(
+            "call-1", state=CapabilityResultState.FAILED, status="failed"
+        )
+
+        self.assertNotEqual(self._source()("call-1"), "succeeded")
+
+    def test_a_failed_state_wins_over_a_succeeded_status(self) -> None:
+        """Both halves must agree before a job counts as releasable."""
+        from alx.contracts import CapabilityResultState
+
+        self._record_job(
+            "call-1", state=CapabilityResultState.FAILED, status="succeeded"
+        )
+
+        self.assertEqual(self._source()("call-1"), "failed")
+
+    def test_an_unrelated_capability_is_not_consulted(self) -> None:
+        self._record_job("call-1", capability="send_mail")
+
+        self.assertEqual(self._source()("call-1"), "")
+
+    def test_another_jobs_result_is_not_borrowed(self) -> None:
+        self._record_job("call-1")
+
+        self.assertEqual(self._source()("call-2"), "")
+
+    def test_an_unrecorded_job_returns_nothing(self) -> None:
+        self.assertEqual(self._source()("call-1"), "")
+
+    def test_a_blank_job_id_returns_nothing(self) -> None:
+        self.assertEqual(self._source()(""), "")
+
+    def test_release_succeeds_after_a_genuine_successful_job(self) -> None:
+        """End to end through the real source, not a stub.
+
+        This is the regression the defect hid: with the old lookup the release
+        path was unreachable, so nothing proved it could complete against the
+        store the runtime wires in.
+        """
+        from alx.providers.coding_worktree import CodingWorktreeAllocator
+
+        allocator = CodingWorktreeAllocator(
+            self.root, self.repository, self._source()
+        )
+        allocated = allocator.allocate("call-1")
+        allocator.record_outcome("call-1", "succeeded")
+        self._record_job("call-1")
+
+        released = allocator.release_authorised("call-1")
+
+        self.assertTrue(released["released"])
+        self.assertFalse(allocated.path.exists())
+        self.assertNotIn(str(allocated.path), self.worktrees())
+
+    def test_release_refuses_after_a_genuine_failed_job(self) -> None:
+        from alx.contracts import CapabilityResultState
+        from alx.providers.coding_worktree import CodingWorktreeAllocator
+
+        allocator = CodingWorktreeAllocator(
+            self.root, self.repository, self._source()
+        )
+        allocated = allocator.allocate("call-1")
+        allocator.record_outcome("call-1", "failed")
+        self._record_job(
+            "call-1", state=CapabilityResultState.FAILED, status="failed"
+        )
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("call-1")
+
+        self.assertEqual(caught.exception.code, "job_not_successful")
+        self.assertTrue(allocated.path.is_dir())
+
+
+class TheBrokerCallIdBecomesAFilesystemSafeJobId(Repository):
+    """A call id reaching the filesystem is validated, never trusted.
+
+    The broker's ids are UUID-shaped, so in practice every real one is already
+    safe. That is a property of the current broker rather than a contract this
+    module can rely on, so the identity is held to an explicit grammar before
+    it names a directory: a separator, a `..`, an absolute path or a control
+    character must not be able to influence where a worktree lands.
+
+    Validation rather than sanitisation, so the identity stays one-to-one with
+    the broker's call id and no second identifier is invented.
+    """
+
+    def test_the_brokers_own_ids_are_accepted(self) -> None:
+        from uuid import uuid4
+
+        for _ in range(5):
+            self.assertTrue(job_id_permitted(str(uuid4())))
+
+    def test_ordinary_call_ids_are_accepted(self) -> None:
+        for job_id in ("call-1", "call_42", "abc123", "a" * 128):
+            self.assertTrue(job_id_permitted(job_id), job_id)
+
+    def test_path_separators_are_refused(self) -> None:
+        for job_id in ("a/b", "a\\b", "/abs", "a/../b"):
+            self.assertFalse(job_id_permitted(job_id), job_id)
+
+    def test_traversal_is_refused(self) -> None:
+        for job_id in ("..", ".", "../escape", "a/.."):
+            self.assertFalse(job_id_permitted(job_id), job_id)
+
+    def test_control_and_null_characters_are_refused(self) -> None:
+        for job_id in ("a\x00b", "a\nb", "a\tb", "a\rb"):
+            self.assertFalse(job_id_permitted(job_id), job_id)
+
+    def test_option_shaped_ids_are_refused(self) -> None:
+        """A leading dash must never reach a git argv as a flag."""
+        for job_id in ("-rf", "--force", "-"):
+            self.assertFalse(job_id_permitted(job_id), job_id)
+
+    def test_whitespace_and_blank_are_refused(self) -> None:
+        for job_id in ("", "   ", " lead", "trail ", "a b"):
+            self.assertFalse(job_id_permitted(job_id), job_id)
+
+    def test_an_overlong_id_is_refused(self) -> None:
+        self.assertFalse(job_id_permitted("a" * 129))
+
+    def test_an_unsafe_id_never_reaches_the_filesystem(self) -> None:
+        """Refused at allocation, so no directory is created for it."""
+        allocator = self.allocator()
+        for job_id in ("../escape", "a/b", "-rf", "a\x00b"):
+            with self.subTest(job_id=job_id):
+                with self.assertRaises(CodingError) as caught:
+                    allocator.allocate(job_id)
+                self.assertEqual(
+                    caught.exception.details["reason_code"],
+                    "job_id_not_permitted",
+                )
+        # Nothing was created anywhere under the root.
+        existing = list(self.root.iterdir()) if self.root.is_dir() else []
+        self.assertEqual(existing, [])
+
+    def test_an_unsafe_id_cannot_be_released_either(self) -> None:
+        allocator = self.allocator()
+        self.finished("../escape", "succeeded")
+
+        with self.assertRaises(CodingError) as caught:
+            allocator.release_authorised("../escape")
+
+        self.assertEqual(
+            caught.exception.details["reason_code"], "job_id_not_permitted"
+        )
+
+    def test_the_executor_refuses_an_unsafe_call_id(self) -> None:
+        """The boundary where a call id becomes a job identity."""
+        from alx.tools.coding import parse_coding_arguments
+
+        request, failure = parse_coding_arguments({"task": "fix"}, "../escape")
+
+        self.assertIsNone(request)
+        self.assertEqual(failure["invalid_field"], "job_id")
+        self.assertEqual(failure["reason_code"], "unsafe")
+
+    def test_the_executor_accepts_a_broker_shaped_call_id(self) -> None:
+        from uuid import uuid4
+
+        from alx.tools.coding import parse_coding_arguments
+
+        call_id = str(uuid4())
+        request, failure = parse_coding_arguments({"task": "fix"}, call_id)
+
+        self.assertIsNone(failure)
+        # One-to-one with the broker's id: kept verbatim, never re-encoded.
+        self.assertEqual(request.job_id, call_id)
+
+
 if __name__ == "__main__":
     unittest.main()
