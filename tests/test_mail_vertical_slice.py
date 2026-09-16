@@ -21,6 +21,7 @@ from alx.contracts import (  # noqa: E402
     CapabilityCall,
     CapabilityResult,
     CapabilityResultState,
+    CognitionOrigin,
     ConversationOrigin,
     ConversationSnapshot,
     ConversationTurn,
@@ -34,6 +35,7 @@ from alx.contracts import (  # noqa: E402
     SuccessCriterion,
 )
 from alx.conversation import ConversationGateway, SQLiteConversationStore  # noqa: E402
+from alx.bootstrap.reasoning import OriginSelectedReasoner  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.providers import ICloudMailAdapter, SQLiteMailObservationState  # noqa: E402
@@ -673,6 +675,7 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             self.assertEqual(outcome.response, "A supplier sent a quote.")
             self.assertEqual(reasoner.contexts[0].events[0].transient_data["body"], "private body")
             self.assertEqual(reasoner.contexts[0].trigger_event_id, event.event_id)
+            self.assertIs(reasoner.contexts[0].origin, CognitionOrigin.EXTERNAL_EVENT)
             recovered = conversations.load("conversation-1")
             self.assertEqual(recovered.events, ())
             self.assertEqual(recovered.turns[-1].origin, ConversationOrigin.ALX_RESPONSE)
@@ -684,6 +687,47 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
                 recovered.turns[-1].provenance.content_expires_at,
                 NOW + timedelta(days=30),
             )
+        finally:
+            conversations.close()
+            goals.close()
+            directory.cleanup()
+
+    def test_mail_event_selects_the_external_reasoning_path(self) -> None:
+        """Mail provenance, not its content, selects the autonomous Core."""
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        conversations = SQLiteConversationStore(root / "conversations.sqlite3")
+        goals = SQLiteGoalStore(root / "goals.sqlite3")
+
+        class RecordingReasoner:
+            def __init__(self) -> None:
+                self.contexts = []
+
+            def decide(self, context):
+                self.contexts.append(context)
+                return AgentDecision(response="Observed.")
+
+        person = RecordingReasoner()
+        external = RecordingReasoner()
+        gateway = ConversationGateway(
+            CoreAgent(
+                goals, OriginSelectedReasoner(person, external),
+                lambda call, state: None, (),
+            ),
+            conversations,
+            identifier_factory=lambda: "response-1",
+            clock=lambda: NOW,
+        )
+        event = BackgroundEvent(
+            "mail:777:2", "mail.message_arrived", NOW,
+            {"mailbox_id": "INBOX", "uid": "2"},
+        )
+        try:
+            gateway.receive_background_event("conversation-1", event, 1, RETENTION)
+            self.assertEqual(person.contexts, [])
+            self.assertEqual(len(external.contexts), 1)
+            self.assertIs(external.contexts[0].origin, CognitionOrigin.EXTERNAL_EVENT)
+            self.assertEqual(external.contexts[0].trigger_event_id, event.event_id)
         finally:
             conversations.close()
             goals.close()

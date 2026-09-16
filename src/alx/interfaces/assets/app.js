@@ -441,7 +441,9 @@ function handleControl(message) {
   }
   if (message.value === "thinking") {
     beginDiagnosticStage("Reasoning");
-    diagnostic("Final transcription received", "ok");
+    if (message.input_origin === "speech_transcript") {
+      diagnostic("Final transcription received", "ok");
+    }
     diagnostic("Authoritative Core reasoning in progress", "active");
   }
   if (message.value === "speaking") {

@@ -350,6 +350,56 @@ class CoreAgent:
             candidate, proposal_error = self._reduce_goal_proposal(
                 snapshot, decision.goal_proposal, conversation, trigger_event_id,
             )
+            memory_error = self._memory_proposal_grounding_error(
+                conversation,
+                candidate if candidate is not None else (
+                    None if snapshot is None else snapshot.state
+                ),
+                decision.memory_proposals,
+                now,
+            )
+            if memory_error is not None:
+                LOGGER.info("Memory proposal rejected: %s", memory_error)
+                # Nothing is stored for a rejected proposal, and this fires
+                # before the goal is persisted, so the decision leaves no trace
+                # to undo. The specific grounding fault is named so she can
+                # correct that field rather than resend the same proposal.
+                if self._already_refused(
+                    refused_calls, "memory_proposal_invalid", memory_error
+                ):
+                    return CoreOutcome(
+                        CoreState.ERROR, snapshot, reason="memory_proposal_invalid"
+                    )
+                refused_calls = (*refused_calls, {
+                    "reason": "memory_proposal_invalid",
+                    "subject": memory_error,
+                })
+                continue
+            memory_conflicts = self._conflicting_memories(
+                decision.memory_proposals, retention_until,
+            )
+            if memory_conflicts:
+                # A memory identifier is a semantic claim, not a storage
+                # failure.  Check it before any goal revision or pending-memory
+                # batch is written, then let the Core correct the claim.
+                conflict_subject = ",".join(
+                    str(item["memory_id"]) for item in memory_conflicts
+                )
+                if self._already_refused(
+                    refused_calls, "memory_identity_conflict", conflict_subject
+                ):
+                    return CoreOutcome(
+                        CoreState.ERROR, snapshot, reason="memory_identity_conflict"
+                    )
+                refused_calls = (*refused_calls, {
+                    "reason": "memory_identity_conflict",
+                    "subject": conflict_subject,
+                })
+                if decision.call is None:
+                    conflict_response = decision.response
+                    conflict_provenance = decision_provenance
+                    conflict_silent = decision.finish_silently
+                continue
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
                 self._record_rejection(
@@ -517,26 +567,6 @@ class CoreAgent:
                     ),
                 )
 
-            memory_error = self._memory_proposal_grounding_error(
-                conversation, effective, decision.memory_proposals, now,
-            )
-            if memory_error is not None:
-                LOGGER.info("Memory proposal rejected: %s", memory_error)
-                # Nothing is stored for a rejected proposal, and this fires
-                # before the goal is persisted, so the decision leaves no trace
-                # to undo. The specific grounding fault is named so she can
-                # correct that field rather than resend the same proposal.
-                if self._already_refused(
-                    refused_calls, "memory_proposal_invalid", memory_error
-                ):
-                    return CoreOutcome(
-                        CoreState.ERROR, snapshot, reason="memory_proposal_invalid"
-                    )
-                refused_calls = (*refused_calls, {
-                    "reason": "memory_proposal_invalid",
-                    "subject": memory_error,
-                })
-                continue
             if proposal_error is None and (
                 decision.goal_proposal is not None
                 or decision.approval_proposal is not None
@@ -571,7 +601,7 @@ class CoreAgent:
                         snapshot, decision.memory_proposals, retention_until)
                 except MemoryIdentityConflict:
                     memory_conflicts = self._conflicting_memories(
-                        decision.memory_proposals)
+                        decision.memory_proposals, retention_until)
                     continue
                 memory_conflicts = ()
                 if not committed:
@@ -596,7 +626,7 @@ class CoreAgent:
                     # the answer is still delivered below, and memory_state
                     # records that nothing was stored.
                     memory_conflicts = self._conflicting_memories(
-                        decision.memory_proposals)
+                        decision.memory_proposals, retention_until)
                     conflict_response = decision.response
                     conflict_provenance = decision_provenance
                     conflict_silent = decision.finish_silently
@@ -654,7 +684,7 @@ class CoreAgent:
                         snapshot, decision.memory_proposals, retention_until)
                 except MemoryIdentityConflict:
                     memory_conflicts = self._conflicting_memories(
-                        decision.memory_proposals)
+                        decision.memory_proposals, retention_until)
                     continue
                 memory_conflicts = ()
                 if not committed:
@@ -732,14 +762,6 @@ class CoreAgent:
                     and item.scope.matches(decision.call)) else item
                 for item in snapshot.state.approvals
             )
-            # Checked before the durable checkpoint claims the approval: a
-            # conflict sends the turn back to her without dispatching, and a
-            # claimed approval with no dispatch would look like an interrupted
-            # external action on the next restart.
-            conflicts = self._conflicting_memories(decision.memory_proposals)
-            if conflicts:
-                memory_conflicts = conflicts
-                continue
             checkpoint = replace(snapshot.state,
                                  attempts=(*snapshot.state.attempts, pending),
                                  approvals=approvals)
@@ -750,7 +772,7 @@ class CoreAgent:
                     snapshot, decision.memory_proposals, retention_until)
             except MemoryIdentityConflict:
                 memory_conflicts = self._conflicting_memories(
-                    decision.memory_proposals)
+                    decision.memory_proposals, retention_until)
                 continue
             memory_conflicts = ()
             if not committed:
@@ -1451,6 +1473,9 @@ class CoreAgent:
         if self._memory_store is None:
             return snapshot, False
         try:
+            conflicts = self._conflicting_memories(proposals, retention_until)
+            if conflicts:
+                raise MemoryIdentityConflict(str(conflicts[0]["memory_id"]))
             if snapshot is None:
                 self._memory_store.remember_many(proposals, retention_until)
                 return None, True
@@ -1505,13 +1530,16 @@ class CoreAgent:
             LOGGER.warning("Goal rejection record could not be written")
 
     def _conflicting_memories(
-        self, proposals: tuple[MemoryProposal, ...],
+        self, proposals: tuple[MemoryProposal, ...], retention_until: datetime,
     ) -> tuple[Mapping[str, Any], ...]:
         """The mechanical facts the Core needs to resolve an identifier clash.
 
         Only what is already true in the store: the identifier, the kind, and
         the content it currently holds. Nothing here suggests what she should
-        do about it, and nothing compares the two texts for similarity.
+        do about it, and nothing compares the two texts for similarity.  The
+        equality check deliberately mirrors the durable store's idempotency
+        rule, so an exact replay reaches the store harmlessly while every
+        changed identity is returned to the Core before durable staging.
         """
         if self._memory_store is None:
             return ()
@@ -1521,10 +1549,19 @@ class CoreAgent:
                 existing = self._memory_store.load(proposal.memory_id)
             except Exception:
                 continue
-            revision = existing.revisions[-1]
-            if (existing.kind is proposal.kind
-                    and revision.content == proposal.content):
+            initial = existing.revisions[0]
+            if (
+                existing.kind is proposal.kind
+                and existing.person_id == proposal.person_id
+                and existing.supersedes_memory_id == proposal.supersedes_memory_id
+                and initial.content == proposal.content
+                and initial.source_references == proposal.source_references
+                and initial.recorded_at == proposal.formed_at
+                and initial.meaning == proposal.meaning
+                and existing.retention_until == retention_until
+            ):
                 continue
+            revision = existing.revisions[-1]
             conflicts.append({
                 "memory_id": proposal.memory_id,
                 "existing_kind": existing.kind.value,

@@ -73,6 +73,7 @@ class VoiceEvent:
     diagnostic: Mapping[str, Any] | None = None
     activity: str | None = None
     text: str | None = None
+    input_origin: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind is VoiceEventKind.TEXT and not self.text:
@@ -95,6 +96,8 @@ class VoiceEvent:
             raise ValueError("error events require a reason")
         if self.kind is not VoiceEventKind.ERROR and self.reason is not None:
             raise ValueError("only error events may carry a reason")
+        if self.kind is not VoiceEventKind.THINKING and self.input_origin is not None:
+            raise ValueError("only thinking events may carry an input origin")
 
 
 class VoiceDiagnosticBuffer:
@@ -472,7 +475,12 @@ class VoiceSession:
                 if now.tzinfo is None or now.utcoffset() is None:
                     yield VoiceEvent(VoiceEventKind.ERROR, reason="clock_error")
                     return
-                yield VoiceEvent(VoiceEventKind.THINKING)
+                input_origin = {
+                    "transcription": "speech_transcript",
+                    "typed": "typed",
+                    "background": "background_event",
+                }[kind]
+                yield VoiceEvent(VoiceEventKind.THINKING, input_origin=input_origin)
                 LOGGER.info("Authoritative Core turn started: %s", kind)
 
                 async def run_turn() -> Any:

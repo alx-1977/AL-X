@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     BackgroundEvent, ConversationOrigin, ConversationSnapshot, ConversationTurn,
-    DurableConversationStore,
+    CognitionOrigin, DurableConversationStore,
     ContentOrigin, RetentionPolicy,
 )
 from alx.conversation.store import ConversationNotFound
@@ -170,6 +170,7 @@ class ConversationGateway:
             retention_until,
             step_budget,
             trigger_event_id=event.event_id,
+            origin=CognitionOrigin.EXTERNAL_EVENT,
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
             response_turn = ConversationTurn(

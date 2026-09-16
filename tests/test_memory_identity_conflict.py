@@ -29,13 +29,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import (  # noqa: E402
-    AgentDecision, ApprovalLifecycle, CapabilityAttemptDisposition,
+    AgentDecision, ApprovalLifecycle, AudioChunk, CapabilityAttemptDisposition,
     CapabilityDefinition, ConversationOrigin,
-    ConversationSnapshot, ConversationTurn, MemoryKind, MemoryProposal,
-    SideEffect, StructuredSchema, ValueKind,
+    ConversationSnapshot, ConversationTurn, Evidence, GoalMutationKind,
+    GoalProposal, GoalState, GoalStatus, MemoryKind, MemoryProposal,
+    Objective, SideEffect, StructuredSchema, SuccessCriterion,
+    TranscriptionEvent, TranscriptionState, ValueKind,
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
+from alx.interfaces import VoiceEventKind, VoiceSession  # noqa: E402
 from alx.memories.store import (  # noqa: E402
     MemoryIdentityConflict, SQLiteMemoryStore,
 )
@@ -281,6 +284,205 @@ class MemoryIdentityConflictTest(unittest.TestCase):
             outcome.reason, "memory_persistence_error",
             "real storage failure must not be confused with an identity conflict",
         )
+
+    def test_completion_memory_conflict_is_corrected_before_durable_staging(self) -> None:
+        """A known conflict cannot first complete the goal or queue a batch."""
+        existing_evidence = Evidence(
+            "evidence-existing", "The existing fact is enough.",
+            supports=("criterion-1",), source_references=(f"turn:{TURN_ID}",),
+        )
+        initial = self.store.create(
+            GoalState(
+                "goal-1",
+                Objective(f"turn:{TURN_ID}", "Finish the work"),
+                (SuccessCriterion("criterion-1", "the fact is recorded"),),
+                evidence=(existing_evidence,),
+            ),
+            "conversation-1", RETENTION,
+        )
+        completion = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
+        first = AgentDecision(
+            goal_id="goal-1", response="The work is complete.",
+            goal_proposal=completion, response_requires_goal_commit=True,
+            memory_proposals=(proposal(
+                "rel-partnership-20260903", "Different content entirely.",
+            ),),
+        )
+        corrected = AgentDecision(
+            goal_id="goal-1", response="The work is complete.",
+            goal_proposal=completion, response_requires_goal_commit=True,
+        )
+        store = self.store
+
+        class Correcting:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.contexts = []
+
+            def decide(self, context):
+                self.contexts.append(context)
+                self.calls += 1
+                if self.calls == 1:
+                    return first
+                # This is the correction call. The rejected completion and
+                # memory intent must have left no durable staging behind.
+                self.assertEqual(store.load("goal-1").revision, initial.revision)
+                self.assertEqual(store.pending_memory_batches("goal-1"), ())
+                state = store.load("goal-1").state
+                self.assertIs(state.status, GoalStatus.ACTIVE)
+                self.assertEqual(state.evidence, (existing_evidence,))
+                return corrected
+
+            def assertEqual(self, left, right) -> None:
+                testcase.assertEqual(left, right)
+
+            def assertIs(self, left, right) -> None:
+                testcase.assertIs(left, right)
+
+        testcase = self
+        reasoner = Correcting()
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(
+            reasoner.contexts[1].memory_conflicts[0]["memory_id"],
+            "rel-partnership-20260903",
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertIs(outcome.snapshot.state.status, GoalStatus.COMPLETED)
+        self.assertEqual(outcome.snapshot.state.evidence, (existing_evidence,))
+        self.assertEqual(self.store.pending_memory_batches("goal-1"), ())
+
+    def test_core_identical_replay_passes_preflight_without_a_correction(self) -> None:
+        """The preflight is as idempotent as the durable memory store."""
+        reasoner = Queued(AgentDecision(
+            response="Sleep well.",
+            memory_proposals=(proposal(
+                "rel-partnership-20260903", "The first thing she remembered.",
+            ),),
+        ))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 1)
+
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(len(reasoner.contexts), 1)
+
+    def test_repeated_identity_conflict_uses_the_normal_one_correction_bound(self) -> None:
+        conflicting = AgentDecision(
+            response="Sleep well.",
+            memory_proposals=(proposal(
+                "rel-partnership-20260903", "Different content entirely.",
+            ),),
+        )
+        reasoner = Queued(conflicting, conflicting)
+
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+
+        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(outcome.reason, "memory_identity_conflict")
+        self.assertNotEqual(outcome.reason, "memory_persistence_error")
+
+    def test_startup_flushes_a_legitimate_pending_memory_batch(self) -> None:
+        """Preflight does not weaken crash-safe replay of valid batches."""
+        state = GoalState(
+            "goal-1",
+            Objective(f"turn:{TURN_ID}", "Finish the work"),
+            (SuccessCriterion("criterion-1", "the fact is recorded"),),
+        )
+        initial = self.store.create(state, "conversation-1", RETENTION)
+        self.store.replace_with_memory_batch(
+            state, RETENTION, initial.revision,
+            (proposal("fresh-after-restart", "A valid pending memory."),),
+        )
+        reasoner = Queued(AgentDecision(goal_id="goal-1", response="Continuing."))
+
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 1)
+
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.store.pending_memory_batches("goal-1"), ())
+        self.assertEqual(
+            self.memories.load("fresh-after-restart").revisions[-1].content,
+            "A valid pending memory.",
+        )
+
+
+class MemoryIdentityConflictVoiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_corrected_conflict_returns_voice_to_listening_without_pipeline_error(self) -> None:
+        """The semantic correction remains a normal Core response to voice."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        goals = SQLiteGoalStore(root / "goals.sqlite3")
+        memories = SQLiteMemoryStore(root / "memories.sqlite3")
+        self.addCleanup(goals.close)
+        self.addCleanup(memories.close)
+        memories.remember_many(
+            (proposal("rel-partnership-20260903", "The first thing she remembered."),),
+            RETENTION,
+        )
+        evidence = Evidence(
+            "evidence-existing", "The existing fact is enough.",
+            supports=("criterion-1",), source_references=(f"turn:{TURN_ID}",),
+        )
+        goals.create(
+            GoalState(
+                "goal-1",
+                Objective(f"turn:{TURN_ID}", "Finish the work"),
+                (SuccessCriterion("criterion-1", "the fact is recorded"),),
+                evidence=(evidence,),
+            ),
+            "conversation-1", RETENTION,
+        )
+        completion = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
+        reasoner = Queued(
+            AgentDecision(
+                goal_id="goal-1", response="The work is complete.",
+                goal_proposal=completion, response_requires_goal_commit=True,
+                memory_proposals=(proposal(
+                    "rel-partnership-20260903", "Different content entirely.",
+                ),),
+            ),
+            AgentDecision(
+                goal_id="goal-1", response="The work is complete.",
+                goal_proposal=completion, response_requires_goal_commit=True,
+            ),
+        )
+        agent = CoreAgent(
+            goals, reasoner, lambda proposed, state: None, (DEFINITION,),
+            memory_store=memories, clock=lambda: NOW,
+        )
+        # The Core path above is the semantic-conflict integration.  Feed its
+        # authoritative normal outcome through voice separately, keeping the
+        # test's worker boundary mechanical rather than opening test SQLite
+        # connections on a transient worker thread.
+        corrected_outcome = agent.process(conversation(), RETENTION, 2)
+
+        class Gateway:
+            def receive_conversation_turn(self, turn, step_budget, retention_until):
+                return corrected_outcome
+
+        class Transcriber:
+            async def transcribe(self, audio):
+                async for _chunk in audio:
+                    pass
+                yield TranscriptionEvent(
+                    "stt", "one", TranscriptionState.FINAL, "Please finish.", NOW,
+                )
+
+        async def audio():
+            yield AudioChunk("mic", 0, b"pcm", "audio/pcm", 16000)
+
+        session = VoiceSession(
+            Gateway(), Transcriber(), None, "friedl", 2, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: TURN_ID,
+        )
+        events = [event async for event in session.exchange("conversation-1", audio())]
+
+        self.assertIn(VoiceEventKind.LISTENING, [event.kind for event in events])
+        self.assertNotIn(VoiceEventKind.ERROR, [event.kind for event in events])
+        self.assertTrue(any(
+            event.kind is VoiceEventKind.TEXT and event.text == "The work is complete."
+            for event in events
+        ))
 
 
 class MemoryVisibilityTest(unittest.TestCase):
