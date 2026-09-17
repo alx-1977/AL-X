@@ -620,9 +620,23 @@ class CoreAgent:
                 if self._memory_store is None:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_store_unavailable")
                 try:
-                    retrieved_memories = self._memory_store.retrieve(decision.memory_query, now)
+                    found = self._memory_store.retrieve(decision.memory_query, now)
                 except Exception:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_retrieval_error")
+                # Accumulate across the retrievals of one process rather than
+                # replacing. A second retrieval used to discard the first, so
+                # reasoning that needed two of them could only ever see the
+                # later one and would re-ask for what it had already found.
+                #
+                # Deduplicated by memory_id alone. Two retrievals legitimately
+                # overlap, and the same memory twice is the same memory; asking
+                # whether two *different* memories mean the same thing would be
+                # a judgement, and it is not one this code may make.
+                known = {item.memory_id for item in retrieved_memories}
+                retrieved_memories = (
+                    *retrieved_memories,
+                    *(item for item in found if item.memory_id not in known),
+                )
                 memory_query_ids.add(decision.memory_query.query_id)
                 continue
 

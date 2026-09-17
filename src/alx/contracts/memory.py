@@ -46,6 +46,46 @@ class MemorySourceMatch(str, Enum):
     ALL = "all"
 
 
+# The most memories one retrieval may return. Topic retrieval is ranked rather
+# than exact, so without a ceiling a vague topic would drift back towards the
+# whole-store replay that `IDENTITY_AND_MEMORY.md` forbids. Every retrieval is
+# capped, not only topic retrieval, because a wide date range is just as broad.
+MAX_RETRIEVAL_LIMIT = 25
+
+
+class MemoryMatchReason(str, Enum):
+    """Why one memory surfaced, in terms of cognition rather than mechanism.
+
+    Deliberately coarse. It says whether a result is a certainty or a
+    suggestion, which is what AL/X needs in order to weigh it, and nothing
+    about how the suggestion was produced. A value naming the backend —
+    "lexical", "semantic", "fts" — would let her reason about the retrieval
+    machinery, and the machinery is meant to be replaceable without her
+    noticing.
+    """
+
+    # Named outright: an identifier or source reference she supplied.
+    EXACT = "exact"
+    # Fell inside a deterministic boundary she set, such as a date range.
+    SCOPE = "scope"
+    # Matched what she asked about. A suggestion, never a certainty.
+    TOPIC = "topic"
+
+
+class MemorySupersession(str, Enum):
+    """Whether a retrieved memory is the current one or a historical one.
+
+    Retrieval reports this; it never acts on it. Deciding which of two
+    conflicting memories is true is a question about meaning, and under Law 3
+    that belongs to the Core.
+    """
+
+    # Nothing has replaced this memory.
+    CURRENT = "current"
+    # A later memory replaced this one. It was true; it may not be now.
+    SUPERSEDED = "superseded"
+
+
 class MemoryIdentityConflict(Exception):
     """A proposed memory_id already names a memory with different content.
 
@@ -68,6 +108,18 @@ class MemoryQuery:
     source_references: tuple[str, ...] = ()
     source_match: MemorySourceMatch = MemorySourceMatch.ANY
     include_superseded: bool = False
+    # What the retrieval is about. The one ranking dimension: it generates
+    # candidates rather than bounding them, so it is always paired with the
+    # ceiling below. Blank is not a topic, and whitespace is not a topic.
+    topic: str | None = None
+    # Which project's records to look in. A deterministic boundary applied
+    # before any ranking, so a memory belonging elsewhere cannot surface by
+    # matching a topic well. Omitting it searches every project and the
+    # unscoped memories together, which is what cross-project recall needs.
+    project_id: str | None = None
+    # The ceiling on one retrieval. Present on every query, because a broad
+    # date range replays as much of the store as a vague topic would.
+    limit: int = MAX_RETRIEVAL_LIMIT
 
     def __post_init__(self) -> None:
         _required(self.query_id, "query_id")
@@ -104,6 +156,25 @@ class MemoryQuery:
             raise TypeError("source_match must be a MemorySourceMatch")
         if not isinstance(self.include_superseded, bool):
             raise TypeError("include_superseded must be boolean")
+        if self.topic is not None:
+            if not isinstance(self.topic, str):
+                raise TypeError("topic must be a string or None")
+            # Normalised before it is judged, so " " cannot pass as a topic and
+            # then match everything once the backend trims it.
+            normalised = " ".join(self.topic.split())
+            if not normalised:
+                raise ValueError("topic must not be blank")
+            object.__setattr__(self, "topic", normalised)
+        if self.project_id is not None:
+            _required(self.project_id, "project_id")
+        if not isinstance(self.limit, int) or isinstance(self.limit, bool):
+            raise TypeError("limit must be an int")
+        if self.limit < 1:
+            raise ValueError("limit must be positive")
+        if self.limit > MAX_RETRIEVAL_LIMIT:
+            raise ValueError(
+                f"limit must not exceed {MAX_RETRIEVAL_LIMIT}"
+            )
         if MemoryKind.RELATIONSHIP in self.kinds and self.person_id is None:
             raise ValueError("relationship retrieval requires person_id")
         if self.person_id is not None and MemoryKind.RELATIONSHIP not in self.kinds:
@@ -117,10 +188,25 @@ class MemoryQuery:
                     self.formed_after,
                     self.formed_before,
                     self.source_references,
+                    self.topic,
                 )
             )
         ):
             raise ValueError("non-relationship kinds require their own retrieval scope")
+        # A retrieval must say more than which kinds of memory it wants. Kinds
+        # alone would replay the store, which is the whole-history replay
+        # `IDENTITY_AND_MEMORY.md` forbids, and refusing it once ended two live
+        # turns mid-sentence because the protocol never said how to narrow.
+        #
+        # A topic now satisfies this. It is not an exact boundary, but it is a
+        # genuine narrowing: results are ranked against something she asked
+        # about and capped by `limit`, so the answer to a vague topic is the
+        # best few, never the store.
+        #
+        # `project_id` deliberately does not satisfy it. A project accumulates
+        # indefinitely, so "everything in this project" is the same replay
+        # wearing a scope. It narrows a retrieval; it cannot be the whole of
+        # one.
         if not any(
             (
                 self.memory_ids,
@@ -128,6 +214,7 @@ class MemoryQuery:
                 self.formed_after,
                 self.formed_before,
                 self.source_references,
+                self.topic,
             )
         ):
             raise ValueError("retrieval requires a scope narrower than memory kind alone")
@@ -231,6 +318,12 @@ class MemorySnapshot:
     # Defaulted so that every existing construction site, and every memory
     # written before scopes existed, stays valid and unscoped.
     scope: ScopeReference | None = None
+    # Why this memory surfaced, and whether it is still the current one. Both
+    # describe one retrieval rather than the memory itself, so both default:
+    # a snapshot loaded by identifier is not the answer to a query and says
+    # nothing about either.
+    match_reason: MemoryMatchReason | None = None
+    supersession: MemorySupersession | None = None
 
     @property
     def current(self) -> MemoryRevision:

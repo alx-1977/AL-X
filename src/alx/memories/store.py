@@ -7,8 +7,11 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from dataclasses import replace
+
 from alx.contracts import (
     MemoryCorrection,
+    MemoryMatchReason,
     MemoryIdentityConflict,
     MemoryKind,
     MemoryProposal,
@@ -16,6 +19,7 @@ from alx.contracts import (
     MemoryRevision,
     MemorySnapshot,
     MemorySourceMatch,
+    MemorySupersession,
 )
 from alx.contracts.provenance import (
     ContentProvenance,
@@ -61,6 +65,30 @@ class InvalidMemorySupersession(MemoryStoreError):
 def _aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
+
+
+def _topic_query(topic: str) -> str | None:
+    """Turn what AL/X asked about into one safe FTS5 query.
+
+    Every term is quoted and the terms are ANDed. Quoting is what stops FTS5's
+    own syntax being read out of her words: a topic containing `OR`, `NEAR` or
+    a bare `*` would otherwise change the search into something she did not
+    ask for, and an unbalanced quote would make it fail outright.
+
+    ANDing is the deliberately conservative choice. Requiring every term
+    returns fewer, more relevant memories and answers a two-word topic with
+    memories about both words rather than either, which is nearer to what
+    asking about something means.
+
+    Returns None when nothing usable survives, which the caller reads as a
+    topic that matches nothing rather than one that matches everything.
+    """
+    terms = [
+        "".join(character for character in term if character.isalnum() or character in "-_")
+        for term in topic.split()
+    ]
+    usable = [f'"{term}"' for term in terms if term]
+    return " AND ".join(usable) if usable else None
 
 
 def _encode_revision(revision: MemoryRevision) -> str:
@@ -142,7 +170,94 @@ class SQLiteMemoryStore:
                     self._connection.execute(
                         f'ALTER TABLE memory_revisions ADD COLUMN "{column}" TEXT'
                     )
+            self._build_topic_index()
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    # ---- topic index ----------------------------------------------------
+    #
+    # A derived accelerator over the current content of each memory, and
+    # nothing else. The authoritative rows are `memories` and
+    # `memory_revisions`; this table holds a copy of text those rows already
+    # contain, so dropping it loses nothing and rebuilding it from them is
+    # always correct. `rebuild_topic_index` exists to make that explicit and
+    # testable rather than theoretical.
+    #
+    # It is an external-content-free FTS5 table rather than one linked to a
+    # source table, because the text it indexes is the *current* revision,
+    # which is a computed choice over `memory_revisions` rather than a column
+    # anyone could point FTS5 at. Keeping it independent means a correction
+    # updates one row here instead of leaving the index describing a revision
+    # that is no longer current.
+    #
+    # Every memory is indexed, including one that something later replaced,
+    # and only its *current* revision is. Superseded memories stay in the index
+    # deliberately: whether history is wanted is `include_superseded`, a
+    # deterministic filter AL/X sets, and an index that quietly dropped those
+    # rows would make asking for history return nothing while appearing to
+    # work. The index decides relevance; it never decides what is true now.
+
+    def _build_topic_index(self) -> None:
+        self._connection.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_topics USING fts5("
+            "memory_id UNINDEXED, content, tokenize='unicode61')"
+        )
+
+    def rebuild_topic_index(self) -> None:
+        """Discard the derived index and recreate it from the memories.
+
+        Safe at any time: it touches no authoritative row. It exists so that
+        an index which is absent, stale or damaged is a recoverable condition
+        rather than a reason to doubt what is remembered.
+        """
+        with self._connection:
+            self._connection.execute("DROP TABLE IF EXISTS memory_topics")
+            self._build_topic_index()
+            for (memory_id,) in self._connection.execute(
+                "SELECT memory_id FROM memories ORDER BY memory_id"
+            ).fetchall():
+                self._index_memory(memory_id)
+
+    def _index_memory(self, memory_id: str) -> None:
+        """Record one memory's current content, replacing what was there."""
+        row = self._connection.execute(
+            "SELECT revision_json FROM memory_revisions WHERE memory_id = ? "
+            "ORDER BY revision DESC LIMIT 1",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            return
+        content = json.loads(row[0]).get("content")
+        self._connection.execute(
+            "DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,)
+        )
+        if isinstance(content, str) and content.strip():
+            self._connection.execute(
+                "INSERT INTO memory_topics(memory_id, content) VALUES (?, ?)",
+                (memory_id, content),
+            )
+
+    def _topic_matches(self, topic: str) -> list[str] | None:
+        """Memory identifiers whose current content matches, best first.
+
+        Returns None when the index cannot answer, which the caller treats as
+        "no topic ranking available" rather than "no memories". The index is
+        derived, so its absence must degrade ranking and never deny a memory
+        that the authoritative rows still hold.
+        """
+        query = _topic_query(topic)
+        if query is None:
+            return []
+        try:
+            rows = self._connection.execute(
+                "SELECT memory_id FROM memory_topics WHERE memory_topics "
+                "MATCH ? ORDER BY rank",
+                (query,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # No index, or a tokenizer that cannot parse this query. Neither is
+            # a statement about what is remembered.
+            return None
+        return [item[0] for item in rows]
 
     def create(self, proposal: MemoryProposal, retention_until: datetime) -> MemorySnapshot:
         _aware(retention_until, "retention_until")
@@ -218,7 +333,19 @@ class SQLiteMemoryStore:
         return tuple(self.load(row[0]) for row in rows)
 
     def retrieve(self, query: MemoryQuery, as_of: datetime) -> tuple[MemorySnapshot, ...]:
-        """Apply Core-selected metadata constraints without interpreting meaning."""
+        """Apply Core-selected metadata constraints without interpreting meaning.
+
+        Order matters and is deliberate. Every deterministic constraint — kind,
+        identifier, person, project, date, source, supersession — decides which
+        memories are eligible. Only then does a topic order what survived. A
+        topic can therefore never widen a boundary AL/X set, which is what
+        keeps a good match in another project, or another person's memory, from
+        surfacing because the words happened to fit.
+
+        Nothing here interprets what a memory means or which of two memories is
+        right. It marks each result as current or superseded and returns them
+        both when asked; the judgement is the Core's.
+        """
         _aware(as_of, "as_of")
         snapshots = tuple(
             self.load(row[0])
@@ -257,10 +384,47 @@ class SQLiteMemoryStore:
                     continue
                 if query.source_match is MemorySourceMatch.ALL and not requested_sources.issubset(sources):
                     continue
+            if query.project_id is not None:
+                scope = item.scope
+                if scope is None or scope.project_id != query.project_id:
+                    continue
             if not query.include_superseded and item.memory_id in superseded_ids:
                 continue
             selected.append(item)
-        return tuple(selected)
+
+        if query.topic is not None:
+            ranked = self._topic_matches(query.topic)
+            if ranked is None:
+                # The derived index could not answer. Ranking is unavailable,
+                # so the eligible set is returned in its ordinary order rather
+                # than denying memories the authoritative rows still hold.
+                reason = MemoryMatchReason.SCOPE
+            else:
+                position = {
+                    memory_id: index for index, memory_id in enumerate(ranked)
+                }
+                selected = [
+                    item for item in selected if item.memory_id in position
+                ]
+                selected.sort(key=lambda item: position[item.memory_id])
+                reason = MemoryMatchReason.TOPIC
+        elif query.memory_ids or query.source_references:
+            reason = MemoryMatchReason.EXACT
+        else:
+            reason = MemoryMatchReason.SCOPE
+
+        return tuple(
+            replace(
+                item,
+                match_reason=reason,
+                supersession=(
+                    MemorySupersession.SUPERSEDED
+                    if item.memory_id in superseded_ids
+                    else MemorySupersession.CURRENT
+                ),
+            )
+            for item in selected[: query.limit]
+        )
 
     def correct(self, memory_id: str, correction: MemoryCorrection, expected_revision: int) -> MemorySnapshot:
         current = self.load(memory_id)
@@ -299,6 +463,9 @@ class SQLiteMemoryStore:
                         *provenance_to_storage(revision.provenance),
                     ),
                 )
+                # The current revision changed, so what the index describes
+                # must change with it.
+                self._index_memory(memory_id)
         except sqlite3.IntegrityError as error:
             raise MemoryRevisionConflict(memory_id) from error
         return self.load(memory_id)
@@ -313,6 +480,9 @@ class SQLiteMemoryStore:
                 if self._exists(memory_id):
                     raise MemoryRevisionConflict(memory_id)
                 raise MemoryNotFound(memory_id)
+            self._connection.execute(
+                "DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,)
+            )
 
     def purge_expired(self, now: datetime) -> tuple[str, ...]:
         _aware(now, "now")
@@ -325,6 +495,10 @@ class SQLiteMemoryStore:
         )
         with self._connection:
             self._connection.executemany("DELETE FROM memories WHERE memory_id = ?", ((item,) for item in identifiers))
+            self._connection.executemany(
+                "DELETE FROM memory_topics WHERE memory_id = ?",
+                ((item,) for item in identifiers),
+            )
         return identifiers
 
     def _exists(self, memory_id: str) -> bool:
@@ -358,6 +532,9 @@ class SQLiteMemoryStore:
                 *provenance_to_storage(proposal.provenance),
             ),
         )
+        # Inside the caller's transaction, so the index cannot record a memory
+        # that was not stored.
+        self._index_memory(proposal.memory_id)
 
     @staticmethod
     def _matches_proposal(
