@@ -39,7 +39,7 @@ from alx.contracts import (  # noqa: E402
     scope_to_storage,
 )
 from alx.goals.store import SQLiteGoalStore  # noqa: E402
-from alx.memories import SQLiteMemoryStore  # noqa: E402
+from alx.memories import MemoryIdentityConflict, SQLiteMemoryStore  # noqa: E402
 from alx.projects import (  # noqa: E402
     DuplicateProject,
     ProjectInUse,
@@ -307,6 +307,62 @@ class MemoryScopeTests(unittest.TestCase):
         # The superseded memory is kept and stays inspectable.
         self.assertEqual(self.store.load("m1").current.content, "older")
 
+    def test_a_differing_scope_under_one_identifier_conflicts(self) -> None:
+        """One identifier must not quietly come to mean two places.
+
+        Scope is part of what constitutes the memory, so a proposal reusing an
+        identifier with a different scope is a different memory. Before this
+        was compared, the retry resolved silently to the stored memory and the
+        caller received the old scope having asked for the new one.
+        """
+        self.store.remember(
+            MemoryProposal(
+                "m1", MemoryKind.FACTUAL, "a fact", ("turn:1",), NOW,
+                scope=ScopeReference(project_id="A"),
+            ),
+            RETENTION,
+        )
+        with self.assertRaises(MemoryIdentityConflict):
+            self.store.remember(
+                MemoryProposal(
+                    "m1", MemoryKind.FACTUAL, "a fact", ("turn:1",), NOW,
+                    scope=ScopeReference(project_id="B"),
+                ),
+                RETENTION,
+            )
+        self.assertEqual(self.store.load("m1").scope, ScopeReference(project_id="A"))
+
+    def test_scoping_a_previously_unscoped_identifier_conflicts(self) -> None:
+        """Gaining a scope is also a change of what the identifier means."""
+        self.store.remember(
+            MemoryProposal("m1", MemoryKind.FACTUAL, "a fact", ("turn:1",), NOW),
+            RETENTION,
+        )
+        with self.assertRaises(MemoryIdentityConflict):
+            self.store.remember(
+                MemoryProposal(
+                    "m1", MemoryKind.FACTUAL, "a fact", ("turn:1",), NOW,
+                    scope=ScopeReference(project_id="A"),
+                ),
+                RETENTION,
+            )
+
+    def test_an_identical_scoped_retry_is_still_idempotent(self) -> None:
+        """The conflict guard must not become an obstacle to a plain retry.
+
+        Comparing provenance once made this guard unreachable and ended a live
+        conversation mid-sentence. Adding scope to the comparison must not
+        repeat that: the same memory proposed twice still resolves quietly.
+        """
+        proposal = MemoryProposal(
+            "m1", MemoryKind.FACTUAL, "a fact", ("turn:1",), NOW,
+            scope=ScopeReference(project_id="A"),
+        )
+        self.store.remember(proposal, RETENTION)
+        again = self.store.remember(proposal, RETENTION)
+        self.assertEqual(again.scope, ScopeReference(project_id="A"))
+        self.assertEqual(len(again.revisions), 1)
+
     def test_a_scope_of_the_wrong_type_is_refused(self) -> None:
         with self.assertRaises(TypeError):
             MemoryProposal(
@@ -405,7 +461,14 @@ class GoalScopeTests(unittest.TestCase):
         )
 
     def test_scope_survives_a_goal_revision(self) -> None:
-        """Updating a goal must not quietly drop where it belongs."""
+        """Updating a goal must not quietly drop where it belongs.
+
+        Both the snapshot `replace` hands back and the one reloaded from the
+        store are checked. Asserting only on the reload hid a real defect: the
+        database kept the scope because the UPDATE leaves the column alone,
+        while the returned snapshot took the field's default and reported the
+        goal as unscoped until somebody happened to load it again.
+        """
         snapshot = self.store.create(
             goal(), "conv-1", RETENTION, None, ScopeReference(project_id="p1")
         )
@@ -415,8 +478,33 @@ class GoalScopeTests(unittest.TestCase):
             (SuccessCriterion("c1", "measurements recorded"),),
             progress=(),
         )
-        self.store.replace(replaced, RETENTION, snapshot.revision)
+        returned = self.store.replace(replaced, RETENTION, snapshot.revision)
+        self.assertEqual(returned.scope, ScopeReference(project_id="p1"))
         self.assertEqual(self.store.load("g1").scope, ScopeReference(project_id="p1"))
+
+    def test_scope_survives_a_revision_carrying_memories(self) -> None:
+        """The second replacement path returns the same scope as the first."""
+        snapshot = self.store.create(
+            goal(), "conv-1", RETENTION, None, ScopeReference(project_id="p1")
+        )
+        returned = self.store.replace_with_memory_batch(
+            goal(),
+            RETENTION,
+            snapshot.revision,
+            (
+                MemoryProposal(
+                    "m1", MemoryKind.FACTUAL, "a fact", ("turn:1",), NOW
+                ),
+            ),
+        )
+        self.assertEqual(returned.scope, ScopeReference(project_id="p1"))
+        self.assertEqual(self.store.load("g1").scope, ScopeReference(project_id="p1"))
+
+    def test_an_unscoped_goal_revision_stays_unscoped(self) -> None:
+        snapshot = self.store.create(goal(), "conv-1", RETENTION)
+        returned = self.store.replace(goal(), RETENTION, snapshot.revision)
+        self.assertIsNone(returned.scope)
+        self.assertIsNone(self.store.load("g1").scope)
 
 
 class ScopeIsNotAStoreTests(unittest.TestCase):

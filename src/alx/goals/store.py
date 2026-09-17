@@ -351,7 +351,7 @@ class SQLiteGoalStore:
     ) -> GoalSnapshot:
         _aware(retention_until, "retention_until")
         with self._connection:
-            conversation_id, retained_provenance = self._replace_rows(
+            conversation_id, retained_provenance, scope = self._replace_rows(
                 state, retention_until, expected_revision, provenance
             )
         return GoalSnapshot(
@@ -360,6 +360,7 @@ class SQLiteGoalStore:
             expected_revision + 1,
             retention_until,
             retained_provenance,
+            scope,
         )
 
     def replace_with_memory_batch(
@@ -377,7 +378,7 @@ class SQLiteGoalStore:
             raise ValueError("replace_with_memory_batch requires proposals")
         goal_revision = expected_revision + 1
         with self._connection:
-            conversation_id, retained_provenance = self._replace_rows(
+            conversation_id, retained_provenance, scope = self._replace_rows(
                 state, retention_until, expected_revision, provenance
             )
             self._connection.executemany(
@@ -400,6 +401,7 @@ class SQLiteGoalStore:
             goal_revision,
             retention_until,
             retained_provenance,
+            scope,
         )
 
     def pending_memory_batches(self, goal_id: str) -> tuple[PendingMemoryBatch, ...]:
@@ -480,7 +482,7 @@ class SQLiteGoalStore:
         retention_until: datetime,
         expected_revision: int,
         provenance: ContentProvenance | None,
-    ) -> tuple[str, ContentProvenance | None]:
+    ) -> tuple[str, ContentProvenance | None, ScopeReference | None]:
         existing_row = self._connection.execute(
             "SELECT content_origins, content_recorded_at, content_expires_at, "
             "mail_references FROM goals WHERE goal_id = ?",
@@ -521,8 +523,12 @@ class SQLiteGoalStore:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
                 raise GoalRevisionConflict(state.goal_id)
             raise GoalNotFound(state.goal_id)
+        # The scope is read back rather than carried in, because a replacement
+        # never sets it: the UPDATE above leaves the column alone, so the
+        # persisted value is the authority for what the returned snapshot says.
         row = self._connection.execute(
-            "SELECT conversation_id FROM goals WHERE goal_id = ?", (state.goal_id,)
+            "SELECT conversation_id, scope FROM goals WHERE goal_id = ?",
+            (state.goal_id,),
         ).fetchone()
         assert row is not None
-        return row[0], retained
+        return row[0], retained, scope_from_storage(row[1])

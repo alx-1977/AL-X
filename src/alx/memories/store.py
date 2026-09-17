@@ -368,12 +368,12 @@ class SQLiteMemoryStore:
         """Whether a proposal is the memory already stored under that identifier.
 
         Every field that constitutes the memory is compared: what is
-        remembered, who it concerns, what it came from, when it was formed and
-        what it means. Provenance is deliberately not among them. It describes
-        the reasoning step that produced the proposal, not the fact being
-        remembered, and the Core stamps a fresh one on every step: its
-        recorded_at is that step's clock and its mail references grow as
-        messages arrive. Comparing it made this guard unreachable, so a
+        remembered, who it concerns, where it belongs, what it came from, when
+        it was formed and what it means. Provenance is deliberately not among
+        them. It describes the reasoning step that produced the proposal, not
+        the fact being remembered, and the Core stamps a fresh one on every
+        step: its recorded_at is that step's clock and its mail references grow
+        as messages arrive. Comparing it made this guard unreachable, so a
         repeated identifier raised MemoryIdentityConflict, the Core returned
         memory_persistence_error and the conversation ended mid-sentence.
 
@@ -385,6 +385,7 @@ class SQLiteMemoryStore:
         return (
             existing.kind is proposal.kind
             and existing.person_id == proposal.person_id
+            and existing.scope == proposal.scope
             and existing.supersedes_memory_id == proposal.supersedes_memory_id
             and initial.content == proposal.content
             and initial.source_references == proposal.source_references
