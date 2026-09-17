@@ -23,6 +23,7 @@ from alx.contracts.records import (
     GoalStopReason,
 )
 from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
+from alx.contracts.scope import ScopeReference
 from alx.contracts.provenance import ContentProvenance
 
 
@@ -43,6 +44,11 @@ class GoalSnapshot:
     revision: int
     retention_until: datetime
     provenance: ContentProvenance | None = None
+    # Where this work belongs, when the Core chose to say. Defaulted, so every
+    # existing construction site and every goal written before scopes existed
+    # stays valid and unscoped. It is a label on the work, never a second way
+    # to find it: goal selection is unchanged and still lists by conversation.
+    scope: ScopeReference | None = None
 
     def __post_init__(self) -> None:
         if self.revision <= 0:

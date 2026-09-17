@@ -12,6 +12,8 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from alx.contracts.scope import ScopeReference
+
 if TYPE_CHECKING:
     from alx.contracts.provenance import ContentProvenance
 
@@ -144,6 +146,11 @@ class MemoryProposal:
     meaning: str | None = None
     supersedes_memory_id: str | None = None
     provenance: ContentProvenance | None = None
+    # Where this memory belongs, when the Core chose to say. Optional
+    # everywhere: memory is platform-wide, so an unscoped memory is ordinary
+    # rather than incomplete, and a scope never narrows who may read it.
+    # Person isolation remains `person_id` alone.
+    scope: ScopeReference | None = None
 
     def __post_init__(self) -> None:
         _required(self.memory_id, "memory_id")
@@ -173,6 +180,8 @@ class MemoryProposal:
 
             if not isinstance(self.provenance, ContentProvenance):
                 raise TypeError("memory provenance must be ContentProvenance or None")
+        if self.scope is not None and not isinstance(self.scope, ScopeReference):
+            raise TypeError("memory scope must be a ScopeReference or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +228,9 @@ class MemorySnapshot:
     supersedes_memory_id: str | None
     revisions: tuple[MemoryRevision, ...]
     retention_until: datetime
+    # Defaulted so that every existing construction site, and every memory
+    # written before scopes existed, stays valid and unscoped.
+    scope: ScopeReference | None = None
 
     @property
     def current(self) -> MemoryRevision:

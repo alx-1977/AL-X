@@ -22,9 +22,10 @@ from alx.contracts.provenance import (
     provenance_from_storage,
     provenance_to_storage,
 )
+from alx.contracts.scope import scope_from_storage, scope_to_storage
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -122,6 +123,14 @@ class SQLiteMemoryStore:
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS memory_revisions (memory_id TEXT NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE, revision INTEGER NOT NULL, revision_json TEXT NOT NULL, content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, mail_references TEXT, PRIMARY KEY(memory_id, revision))"
             )
+            memory_columns = {
+                item[1]
+                for item in self._connection.execute("PRAGMA table_info(memories)")
+            }
+            # Additive and nullable: every memory written before scopes
+            # existed stays valid and reads back unscoped.
+            if "scope" not in memory_columns:
+                self._connection.execute("ALTER TABLE memories ADD COLUMN scope TEXT")
             columns = {
                 item[1]
                 for item in self._connection.execute(
@@ -173,7 +182,7 @@ class SQLiteMemoryStore:
 
     def load(self, memory_id: str) -> MemorySnapshot:
         row = self._connection.execute(
-            "SELECT kind, person_id, supersedes_memory_id, retention_until FROM memories WHERE memory_id = ?",
+            "SELECT kind, person_id, supersedes_memory_id, retention_until, scope FROM memories WHERE memory_id = ?",
             (memory_id,),
         ).fetchone()
         if row is None:
@@ -187,7 +196,10 @@ class SQLiteMemoryStore:
                 (memory_id,),
             )
         )
-        return MemorySnapshot(memory_id, MemoryKind(row[0]), row[1], row[2], revisions, datetime.fromisoformat(row[3]))
+        return MemorySnapshot(
+            memory_id, MemoryKind(row[0]), row[1], row[2], revisions,
+            datetime.fromisoformat(row[3]), scope_from_storage(row[4]),
+        )
 
     def list_memories(self, kind: MemoryKind, *, person_id: str | None = None) -> tuple[MemorySnapshot, ...]:
         if kind is MemoryKind.RELATIONSHIP and person_id is None:
@@ -334,8 +346,8 @@ class SQLiteMemoryStore:
             provenance=proposal.provenance,
         )
         self._connection.execute(
-            "INSERT INTO memories(memory_id, kind, person_id, supersedes_memory_id, retention_until) VALUES (?, ?, ?, ?, ?)",
-            (proposal.memory_id, proposal.kind.value, proposal.person_id, proposal.supersedes_memory_id, retention_until.isoformat()),
+            "INSERT INTO memories(memory_id, kind, person_id, supersedes_memory_id, retention_until, scope) VALUES (?, ?, ?, ?, ?, ?)",
+            (proposal.memory_id, proposal.kind.value, proposal.person_id, proposal.supersedes_memory_id, retention_until.isoformat(), scope_to_storage(proposal.scope)),
         )
         self._connection.execute(
             "INSERT INTO memory_revisions(memory_id, revision, revision_json, content_origins, content_recorded_at, content_expires_at, mail_references) VALUES (?, ?, ?, ?, ?, ?, ?)",

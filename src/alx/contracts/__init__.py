@@ -146,6 +146,13 @@ from alx.contracts.provenance import (
     ExpiryReason,
     RetentionPolicy,
 )
+from alx.contracts.scope import (
+    Project,
+    ProjectStatus,
+    ScopeReference,
+    scope_from_storage,
+    scope_to_storage,
+)
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
 from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, GoalSummary, PendingMemoryBatch, ReasoningContext, ReasoningProvider
 from alx.contracts.records import StructuredData
@@ -283,6 +290,8 @@ __all__ = [
     "ContentTombstone",
     "ContentProvenance",
     "ContentOrigin",
+    "Project", "ProjectStatus", "ScopeReference",
+    "scope_from_storage", "scope_to_storage",
     "Approval", "ApprovalProposal", "ApprovalLifecycle", "ApprovalScope", "BackgroundEvent", "CapabilityCall", "CapabilityAttempt", "CapabilityAttemptDisposition",
     "CapabilityResult", "CapabilityResultState", "ConversationOrigin",
     "ConversationTurn", "Evidence", "history_evidence_ids", "GoalMutationKind", "GoalProposal", "GoalState", "GoalStatus", "GoalStopReason",

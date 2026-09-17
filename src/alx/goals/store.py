@@ -21,9 +21,14 @@ from alx.contracts.provenance import (
     provenance_from_storage,
     provenance_to_storage,
 )
+from alx.contracts.scope import (
+    ScopeReference,
+    scope_from_storage,
+    scope_to_storage,
+)
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -239,6 +244,10 @@ class SQLiteGoalStore:
             }
             if "conversation_id" not in columns:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN conversation_id TEXT")
+            # Additive and nullable: a goal written before scopes existed stays
+            # valid and reads back unscoped. Goal selection is unchanged.
+            if "scope" not in columns:
+                self._connection.execute("ALTER TABLE goals ADD COLUMN scope TEXT")
             for column in PROVENANCE_COLUMNS:
                 if column not in columns:
                     self._connection.execute(
@@ -275,6 +284,7 @@ class SQLiteGoalStore:
         conversation_id: str,
         retention_until: datetime,
         provenance: ContentProvenance | None = None,
+        scope: ScopeReference | None = None,
     ) -> GoalSnapshot:
         _aware(retention_until, "retention_until")
         if not conversation_id.strip():
@@ -283,22 +293,22 @@ class SQLiteGoalStore:
             with self._connection:
                 encoded = provenance_to_storage(provenance)
                 self._connection.execute(
-                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded),
+                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope)),
                 )
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
                 raise GoalAlreadyExists(state.goal_id) from error
             raise
-        return GoalSnapshot(state, conversation_id, 1, retention_until, provenance)
+        return GoalSnapshot(state, conversation_id, 1, retention_until, provenance, scope)
 
     def load(self, goal_id: str) -> GoalSnapshot:
         row = self._connection.execute(
-            "SELECT revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references FROM goals WHERE goal_id = ?", (goal_id,)
+            "SELECT revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope FROM goals WHERE goal_id = ?", (goal_id,)
         ).fetchone()
         if row is None:
             raise GoalNotFound(goal_id)
-        return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), row[3], row[0], _time_from_data(row[1]), provenance_from_storage(*row[4:]))  # type: ignore[arg-type]
+        return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), row[3], row[0], _time_from_data(row[1]), provenance_from_storage(*row[4:8]), scope_from_storage(row[8]))  # type: ignore[arg-type]
 
     def list_unfinished(self, conversation_id: str) -> tuple[GoalSummary, ...]:
         """Every unfinished goal of one conversation, compactly, in creation order.
