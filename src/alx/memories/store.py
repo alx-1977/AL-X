@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,8 @@ from alx.contracts.provenance import (
 )
 from alx.contracts.scope import scope_from_storage, scope_to_storage
 
+
+LOGGER = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 PROVENANCE_COLUMNS = (
@@ -62,6 +65,20 @@ class InvalidMemorySupersession(MemoryStoreError):
     pass
 
 
+class TopicRetrievalUnavailable(MemoryStoreError):
+    """A topic retrieval was asked for while the derived index cannot answer.
+
+    Raised rather than answered, because the two possible quiet answers are
+    both untrue. Returning nothing would say no memory matches; returning the
+    eligible memories unranked would say these are what she asked about. The
+    honest fact is that the capability is missing, and only the Core can decide
+    what to do about that.
+
+    It is deliberately not raised for any other operation: remembering,
+    loading and every exact retrieval carry on untouched.
+    """
+
+
 def _aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
@@ -82,12 +99,29 @@ def _topic_query(topic: str) -> str | None:
 
     Returns None when nothing usable survives, which the caller reads as a
     topic that matches nothing rather than one that matches everything.
+
+    Punctuation inside a term is kept. Deleting it silently changed what was
+    being searched for — `13.56 MHz` became `1356`, `1/3 oz` became `13` — and
+    both then matched nothing, which in a domain full of part numbers,
+    tolerances and frequencies is the worst possible failure: a confident empty
+    answer about exactly the things most worth remembering.
+
+    Quoting is what makes that safe. Inside a double-quoted FTS5 string the
+    tokenizer splits on punctuation and the operators lose their meaning, so
+    `13.56` becomes the phrase "13 56", `MAX17048` and `3V3` survive whole, and
+    `OR`, `NEAR`, `*` and `^` are ordinary text. The only character that needs
+    handling is the double quote itself, which is escaped by doubling as SQL
+    has always done. Nothing here needs to know which punctuation an engineer
+    might use, which is what keeps it from being a list someone has to
+    maintain.
     """
-    terms = [
-        "".join(character for character in term if character.isalnum() or character in "-_")
+    usable = [
+        '"' + term.replace('"', '""') + '"'
         for term in topic.split()
+        # A term of pure punctuation tokenizes to nothing and would make FTS5
+        # reject the whole query, taking the usable terms with it.
+        if any(character.isalnum() for character in term)
     ]
-    usable = [f'"{term}"' for term in terms if term]
     return " AND ".join(usable) if usable else None
 
 
@@ -129,6 +163,11 @@ class SQLiteMemoryStore:
         # cannot stall the asyncio voice transport.
         self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.execute("PRAGMA foreign_keys = ON")
+        # Whether topic retrieval is possible at all. Set by the migration and
+        # cleared if the index later becomes unusable; it is the one place the
+        # store records that search is degraded, so nothing else has to guess
+        # from a swallowed exception.
+        self._topic_index_available = False
         self._migrate()
 
     def close(self) -> None:
@@ -197,10 +236,47 @@ class SQLiteMemoryStore:
     # work. The index decides relevance; it never decides what is true now.
 
     def _build_topic_index(self) -> None:
-        self._connection.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_topics USING fts5("
-            "memory_id UNINDEXED, content, tokenize='unicode61')"
-        )
+        """Create the index and fill it from the memories already stored.
+
+        Backfill is what makes this safe to add to a database that predates it.
+        The table is created empty, so without this an existing memory would
+        stay invisible to topic retrieval while loading perfectly by
+        identifier — search that silently knows nothing about everything
+        remembered so far, which is worse than search that is plainly absent.
+
+        It is idempotent and costs nothing on an already-populated index: the
+        backfill runs only when the index holds no rows, so reopening a
+        migrated database does not rebuild it. An index emptied or damaged
+        later is repaired by `rebuild_topic_index`, which is explicit.
+
+        Failure here is not failure of the store. FTS5 is compiled into SQLite
+        rather than guaranteed by it, so a runtime without it must still be
+        able to remember; the flag records that topic retrieval is unavailable
+        and every other operation carries on.
+        """
+        try:
+            self._connection.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_topics USING fts5("
+                "memory_id UNINDEXED, content, tokenize='unicode61')"
+            )
+            indexed = self._connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM memory_topics)"
+            ).fetchone()[0]
+            # Marked available before the backfill, because the backfill writes
+            # through the same guarded path every other write uses and that
+            # path declines to act while the index is considered unavailable.
+            self._topic_index_available = True
+            if not indexed:
+                for (memory_id,) in self._connection.execute(
+                    "SELECT memory_id FROM memories ORDER BY memory_id"
+                ).fetchall():
+                    self._index_memory(memory_id)
+        except sqlite3.OperationalError:
+            LOGGER.warning(
+                "Topic retrieval is unavailable: this SQLite has no FTS5. "
+                "Memory itself is unaffected."
+            )
+            self._topic_index_available = False
 
     def rebuild_topic_index(self) -> None:
         """Discard the derived index and recreate it from the memories.
@@ -210,15 +286,21 @@ class SQLiteMemoryStore:
         rather than a reason to doubt what is remembered.
         """
         with self._connection:
-            self._connection.execute("DROP TABLE IF EXISTS memory_topics")
+            try:
+                self._connection.execute("DROP TABLE IF EXISTS memory_topics")
+            except sqlite3.OperationalError:
+                self._topic_index_available = False
+                return
             self._build_topic_index()
-            for (memory_id,) in self._connection.execute(
-                "SELECT memory_id FROM memories ORDER BY memory_id"
-            ).fetchall():
-                self._index_memory(memory_id)
 
     def _index_memory(self, memory_id: str) -> None:
-        """Record one memory's current content, replacing what was there."""
+        """Record one memory's current content, replacing what was there.
+
+        A no-op when there is no index. Remembering must never fail because
+        the thing that makes memories findable by topic is missing.
+        """
+        if not self._topic_index_available:
+            return
         row = self._connection.execute(
             "SELECT revision_json FROM memory_revisions WHERE memory_id = ? "
             "ORDER BY revision DESC LIMIT 1",
@@ -227,23 +309,41 @@ class SQLiteMemoryStore:
         if row is None:
             return
         content = json.loads(row[0]).get("content")
-        self._connection.execute(
-            "DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,)
-        )
-        if isinstance(content, str) and content.strip():
+        try:
             self._connection.execute(
-                "INSERT INTO memory_topics(memory_id, content) VALUES (?, ?)",
-                (memory_id, content),
+                "DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,)
             )
+            if isinstance(content, str) and content.strip():
+                self._connection.execute(
+                    "INSERT INTO memory_topics(memory_id, content) VALUES (?, ?)",
+                    (memory_id, content),
+                )
+        except sqlite3.OperationalError:
+            # The index vanished under us. The memory is still stored, so this
+            # degrades search and nothing else.
+            self._topic_index_available = False
+
+    def _forget_topic(self, memory_ids: tuple[str, ...]) -> None:
+        """Drop index rows for memories that no longer exist."""
+        if not self._topic_index_available:
+            return
+        try:
+            self._connection.executemany(
+                "DELETE FROM memory_topics WHERE memory_id = ?",
+                ((item,) for item in memory_ids),
+            )
+        except sqlite3.OperationalError:
+            self._topic_index_available = False
 
     def _topic_matches(self, topic: str) -> list[str] | None:
         """Memory identifiers whose current content matches, best first.
 
-        Returns None when the index cannot answer, which the caller treats as
-        "no topic ranking available" rather than "no memories". The index is
-        derived, so its absence must degrade ranking and never deny a memory
-        that the authoritative rows still hold.
+        None means the index could not answer, which is a different fact from
+        an empty list and is reported as such rather than being passed off as
+        "nothing matched".
         """
+        if not self._topic_index_available:
+            return None
         query = _topic_query(topic)
         if query is None:
             return []
@@ -254,8 +354,7 @@ class SQLiteMemoryStore:
                 (query,),
             ).fetchall()
         except sqlite3.OperationalError:
-            # No index, or a tokenizer that cannot parse this query. Neither is
-            # a statement about what is remembered.
+            self._topic_index_available = False
             return None
         return [item[0] for item in rows]
 
@@ -395,10 +494,13 @@ class SQLiteMemoryStore:
         if query.topic is not None:
             ranked = self._topic_matches(query.topic)
             if ranked is None:
-                # The derived index could not answer. Ranking is unavailable,
-                # so the eligible set is returned in its ordinary order rather
-                # than denying memories the authoritative rows still hold.
-                reason = MemoryMatchReason.SCOPE
+                # Neither quiet answer is true: an empty result would claim
+                # nothing matched, and the unranked eligible set would claim
+                # these are what she asked about. Say what is actually wrong.
+                raise TopicRetrievalUnavailable(
+                    "topic retrieval requires the derived index, which this "
+                    "SQLite cannot provide"
+                )
             else:
                 position = {
                     memory_id: index for index, memory_id in enumerate(ranked)
@@ -480,9 +582,7 @@ class SQLiteMemoryStore:
                 if self._exists(memory_id):
                     raise MemoryRevisionConflict(memory_id)
                 raise MemoryNotFound(memory_id)
-            self._connection.execute(
-                "DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,)
-            )
+            self._forget_topic((memory_id,))
 
     def purge_expired(self, now: datetime) -> tuple[str, ...]:
         _aware(now, "now")
@@ -495,10 +595,7 @@ class SQLiteMemoryStore:
         )
         with self._connection:
             self._connection.executemany("DELETE FROM memories WHERE memory_id = ?", ((item,) for item in identifiers))
-            self._connection.executemany(
-                "DELETE FROM memory_topics WHERE memory_id = ?",
-                ((item,) for item in identifiers),
-            )
+            self._forget_topic(identifiers)
         return identifiers
 
     def _exists(self, memory_id: str) -> bool:

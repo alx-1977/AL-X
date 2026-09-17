@@ -10,6 +10,7 @@ from typing import Any
 from alx.contracts.continuity import AutonomousSpendAuthority
 from alx.contracts.models import input_token_upper_bound
 from alx.contracts import (
+    MAX_MEMORY_RETRIEVAL_LIMIT,
     AgentDecision,
     ApprovalProposal,
     ApprovalScope,
@@ -1090,7 +1091,14 @@ def decision_schema() -> dict[str, Any]:
                     "belonging to none."
                 ),
             },
-            "memory_limit": {"type": "integer"},
+            "memory_limit": {
+                "type": "integer",
+                # The same bounds the runtime contract enforces. Left open, a
+                # model emitting 1000 produced a ValueError that ended the turn
+                # — the failure this whole change exists to stop.
+                "minimum": 1,
+                "maximum": MAX_MEMORY_RETRIEVAL_LIMIT,
+            },
         }
     )
     properties: dict[str, Any] = {
@@ -1339,9 +1347,14 @@ class ModelReasoner:
                 _strings(action["memory_source_references"], "memory_source_references"),
                 MemorySourceMatch(action["memory_source_match"]),
                 action["memory_include_superseded"],
-                action["memory_topic"],
-                action["memory_project_id"],
-                action["memory_limit"],
+                # Read with defaults rather than by direct index. The schema
+                # requires all three, but a provider that drops a null field,
+                # or an older cached response shaped before these existed,
+                # would otherwise raise KeyError and end the turn over a field
+                # whose absence simply means "unspecified".
+                action.get("memory_topic"),
+                action.get("memory_project_id"),
+                action.get("memory_limit") or MAX_MEMORY_RETRIEVAL_LIMIT,
             )
             return AgentDecision(memory_proposals=memory_proposals, memory_query=query,
                                  goal_proposal=proposal, goal_id=goal_id)

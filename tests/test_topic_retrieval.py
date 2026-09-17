@@ -39,7 +39,10 @@ from alx.contracts import (  # noqa: E402
     MemorySupersession,
     ScopeReference,
 )
-from alx.memories import SQLiteMemoryStore  # noqa: E402
+from alx.memories import (  # noqa: E402
+    SQLiteMemoryStore,
+    TopicRetrievalUnavailable,
+)
 
 NOW = datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=30)
@@ -339,13 +342,22 @@ class DerivedIndexTests(MemoryStoreTestCase):
         found = self.store.retrieve(MemoryQuery("q", FACTUAL, memory_ids=("a",)), NOW)
         self.assertEqual([item.memory_id for item in found], ["a"])
 
-    def test_a_missing_index_costs_ranking_not_memories(self) -> None:
-        """Degrade, never deny: the rows are still what is remembered."""
+    def test_a_missing_index_is_reported_rather_than_worked_around(self) -> None:
+        """A topic retrieval that cannot rank must say so.
+
+        This once returned the eligible memories marked `scope`, which reads as
+        "here is what you asked about" when the truth is that nothing ranked
+        them. Both quiet answers are false — an empty result would claim
+        nothing matched — so the missing capability is raised instead, and the
+        memories themselves stay exactly where they were.
+        """
         self.remember("a", "the antenna matched at 13.56 MHz")
         self.store._connection.execute("DROP TABLE memory_topics")
-        found = self.store.retrieve(MemoryQuery("q", FACTUAL, topic="antenna"), NOW)
-        self.assertEqual([item.memory_id for item in found], ["a"])
-        self.assertIs(found[0].match_reason, MemoryMatchReason.SCOPE)
+        with self.assertRaises(TopicRetrievalUnavailable):
+            self.store.retrieve(MemoryQuery("q", FACTUAL, topic="antenna"), NOW)
+        self.assertEqual(
+            self.store.load("a").current.content, "the antenna matched at 13.56 MHz"
+        )
 
     def test_a_correction_updates_what_the_index_describes(self) -> None:
         from alx.contracts import MemoryCorrection
