@@ -722,6 +722,11 @@ class InlineCommentReviewBindingTests(ProviderTestCase):
         """An unsubmitted draft is not something the reviewer has said."""
         draft = _review(self.B, "Summary.", review_id=self.R2)
         draft["state"] = "PENDING"
+        # Newest, so it is what selection would pick without the guard. With
+        # the same timestamp as R1 the assertion held whether the guard was
+        # there or not: `max` keeps the first of a tie, and the first was the
+        # submitted review.
+        draft["submitted_at"] = "2026-09-06T21:00:00Z"
         content = self.read(
             [_review(self.B, "Summary.", review_id=self.R1), draft],
             {self.R2: [self.inline(self.R2, body="drafted")]},
