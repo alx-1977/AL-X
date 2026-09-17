@@ -70,6 +70,11 @@ def _review(
         # states what it looked at, and how the production path binds a review
         # to a head. Tests about content compare against `body` itself.
         "body": f"{body}\n\nReviewed up to {sha}.",
+        "state": "COMMENTED",
+        # The commit the review was submitted against. Unlike a comment's
+        # anchor, GitHub never moves this, which is what the inline findings
+        # are bound through.
+        "commit_id": sha,
         "submitted_at": "2026-09-06T20:11:00Z",
     }
 
@@ -142,6 +147,7 @@ class FindingsWithoutEmailTests(ProviderTestCase):
                 {
                     "user": {"login": REVIEWER_LOGIN},
                     "commit_id": HEAD,
+                    "pull_request_review_id": 7,
                     "body": "Completed reviews can be suppressed after interruption.",
                     "path": "src/alx/continuity/completed_work_source.py",
                     "line": 52,
@@ -149,6 +155,7 @@ class FindingsWithoutEmailTests(ProviderTestCase):
                 {
                     "user": {"login": REVIEWER_LOGIN},
                     "commit_id": HEAD,
+                    "pull_request_review_id": 7,
                     "body": "Fast reviews can remain pending.",
                     "path": "src/alx/bootstrap/live_voice.py",
                     "line": 381,
@@ -561,98 +568,177 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class InlineCommentRevisionTests(ProviderTestCase):
-    """A finding is evidence about the revision it was written against.
+class InlineCommentReviewBindingTests(ProviderTestCase):
+    """A finding belongs to the review round it was submitted in.
 
     The summary was bound to the requested head from the start; the inline
     comments were not, so `ReviewContent` for one revision could carry findings
-    somebody wrote about another. That undoes the exactness the summary is
-    selected for — a reader has no way to tell which of the two a comment
-    belongs to.
+    written about another.
 
-    GitHub states it on the comment: `commit_id` is where it applies now,
-    `original_commit_id` where it was written.
+    The comment's own `commit_id` looks like the fix and is not one. GitHub
+    re-anchors it onto a newer head whenever the line it marks still exists
+    there, so an old round's findings arrive wearing the current SHA. Observed
+    on this repository: three comments submitted against one head were carried
+    onto the next, while the review object kept the commit it was submitted
+    against. `original_commit_id` fails the other way, staying on the authoring
+    revision. The review id is the only stable round identity, so that is the
+    binding.
     """
 
-    OTHER = "b" * 40
+    A = "a" * 40   # the earlier head
+    B = "b" * 40   # the head under review
 
-    def inline(self, **overrides) -> dict:
+    R1 = 71
+    R2 = 72
+
+    def inline(self, review_id: int, **overrides) -> dict:
+        """A reviewer comment, carrying the anchors GitHub really sets."""
         item = {
             "id": 900,
             "user": {"login": REVIEWER_LOGIN},
             "body": "a finding",
             "path": "x.py",
             "line": 1,
-            "commit_id": HEAD,
-            "original_commit_id": HEAD,
+            # Re-anchored onto the current head, as GitHub does.
+            "commit_id": self.B,
+            "original_commit_id": self.A,
+            "pull_request_review_id": review_id,
         }
         item.update(overrides)
         return item
 
-    def read(self, inline, head=HEAD):
-        return self.provider([_review(head, "Summary.")], {7: inline}).read(
-            ReviewContentRequest(21, head)
-        )
+    def read(self, reviews, comments, head):
+        return self.provider(reviews, comments).read(ReviewContentRequest(21, head))
 
-    def test_a_comment_about_this_revision_is_included(self) -> None:
-        content = self.read([self.inline()])
+    def test_a_review_s_own_comments_are_returned_for_its_head(self) -> None:
+        """1. Review R1 on head A, with R1's comments, read for A."""
+        content = self.read(
+            [_review(self.A, "Summary.", review_id=self.R1)],
+            {self.R1: [self.inline(self.R1, commit_id=self.A,
+                                   original_commit_id=self.A)]},
+            self.A,
+        )
         self.assertEqual([item.body for item in content.comments], ["a finding"])
 
-    def test_a_comment_about_another_revision_is_excluded(self) -> None:
-        content = self.read([
-            self.inline(commit_id=self.OTHER, original_commit_id=self.OTHER)
-        ])
+    def test_a_re_anchored_comment_is_not_a_finding_about_the_new_head(self) -> None:
+        """2. R1's comment carried onto B must not answer for B.
+
+        This is the case the whole binding exists for: every anchor field on
+        the comment now says B.
+        """
+        stale = self.inline(self.R1, commit_id=self.B, original_commit_id=self.A)
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [stale]},
+            self.B,
+        )
         self.assertEqual(content.comments, ())
 
-    def test_mixed_revisions_keep_only_this_one(self) -> None:
-        content = self.read([
-            self.inline(id=1, body="about this head"),
-            self.inline(
-                id=2, body="about another head",
-                commit_id=self.OTHER, original_commit_id=self.OTHER,
-            ),
-        ])
+    def test_the_current_review_s_comments_are_returned(self) -> None:
+        """3. Review R2 on head B, with R2's own comments."""
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [self.inline(self.R2, body="about B")]},
+            self.B,
+        )
+        self.assertEqual([item.body for item in content.comments], ["about B"])
+
+    def test_mixed_rounds_keep_only_the_current_review_s(self) -> None:
+        """4. R1 and R2 comments present; only R2's are about B."""
+        content = self.read(
+            [
+                _review(self.A, "Earlier.", review_id=self.R1),
+                _review(self.B, "Summary.", review_id=self.R2),
+            ],
+            {self.R2: [
+                self.inline(self.R1, id=1, body="carried from R1"),
+                self.inline(self.R2, id=2, body="written in R2"),
+            ]},
+            self.B,
+        )
         self.assertEqual(
-            [item.body for item in content.comments], ["about this head"]
+            [item.body for item in content.comments], ["written in R2"]
         )
 
-    def test_a_comment_written_against_this_revision_still_counts(self) -> None:
-        """`original_commit_id` is where it was written, and that is enough."""
-        content = self.read([
-            self.inline(commit_id=self.OTHER, original_commit_id=HEAD)
-        ])
-        self.assertEqual([item.body for item in content.comments], ["a finding"])
-
-    def test_a_comment_with_no_revision_is_excluded_rather_than_guessed(self) -> None:
-        item = self.inline()
-        del item["commit_id"]
-        del item["original_commit_id"]
-        content = self.read([item])
+    def test_an_attacker_comment_in_the_current_review_is_excluded(self) -> None:
+        """5. Round membership never substitutes for authorship."""
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [
+                self.inline(self.R2, id=1, user={"login": "attacker"}),
+                self.inline(self.R2, id=2,
+                            user={"login": "coderabbit-evil[bot]"}),
+            ]},
+            self.B,
+        )
         self.assertEqual(content.comments, ())
 
-    def test_another_account_s_comment_is_never_a_finding(self) -> None:
-        """Authorship and revision are both required, not either."""
-        content = self.read([
-            self.inline(user={"login": "attacker"}),
-            self.inline(id=2, user={"login": "coderabbit-evil[bot]"}),
-        ])
+    def test_a_clean_current_review_honestly_reports_no_findings(self) -> None:
+        """6. A summary for B with no inline findings of its own.
+
+        The stale comments are present and re-anchored to B. Reporting them
+        would turn a clean review into a review with findings.
+        """
+        content = self.read(
+            [
+                _review(self.A, "Earlier.", review_id=self.R1),
+                _review(self.B, "No actionable comments.", review_id=self.R2),
+            ],
+            {self.R2: [self.inline(self.R1, id=1, body="carried from R1")]},
+            self.B,
+        )
+        self.assertTrue(content.available)
+        self.assertEqual(content.comments, ())
+
+    def test_a_comment_with_no_review_id_is_excluded_rather_than_guessed(self) -> None:
+        item = self.inline(self.R2)
+        del item["pull_request_review_id"]
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [item]},
+            self.B,
+        )
+        self.assertEqual(content.comments, ())
+
+    def test_no_review_object_for_this_head_returns_no_findings(self) -> None:
+        """A summary can name a head with no readable review object.
+
+        There is then nothing to bind to, and importing whatever comments sit
+        on the pull request would be inventing their applicability.
+        """
+        content = self.provider(
+            [{
+                "id": 7,
+                "user": {"login": REVIEWER_LOGIN},
+                "body": f"Summary. Reviewed up to {self.B}.",
+                "submitted_at": "2026-09-06T20:11:00Z",
+            }],
+            {7: [self.inline(self.R1)]},
+        ).read(ReviewContentRequest(21, self.B))
+        self.assertTrue(content.available)
+        self.assertEqual(content.comments, ())
+
+    def test_a_pending_review_is_not_evidence(self) -> None:
+        """An unsubmitted draft is not something the reviewer has said."""
+        draft = _review(self.B, "Summary.", review_id=self.R2)
+        draft["state"] = "PENDING"
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R1), draft],
+            {self.R2: [self.inline(self.R2, body="drafted")]},
+            self.B,
+        )
         self.assertEqual(content.comments, ())
 
     def test_the_binding_holds_for_greptile_too(self) -> None:
-        """Provider-neutral: the rule is the contract's, not one adapter's."""
+        """8. Provider-neutral: the rule is the contract's, not one adapter's."""
         self.github = FakeGitHub(
-            [{
-                "id": 7,
-                "user": {"login": "greptile[bot]"},
-                "body": f"Summary. Reviewed up to {HEAD}.",
-                "submitted_at": "2026-09-06T20:11:00Z",
-            }],
-            {7: [
-                self.inline(user={"login": "greptile[bot]"}),
-                self.inline(
-                    id=2, user={"login": "greptile[bot]"},
-                    commit_id=self.OTHER, original_commit_id=self.OTHER,
-                ),
+            [_review(self.B, "Summary.", review_id=self.R2,
+                     user="greptile[bot]")],
+            {self.R2: [
+                self.inline(self.R2, id=1, user={"login": "greptile[bot]"},
+                            body="written in R2"),
+                self.inline(self.R1, id=2, user={"login": "greptile[bot]"},
+                            body="carried from R1"),
             ]},
         )
         original = github_review.httpx.request
@@ -660,5 +746,7 @@ class InlineCommentRevisionTests(ProviderTestCase):
         self.addCleanup(setattr, github_review.httpx, "request", original)
         content = GitHubReviewProvider(
             "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
-        ).read(ReviewContentRequest(21, HEAD))
-        self.assertEqual(len(content.comments), 1)
+        ).read(ReviewContentRequest(21, self.B))
+        self.assertEqual(
+            [item.body for item in content.comments], ["written in R2"]
+        )

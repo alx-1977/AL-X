@@ -13,10 +13,12 @@ or a branch name that resolves to a tag, is not visible in a string comparison.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +33,10 @@ from alx.contracts.publication import (  # noqa: E402
     publishable_branch,
 )
 from alx.providers.github_pull_request import GitHubPullRequests  # noqa: E402
-from alx.providers.repository_publication import RepositoryPublication  # noqa: E402
+from alx.providers.repository_publication import (
+    RepositoryPublication,
+    _git_environment,
+)  # noqa: E402
 from alx.tools.publication import (  # noqa: E402
     DEFINITIONS,
     OPEN_PULL_REQUEST,
@@ -85,8 +90,12 @@ class BranchNameTests(unittest.TestCase):
                     PublicationRequest(branch="fix/thing", head_sha=sha)
 
 
-class PublicationTests(unittest.TestCase):
-    """Real repositories, real git, real pushes between them."""
+class RealRepositoryHarness(unittest.TestCase):
+    """Real repositories, real git, real pushes between them.
+
+    Held apart from the tests so another case can reuse the repositories
+    without also re-running everything asserted against them.
+    """
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -119,6 +128,10 @@ class PublicationTests(unittest.TestCase):
 
     def remote_sha(self, name: str) -> str:
         return git(self.remote, "rev-parse", f"refs/heads/{name}")
+
+
+class PublicationTests(RealRepositoryHarness):
+    """What publishing guarantees, against real git."""
 
     def test_a_repair_branch_reaches_the_remote_at_that_commit(self) -> None:
         sha = self.branch("fix/thing")
@@ -613,3 +626,83 @@ class GitHubThrottleTests(PullRequestTests):
                 self.assertNotIn("Retry-After", literals)
                 self.assertNotIn("X-RateLimit-Remaining", literals)
                 self.assertIn("unavailable", source)
+
+
+class GitLocaleTests(RealRepositoryHarness):
+    """Git's wording is parsed, so the locale that decides it is set here.
+
+    Two facts this module reports are read from git's own English text: that a
+    refusal was a divergence rather than a plain rejection, and that the remote
+    already had the revision. Git translates both when the environment asks it
+    to. Inheriting the user's locale therefore made the push safe but its
+    description wrong — a diverged remote reported as `publication_refused`, an
+    already-published branch reported as newly published.
+
+    These run the real publication path with a translated locale set in the
+    parent environment. Whether this machine has git's translations installed
+    decides whether the parent locale could have changed the wording, so the
+    binding is asserted on the environment the production code builds, and the
+    outcomes are asserted end to end through real pushes.
+    """
+
+    TRANSLATED = {"LC_ALL": "de_DE.UTF-8", "LANG": "de_DE.UTF-8",
+                  "LC_CTYPE": "de_DE.UTF-8", "LC_MESSAGES": "de_DE.UTF-8"}
+
+    def setUp(self) -> None:
+        super().setUp()
+        for name, value in self.TRANSLATED.items():
+            patched = unittest.mock.patch.dict(os.environ, {name: value})
+            patched.start()
+            self.addCleanup(patched.stop)
+
+    def test_the_git_environment_pins_the_locale(self) -> None:
+        """Set, not inherited: the parent's locale cannot reach git."""
+        environment = _git_environment()
+        self.assertEqual(environment["LC_ALL"], "C")
+        self.assertEqual(environment["LANG"], "C")
+        # Nothing else carries a locale through either.
+        for name in ("LC_CTYPE", "LC_MESSAGES", "LANGUAGE"):
+            self.assertNotIn(name, environment)
+
+    def test_a_branch_still_publishes_under_a_translated_parent(self) -> None:
+        sha = self.branch("fix/thing")
+        outcome = self.publication.publish(
+            PublicationRequest(branch="fix/thing", head_sha=sha)
+        )
+        self.assertTrue(outcome.published)
+        self.assertEqual(self.remote_sha("fix/thing"), sha)
+
+    def test_up_to_date_is_still_recognised_under_a_translated_parent(self) -> None:
+        """The already-current reading is git's words, so it is at risk."""
+        sha = self.branch("fix/thing")
+        self.publication.publish(PublicationRequest("fix/thing", sha))
+        again = self.publication.publish(PublicationRequest("fix/thing", sha))
+        self.assertTrue(again.already_current)
+        # Published either way: the branch is on the remote at that commit.
+        self.assertTrue(again.published)
+
+    def test_divergence_is_still_recognised_under_a_translated_parent(self) -> None:
+        """The other reading taken from git's words, end to end."""
+        sha = self.branch("fix/thing")
+        self.publication.publish(PublicationRequest("fix/thing", sha))
+        other = Path(self.directory.name) / "other"
+        subprocess.run(
+            ["git", "clone", "-b", "fix/thing", str(self.remote), str(other)],
+            capture_output=True, check=True,
+        )
+        git(other, "config", "user.email", "other@example.test")
+        git(other, "config", "user.name", "Other")
+        (other / "theirs.txt").write_text("theirs\n")
+        git(other, "add", "theirs.txt")
+        git(other, "commit", "-m", "their work")
+        git(other, "push", "origin", "fix/thing")
+        theirs = self.remote_sha("fix/thing")
+
+        (self.local / "work.txt").write_text("ours\n")
+        git(self.local, "add", "work.txt")
+        git(self.local, "commit", "-m", "our work")
+        ours = git(self.local, "rev-parse", "HEAD")
+        with self.assertRaises(PublicationError) as caught:
+            self.publication.publish(PublicationRequest("fix/thing", ours))
+        self.assertEqual(caught.exception.code, "branch_diverged")
+        self.assertEqual(self.remote_sha("fix/thing"), theirs)

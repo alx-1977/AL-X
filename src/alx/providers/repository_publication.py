@@ -72,10 +72,20 @@ def _git_environment() -> dict[str, str]:
     """The small fixed environment every publication command runs under."""
     environment = {
         name: os.environ[name]
-        for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "HOME")
+        for name in ("PATH", "TZ", "HOME")
         if name in os.environ
     }
     environment.update({
+        # Fixed, never inherited. Two decisions this module reports are read
+        # from git's own wording: whether a refusal was a divergence, and
+        # whether the remote already had the revision. Git translates both when
+        # the locale says to, so inheriting a translated locale would leave the
+        # push correctly refused but described wrongly — a diverged remote
+        # reported as `publication_refused`, an up-to-date one as newly
+        # published. The environment decides what the text says, so it is set
+        # here rather than hoped for.
+        "LC_ALL": "C",
+        "LANG": "C",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",

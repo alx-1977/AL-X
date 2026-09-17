@@ -557,6 +557,26 @@ class ReviewObserverTests(unittest.TestCase):
         observed = observer.observe(subject_reference(21, HEAD))
         self.assertIs(observed.state, TaskState.COMPLETED)
 
+    def test_an_earlier_round_s_review_does_not_complete_a_later_head(self) -> None:
+        """A review submitted against A is not a review of B.
+
+        GitHub re-anchors an old round's inline comments onto the new head, so
+        the only evidence that R1 ever concerned A can be the review object
+        itself. If that were read loosely, a corrective commit would be
+        reported as reviewed the moment it was pushed — the review never ran.
+        """
+        observer = self._observer(
+            [{
+                "id": 71,
+                "user": {"login": REVIEWER_LOGIN},
+                "body": f"Reviewed {OTHER_HEAD}.",
+                "commit_id": OTHER_HEAD,
+            }],
+            [],
+        )
+        observed = observer.observe(subject_reference(21, HEAD))
+        self.assertIsNot(observed.state, TaskState.COMPLETED)
+
     def test_a_review_at_another_revision_does_not_complete(self) -> None:
         """A clean review of an earlier head must never answer for this one."""
         observer = self._observer(

@@ -103,6 +103,17 @@ class ExternalReviewHandoffTests(unittest.TestCase):
             # After the request, as a real review is.
             "created_at": "2026-09-07T06:15:30Z",
         }
+        # The review round the finding was published in. Inline comments are
+        # bound to the head through this object, so a handoff that carries a
+        # finding needs the real artefact rather than a bare comment.
+        submitted = [{
+            "id": 55,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-09-07T06:15:30Z",
+        }]
         inline = [{
             "id": 100,
             "user": {"login": REVIEWER_LOGIN},
@@ -111,6 +122,7 @@ class ExternalReviewHandoffTests(unittest.TestCase):
             "line": 4,
             "commit_id": HEAD,
             "original_commit_id": HEAD,
+            "pull_request_review_id": 55,
         }]
 
         class Response:
@@ -132,7 +144,7 @@ class ExternalReviewHandoffTests(unittest.TestCase):
             if base.endswith("/pulls/21/comments"):
                 return Response(inline if first else [])
             if base.endswith("/pulls/21/reviews"):
-                return Response([])
+                return Response(submitted if first else [])
             return Response({"head": {"sha": HEAD}})
 
         original = github_review.httpx.request

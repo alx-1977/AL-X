@@ -27,6 +27,9 @@ BASE = "c" * 40
 
 SUMMARY_COMMENT_ID = 7001
 STALE_COMMENT_ID = 7000
+# Review objects: the round a finding was submitted in.
+REVIEW_ID = 5001
+STALE_REVIEW_ID = 5000
 PUBLISHED_AT = "2026-09-07T06:15:00Z"
 STALE_PUBLISHED_AT = "2026-09-07T05:00:00Z"
 
@@ -41,6 +44,7 @@ STALE_SUMMARY_BODY = (
     f"and {OLD_HEAD}.\n"
 )
 INLINE_BODY = "This branch is never taken when the store is empty."
+STALE_INLINE_BODY = "The earlier revision left this cursor unclosed."
 
 
 def _user(login: str) -> dict:
@@ -73,12 +77,40 @@ def issue_comments() -> list[dict]:
     ]
 
 
-def inline_comments() -> list[dict]:
-    """Inline findings, carrying the revision GitHub records them against.
+def reviews() -> list[dict]:
+    """The submitted review objects, one per round.
 
-    `commit_id` and `original_commit_id` are what bind a comment to a head. A
-    fixture without them would exercise a comment the production path is right
-    to exclude.
+    A review is submitted against one commit and is never re-pointed, which is
+    what makes it the binding for the comments below.
+    """
+    return [
+        {
+            "id": STALE_REVIEW_ID,
+            "user": _user(REVIEWER_LOGIN),
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": OLD_HEAD,
+            "submitted_at": STALE_PUBLISHED_AT,
+        },
+        {
+            "id": REVIEW_ID,
+            "user": _user(REVIEWER_LOGIN),
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+            "submitted_at": PUBLISHED_AT,
+        },
+    ]
+
+
+def inline_comments() -> list[dict]:
+    """Inline findings, shaped as GitHub really returns them.
+
+    The stale comment is the important one. It was submitted in the review of
+    `OLD_HEAD`, and its `commit_id` has been re-anchored to `HEAD` because the
+    line it marks still exists there — exactly what GitHub was observed doing
+    on this repository. A fixture that left `commit_id` on the old head would
+    never exercise the case the binding exists for.
     """
     return [
         {
@@ -89,6 +121,19 @@ def inline_comments() -> list[dict]:
             "line": 412,
             "commit_id": HEAD,
             "original_commit_id": HEAD,
+            "pull_request_review_id": REVIEW_ID,
+        },
+        {
+            # Written about the previous revision, carried onto this one by
+            # GitHub. Not a finding about HEAD.
+            "id": 8000,
+            "user": _user(REVIEWER_LOGIN),
+            "body": STALE_INLINE_BODY,
+            "path": "src/alx/goals/store.py",
+            "line": 88,
+            "commit_id": HEAD,
+            "original_commit_id": OLD_HEAD,
+            "pull_request_review_id": STALE_REVIEW_ID,
         },
         {
             "id": 8002,
@@ -97,6 +142,8 @@ def inline_comments() -> list[dict]:
             "path": "src/alx/goals/store.py",
             "line": 412,
             "commit_id": HEAD,
+            "original_commit_id": HEAD,
+            "pull_request_review_id": REVIEW_ID,
         },
     ]
 
@@ -116,6 +163,7 @@ def transport(
     number: int = 42,
     comments: list[dict] | None = None,
     inline: list[dict] | None = None,
+    submitted: list[dict] | None = None,
 ):
     """A stand-in for GitHub that answers the production path's real calls.
 
@@ -125,6 +173,7 @@ def transport(
     """
     issued = comments if comments is not None else issue_comments()
     lines = inline if inline is not None else inline_comments()
+    rounds = submitted if submitted is not None else reviews()
     posted: list[dict] = []
 
     class Response:
@@ -149,7 +198,7 @@ def transport(
         if method == "GET" and path.endswith(f"/pulls/{number}/comments"):
             return Response(lines if page == 1 else [])
         if method == "GET" and path.endswith(f"/pulls/{number}/reviews"):
-            return Response([])
+            return Response(rounds if page == 1 else [])
         raise AssertionError(f"unexpected call: {method} {url}")
 
     request.posted = posted  # type: ignore[attr-defined]
@@ -161,6 +210,9 @@ __all__ = [
     "HEAD",
     "INLINE_BODY",
     "OLD_HEAD",
+    "REVIEW_ID",
+    "STALE_INLINE_BODY",
+    "STALE_REVIEW_ID",
     "OTHER_LOGIN",
     "PUBLISHED_AT",
     "REVIEWER_LOGIN",
@@ -169,6 +221,7 @@ __all__ = [
     "SUMMARY_COMMENT_ID",
     "inline_comments",
     "issue_comments",
+    "reviews",
     "pull_request",
     "transport",
 ]

@@ -25,6 +25,18 @@ statement is what binds the review to a head; where it does not, the review's
 own commit is used, and where neither is available the content is reported
 unavailable rather than guessed at.
 
+Inline findings are bound through the review object they were submitted under —
+head, then review, then that review's comments. The comment's own `commit_id`
+looks like the obvious key and is not one: GitHub re-anchors it onto a newer
+head whenever the marked line survives there, so findings from an earlier round
+arrive wearing the current revision's SHA. The review object is submitted once
+against one commit and never moves, so it is what the binding rests on.
+
+The question this answers is "what did the reviewer say about this revision",
+not "what is still worth fixing". A finding from an earlier round that nobody
+has addressed is real, but it is not evidence about this head, and collapsing
+the two would let an old round's findings read as a fresh review's.
+
 Nothing here judges. There is no severity, no finding count, no clean flag and
 no merge opinion: the reviewer's words are returned as the reviewer wrote them,
 marked as external content, and what they mean is AL/X's to decide.
@@ -190,6 +202,14 @@ class GitHubReviewProvider:
 
     # ---- reading --------------------------------------------------------
 
+    @staticmethod
+    def _when(item: dict) -> datetime:
+        return (
+            _moment(item.get("submitted_at"))
+            or _moment(item.get("created_at"))
+            or datetime.min.replace(tzinfo=UTC)
+        )
+
     def _authored(self, item: object) -> bool:
         return (
             isinstance(item, dict)
@@ -209,19 +229,45 @@ class GitHubReviewProvider:
             line=line if isinstance(line, int) and not isinstance(line, bool) else None,
         )
 
-    @staticmethod
-    def _about_revision(item: dict, head_sha: str) -> bool:
-        """Whether GitHub says this comment belongs to this revision.
+    def _review_for(self, reviews: list[dict], head_sha: str) -> dict | None:
+        """The reviewer's own submitted review of this exact revision.
 
-        Read from the comment's own revision fields rather than inferred from
-        when it was posted: a timestamp says a comment exists, never what it
-        was written about.
+        A review object is the unit the reviewer actually publishes: it is
+        submitted once, against one commit, and never re-pointed afterwards.
+        That is what makes it the thing to bind to.
+
+        The comment fields cannot carry this. `commit_id` is where a comment
+        applies *now*, and GitHub rewrites it onto a newer head whenever the
+        line it marks still exists there — so a finding written about an
+        earlier revision reappears wearing the current one's SHA. Observed
+        directly on this repository: three comments submitted in a review of
+        one head were re-anchored onto the next, while the review object they
+        belong to kept the head it was actually submitted against.
+
+        `original_commit_id` fails the other way: it stays on the authoring
+        revision, so selecting by it alone drops the reviewer's findings about
+        the current head whenever it re-states an earlier one. Neither field,
+        and no combination of them, tells you which review round a comment came
+        from. The review id does.
         """
-        for field in ("commit_id", "original_commit_id"):
-            value = item.get(field)
-            if isinstance(value, str) and value == head_sha:
-                return True
-        return False
+        submitted = [
+            item
+            for item in reviews
+            if self._authored(item)
+            and item.get("commit_id") == head_sha
+            and isinstance(item.get("id"), int)
+            # A review still being drafted is not something the reviewer has
+            # said; only a submitted one is evidence.
+            and item.get("state") != "PENDING"
+        ]
+        if not submitted:
+            return None
+        return max(submitted, key=self._when)
+
+    @staticmethod
+    def _belongs_to(item: dict, review_id: int) -> bool:
+        """Whether this comment was published as part of that review."""
+        return item.get("pull_request_review_id") == review_id
 
     def _covers(self, body: str, head_sha: str) -> bool:
         """Whether this text is the reviewer saying it looked at this revision.
@@ -250,6 +296,12 @@ class GitHubReviewProvider:
             # a distinction nothing downstream can act on.
             raise ReviewReadError("review_unavailable") from error
 
+        # The review object submitted against this exact revision, where there
+        # is one. It is what binds the inline findings below: comments belong
+        # to a review round, and the round is the only thing GitHub records
+        # that a later revision cannot move.
+        review = self._review_for(reviews, head_sha)
+
         # The reviewer's own summaries, newest first, restricted to ones that
         # name this revision. A summary about an earlier head is evidence about
         # that head and must not answer a question about this one.
@@ -270,33 +322,35 @@ class GitHubReviewProvider:
                 unavailable_reason=NO_REVIEW_FOR_REVISION,
             )
 
-        def when(item: dict) -> datetime:
-            return (
-                _moment(item.get("submitted_at"))
-                or _moment(item.get("created_at"))
-                or datetime.min.replace(tzinfo=UTC)
-            )
-
-        latest = max(summaries, key=when)
-        # Bound to the revision, not merely to the pull request. A comment
-        # written against an earlier head is a finding about code that has
-        # since changed, and returning it as this revision's would undo the
-        # exactness the summary is selected for: `ReviewContent` for head A
-        # would carry findings somebody wrote about head B.
+        latest = max(summaries, key=self._when)
+        # The findings this reviewer published in its review of this revision,
+        # identified by the review they were submitted under rather than by
+        # where GitHub currently anchors them.
         #
-        # GitHub states this on the comment itself. `commit_id` is where it
-        # applies now and `original_commit_id` is where it was written; either
-        # matching is enough to say it belongs to this revision, and a comment
-        # carrying neither is excluded rather than guessed at.
-        comments = tuple(
-            comment
-            for comment in (
-                self._comment(item)
-                for item in inline
-                if self._authored(item) and self._about_revision(item, head_sha)
+        # With no review object for this head there is nothing to bind to, and
+        # no inline findings are reported. That is an honest empty rather than
+        # a gap: a summary can name a revision without a review object being
+        # readable, and importing whatever comments happen to sit on the pull
+        # request would be inventing their applicability.
+        #
+        # A finding from an earlier round that is still unfixed is deliberately
+        # not carried forward here. It remains true of the code, but it is not
+        # something the reviewer said about this revision, and `ReviewContent`
+        # answers the second question. Where the reviewer itself re-states a
+        # finding in the new round, it arrives as a comment of that round and
+        # is returned like any other.
+        comments: tuple[ReviewComment, ...] = ()
+        if review is not None:
+            review_id = review["id"]
+            comments = tuple(
+                comment
+                for comment in (
+                    self._comment(item)
+                    for item in inline
+                    if self._authored(item) and self._belongs_to(item, review_id)
+                )
+                if comment is not None
             )
-            if comment is not None
-        )
         return ReviewContent(
             pull_request_number=number,
             head_sha=head_sha,
@@ -304,7 +358,7 @@ class GitHubReviewProvider:
             available=True,
             summary=latest["body"],
             comments=comments,
-            submitted_at=when(latest),
+            submitted_at=self._when(latest),
             retrieved_at=self._now(),
         )
 
