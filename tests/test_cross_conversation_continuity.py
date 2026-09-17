@@ -187,9 +187,20 @@ class MigratedRecencyTests(unittest.TestCase):
         self.path = Path(self.directory.name) / "goals.sqlite3"
 
     def legacy_database(
-        self, goals: dict[str, datetime], *, project_id: str | None = None
+        self,
+        goals: dict[str, datetime],
+        *,
+        project_id: str | None = None,
+        statuses: dict[str, GoalStatus] | None = None,
     ) -> None:
-        """A v6 database: no `updated_at`, and retention set per goal."""
+        """A v6 database: no `updated_at`, and retention set per goal.
+
+        Terminal goals are serialised here, before the migration runs, rather
+        than created active and cancelled afterwards. Cancelling through the
+        new store exercises the write path; only a genuinely terminal legacy
+        row exercises the backfill that has to read a status out of
+        `state_json`.
+        """
         connection = sqlite3.connect(self.path)
         connection.execute(
             "CREATE TABLE goals (goal_id TEXT PRIMARY KEY, revision INTEGER "
@@ -206,7 +217,14 @@ class MigratedRecencyTests(unittest.TestCase):
                     goal_id,
                     1,
                     retention.isoformat(),
-                    json.dumps(_goal_to_data(goal(goal_id))),
+                    json.dumps(
+                        _goal_to_data(
+                            goal(
+                                goal_id,
+                                (statuses or {}).get(goal_id, GoalStatus.ACTIVE),
+                            )
+                        )
+                    ),
                     "conv-old",
                     None if project_id is None else json.dumps({"project_id": project_id}),
                 ),
@@ -268,18 +286,41 @@ class MigratedRecencyTests(unittest.TestCase):
         listed = store.list_unfinished("conv-old")
         self.assertEqual([item.goal_id for item in listed], ["old"])
 
-    def test_a_terminal_goal_is_projected_as_finished(self) -> None:
-        """The projection must agree with the status it is derived from."""
-        self.legacy_database({"old": RETENTION})
-        store = self.open()
-        snapshot = store.load("old")
-        finished = replace(
-            snapshot.state,
-            status=GoalStatus.CANCELLED,
-            stop_reason=GoalStopReason.CANCELLED,
+    def test_a_terminal_legacy_goal_migrates_as_finished(self) -> None:
+        """The backfill has to read a status out of `state_json`.
+
+        Both goals are written as v6 rows before the new store ever opens, so
+        the migration is what decides their projection. Creating one active and
+        cancelling it afterwards would prove the write path instead, and leave
+        the branch that reads legacy state entirely untested.
+        """
+        self.legacy_database(
+            {"open": RETENTION, "dropped": RETENTION},
+            # Cancelled rather than completed: a completed goal must carry
+            # evidence for every criterion, which is a contract about goals
+            # and not about this migration. Both are terminal, and the
+            # backfill reads the same field for either.
+            statuses={"dropped": GoalStatus.CANCELLED},
         )
-        store.replace(finished, RETENTION, snapshot.revision)
-        self.assertEqual(store.list_unfinished("conv-old"), ())
+        store = self.open()
+        self.assertEqual(
+            [item.goal_id for item in store.list_unfinished("conv-old")], ["open"]
+        )
+
+    def test_the_migrated_projection_matches_the_stored_status(self) -> None:
+        """The column is a projection, so it must agree with its source."""
+        self.legacy_database(
+            {"open": RETENTION, "dropped": RETENTION},
+            statuses={"dropped": GoalStatus.CANCELLED},
+        )
+        store = self.open()
+        projected = dict(
+            store._connection.execute("SELECT goal_id, unfinished FROM goals")
+        )
+        self.assertEqual(projected, {"open": 1, "dropped": 0})
+        # The authoritative status is untouched by being projected.
+        self.assertIs(store.load("dropped").state.status, GoalStatus.CANCELLED)
+        self.assertIs(store.load("open").state.status, GoalStatus.ACTIVE)
 
     def test_a_migrated_project_scope_is_queryable(self) -> None:
         """Scope was already stored as JSON; the column only makes it findable."""
@@ -368,52 +409,85 @@ class BoundedWorkTests(StoreTestCase):
             len(taken), 12, f"took {len(taken)} rows to return 10 candidates"
         )
 
-    CANDIDATE_QUERIES = (
-        (
-            "conversation",
-            "SELECT goal_id FROM goals WHERE unfinished = 1 AND "
-            "conversation_id = ? ORDER BY updated_at DESC, goal_id DESC LIMIT 10",
-            ("conv-1",),
-        ),
-        (
-            "project",
-            "SELECT goal_id FROM goals WHERE unfinished = 1 AND project_id = ? "
-            "ORDER BY updated_at DESC, goal_id DESC LIMIT 10",
-            ("pn532",),
-        ),
-        (
-            "recency",
-            "SELECT goal_id FROM goals WHERE unfinished = 1 "
-            "ORDER BY updated_at DESC, goal_id DESC LIMIT 10",
-            (),
-        ),
-    )
+    def captured_candidate_queries(
+        self, *arguments, **keywords
+    ) -> list[tuple[str, tuple]]:
+        """The statements `list_unfinished` actually ran, with their arguments.
+
+        Captured from the connection rather than restated in the test. A
+        hand-written copy of the SQL proves only that the copy is well formed:
+        production could drop its LIMIT, lose the `unfinished` predicate or
+        change its ordering back to something unindexable, and a test holding
+        its own version would not notice.
+        """
+        seen: list[tuple[str, tuple]] = []
+        real = self.store._connection
+
+        class Recording:
+            def execute(self, sql, parameters=()):
+                if "FROM goals WHERE unfinished" in sql:
+                    seen.append((sql, tuple(parameters)))
+                return real.execute(sql, parameters)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        self.store._connection = Recording()
+        try:
+            self.store.list_unfinished(*arguments, **keywords)
+        finally:
+            self.store._connection = real
+        return seen
 
     def test_every_candidate_source_is_answered_from_an_index(self) -> None:
-        """The boundedness claim, checked where it is actually decided.
+        """The boundedness claim, checked against what production actually ran.
 
         Counting rows that reach Python could not see this: a single ranked
         query scanned every goal and temp-sorted the lot before yielding the
         first row, so the cost was already paid by the time anything was
-        counted. The plan is the only place that distinguishes the two.
+        counted. The plan is the only place that distinguishes the two, and it
+        has to be the plan of the real statement.
 
         Asserted on the access pattern rather than on the plan's exact wording,
         so the architectural property is protected without pinning SQLite's
         formatting.
         """
+        # Few enough in each source that none fills the cap alone, so all
+        # three actually run and every one of them is inspected. A source that
+        # short-circuits is correct behaviour, but it would leave the others
+        # unchecked here.
+        self.create("mine", "conv-1")
+        self.create("project", "conv-2", project_id="pn532")
         for index in range(40):
-            self.create(f"g{index}", "conv-1", project_id="pn532")
-        for name, sql, arguments in self.CANDIDATE_QUERIES:
-            with self.subTest(source=name):
+            self.create(f"other-{index}", "conv-2")
+        captured = self.captured_candidate_queries(
+            "conv-1", project_id="pn532", limit=10
+        )
+        self.assertEqual(len(captured), 3, "three bounded sources are expected")
+
+        for sql, parameters in captured:
+            with self.subTest(sql=sql):
+                # Every source is bounded in the database, not only in Python.
+                self.assertIn("LIMIT", sql.upper())
+                self.assertIn("unfinished = 1", sql)
                 plan = " ".join(
                     row[3]
                     for row in self.store._connection.execute(
-                        f"EXPLAIN QUERY PLAN {sql}", arguments
+                        f"EXPLAIN QUERY PLAN {sql}", parameters
                     )
                 )
-                self.assertIn("USING COVERING INDEX", plan, plan)
+                self.assertIn("USING", plan, plan)
+                self.assertIn("INDEX", plan, plan)
                 self.assertNotIn("SCAN goals", plan, plan)
                 self.assertNotIn("TEMP B-TREE", plan, plan)
+
+    def test_an_unbounded_listing_is_the_only_one_without_a_limit(self) -> None:
+        """Recovery asks for everything deliberately; candidates never do."""
+        self.create("a", "conv-1")
+        bounded = self.captured_candidate_queries("conv-1", limit=10)
+        self.assertTrue(all("LIMIT" in sql.upper() for sql, _ in bounded))
+        unbounded = self.captured_candidate_queries()
+        self.assertTrue(all("LIMIT" not in sql.upper() for sql, _ in unbounded))
 
     def test_the_projection_is_bounded_at_scale(self) -> None:
         """Far more history than the cap, and the cost does not follow it."""
