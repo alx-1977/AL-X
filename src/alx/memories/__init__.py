@@ -8,6 +8,7 @@ from alx.memories.store import (
     MemoryRevisionConflict,
     SQLiteMemoryStore,
     SupersededMemoryNotFound,
+    TopicRetrievalUnavailable,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "MemoryRevisionConflict",
     "SQLiteMemoryStore",
     "SupersededMemoryNotFound",
+    "TopicRetrievalUnavailable",
 ]

@@ -174,11 +174,14 @@ from alx.contracts.models import (
 from alx.contracts.memory import (
     MemoryCorrection,
     MemoryIdentityConflict, MemoryKind,
+    MemoryMatchReason,
     MemoryProposal,
     MemoryQuery,
     MemoryRevision,
     MemorySnapshot,
     MemorySourceMatch,
+    MemorySupersession,
+    MAX_RETRIEVAL_LIMIT as MAX_MEMORY_RETRIEVAL_LIMIT,
 )
 from alx.contracts.mail import (
     MailAccessError,
@@ -305,7 +308,8 @@ __all__ = [
     "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",
     "ReasoningModel",
     "MemoryCorrection", "MemoryIdentityConflict", "MemoryKind",
-    "MemoryProposal", "MemoryQuery",
+    "MemoryMatchReason", "MemoryProposal", "MemoryQuery", "MemorySupersession",
+    "MAX_MEMORY_RETRIEVAL_LIMIT",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
     "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
     "MailObservationControl", "MailParticipants", "MailReference",

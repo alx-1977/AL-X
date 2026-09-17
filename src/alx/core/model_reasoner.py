@@ -10,6 +10,7 @@ from typing import Any
 from alx.contracts.continuity import AutonomousSpendAuthority
 from alx.contracts.models import input_token_upper_bound
 from alx.contracts import (
+    MAX_MEMORY_RETRIEVAL_LIMIT,
     AgentDecision,
     ApprovalProposal,
     ApprovalScope,
@@ -211,9 +212,32 @@ something you may already have recorded, consider one retrieval to see what is
 there. Whether an existing memory already covers it, and whether to leave it,
 add to it, or supersede it, is your judgement.
 A retrieval must be narrowed by more than memory kind: give at least one of
-memory_ids, memory_person_id, memory_formed_after, memory_formed_before or
-memory_source_references. Kinds alone would replay the whole store and is
-refused, which ends the turn without an answer.
+memory_ids, memory_person_id, memory_formed_after, memory_formed_before,
+memory_source_references or memory_topic. Kinds alone would replay the whole
+store and is refused, which ends the turn without an answer.
+memory_topic is what the retrieval is about, in your own words. It ranks the
+memories the other constraints already allow, so it orders rather than widens:
+it can never reach a memory a scope excluded. memory_project_id restricts to
+one project and is a boundary, not a preference — a memory in another project
+does not appear however well it fits the topic. Leaving it null searches every
+project together with the memories belonging to none, which is what a question
+spanning your work needs. It does not narrow a retrieval by itself.
+memory_limit caps how many come back, at most 25.
+Each retrieved memory carries match_reason and supersession. match_reason is
+exact when you named it, scope when it fell inside a boundary you set, and
+topic when it matched what you asked about — a suggestion rather than a
+certainty. supersession is superseded when a later memory replaced this one:
+it was true once and may not be now. Superseded memories are left out unless
+memory_include_superseded is true. When a current and a superseded memory
+disagree, both are shown and neither is corrected for you; what they mean
+together is your judgement.
+Retrieved memories accumulate across the retrievals of one turn, so a second
+retrieval adds to what the first found rather than replacing it, and asking
+again for something already retrieved gains nothing.
+Memory and the conversation you can see are the whole of what you can recall.
+There is no search over past conversations: if something was discussed but no
+memory was formed, and it is not in the conversation shown to you, you have no
+record of it. Say so plainly rather than implying you remember it.
 A memory identifier names one memory permanently. Every memory you form takes a
 new identifier, including one that refines or corrects something you already
 remember. To replace an earlier memory, give the new one its own identifier and
@@ -771,6 +795,14 @@ def _context_payload(context: ReasoningContext) -> str:
                 "revised_at": item.current.recorded_at.isoformat(),
                 "revision_reason": item.current.reason,
                 "meaning": item.current.meaning,
+                "project_id": None if item.scope is None else item.scope.project_id,
+                # Why this surfaced, and whether anything has replaced it.
+                "match_reason": (
+                    None if item.match_reason is None else item.match_reason.value
+                ),
+                "supersession": (
+                    None if item.supersession is None else item.supersession.value
+                ),
             }
             for item in context.memories
         ],
@@ -1043,6 +1075,30 @@ def decision_schema() -> dict[str, Any]:
                 "enum": [item.value for item in MemorySourceMatch],
             },
             "memory_include_superseded": {"type": "boolean"},
+            "memory_topic": {
+                **nullable_string,
+                "description": (
+                    "What the retrieval is about, in your own words. Ranks the "
+                    "memories a scope allows; it never widens one. Null when "
+                    "you are retrieving by identifier, person, date or source."
+                ),
+            },
+            "memory_project_id": {
+                **nullable_string,
+                "description": (
+                    "Restrict to one project's memories, using a project_id you "
+                    "have seen. Null searches every project and the memories "
+                    "belonging to none."
+                ),
+            },
+            "memory_limit": {
+                "type": "integer",
+                # The same bounds the runtime contract enforces. Left open, a
+                # model emitting 1000 produced a ValueError that ended the turn
+                # — the failure this whole change exists to stop.
+                "minimum": 1,
+                "maximum": MAX_MEMORY_RETRIEVAL_LIMIT,
+            },
         }
     )
     properties: dict[str, Any] = {
@@ -1291,6 +1347,14 @@ class ModelReasoner:
                 _strings(action["memory_source_references"], "memory_source_references"),
                 MemorySourceMatch(action["memory_source_match"]),
                 action["memory_include_superseded"],
+                # Read with defaults rather than by direct index. The schema
+                # requires all three, but a provider that drops a null field,
+                # or an older cached response shaped before these existed,
+                # would otherwise raise KeyError and end the turn over a field
+                # whose absence simply means "unspecified".
+                action.get("memory_topic"),
+                action.get("memory_project_id"),
+                action.get("memory_limit") or MAX_MEMORY_RETRIEVAL_LIMIT,
             )
             return AgentDecision(memory_proposals=memory_proposals, memory_query=query,
                                  goal_proposal=proposal, goal_id=goal_id)
