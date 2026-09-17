@@ -38,6 +38,8 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+from dataclasses import replace  # noqa: E402
+
 from alx.contracts import (  # noqa: E402
     AgentDecision,
     GoalStopReason,
@@ -184,7 +186,9 @@ class MigratedRecencyTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "goals.sqlite3"
 
-    def legacy_database(self, goals: dict[str, datetime]) -> None:
+    def legacy_database(
+        self, goals: dict[str, datetime], *, project_id: str | None = None
+    ) -> None:
         """A v6 database: no `updated_at`, and retention set per goal."""
         connection = sqlite3.connect(self.path)
         connection.execute(
@@ -197,13 +201,14 @@ class MigratedRecencyTests(unittest.TestCase):
         for goal_id, retention in goals.items():
             connection.execute(
                 "INSERT INTO goals(goal_id, revision, retention_until, "
-                "state_json, conversation_id) VALUES (?, ?, ?, ?, ?)",
+                "state_json, conversation_id, scope) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     goal_id,
                     1,
                     retention.isoformat(),
                     json.dumps(_goal_to_data(goal(goal_id))),
                     "conv-old",
+                    None if project_id is None else json.dumps({"project_id": project_id}),
                 ),
             )
         connection.execute("PRAGMA user_version = 6")
@@ -249,6 +254,40 @@ class MigratedRecencyTests(unittest.TestCase):
         listed = [item.goal_id for item in store.list_unfinished("conv-old")]
         self.assertEqual(listed[0], "old-a")
         self.assertIsNotNone(store.list_unfinished("conv-old")[0].updated_at)
+
+    def test_the_queryable_projections_are_backfilled(self) -> None:
+        """A goal whose projection were missing would vanish from every query.
+
+        `unfinished` and `project_id` are columns now, so a migrated goal that
+        did not get them would be filtered out by `unfinished = 1` and silently
+        cease to exist. They are derived from the values already stored, so the
+        meaning is exact rather than guessed.
+        """
+        self.legacy_database({"old": RETENTION})
+        store = self.open()
+        listed = store.list_unfinished("conv-old")
+        self.assertEqual([item.goal_id for item in listed], ["old"])
+
+    def test_a_terminal_goal_is_projected_as_finished(self) -> None:
+        """The projection must agree with the status it is derived from."""
+        self.legacy_database({"old": RETENTION})
+        store = self.open()
+        snapshot = store.load("old")
+        finished = replace(
+            snapshot.state,
+            status=GoalStatus.CANCELLED,
+            stop_reason=GoalStopReason.CANCELLED,
+        )
+        store.replace(finished, RETENTION, snapshot.revision)
+        self.assertEqual(store.list_unfinished("conv-old"), ())
+
+    def test_a_migrated_project_scope_is_queryable(self) -> None:
+        """Scope was already stored as JSON; the column only makes it findable."""
+        self.legacy_database({"old": RETENTION}, project_id="pn532")
+        store = self.open()
+        listed = store.list_unfinished("conv-other", project_id="pn532")
+        self.assertEqual([item.goal_id for item in listed], ["old"])
+        self.assertEqual(listed[0].project_id, "pn532")
 
     def test_the_migration_is_idempotent(self) -> None:
         self.legacy_database({"old": RETENTION})
@@ -328,6 +367,78 @@ class BoundedWorkTests(StoreTestCase):
         self.assertLessEqual(
             len(taken), 12, f"took {len(taken)} rows to return 10 candidates"
         )
+
+    CANDIDATE_QUERIES = (
+        (
+            "conversation",
+            "SELECT goal_id FROM goals WHERE unfinished = 1 AND "
+            "conversation_id = ? ORDER BY updated_at DESC, goal_id DESC LIMIT 10",
+            ("conv-1",),
+        ),
+        (
+            "project",
+            "SELECT goal_id FROM goals WHERE unfinished = 1 AND project_id = ? "
+            "ORDER BY updated_at DESC, goal_id DESC LIMIT 10",
+            ("pn532",),
+        ),
+        (
+            "recency",
+            "SELECT goal_id FROM goals WHERE unfinished = 1 "
+            "ORDER BY updated_at DESC, goal_id DESC LIMIT 10",
+            (),
+        ),
+    )
+
+    def test_every_candidate_source_is_answered_from_an_index(self) -> None:
+        """The boundedness claim, checked where it is actually decided.
+
+        Counting rows that reach Python could not see this: a single ranked
+        query scanned every goal and temp-sorted the lot before yielding the
+        first row, so the cost was already paid by the time anything was
+        counted. The plan is the only place that distinguishes the two.
+
+        Asserted on the access pattern rather than on the plan's exact wording,
+        so the architectural property is protected without pinning SQLite's
+        formatting.
+        """
+        for index in range(40):
+            self.create(f"g{index}", "conv-1", project_id="pn532")
+        for name, sql, arguments in self.CANDIDATE_QUERIES:
+            with self.subTest(source=name):
+                plan = " ".join(
+                    row[3]
+                    for row in self.store._connection.execute(
+                        f"EXPLAIN QUERY PLAN {sql}", arguments
+                    )
+                )
+                self.assertIn("USING COVERING INDEX", plan, plan)
+                self.assertNotIn("SCAN goals", plan, plan)
+                self.assertNotIn("TEMP B-TREE", plan, plan)
+
+    def test_the_projection_is_bounded_at_scale(self) -> None:
+        """Far more history than the cap, and the cost does not follow it."""
+        for index in range(120):
+            self.create(f"old-{index}", "conv-old")
+        self.create("mine", "conv-1")
+
+        decoded: list[str] = []
+        original = goals_store._goal_from_data
+
+        def counting(goal_id, data):
+            decoded.append(goal_id)
+            return original(goal_id, data)
+
+        goals_store._goal_from_data = counting  # type: ignore[assignment]
+        try:
+            listed = self.store.list_unfinished("conv-1", limit=10)
+        finally:
+            goals_store._goal_from_data = original  # type: ignore[assignment]
+
+        self.assertEqual(len(listed), 10)
+        self.assertEqual(listed[0].goal_id, "mine")
+        self.assertTrue(listed[0].from_current_conversation)
+        # 121 goals stored; the old ones are never decoded to find the ten.
+        self.assertLessEqual(len(decoded), 12, f"decoded {len(decoded)}")
 
     def test_an_unbounded_listing_still_returns_everything(self) -> None:
         """Recovery asks for all of it deliberately, and must still get it."""
@@ -658,24 +769,57 @@ class NoSemanticRankingTests(StoreTestCase):
         self.assertEqual(arguments, ["conversation_id", "project_id", "limit"])
 
     def test_the_listing_body_never_touches_a_conversation(self) -> None:
-        """Law 1 in the body: no attribute of a turn is reachable from here.
+        """Law 1 in the body: nothing that carries language is reachable here.
 
-        The signature alone would not catch a lookup added inside, so every
-        attribute the function reads is checked. `conversation_id` is an
-        identifier and stays allowed; anything that could carry what was said
-        does not.
+        Every shape that could reach content is checked, not only attribute
+        access. An earlier version looked at `ast.Attribute` alone, which
+        `row["content"]` or `load_conversation(...)` would have walked straight
+        past — the guard would have held the door while the window was open.
+
+        The docstring is excluded, because prose about what the function must
+        not do would otherwise trip the check that it does not do it.
         """
         node = self.listing_function()
-        attributes = {
-            item.attr
-            for item in ast.walk(node)
-            if isinstance(item, ast.Attribute)
+        forbidden = {
+            "turns", "content", "message", "text", "utterance", "body",
+            "prompt", "transcript", "wording", "said", "speech",
         }
-        for forbidden in (
-            "turns", "content", "message", "text", "utterance", "body", "prompt",
+        found: set[str] = set()
+        for item in ast.walk(self.body_without_docstring(node)):
+            # `row.content`, and any attribute chain reaching one.
+            if isinstance(item, ast.Attribute):
+                found.add(item.attr)
+            # A bare name: `content = ...`, or a helper called by that name.
+            elif isinstance(item, ast.Name):
+                found.add(item.id)
+            # `load_conversation(...)` — the call's own name, which an
+            # attribute or name check above already covers, plus keywords.
+            elif isinstance(item, ast.keyword) and item.arg:
+                found.add(item.arg)
+            # `row["content"]`, `values.get("message")`: the key is a string
+            # constant, so string literals in the body are checked too.
+            elif isinstance(item, ast.Constant) and isinstance(item.value, str):
+                found.update(
+                    token
+                    for token in forbidden
+                    if token in item.value.lower()
+                )
+        for token in sorted(forbidden):
+            with self.subTest(token=token):
+                self.assertNotIn(token, found)
+
+    @staticmethod
+    def body_without_docstring(node: ast.FunctionDef) -> ast.Module:
+        """The function's statements, with its docstring removed."""
+        statements = list(node.body)
+        if (
+            statements
+            and isinstance(statements[0], ast.Expr)
+            and isinstance(statements[0].value, ast.Constant)
+            and isinstance(statements[0].value.value, str)
         ):
-            with self.subTest(attribute=forbidden):
-                self.assertNotIn(forbidden, attributes)
+            statements = statements[1:]
+        return ast.Module(body=statements, type_ignores=[])
 
     def test_wording_cannot_change_the_candidates(self) -> None:
         """The property the two checks above exist to protect.

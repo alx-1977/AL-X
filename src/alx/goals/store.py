@@ -29,7 +29,7 @@ from alx.contracts.scope import (
 )
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -139,6 +139,22 @@ def _attempts(data: dict[str, Any]) -> tuple[CapabilityAttempt, ...]:
         call = None if item[0] is None else CapabilityCall(item[0], item[1], item[2], item[3])
         values.append(CapabilityAttempt(call, CapabilityAttemptDisposition(item[4]), item[5], result, item[7]))
     return tuple(values)
+
+
+# The statuses that mean a goal is finished. Stated once, derived from the
+# same predicate the contract uses, so the queryable column cannot drift from
+# what `GoalSummary.unfinished` means.
+_TERMINAL_STATUSES = (GoalStatus.COMPLETED, GoalStatus.CANCELLED)
+
+
+def _is_unfinished(state: GoalState) -> int:
+    """Whether a goal is still open, as a value SQLite can index.
+
+    A projection of `state.status`, which stays authoritative inside
+    `state_json`. It exists because deciding this from the document meant
+    decoding every goal ever stored to find the few that are open.
+    """
+    return 0 if state.status in _TERMINAL_STATUSES else 1
 
 
 def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
@@ -276,6 +292,53 @@ class SQLiteGoalStore:
             # takes its real place the first time it is actually written.
             if "updated_at" not in columns:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN updated_at TEXT")
+            # Two projections of facts the goal already holds, promoted into
+            # columns so the candidate query can be answered from an index
+            # instead of by decoding every goal that was ever stored.
+            #
+            # Neither is a new source of truth. `unfinished` is derived from
+            # `state.status` and `project_id` from the scope object, both on
+            # every write, in the same statement that writes the state — so
+            # they cannot disagree with it or be updated separately.
+            if "unfinished" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE goals ADD COLUMN unfinished INTEGER"
+                )
+            if "project_id" not in columns:
+                self._connection.execute("ALTER TABLE goals ADD COLUMN project_id TEXT")
+            # Backfilled from the stored values themselves, so the meaning is
+            # exact rather than inferred and the result is the same however
+            # many times this runs. A goal whose projection were missing would
+            # drop out of every candidate query, so this is the difference
+            # between a migration and a disappearance.
+            self._connection.execute(
+                "UPDATE goals SET project_id = json_extract(scope, '$.project_id') "
+                "WHERE project_id IS NULL AND scope IS NOT NULL"
+            )
+            self._connection.execute(
+                "UPDATE goals SET unfinished = CASE "
+                "  WHEN json_extract(state_json, '$.status') IN ('completed', "
+                "       'cancelled') THEN 0 ELSE 1 END "
+                "WHERE unfinished IS NULL"
+            )
+            # One index per bounded candidate source. The tie-break is
+            # goal_id rather than rowid, because SQLite will not index rowid
+            # and the primary key is just as stable.
+            # One index per bounded candidate source. Each covers a source's
+            # filter and its ordering, so SQLite walks the index rather than
+            # sorting the whole table to find ten rows.
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS goals_open_by_conversation "
+                "ON goals(unfinished, conversation_id, updated_at DESC, goal_id DESC)"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS goals_open_by_project "
+                "ON goals(unfinished, project_id, updated_at DESC, goal_id DESC)"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS goals_open_by_recency "
+                "ON goals(unfinished, updated_at DESC, goal_id DESC)"
+            )
             for column in PROVENANCE_COLUMNS:
                 if column not in columns:
                     self._connection.execute(
@@ -321,8 +384,8 @@ class SQLiteGoalStore:
             with self._connection:
                 encoded = provenance_to_storage(provenance)
                 self._connection.execute(
-                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope), _time_to_data(self._now())),
+                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope, updated_at, unfinished, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope), _time_to_data(self._now()), _is_unfinished(state), None if scope is None else scope.project_id),
                 )
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
@@ -367,44 +430,81 @@ class SQLiteGoalStore:
             raise TypeError("limit must be an int or None")
         if limit is not None and limit < 1:
             raise ValueError("limit must be positive")
-        # A cursor rather than fetchall(): the caller asks for at most a
-        # handful of candidates, and the ordering that decides which ones is
-        # already SQL's. Materialising every goal first would decode a state
-        # document per row to answer a question the first few rows settle, so
-        # the cost of one reasoning call would grow with everything ever left
-        # unfinished. Iteration stops at the cap, and SQLite computes only the
-        # prefix that is consumed.
-        cursor = self._connection.execute(
+
+        # Three bounded sources rather than one ranked query. A single ORDER BY
+        # expressing the priority made SQLite scan every goal and temp-sort the
+        # lot before yielding the first row: bounded in what reached the
+        # prompt, unbounded in what the database did to get there, and a cursor
+        # could not fix that because the sort happens first.
+        #
+        # Each source is a plain equality on an indexed column with its own
+        # LIMIT, so SQLite walks an index and stops. The priority they express
+        # together is the same one, and merging them in order preserves it.
+        #
+        # The ordering is exactly what the index stores, with no expression
+        # over it: `updated_at IS NULL` as a leading term was redundant —
+        # SQLite already sorts NULL last under DESC — and it forced a temp
+        # B-tree over the whole matching set, which was most of the cost the
+        # index was added to remove.
+        sources: list[tuple[str, tuple[Any, ...]]] = []
+        if conversation_id is not None:
+            sources.append((
+                "SELECT goal_id, state_json, conversation_id, scope, updated_at "
+                "FROM goals WHERE unfinished = 1 AND conversation_id = ? "
+                "ORDER BY updated_at DESC, goal_id DESC",
+                (conversation_id,),
+            ))
+        if project_id is not None:
+            sources.append((
+                "SELECT goal_id, state_json, conversation_id, scope, updated_at "
+                "FROM goals WHERE unfinished = 1 AND project_id = ? "
+                "ORDER BY updated_at DESC, goal_id DESC",
+                (project_id,),
+            ))
+        sources.append((
             "SELECT goal_id, state_json, conversation_id, scope, updated_at "
-            "FROM goals ORDER BY "
-            # Rank is a SQL expression over stored columns only. Nothing about
-            # the conversation's content reaches it.
-            "  CASE WHEN ?1 IS NOT NULL AND conversation_id = ?1 THEN 0 "
-            "       WHEN ?2 IS NOT NULL AND scope IS NOT NULL "
-            "            AND json_extract(scope, '$.project_id') = ?2 THEN 1 "
-            "       ELSE 2 END, "
-            # Undated rows sort last rather than first, so a goal that predates
-            # the column does not masquerade as the most recent work.
-            "  updated_at IS NULL, updated_at DESC, rowid DESC",
-            (conversation_id, project_id),
-        )
-        summaries = []
-        for goal_id, state_json, origin, scope, updated_at in cursor:
-            scope_reference = scope_from_storage(scope)
-            summary = GoalSummary.of(
-                _goal_from_data(goal_id, json.loads(state_json)),
-                project_id=(
-                    None if scope_reference is None else scope_reference.project_id
-                ),
-                updated_at=None if updated_at is None else _time_from_data(updated_at),
-                from_current_conversation=(
-                    conversation_id is not None and origin == conversation_id
-                ),
-            )
-            if summary.unfinished:
-                summaries.append(summary)
-            if limit is not None and len(summaries) >= limit:
-                break
+            "FROM goals WHERE unfinished = 1 "
+            "ORDER BY updated_at DESC, goal_id DESC",
+            (),
+        ))
+
+        summaries: list[GoalSummary] = []
+        seen: set[str] = set()
+        for sql, arguments in sources:
+            if limit is not None:
+                if len(summaries) >= limit:
+                    break
+                # Each source is asked for no more than the whole answer could
+                # need. An earlier source may already have supplied some of it,
+                # and a later one may repeat what an earlier one returned, so
+                # the ceiling is the cap rather than what is left.
+                sql = f"{sql} LIMIT ?"
+                arguments = (*arguments, limit)
+            for goal_id, state_json, origin, scope, updated_at in self._connection.execute(
+                sql, arguments
+            ):
+                if goal_id in seen:
+                    continue
+                seen.add(goal_id)
+                scope_reference = scope_from_storage(scope)
+                summaries.append(
+                    GoalSummary.of(
+                        _goal_from_data(goal_id, json.loads(state_json)),
+                        project_id=(
+                            None
+                            if scope_reference is None
+                            else scope_reference.project_id
+                        ),
+                        updated_at=(
+                            None if updated_at is None else _time_from_data(updated_at)
+                        ),
+                        from_current_conversation=(
+                            conversation_id is not None and origin == conversation_id
+                        ),
+                    )
+                )
+                if limit is not None and len(summaries) >= limit:
+                    break
         return tuple(summaries)
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]:
@@ -589,13 +689,17 @@ class SQLiteGoalStore:
         updated = self._connection.execute(
             "UPDATE goals SET revision = revision + 1, retention_until = ?, "
             "state_json = ?, content_origins = ?, content_recorded_at = ?, "
-            "content_expires_at = ?, mail_references = ?, updated_at = ? "
+            "content_expires_at = ?, mail_references = ?, updated_at = ?, "
+            # Rewritten from the same state this statement stores, so the
+            # projection cannot lag the status it describes.
+            "unfinished = ? "
             "WHERE goal_id = ? AND revision = ?",
             (
                 _time_to_data(retention_until),
                 json.dumps(_goal_to_data(state), separators=(",", ":")),
                 *encoded,
                 _time_to_data(self._now()),
+                _is_unfinished(state),
                 state.goal_id,
                 expected_revision,
             ),
