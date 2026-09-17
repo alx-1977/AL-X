@@ -259,16 +259,23 @@ class SQLiteGoalStore:
             if "scope" not in columns:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN scope TEXT")
             # When a goal was last written, so candidates can be ordered by a
-            # fact rather than by an opinion about relevance. Backfilled from
-            # retention_until, which every write already moves: it is not the
-            # same quantity, but it is monotonic per goal and is the only
-            # existing evidence of recency, so it orders old goals sensibly
-            # rather than leaving them undated and last.
+            # fact rather than by an opinion about relevance.
+            #
+            # Goals written before this column existed keep NULL. It was
+            # briefly backfilled from retention_until on the reasoning that
+            # every write moves it, which is true per goal and does not follow
+            # across goals: a retention horizon is policy, clamped for
+            # mail-derived content under D-013 and never extendable by a
+            # replacement, so a goal written yesterday can expire sooner than
+            # one written last month and would have ranked below it. That is a
+            # fabricated recency, and an invented timestamp is worse than an
+            # absent one because nothing downstream can tell it was invented.
+            #
+            # Unknown recency sorts after known recency, which is what the
+            # ordering below already does with NULL. A migrated goal therefore
+            # takes its real place the first time it is actually written.
             if "updated_at" not in columns:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN updated_at TEXT")
-                self._connection.execute(
-                    "UPDATE goals SET updated_at = COALESCE(updated_at, retention_until)"
-                )
             for column in PROVENANCE_COLUMNS:
                 if column not in columns:
                     self._connection.execute(
@@ -360,7 +367,14 @@ class SQLiteGoalStore:
             raise TypeError("limit must be an int or None")
         if limit is not None and limit < 1:
             raise ValueError("limit must be positive")
-        rows = self._connection.execute(
+        # A cursor rather than fetchall(): the caller asks for at most a
+        # handful of candidates, and the ordering that decides which ones is
+        # already SQL's. Materialising every goal first would decode a state
+        # document per row to answer a question the first few rows settle, so
+        # the cost of one reasoning call would grow with everything ever left
+        # unfinished. Iteration stops at the cap, and SQLite computes only the
+        # prefix that is consumed.
+        cursor = self._connection.execute(
             "SELECT goal_id, state_json, conversation_id, scope, updated_at "
             "FROM goals ORDER BY "
             # Rank is a SQL expression over stored columns only. Nothing about
@@ -373,9 +387,9 @@ class SQLiteGoalStore:
             # the column does not masquerade as the most recent work.
             "  updated_at IS NULL, updated_at DESC, rowid DESC",
             (conversation_id, project_id),
-        ).fetchall()
+        )
         summaries = []
-        for goal_id, state_json, origin, scope, updated_at in rows:
+        for goal_id, state_json, origin, scope, updated_at in cursor:
             scope_reference = scope_from_storage(scope)
             summary = GoalSummary.of(
                 _goal_from_data(goal_id, json.loads(state_json)),
