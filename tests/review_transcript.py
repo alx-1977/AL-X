@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
-# The reviewer's bot login, as GitHub reports it. The production path matches
-# on the login prefix rather than a numeric id, so a transcript only has to be
-# honest about the name.
+# The reviewer's bot login, exactly as GitHub reports it. The production path
+# matches against an allowlist of exact logins, so a transcript that named a
+# lookalike would be correctly ignored.
 REVIEWER_LOGIN = "coderabbitai[bot]"
 OTHER_LOGIN = "alx-1977"
 
@@ -74,6 +74,12 @@ def issue_comments() -> list[dict]:
 
 
 def inline_comments() -> list[dict]:
+    """Inline findings, carrying the revision GitHub records them against.
+
+    `commit_id` and `original_commit_id` are what bind a comment to a head. A
+    fixture without them would exercise a comment the production path is right
+    to exclude.
+    """
     return [
         {
             "id": 8001,
@@ -81,6 +87,8 @@ def inline_comments() -> list[dict]:
             "body": INLINE_BODY,
             "path": "src/alx/goals/store.py",
             "line": 412,
+            "commit_id": HEAD,
+            "original_commit_id": HEAD,
         },
         {
             "id": 8002,
@@ -88,6 +96,7 @@ def inline_comments() -> list[dict]:
             "body": "noted, thanks",
             "path": "src/alx/goals/store.py",
             "line": 412,
+            "commit_id": HEAD,
         },
     ]
 

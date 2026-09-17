@@ -23,6 +23,7 @@ import re
 
 import httpx
 
+from alx.providers.github_http import unavailable
 from alx.contracts.publication import (
     PullRequestError,
     PullRequestOutcome,
@@ -82,7 +83,10 @@ class GitHubPullRequests:
             # carry a URL with a token in it.
             LOGGER.warning("GitHub request failed: %s", type(error).__name__)
             raise PullRequestError("pull_request_unavailable") from error
-        if response.status_code >= 500 or response.status_code == 429:
+        # The same reading as the review path, shared rather than restated: a
+        # rate limit arrives as 403 with a header, and reading it as a refusal
+        # would turn "try later" into a failed capability.
+        if unavailable(response):
             raise PullRequestError("pull_request_unavailable")
         if response.status_code >= 400:
             raise PullRequestError("pull_request_refused")
@@ -92,15 +96,40 @@ class GitHubPullRequests:
             raise PullRequestError("pull_request_unavailable") from error
 
     def _existing(self, branch: str) -> object | None:
-        """The open pull request for this branch, if GitHub already has one."""
+        """The open pull request for this branch into the fixed base.
+
+        The base is part of the identity, not a detail. Filtering on head alone
+        returned any open pull request from this branch, including one into
+        some other base — so `open_pull_request` could hand back a proposal
+        that no gate runs on and no reviewer watches, reported as though the
+        work had been proposed for review.
+
+        GitHub's `base` filter is asked for, and the answer is checked again
+        here: a filter is a request, and what the identity rests on should not
+        depend on the server having honoured it.
+        """
         owner = self._repository.split("/")[0]
         found = self._request(
             "GET",
             f"/repos/{self._repository}/pulls"
-            f"?state=open&head={owner}:{branch}&per_page=1",
+            f"?state=open&head={owner}:{branch}&base={BASE}&per_page=10",
         )
-        if isinstance(found, list) and found and isinstance(found[0], dict):
-            return found[0]
+        if not isinstance(found, list):
+            return None
+        for item in found:
+            if not isinstance(item, dict):
+                continue
+            head = item.get("head")
+            base = item.get("base")
+            if not isinstance(head, dict) or not isinstance(base, dict):
+                continue
+            if base.get("ref") != BASE:
+                continue
+            if head.get("ref") != branch:
+                continue
+            if item.get("state") != "open":
+                continue
+            return item
         return None
 
     @staticmethod

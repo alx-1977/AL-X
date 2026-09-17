@@ -109,6 +109,8 @@ class ExternalReviewHandoffTests(unittest.TestCase):
             "body": "Inline finding",
             "path": "x.py",
             "line": 4,
+            "commit_id": HEAD,
+            "original_commit_id": HEAD,
         }]
 
         class Response:

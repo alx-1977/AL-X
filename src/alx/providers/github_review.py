@@ -47,6 +47,7 @@ from alx.contracts.review_content import (
     ReviewReadError,
 )
 from alx.contracts.review_provider import ReviewProviderProfile
+from alx.providers.github_http import unavailable
 
 LOGGER = logging.getLogger(__name__)
 
@@ -129,20 +130,7 @@ class GitHubReviewProvider:
             # token in it.
             LOGGER.warning("GitHub request failed: %s", type(error).__name__)
             raise _Unavailable() from error
-        # GitHub answers a rate limit with 403 and a retry header, not 429, so
-        # a plain status check reads throttling as a refusal. "Try later" and
-        # "no" call for different responses: one is worth waiting out, and the
-        # other means the request will never be accepted.
-        headers = getattr(response, "headers", {}) or {}
-        throttled = response.status_code == 403 and (
-            "Retry-After" in headers
-            or headers.get("X-RateLimit-Remaining") == "0"
-        )
-        if (
-            throttled
-            or response.status_code in (408, 429)
-            or response.status_code >= 500
-        ):
+        if unavailable(response):
             raise _Unavailable()
         if response.status_code >= 400:
             raise _Refused()
@@ -221,6 +209,20 @@ class GitHubReviewProvider:
             line=line if isinstance(line, int) and not isinstance(line, bool) else None,
         )
 
+    @staticmethod
+    def _about_revision(item: dict, head_sha: str) -> bool:
+        """Whether GitHub says this comment belongs to this revision.
+
+        Read from the comment's own revision fields rather than inferred from
+        when it was posted: a timestamp says a comment exists, never what it
+        was written about.
+        """
+        for field in ("commit_id", "original_commit_id"):
+            value = item.get(field)
+            if isinstance(value, str) and value == head_sha:
+                return True
+        return False
+
     def _covers(self, body: str, head_sha: str) -> bool:
         """Whether this text is the reviewer saying it looked at this revision.
 
@@ -276,12 +278,22 @@ class GitHubReviewProvider:
             )
 
         latest = max(summaries, key=when)
+        # Bound to the revision, not merely to the pull request. A comment
+        # written against an earlier head is a finding about code that has
+        # since changed, and returning it as this revision's would undo the
+        # exactness the summary is selected for: `ReviewContent` for head A
+        # would carry findings somebody wrote about head B.
+        #
+        # GitHub states this on the comment itself. `commit_id` is where it
+        # applies now and `original_commit_id` is where it was written; either
+        # matching is enough to say it belongs to this revision, and a comment
+        # carrying neither is excluded rather than guessed at.
         comments = tuple(
             comment
             for comment in (
                 self._comment(item)
                 for item in inline
-                if self._authored(item)
+                if self._authored(item) and self._about_revision(item, head_sha)
             )
             if comment is not None
         )

@@ -44,11 +44,19 @@ class ReviewProvider(str, Enum):
 class ReviewProviderProfile:
     """The provider-specific facts of one GitHub-native reviewer.
 
-    `account_prefix` matches the reviewer's bot login rather than a numeric
-    account id. An id is exact, but it is also unverifiable for a reviewer that
-    has never commented here, and a wrong constant would silently read every
-    review as empty. Greptile publishes under more than one bot login, so the
-    prefix is the property that actually identifies the account across them.
+    `allowed_logins` is an exact set, and that is the whole point. It began as a
+    prefix, chosen because Greptile publishes under more than one bot login and
+    a prefix covered both without my having to know which. That traded
+    authentication for convenience: `coderabbit-evil[bot]` and `coderabbitXYZ`
+    both start with `coderabbit`, so any account somebody could register under
+    a lookalike name would have passed as the reviewer.
+
+    That matters more here than it looks. Review evidence reaches AL/X's
+    reasoning and can complete a watched task, so an account that passes this
+    check can put findings in front of her that she will weigh as a reviewer's.
+    Matching a revision exactly does not authenticate who wrote about it.
+
+    Each login is listed because it was verified, not because it was guessed.
     """
 
     provider: ReviewProvider
@@ -58,15 +66,21 @@ class ReviewProviderProfile:
     # these reviewers reviews a new pull request without being asked; this is
     # what gets a fresh review after a corrective commit.
     trigger: str
-    # The lowercase start of the reviewer's GitHub login.
-    account_prefix: str
+    # The exact GitHub logins this reviewer publishes under.
+    allowed_logins: frozenset[str]
 
     def authored_by_reviewer(self, login: object) -> bool:
-        """Whether this GitHub account is the configured reviewer."""
-        return (
-            isinstance(login, str)
-            and login.strip().lower().startswith(self.account_prefix)
-        )
+        """Whether this GitHub account is the configured reviewer.
+
+        Compared lowercase and stripped, which is the only normalisation
+        GitHub's identity semantics actually require: logins are
+        case-insensitive, so `CodeRabbitAI[bot]` is the same account. Nothing
+        else is normalised, because every further liberty taken here is a
+        family of accounts somebody else can register.
+        """
+        if not isinstance(login, str):
+            return False
+        return login.strip().lower() in self.allowed_logins
 
 
 PROFILES: dict[ReviewProvider, ReviewProviderProfile] = {
@@ -77,17 +91,21 @@ PROFILES: dict[ReviewProvider, ReviewProviderProfile] = {
         provider=ReviewProvider.CODERABBIT,
         reviewer="coderabbit",
         trigger="@coderabbitai review",
-        account_prefix="coderabbit",
+        # Verified against this repository: every review CodeRabbit has
+        # published here came from this account (id 136622811).
+        allowed_logins=frozenset({"coderabbitai[bot]"}),
     ),
     # Greptile's documented trigger. It has published no review here yet, so
-    # the account is matched by prefix: both `greptile-apps[bot]` and
-    # `greptile[bot]` exist on GitHub and the documentation does not say which
-    # posts reviews.
+    # both accounts it is known to publish under are listed rather than one
+    # being guessed at: `greptile-apps[bot]` (id 165735046) and `greptile[bot]`
+    # (id 271099122) both exist on GitHub, and the documentation does not say
+    # which posts reviews. Listing both is exact; a prefix covering them was
+    # not. If a third appears, it is added here after being verified.
     ReviewProvider.GREPTILE: ReviewProviderProfile(
         provider=ReviewProvider.GREPTILE,
         reviewer="greptile",
         trigger="@greptileai",
-        account_prefix="greptile",
+        allowed_logins=frozenset({"greptile-apps[bot]", "greptile[bot]"}),
     ),
 }
 

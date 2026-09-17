@@ -141,12 +141,14 @@ class FindingsWithoutEmailTests(ProviderTestCase):
             7: [
                 {
                     "user": {"login": REVIEWER_LOGIN},
+                    "commit_id": HEAD,
                     "body": "Completed reviews can be suppressed after interruption.",
                     "path": "src/alx/continuity/completed_work_source.py",
                     "line": 52,
                 },
                 {
                     "user": {"login": REVIEWER_LOGIN},
+                    "commit_id": HEAD,
                     "body": "Fast reviews can remain pending.",
                     "path": "src/alx/bootstrap/live_voice.py",
                     "line": 381,
@@ -557,3 +559,106 @@ class AuthorityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InlineCommentRevisionTests(ProviderTestCase):
+    """A finding is evidence about the revision it was written against.
+
+    The summary was bound to the requested head from the start; the inline
+    comments were not, so `ReviewContent` for one revision could carry findings
+    somebody wrote about another. That undoes the exactness the summary is
+    selected for — a reader has no way to tell which of the two a comment
+    belongs to.
+
+    GitHub states it on the comment: `commit_id` is where it applies now,
+    `original_commit_id` where it was written.
+    """
+
+    OTHER = "b" * 40
+
+    def inline(self, **overrides) -> dict:
+        item = {
+            "id": 900,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": HEAD,
+            "original_commit_id": HEAD,
+        }
+        item.update(overrides)
+        return item
+
+    def read(self, inline, head=HEAD):
+        return self.provider([_review(head, "Summary.")], {7: inline}).read(
+            ReviewContentRequest(21, head)
+        )
+
+    def test_a_comment_about_this_revision_is_included(self) -> None:
+        content = self.read([self.inline()])
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+    def test_a_comment_about_another_revision_is_excluded(self) -> None:
+        content = self.read([
+            self.inline(commit_id=self.OTHER, original_commit_id=self.OTHER)
+        ])
+        self.assertEqual(content.comments, ())
+
+    def test_mixed_revisions_keep_only_this_one(self) -> None:
+        content = self.read([
+            self.inline(id=1, body="about this head"),
+            self.inline(
+                id=2, body="about another head",
+                commit_id=self.OTHER, original_commit_id=self.OTHER,
+            ),
+        ])
+        self.assertEqual(
+            [item.body for item in content.comments], ["about this head"]
+        )
+
+    def test_a_comment_written_against_this_revision_still_counts(self) -> None:
+        """`original_commit_id` is where it was written, and that is enough."""
+        content = self.read([
+            self.inline(commit_id=self.OTHER, original_commit_id=HEAD)
+        ])
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+    def test_a_comment_with_no_revision_is_excluded_rather_than_guessed(self) -> None:
+        item = self.inline()
+        del item["commit_id"]
+        del item["original_commit_id"]
+        content = self.read([item])
+        self.assertEqual(content.comments, ())
+
+    def test_another_account_s_comment_is_never_a_finding(self) -> None:
+        """Authorship and revision are both required, not either."""
+        content = self.read([
+            self.inline(user={"login": "attacker"}),
+            self.inline(id=2, user={"login": "coderabbit-evil[bot]"}),
+        ])
+        self.assertEqual(content.comments, ())
+
+    def test_the_binding_holds_for_greptile_too(self) -> None:
+        """Provider-neutral: the rule is the contract's, not one adapter's."""
+        self.github = FakeGitHub(
+            [{
+                "id": 7,
+                "user": {"login": "greptile[bot]"},
+                "body": f"Summary. Reviewed up to {HEAD}.",
+                "submitted_at": "2026-09-06T20:11:00Z",
+            }],
+            {7: [
+                self.inline(user={"login": "greptile[bot]"}),
+                self.inline(
+                    id=2, user={"login": "greptile[bot]"},
+                    commit_id=self.OTHER, original_commit_id=self.OTHER,
+                ),
+            ]},
+        )
+        original = github_review.httpx.request
+        github_review.httpx.request = self.github.request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        content = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
+        ).read(ReviewContentRequest(21, HEAD))
+        self.assertEqual(len(content.comments), 1)

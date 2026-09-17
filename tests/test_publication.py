@@ -236,21 +236,30 @@ class PublicationTests(unittest.TestCase):
 class FakeGitHub:
     """GitHub's pull request endpoints, answering the production calls."""
 
-    def __init__(self, existing: list | None = None) -> None:
+    def __init__(self, existing: list | None = None, status: int = 200,
+                 headers: dict | None = None) -> None:
         self.existing = existing if existing is not None else []
         self.created: list[dict] = []
+        self.queries: list[str] = []
+        self.status = status
+        self.headers = headers or {}
 
     def request(self, method: str, url: str, **keywords):
+        outer = self
+
         class Response:
             def __init__(self, payload, status=200) -> None:
                 self.status_code = status
-                self.headers: dict = {}
+                self.headers: dict = outer.headers
                 self._payload = payload
 
             def json(self):
                 return self._payload
 
         if method == "GET" and "/pulls?" in url:
+            self.queries.append(url)
+            if self.status != 200:
+                return Response([], self.status)
             return Response(self.existing)
         if method == "POST" and url.endswith("/pulls"):
             payload = keywords.get("json") or {}
@@ -384,3 +393,223 @@ class CapabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewerIdentityTests(unittest.TestCase):
+    """Reviewer identity is an authentication boundary.
+
+    Review evidence reaches AL/X's reasoning and can complete a watched task,
+    so an account that passes this check can put findings in front of her that
+    she will weigh as a reviewer's. Matching the revision exactly does not
+    authenticate who wrote about it.
+
+    This began as a prefix, which accepted every lookalike anyone could
+    register. These hold the exact-allowlist boundary that replaced it.
+    """
+
+    def profile(self, provider):
+        from alx.contracts.review_provider import profile_for
+
+        return profile_for(provider)
+
+    def test_the_real_reviewer_accounts_are_accepted(self) -> None:
+        from alx.contracts.review_provider import ReviewProvider
+
+        cases = {
+            ReviewProvider.CODERABBIT: ["coderabbitai[bot]"],
+            # Greptile publishes under both, and neither is guessed at.
+            ReviewProvider.GREPTILE: ["greptile-apps[bot]", "greptile[bot]"],
+        }
+        for provider, logins in cases.items():
+            for login in logins:
+                with self.subTest(provider=provider.value, login=login):
+                    self.assertTrue(self.profile(provider).authored_by_reviewer(login))
+
+    def test_a_lookalike_account_is_refused(self) -> None:
+        """Anyone can register a name that merely starts the same way."""
+        from alx.contracts.review_provider import ReviewProvider
+
+        cases = {
+            ReviewProvider.CODERABBIT: [
+                "coderabbit-evil[bot]", "coderabbitXYZ", "coderabbit",
+                "coderabbitai", "coderabbitai[bot]x", "xcoderabbitai[bot]",
+            ],
+            ReviewProvider.GREPTILE: [
+                "greptile-evil[bot]", "greptileXYZ", "greptile-apps",
+                "greptileai[bot]", "greptile[bot]-x",
+            ],
+        }
+        for provider, logins in cases.items():
+            for login in logins:
+                with self.subTest(provider=provider.value, login=login):
+                    self.assertFalse(self.profile(provider).authored_by_reviewer(login))
+
+    def test_case_is_the_only_normalisation(self) -> None:
+        """GitHub logins are case-insensitive, so the same account may differ."""
+        from alx.contracts.review_provider import ReviewProvider
+
+        profile = self.profile(ReviewProvider.CODERABBIT)
+        self.assertTrue(profile.authored_by_reviewer("CodeRabbitAI[bot]"))
+        self.assertTrue(profile.authored_by_reviewer("  coderabbitai[bot]  "))
+
+    def test_nothing_that_is_not_a_login_is_accepted(self) -> None:
+        from alx.contracts.review_provider import ReviewProvider
+
+        profile = self.profile(ReviewProvider.CODERABBIT)
+        for value in (None, 1, "", "   ", [], {"login": "coderabbitai[bot]"}):
+            with self.subTest(value=value):
+                self.assertFalse(profile.authored_by_reviewer(value))
+
+    def test_one_provider_never_accepts_another_s_account(self) -> None:
+        from alx.contracts.review_provider import ReviewProvider
+
+        self.assertFalse(
+            self.profile(ReviewProvider.CODERABBIT)
+            .authored_by_reviewer("greptile[bot]")
+        )
+        self.assertFalse(
+            self.profile(ReviewProvider.GREPTILE)
+            .authored_by_reviewer("coderabbitai[bot]")
+        )
+
+    def test_no_provider_matches_by_prefix_or_substring(self) -> None:
+        """Structural: the check is membership, never a shape comparison."""
+        import ast
+
+        from alx.contracts.review_provider import ReviewProviderProfile
+
+        source = (
+            REPOSITORY_ROOT / "src/alx/contracts/review_provider.py"
+        ).read_text()
+        for node in ast.walk(ast.parse(source)):
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "authored_by_reviewer"
+            ):
+                reached = {
+                    item.func.attr
+                    for item in ast.walk(node)
+                    if isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Attribute)
+                }
+                for forbidden in ("startswith", "endswith", "match", "search"):
+                    self.assertNotIn(forbidden, reached)
+                return
+        raise AssertionError("the identity check is missing")
+
+
+class PullRequestIdentityTests(PullRequestTests):
+    """A pull request is identified by head *and* base, not head alone.
+
+    Filtering on head alone returned any open pull request from the branch,
+    including one into some other base — so `open_pull_request` could hand back
+    a proposal that no gate runs on and no reviewer watches, reported as though
+    the work had been put up for review.
+    """
+
+    def test_the_reuse_lookup_asks_for_the_fixed_base(self) -> None:
+        self.provider().open(PullRequestRequest("fix/thing", "Fix"))
+        self.assertTrue(self.github.queries)
+        self.assertIn("base=main", self.github.queries[0])
+        self.assertIn("state=open", self.github.queries[0])
+
+    def test_a_pull_request_into_another_base_is_not_reused(self) -> None:
+        """The answer is checked again, not trusted because it was filtered."""
+        other_base = [{
+            "number": 42,
+            "state": "open",
+            "head": {"sha": HEAD, "ref": "fix/thing"},
+            "base": {"ref": "release/1.0"},
+        }]
+        outcome = self.provider(other_base).open(
+            PullRequestRequest("fix/thing", "Fix the thing")
+        )
+        # Not reused: a new one is opened into main instead.
+        self.assertTrue(outcome.created)
+        self.assertEqual(outcome.base, "main")
+        self.assertEqual(self.github.created[0]["base"], "main")
+
+    def test_a_pull_request_from_another_branch_is_not_reused(self) -> None:
+        wrong_head = [{
+            "number": 42,
+            "state": "open",
+            "head": {"sha": HEAD, "ref": "fix/other"},
+            "base": {"ref": "main"},
+        }]
+        outcome = self.provider(wrong_head).open(
+            PullRequestRequest("fix/thing", "Fix")
+        )
+        self.assertTrue(outcome.created)
+
+    def test_a_closed_pull_request_is_not_reused(self) -> None:
+        closed = [{
+            "number": 42,
+            "state": "closed",
+            "head": {"sha": HEAD, "ref": "fix/thing"},
+            "base": {"ref": "main"},
+        }]
+        outcome = self.provider(closed).open(PullRequestRequest("fix/thing", "Fix"))
+        self.assertTrue(outcome.created)
+
+    def test_the_returned_evidence_always_states_the_fixed_base(self) -> None:
+        outcome = self.provider().open(PullRequestRequest("fix/thing", "Fix"))
+        self.assertEqual(outcome.base, "main")
+
+
+class GitHubThrottleTests(PullRequestTests):
+    """"Try later" and "no" are different answers, on both GitHub paths.
+
+    GitHub rate-limits with 403 and a retry header rather than 429. The review
+    path knew that and the publication path did not, so the same status meant
+    two different things depending on which provider asked — one would have
+    reported a throttle as a capability failure.
+    """
+
+    def test_a_throttled_403_is_unavailable_not_refused(self) -> None:
+        for headers in ({"Retry-After": "60"}, {"X-RateLimit-Remaining": "0"}):
+            with self.subTest(headers=headers):
+                self.github = FakeGitHub(status=403, headers=headers)
+                import alx.providers.github_pull_request as module
+
+                original = module.httpx.request
+                module.httpx.request = self.github.request
+                self.addCleanup(setattr, module.httpx, "request", original)
+                provider = GitHubPullRequests("owner/repo", "token")
+                with self.assertRaises(PullRequestError) as caught:
+                    provider.open(PullRequestRequest("fix/thing", "Fix"))
+                self.assertEqual(caught.exception.code, "pull_request_unavailable")
+
+    def test_a_bare_403_is_still_a_refusal(self) -> None:
+        """Without the evidence GitHub sends with a limit, it is a refusal."""
+        self.github = FakeGitHub(status=403)
+        import alx.providers.github_pull_request as module
+
+        original = module.httpx.request
+        module.httpx.request = self.github.request
+        self.addCleanup(setattr, module.httpx, "request", original)
+        with self.assertRaises(PullRequestError) as caught:
+            GitHubPullRequests("owner/repo", "token").open(
+                PullRequestRequest("fix/thing", "Fix")
+            )
+        self.assertEqual(caught.exception.code, "pull_request_refused")
+
+    def test_both_providers_share_one_reading(self) -> None:
+        """Structural: neither provider restates the rule for itself."""
+        import ast
+
+        for relative in (
+            "src/alx/providers/github_pull_request.py",
+            "src/alx/providers/github_review.py",
+        ):
+            with self.subTest(module=relative):
+                source = (REPOSITORY_ROOT / relative).read_text()
+                literals = {
+                    node.value
+                    for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                }
+                # The header names live in the shared helper alone.
+                self.assertNotIn("Retry-After", literals)
+                self.assertNotIn("X-RateLimit-Remaining", literals)
+                self.assertIn("unavailable", source)
