@@ -79,6 +79,18 @@ class GoalSummary:
     outstanding_work: tuple[str, ...] = ()
     blockers: tuple[str, ...] = ()
     has_pending_dispatch: bool = False
+    # Which project this work belongs to, when it says. A fact about the goal,
+    # carried so the Core can see what a candidate is part of without loading
+    # it. Nothing here decides that a project makes a goal relevant.
+    project_id: str | None = None
+    # When the goal was last written. The one recency fact a candidate carries,
+    # and the difference between "work remains open" and "we were just working
+    # on this" — which are different claims needing different evidence.
+    updated_at: datetime | None = None
+    # Whether this candidate came from the conversation now in progress.
+    # Provenance, not priority: the Core reads it to judge how current the work
+    # is, and nothing infers relevance from it.
+    from_current_conversation: bool = False
 
     def __post_init__(self) -> None:
         if not self.goal_id.strip():
@@ -89,7 +101,20 @@ class GoalSummary:
         object.__setattr__(self, "blockers", tuple(self.blockers))
 
     @classmethod
-    def of(cls, state: GoalState) -> GoalSummary:
+    def of(
+        cls,
+        state: GoalState,
+        *,
+        project_id: str | None = None,
+        updated_at: datetime | None = None,
+        from_current_conversation: bool = False,
+    ) -> GoalSummary:
+        """Build a candidate from a goal's state and its storage facts.
+
+        The extra fields are keyword-only and defaulted, so every existing
+        construction site stays correct and a summary built from state alone
+        simply says nothing about scope or recency.
+        """
         return cls(
             state.goal_id,
             state.objective.summary,
@@ -101,6 +126,9 @@ class GoalSummary:
                 item.disposition is CapabilityAttemptDisposition.PENDING
                 for item in state.attempts
             ),
+            project_id=project_id,
+            updated_at=updated_at,
+            from_current_conversation=from_current_conversation,
         )
 
     @property
@@ -317,7 +345,13 @@ class DurableGoalStore(Protocol):
 
     def load(self, goal_id: str) -> GoalSnapshot: ...
 
-    def list_unfinished(self, conversation_id: str) -> tuple[GoalSummary, ...]: ...
+    def list_unfinished(
+        self,
+        conversation_id: str | None = None,
+        *,
+        project_id: str | None = None,
+        limit: int | None = None,
+    ) -> tuple[GoalSummary, ...]: ...
 
     def replace(
         self,

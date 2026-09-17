@@ -61,6 +61,11 @@ class CoreOutcome:
 # the active work still cites. Nothing is deleted; older casual conversation
 # simply has to be retrieved rather than being silently present.
 REASONING_TURN_WINDOW = 12
+# How many unfinished goals one reasoning call may be shown. Awareness of open
+# work must not grow with the history: without a bound, every conversation
+# would eventually carry every goal AL/X has ever left unfinished. The cap is
+# on the final projection, not on each source that feeds it.
+UNFINISHED_GOAL_CANDIDATES = 10
 
 
 def project_turns_for_reasoning(
@@ -186,7 +191,12 @@ class CoreAgent:
         """
         self._validate_step_budget(step_budget)
         conversation_id = conversation.conversation_id
-        for summary in self._store.list_unfinished(conversation_id):
+        # Recovery is deliberately unbounded and unscoped, unlike the candidate
+        # projection below. An interrupted dispatch or an unflushed memory
+        # batch is a fact about durable state, not a thing to be shown to
+        # reasoning, and leaving one unrepaired because it belongs to another
+        # conversation would wedge that goal permanently.
+        for summary in self._store.list_unfinished():
             if summary.has_pending_dispatch:
                 # A dispatch that never returned means the process stopped
                 # between the durable checkpoint and the result. Refusing
@@ -326,8 +336,20 @@ class CoreAgent:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason=selection_error)
                 if snapshot is None or snapshot.state.goal_id != decision.goal_id:
                     snapshot = self._store.load(decision.goal_id)
-                    if snapshot.conversation_id != conversation_id:
-                        return CoreOutcome(CoreState.ERROR, None, reason="goal_conversation_mismatch")
+                    # A goal may be resumed from any conversation, but only one
+                    # that was actually offered this turn. The check used to be
+                    # that the goal belonged to this conversation, which made
+                    # durable work unreachable the moment the runtime carried a
+                    # different id. What it was really protecting is unchanged:
+                    # reasoning may reach the candidates it was shown and no
+                    # others, so a goal id invented or remembered from elsewhere
+                    # still buys nothing.
+                    if not any(
+                        item.goal_id == decision.goal_id for item in summaries
+                    ):
+                        return CoreOutcome(
+                            CoreState.ERROR, None, reason="goal_selection_unknown"
+                        )
                     selections += 1
                     # The selected goal is now a reasoning input, so the
                     # provenance of everything this step persists must include
@@ -1068,12 +1090,36 @@ class CoreAgent:
         state is still what the Core is reasoning about. Dropping it here
         would contradict the reasoning context on the very next step.
         """
-        summaries = self._store.list_unfinished(conversation_id)
-        if snapshot is None or any(
-            item.goal_id == snapshot.state.goal_id for item in summaries
-        ):
+        # The project the current work belongs to, when there is current work.
+        # A storage fact read off the selected goal, never inferred from what
+        # was said.
+        active_project = (
+            None
+            if snapshot is None or snapshot.scope is None
+            else snapshot.scope.project_id
+        )
+        summaries = self._store.list_unfinished(
+            conversation_id,
+            project_id=active_project,
+            limit=UNFINISHED_GOAL_CANDIDATES,
+        )
+        if snapshot is None:
             return summaries
-        return (*summaries, GoalSummary.of(snapshot.state))
+        if any(item.goal_id == snapshot.state.goal_id for item in summaries):
+            return summaries
+        # The goal being worked under is always visible, even when the cap
+        # would have excluded it. Dropping it would contradict the reasoning
+        # context on the very next step, so it replaces the lowest-priority
+        # candidate rather than extending the bound.
+        selected = GoalSummary.of(
+            snapshot.state,
+            project_id=active_project,
+            from_current_conversation=(
+                snapshot.conversation_id == conversation_id
+            ),
+        )
+        kept = summaries[: UNFINISHED_GOAL_CANDIDATES - 1]
+        return (*kept, selected)
 
     # One goal is read per turn. A second move to a different goal is refused
     # rather than paid for: selecting A, then B, then C bought a reasoning

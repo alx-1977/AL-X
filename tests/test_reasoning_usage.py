@@ -488,7 +488,7 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
             def load(self, _goal_id):
                 return None
 
-            def list_unfinished(self, _conversation_id):
+            def list_unfinished(self, _conversation_id=None, *, project_id=None, limit=None):
                 return ()
 
         def check(_task_id):

@@ -47,7 +47,7 @@ class CapturingReasoner:
 
 
 class NullGoalStore:
-    def list_unfinished(self, conversation_id):
+    def list_unfinished(self, conversation_id=None, *, project_id=None, limit=None):
         return ()
 
 
