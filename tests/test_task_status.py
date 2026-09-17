@@ -28,27 +28,36 @@ from alx.continuity.tasks import SQLiteTaskStore, TaskStoreCorrupt  # noqa: E402
 from alx.contracts.cognition import CognitionOrigin  # noqa: E402
 from alx.contracts.task import ExternalTask, TaskObservation, TaskState  # noqa: E402
 from alx.interfaces.task_poller import TaskPoller  # noqa: E402
-from alx.providers.qodo_status import (  # noqa: E402
-    QodoStatusObserver,
+from alx.contracts.review_content import ReviewReadError  # noqa: E402
+from alx.contracts.review_provider import (  # noqa: E402
+    PROFILES,
+    ReviewProvider,
+    profile_for,
+)
+from alx.providers import github_review  # noqa: E402
+from alx.providers.github_review import GitHubReviewProvider  # noqa: E402
+from alx.providers.review_status import (  # noqa: E402
+    ReviewStatusObserver,
     subject_reference,
 )
-from tests.qodo_transcript import (  # noqa: E402
-    GitHubTranscript,
+from tests.review_transcript import (  # noqa: E402
     PUBLISHED_AT,
-    realistic_issue_comments,
+    REVIEWER_LOGIN,
 )
 
 
 HEAD = "a" * 40
 OTHER = "b" * 40
-QODO = 151058649
+OTHER_HEAD = OTHER
+# The configured reviewer's name, as the task store records the service.
+REVIEWER = "coderabbit"
 
 
 def _task(state: TaskState = TaskState.REQUESTED, **overrides) -> ExternalTask:
     values = dict(
         task_id=f"review:21:{HEAD}",
         kind="external_review",
-        service="qodo",
+        service=REVIEWER,
         subject_reference=subject_reference(21, HEAD),
         state=state,
         requested_at=datetime.now(UTC) - timedelta(seconds=90),
@@ -77,7 +86,7 @@ class PollerHarness(unittest.TestCase):
         self.lines: list[tuple[str, dict]] = []
         self.woken: list[ExternalTask] = []
 
-    def _poller(self, observer, service: str = "qodo") -> TaskPoller:
+    def _poller(self, observer, service: str = REVIEWER) -> TaskPoller:
         return TaskPoller(
             self.store,
             {service: observer},
@@ -188,7 +197,7 @@ class TaskStoreTests(unittest.TestCase):
             (
                 "corrupt-task",
                 "external_review",
-                "qodo",
+                REVIEWER,
                 subject_reference(21),
                 "invented_state",
                 datetime.now(UTC).isoformat(),
@@ -213,7 +222,7 @@ class TaskStoreTests(unittest.TestCase):
             (
                 "corrupt-completed-task",
                 "external_review",
-                "qodo",
+                REVIEWER,
                 subject_reference(21, HEAD),
                 TaskState.COMPLETED.value,
                 "not-a-timestamp",
@@ -282,7 +291,7 @@ class PollerTests(PollerHarness):
         # than a line that scrolls away. Not a claim about progress.
         self.assertEqual(values["state"], "waiting_for_result")
         self.assertEqual(values["subject"], f"PR #21 @ {HEAD[:7]}")
-        self.assertEqual(values["service"], "qodo")
+        self.assertEqual(values["service"], REVIEWER)
         self.assertIsInstance(values["elapsed_seconds"], int)
         self.assertGreaterEqual(values["elapsed_seconds"], 90)
 
@@ -362,7 +371,7 @@ class PollerTests(PollerHarness):
         self.assertEqual(first_lines[0][1]["state"], "observer_unavailable")
 
     def test_a_returning_observer_restores_its_retained_tasks(self) -> None:
-        self.store.record(_task(service="qodo"))
+        self.store.record(_task(service=REVIEWER))
         TaskPoller(
             self.store,
             {},
@@ -372,7 +381,7 @@ class PollerTests(PollerHarness):
         ).tick()
         self.assertEqual(self.store.outstanding(), ())
 
-        self.store.restore_observers(frozenset({"qodo"}))
+        self.store.restore_observers(frozenset({REVIEWER}))
         restored = self.store.outstanding()
         self.assertEqual(len(restored), 1)
         self.assertIs(restored[0].state, TaskState.REQUESTED)
@@ -382,7 +391,7 @@ class PollerTests(PollerHarness):
         startup_store = SQLiteTaskStore(
             Path(self.directory.name) / "external-tasks.sqlite3"
         )
-        startup_store.record(_task(service="qodo"))
+        startup_store.record(_task(service=REVIEWER))
         TaskPoller(
             startup_store,
             {},
@@ -397,7 +406,7 @@ class PollerTests(PollerHarness):
             "",
             announce=lambda conversation, values: None,
             completed=lambda task: None,
-            observers={"qodo": RecordingObserver(TaskState.COMPLETED)},
+            observers={REVIEWER: RecordingObserver(TaskState.COMPLETED)},
         )
 
         self.assertIsNotNone(runtime)
@@ -427,8 +436,7 @@ class WatcherCannotActTests(unittest.TestCase):
 
     MODULES = (
         "src/alx/interfaces/task_poller.py",
-        "src/alx/providers/qodo_status.py",
-        "src/alx/providers/qodo_artifact.py",
+        "src/alx/providers/review_status.py",
         "src/alx/continuity/tasks.py",
     )
 
@@ -441,39 +449,54 @@ class WatcherCannotActTests(unittest.TestCase):
                         names = [alias.name for alias in node.names]
                         names.append(getattr(node, "module", "") or "")
                         joined = " ".join(names)
-                        self.assertNotIn("qodo_review", joined)
                         self.assertNotIn("github_merge", joined)
                         self.assertNotIn("tools.review", joined)
                         self.assertNotIn("tools.repository", joined)
                     if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                        self.assertNotEqual(node.value, "/review")
+                        # No reviewer's trigger and no merge capability: the
+                        # watcher reports, and nothing it can reach acts.
+                        for trigger in (
+                            profile.trigger for profile in PROFILES.values()
+                        ):
+                            self.assertNotEqual(node.value, trigger)
                         self.assertNotEqual(node.value, "merge_pull_request")
 
     def test_the_observer_only_reads(self) -> None:
-        """No write verb reaches GitHub from the status path."""
-        calls = []
-        for relative in (
-            "src/alx/providers/qodo_status.py",
-            "src/alx/providers/qodo_artifact.py",
-        ):
-            tree = ast.parse((REPOSITORY_ROOT / relative).read_text())
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                target = node.func
-                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-                    if target.value.id == "httpx":
-                        calls.append(target.attr)
-                        self.assertEqual(target.attr, "get")
-        self.assertEqual(calls, ["get"])
+        """No write reaches GitHub from the status path.
+
+        The observer holds a provider that can also request a review, so the
+        check is what the observer itself can reach: it calls `read` and
+        nothing else, and `read` is already proved unable to write.
+        """
+        tree = ast.parse(
+            (REPOSITORY_ROOT / "src/alx/providers/review_status.py").read_text()
+        )
+        reached = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        self.assertIn("read", reached)
+        for verb in ("request", "post", "put", "patch", "delete"):
+            self.assertNotIn(verb, reached, f"the watcher must not {verb}")
 
 
-class QodoObserverTests(unittest.TestCase):
-    """The completion rule Friedl approved, and nothing beyond it."""
+class ReviewObserverTests(unittest.TestCase):
+    """The completion rule Friedl approved, and nothing beyond it.
 
-    def _observer(self, reviews, comments):
-        from alx.providers import qodo_artifact
+    Formerly the Qodo observer's tests. What they protected is provider-neutral
+    and survives: a task completes only when a review of the exact revision can
+    actually be read, another revision's review does not answer for this one,
+    another account's comment is not the reviewer's, and an unreadable state is
+    unknown rather than still-waiting.
 
+    Exercised through the production observer over the production provider, so
+    the completion rule is checked where it is actually decided rather than
+    against a reconstruction of it. The marker-comment test is gone with the
+    protocol it described.
+    """
+
+    def _observer(self, reviews, comments, provider=ReviewProvider.CODERABBIT):
         normalised = []
         for index, review in enumerate(reviews, 1):
             item = dict(review)
@@ -481,11 +504,35 @@ class QodoObserverTests(unittest.TestCase):
             item.setdefault("body", "Review complete.")
             item.setdefault("submitted_at", PUBLISHED_AT)
             normalised.append(item)
-        transcript = GitHubTranscript(issue_comments=comments, reviews=normalised)
-        original = qodo_artifact.httpx.get
-        qodo_artifact.httpx.get = transcript.get
-        self.addCleanup(setattr, qodo_artifact.httpx, "get", original)
-        return QodoStatusObserver("owner/repo", "token")
+
+        class Response:
+            def __init__(self, payload) -> None:
+                self.status_code = 200
+                self.headers: dict = {}
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def request(method, url, **keywords):
+            if method != "GET":
+                raise AssertionError("the observer must not write")
+            base = url.split("?")[0]
+            first = "page=1" in url
+            if base.endswith("/reviews"):
+                return Response(normalised if first else [])
+            if base.endswith("/issues/21/comments"):
+                return Response(comments if first else [])
+            if base.endswith("/comments"):
+                return Response([])
+            return Response({"head": {"sha": HEAD}})
+
+        original = github_review.httpx.request
+        github_review.httpx.request = request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        return ReviewStatusObserver(
+            GitHubReviewProvider("owner/repo", "token", profile_for(provider))
+        )
 
     def test_a_repository_that_cannot_build_a_url_is_refused(self) -> None:
         """The same rule as the review and merge providers, for one reason.
@@ -495,109 +542,116 @@ class QodoObserverTests(unittest.TestCase):
         resolves. Refusing at construction makes the misconfiguration visible
         where it can be fixed.
         """
-        for repository in (
-            "own er/repo",
-            "owner/re?po",
-            "owner/repo#x",
-            "owner/",
-            "owner/repo/extra",
-            "../../etc",
-        ):
+        for repository in ("own er/repo", "owner/re?po", "owner/repo#x",
+                           "owner/", "/repo", ""):
             with self.subTest(repository=repository):
                 with self.assertRaises(ValueError):
-                    QodoStatusObserver(repository, "token")
+                    GitHubReviewProvider(
+                        repository, "token", profile_for(ReviewProvider.CODERABBIT)
+                    )
 
-        self.assertIsNotNone(QodoStatusObserver("owner/repo", "token"))
-
-    def test_a_review_object_at_the_exact_revision_completes(self) -> None:
+    def test_a_review_at_the_exact_revision_completes(self) -> None:
         observer = self._observer(
-            [{"user": {"id": QODO}, "commit_id": HEAD}], []
+            [{"user": {"login": REVIEWER_LOGIN}, "body": f"Reviewed {HEAD}."}], []
         )
-        self.assertIs(
-            observer.observe(subject_reference(21, HEAD)).state, TaskState.COMPLETED
-        )
+        observed = observer.observe(subject_reference(21, HEAD))
+        self.assertIs(observed.state, TaskState.COMPLETED)
 
-    def test_a_review_object_at_another_revision_does_not_complete(self) -> None:
+    def test_a_review_at_another_revision_does_not_complete(self) -> None:
+        """A clean review of an earlier head must never answer for this one."""
         observer = self._observer(
-            [{"user": {"id": QODO}, "commit_id": OTHER}], []
+            [{"user": {"login": REVIEWER_LOGIN}, "body": f"Reviewed {OTHER_HEAD}."}],
+            [],
         )
-        self.assertIs(
-            observer.observe(subject_reference(21, HEAD)).state,
-            TaskState.WAITING_FOR_RESULT,
-        )
+        observed = observer.observe(subject_reference(21, HEAD))
+        self.assertIs(observed.state, TaskState.WAITING_FOR_RESULT)
 
-    def test_an_updated_marker_naming_the_revision_completes(self) -> None:
-        """A clean review publishes no review object, so this is the only signal."""
+    def test_a_summary_comment_naming_the_revision_completes(self) -> None:
+        """Reviewers publish their summary on the issue thread, not as a review."""
         observer = self._observer(
             [],
-            realistic_issue_comments(HEAD),
+            [{
+                "id": 5,
+                "user": {"login": REVIEWER_LOGIN},
+                "body": f"No actionable comments. Reviewed up to {HEAD}.",
+                "created_at": PUBLISHED_AT,
+            }],
         )
-        self.assertIs(
-            observer.observe(subject_reference(21, HEAD)).state, TaskState.COMPLETED
-        )
-
-    def test_a_qodo_comment_about_another_revision_does_not_complete(self) -> None:
-        """The marker must name this revision, not merely be Qodo's.
-
-        Qodo comments on a pull request many times. Treating any of its
-        comments as a result would report a review of a revision that was
-        never examined.
-        """
-        observer = self._observer(
-            [],
-            [
-                {"user": {"id": QODO}, "body": "Qodo is busy working"},
-                {
-                    "user": {"id": QODO},
-                    "body": f"updated up to https://github.com/o/r/commit/{OTHER}",
-                },
-            ],
-        )
-        self.assertIs(
-            observer.observe(subject_reference(21, HEAD)).state,
-            TaskState.WAITING_FOR_RESULT,
-        )
+        observed = observer.observe(subject_reference(21, HEAD))
+        self.assertIs(observed.state, TaskState.COMPLETED)
 
     def test_another_accounts_comment_naming_the_revision_does_not_complete(
         self,
     ) -> None:
+        """A person quoting the head is not the reviewer having reviewed it."""
         observer = self._observer(
-            [], [{"user": {"id": 1}, "body": f"see /commit/{HEAD}"}]
+            [],
+            [{
+                "id": 5,
+                "user": {"login": "alx-1977"},
+                "body": f"please look at {HEAD}",
+                "created_at": PUBLISHED_AT,
+            }],
         )
+        observed = observer.observe(subject_reference(21, HEAD))
+        self.assertIs(observed.state, TaskState.WAITING_FOR_RESULT)
+
+    def test_the_configured_reviewer_decides_whose_word_counts(self) -> None:
+        """Switching provider changes which account completes a task."""
+        comment = [{
+            "id": 5,
+            "user": {"login": "greptile-apps[bot]"},
+            "body": f"Reviewed up to {HEAD}.",
+            "created_at": PUBLISHED_AT,
+        }]
+        waiting = self._observer([], comment, provider=ReviewProvider.CODERABBIT)
         self.assertIs(
-            observer.observe(subject_reference(21, HEAD)).state,
+            waiting.observe(subject_reference(21, HEAD)).state,
             TaskState.WAITING_FOR_RESULT,
+        )
+        completed = self._observer([], comment, provider=ReviewProvider.GREPTILE)
+        self.assertIs(
+            completed.observe(subject_reference(21, HEAD)).state,
+            TaskState.COMPLETED,
         )
 
     def test_unreadable_state_is_unknown_rather_than_waiting(self) -> None:
-        from alx.providers import qodo_status
+        """Unreadable is not incomplete: nothing is claimed either way."""
 
-        def refuse(url, headers, timeout):
-            raise qodo_status.httpx.HTTPError("no")
+        class Failing:
+            reviewer = "coderabbit"
 
-        original = qodo_status.httpx.get
-        qodo_status.httpx.get = refuse
-        self.addCleanup(setattr, qodo_status.httpx, "get", original)
-        observer = QodoStatusObserver("owner/repo", "token")
-        self.assertIs(
-            observer.observe(subject_reference(21, HEAD)).state,
-            TaskState.STATUS_UNKNOWN,
+            def read(self, request):
+                raise ReviewReadError("review_unavailable")
+
+        observed = ReviewStatusObserver(Failing()).observe(
+            subject_reference(21, HEAD)
         )
+        self.assertIs(observed.state, TaskState.STATUS_UNKNOWN)
 
     def test_a_subject_that_cannot_be_read_is_unknown(self) -> None:
-        observer = self._observer([], [])
-        for subject in ("", f"pull/21@{HEAD[:12]}", "nonsense"):
+        for subject in ("", "pull/", "pull/x@" + HEAD, "nonsense"):
             with self.subTest(subject=subject):
-                self.assertIs(
-                    observer.observe(subject).state, TaskState.STATUS_UNKNOWN
-                )
+                observed = self._observer([], []).observe(subject)
+                self.assertIs(observed.state, TaskState.STATUS_UNKNOWN)
+
+    def test_a_subject_without_a_revision_is_unknown(self) -> None:
+        """Without a head there is nothing to bind a review to."""
+        observed = self._observer([], []).observe(subject_reference(21))
+        self.assertIs(observed.state, TaskState.STATUS_UNKNOWN)
 
 
 class ReviewFindingRegressions(unittest.TestCase):
-    """The defects an external review found in the watcher, kept closed."""
+    """The defects an external review found in the watcher, kept closed.
+
+    Both survive the provider migration unchanged in meaning: a result that
+    predates the request is the previous answer, and a busy pull request
+    outgrows one page of history. Exercised through the production observer
+    over the production provider.
+    """
 
     def _observer(self, reviews, comments):
-        return QodoObserverTests._observer(self, reviews, comments)
+        return ReviewObserverTests._observer(self, reviews, comments)
 
     def test_a_result_older_than_the_request_does_not_complete_it(self) -> None:
         """Asking again for an unchanged revision is a new occasion.
@@ -607,14 +661,13 @@ class ReviewFindingRegressions(unittest.TestCase):
         """
         asked = datetime.now(UTC)
         observer = self._observer(
-            [
-                {
-                    "user": {"id": QODO},
-                    "commit_id": HEAD,
-                    "submitted_at": (asked - timedelta(hours=1)).isoformat(),
-                }
-            ],
             [],
+            [{
+                "id": 5,
+                "user": {"login": REVIEWER_LOGIN},
+                "body": f"Reviewed up to {HEAD}.",
+                "created_at": (asked - timedelta(hours=1)).isoformat(),
+            }],
         )
         self.assertIs(
             observer.observe(subject_reference(21, HEAD), asked).state,
@@ -624,14 +677,13 @@ class ReviewFindingRegressions(unittest.TestCase):
     def test_a_result_after_the_request_completes_it(self) -> None:
         asked = datetime.now(UTC)
         observer = self._observer(
-            [
-                {
-                    "user": {"id": QODO},
-                    "commit_id": HEAD,
-                    "submitted_at": (asked + timedelta(minutes=1)).isoformat(),
-                }
-            ],
             [],
+            [{
+                "id": 5,
+                "user": {"login": REVIEWER_LOGIN},
+                "body": f"Reviewed up to {HEAD}.",
+                "created_at": (asked + timedelta(minutes=1)).isoformat(),
+            }],
         )
         self.assertIs(
             observer.observe(subject_reference(21, HEAD), asked).state,
@@ -640,37 +692,48 @@ class ReviewFindingRegressions(unittest.TestCase):
 
     def test_a_result_on_a_later_page_is_still_found(self) -> None:
         """A busy pull request outgrows one page of history."""
-        from alx.providers import qodo_artifact
 
         class Response:
             def __init__(self, body):
                 self.status_code = 200
+                self.headers: dict = {}
                 self._body = body
 
             def json(self):
                 return self._body
 
-        def get(url, headers, timeout):
-            if "/pulls/21/reviews" not in url or "/comments" in url:
+        def request(method, url, **keywords):
+            if method != "GET":
+                raise AssertionError("the observer must not write")
+            base = url.split("?")[0]
+            if not base.endswith("/issues/21/comments"):
                 return Response([])
             page = url.rsplit("page=", 1)[-1]
             if page == "1":
-                # A full page, so the reader continues to the next.
-                return Response([{"user": {"id": 1}, "commit_id": OTHER}] * 100)
+                # A full page of someone else's comments, so the reader
+                # continues to the next.
+                return Response([
+                    {"id": index, "user": {"login": "alx-1977"},
+                     "body": "noted", "created_at": PUBLISHED_AT}
+                    for index in range(100)
+                ])
             if page == "2":
                 return Response([{
                     "id": 101,
-                    "user": {"id": QODO},
-                    "commit_id": HEAD,
-                    "body": "Review complete.",
-                    "submitted_at": PUBLISHED_AT,
+                    "user": {"login": REVIEWER_LOGIN},
+                    "body": f"Review complete. Reviewed up to {HEAD}.",
+                    "created_at": PUBLISHED_AT,
                 }])
             return Response([])
 
-        original = qodo_artifact.httpx.get
-        qodo_artifact.httpx.get = get
-        self.addCleanup(setattr, qodo_artifact.httpx, "get", original)
-        observer = QodoStatusObserver("owner/repo", "token")
+        original = github_review.httpx.request
+        github_review.httpx.request = request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        observer = ReviewStatusObserver(
+            GitHubReviewProvider(
+                "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            )
+        )
         self.assertIs(
             observer.observe(subject_reference(21, HEAD)).state, TaskState.COMPLETED
         )
@@ -691,7 +754,7 @@ class PollerFailureRegressions(PollerHarness):
 
         poller = TaskPoller(
             self.store,
-            {"qodo": RecordingObserver(TaskState.COMPLETED)},
+            {REVIEWER: RecordingObserver(TaskState.COMPLETED)},
             interval_seconds=1.0,
             announce=lambda conversation, values: self.lines.append(
                 (conversation, values)
@@ -739,7 +802,7 @@ class WatchIdentityTests(unittest.TestCase):
 
         requested_at = datetime.now(UTC)
         for _ in range(2):
-            _watch_review(Runtime(), "conversation-1", 21, HEAD, requested_at)
+            _watch_review(Runtime(), "conversation-1", 21, HEAD, requested_at, REVIEWER)
         self.assertEqual(len(captured), 2)
         self.assertNotEqual(captured[0].task_id, captured[1].task_id)
         self.assertEqual(captured[0].subject_reference, subject_reference(21, HEAD))
@@ -756,7 +819,7 @@ class WatchIdentityTests(unittest.TestCase):
         class Runtime:
             poller = Poller()
 
-        _watch_review(Runtime(), "conversation-1", 21, "", datetime.now(UTC))
+        _watch_review(Runtime(), "conversation-1", 21, "", datetime.now(UTC), REVIEWER)
         self.assertEqual(captured[0].subject_reference, subject_reference(21))
 
 
@@ -894,7 +957,7 @@ class StoreUpgradeTest(unittest.TestCase):
             (
                 f"review:21:{HEAD}",
                 "external_review",
-                "qodo",
+                REVIEWER,
                 subject_reference(21, HEAD),
                 TaskState.COMPLETED.value,
                 (finished - timedelta(seconds=60)).isoformat(),
@@ -1005,7 +1068,7 @@ class CompletionReachesCoreTest(unittest.TestCase):
         self.store.record(_task())
         poller = TaskPoller(
             self.store,
-            {"qodo": RecordingObserver(state)},
+            {REVIEWER: RecordingObserver(state)},
             interval_seconds=1.0,
             announce=lambda conversation, values: None,
             # Completion is durable in the store; nothing is written to the

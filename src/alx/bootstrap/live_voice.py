@@ -21,13 +21,14 @@ from alx.bootstrap.mail import (
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.coding import build_coding_runtime
+from alx.bootstrap.publication import build_publication_runtime
 from alx.bootstrap.repository import build_repository_runtime, build_canonical_repository_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
 from alx.contracts.task import ExternalTask, TaskState
-from alx.providers.qodo_status import subject_reference
+from alx.providers.review_status import subject_reference
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
@@ -271,6 +272,7 @@ def _watch_review(
     number: int,
     head_sha: str,
     requested_at: datetime,
+    reviewer: str,
 ) -> None:
     """Record a requested review so the watcher can report on it.
 
@@ -287,7 +289,9 @@ def _watch_review(
                 # earlier row's handoff state, so identity is now collision-safe.
                 task_id=f"review:{number}:{uuid4().hex}",
                 kind="external_review",
-                service="qodo",
+                # The configured reviewer, so the watcher and the
+                # record name the same one.
+                service=reviewer,
                 subject_reference=subject_reference(number, head_sha),
                 state=TaskState.REQUESTED,
                 requested_at=requested_at,
@@ -596,12 +600,14 @@ async def run(repository_root: Path) -> None:
         review_configuration.repository,
         review_configuration.token,
         lambda: current_call_id[0],
+        reviewer=review_configuration.reviewer,
         started=lambda number, sha, requested_at: _watch_review(
             task_holder[0],
             current_conversation_id[0],
             number,
             sha,
             requested_at,
+            review_configuration.reviewer,
         ),
     )
     if review_runtime is not None:
@@ -626,6 +632,24 @@ async def run(repository_root: Path) -> None:
         policies.update(merge_runtime.policies)
         executors.update(merge_runtime.executors)
         permissions.update(merge_runtime.permissions)
+
+    # Publishing a repair so it can be reviewed. AL/X's authority, never the
+    # Coding Agent's: a job commits in its worktree and cannot push.
+    publication_runtime = build_publication_runtime(
+        merge_configuration.is_usable,
+        merge_configuration.repository,
+        merge_configuration.token,
+        repository_runtime_configuration.root
+        if repository_runtime_configuration.is_usable
+        else None,
+        lambda: current_call_id[0],
+    )
+    if publication_runtime is not None:
+        for definition in publication_runtime.definitions:
+            registry.register(definition)
+        policies.update(publication_runtime.policies)
+        executors.update(publication_runtime.executors)
+        permissions.update(publication_runtime.permissions)
 
     repository_runtime = build_canonical_repository_runtime(
         repository_runtime_configuration.is_usable,

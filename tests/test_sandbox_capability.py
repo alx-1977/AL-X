@@ -134,6 +134,19 @@ CODING_PROCESS_SITES = {
 # is asserted below before the generic scans skip its separately governed site.
 REPOSITORY_RUNTIME_SITE = PRODUCTION_ROOT / "providers" / "repository_runtime.py"
 
+# Publishing a repair branch is its own governed site, separate from the
+# canonical-main runtime and from Coding Agent authority. It is admitted for
+# the same reason and under the same terms: one fixed Git runner, argv built
+# here from a validated branch name, and no shape in which a force, a lease, a
+# deletion refspec or an alternate remote can be produced. It is separate from
+# `coding_git.py` because the authority differs — a job may commit in its
+# worktree and may never push, and AL/X may publish and may not run a test.
+# Neither is a second route to the other's outcome. Its boundary is asserted
+# below before the generic scans skip it.
+REPOSITORY_PUBLICATION_SITE = (
+    PRODUCTION_ROOT / "providers" / "repository_publication.py"
+)
+
 
 def _sandbox_modules() -> list[Path]:
     named = set(PRODUCTION_ROOT.rglob("*sandbox*.py"))
@@ -648,9 +661,18 @@ class SingleExecutionSiteTest(unittest.TestCase):
 
     def test_only_the_runner_imports_a_process_execution_module(self) -> None:
         self._assert_repository_runtime_process_boundary(REPOSITORY_RUNTIME_SITE.read_text())
+        # The same boundary, asserted for the publication site: one fixed
+        # runner, not a module-wide exemption.
+        self._assert_repository_runtime_process_boundary(
+            REPOSITORY_PUBLICATION_SITE.read_text()
+        )
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES or path == REPOSITORY_RUNTIME_SITE:
+            if (
+                path in EXECUTION_SITES
+                or path in CODING_PROCESS_SITES
+                or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_PUBLICATION_SITE}
+            ):
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -676,7 +698,11 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
         offenders = []
         for path in self._production_modules():
-            if path in EXECUTION_SITES or path in CODING_PROCESS_SITES or path == REPOSITORY_RUNTIME_SITE:
+            if (
+                path in EXECUTION_SITES
+                or path in CODING_PROCESS_SITES
+                or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_PUBLICATION_SITE}
+            ):
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):

@@ -4,10 +4,12 @@ Returning None leaves the capability unregistered, so AL/X cannot request a
 review at all. That is the difference between the capability being withheld and
 requesting merely failing.
 
-Qodo is the reviewer this composes because it is the one installed on the
-repository. The provider is injected, so another reviewer can replace it
-without changing the capability, the gate or the Core; nothing here selects
-between reviewers, because there is one.
+Which reviewer is composed is configuration. Every supported reviewer watches
+this repository through GitHub and works the same way, so one provider serves
+all of them and the profile supplies the three things that differ: the name,
+the trigger comment, and the bot account. Changing the configured reviewer
+changes nothing about the capability, the gate, the Core, or what AL/X asks
+for.
 """
 
 from __future__ import annotations
@@ -20,8 +22,8 @@ from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.contracts.review import ReviewRequest
-from alx.providers.qodo_review import QodoReviewProvider
-from alx.providers.qodo_review_content import QodoReviewContentProvider
+from alx.contracts.review_provider import ReviewProvider, profile_for
+from alx.providers.github_review import GitHubReviewProvider
 from alx.safety import AuthorityPolicy
 from alx.tools.review import (
     DEFINITION as REVIEW_DEFINITION,
@@ -63,6 +65,9 @@ def build_review_runtime(
     repository: str,
     token: str,
     call_id_source: Callable[[], str],
+    # Which reviewer to compose. Configuration, never a reasoning input: AL/X
+    # asks for a review, not for a particular reviewer.
+    reviewer: ReviewProvider | str = ReviewProvider.CODERABBIT,
     provider: Any = None,
     # Reads what a reviewer published. Injected like the requesting provider,
     # so another reviewer can replace it without changing the capability.
@@ -81,9 +86,27 @@ def build_review_runtime(
         return None
 
     try:
-        selected = provider or QodoReviewProvider(repository, token)
-        reader = content_provider or QodoReviewContentProvider(repository, token)
-    except ValueError:
+        # The configured name becomes a provider here, where providers are
+        # composed. An unrecognised one falls back rather than leaving review
+        # silently unavailable: a typo should cost the default reviewer, not
+        # the capability.
+        if not isinstance(reviewer, ReviewProvider):
+            try:
+                reviewer = ReviewProvider(str(reviewer).strip().lower())
+            except ValueError:
+                LOGGER.warning(
+                    "Unknown review provider %r: using %s",
+                    reviewer,
+                    ReviewProvider.CODERABBIT.value,
+                )
+                reviewer = ReviewProvider.CODERABBIT
+        # One provider object requests and reads: both are GitHub calls about
+        # the same pull request by the same reviewer, and splitting them would
+        # mean two places that have to agree on which reviewer is configured.
+        composed = GitHubReviewProvider(repository, token, profile_for(reviewer))
+        selected = provider or composed
+        reader = content_provider or composed
+    except (KeyError, TypeError, ValueError):
         LOGGER.warning("External review requesting is misconfigured: no capability")
         return None
 
