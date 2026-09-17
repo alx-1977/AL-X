@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 source_root = "src/alx"
 
 boundaries = [
@@ -69,3 +69,118 @@ bootstrap = [
   "config",
 ]
 config = []
+
+# ---------------------------------------------------------------------------
+# Law 0 production-outcome manifest
+# ---------------------------------------------------------------------------
+#
+# Law 0 states that every production outcome has exactly one authoritative
+# implementation path. This manifest is the declared list of outcomes whose
+# single entry point is mechanically enforced by `scripts/check_architecture.py`.
+#
+# WHAT THE GATE PROVES
+#
+# For each entry below the gate proves, by AST inspection of `source_root`:
+#
+#   - the declared `entry` resolves to a real function definition;
+#   - that qualified name is defined exactly once in the whole source tree;
+#   - no two outcomes declare the same `entry`;
+#   - every `id` is unique;
+#   - no `forbidden` fragment appears anywhere in the source tree.
+#
+# WHAT THE GATE DOES NOT PROVE
+#
+# This gate is a named-entry-point check. It is deliberately NOT a semantic
+# proof that no duplicate behaviour exists, and a passing run must never be
+# read as "Law 0 is satisfied". It cannot see:
+#
+#   - outcomes nobody declared here (only declared outcomes are covered);
+#   - a second route that duplicates behaviour under an unrelated name;
+#   - reachability — "defined once" is not "reachable by one path", because
+#     dependency-injected callables defeat local static analysis;
+#   - dynamic dispatch through getattr, callable maps or registry indirection;
+#   - anything outside `source_root`, including the frontend and `scripts/`.
+#
+# It is an additional floor beneath the behavioural Law 0 tests in `tests/`,
+# not a replacement for them, and not a substitute for the human superseded-
+# path evidence that `docs/LAW_ENFORCEMENT.md` requires.
+#
+# SCOPE OF THIS SEEDING
+#
+# Seeded only with outcomes traceable to real incidents or recorded decisions.
+# A complete speculative inventory was deliberately not attempted: an outcome
+# declared without a real route behind it produces false confidence.
+#
+# `entry` is "<path under source_root>::<qualified name>". `forbidden` lists
+# superseded identifiers that must not reappear anywhere in the source tree.
+
+[[outcomes]]
+id = "mail.observed_fact_becomes_core_turn"
+description = "An observed mailbox fact becomes a Core cognition turn."
+entry = "continuity/mail_source.py::MailCognitionSource.due_opportunities"
+# The voice session once drained a delivery generator of its own, so an
+# observation reached the Core through a live session or not at all.
+forbidden = ["def receive_background_event", "async def events"]
+
+[[outcomes]]
+id = "mail.mailbox_is_scanned"
+description = "The mailbox is polled for new and vanished messages."
+entry = "providers/icloud_mail.py::ICloudMailAdapter.scan"
+# Scanning was owned by the voice session; closing the browser stopped it.
+# The process-lifetime poller replaced it and the session loop was deleted.
+forbidden = []
+
+[[outcomes]]
+id = "cognition.opportunity_reaches_core"
+description = "An unprompted occasion becomes one authoritative Core turn."
+entry = "conversation/gateway.py::ConversationGateway.receive_cognition_opportunity"
+# `receive_background_event()` stayed callable after this became authoritative.
+# `CognitionOpportunitySource` is deliberately NOT forbidden here: it is a live
+# Protocol in `contracts/continuity.py`. Only its use by the voice transport was
+# superseded, and a repo-wide fragment cannot express "absent from one module".
+# `tests/test_cognition_opportunity.py` keeps that narrower assertion.
+forbidden = ["def receive_background_event"]
+
+[[outcomes]]
+id = "conversation.person_turn_reaches_core"
+description = "A typed or spoken person turn becomes one authoritative Core turn."
+entry = "conversation/gateway.py::ConversationGateway.receive_conversation_turn"
+forbidden = []
+
+[[outcomes]]
+id = "repository.canonical_main_synchronizes"
+description = "The canonical checkout's local main fast-forwards from origin main."
+# D-030. Reachable through the Coding Agent and the repository runtime at once
+# would be two routes to one outcome; coding git authority is enumerated in
+# `providers/coding_git.py` and grants no fetch shape.
+entry = "providers/repository_runtime.py::CanonicalRepositoryRuntime.synchronize"
+forbidden = []
+
+[[outcomes]]
+id = "web.public_page_is_retrieved"
+description = "A public web page is retrieved over the network."
+# D-025. A second fetcher would be a second way onto the network.
+entry = "providers/web_fetch.py::HttpWebFetchProvider.fetch"
+forbidden = []
+
+[[outcomes]]
+id = "xero.supplier_bill_is_committed"
+description = "An ordinary supplier bill is committed to Xero."
+# D-020. Five capabilities could each independently reach a posted bill before
+# `capture_supplier_invoice` consolidated them; all five were deleted.
+entry = "tools/xero.py::build_xero_executors.<locals>.capture_invoice"
+forbidden = [
+  "execute_xero_bill",
+  "create_xero_draft_bill",
+  "update_xero_draft_bill",
+  "attach_mail_document_to_xero_bill",
+  "authorise_xero_bill",
+]
+
+[[outcomes]]
+id = "dhl.import_is_posted"
+description = "A DHL import is reconciled and posted as its own bill."
+# D-021. A separate outcome from an ordinary bill, and deliberately so: a DHL
+# document reaching the ordinary path would be the Law 0 violation.
+entry = "tools/dhl.py::build_dhl_executors.<locals>.process"
+forbidden = ["analyze_dhl_customs_documents", "reconcile_dhl_import_documents"]

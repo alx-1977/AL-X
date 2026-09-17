@@ -36,12 +36,34 @@ RAW_LANGUAGE_FORBIDDEN_BOUNDARIES = {"capabilities", "goals", "safety", "tools"}
 
 
 @dataclass(frozen=True)
+class Outcome:
+    """One declared Law 0 production outcome and its single entry point.
+
+    `entry` names the one authoritative definition as "<relative path>::<qualified
+    name>". `forbidden` lists superseded identifiers that must not reappear
+    anywhere in the source tree. See the manifest header in
+    `architecture/boundaries.toml` for what this deliberately does not prove.
+    """
+
+    identifier: str
+    description: str
+    module: str
+    qualified_name: str
+    forbidden: tuple[str, ...]
+
+    @property
+    def entry(self) -> str:
+        return f"{self.module}::{self.qualified_name}"
+
+
+@dataclass(frozen=True)
 class Rules:
     source_root: str
     boundaries: frozenset[str]
     allowed_imports: dict[str, frozenset[str]]
     restricted_external_imports: dict[str, frozenset[str]]
     forbidden_source_names: frozenset[str]
+    outcomes: tuple[Outcome, ...] = ()
 
 
 @dataclass(frozen=True, order=True)
@@ -60,7 +82,7 @@ def load_rules(root: Path) -> Rules:
     with config_path.open("rb") as handle:
         data = tomllib.load(handle)
 
-    if data.get("schema_version") != 1:
+    if data.get("schema_version") != 2:
         raise ValueError("architecture/boundaries.toml: unsupported schema_version")
 
     boundaries = frozenset(data["boundaries"])
@@ -88,7 +110,80 @@ def load_rules(root: Path) -> Rules:
             for dependency, owners in data["restricted_external_imports"].items()
         },
         forbidden_source_names=frozenset(data["forbidden_source_names"]),
+        outcomes=_load_outcomes(data.get("outcomes", [])),
     )
+
+
+def _load_outcomes(entries: list[dict]) -> tuple[Outcome, ...]:
+    """Parse the Law 0 manifest, refusing a manifest that cannot be enforced.
+
+    A malformed or ambiguous manifest is a configuration error rather than a
+    violation: a gate that silently skips an outcome is worse than no gate,
+    because it reports success over an unchecked route.
+    """
+    outcomes: list[Outcome] = []
+    seen_ids: set[str] = set()
+    seen_entries: dict[str, str] = {}
+
+    for entry in entries:
+        for field_name in ("id", "description", "entry"):
+            value = entry.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    "architecture/boundaries.toml: every outcome needs a non-blank "
+                    f"{field_name!r}"
+                )
+
+        identifier = entry["id"]
+        if identifier in seen_ids:
+            raise ValueError(
+                f"architecture/boundaries.toml: duplicate outcome id: {identifier}"
+            )
+        seen_ids.add(identifier)
+
+        reference = entry["entry"]
+        if reference.count("::") != 1:
+            raise ValueError(
+                "architecture/boundaries.toml: outcome entry must be "
+                f"'<path>::<qualified name>': {reference}"
+            )
+        # Two outcomes naming one function would mean the manifest cannot say
+        # which outcome that function is the single path for.
+        if reference in seen_entries:
+            raise ValueError(
+                "architecture/boundaries.toml: outcomes "
+                f"{seen_entries[reference]!r} and {identifier!r} share the entry "
+                f"{reference}"
+            )
+        seen_entries[reference] = identifier
+
+        module, qualified_name = reference.split("::")
+        if not module.strip() or not qualified_name.strip():
+            raise ValueError(
+                "architecture/boundaries.toml: outcome entry must be "
+                f"'<path>::<qualified name>': {reference}"
+            )
+
+        forbidden = entry.get("forbidden", [])
+        if not isinstance(forbidden, list) or any(
+            not isinstance(item, str) or not item.strip() for item in forbidden
+        ):
+            raise ValueError(
+                "architecture/boundaries.toml: forbidden fragments must be "
+                f"non-blank strings: {identifier}"
+            )
+
+        outcomes.append(
+            Outcome(
+                identifier=identifier,
+                description=entry["description"],
+                module=module,
+                qualified_name=qualified_name,
+                forbidden=tuple(forbidden),
+            )
+        )
+
+    return tuple(outcomes)
 
 
 def _normalise_identifier(value: str) -> str:
@@ -828,6 +923,137 @@ def _opportunity_source_violations(
     return violations
 
 
+def _definition_qualnames(tree: ast.AST) -> dict[str, list[int]]:
+    """Every function defined in one module, by qualified name and line.
+
+    Nested functions carry the `<locals>` segment Python itself uses, so a
+    capability executor closed over its adapter is nameable in the manifest
+    exactly as `__qualname__` would render it.
+    """
+    found: dict[str, list[int]] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualified = f"{prefix}{child.name}"
+                found.setdefault(qualified, []).append(child.lineno)
+                walk(child, f"{qualified}.<locals>.")
+            elif isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+            else:
+                # A definition guarded by `if` or wrapped in `try` still exists.
+                walk(child, prefix)
+
+    walk(tree, "")
+    return found
+
+
+def _outcome_violations(root: Path, rules: Rules) -> list[Violation]:
+    """Law 0: each declared outcome keeps exactly one named entry point.
+
+    Three failures are distinguished because they mean different things. A
+    missing entry means the manifest has rotted against the code. A repeated
+    entry means a second route to a declared outcome now exists. A resurfaced
+    forbidden fragment means a superseded path came back.
+    """
+    if not rules.outcomes:
+        return []
+
+    source_root = root / rules.source_root
+    # The manifest describes the whole production tree, so it can only be judged
+    # against one. A caller inspecting a fragment — a single synthesised module
+    # in a temporary root — would otherwise see every outcome reported missing,
+    # which says nothing about that fragment.
+    #
+    # The test is therefore whether this root is the production tree at all,
+    # not whether any individual module survived. A tree missing every declared
+    # module is a fragment and is skipped; a tree holding some of them is the
+    # real one, and a module deleted from it is reported below rather than
+    # quietly excusing the whole manifest.
+    present = [
+        outcome
+        for outcome in rules.outcomes
+        if (source_root / outcome.module).is_file()
+    ]
+    if not present:
+        return []
+
+    violations: list[Violation] = []
+
+    # One parse of the tree serves every outcome.
+    definitions: dict[str, list[tuple[str, int]]] = {}
+    texts: dict[str, str] = {}
+    for path in sorted(source_root.rglob("*.py")):
+        relative_text = str(path.relative_to(root))
+        try:
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=relative_text)
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            # The per-file pass in check_source already reports this.
+            continue
+        texts[relative_text] = text
+        posix = path.relative_to(source_root).as_posix()
+        for qualified, lines in _definition_qualnames(tree).items():
+            for line in lines:
+                definitions.setdefault(qualified, []).append((posix, line))
+
+    for outcome in rules.outcomes:
+        sites = definitions.get(outcome.qualified_name, [])
+
+        if not sites:
+            violations.append(
+                Violation(
+                    "architecture/boundaries.toml",
+                    0,
+                    f"outcome {outcome.identifier!r} declares the entry "
+                    f"{outcome.entry} but no such definition exists; the "
+                    "manifest must name a real production path",
+                )
+            )
+        else:
+            # Defined more than once is a second named route to one outcome,
+            # whether or not the copy currently sits in the declared module.
+            if len(sites) > 1:
+                where = ", ".join(f"{module}:{line}" for module, line in sites)
+                violations.append(
+                    Violation(
+                        "architecture/boundaries.toml",
+                        0,
+                        f"outcome {outcome.identifier!r} must have one production "
+                        f"path, but {outcome.qualified_name} is defined "
+                        f"{len(sites)} times: {where}",
+                    )
+                )
+            if not any(module == outcome.module for module, _ in sites):
+                where = ", ".join(module for module, _ in sites)
+                violations.append(
+                    Violation(
+                        "architecture/boundaries.toml",
+                        0,
+                        f"outcome {outcome.identifier!r} declares "
+                        f"{outcome.entry} but {outcome.qualified_name} is "
+                        f"defined in {where}",
+                    )
+                )
+
+        for fragment in outcome.forbidden:
+            for relative_text in sorted(texts):
+                text = texts[relative_text]
+                if fragment not in text:
+                    continue
+                line = text[: text.index(fragment)].count("\n") + 1
+                violations.append(
+                    Violation(
+                        relative_text,
+                        line,
+                        f"superseded path for outcome {outcome.identifier!r} is "
+                        f"back: {fragment!r} must not exist in production source",
+                    )
+                )
+
+    return violations
+
+
 def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
     root = root.resolve()
     rules = rules or load_rules(root)
@@ -885,6 +1111,7 @@ def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
             violations.extend(_speech_synthesis_violations(relative_text, tree))
 
     violations.extend(_frontend_violations(root))
+    violations.extend(_outcome_violations(root, rules))
     return sorted(set(violations))
 
 
