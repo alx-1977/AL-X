@@ -32,10 +32,14 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import (  # noqa: E402
     MAX_MEMORY_RETRIEVAL_LIMIT,
+    ConversationOrigin,
+    ConversationTurn,
     MemoryKind,
     MemoryMatchReason,
     MemoryProposal,
     MemoryQuery,
+    ModelCompletion,
+    ReasoningContext,
 )
 from alx.memories import SQLiteMemoryStore, TopicRetrievalUnavailable  # noqa: E402
 from alx.memories import store as memory_store  # noqa: E402
@@ -43,6 +47,10 @@ from alx.memories import store as memory_store  # noqa: E402
 NOW = datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=30)
 FACTUAL = (MemoryKind.FACTUAL,)
+
+# Distinguishes "this field is absent from the response" from "this field is
+# present and null", which are different things to the parser.
+_OMITTED = object()
 
 
 def legacy_database(path: Path, memories: dict[str, str]) -> None:
@@ -426,9 +434,19 @@ class ModelContractAlignmentTests(unittest.TestCase):
                 query = MemoryQuery("q", **keywords)
                 self.assertEqual(query.topic, keywords["topic"])
 
-    def test_a_missing_optional_field_does_not_end_the_turn(self) -> None:
-        """A provider dropping a null field must not raise KeyError."""
-        from alx.core.model_reasoner import MAX_MEMORY_RETRIEVAL_LIMIT as ceiling
+    def parsed(self, **action_fields: object) -> MemoryQuery:
+        """The `MemoryQuery` the production parser builds from one response.
+
+        Driven through `ModelReasoner.decide` rather than asserted against a
+        dictionary of the test's own making. A test that reads its own literal
+        back cannot fail: it would keep passing if the parser returned to
+        indexing these fields directly, which is the defect it exists to catch.
+
+        `decide` also converts `KeyError` into `DecisionValidationError`, so a
+        field the parser insists on and a provider omits ends the turn. Going
+        through the real path is what makes that visible here.
+        """
+        from alx.core.model_reasoner import ModelReasoner
 
         action = {
             "type": "retrieve_memories",
@@ -442,11 +460,120 @@ class ModelContractAlignmentTests(unittest.TestCase):
             "memory_source_match": "any",
             "memory_include_superseded": False,
             "memory_topic": "antenna",
+            "memory_project_id": None,
+            "memory_limit": MAX_MEMORY_RETRIEVAL_LIMIT,
         }
-        # The parse reads these with defaults, so the absent fields mean
-        # "unspecified" rather than raising.
-        self.assertIsNone(action.get("memory_project_id"))
-        self.assertEqual(action.get("memory_limit") or ceiling, ceiling)
+        for name, value in action_fields.items():
+            if value is _OMITTED:
+                action.pop(name, None)
+            else:
+                action[name] = value
+
+        class Model:
+            def complete(self, request):
+                return ModelCompletion(
+                    provider="test",
+                    model="test",
+                    output={
+                        "goal_id": None,
+                        "action": action,
+                        "goal_update": None,
+                        "memory_proposals": [],
+                    },
+                )
+
+        decision = ModelReasoner(
+            Model(), "The approved Laws.", "The identity context."
+        ).decide(
+            ReasoningContext(
+                active_goal=None,
+                turns=(
+                    ConversationTurn(
+                        "c1", "t1", ConversationOrigin.TYPED,
+                        "what do we know?", NOW, "friedl",
+                    ),
+                ),
+                capabilities=(),
+                conversation_id="c1",
+            )
+        )
+        assert decision.memory_query is not None
+        return decision.memory_query
+
+    def test_omitted_optional_fields_do_not_end_the_turn(self) -> None:
+        """A provider dropping a null field must not end the turn.
+
+        The fields are required by the schema, but a provider that omits a null
+        one, or a response shaped before these existed, must mean "unspecified"
+        rather than `DecisionValidationError`.
+        """
+        query = self.parsed(memory_project_id=_OMITTED, memory_limit=_OMITTED)
+        self.assertEqual(query.topic, "antenna")
+        self.assertIsNone(query.project_id)
+        self.assertEqual(query.limit, MAX_MEMORY_RETRIEVAL_LIMIT)
+
+    def test_an_omitted_topic_is_unspecified_rather_than_fatal(self) -> None:
+        query = self.parsed(
+            memory_topic=_OMITTED, memory_ids=["a"],
+        )
+        self.assertIsNone(query.topic)
+        self.assertEqual(query.memory_ids, ("a",))
+
+    def test_every_combination_survives_production_parsing(self) -> None:
+        """What the contract accepts, the real parser must actually produce."""
+        for name, fields, check in (
+            (
+                "topic only",
+                {},
+                lambda q: (q.topic, q.project_id) == ("antenna", None),
+            ),
+            (
+                "topic + project",
+                {"memory_project_id": "pn532"},
+                lambda q: q.project_id == "pn532",
+            ),
+            (
+                "topic + person",
+                {"memory_kinds": ["relationship"], "memory_person_id": "friedl"},
+                lambda q: q.person_id == "friedl",
+            ),
+            (
+                "topic + date",
+                {"memory_formed_after": NOW.isoformat()},
+                lambda q: q.formed_after == NOW,
+            ),
+            (
+                "topic + source",
+                {"memory_source_references": ["turn:1"]},
+                lambda q: q.source_references == ("turn:1",),
+            ),
+            (
+                "topic + kind",
+                {"memory_kinds": ["factual", "autobiographical"]},
+                lambda q: len(q.kinds) == 2,
+            ),
+            (
+                "topic + project + person",
+                {
+                    "memory_kinds": ["relationship"],
+                    "memory_person_id": "friedl",
+                    "memory_project_id": "pn532",
+                },
+                lambda q: (q.person_id, q.project_id) == ("friedl", "pn532"),
+            ),
+            (
+                "topic + ids",
+                {"memory_ids": ["a"]},
+                lambda q: q.memory_ids == ("a",),
+            ),
+        ):
+            with self.subTest(combination=name):
+                query = self.parsed(**fields)
+                self.assertEqual(query.topic, "antenna")
+                self.assertTrue(check(query), f"{name} did not parse as expected")
+
+    def test_the_bounded_limit_reaches_the_contract(self) -> None:
+        self.assertEqual(self.parsed(memory_limit=3).limit, 3)
 
 
 if __name__ == "__main__":
