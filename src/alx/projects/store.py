@@ -113,17 +113,32 @@ class SQLiteProjectStore:
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def create(self, project: Project) -> Project:
+        """Record one project, or refuse because that identity is taken.
+
+        The duplicate is detected by the insert itself rather than by asking
+        first. A separate `SELECT` then `INSERT` is two statements with a gap
+        between them, and the store hands out independent connections, so two
+        callers could both find the identifier free and the loser would raise
+        `sqlite3.IntegrityError` — a storage-layer exception escaping through
+        a contract that promises `DuplicateProject`.
+
+        `ON CONFLICT(project_id) DO NOTHING` closes the gap by making the
+        check and the write one atomic statement: the row is written or it is
+        not, and `rowcount` says which. Conflict handling is targeted at
+        `project_id` rather than catching `IntegrityError`, so any other
+        integrity failure still propagates as itself instead of being
+        misreported as a duplicate identity.
+        """
         _aware(project.created_at, "created_at")
-        if self._exists(project.project_id):
-            raise DuplicateProject(project.project_id)
         origins, recorded, expires, references = provenance_to_storage(
             project.provenance
         )
         with self._connection:
-            self._connection.execute(
+            cursor = self._connection.execute(
                 "INSERT INTO projects(project_id, name, created_at, status, "
                 "content_origins, content_recorded_at, content_expires_at, "
-                "mail_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "mail_references) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(project_id) DO NOTHING",
                 (
                     project.project_id,
                     project.name,
@@ -135,6 +150,11 @@ class SQLiteProjectStore:
                     references,
                 ),
             )
+            # Nothing written means the identifier was already taken. The
+            # stored project keeps whatever it already said; a create never
+            # overwrites one.
+            if cursor.rowcount == 0:
+                raise DuplicateProject(project.project_id)
         return project
 
     def load(self, project_id: str) -> Project:

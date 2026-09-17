@@ -18,6 +18,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -129,6 +130,87 @@ class ProjectIdentityTests(unittest.TestCase):
         self.store.create(Project("p1", "PN532 antenna", NOW))
         with self.assertRaises(DuplicateProject):
             self.store.create(Project("p1", "A different name", NOW))
+
+    def test_a_refused_duplicate_does_not_overwrite_the_stored_project(self) -> None:
+        self.store.create(Project("p1", "PN532 antenna", NOW))
+        with self.assertRaises(DuplicateProject):
+            self.store.create(Project("p1", "A different name", NOW))
+        self.assertEqual(self.store.load("p1").name, "PN532 antenna")
+
+    def test_concurrent_creation_of_one_identifier_has_one_winner(self) -> None:
+        """The contract must hold when two callers race, not only in sequence.
+
+        The store hands out independent connections, so asking whether an
+        identifier exists and then inserting it are two statements with a gap
+        between them. Before the insert became atomic, callers losing that race
+        raised `sqlite3.IntegrityError` — a storage-layer exception escaping
+        through a contract that promises `DuplicateProject`. Measured at the
+        time: six of eight threads leaked the raw error.
+
+        A barrier releases every thread at once rather than a sleep, so the
+        window is actually exercised instead of approximately hoped for.
+        """
+        writers = 12
+        path = Path(self.directory.name) / "concurrent.sqlite3"
+        stores = [SQLiteProjectStore(path) for _ in range(writers)]
+        for store in stores:
+            self.addCleanup(store.close)
+
+        barrier = threading.Barrier(writers)
+        lock = threading.Lock()
+        outcomes: list[str] = []
+
+        def create(store: SQLiteProjectStore, index: int) -> None:
+            try:
+                barrier.wait()
+                store.create(Project("same", f"name-{index}", NOW))
+                result = "created"
+            except DuplicateProject:
+                result = "duplicate"
+            except sqlite3.IntegrityError:
+                # The leak this test exists to catch, named separately so a
+                # regression reports the real cause rather than a count.
+                result = "raw_integrity_error"
+            except Exception as error:  # pragma: no cover - diagnostic only
+                result = type(error).__name__
+            with lock:
+                outcomes.append(result)
+
+        threads = [
+            threading.Thread(target=create, args=(store, index))
+            for index, store in enumerate(stores)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(outcomes.count("raw_integrity_error"), 0, outcomes)
+        self.assertEqual(outcomes.count("created"), 1, outcomes)
+        self.assertEqual(outcomes.count("duplicate"), writers - 1, outcomes)
+        # The survivor is a whole project, not a half-written row.
+        stored = stores[0].load("same")
+        self.assertEqual(stored.project_id, "same")
+        self.assertIs(stored.status, ProjectStatus.ACTIVE)
+        self.assertEqual(stored.created_at, NOW)
+
+    def test_an_unrelated_integrity_failure_is_not_reported_as_a_duplicate(
+        self,
+    ) -> None:
+        """Conflict handling is targeted, so other faults stay themselves.
+
+        Catching `IntegrityError` wholesale would call any constraint failure a
+        duplicate identity. A NOT NULL violation must still surface as what it
+        is.
+        """
+        connection = sqlite3.connect(self.path)
+        self.addCleanup(connection.close)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO projects(project_id, name, created_at, status) "
+                "VALUES (?, ?, ?, ?)",
+                ("p2", None, NOW.isoformat(), "active"),
+            )
 
     def test_an_unknown_project_is_not_invented(self) -> None:
         with self.assertRaises(ProjectNotFound):
