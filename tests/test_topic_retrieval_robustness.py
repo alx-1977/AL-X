@@ -512,6 +512,54 @@ class ModelContractAlignmentTests(unittest.TestCase):
         self.assertIsNone(query.project_id)
         self.assertEqual(query.limit, MAX_MEMORY_RETRIEVAL_LIMIT)
 
+    def test_an_explicit_null_scope_field_is_unspecified(self) -> None:
+        """Present-and-null is a different path from absent.
+
+        A provider that emits `"memory_project_id": null` and one that leaves
+        the key out reach the parser as different dictionaries, so covering
+        omission alone protects only half of what the schema permits. Both of
+        these fields declare `["string", "null"]`, so null is contractual here
+        rather than merely tolerated.
+        """
+        query = self.parsed(memory_project_id=None)
+        self.assertIsNone(query.project_id)
+        self.assertEqual(query.topic, "antenna")
+
+    def test_an_explicit_null_topic_is_unspecified(self) -> None:
+        query = self.parsed(memory_topic=None, memory_ids=["a"])
+        self.assertIsNone(query.topic)
+        self.assertEqual(query.memory_ids, ("a",))
+
+    def test_an_explicit_null_limit_falls_back_to_the_bound(self) -> None:
+        """Defensive tolerance, deliberately not a claim about the contract.
+
+        `memory_limit` declares `integer` and not `["integer", "null"]`, so a
+        null is outside what the schema allows and this asserts only that the
+        parser survives one rather than that emitting one is legal. Widening
+        the schema to make null contractual would loosen a bound that exists to
+        stop an out-of-range value ending the turn, which is the opposite of
+        what this field is for.
+        """
+        self.assertEqual(
+            self.parsed(memory_limit=None).limit, MAX_MEMORY_RETRIEVAL_LIMIT
+        )
+
+    def test_explicit_null_and_omission_agree(self) -> None:
+        """The two shapes of "unspecified" must not mean different things."""
+        explicit = self.parsed(memory_project_id=None, memory_limit=None)
+        omitted = self.parsed(memory_project_id=_OMITTED, memory_limit=_OMITTED)
+        self.assertEqual(explicit.project_id, omitted.project_id)
+        self.assertEqual(explicit.limit, omitted.limit)
+
+    def test_the_schema_says_which_fields_may_be_null(self) -> None:
+        """Null is tested where the schema permits it, and not invented where
+        it does not."""
+        properties = self.memory_action()["properties"]
+        for name in ("memory_topic", "memory_project_id"):
+            with self.subTest(field=name):
+                self.assertIn("null", properties[name]["type"])
+        self.assertEqual(properties["memory_limit"]["type"], "integer")
+
     def test_an_omitted_topic_is_unspecified_rather_than_fatal(self) -> None:
         query = self.parsed(
             memory_topic=_OMITTED, memory_ids=["a"],
