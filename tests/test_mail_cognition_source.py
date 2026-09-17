@@ -763,12 +763,22 @@ class EachThreadHasItsOwnDurableConversation(Fixture):
             NOW.replace(year=2027),
         )
 
-        self.assertEqual(
-            [item.goal_id for item in store.list_unfinished(quote)], ["goal-1"]
-        )
-        self.assertEqual(
-            store.list_unfinished(invoice), (),
-            "an unrelated thread must not see this goal as its own",
+        own = store.list_unfinished(quote)
+        self.assertEqual([item.goal_id for item in own], ["goal-1"])
+        self.assertTrue(own[0].from_current_conversation)
+
+        # Stage 2B made unfinished work visible across conversations, so the
+        # invoice thread now sees this goal rather than being told it does not
+        # exist. What isolation meant is preserved where it matters: the goal
+        # is not the invoice thread's own, it says so, and it leads no list but
+        # its own. Whether an unrelated thread's open work is worth anything
+        # here is a judgement, and hiding it was how durable work became
+        # unreachable in the first place.
+        other = store.list_unfinished(invoice)
+        self.assertEqual([item.goal_id for item in other], ["goal-1"])
+        self.assertFalse(
+            other[0].from_current_conversation,
+            "another thread's goal must never look like this thread's own",
         )
 
 

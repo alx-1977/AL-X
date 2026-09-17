@@ -34,6 +34,7 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.conversation import ConversationGateway, SQLiteConversationStore  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
+from alx.core.loop import UNFINISHED_GOAL_CANDIDATES  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.memories import SQLiteMemoryStore  # noqa: E402
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate  # noqa: E402
@@ -274,8 +275,11 @@ class GoalSummaryTests(Fixture):
         self.agent(reasoner).process(conversation(), RETENTION, 25)
         context = reasoner.contexts[0]
         self.assertIsNone(context.active_goal, "nothing may preselect a goal")
+        # Ordered by recency now rather than creation, so the most recently
+        # written goal leads. Both remain offered and neither is preselected.
         self.assertEqual(
-            [item.goal_id for item in context.unfinished_goals], ["goal-a", "goal-x"]
+            sorted(item.goal_id for item in context.unfinished_goals),
+            ["goal-a", "goal-x"],
         )
 
     def test_a_summary_identifies_a_goal_without_carrying_its_history(self) -> None:
@@ -317,15 +321,26 @@ class GoalSummaryTests(Fixture):
         self.assertEqual(reasoner.contexts[1].active_goal.goal_id, "goal-a")
         self.assertEqual(len(reasoner.contexts[1].unfinished_goals), 2)
 
-    def test_a_goal_from_another_conversation_is_never_offered(self) -> None:
+    def test_another_conversations_goal_is_offered_and_marked(self) -> None:
+        """Unfinished work outlives the conversation it began in.
+
+        It was once excluded outright, which made a goal unreachable the moment
+        the runtime carried a different conversation id. It is offered now, and
+        carries the provenance that says it is not current work, because
+        deciding whether it matters is the Core's judgement and it needs the
+        fact to make it.
+        """
         self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
         self.store.create(active_goal("goal-z"), "another-conversation", RETENTION)
         reasoner = Queued(AgentDecision(response="Noted."))
         self.agent(reasoner).process(conversation(), RETENTION, 25)
+        offered = reasoner.contexts[0].unfinished_goals
         self.assertEqual(
-            [item.goal_id for item in reasoner.contexts[0].unfinished_goals],
-            ["goal-a"],
+            sorted(item.goal_id for item in offered), ["goal-a", "goal-z"]
         )
+        current = {item.goal_id: item.from_current_conversation for item in offered}
+        self.assertTrue(current["goal-a"])
+        self.assertFalse(current["goal-z"])
 
     def test_an_unknown_goal_selection_is_corrected_not_fatal(self) -> None:
         """A wrong identifier cost a whole voice session on 2026-09-10."""
@@ -406,21 +421,42 @@ class GoalSummaryTests(Fixture):
         self.assertEqual(outcome.reason, "goal_selection_unknown")
         self.assertEqual(len(reasoner.contexts), 2)
 
-    def test_another_conversations_goal_stays_unavailable(self) -> None:
-        """Correction must not become cross-conversation access."""
+    def test_another_conversations_goal_can_be_resumed(self) -> None:
+        """Work continues across conversations, under one durable identity."""
         self.store.create(active_goal("goal-z"), "another-conversation", RETENTION)
         reasoner = Queued(
-            AgentDecision(response="One.", goal_id="goal-z"),
-            AgentDecision(response="Two.", goal_id="goal-z"),
+            AgentDecision(goal_id="goal-z"),
+            AgentDecision(response="Picking that back up.", goal_id="goal-z"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        # Resumed, not copied: one goal identity, and its origin conversation
+        # is provenance that a later conversation does not rewrite.
+        self.assertEqual(
+            self.store.load("goal-z").conversation_id, "another-conversation"
+        )
+
+    def test_a_goal_that_was_not_offered_cannot_be_taken(self) -> None:
+        """The guard that survives: reasoning reaches what it was shown.
+
+        Conversation membership used to be the check. It is now candidacy,
+        which protects the same thing without making durable work unreachable:
+        an identifier invented, or remembered from somewhere else, still buys
+        nothing.
+        """
+        self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
+        for index in range(UNFINISHED_GOAL_CANDIDATES + 2):
+            self.store.create(
+                active_goal(f"filler-{index}"), "conversation-1", RETENTION,
+            )
+        reasoner = Queued(
+            AgentDecision(response="One.", goal_id="goal-a"),
+            AgentDecision(response="Two.", goal_id="goal-a"),
             AgentDecision(response="never reached"),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "goal_selection_unknown")
-        # Never loaded, so its record is untouched by this conversation.
-        self.assertEqual(
-            self.store.load("goal-z").conversation_id, "another-conversation"
-        )
 
     def test_asking_twice_for_the_same_goal_is_stopped(self) -> None:
         """Inspection is a step toward acting, never a way to spend the budget."""
@@ -526,14 +562,32 @@ class SelectionCannotBuyReasoningTests(Fixture):
         self.assertEqual(len(reasoner.contexts), 2)
 
     def test_the_step_budget_is_never_reached_by_selection_alone(self) -> None:
-        """Twenty-five goals, twenty-five steps, two decisions."""
-        self.create_goals(25)
+        """Many goals, many steps, two decisions.
+
+        Selecting one goal after another must stop at the selection limit
+        rather than spending the turn. The goals are kept within the candidate
+        cap so that the limit being tested is the selection one: past the cap a
+        goal is simply not offered, which is a different refusal covered
+        separately.
+        """
+        self.create_goals(UNFINISHED_GOAL_CANDIDATES)
         reasoner = Queued(
-            *[AgentDecision(goal_id=f"goal-{index}") for index in range(25)]
+            *[
+                AgentDecision(goal_id=f"goal-{index}")
+                for index in range(UNFINISHED_GOAL_CANDIDATES)
+            ]
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.reason, "goal_selection_exhausted")
         self.assertLessEqual(len(reasoner.contexts), 2)
+
+    def test_a_goal_beyond_the_candidate_cap_is_not_selectable(self) -> None:
+        """The cap bounds awareness, and what is not offered cannot be taken."""
+        self.create_goals(UNFINISHED_GOAL_CANDIDATES + 5)
+        reasoner = Queued(AgentDecision(response="Noted."))
+        self.agent(reasoner).process(conversation(), RETENTION, 25)
+        offered = reasoner.contexts[0].unfinished_goals
+        self.assertEqual(len(offered), UNFINISHED_GOAL_CANDIDATES)
 
     def test_acting_on_the_one_selected_goal_is_unaffected(self) -> None:
         """The cap limits moving between goals, never working within one."""
@@ -968,13 +1022,14 @@ class RunawayScenarioTests(unittest.TestCase):
         reopened = SQLiteGoalStore(self.root / "goals.sqlite3")
         try:
             summaries = reopened.list_unfinished("conversation-1")
-            self.assertEqual(
-                [item.goal_id for item in summaries], ["goal-a", "goal-b"]
-            )
-            self.assertEqual(summaries[0].status, GoalStatus.AWAITING_INPUT)
-            self.assertEqual(summaries[0].outstanding_work,
+            # Both survive the restart independently. They are ordered by
+            # recency rather than creation now, so each is checked by name.
+            by_id = {item.goal_id: item for item in summaries}
+            self.assertEqual(sorted(by_id), ["goal-a", "goal-b"])
+            self.assertEqual(by_id["goal-a"].status, GoalStatus.AWAITING_INPUT)
+            self.assertEqual(by_id["goal-a"].outstanding_work,
                              ("one detail still to be supplied",))
-            self.assertEqual(summaries[1].status, GoalStatus.ACTIVE)
+            self.assertEqual(by_id["goal-b"].status, GoalStatus.ACTIVE)
             # The paused goal never absorbed the other one's work.
             self.assertEqual(reopened.load("goal-a").state.attempts, ())
             self.assertEqual(reopened.load("goal-a").state.approvals, ())

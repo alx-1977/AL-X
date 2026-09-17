@@ -555,20 +555,23 @@ class GoalScopeTests(unittest.TestCase):
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.load("g1").scope, ScopeReference(project_id="p1"))
 
-    def test_goal_selection_is_unchanged(self) -> None:
-        """Stage 1 adds no new way to reach a goal; selection still lists by
-        conversation, exactly as before."""
+    def test_a_conversations_own_goals_come_first(self) -> None:
+        """Stage 1 added scope to goals without changing how they were found.
+
+        Stage 2B made conversation an ordering fact rather than a gate, so
+        every unfinished goal is now listed and the current conversation's own
+        work simply leads. Scope is still not a way to reach a goal by itself.
+        """
         self.store.create(
             goal("g1"), "conv-1", RETENTION, None, ScopeReference(project_id="p1")
         )
         self.store.create(goal("g2"), "conv-1", RETENTION)
         self.store.create(goal("g3"), "conv-2", RETENTION)
+        listed = [item.goal_id for item in self.store.list_unfinished("conv-1")]
+        self.assertEqual(sorted(listed[:2]), ["g1", "g2"])
+        self.assertEqual(listed[2], "g3")
         self.assertEqual(
-            [item.goal_id for item in self.store.list_unfinished("conv-1")],
-            ["g1", "g2"],
-        )
-        self.assertEqual(
-            [item.goal_id for item in self.store.list_unfinished("conv-2")], ["g3"]
+            [item.goal_id for item in self.store.list_unfinished("conv-2")][0], "g3"
         )
 
     def test_scope_survives_a_goal_revision(self) -> None:

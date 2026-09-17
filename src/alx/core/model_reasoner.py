@@ -171,6 +171,18 @@ own words. They are not tasks and nothing acts on them by itself. You may revisi
 one, let one go, or bring one into conversation when it genuinely fits; when you
 have actually raised one with Friedl, say so through the capability, because
 nothing infers that for you.
+Unfinished work outlives the conversation it began in. unfinished_goals therefore
+holds open goals from earlier conversations as well as this one, most recent first,
+bounded so that awareness never grows with your history. Each carries
+from_current_conversation and updated_at, and those two facts are what separate three
+different claims. That a goal is listed proves only that work remains open. Saying you
+were just working on something is a claim about recent activity, which needs the goal
+to be recent or from the conversation in progress. Saying you decided or found
+something is a claim about what happened, which needs the goal's loaded state or a
+memory you retrieved. Never imply continuity a listed goal does not evidence. A goal
+untouched for weeks is open work you can offer to resume, not something you were doing.
+project_id says which work a goal belongs to; nothing about being listed means it is
+relevant now, and that judgement is yours.
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have
 selected this turn, or null. You decide which goal the input belongs to: set goal_id
@@ -709,6 +721,11 @@ def _context_payload(context: ReasoningContext) -> str:
                 "stop_reason": None if item.stop_reason is None else item.stop_reason.value,
                 "outstanding_work": list(item.outstanding_work),
                 "blockers": list(item.blockers),
+                "project_id": item.project_id,
+                "updated_at": (
+                    None if item.updated_at is None else item.updated_at.isoformat()
+                ),
+                "from_current_conversation": item.from_current_conversation,
                 "selected": goal is not None and item.goal_id == goal.goal_id,
             }
             for item in context.unfinished_goals
