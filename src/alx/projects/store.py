@@ -178,7 +178,7 @@ class SQLiteProjectStore:
             )
         return self.load(project_id)
 
-    def delete(self, project_id: str, referencing_records: int = 0) -> None:
+    def delete(self, project_id: str, referencing_records: int) -> None:
         """Remove a project created in error.
 
         `referencing_records` is supplied by the caller that knows which stores
@@ -187,6 +187,18 @@ class SQLiteProjectStore:
         reader of records it has no business interpreting. A non-zero count
         refuses the deletion, so a scope that records still name cannot vanish
         beneath them.
+
+        It is required rather than defaulted, and deliberately so. A default of
+        zero would mean the safe-looking call `delete(project_id)` asserts that
+        nothing references the project without anyone having looked, so the one
+        path that destroys a scope would fail open. Making the caller state the
+        count means a caller that has not counted cannot call this at all.
+        `SQLiteMemoryStore.delete` and `SQLiteGoalStore.delete` take their
+        `expected_revision` the same way, for the same reason.
+
+        Counting is the caller's job and stays that way: discovering which
+        records name a scope requires reading stores this one must not know
+        about.
         """
         if not isinstance(referencing_records, int) or isinstance(
             referencing_records, bool

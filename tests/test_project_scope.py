@@ -13,6 +13,7 @@ boundary, an archive that takes memory with it. Each of those has a test here.
 
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 import sys
@@ -199,10 +200,51 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertEqual(remembered.current.content, "the antenna matched at 13.56 MHz")
         self.assertEqual(remembered.scope, ScopeReference(project_id="p1"))
 
+    def test_archiving_needs_no_reference_information(self) -> None:
+        """Archive and delete are different acts, and stay different.
+
+        Archiving retires the work and destroys nothing, so it takes no count
+        and must not have acquired one when deletion was made to fail closed.
+        """
+        self.scoped_memory()
+        self.projects.set_status("p1", ProjectStatus.ARCHIVED)
+        self.assertIs(self.projects.load("p1").status, ProjectStatus.ARCHIVED)
+        self.assertEqual(
+            list(inspect.signature(SQLiteProjectStore.set_status).parameters),
+            ["self", "project_id", "status"],
+        )
+
     def test_a_project_can_be_reopened(self) -> None:
         self.projects.set_status("p1", ProjectStatus.ARCHIVED)
         self.projects.set_status("p1", ProjectStatus.ACTIVE)
         self.assertIs(self.projects.load("p1").status, ProjectStatus.ACTIVE)
+
+    def test_deletion_cannot_be_invoked_without_reference_information(self) -> None:
+        """The one path that destroys a scope must fail closed.
+
+        A defaulted count would let `delete(project_id)` assert that nothing
+        references the project without anyone having looked. The signature is
+        the enforcement, so it is asserted directly: a caller that has not
+        counted cannot reach the deletion at all, and the project survives.
+        """
+        with self.assertRaises(TypeError):
+            self.projects.delete("p1")  # type: ignore[call-arg]
+        self.assertEqual(self.projects.load("p1").project_id, "p1")
+
+    def test_the_reference_count_has_no_default(self) -> None:
+        """Held at the signature, so a default cannot be reintroduced quietly."""
+        parameter = inspect.signature(SQLiteProjectStore.delete).parameters[
+            "referencing_records"
+        ]
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+
+    def test_a_nonsensical_reference_count_is_refused(self) -> None:
+        """A count that cannot be a count is not an assertion about references."""
+        for value in (-1, True, "0", None):
+            with self.subTest(value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    self.projects.delete("p1", referencing_records=value)  # type: ignore[arg-type]
+        self.assertEqual(self.projects.load("p1").project_id, "p1")
 
     def test_deleting_a_referenced_project_is_refused(self) -> None:
         """Deleting a named scope would strand the records that name it."""
