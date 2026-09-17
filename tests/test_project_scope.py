@@ -43,7 +43,6 @@ from alx.goals.store import SQLiteGoalStore  # noqa: E402
 from alx.memories import MemoryIdentityConflict, SQLiteMemoryStore  # noqa: E402
 from alx.projects import (  # noqa: E402
     DuplicateProject,
-    ProjectInUse,
     ProjectNotFound,
     SQLiteProjectStore,
     UnsupportedSchema,
@@ -219,57 +218,45 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.projects.set_status("p1", ProjectStatus.ACTIVE)
         self.assertIs(self.projects.load("p1").status, ProjectStatus.ACTIVE)
 
-    def test_deletion_cannot_be_invoked_without_reference_information(self) -> None:
-        """The one path that destroys a scope must fail closed.
+    def test_no_public_api_can_remove_a_project(self) -> None:
+        """The Stage 1 invariant, asserted against the surface itself.
 
-        A defaulted count would let `delete(project_id)` assert that nothing
-        references the project without anyone having looked. The signature is
-        the enforcement, so it is asserted directly: a caller that has not
-        counted cannot reach the deletion at all, and the project survives.
+        A record may name an archived project indefinitely, so nothing here may
+        take that project away. Physical deletion cannot be made safe at this
+        boundary: the references live in stores this one must not read, and a
+        count taken from a caller is only true until the moment after it is
+        taken. Removing the operation removes the race with it.
         """
-        with self.assertRaises(TypeError):
-            self.projects.delete("p1")  # type: ignore[call-arg]
-        self.assertEqual(self.projects.load("p1").project_id, "p1")
+        for removed in ("delete", "remove", "purge", "drop", "destroy"):
+            with self.subTest(operation=removed):
+                self.assertFalse(hasattr(SQLiteProjectStore, removed))
 
-    def test_the_reference_count_has_no_default(self) -> None:
-        """Held at the signature, so a default cannot be reintroduced quietly."""
-        parameter = inspect.signature(SQLiteProjectStore.delete).parameters[
-            "referencing_records"
-        ]
-        self.assertIs(parameter.default, inspect.Parameter.empty)
+    def test_the_store_issues_no_delete_statement(self) -> None:
+        """A soft-delete alias that physically deletes underneath is still it."""
+        source = (REPOSITORY_ROOT / "src/alx/projects/store.py").read_text()
+        self.assertNotIn("DELETE FROM", source.upper())
 
-    def test_a_nonsensical_reference_count_is_refused(self) -> None:
-        """A count that cannot be a count is not an assertion about references."""
-        for value in (-1, True, "0", None):
-            with self.subTest(value=value):
-                with self.assertRaises((TypeError, ValueError)):
-                    self.projects.delete("p1", referencing_records=value)  # type: ignore[arg-type]
-        self.assertEqual(self.projects.load("p1").project_id, "p1")
-
-    def test_deleting_a_referenced_project_is_refused(self) -> None:
-        """Deleting a named scope would strand the records that name it."""
+    def test_a_scoped_record_keeps_a_resolvable_project(self) -> None:
+        """The point of the invariant: a reference stays resolvable for good."""
         self.scoped_memory()
-        with self.assertRaises(ProjectInUse):
-            self.projects.delete("p1", referencing_records=1)
-        self.assertEqual(self.projects.load("p1").project_id, "p1")
-        self.assertEqual(self.memories.load("m1").current.content,
-                         "the antenna matched at 13.56 MHz")
+        self.projects.set_status("p1", ProjectStatus.ARCHIVED)
+        scope = self.memories.load("m1").scope
+        assert scope is not None and scope.project_id is not None
+        resolved = self.projects.load(scope.project_id)
+        self.assertEqual(resolved.project_id, "p1")
+        self.assertIs(resolved.status, ProjectStatus.ARCHIVED)
 
-    def test_an_unreferenced_project_can_be_deleted(self) -> None:
-        self.projects.delete("p1", referencing_records=0)
-        with self.assertRaises(ProjectNotFound):
-            self.projects.load("p1")
-
-    def test_deletion_never_reaches_into_memory(self) -> None:
-        """The count is supplied; this store cannot see another store's rows.
-
-        Reaching into memories from here would make the project store a second
-        reader of records it has no business interpreting.
-        """
+    def test_an_archived_project_survives_reopening_the_store(self) -> None:
+        """Archived is retired, never gone: identity outlives the process."""
         self.scoped_memory()
-        self.projects.delete("p1", referencing_records=0)
-        self.assertEqual(self.memories.load("m1").scope,
-                         ScopeReference(project_id="p1"))
+        self.projects.set_status("p1", ProjectStatus.ARCHIVED)
+        self.projects.close()
+        reopened = SQLiteProjectStore(
+            Path(self.directory.name) / "projects.sqlite3"
+        )
+        self.addCleanup(reopened.close)
+        self.assertIs(reopened.load("p1").status, ProjectStatus.ARCHIVED)
+        self.assertEqual(reopened.load("p1").name, "PN532 antenna")
 
 
 class MemoryScopeTests(unittest.TestCase):

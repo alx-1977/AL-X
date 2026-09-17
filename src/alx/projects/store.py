@@ -10,9 +10,21 @@ retires a project. Records scoped to an archived project keep their own
 retention and supersession untouched: a project's lifecycle describes the
 work, never the truth or reachability of what was learned doing it.
 
-Deletion exists for a project created by mistake and is refused once anything
-references it, because removing a scope that records still name would leave
-those records pointing at nothing while appearing to have lost their history.
+A project's identity is permanent here: Stage 1 exposes no way to remove one.
+A durable record may therefore name an archived project indefinitely and still
+resolve it.
+
+Physical deletion was considered and deliberately left out. Removing a project
+safely means proving that nothing references it, and that proof cannot be made
+here: the references live in stores this module must not read, and a count
+obtained from a caller is only true until the moment after it is taken, so a
+record could acquire the scope between the count and the delete. An operation
+that can strand records whenever that race is lost does not belong in a
+foundation, and nothing in production needs it — a project created in error is
+archived like any other.
+
+Deletion can return when a consistency boundary exists that can establish
+reference safety atomically. That boundary is deliberately not built here.
 """
 
 from __future__ import annotations
@@ -43,10 +55,6 @@ class ProjectNotFound(ProjectStoreError):
 
 class DuplicateProject(ProjectStoreError):
     pass
-
-
-class ProjectInUse(ProjectStoreError):
-    """A project still named by durable records cannot be deleted."""
 
 
 class UnsupportedSchema(ProjectStoreError):
@@ -177,43 +185,6 @@ class SQLiteProjectStore:
                 (status.value, project_id),
             )
         return self.load(project_id)
-
-    def delete(self, project_id: str, referencing_records: int) -> None:
-        """Remove a project created in error.
-
-        `referencing_records` is supplied by the caller that knows which stores
-        hold scopes, because this store deliberately cannot see them: reaching
-        into memories or goals from here would make the project store a second
-        reader of records it has no business interpreting. A non-zero count
-        refuses the deletion, so a scope that records still name cannot vanish
-        beneath them.
-
-        It is required rather than defaulted, and deliberately so. A default of
-        zero would mean the safe-looking call `delete(project_id)` asserts that
-        nothing references the project without anyone having looked, so the one
-        path that destroys a scope would fail open. Making the caller state the
-        count means a caller that has not counted cannot call this at all.
-        `SQLiteMemoryStore.delete` and `SQLiteGoalStore.delete` take their
-        `expected_revision` the same way, for the same reason.
-
-        Counting is the caller's job and stays that way: discovering which
-        records name a scope requires reading stores this one must not know
-        about.
-        """
-        if not isinstance(referencing_records, int) or isinstance(
-            referencing_records, bool
-        ):
-            raise TypeError("referencing_records must be an int")
-        if referencing_records < 0:
-            raise ValueError("referencing_records must not be negative")
-        if not self._exists(project_id):
-            raise ProjectNotFound(project_id)
-        if referencing_records:
-            raise ProjectInUse(project_id)
-        with self._connection:
-            self._connection.execute(
-                "DELETE FROM projects WHERE project_id = ?", (project_id,)
-            )
 
     def _exists(self, project_id: str) -> bool:
         return (

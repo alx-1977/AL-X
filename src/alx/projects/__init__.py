@@ -2,7 +2,6 @@
 
 from alx.projects.store import (
     DuplicateProject,
-    ProjectInUse,
     ProjectNotFound,
     ProjectStoreError,
     SQLiteProjectStore,
@@ -11,7 +10,6 @@ from alx.projects.store import (
 
 __all__ = [
     "DuplicateProject",
-    "ProjectInUse",
     "ProjectNotFound",
     "ProjectStoreError",
     "SQLiteProjectStore",
