@@ -266,6 +266,19 @@ def migrate_legacy_conversations(
 
 
 
+def _reviewer_name(review_runtime: Any) -> str:
+    """The reviewer a composed runtime actually uses.
+
+    Read from the provider rather than from configuration. Selection accepts
+    a name case-insensitively and falls back to the default on an unknown one,
+    so the configured string and the composed reviewer can differ — and the
+    task store, the observer registry and the poller all have to agree on one
+    name or the review is recorded under a service nothing watches.
+    """
+    provider = getattr(review_runtime, "provider", None)
+    return str(getattr(provider, "reviewer", "") or "")
+
+
 def _watch_review(
     task_runtime: Any,
     conversation_id: str,
@@ -595,6 +608,10 @@ async def run(repository_root: Path) -> None:
     # The watcher is composed later, beside the transport, so the review path
     # reaches it through a holder rather than being reordered around it.
     task_holder: list[Any] = [None]
+    # The review runtime names its own reviewer, and the callback below needs
+    # that name before the runtime exists. Held like the task runtime, for the
+    # same reason: the callback is built first and reads it when it runs.
+    review_runtime_holder: list[Any] = [None]
     review_runtime = build_review_runtime(
         review_configuration.is_usable,
         review_configuration.repository,
@@ -607,9 +624,18 @@ async def run(repository_root: Path) -> None:
             number,
             sha,
             requested_at,
-            review_configuration.reviewer,
+            # The resolved reviewer, read from the provider that was actually
+            # composed — never the configured string. Selection normalises
+            # case and falls back on an unknown name, so `CodeRabbit` and a
+            # typo both compose the coderabbit provider while the raw value
+            # says otherwise. The watcher registers its observer under the
+            # provider's own name, and the poller finds an observer by the
+            # task's service: recording the raw value meant a lookup that
+            # matched nothing, and a review nobody ever polled.
+            _reviewer_name(review_runtime_holder[0]),
         ),
     )
+    review_runtime_holder[0] = review_runtime
     if review_runtime is not None:
         for definition in review_runtime.definitions:
             registry.register(definition)

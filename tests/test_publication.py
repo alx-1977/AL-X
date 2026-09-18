@@ -212,22 +212,92 @@ class PublicationTests(RealRepositoryHarness):
         self.assertEqual(self.remote_sha("fix/thing"), theirs)
 
     def test_no_force_or_deletion_shape_can_be_produced(self) -> None:
-        """Authority by enumeration: the argv is built, never passed through."""
+        """Authority by enumeration, checked on the push that actually runs.
+
+        This used to raise on the first command the provider issued, so the
+        only argv it ever inspected was a `rev-parse` — it asserted that a
+        preliminary read carried no force option, which nothing was ever going
+        to make it do. The push, the one command where a force option would do
+        damage, was never reached.
+
+        Now every command runs for real and each argv is recorded, so the
+        forbidden shapes are looked for where they would have to appear.
+        """
+        sha = self.branch("fix/thing")
         commands: list[list[str]] = []
+        real = subprocess.run
 
         def runner(argv, **keywords):
-            commands.append(argv)
-            raise AssertionError("no command should run in this test")
+            commands.append(list(argv))
+            return real(argv, **keywords)
 
         publication = RepositoryPublication(self.local, runner=runner)
-        with self.assertRaises(AssertionError):
-            publication.publish(PublicationRequest("fix/thing", HEAD))
-        flat = " ".join(" ".join(command) for command in commands)
+        outcome = publication.publish(PublicationRequest("fix/thing", sha))
+        self.assertTrue(outcome.published)
+
+        pushes = [command for command in commands if "push" in command]
+        self.assertEqual(len(pushes), 1, "exactly one push runs")
         for forbidden in (
-            "--force", "-f", "--force-with-lease", "--delete", "--mirror",
-            "--all", "--tags",
+            "--force", "-f", "--force-with-lease", "--delete", "-d",
+            "--mirror", "--all", "--tags", "--prune",
         ):
-            self.assertNotIn(forbidden, flat)
+            with self.subTest(option=forbidden):
+                self.assertNotIn(forbidden, pushes[0])
+        # Nor anywhere else in the argv this capability builds.
+        flat = " ".join(" ".join(command) for command in commands)
+        for forbidden in ("--force", "--mirror", "--delete"):
+            with self.subTest(option=forbidden, scope="all commands"):
+                self.assertNotIn(forbidden, flat)
+
+    def test_a_branch_moving_after_validation_publishes_the_approved_commit(
+        self,
+    ) -> None:
+        """The approved revision travels, not whatever the name later means.
+
+        The revision is verified and then the push used to name the *branch*,
+        which git resolves when the push runs — after the check. Anything
+        sharing the worktree could move it in between, and the capability would
+        send a commit nobody approved under a request that named the old one.
+
+        The move is staged from inside the runner, so it happens between the
+        validation and the push exactly as a real race would.
+        """
+        approved = self.branch("fix/thing")
+        commands: list[list[str]] = []
+        real = subprocess.run
+        moved: list[str] = []
+
+        def runner(argv, **keywords):
+            commands.append(list(argv))
+            completed = real(argv, **keywords)
+            # The moment validation has read the branch and accepted it, move
+            # it — which is precisely the window the push used to reopen.
+            if not moved and "rev-parse" in argv and approved in (
+                completed.stdout or ""
+            ):
+                (self.local / "work.txt").write_text("someone else\n")
+                git(self.local, "add", "work.txt")
+                git(self.local, "commit", "-q", "-m", "concurrent work")
+                moved.append(git(self.local, "rev-parse", "HEAD"))
+            return completed
+
+        publication = RepositoryPublication(self.local, runner=runner)
+        outcome = publication.publish(
+            PublicationRequest("fix/thing", approved)
+        )
+
+        self.assertTrue(moved, "the branch must actually have moved")
+        self.assertNotEqual(moved[0], approved)
+        pushes = [command for command in commands if "push" in command]
+        self.assertEqual(len(pushes), 1)
+        # The argv names the approved commit, never the branch name.
+        self.assertIn(f"{approved}:refs/heads/fix/thing", pushes[0])
+        self.assertNotIn(
+            "refs/heads/fix/thing:refs/heads/fix/thing", pushes[0]
+        )
+        # And that is what the remote received.
+        self.assertEqual(self.remote_sha("fix/thing"), approved)
+        self.assertEqual(outcome.head_sha, approved)
 
     def test_only_origin_is_ever_pushed_to(self) -> None:
         sha = self.branch("fix/thing")
@@ -245,8 +315,10 @@ class PublicationTests(RealRepositoryHarness):
         self.assertEqual(len(pushes), 1)
         self.assertIn("origin", pushes[0])
         # Both sides named, so the destination cannot come from configuration
-        # and cannot be a deletion, which is an empty source.
-        self.assertIn("refs/heads/fix/thing:refs/heads/fix/thing", pushes[0])
+        # and cannot be a deletion, which is an empty source. The source is the
+        # approved commit itself rather than the branch name, so a branch that
+        # moves after validation cannot change what travels.
+        self.assertIn(f"{sha}:refs/heads/fix/thing", pushes[0])
         # What the remote holds, it keeps. The argv is enumerated rather than
         # passed through, so neither option has a shape it could take — but a
         # successful push is where a force would actually do its damage, and

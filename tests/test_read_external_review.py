@@ -755,3 +755,76 @@ class InlineCommentReviewBindingTests(ProviderTestCase):
         self.assertEqual(
             [item.body for item in content.comments], ["written in R2"]
         )
+
+
+class AuthoritativeHeadBindingTests(ProviderTestCase):
+    """The revision comes from GitHub's field, not from the summary's prose.
+
+    A review object carries the commit it was submitted against. Requiring the
+    body text to also spell out the SHA made prose the gate: a reviewer that
+    words its range differently, or omits it, had its review discarded along
+    with every finding linked to it, and `read` reported no review of a
+    revision that plainly had one.
+
+    Prose still binds a summary that has no review object behind it — an issue
+    comment naming the range is how those are recognised. It simply no longer
+    overrides the authoritative field.
+    """
+
+    A = "a" * 40
+    B = "b" * 40
+    R = 91
+
+    def test_a_bound_review_counts_though_its_body_omits_the_sha(self) -> None:
+        review = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "Actionable comments posted: 1",   # no revision in the text
+            "state": "COMMENTED",
+            "commit_id": self.B,
+            "submitted_at": "2026-09-06T20:11:00Z",
+        }
+        content = self.provider([review], {self.R: [{
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.B,
+            "pull_request_review_id": self.R,
+        }]}).read(ReviewContentRequest(21, self.B))
+
+        self.assertTrue(content.available)
+        self.assertEqual(content.summary, "Actionable comments posted: 1")
+        # The findings linked to it travel too, rather than being stranded.
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+    def test_a_review_bound_to_another_head_is_refused_whatever_it_says(
+        self,
+    ) -> None:
+        """Prose must not rescue a review the field binds elsewhere."""
+        review = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            # The body names the requested head; the field says otherwise.
+            "body": f"Reviewed up to {self.B}.",
+            "state": "COMMENTED",
+            "commit_id": self.A,
+            "submitted_at": "2026-09-06T20:11:00Z",
+        }
+        content = self.provider([review], {self.R: [{
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.A,
+            "pull_request_review_id": self.R,
+        }]}).read(ReviewContentRequest(21, self.B))
+
+        # The summary is still recognised, because a reviewer saying it looked
+        # at this head is evidence. But no finding is imported from a review
+        # object submitted against a different commit.
+        self.assertEqual(content.comments, ())

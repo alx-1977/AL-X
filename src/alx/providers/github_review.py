@@ -176,6 +176,15 @@ class GitHubReviewProvider:
     def request(self, review: ReviewRequest) -> ReviewOutcome:
         """Ask the configured reviewer to look at this pull request again."""
         number = review.pull_request_number
+        # Stamped before the trigger goes out, never after. The observer
+        # refuses a review published at or before this moment, because such a
+        # review answers the previous request rather than this one. Taking the
+        # time afterwards put the POST and a second head lookup inside the
+        # window: a reviewer that answers quickly — CodeRabbit does, within
+        # seconds — would have its review dismissed as older than the request
+        # that prompted it, and the task would wait forever for a review that
+        # had already arrived.
+        requested_at = self._now()
         try:
             head = self._head(number)
             self._call(
@@ -197,7 +206,7 @@ class GitHubReviewProvider:
             head_sha=head if head and head == confirmed else "",
             requested=True,
             reviewer=self._profile.reviewer,
-            requested_at=self._now(),
+            requested_at=requested_at,
         )
 
     # ---- reading --------------------------------------------------------
@@ -305,12 +314,24 @@ class GitHubReviewProvider:
         # The reviewer's own summaries, newest first, restricted to ones that
         # name this revision. A summary about an earlier head is evidence about
         # that head and must not answer a question about this one.
+        #
+        # Prose is not the only way a revision gets named, and it is the weaker
+        # way. Where a review object carries GitHub's own `commit_id` for this
+        # head, that is the reviewer's revision stated as data, and it stands
+        # whatever the body says: a reviewer whose summary words the range
+        # differently, or omits it, was still reviewing this commit. Requiring
+        # the text to restate the SHA discarded a review that was already
+        # bound, together with the findings linked to it, and reported no
+        # review of a revision that had one.
         summaries = [
             item
             for item in issue_comments + reviews
             if self._authored(item)
             and isinstance(item.get("body"), str)
-            and self._covers(item["body"], head_sha)
+            and (
+                self._covers(item["body"], head_sha)
+                or (review is not None and item.get("id") == review.get("id"))
+            )
         ]
         if not summaries:
             return ReviewContent(

@@ -39,6 +39,11 @@ from alx.contracts import (  # noqa: E402
     SideEffect,
 )
 from alx.contracts.review_provider import ReviewProvider, profile_for  # noqa: E402
+from alx.providers.review_status import (  # noqa: E402
+    ReviewStatusObserver,
+    subject_reference,
+)
+from alx.contracts.task import TaskState  # noqa: E402
 from alx.providers.github_review import GitHubReviewProvider  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.tools.review import REQUEST_EXTERNAL_REVIEW  # noqa: E402
@@ -494,3 +499,104 @@ class ConfiguredProviderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestBoundaryTests(unittest.TestCase):
+    """A review that lands while the request is going out still counts.
+
+    The observer refuses a review published at or before the request moment,
+    because such a review answers the previous request. That rule needs the
+    moment the request *began*: the trigger POST and the head lookup after it
+    are both inside the interval, and stamping the time afterwards put a
+    reviewer's fast answer on the wrong side of it. CodeRabbit reviews within
+    seconds of being asked, so this is the ordinary case rather than a rare
+    one — the task would wait forever for a review that had already arrived.
+
+    Exercised across the real handoff: the provider produces the timestamp and
+    the observer consumes it, as they do in production.
+    """
+
+    def _provider(self, moments, submitted_at):
+        """A provider whose clock advances on every call, as a real one does.
+
+        The last moment repeats once the sequence runs out, so a test states
+        the times that matter rather than counting how often the clock is read.
+        """
+        remaining = list(moments)
+
+        def clock_next():
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+        class Response:
+            def __init__(self, body):
+                self.status_code = 200
+                self._body = body
+                self.headers: dict = {}
+
+            def json(self):
+                return self._body
+
+        def request(method, url, **keywords):
+            if method == "POST":
+                return Response({})
+            base = url.split("?")[0]
+            first = "page=1" in url
+            if base.endswith("/reviews"):
+                return Response([{
+                    "id": 5001,
+                    "user": {"login": "coderabbitai[bot]"},
+                    "body": f"Reviewed up to {HEAD}.",
+                    "state": "COMMENTED",
+                    "commit_id": HEAD,
+                    "submitted_at": submitted_at,
+                }] if first else [])
+            if base.endswith("/comments"):
+                return Response([])
+            # The pull request itself: the head lookup the request path makes.
+            return Response({"head": {"sha": HEAD}})
+
+        import alx.providers.github_review as module
+
+        original = module.httpx.request
+        module.httpx.request = request
+        self.addCleanup(setattr, module.httpx, "request", original)
+        provider = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        )
+        provider._now = clock_next  # type: ignore[method-assign]
+        return provider
+
+    def test_a_review_submitted_during_the_request_is_accepted(self) -> None:
+        """The review lands between the trigger and the outcome being built."""
+        begin = datetime(2026, 9, 7, 6, 15, 0, tzinfo=UTC)
+        during = datetime(2026, 9, 7, 6, 15, 14, tzinfo=UTC)
+        after = datetime(2026, 9, 7, 6, 15, 30, tzinfo=UTC)
+        provider = self._provider(
+            # Request start, then later moments as the calls proceed.
+            [begin, during, after],
+            submitted_at=during.isoformat().replace("+00:00", "Z"),
+        )
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        # The boundary is when the request began, not when it finished.
+        self.assertEqual(outcome.requested_at, begin)
+
+        observer = ReviewStatusObserver(provider)
+        observed = observer.observe(
+            subject_reference(21, HEAD), since=outcome.requested_at
+        )
+        self.assertIs(observed.state, TaskState.COMPLETED)
+
+    def test_a_review_from_before_the_request_still_does_not_count(self) -> None:
+        """The rule it protects is unchanged: an older review answers an older ask."""
+        begin = datetime(2026, 9, 7, 6, 15, 0, tzinfo=UTC)
+        earlier = datetime(2026, 9, 7, 5, 0, 0, tzinfo=UTC)
+        provider = self._provider(
+            [begin],
+            submitted_at=earlier.isoformat().replace("+00:00", "Z"),
+        )
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        observer = ReviewStatusObserver(provider)
+        observed = observer.observe(
+            subject_reference(21, HEAD), since=outcome.requested_at
+        )
+        self.assertIs(observed.state, TaskState.WAITING_FOR_RESULT)

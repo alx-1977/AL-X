@@ -23,6 +23,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+from alx.bootstrap.live_voice import _reviewer_name  # noqa: E402
 from alx.bootstrap.review import build_review_runtime  # noqa: E402
 from alx.bootstrap.tasks import build_task_runtime  # noqa: E402
 from alx.continuity.tasks import SQLiteTaskStore, TaskStoreCorrupt  # noqa: E402
@@ -1366,3 +1367,77 @@ class ProductionWatcherWiringTests(unittest.TestCase):
             if keyword.arg == "review_provider"
         )
         self.assertIn("review_runtime", ast.unparse(passed))
+
+    def test_the_recorded_service_is_the_resolved_reviewer(self) -> None:
+        """Configuration is normalised; the recorded identity must follow it.
+
+        Selection accepts a name case-insensitively and falls back to the
+        default on an unknown one, so the configured string and the composed
+        reviewer can differ. The poller finds an observer by the task's
+        service, so recording the raw value produced a lookup that matched
+        nothing — a review requested, stored, and never polled.
+        """
+        for configured, canonical in (
+            ("coderabbit", "coderabbit"),
+            ("CodeRabbit", "coderabbit"),
+            ("  CODERABBIT  ", "coderabbit"),
+            ("greptile", "greptile"),
+            ("Greptile", "greptile"),
+            # Unknown names fall back rather than leaving review unavailable.
+            ("greptil", "coderabbit"),
+            ("qodo", "coderabbit"),
+            ("", "coderabbit"),
+        ):
+            with self.subTest(configured=configured):
+                runtime = build_review_runtime(
+                    True,
+                    "alx-1977/AL-X",
+                    "a-token",
+                    lambda: "call-1",
+                    reviewer=configured,
+                )
+                self.assertIsNotNone(runtime)
+                self.assertEqual(_reviewer_name(runtime), canonical)
+
+    def test_the_recorded_service_matches_the_watching_observer(self) -> None:
+        """The handoff itself: what is recorded is what is watched.
+
+        Both halves are composed the way production composes them, and the
+        name written on the task is looked up in the poller's own registry —
+        which is what the poller does on every tick.
+        """
+        for configured in ("CodeRabbit", "greptil", "Greptile"):
+            with self.subTest(configured=configured):
+                review_runtime = build_review_runtime(
+                    True, "alx-1977/AL-X", "a-token", lambda: "call-1",
+                    reviewer=configured,
+                )
+                service = _reviewer_name(review_runtime)
+                runtime = self.build(review_runtime.provider)
+                self.assertIsNotNone(runtime)
+                runtime.poller.record(_task(service=service))
+                recorded = runtime.store.outstanding()[0]
+                # The poller resolves an observer by exactly this name.
+                self.assertIn(recorded.service, runtime.poller._observers)
+
+    def test_the_production_call_site_records_the_resolved_reviewer(self) -> None:
+        """The composition root, where the raw value used to be passed.
+
+        The tests above prove what each value produces, but they pass the name
+        themselves — so the production call site could go on handing over the
+        configured string and they would all still pass. That is how this
+        shipped, so the call site is read where it lives.
+        """
+        source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
+        tree = ast.parse(source)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_watch_review"
+        ]
+        self.assertEqual(len(calls), 1, "one production call site is expected")
+        passed = ast.unparse(calls[0].args[-1])
+        self.assertIn("_reviewer_name", passed)
+        self.assertNotIn("review_configuration.reviewer", passed)

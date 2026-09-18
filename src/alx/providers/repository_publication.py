@@ -174,12 +174,20 @@ class RepositoryPublication:
             # anyway would send a revision nobody authorised.
             raise PublicationError("branch_unknown")
 
-        # `refs/heads/<branch>:refs/heads/<branch>`, explicit on both sides, so
-        # the destination cannot be inferred from configuration and cannot be a
+        # `<approved sha>:refs/heads/<branch>`, explicit on both sides, so the
+        # destination cannot be inferred from configuration and cannot be a
         # deletion (which is an empty source) or a rename.
+        #
+        # The source is the commit that was just verified, not the branch name
+        # that pointed at it. A name is read by git when the push runs, which
+        # is after the check: a branch that moved in between — another job
+        # committing, a checkout, anything sharing the worktree — would send a
+        # revision nobody approved, under a request that named the old one.
+        # The verified revision is what travels, and if the branch has moved
+        # the push simply carries the approved commit regardless.
         completed = self._run((
             "git", "push", ORIGIN,
-            f"refs/heads/{request.branch}:refs/heads/{request.branch}",
+            f"{local}:refs/heads/{request.branch}",
         ))
         output = f"{completed.stdout or ''}\n{completed.stderr or ''}"
         if completed.returncode != 0:
