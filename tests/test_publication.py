@@ -78,13 +78,16 @@ class BranchNameTests(unittest.TestCase):
         """The argv is built from this name, so its shape is the guard."""
         for branch in (
             "--force", "-f", "../evil", "a b", "refs/heads/x", "x:y",
-            "+x", "x\\n", "", "   ", "a/b/c",
+            # Real newlines, not the two characters that spell one. A name git
+            # would otherwise accept, with a newline appended, is what proves
+            # the pattern is anchored at the end rather than merely searched.
+            "+x", "x\n", "fix/thing\n", "", "   ", "a/b/c",
         ):
             with self.subTest(branch=branch):
                 self.assertFalse(publishable_branch(branch))
 
     def test_the_revision_must_be_a_full_commit_id(self) -> None:
-        for sha in ("", "abc", "A" * 40, "g" * 40, HEAD + "\\n"):
+        for sha in ("", "abc", "A" * 40, "g" * 40, HEAD + "\n"):
             with self.subTest(sha=sha):
                 with self.assertRaises(ValueError):
                     PublicationRequest(branch="fix/thing", head_sha=sha)
@@ -404,10 +407,6 @@ class CapabilityTests(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReviewerIdentityTests(unittest.TestCase):
     """Reviewer identity is an authentication boundary.
 
@@ -706,3 +705,7 @@ class GitLocaleTests(RealRepositoryHarness):
             self.publication.publish(PublicationRequest("fix/thing", ours))
         self.assertEqual(caught.exception.code, "branch_diverged")
         self.assertEqual(self.remote_sha("fix/thing"), theirs)
+
+
+if __name__ == "__main__":
+    unittest.main()
