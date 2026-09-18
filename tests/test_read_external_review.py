@@ -915,8 +915,6 @@ class AuthoritativeHeadBindingTests(ProviderTestCase):
         self.assertEqual(content.comments, ())
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class PaginationFailsClosedTests(unittest.TestCase):
@@ -1019,3 +1017,7 @@ class PaginationFailsClosedTests(unittest.TestCase):
 
         with self.assertRaises(ReviewReadError):
             self._provider(pages_of).read(ReviewContentRequest(21, HEAD))
+
+
+if __name__ == "__main__":
+    unittest.main()

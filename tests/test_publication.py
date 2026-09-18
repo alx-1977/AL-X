@@ -787,8 +787,6 @@ class GitLocaleTests(RealRepositoryHarness):
         self.assertEqual(self.remote_sha("fix/thing"), theirs)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class PublicationRepositoryIdentityTests(RealRepositoryHarness):
@@ -877,3 +875,7 @@ class PublicationRepositoryIdentityTests(RealRepositoryHarness):
             git(self.remote, "rev-parse", "refs/heads/fix/thing")
         self.assertEqual(git(self.remote, "rev-parse", "refs/heads/main"), before)
         self.assertTrue(sha)
+
+
+if __name__ == "__main__":
+    unittest.main()
