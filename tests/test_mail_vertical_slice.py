@@ -261,22 +261,42 @@ class MailProviderTests(unittest.TestCase):
                 return event
         return None
 
-    def test_announced_event_carries_body_transiently_without_persisting_it(self) -> None:
+    def test_announced_event_carries_local_metadata_and_no_body(self) -> None:
+        """Context names the message; it does not go and fetch it.
+
+        The body used to be attached here, which cost one IMAP connection per
+        event while a person waited for the turn to start. What ingestion
+        already persisted — sender, subject, identifiers, timestamps — is what
+        she needs to judge whether an email matters, and it costs nothing.
+
+        The body is still never persisted. That invariant is older than this
+        change and is asserted below unchanged.
+        """
         self.adapter.scan()
         self.imap.items[2] = message("New quote", "The quote is R2,000")
         # Discovery is the process poller's job, so reading context only
         # carries what scanning has already made durable.
         self.adapter.scan()
+        before = len(self.imap.commands)
         event = self._announced_event()
-        self.assertEqual(event.transient_data["body"], "The quote is R2,000")
+
+        # Named as absent rather than missing, so she can tell an empty
+        # message from one that has not been fetched.
+        self.assertEqual(event.transient_data["content_unavailable"], "not_fetched")
+        self.assertNotIn("body", event.transient_data)
         self.assertNotIn("body", event.data)
+        # The metadata that makes the event useful is there.
+        self.assertEqual(event.data["subject"], "New quote")
+        self.assertIn("sender", event.data)
+        self.assertIn("observed_at", event.data)
+        # Nothing was asked of the mail account to build this.
+        self.assertEqual(self.imap.commands[before:], [])
+
         retained = self.state._connection.execute(
             "SELECT event_json FROM mail_observations WHERE uid = 2"
         ).fetchone()[0]
         self.assertNotIn("The quote is R2,000", retained)
-        rendered = repr(self.imap.commands)
-        self.assertIn("BODY.PEEK[]", rendered)
-        self.assertNotIn("STORE", rendered)
+        self.assertNotIn("STORE", repr(self.imap.commands))
 
     def test_read_reports_attachment_presence_without_changing_seen(self) -> None:
         self.adapter.scan()
@@ -378,8 +398,12 @@ class MailProviderTests(unittest.TestCase):
         first = self._announced_event()
         second = self._announced_event()
         self.assertEqual(first.event_id, second.event_id)
-        self.assertEqual(first.transient_data["body"], "Transient body")
-        self.assertEqual(second.transient_data["body"], "Transient body")
+        # Re-offered identically, and neither offer fetches anything.
+        self.assertEqual(first.data["subject"], "Retry me")
+        self.assertEqual(second.data["subject"], "Retry me")
+        self.assertEqual(
+            first.transient_data["content_unavailable"], "not_fetched"
+        )
         self.assertEqual(next_arrival(self.state).data["uid"], "2")
 
     def test_the_cursor_advances_across_non_contiguous_identifiers(self) -> None:
@@ -972,6 +996,143 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
         finally:
             goals.close()
             directory.cleanup()
+
+class ForegroundContextIsLocalTests(unittest.TestCase):
+    """Preparing a turn must not depend on the mail account answering.
+
+    On 2026-09-18 a typed greeting took ninety-two seconds before the
+    reasoning provider was invoked. Eight mail observations were waiting, and
+    context assembly attached each message body by reading it: one IMAP
+    connection per event — connect, TLS, LOGIN, SELECT, FETCH, LOGOUT — in
+    series, on the path a person waits on. Nothing failed and nothing was
+    logged; it was merely slow, so the interface showed "reasoning in
+    progress" throughout.
+
+    The cost was proportional to the mail queue, which is the wrong thing for
+    a greeting to depend on. These tests hold context assembly to local state,
+    and the count assertions are what stop the fetch being reintroduced.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.state = SQLiteMailObservationState(
+            Path(self.directory.name) / "observations.sqlite3"
+        )
+        self.addCleanup(self.state.close)
+        self.imap = FakeImap()
+        self.adapter = ICloudMailAdapter(
+            "imap.example.test", 993, "friedl@example.test", "secret",
+            self.state, 1,
+            connection_factory=lambda *arguments, **keywords: self.imap,
+        )
+
+    def observe(self, count: int) -> None:
+        """Put `count` observations in local state, as scanning would."""
+        self.adapter.scan()
+        for index in range(2, 2 + count):
+            self.imap.items[index] = message(
+                f"Subject {index}", f"Body {index}"
+            )
+        self.adapter.scan()
+
+    def test_context_assembly_opens_no_connection_and_sends_no_command(
+        self,
+    ) -> None:
+        self.observe(8)
+        before = len(self.imap.commands)
+        events = self.adapter.contextual_events()
+        self.assertTrue(events, "the observations should reach context")
+        self.assertEqual(
+            self.imap.commands[before:],
+            [],
+            "context assembly must not talk to the mail account",
+        )
+
+    def test_the_cost_does_not_grow_with_the_number_waiting(self) -> None:
+        """Zero, eight or eighty: the same number of commands, which is none."""
+        for count in (0, 1, 8, 20):
+            with self.subTest(waiting=count):
+                self.setUp()
+                self.observe(count)
+                before = len(self.imap.commands)
+                self.adapter.contextual_events()
+                self.assertEqual(len(self.imap.commands) - before, 0)
+
+    def test_no_event_is_read_through_the_network_path(self) -> None:
+        """Structural: the fetching helper is not reached from here.
+
+        The count assertions above would also catch a reintroduced fetch, but
+        this names the specific call that caused the incident.
+        """
+        self.observe(4)
+        calls: list[object] = []
+        original = type(self.adapter).read_transient
+        type(self.adapter).read_transient = (
+            lambda self, event: calls.append(event) or original(self, event)
+        )
+        self.addCleanup(
+            setattr, type(self.adapter), "read_transient", original
+        )
+        self.adapter.contextual_events()
+        self.assertEqual(calls, [])
+
+    def test_useful_local_metadata_still_reaches_the_core(self) -> None:
+        """What she needs to judge an email is what ingestion already stored."""
+        self.observe(1)
+        event = next(
+            item
+            for item in self.adapter.contextual_events()
+            if item.kind in ("mail.message_arrived", "mail.message_waiting")
+        )
+        self.assertEqual(event.data["subject"], "Subject 2")
+        self.assertIn("sender", event.data)
+        self.assertIn("observed_at", event.data)
+        self.assertIn("message_id", event.data)
+        self.assertIn("uid", event.data)
+
+    def test_an_absent_body_is_named_rather_than_omitted(self) -> None:
+        """A message with no text and one not fetched are different facts."""
+        self.observe(1)
+        event = next(
+            item
+            for item in self.adapter.contextual_events()
+            if item.kind in ("mail.message_arrived", "mail.message_waiting")
+        )
+        self.assertEqual(
+            event.transient_data["content_unavailable"], "not_fetched"
+        )
+        self.assertNotIn("body", event.transient_data)
+
+    def test_reading_a_message_deliberately_still_fetches_it(self) -> None:
+        """The capability she calls is unchanged: that is where I/O belongs."""
+        self.observe(1)
+        before = len(self.imap.commands)
+        content = self.adapter.read(MailReference("INBOX", "777", "2"))
+        self.assertEqual(content.body, "Body 2")
+        self.assertIn("BODY.PEEK[]", repr(self.imap.commands[before:]))
+
+    def test_the_gateway_assembles_context_with_the_account_unreachable(
+        self,
+    ) -> None:
+        """The production path, with every connection attempt refused.
+
+        If anything on this path still reached for the network, the turn would
+        fail here rather than merely be slow.
+        """
+        self.observe(6)
+
+        def refuse(*arguments, **keywords):
+            raise AssertionError("no connection may be opened while assembling")
+
+        self.adapter._connection_factory = refuse
+        events = self.adapter.contextual_events()
+        self.assertTrue(events)
+        for event in events:
+            if event.kind in ("mail.message_arrived", "mail.message_waiting"):
+                self.assertEqual(
+                    event.transient_data["content_unavailable"], "not_fetched"
+                )
 
 
 if __name__ == "__main__":

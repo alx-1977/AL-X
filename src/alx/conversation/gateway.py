@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from time import monotonic
 from uuid import uuid4
 
 from alx.contracts import (
@@ -14,6 +16,19 @@ from alx.contracts import (
 )
 from alx.conversation.store import ConversationNotFound
 from alx.core import CoreAgent, CoreOutcome, CoreState
+
+LOGGER = logging.getLogger(__name__)
+
+# Above this many seconds, assembling context is worth saying out loud.
+# Context is prepared while the person waits, so it should be work nobody
+# notices; when it stops being that, the log should say so rather than leave a
+# silent gap between the turn starting and the Core being called. Set where an
+# attentive person begins to feel a pause.
+#
+# This is about how long the work took, never about what the mail says. No
+# rule here decides whether a message matters or whether AL/X should speak:
+# that is hers, and the speech path is checked to contain no such rule.
+_SLOW_CONTEXT_ASSEMBLY_SECONDS = 0.25
 
 
 class ConversationGateway:
@@ -33,9 +48,18 @@ class ConversationGateway:
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
+        started_at = monotonic()
+        contextual = self._contextual_events()
+        elapsed = monotonic() - started_at
+        if elapsed >= _SLOW_CONTEXT_ASSEMBLY_SECONDS:
+            LOGGER.warning(
+                "Contextual event assembly took %.2fs for %d events",
+                elapsed,
+                len(contextual),
+            )
         events = {
             item.event_id: item
-            for item in (*self._contextual_events(), *additional)
+            for item in (*contextual, *additional)
         }
         return ConversationSnapshot(
             conversation.conversation_id,
