@@ -101,7 +101,12 @@ class Operation(str, Enum):
     AMEND = "amend"
     CHERRY_PICK = "cherry_pick"
     REVERT = "revert"
-    MERGE = "merge"
+    # `local_merge`, not `merge`: this joins one local history to another and
+    # knows nothing about pull requests. `merge_pull_request` is the GitHub
+    # operation, bound to an exact reviewed head and subject to branch
+    # protection. Naming this one `merge` invited them to be read as duplicates
+    # of each other, which a reviewer duly did.
+    LOCAL_MERGE = "local_merge"
     REBASE = "rebase"
     RESET = "reset"
 

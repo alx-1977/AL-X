@@ -314,7 +314,7 @@ class RepositoryAuthority:
                 return ("git", "cherry-pick", _revision(arguments, "revision"))
             case Operation.REVERT:
                 return ("git", "revert", "--no-edit", _revision(arguments, "revision"))
-            case Operation.MERGE:
+            case Operation.LOCAL_MERGE:
                 return ("git", "merge", "--no-edit", _revision(arguments, "revision"))
             case Operation.REBASE:
                 return ("git", "rebase", _revision(arguments, "onto"))

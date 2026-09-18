@@ -358,11 +358,11 @@ class OrdinaryOperationTests(RealRepositoryHarness):
             committed.resulting_sha,
         )
 
-    def test_merge_cherry_pick_and_revert(self) -> None:
+    def test_local_merge_cherry_pick_and_revert(self) -> None:
         self.branch("fix/thing")
         picked = git(self.local, "rev-parse", "HEAD")
         git(self.local, "checkout", "-q", "main")
-        merged = self.perform(Operation.MERGE, revision="fix/thing")
+        merged = self.perform(Operation.LOCAL_MERGE, revision="fix/thing")
         self.assertTrue(merged.succeeded)
         reverted = self.perform(Operation.REVERT, revision=picked)
         self.assertTrue(reverted.succeeded)
