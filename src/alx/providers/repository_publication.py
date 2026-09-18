@@ -130,6 +130,9 @@ class RepositoryPublication:
         self._root = root.resolve()
         self._timeout = timeout_seconds
         self._runner = runner
+        # The remote URL this object was allowed to publish to, remembered
+        # when it was checked. See `origin_identity`.
+        self._validated_remote = ""
 
     def origin_identity(self) -> str:
         """The `owner/name` this checkout's origin points at, or "".
@@ -137,11 +140,25 @@ class RepositoryPublication:
         Empty when there is no origin, when it cannot be read, or when it is
         not a GitHub remote in a form this system recognises — all of which
         are answers the caller must refuse on rather than guess past.
+
+        The URL behind that identity is kept, because the name `origin` is
+        only a lookup in `.git/config` and the push would perform it again
+        later. Validating a name and then using the name leaves the interval
+        between them open: anything able to write that file could point
+        `origin` elsewhere and the approved commit would go there. What was
+        checked is what gets pushed to.
         """
+        url = self._origin_url()
+        identity = origin_identity(url)
+        self._validated_remote = url if identity else ""
+        return identity
+
+    def _origin_url(self) -> str:
+        """The URL `origin` currently names, or "" when it cannot be read."""
         completed = self._run(_ORIGIN_URL)
         if completed.returncode != 0:
             return ""
-        return origin_identity(completed.stdout or "")
+        return (completed.stdout or "").strip()
 
     def _run(self, command: tuple[str, ...]) -> subprocess.CompletedProcess:
         try:
@@ -203,8 +220,24 @@ class RepositoryPublication:
         # revision nobody approved, under a request that named the old one.
         # The verified revision is what travels, and if the branch has moved
         # the push simply carries the approved commit regardless.
+        # Push to a URL, never to the name `origin`. A name is a lookup in
+        # `.git/config` that git performs when the push runs, so validating
+        # the name and then pushing to the name leaves the interval between
+        # them open: anything able to write that file could point `origin`
+        # elsewhere, and the approved commit would go there.
+        #
+        # The URL is read here and handed to git directly, so what was checked
+        # is what is pushed to. Where composition validated an identity, that
+        # exact URL is required to still be the one configured — a remote
+        # repointed since then is refused rather than followed.
+        remote = self._origin_url()
+        if not remote:
+            raise PublicationError("publication_unavailable")
+        if self._validated_remote and remote != self._validated_remote:
+            LOGGER.warning("Publication origin changed since it was checked")
+            raise PublicationError("publication_unavailable")
         completed = self._run((
-            "git", "push", ORIGIN,
+            "git", "push", remote,
             f"{local}:refs/heads/{request.branch}",
         ))
         output = f"{completed.stdout or ''}\n{completed.stderr or ''}"

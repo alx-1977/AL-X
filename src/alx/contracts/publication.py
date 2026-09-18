@@ -55,11 +55,20 @@ PUBLICATION_FAILURES = (
 )
 
 
+# What opening a pull request can fail with. Every code here is one the
+# provider actually raises: a declared failure nothing produces tells a reader
+# the system distinguishes a case it cannot distinguish.
+#
+# `head_unpublished` was such a code. Telling an unpublished head from any
+# other refusal needs a branch-existence check — GitHub answers both with 422,
+# and its message for the first is also returned for unrelated bad head formats,
+# so it cannot be read from the response. It is a real distinction and worth
+# having, because an unpublished head is the one failure AL/X could act on
+# herself by publishing first; it belongs in the capability that learns to
+# check, not in a contract that promises it now.
 PULL_REQUEST_FAILURES = (
     "arguments_unusable",
     "pull_request_unavailable",
-    # The head branch has not been published, so there is nothing to open against.
-    "head_unpublished",
     # GitHub refused to open it.
     "pull_request_refused",
 )

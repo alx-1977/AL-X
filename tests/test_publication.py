@@ -133,6 +133,9 @@ class RealRepositoryHarness(unittest.TestCase):
     def remote_sha(self, name: str) -> str:
         return git(self.remote, "rev-parse", f"refs/heads/{name}")
 
+    def set_origin(self, url: str) -> None:
+        git(self.local, "remote", "set-url", "origin", url)
+
 
 class PublicationTests(RealRepositoryHarness):
     """What publishing guarantees, against real git."""
@@ -211,6 +214,59 @@ class PublicationTests(RealRepositoryHarness):
             self.publication.publish(PublicationRequest("fix/thing", ours))
         self.assertEqual(caught.exception.code, "branch_diverged")
         self.assertEqual(self.remote_sha("fix/thing"), theirs)
+
+
+    def test_repointing_origin_after_validation_cannot_redirect_publication(
+        self,
+    ) -> None:
+        """What was checked is what is pushed to.
+
+        Composition validates the origin once. `git push origin` would resolve
+        that name again when the push runs, so anything able to write
+        `.git/config` in between — this machine is not the Coding Agent's, but
+        it is a machine — could point it at another repository and the approved
+        commit would go there under a decision made about somewhere else.
+
+        The remote is repointed from inside the runner, after validation and
+        before the push, which is exactly that interval.
+        """
+        elsewhere = Path(self.directory.name) / "elsewhere.git"
+        subprocess.run(
+            ["git", "init", "--bare", "-b", "main", str(elsewhere)],
+            capture_output=True, check=True,
+        )
+        self.set_origin("https://github.com/alx-1977/AL-X.git")
+        publication = RepositoryPublication(self.local)
+        self.assertEqual(publication.origin_identity(), "alx-1977/al-x")
+
+        # Now it points somewhere else entirely.
+        git(self.local, "remote", "set-url", "origin", str(elsewhere))
+        sha = self.branch("fix/thing")
+
+        with self.assertRaises(PublicationError) as caught:
+            publication.publish(PublicationRequest("fix/thing", sha))
+        self.assertEqual(caught.exception.code, "publication_unavailable")
+
+        # Nothing reached the repository it was repointed at.
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(elsewhere, "rev-parse", "refs/heads/fix/thing")
+
+    def test_the_push_names_a_url_rather_than_the_remote_name(self) -> None:
+        """A name is resolved by git; a URL is the destination itself."""
+        sha = self.branch("fix/thing")
+        commands: list[list[str]] = []
+        real = subprocess.run
+
+        def runner(argv, **keywords):
+            commands.append(list(argv))
+            return real(argv, **keywords)
+
+        RepositoryPublication(self.local, runner=runner).publish(
+            PublicationRequest("fix/thing", sha)
+        )
+        push = next(command for command in commands if "push" in command)
+        self.assertEqual(push[2], str(self.remote))
+        self.assertNotIn("origin", push)
 
     def test_no_force_or_deletion_shape_can_be_produced(self) -> None:
         """Authority by enumeration, checked on the push that actually runs.
@@ -314,7 +370,12 @@ class PublicationTests(RealRepositoryHarness):
         )
         pushes = [command for command in commands if "push" in command]
         self.assertEqual(len(pushes), 1)
-        self.assertIn("origin", pushes[0])
+        # The origin's URL, not the name `origin`: a name is resolved again
+        # when the push runs, and the destination must be the one that was
+        # read rather than whatever the name points at by then.
+        configured = git(self.local, "config", "--get", "remote.origin.url")
+        self.assertIn(configured, pushes[0])
+        self.assertNotIn("origin", pushes[0])
         # Both sides named, so the destination cannot come from configuration
         # and cannot be a deletion, which is an empty source. The source is the
         # approved commit itself rather than the branch name, so a branch that
@@ -810,9 +871,6 @@ class PublicationRepositoryIdentityTests(RealRepositoryHarness):
             checkout if checkout is not None else self.local,
             lambda: "call-1",
         )
-
-    def set_origin(self, url: str) -> None:
-        git(self.local, "remote", "set-url", "origin", url)
 
     def test_a_matching_origin_registers_the_capability(self) -> None:
         self.set_origin("https://github.com/alx-1977/AL-X.git")
