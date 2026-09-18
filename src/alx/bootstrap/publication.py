@@ -69,6 +69,34 @@ def build_publication_runtime(
         LOGGER.warning("Publication is misconfigured: no publish capability")
         return None
 
+    # The branch is pushed to the checkout's own `origin`, and the pull request
+    # is opened against a separately configured repository. Nothing but this
+    # comparison keeps those the same place: with two settings that can drift,
+    # a repair could be pushed to one repository and proposed in another, where
+    # the branch does not exist. The push would succeed and the work would sit
+    # somewhere nobody reviews.
+    #
+    # Checked here, once, rather than at each publication: a mismatch is a
+    # misconfiguration, and the honest response is to withhold the capability
+    # rather than to offer one that cannot complete. An origin that cannot be
+    # identified is refused for the same reason — it is not proof of a match.
+    identity = branches.origin_identity()
+    expected = repository.strip().lower()
+    if not identity:
+        LOGGER.warning(
+            "Publication checkout has no identifiable GitHub origin: "
+            "no publish capability"
+        )
+        return None
+    if identity != expected:
+        LOGGER.warning(
+            "Publication checkout publishes to %s but pull requests target %s: "
+            "no publish capability",
+            identity,
+            expected,
+        )
+        return None
+
     LOGGER.info("Publication enabled: %s, %s", PUBLISH_REPAIR_BRANCH, OPEN_PULL_REQUEST)
     # No per-publication approval. Publishing proposes work for review rather
     # than changing anything Friedl relies on: the branch is not main, the

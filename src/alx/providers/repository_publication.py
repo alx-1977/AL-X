@@ -42,6 +42,7 @@ import subprocess  # noqa: S404 - the one branch-publication site
 from pathlib import Path
 from typing import Any, Callable
 
+from alx.providers.repository_runtime import origin_identity
 from alx.contracts.publication import (
     PublicationError,
     PublicationOutcome,
@@ -59,6 +60,11 @@ Runner = Callable[..., Any]
 ORIGIN = "origin"
 
 _SHOW_TOPLEVEL = ("git", "rev-parse", "--show-toplevel")
+# Which GitHub repository this checkout actually pushes to. Read rather than
+# assumed: the push goes to whatever `origin` names, and the pull request is
+# opened against a separately configured repository, so nothing but this
+# comparison keeps the two the same place.
+_ORIGIN_URL = ("git", "config", "--get", "remote.origin.url")
 
 # Configuration forced on every call, so an inherited environment cannot
 # reintroduce a credential helper, an editor, or a config injection.
@@ -124,6 +130,18 @@ class RepositoryPublication:
         self._root = root.resolve()
         self._timeout = timeout_seconds
         self._runner = runner
+
+    def origin_identity(self) -> str:
+        """The `owner/name` this checkout's origin points at, or "".
+
+        Empty when there is no origin, when it cannot be read, or when it is
+        not a GitHub remote in a form this system recognises — all of which
+        are answers the caller must refuse on rather than guess past.
+        """
+        completed = self._run(_ORIGIN_URL)
+        if completed.returncode != 0:
+            return ""
+        return origin_identity(completed.stdout or "")
 
     def _run(self, command: tuple[str, ...]) -> subprocess.CompletedProcess:
         try:

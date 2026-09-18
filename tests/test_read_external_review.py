@@ -917,3 +917,105 @@ class AuthoritativeHeadBindingTests(ProviderTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PaginationFailsClosedTests(unittest.TestCase):
+    """A prefix of a review is not the review.
+
+    `_pages` stops at a fixed cap. It used to return whatever it had, so a
+    reviewer with more findings than the cap allows produced a partial read
+    that arrived wearing the shape of a complete one — and this is the
+    evidence AL/X weighs before a merge. However many findings did not fit
+    were simply absent, with nothing to say so.
+
+    Unreadable is the honest answer. The task keeps waiting rather than acting
+    on part of a review.
+    """
+
+    def _provider(self, pages_of):
+        """`pages_of(n)` answers page n of the inline comments."""
+        self.fetched = 0
+
+        class Response:
+            def __init__(self, payload) -> None:
+                self.status_code = 200
+                self.headers: dict = {}
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def request(method, url, **keywords):
+            base = url.split("?")[0]
+            page = int(url.rsplit("&page=", 1)[1])
+            if base.endswith("/reviews"):
+                return Response([_review(HEAD, "Summary.")] if page == 1 else [])
+            if "/issues/" in base:
+                return Response([])
+            if base.endswith("/comments"):
+                self.fetched += 1
+                return Response(pages_of(page))
+            return Response({"head": {"sha": HEAD}})
+
+        original = github_review.httpx.request
+        github_review.httpx.request = request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        return GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        )
+
+    @staticmethod
+    def _comment(index: int) -> dict:
+        return {
+            "id": index,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": f"finding {index}",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": HEAD,
+            "original_commit_id": HEAD,
+            "pull_request_review_id": 7,
+        }
+
+    def test_a_review_that_ends_before_the_cap_reads_normally(self) -> None:
+        """A short final page is GitHub saying there is no more."""
+        def pages_of(page: int) -> list:
+            if page == 1:
+                return [self._comment(index) for index in range(100)]
+            if page == 2:
+                return [self._comment(100)]      # short: the end
+            return []
+
+        content = self._provider(pages_of).read(ReviewContentRequest(21, HEAD))
+        self.assertTrue(content.available)
+        self.assertEqual(len(content.comments), 101)
+
+    def test_a_review_larger_than_the_cap_is_unavailable_not_partial(self) -> None:
+        """Every allowed page full: more remains, and it cannot be read."""
+        def pages_of(page: int) -> list:
+            return [
+                self._comment(page * 100 + index) for index in range(100)
+            ]
+
+        provider = self._provider(pages_of)
+        with self.assertRaises(ReviewReadError) as caught:
+            provider.read(ReviewContentRequest(21, HEAD))
+        self.assertEqual(caught.exception.code, "review_unavailable")
+        # The cap was honoured rather than the reader running on.
+        self.assertEqual(self.fetched, github_review.MAX_PAGES)
+
+    def test_a_full_final_page_is_never_reported_as_complete(self) -> None:
+        """The boundary case: exactly the cap, last page full.
+
+        Indistinguishable from a complete read unless the cap is treated as
+        the failure it is.
+        """
+        def pages_of(page: int) -> list:
+            if page <= github_review.MAX_PAGES:
+                return [
+                    self._comment(page * 100 + index) for index in range(100)
+                ]
+            return []
+
+        with self.assertRaises(ReviewReadError):
+            self._provider(pages_of).read(ReviewContentRequest(21, HEAD))

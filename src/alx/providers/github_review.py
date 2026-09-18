@@ -161,7 +161,13 @@ class GitHubReviewProvider:
             items.extend(found)
             if len(found) < 100:
                 return items
-        return items
+        # The cap is exhausted and the last page was full, so GitHub has more
+        # to give. What has been read is a prefix of the review, not the review,
+        # and returning it would put a partial answer in front of AL/X wearing
+        # the shape of a complete one — a review she weighs before a merge,
+        # missing however many findings did not fit. Unreadable is the honest
+        # answer: the task keeps waiting rather than acting on part of it.
+        raise _Unavailable()
 
     def _head(self, number: int) -> str:
         pull = self._call("GET", f"/repos/{self._repository}/pulls/{number}")

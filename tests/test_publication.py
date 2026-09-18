@@ -32,6 +32,7 @@ from alx.contracts.publication import (  # noqa: E402
     PullRequestRequest,
     publishable_branch,
 )
+from alx.bootstrap.publication import build_publication_runtime  # noqa: E402
 from alx.providers.github_pull_request import GitHubPullRequests  # noqa: E402
 from alx.providers.repository_publication import (
     RepositoryPublication,
@@ -788,3 +789,91 @@ class GitLocaleTests(RealRepositoryHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicationRepositoryIdentityTests(RealRepositoryHarness):
+    """The branch must be pushed where the pull request will be opened.
+
+    Two settings decide that, and they can drift: the push goes to the
+    checkout's own `origin`, and the pull request is opened against a
+    separately configured repository. Nothing linked them, so a repair could be
+    pushed to one repository and proposed in another, where the branch does not
+    exist — the push succeeding and the work landing somewhere nobody reviews.
+
+    Composed the way production composes it, because the gap was in the
+    composition rather than in either provider.
+    """
+
+    def build(self, repository: str, checkout: Path | None = None):
+        return build_publication_runtime(
+            True,
+            repository,
+            "a-token",
+            checkout if checkout is not None else self.local,
+            lambda: "call-1",
+        )
+
+    def set_origin(self, url: str) -> None:
+        git(self.local, "remote", "set-url", "origin", url)
+
+    def test_a_matching_origin_registers_the_capability(self) -> None:
+        self.set_origin("https://github.com/alx-1977/AL-X.git")
+        runtime = self.build("alx-1977/AL-X")
+        self.assertIsNotNone(runtime)
+        self.assertEqual(
+            [item.capability_id for item in runtime.definitions],
+            [PUBLISH_REPAIR_BRANCH, OPEN_PULL_REQUEST],
+        )
+
+    def test_the_comparison_ignores_the_forms_git_treats_as_equal(self) -> None:
+        """Case and a `.git` suffix are the same repository, not a mismatch."""
+        for url in (
+            "https://github.com/alx-1977/AL-X.git",
+            "https://github.com/alx-1977/AL-X",
+            "https://github.com/ALX-1977/al-x.git",
+            "git@github.com:alx-1977/AL-X.git",
+            "ssh://git@github.com/alx-1977/AL-X.git",
+        ):
+            with self.subTest(origin=url):
+                self.set_origin(url)
+                self.assertIsNotNone(self.build("alx-1977/AL-X"))
+
+    def test_another_repository_withholds_the_capability(self) -> None:
+        """The defect: pushing one place and proposing another."""
+        self.set_origin("https://github.com/someone-else/other-repo.git")
+        self.assertIsNone(self.build("alx-1977/AL-X"))
+
+    def test_an_unidentifiable_origin_withholds_the_capability(self) -> None:
+        """Not a GitHub remote this system recognises is not proof of a match."""
+        for url in (
+            "https://gitlab.com/alx-1977/AL-X.git",
+            "/some/local/path.git",
+            "file:///tmp/whatever",
+            "not a url at all",
+        ):
+            with self.subTest(origin=url):
+                self.set_origin(url)
+                self.assertIsNone(self.build("alx-1977/AL-X"))
+
+    def test_a_checkout_without_an_origin_withholds_the_capability(self) -> None:
+        git(self.local, "remote", "remove", "origin")
+        self.assertIsNone(self.build("alx-1977/AL-X"))
+
+    def test_a_mismatch_publishes_nothing_and_opens_nothing(self) -> None:
+        """Withheld means withheld: no push, no pull request, no capability.
+
+        The remote keeps what it had, and there is no executor to call — the
+        authority is absent rather than present and failing.
+        """
+        sha = self.branch("fix/thing")
+        before = git(self.remote, "rev-parse", "refs/heads/main")
+        self.set_origin("https://github.com/someone-else/other-repo.git")
+
+        runtime = self.build("alx-1977/AL-X")
+        self.assertIsNone(runtime)
+
+        # Nothing reached the remote this harness owns.
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.remote, "rev-parse", "refs/heads/fix/thing")
+        self.assertEqual(git(self.remote, "rev-parse", "refs/heads/main"), before)
+        self.assertTrue(sha)
