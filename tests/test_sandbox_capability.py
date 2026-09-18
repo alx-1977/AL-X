@@ -143,8 +143,8 @@ REPOSITORY_RUNTIME_SITE = PRODUCTION_ROOT / "providers" / "repository_runtime.py
 # worktree and may never push, and AL/X may publish and may not run a test.
 # Neither is a second route to the other's outcome. Its boundary is asserted
 # below before the generic scans skip it.
-REPOSITORY_PUBLICATION_SITE = (
-    PRODUCTION_ROOT / "providers" / "repository_publication.py"
+REPOSITORY_AUTHORITY_SITE = (
+    PRODUCTION_ROOT / "providers" / "repository_authority.py"
 )
 
 
@@ -664,14 +664,14 @@ class SingleExecutionSiteTest(unittest.TestCase):
         # The same boundary, asserted for the publication site: one fixed
         # runner, not a module-wide exemption.
         self._assert_repository_runtime_process_boundary(
-            REPOSITORY_PUBLICATION_SITE.read_text()
+            REPOSITORY_AUTHORITY_SITE.read_text()
         )
         offenders = []
         for path in self._production_modules():
             if (
                 path in EXECUTION_SITES
                 or path in CODING_PROCESS_SITES
-                or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_PUBLICATION_SITE}
+                or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_AUTHORITY_SITE}
             ):
                 continue
             tree = ast.parse(path.read_text())
@@ -701,7 +701,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
             if (
                 path in EXECUTION_SITES
                 or path in CODING_PROCESS_SITES
-                or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_PUBLICATION_SITE}
+                or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_AUTHORITY_SITE}
             ):
                 continue
             tree = ast.parse(path.read_text())

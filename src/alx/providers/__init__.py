@@ -1,5 +1,6 @@
 """Isolated provider adapters; no provider owns AL/X state or reasoning policy."""
 
+from alx.providers.repository_authority import RepositoryAuthority
 from alx.providers.cartesia import CartesiaTranscriber
 from alx.providers.elevenlabs import ElevenLabsSynthesizer
 from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
@@ -23,11 +24,12 @@ from alx.providers.sandbox_retention import SandboxRetention
 from alx.providers.github_merge import GitHubMergeProvider
 from alx.providers.github_pull_request import GitHubPullRequests
 from alx.providers.github_review import GitHubReviewProvider
-from alx.providers.repository_publication import RepositoryPublication
 from alx.providers.review_status import ReviewStatusObserver, subject_reference
 
 
 __all__ = [
+    "RepositoryAuthority",
+    "RepositoryAuthority",
     "SandboxRetention",
     "SandboxRunner",
     "SandboxWorkspace",
@@ -35,7 +37,6 @@ __all__ = [
     "subject_reference",
     "GitHubReviewProvider",
     "GitHubPullRequests",
-    "RepositoryPublication",
     "GitHubMergeProvider",
     "BraveWebSearchProvider",
     "HttpWebFetchProvider",

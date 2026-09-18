@@ -1814,3 +1814,99 @@ invocation — including after failure, cancellation, or crash — leaves the
 worktree intact as recoverable stale state.
 
 No open design questions remain in this proposal.
+
+## D-032 — AL/X holds ordinary repository authority
+
+- **Date:** 2026-09-18
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-18.** Approval source: Friedl's
+  instruction to widen AL/X's repository authority, the design approved in that
+  exchange, and the three follow-up confirmations recorded below.
+
+**Decision.** AL/X manages her repositories the way an engineer does. One
+capability, `repository_operation`, carries one of thirty-two enumerated
+operations — inspection, synchronisation, branch lifecycle, commit work,
+publication and worktrees — and the GitHub boundary covers the pull-request
+work that goes with them. The single restriction is that she may not
+irrecoverably destroy her own canonical existence.
+
+**Why this replaces the narrow model.** Repository authority was granted one
+capability at a time: publish a branch, open a pull request, fast-forward main.
+Each was correct in itself and each was narrow, so an ordinary engineering
+question — is this commit merged, what is on that branch, can this be deleted —
+needed a design, a review and a merge before she could answer it. The narrowness
+was not protecting anything. It was a backlog, and it was answered in practice
+by asking Friedl to run git, which put him back in the loop the architecture
+exists to take him out of.
+
+### What AL/X decides
+
+Which operation is appropriate, and whether to perform it. Whether work is
+ready to publish, whether a branch is still needed, whether a review's findings
+require changes, and whether a revision may merge. Nothing here decides any of
+that for her.
+
+### The one invariant
+
+AL/X may not irrecoverably destroy her own canonical continued existence. It is
+enforced deterministically in `contracts/repository_authority.py`, before any
+command is built, and never by prompt instruction.
+
+It protects exactly three things, each because losing it cannot be undone from
+inside AL/X: the canonical checkout she runs from; the canonical branch on the
+canonical repository, against deletion, force-push, reset and rebase; and that
+branch on the remote. Spelling does not evade it — `main`, `refs/heads/main`
+and `origin/main` are one branch — and path containment is resolved rather than
+compared as text.
+
+It is deliberately narrow. Deleting a feature branch, force-pushing one,
+resetting it hard, removing files, replacing a subsystem or rewriting her own
+implementation are all ordinary work and none is refused. Losing work is a
+mistake and is recoverable through the mechanisms git provides; losing the
+canonical system is not a mistake anybody recovers from. A rule broad enough to
+prevent every mistake would be the permission system this decision removes.
+
+### What this supersedes
+
+**D-030 is superseded.** `inspect_repository_state` and `synchronize_local_main`
+existed solely because AL/X lacked general repository authority. They are two
+operations among thirty-two now, and keeping them beside the general service
+would be a second authority path to the same outcome.
+
+**The mandatory merge-approval requirement in D-026 is superseded.** D-026's
+substance stands: reading a review and judging whether a finding matters is
+interpretation, and interpretation belongs to AL/X. What no longer holds is
+Friedl's approval as a universal precondition for merging. Requiring it would
+contradict the authority recorded here, and the protection it was providing is
+now the deterministic invariant above rather than a person answering prompts.
+External review remains evidence AL/X weighs; where Friedl asks for an approval
+boundary on a particular task, that instruction governs that task.
+
+**`publish_repair_branch` and `open_pull_request` are retired.** Their behaviour
+is `push` and the GitHub pull-request boundary. They were merged four hours
+before this decision; leaving them beside the general service would be exactly
+the duplicate authority path this record exists to prevent.
+
+### What this does not change
+
+**D-028 and D-031 stand unchanged.** The Coding Agent's containment is
+untouched: its git authority remains the thirteen enumerated write shapes, it
+still cannot reach a remote, and it gained nothing here. Repository authority
+belongs to AL/X because she is the one who decides what should happen to the
+repository; a job carries out an instruction inside a worktree. Giving an
+implementation capability the power to publish and merge its own work would
+mean a reviewer looking at whatever the job decided to send.
+
+**Law 0 is unchanged.** One outcome, one production path: the outcome is one
+repository operation performed and reported, and the path is
+`repository_operation` through the registry, broker and Safety Gate.
+
+### Auditability
+
+Every mutation records the repository, the operation, the ref and commit it
+started from, the ref and commit it ended at, the remote where one was
+involved, whether it succeeded, and the refusal reason when the invariant
+blocked it. This is observability rather than approval: it is what lets AL/X
+check that an effect was the one she intended.
+
+No open design questions remain in this decision.

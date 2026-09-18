@@ -1,22 +1,14 @@
-"""Records for putting a repair where a reviewer and CI can see it.
+"""What a pull request is, for the GitHub side of AL/X's repository work.
 
-The Coding Agent commits inside the worktree it was given and stops there. That
-is deliberate under D-028: push, fetch and merge are refused by construction, so
-a job cannot reach the remote. But a commit nobody can see is not a repair —
-law gates run on pull requests, and every external reviewer watches them, so
-work that never leaves the worktree cannot be reviewed, cannot be checked, and
-cannot reach the merge boundary.
+Split from the retired publication contract, which paired these records with a
+`publish_repair_branch` capability. Publishing is now one operation among many
+in `contracts/repository_authority.py`; opening and revising a pull request
+remains a GitHub API concern rather than a git one, so its records live here.
 
-These records name the two steps that close that gap, and nothing else.
-Publishing is not committing, and opening a pull request is not merging: the one
-revision a merge may act on is still established by `contracts/repository.py`,
-which reads the reviewed head rather than trusting whatever the branch points at
-now.
-
-The authority is AL/X's, not the Coding Agent's. Widening `_WRITE_SHAPES` so a
-job could push would give an implementation capability the power to publish its
-own work, and a reviewer would then be looking at whatever the job decided to
-send. The separation is the point.
+The base is still not an input. Every repair goes to the default branch, and a
+caller-chosen base would let work be proposed into somewhere nobody is watching
+— a pull request against a branch with no gates and no reviewer is a review that
+never happens.
 """
 
 from __future__ import annotations
@@ -25,9 +17,6 @@ import re
 from dataclasses import dataclass
 
 
-# \Z rather than $: $ also matches before a terminal newline, so a value with
-# one appended passes validation and reaches GitHub as something nobody can act
-# on. The same mistake was already made once with a merge sha.
 _FULL_SHA = re.compile(r"\A[0-9a-f]{40}\Z")
 
 # A branch name this capability will carry. Deliberately narrower than what git
@@ -41,31 +30,6 @@ _BRANCH = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]
 PROTECTED_BRANCHES = frozenset({"main", "master", "HEAD"})
 
 
-PUBLICATION_FAILURES = (
-    "arguments_unusable",
-    "publication_unavailable",
-    # The branch is not one this capability may publish.
-    "branch_not_permitted",
-    # The local branch does not exist, or does not point where it claimed.
-    "branch_unknown",
-    # The remote holds commits this push would discard. Never forced.
-    "branch_diverged",
-    # The remote refused: protection, permissions, or a rejected non-fast-forward.
-    "publication_refused",
-)
-
-
-# What opening a pull request can fail with. Every code here is one the
-# provider actually raises: a declared failure nothing produces tells a reader
-# the system distinguishes a case it cannot distinguish.
-#
-# `head_unpublished` was such a code. Telling an unpublished head from any
-# other refusal needs a branch-existence check — GitHub answers both with 422,
-# and its message for the first is also returned for unrelated bad head formats,
-# so it cannot be read from the response. It is a real distinction and worth
-# having, because an unpublished head is the one failure AL/X could act on
-# herself by publishing first; it belongs in the capability that learns to
-# check, not in a contract that promises it now.
 PULL_REQUEST_FAILURES = (
     "arguments_unusable",
     "pull_request_unavailable",
@@ -220,11 +184,7 @@ class PullRequestOutcome:
 
 __all__ = [
     "PROTECTED_BRANCHES",
-    "PUBLICATION_FAILURES",
     "PULL_REQUEST_FAILURES",
-    "PublicationError",
-    "PublicationOutcome",
-    "PublicationRequest",
     "PullRequestError",
     "PullRequestOutcome",
     "PullRequestRequest",

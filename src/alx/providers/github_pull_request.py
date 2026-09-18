@@ -24,7 +24,7 @@ import re
 import httpx
 
 from alx.providers.github_http import unavailable
-from alx.contracts.publication import (
+from alx.contracts.github_pull_request import (
     PullRequestError,
     PullRequestOutcome,
     PullRequestRequest,
@@ -173,6 +173,108 @@ class GitHubPullRequests:
             },
         )
         return self._outcome(created, request.branch, created=True)
+
+    # ---- the rest of ordinary pull-request work -------------------------
+
+    def update(self, number: int, title: str = "", body: str = "") -> PullRequestOutcome:
+        """Change the title or body of a pull request that is already open.
+
+        Opening one is not the end of the work: a proposal is revised as the
+        work is, and rewriting the description used to mean asking Friedl to
+        do it. Nothing here touches the head, the base or the state — those are
+        decided by pushing and by merging, not by editing text.
+        """
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise PullRequestError("pull_request_refused")
+        payload: dict[str, str] = {}
+        if title.strip():
+            payload["title"] = title.strip()
+        if body.strip():
+            payload["body"] = body
+        if not payload:
+            raise PullRequestError("pull_request_refused")
+        data = self._request(
+            "PATCH", f"/repos/{self._repository}/pulls/{number}", payload
+        )
+        if not isinstance(data, dict):
+            raise PullRequestError("pull_request_unavailable")
+        head = data.get("head")
+        branch = head.get("ref") if isinstance(head, dict) else ""
+        return self._outcome(data, branch if isinstance(branch, str) else "", created=False)
+
+    def find(self, branch: str) -> PullRequestOutcome | None:
+        """The open pull request for this branch, or None.
+
+        The same head-and-base identity `open` uses, exposed because knowing
+        whether a proposal already exists is an ordinary question and used to
+        require opening one to find out.
+        """
+        existing = self._existing(branch)
+        if existing is None:
+            return None
+        return self._outcome(existing, branch, created=False)
+
+    def review_threads(self, number: int) -> tuple[dict, ...]:
+        """Unresolved review threads on this pull request.
+
+        Read through the GraphQL endpoint because REST does not expose thread
+        resolution state at all. What comes back is the reviewer's, so it is
+        returned as data for AL/X to read rather than judged here.
+        """
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+            "reviewThreads(first:100){nodes{id isResolved isOutdated path line "
+            "comments(first:1){nodes{author{login} body}}}}}}}"
+        )
+        owner, _, name = self._repository.partition("/")
+        data = self._request("POST", "/graphql", {
+            "query": query,
+            "variables": {"owner": owner, "name": name, "number": number},
+        })
+        if not isinstance(data, dict):
+            return ()
+        try:
+            nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        except (KeyError, TypeError):
+            return ()
+        return tuple(item for item in nodes if isinstance(item, dict))
+
+    def resolve_review_thread(self, thread_id: str) -> bool:
+        """Mark one review thread resolved.
+
+        Branch protection can require every thread resolved before a merge, so
+        without this a pull request AL/X has genuinely addressed cannot be
+        merged by her at all. Resolving is a statement that she has dealt with
+        the comment; what counts as dealing with it is her judgement.
+        """
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            raise PullRequestError("pull_request_refused")
+        data = self._request("POST", "/graphql", {
+            "query": (
+                "mutation($id:ID!){resolveReviewThread(input:{threadId:$id})"
+                "{thread{isResolved}}}"
+            ),
+            "variables": {"id": thread_id.strip()},
+        })
+        if not isinstance(data, dict):
+            return False
+        try:
+            return bool(data["data"]["resolveReviewThread"]["thread"]["isResolved"])
+        except (KeyError, TypeError):
+            return False
+
+    def comment(self, number: int, body: str) -> bool:
+        """Leave one comment on the pull request thread."""
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise PullRequestError("pull_request_refused")
+        if not body.strip():
+            raise PullRequestError("pull_request_refused")
+        data = self._request(
+            "POST", f"/repos/{self._repository}/issues/{number}/comments",
+            {"body": body},
+        )
+        return isinstance(data, dict)
 
 
 __all__ = ["API_ROOT", "BASE", "GitHubPullRequests"]
