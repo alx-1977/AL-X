@@ -1380,27 +1380,48 @@ class ICloudMailAdapter:
         )
 
     def contextual_events(self) -> tuple[BackgroundEvent, ...]:
-        """What she is holding and what is waiting, bodies attached.
+        """What she is holding and what is waiting, from local state alone.
 
-        The body is read here rather than stored, so it never enters durable
-        observation state and never outlives the turn it was read for. It is
-        attached to arrivals only: a disappearance has no message left to read,
-        and a waiting item is a queue she is being shown rather than given.
+        This runs while a turn is being assembled, before the Core is called,
+        so whatever it costs is paid by the person waiting for an answer. It
+        used to attach each message body by reading it, which meant one IMAP
+        connection — connect, TLS, LOGIN, SELECT, FETCH, LOGOUT — per event,
+        in series. With eight observations waiting, a typed greeting took
+        ninety-two seconds before reasoning was even invoked, and nothing in
+        the logs said why: no call failed, each was merely slow.
 
-        This is where the body used to be attached by the delivery generator a
-        voice session drained. Reading it here instead means the message
-        reaches her through the same context every turn already receives,
-        whether or not anyone is connected.
+        The latency was proportional to the mail queue, which is the wrong
+        thing for a greeting to depend on. Context assembly is now local: the
+        observation rows already carry sender, subject, message id and both
+        timestamps, because ingestion persisted them when it saw the message.
+        That is what she needs to decide whether an email matters.
 
-        Waiting items carry their body too. They did not need to before,
-        because a waiting item was one she would be handed later by a stream
-        that would read it then; now there is no later hand-off, and an
-        occasion is raised for the observation as it stands. Omitting the body
-        here would offer her a message she cannot read.
+        What is no longer here is the body. It is named as absent rather than
+        omitted, so she can tell "nothing was written" from "not fetched" and
+        ask for it: reading a message is a capability she calls when she
+        decides it is worth reading, which is where a network round trip
+        belongs — in an action she chose, not in the preparation of every turn.
         """
         return tuple(
-            self.read_transient(event)
+            self._without_body(event)
             if event.kind in ("mail.message_arrived", "mail.message_waiting")
             else event
             for event in self._observations.contextual_events()
+        )
+
+    @staticmethod
+    def _without_body(event: BackgroundEvent) -> BackgroundEvent:
+        """The observation as stored, saying plainly that the body is not here.
+
+        Honest rather than silent. An event with no body field could be read
+        as a message that had none; this says the text exists and has not been
+        fetched, which is a different fact and one she can act on.
+        """
+        return BackgroundEvent(
+            event.event_id,
+            event.kind,
+            event.occurred_at,
+            event.data,
+            {"content_unavailable": "not_fetched"},
+            event.provenance,
         )
