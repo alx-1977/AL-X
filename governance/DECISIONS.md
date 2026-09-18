@@ -1895,11 +1895,11 @@ does not replace a GitHub pull-request merge with a local `git merge`.
 
 **`merge_pull_request` is retained** as the structured GitHub-side pull-request
 merge operation, because it operates on pull-request state and enforces
-exact-head and repository-protection semantics that `repository_operation: merge`
+exact-head and repository-protection semantics that `repository_operation: local_merge`
 cannot express.
 
 The two are different operations that happen to share a word.
-`repository_operation: merge` runs `git merge` in the working repository: it
+`repository_operation: local_merge` runs `git merge` in the working repository: it
 joins one local history to another and knows nothing about pull requests.
 `merge_pull_request` calls GitHub's merge endpoint with the head AL/X
 authorised, and GitHub compares that revision against the live head and refuses
@@ -1913,7 +1913,7 @@ if they differ. Four guarantees follow from that and from nothing else:
   would not produce.
 
 A local merge followed by a push satisfies none of them. Routing merges through
-`repository_operation` would therefore remove the head-matching protection this
+`repository_operation: local_merge` would therefore remove the head-matching protection this
 system has relied on since D-026, which is the opposite of what this decision
 intends.
 

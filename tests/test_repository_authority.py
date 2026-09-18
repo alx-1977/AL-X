@@ -59,11 +59,27 @@ _GIT_LOCATION = (
 
 
 def _fixture_environment() -> dict[str, str]:
-    return {
+    """The environment the fixtures build their repositories under.
+
+    Location variables are dropped so the commands act on the temporary
+    repository rather than the caller's. Configuration is then emptied as well:
+    a `commit.gpgsign = true` or a `core.hooksPath` in the caller's global
+    config would make the setup commits demand a signature or run somebody
+    else's hook, and the fixture would fail for a reason that has nothing to do
+    with what is being tested. The provider already isolates its own commands;
+    the helper that builds the fixtures must too, or the suite passes or fails
+    on whose machine it runs.
+    """
+    environment = {
         name: value
         for name, value in os.environ.items()
-        if name not in _GIT_LOCATION
+        if name not in _GIT_LOCATION and not name.startswith("GIT_CONFIG")
     }
+    environment.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    })
+    return environment
 
 
 def git(root: Path, *arguments: str) -> str:
