@@ -83,43 +83,42 @@ def build_repository_authority_runtime(
                 )
         else:
             LOGGER.info("No GitHub token: pull-request operations unavailable")
+        # The origin is read before the authority is built, so the object is
+        # constructed once knowing whether the remote is confirmed rather than
+        # being adjusted afterwards.
+        probe = authority or RepositoryAuthority(system, timeout_seconds)
+        try:
+            identity = probe.origin_identity()
+        except Exception as error:  # noqa: BLE001 - reading git may fail many ways
+            LOGGER.warning(
+                "Repository origin could not be read (%s): local operations only",
+                type(error).__name__,
+            )
+            identity = ""
+        expected = system.repository.strip().lower()
+        remote_verified = bool(identity) and identity == expected
+        if not remote_verified:
+            # Local work is still hers — inspecting history, committing,
+            # branching, resetting a feature branch — and withholding all of it
+            # would leave her unable to look at a repository merely because its
+            # remote is unusual. What is withheld is everything that reaches the
+            # remote: work must not travel to a repository nobody has confirmed
+            # is this one.
+            LOGGER.warning(
+                "Repository checkout is %s but AL/X is configured as %s: "
+                "local operations only",
+                identity or "unidentifiable",
+                expected,
+            )
         selected = authority or RepositoryAuthority(
-            system, timeout_seconds, pull_requests=pull_requests
+            system, timeout_seconds,
+            pull_requests=pull_requests,
+            remote_verified=remote_verified,
         )
     except (TypeError, ValueError) as error:
         LOGGER.warning(
             "Repository authority is misconfigured (%s): no repository capability",
             type(error).__name__,
-        )
-        return None
-
-    # The checkout must be the repository it is configured as. Every operation
-    # here acts on whatever `origin` names, and the invariant that protects
-    # canonical `main` is expressed in terms of the configured identity — so a
-    # checkout pointing somewhere else would be protected by the wrong rule and
-    # push AL/X's work to the wrong place. An origin that cannot be identified
-    # is refused for the same reason: it is not proof of a match.
-    try:
-        identity = selected.origin_identity()
-    except Exception as error:  # noqa: BLE001 - reading git may fail for many reasons
-        LOGGER.warning(
-            "Repository origin could not be read (%s): no repository capability",
-            type(error).__name__,
-        )
-        return None
-    expected = system.repository.strip().lower()
-    if not identity:
-        LOGGER.warning(
-            "Repository checkout has no identifiable GitHub origin: "
-            "no repository capability"
-        )
-        return None
-    if identity != expected:
-        LOGGER.warning(
-            "Repository checkout is %s but AL/X is configured as %s: "
-            "no repository capability",
-            identity,
-            expected,
         )
         return None
 

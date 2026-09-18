@@ -151,6 +151,18 @@ READ_ONLY: frozenset[Operation] = frozenset({
     Operation.READ_REVIEW_THREADS,
 })
 
+# Operations that reach the remote. They may only run when the checkout has
+# been confirmed to be the configured repository: work must not travel to a
+# repository nobody has verified is this one, and a ref must not be deleted
+# there. Local work carries no such risk and is always available.
+REMOTE_OPERATIONS: frozenset[Operation] = frozenset({
+    Operation.FETCH,
+    Operation.PULL_FAST_FORWARD,
+    Operation.PUSH,
+    Operation.FORCE_PUSH,
+    Operation.DELETE_REMOTE_BRANCH,
+})
+
 # Operations GitHub performs rather than git. They need a configured API
 # boundary; without one they are refused rather than silently absent.
 GITHUB_OPERATIONS: frozenset[Operation] = frozenset({
@@ -390,6 +402,7 @@ def refuse_if_self_destructive(
 __all__ = [
     "CANONICAL_BRANCH",
     "GITHUB_OPERATIONS",
+    "REMOTE_OPERATIONS",
     "CanonicalSystem",
     "Operation",
     "READ_ONLY",

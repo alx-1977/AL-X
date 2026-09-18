@@ -34,6 +34,7 @@ from alx.contracts.github_pull_request import (
 )
 from alx.contracts.repository_authority import (
     GITHUB_OPERATIONS,
+    REMOTE_OPERATIONS,
     CanonicalSystem,
     Operation,
     READ_ONLY,
@@ -136,6 +137,7 @@ class RepositoryAuthority:
         timeout_seconds: int = 120,
         runner: Runner = subprocess.run,
         pull_requests: Any = None,
+        remote_verified: bool = True,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("repository timeout must be positive")
@@ -147,6 +149,10 @@ class RepositoryAuthority:
         # configured, in which case those operations say so rather than
         # appearing in the catalogue and failing as unusable arguments.
         self._pull_requests = pull_requests
+        # Whether this checkout was confirmed to be the configured repository.
+        # False leaves local work available and refuses everything that reaches
+        # the remote: an unverified origin is not somewhere AL/X's work may go.
+        self._remote_verified = remote_verified
 
     # ---- process ---------------------------------------------------------
 
@@ -210,13 +216,17 @@ class RepositoryAuthority:
             or ""
         ).strip()
         # `reset` and `rebase` do not name the branch they rewrite: they take a
-        # revision to move to and act on whatever is checked out. Reading only
-        # the named arguments left the ref empty for both, so the invariant
-        # found nothing to protect and `reset --hard <sha>` on the canonical
-        # checkout rewrote canonical `main` without refusal — the one rule this
-        # authority has, silently unenforced. What they act on is HEAD, so HEAD
-        # is what the invariant must be asked about.
-        if not ref and operation in (Operation.RESET, Operation.REBASE):
+        # revision to move to and act on whatever is checked out. So for these
+        # two the checked-out branch is the *only* thing the invariant may be
+        # asked about, and any selector the caller supplied is discarded.
+        #
+        # Falling back to HEAD only when no selector was given was not enough,
+        # and was itself a bypass: `arguments` accepts arbitrary keys, `_argv`
+        # ignores `branch` for both operations, so a request carrying a valid
+        # `revision` and an unrelated `branch` had the invariant examine the
+        # decoy while the command rewrote canonical `main`. What is protected
+        # must be what is acted on, not what the request says it is.
+        if operation in (Operation.RESET, Operation.REBASE):
             ref = self._checked_out_branch()
         return refuse_if_self_destructive(
             self._system, operation, ref=ref, path=path
@@ -580,6 +590,22 @@ class RepositoryAuthority:
                 succeeded=False,
                 failure_code="self_preservation",
                 refusal_reason=refusal,
+            )
+
+        if operation in REMOTE_OPERATIONS and not self._remote_verified:
+            LOGGER.warning(
+                "Repository operation refused: %s reaches an unverified remote",
+                operation.value,
+            )
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=False,
+                failure_code="operation_refused",
+                refusal_reason=(
+                    "the checkout's origin is not the configured repository, "
+                    "so nothing may be sent to it"
+                ),
             )
 
         if operation in GITHUB_OPERATIONS:

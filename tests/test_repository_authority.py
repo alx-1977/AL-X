@@ -214,6 +214,39 @@ class SelfPreservationTests(RealRepositoryHarness):
         self.assertTrue(outcome.succeeded)
         self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
 
+
+    def test_a_decoy_selector_cannot_redirect_the_invariant(self) -> None:
+        """What is protected must be what is acted on.
+
+        `arguments` accepts arbitrary keys and `_argv` ignores `branch` for
+        `reset` and `rebase`, so a request carrying a valid revision and an
+        unrelated branch had the invariant examine the decoy while the command
+        rewrote canonical `main`. Falling back to HEAD only when no selector
+        was given was not enough: for these two operations the selector is
+        meaningless and is discarded entirely.
+        """
+        self.commit("second.txt")
+        git(self.local, "branch", "fix/decoy")
+        before = git(self.local, "rev-parse", "HEAD")
+        first = git(self.local, "rev-parse", "HEAD~1")
+
+        for selector in ("branch", "ref", "target"):
+            with self.subTest(selector=selector):
+                outcome = self.perform(
+                    Operation.RESET,
+                    revision=first, mode="hard", **{selector: "fix/decoy"},
+                )
+                self.assertEqual(outcome.failure_code, "self_preservation")
+                self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
+
+    def test_a_decoy_selector_cannot_redirect_a_rebase(self) -> None:
+        self.branch("fix/thing")
+        git(self.local, "checkout", "-q", "main")
+        outcome = self.perform(
+            Operation.REBASE, onto="fix/thing", branch="fix/thing"
+        )
+        self.assertEqual(outcome.failure_code, "self_preservation")
+
     def test_the_rule_cannot_be_avoided_by_spelling(self) -> None:
         """`main`, `refs/heads/main` and `origin/main` are one branch."""
         for spelling in ("main", "refs/heads/main", "origin/main"):
@@ -770,6 +803,68 @@ class PullRequestOperationTests(RealRepositoryHarness):
                         Operation.READ_REVIEW_THREADS,
                         {"pull_request_number": value},
                     ))
+
+
+class UnverifiedRemoteTests(RealRepositoryHarness):
+    """A checkout whose origin is not the configured repository.
+
+    Withholding the whole authority would leave AL/X unable to read a
+    repository's history merely because its remote is unusual, and reading is
+    never the risk. What is withheld is everything that reaches the remote:
+    work must not travel to a repository nobody has confirmed is this one.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.authority = RepositoryAuthority(
+            self.system, remote_verified=False
+        )
+
+    def test_local_work_is_still_available(self) -> None:
+        sha = self.commit("a.txt")
+        self.assertEqual(
+            self.perform(Operation.RESOLVE, revision=sha[:8]).values["sha"], sha
+        )
+        self.assertTrue(self.perform(Operation.STATUS).succeeded)
+        self.assertTrue(
+            self.perform(
+                Operation.CREATE_BRANCH, branch="fix/x", start_point="main"
+            ).succeeded
+        )
+
+    def test_nothing_may_reach_the_remote(self) -> None:
+        self.branch("fix/thing")
+        for operation, arguments in (
+            (Operation.PUSH, {"branch": "fix/thing"}),
+            (Operation.FORCE_PUSH, {"branch": "fix/thing"}),
+            (Operation.FETCH, {}),
+            (Operation.PULL_FAST_FORWARD, {"branch": "main"}),
+            (Operation.DELETE_REMOTE_BRANCH, {"branch": "fix/thing"}),
+        ):
+            with self.subTest(operation=operation.value):
+                outcome = self.authority.perform(
+                    RepositoryRequest(operation, arguments)
+                )
+                self.assertFalse(outcome.succeeded)
+                self.assertEqual(outcome.failure_code, "operation_refused")
+                self.assertIn("origin", outcome.refusal_reason)
+
+    def test_the_remote_is_untouched(self) -> None:
+        self.branch("fix/thing")
+        self.authority.perform(
+            RepositoryRequest(Operation.PUSH, {"branch": "fix/thing"})
+        )
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.remote, "rev-parse", "refs/heads/fix/thing")
+
+    def test_a_verified_remote_still_publishes(self) -> None:
+        """The gate must not reach a checkout that was confirmed."""
+        verified = RepositoryAuthority(self.system, remote_verified=True)
+        self.branch("fix/thing")
+        outcome = verified.perform(
+            RepositoryRequest(Operation.PUSH, {"branch": "fix/thing"})
+        )
+        self.assertTrue(outcome.succeeded)
 
 
 if __name__ == "__main__":
