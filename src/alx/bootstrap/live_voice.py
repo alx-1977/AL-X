@@ -21,13 +21,14 @@ from alx.bootstrap.mail import (
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.coding import build_coding_runtime
+from alx.bootstrap.publication import build_publication_runtime
 from alx.bootstrap.repository import build_repository_runtime, build_canonical_repository_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
 from alx.contracts.task import ExternalTask, TaskState
-from alx.providers.qodo_status import subject_reference
+from alx.providers.review_status import subject_reference
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
@@ -265,12 +266,26 @@ def migrate_legacy_conversations(
 
 
 
+def _reviewer_name(review_runtime: Any) -> str:
+    """The reviewer a composed runtime actually uses.
+
+    Read from the provider rather than from configuration. Selection accepts
+    a name case-insensitively and falls back to the default on an unknown one,
+    so the configured string and the composed reviewer can differ — and the
+    task store, the observer registry and the poller all have to agree on one
+    name or the review is recorded under a service nothing watches.
+    """
+    provider = getattr(review_runtime, "provider", None)
+    return str(getattr(provider, "reviewer", "") or "")
+
+
 def _watch_review(
     task_runtime: Any,
     conversation_id: str,
     number: int,
     head_sha: str,
     requested_at: datetime,
+    reviewer: str,
 ) -> None:
     """Record a requested review so the watcher can report on it.
 
@@ -287,7 +302,9 @@ def _watch_review(
                 # earlier row's handoff state, so identity is now collision-safe.
                 task_id=f"review:{number}:{uuid4().hex}",
                 kind="external_review",
-                service="qodo",
+                # The configured reviewer, so the watcher and the
+                # record name the same one.
+                service=reviewer,
                 subject_reference=subject_reference(number, head_sha),
                 state=TaskState.REQUESTED,
                 requested_at=requested_at,
@@ -591,19 +608,34 @@ async def run(repository_root: Path) -> None:
     # The watcher is composed later, beside the transport, so the review path
     # reaches it through a holder rather than being reordered around it.
     task_holder: list[Any] = [None]
+    # The review runtime names its own reviewer, and the callback below needs
+    # that name before the runtime exists. Held like the task runtime, for the
+    # same reason: the callback is built first and reads it when it runs.
+    review_runtime_holder: list[Any] = [None]
     review_runtime = build_review_runtime(
         review_configuration.is_usable,
         review_configuration.repository,
         review_configuration.token,
         lambda: current_call_id[0],
+        reviewer=review_configuration.reviewer,
         started=lambda number, sha, requested_at: _watch_review(
             task_holder[0],
             current_conversation_id[0],
             number,
             sha,
             requested_at,
+            # The resolved reviewer, read from the provider that was actually
+            # composed — never the configured string. Selection normalises
+            # case and falls back on an unknown name, so `CodeRabbit` and a
+            # typo both compose the coderabbit provider while the raw value
+            # says otherwise. The watcher registers its observer under the
+            # provider's own name, and the poller finds an observer by the
+            # task's service: recording the raw value meant a lookup that
+            # matched nothing, and a review nobody ever polled.
+            _reviewer_name(review_runtime_holder[0]),
         ),
     )
+    review_runtime_holder[0] = review_runtime
     if review_runtime is not None:
         for definition in review_runtime.definitions:
             registry.register(definition)
@@ -626,6 +658,24 @@ async def run(repository_root: Path) -> None:
         policies.update(merge_runtime.policies)
         executors.update(merge_runtime.executors)
         permissions.update(merge_runtime.permissions)
+
+    # Publishing a repair so it can be reviewed. AL/X's authority, never the
+    # Coding Agent's: a job commits in its worktree and cannot push.
+    publication_runtime = build_publication_runtime(
+        merge_configuration.is_usable,
+        merge_configuration.repository,
+        merge_configuration.token,
+        repository_runtime_configuration.root
+        if repository_runtime_configuration.is_usable
+        else None,
+        lambda: current_call_id[0],
+    )
+    if publication_runtime is not None:
+        for definition in publication_runtime.definitions:
+            registry.register(definition)
+        policies.update(publication_runtime.policies)
+        executors.update(publication_runtime.executors)
+        permissions.update(publication_runtime.permissions)
 
     repository_runtime = build_canonical_repository_runtime(
         repository_runtime_configuration.is_usable,
@@ -906,6 +956,11 @@ async def run(repository_root: Path) -> None:
         # opportunity here instead left a ledger row nothing consumed, so the
         # Core was never woken.
         lambda task: None,
+        # The reviewer being watched, reused rather than rebuilt. Without it
+        # the watcher is never composed, and a review AL/X successfully
+        # requests is recorded nowhere, polled by nothing, and never handed
+        # back to her: the request succeeds and the result never arrives.
+        review_provider=review_runtime.provider if review_runtime else None,
     )
 
     task_holder[0] = task_runtime

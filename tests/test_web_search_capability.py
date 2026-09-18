@@ -677,8 +677,6 @@ class LiveLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger().committed_requests(), 4)
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
 
 
 BRAVE_ROUTES: dict = {}
@@ -906,3 +904,7 @@ class BraveProviderTests(unittest.TestCase):
         self.assertEqual(len(found.results), 1)
         self.assertNotIn("summarizer", str(found))
         self.assertNotIn("conclusion", str(found))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

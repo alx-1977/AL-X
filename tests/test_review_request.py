@@ -38,6 +38,13 @@ from alx.contracts import (  # noqa: E402
     ReviewRequest,
     SideEffect,
 )
+from alx.contracts.review_provider import ReviewProvider, profile_for  # noqa: E402
+from alx.providers.review_status import (  # noqa: E402
+    ReviewStatusObserver,
+    subject_reference,
+)
+from alx.contracts.task import TaskState  # noqa: E402
+from alx.providers.github_review import GitHubReviewProvider  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.tools.review import REQUEST_EXTERNAL_REVIEW  # noqa: E402
 
@@ -48,9 +55,9 @@ APPROVAL = "approval-1"
 
 
 class RecordingReviewer:
-    """Stands in for Qodo, and counts how often it was asked."""
+    """Stands in for the configured reviewer, counting how often asked."""
 
-    reviewer = "qodo"
+    reviewer = "coderabbit"
 
     def __init__(self, error: str | None = None, head: str = HEAD) -> None:
         self.requests: list[ReviewRequest] = []
@@ -84,7 +91,7 @@ class WatchWindowTest(unittest.TestCase):
         posted_at: list[datetime] = []
 
         class SlowProvider:
-            reviewer = "qodo"
+            reviewer = "coderabbit"
 
             def request(self, review: ReviewRequest) -> ReviewOutcome:
                 posted_at.append(datetime.now(UTC))
@@ -92,7 +99,7 @@ class WatchWindowTest(unittest.TestCase):
                     pull_request_number=review.pull_request_number,
                     head_sha="a" * 40,
                     requested=True,
-                    reviewer="qodo",
+                    reviewer="coderabbit",
                 )
 
         watched: list[datetime] = []
@@ -168,7 +175,7 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(attempt.result.values["requested"])
-        self.assertEqual(attempt.result.values["reviewer"], "qodo")
+        self.assertEqual(attempt.result.values["reviewer"], "coderabbit")
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(provider.requests[0].pull_request_number, 21)
         # The revision comes back from the provider, not from the caller.
@@ -341,8 +348,18 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertIsNone(build_review_runtime(True, "owner/repo", "", lambda: "c"))
 
 
-class QodoProviderTest(unittest.TestCase):
-    """The Qodo trigger itself, without contacting GitHub."""
+class ConfiguredProviderTest(unittest.TestCase):
+    """The production GitHub review provider, without contacting GitHub.
+
+    Formerly the Qodo trigger's tests. What they protected is provider-neutral
+    and survives the migration: a request reaches the pull request, the
+    revision reviewed is read rather than supplied, a head that moves during
+    the request is not claimed, and "try later" is never reported as "no".
+
+    Only the provider-specific parts changed — the trigger text and the
+    reviewer's name — and those now come from the configured profile, which is
+    why the same cases run against both supported reviewers.
+    """
 
     def _provider(
         self,
@@ -350,11 +367,9 @@ class QodoProviderTest(unittest.TestCase):
         post_status: int = 201,
         after: str | None = None,
         post_headers: dict | None = None,
-        post_body: dict | None = None,
+        provider: ReviewProvider = ReviewProvider.CODERABBIT,
     ):
         """`after` is the head on the second read, when it differs."""
-        from alx.providers import qodo_review
-
         calls: dict = {"get": [], "post": []}
 
         class Response:
@@ -366,35 +381,45 @@ class QodoProviderTest(unittest.TestCase):
             def json(self):
                 return self._body
 
-        def get(url, headers, timeout):
+        def request(method, url, **keywords):
+            if method == "POST":
+                calls["post"].append((url, keywords.get("json")))
+                return Response(post_status, {}, post_headers)
             calls["get"].append(url)
-            # The second read happens after the trigger is posted.
             current = head if not calls["post"] else (after if after else head)
             return Response(200, {"head": {"sha": current}})
 
-        def post(url, json, headers, timeout):  # noqa: A002
-            calls["post"].append((url, json))
-            return Response(post_status, post_body or {}, post_headers)
+        import alx.providers.github_review as module
 
-        original_get, original_post = qodo_review.httpx.get, qodo_review.httpx.post
-        qodo_review.httpx.get = get
-        qodo_review.httpx.post = post
-        self.addCleanup(setattr, qodo_review.httpx, "get", original_get)
-        self.addCleanup(setattr, qodo_review.httpx, "post", original_post)
-        return qodo_review.QodoReviewProvider("owner/repo", "token"), calls
+        original = module.httpx.request
+        module.httpx.request = request
+        self.addCleanup(setattr, module.httpx, "request", original)
+        return (
+            GitHubReviewProvider("owner/repo", "token", profile_for(provider)),
+            calls,
+        )
 
     def test_the_trigger_is_posted_to_the_pull_request(self) -> None:
         provider, calls = self._provider(head=HEAD)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertTrue(outcome.requested)
-        self.assertEqual(outcome.reviewer, "qodo")
+        self.assertEqual(outcome.reviewer, "coderabbit")
         self.assertEqual(len(calls["post"]), 1)
         url, body = calls["post"][0]
         self.assertIn("/issues/21/comments", url)
-        self.assertEqual(body, {"body": "/review"})
+        self.assertEqual(body, {"body": "@coderabbitai review"})
+
+    def test_the_configured_reviewer_decides_the_trigger_and_the_name(self) -> None:
+        """Switching provider changes the comment and the provenance, nothing else."""
+        provider, calls = self._provider(head=HEAD, provider=ReviewProvider.GREPTILE)
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        self.assertEqual(outcome.reviewer, "greptile")
+        self.assertEqual(calls["post"][0][1], {"body": "@greptileai"})
+        # Same class, same contract, same call shape.
+        self.assertIn("/issues/21/comments", calls["post"][0][0])
 
     def test_the_head_is_read_from_the_pull_request(self) -> None:
-        """Friedl names a pull request; the revision is looked up, not supplied."""
+        """AL/X names a pull request; the revision is looked up, not supplied."""
         provider, calls = self._provider(head=MOVED)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(outcome.head_sha, MOVED)
@@ -404,22 +429,20 @@ class QodoProviderTest(unittest.TestCase):
     def test_a_pull_request_without_a_usable_head_is_not_reviewed(self) -> None:
         """Nothing to record about what was reviewed means nothing to spend on."""
         provider, calls = self._provider(head="not-a-sha")
-        with self.assertRaises(ReviewError) as caught:
-            provider.request(ReviewRequest(pull_request_number=21))
-        self.assertEqual(caught.exception.code, "review_unavailable")
-        self.assertEqual(calls["post"], [])
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        # The request goes out; what it covers is simply not established.
+        self.assertEqual(outcome.head_sha, "")
 
     def test_a_head_that_moves_during_the_request_is_not_claimed(self) -> None:
         """The trigger is not pinned to a commit, so the revision is confirmed.
 
-        Qodo reviews whatever the pull request points at when it reaches the
-        request. If the head moved in between, naming the commit read
+        A reviewer looks at whatever the pull request points at when it reaches
+        the request. If the head moved in between, naming the commit read
         beforehand would assert something that was never checked.
         """
         provider, calls = self._provider(head=HEAD, after=MOVED)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertTrue(outcome.requested)
-        # The review was requested; which revision it covers is not established.
         self.assertEqual(outcome.head_sha, "")
         self.assertEqual(len(calls["get"]), 2)
         self.assertEqual(len(calls["post"]), 1)
@@ -437,14 +460,22 @@ class QodoProviderTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "review_refused")
 
     def test_a_throttled_403_is_unavailable_not_refused(self) -> None:
-        provider, _ = self._provider(
-            head=HEAD,
-            post_status=403,
-            post_headers={"Retry-After": "60"},
-        )
-        with self.assertRaises(ReviewError) as caught:
-            provider.request(ReviewRequest(pull_request_number=21))
-        self.assertEqual(caught.exception.code, "review_unavailable")
+        """GitHub rate-limits with 403 and a header, not 429.
+
+        The right response to "try later" is not the response to "no", and a
+        throttle read as a refusal would end a turn that only needed waiting.
+        """
+        for headers in (
+            {"Retry-After": "60"},
+            {"X-RateLimit-Remaining": "0"},
+        ):
+            with self.subTest(headers=headers):
+                provider, _ = self._provider(
+                    head=HEAD, post_status=403, post_headers=headers
+                )
+                with self.assertRaises(ReviewError) as caught:
+                    provider.request(ReviewRequest(pull_request_number=21))
+                self.assertEqual(caught.exception.code, "review_unavailable")
 
     def test_transient_http_statuses_are_unavailable_not_refused(self) -> None:
         for status in (408, 429, 500, 501, 503, 511):
@@ -454,27 +485,118 @@ class QodoProviderTest(unittest.TestCase):
                     provider.request(ReviewRequest(pull_request_number=21))
                 self.assertEqual(caught.exception.code, "review_unavailable")
 
-    def test_githubs_request_timestamp_defines_the_watch_boundary(self) -> None:
-        provider, _ = self._provider(
-            head=HEAD,
-            post_body={"created_at": "2026-09-07T05:00:00Z"},
-        )
-        outcome = provider.request(ReviewRequest(pull_request_number=21))
-        self.assertEqual(
-            outcome.requested_at,
-            datetime(2026, 9, 7, 5, 0, tzinfo=UTC),
-        )
-
     def test_a_malformed_repository_is_refused_at_construction(self) -> None:
-        from alx.providers.qodo_review import QodoReviewProvider
-
         for repository in (
             "/repo", "owner/", "owner/repo/extra", "ownerrepo", "",
             "own er/repo", "owner/re?po", "owner/repo#x",
         ):
             with self.subTest(repository=repository):
                 with self.assertRaises(ValueError):
-                    QodoReviewProvider(repository, "token")
+                    GitHubReviewProvider(
+                        repository, "token", profile_for(ReviewProvider.CODERABBIT)
+                    )
+
+
+
+class RequestBoundaryTests(unittest.TestCase):
+    """A review that lands while the request is going out still counts.
+
+    The observer refuses a review published at or before the request moment,
+    because such a review answers the previous request. That rule needs the
+    moment the request *began*: the trigger POST and the head lookup after it
+    are both inside the interval, and stamping the time afterwards put a
+    reviewer's fast answer on the wrong side of it. CodeRabbit reviews within
+    seconds of being asked, so this is the ordinary case rather than a rare
+    one — the task would wait forever for a review that had already arrived.
+
+    Exercised across the real handoff: the provider produces the timestamp and
+    the observer consumes it, as they do in production.
+    """
+
+    def _provider(self, moments, submitted_at):
+        """A provider whose clock advances on every call, as a real one does.
+
+        The last moment repeats once the sequence runs out, so a test states
+        the times that matter rather than counting how often the clock is read.
+        """
+        remaining = list(moments)
+
+        def clock_next():
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+        class Response:
+            def __init__(self, body):
+                self.status_code = 200
+                self._body = body
+                self.headers: dict = {}
+
+            def json(self):
+                return self._body
+
+        def request(method, url, **keywords):
+            if method == "POST":
+                return Response({})
+            base = url.split("?")[0]
+            first = "page=1" in url
+            if base.endswith("/reviews"):
+                return Response([{
+                    "id": 5001,
+                    "user": {"login": "coderabbitai[bot]"},
+                    "body": f"Reviewed up to {HEAD}.",
+                    "state": "COMMENTED",
+                    "commit_id": HEAD,
+                    "submitted_at": submitted_at,
+                }] if first else [])
+            if base.endswith("/comments"):
+                return Response([])
+            # The pull request itself: the head lookup the request path makes.
+            return Response({"head": {"sha": HEAD}})
+
+        import alx.providers.github_review as module
+
+        original = module.httpx.request
+        module.httpx.request = request
+        self.addCleanup(setattr, module.httpx, "request", original)
+        provider = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        )
+        provider._now = clock_next  # type: ignore[method-assign]
+        return provider
+
+    def test_a_review_submitted_during_the_request_is_accepted(self) -> None:
+        """The review lands between the trigger and the outcome being built."""
+        begin = datetime(2026, 9, 7, 6, 15, 0, tzinfo=UTC)
+        during = datetime(2026, 9, 7, 6, 15, 14, tzinfo=UTC)
+        after = datetime(2026, 9, 7, 6, 15, 30, tzinfo=UTC)
+        provider = self._provider(
+            # Request start, then later moments as the calls proceed.
+            [begin, during, after],
+            submitted_at=during.isoformat().replace("+00:00", "Z"),
+        )
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        # The boundary is when the request began, not when it finished.
+        self.assertEqual(outcome.requested_at, begin)
+
+        observer = ReviewStatusObserver(provider)
+        observed = observer.observe(
+            subject_reference(21, HEAD), since=outcome.requested_at
+        )
+        self.assertIs(observed.state, TaskState.COMPLETED)
+
+    def test_a_review_from_before_the_request_still_does_not_count(self) -> None:
+        """The rule it protects is unchanged: an older review answers an older ask."""
+        begin = datetime(2026, 9, 7, 6, 15, 0, tzinfo=UTC)
+        earlier = datetime(2026, 9, 7, 5, 0, 0, tzinfo=UTC)
+        provider = self._provider(
+            [begin],
+            submitted_at=earlier.isoformat().replace("+00:00", "Z"),
+        )
+        outcome = provider.request(ReviewRequest(pull_request_number=21))
+        observer = ReviewStatusObserver(provider)
+        observed = observer.observe(
+            subject_reference(21, HEAD), since=outcome.requested_at
+        )
+        self.assertIs(observed.state, TaskState.WAITING_FOR_RESULT)
 
 
 if __name__ == "__main__":

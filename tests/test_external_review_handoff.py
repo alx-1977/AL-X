@@ -1,4 +1,13 @@
-"""A real Qodo completion reaches a Core turn and is read there."""
+"""A real review completion reaches a Core turn and is read there.
+
+The whole handoff, end to end and through the production path: a reviewer
+publishes, the watcher observes it as complete, that becomes an occasion, the
+Core wakes on it and calls the real read capability, and the reviewer's own
+words arrive as evidence with the revision they were written about.
+
+Provider-neutral throughout. The reviewer is configuration, so the only thing
+this test names about it is the account that published.
+"""
 
 from __future__ import annotations
 
@@ -28,15 +37,19 @@ from alx.conversation.store import SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.interfaces.task_poller import TaskPoller
-from alx.providers import qodo_artifact
-from alx.providers.qodo_review_content import QodoReviewContentProvider
-from alx.providers.qodo_status import QodoStatusObserver, subject_reference
+from alx.contracts.review_provider import ReviewProvider, profile_for
+from alx.providers import github_review
+from alx.providers.github_review import GitHubReviewProvider
+from alx.providers.review_status import ReviewStatusObserver, subject_reference
 from alx.tools.review_content import (
     DEFINITION,
     READ_EXTERNAL_REVIEW,
     build_review_content_executors,
 )
-from tests.qodo_transcript import GitHubTranscript, HEAD, PUBLISHED_AT, SUMMARY
+from tests.review_transcript import HEAD, PUBLISHED_AT, REVIEWER_LOGIN
+
+REVIEWER = "coderabbit"
+SUMMARY = f"Formal review body. Reviewed up to {HEAD}."
 
 
 class Ledger:
@@ -83,23 +96,63 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
-        transcript = GitHubTranscript(
-            reviews=[
-                {
-                    "id": 99,
-                    "user": {"id": qodo_artifact.REVIEWER_ID},
-                    "commit_id": HEAD,
-                    "body": "Formal review body",
-                    "submitted_at": "2026-09-07T06:14:59Z",
-                }
-            ],
-            review_comments={
-                99: [{"body": "Inline finding", "path": "x.py", "line": 4}]
-            },
+        summary = {
+            "id": 99,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": SUMMARY,
+            # After the request, as a real review is.
+            "created_at": "2026-09-07T06:15:30Z",
+        }
+        # The review round the finding was published in. Inline comments are
+        # bound to the head through this object, so a handoff that carries a
+        # finding needs the real artefact rather than a bare comment.
+        submitted = [{
+            "id": 55,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-09-07T06:15:30Z",
+        }]
+        inline = [{
+            "id": 100,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "Inline finding",
+            "path": "x.py",
+            "line": 4,
+            "commit_id": HEAD,
+            "original_commit_id": HEAD,
+            "pull_request_review_id": 55,
+        }]
+
+        class Response:
+            def __init__(self, payload) -> None:
+                self.status_code = 200
+                self.headers: dict = {}
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def request(method, url, **keywords):
+            if method != "GET":
+                raise AssertionError("the handoff reads; it must not write")
+            base = url.split("?")[0]
+            first = "page=1" in url
+            if base.endswith("/issues/21/comments"):
+                return Response([summary] if first else [])
+            if base.endswith("/pulls/21/comments"):
+                return Response(inline if first else [])
+            if base.endswith("/pulls/21/reviews"):
+                return Response(submitted if first else [])
+            return Response({"head": {"sha": HEAD}})
+
+        original = github_review.httpx.request
+        github_review.httpx.request = request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        provider = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
         )
-        original = qodo_artifact.httpx.get
-        qodo_artifact.httpx.get = transcript.get
-        self.addCleanup(setattr, qodo_artifact.httpx, "get", original)
 
         task_store = SQLiteTaskStore(root / "tasks.sqlite3")
         requested_at = datetime.fromisoformat(PUBLISHED_AT) - timedelta(seconds=1)
@@ -107,7 +160,7 @@ class ExternalReviewHandoffTests(unittest.TestCase):
             ExternalTask(
                 task_id="review-task-1",
                 kind="external_review",
-                service="qodo",
+                service=REVIEWER,
                 subject_reference=subject_reference(21, HEAD),
                 state=TaskState.REQUESTED,
                 requested_at=requested_at,
@@ -116,7 +169,7 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         )
         TaskPoller(
             task_store,
-            {"qodo": QodoStatusObserver("owner/repo", "token")},
+            {REVIEWER: ReviewStatusObserver(provider)},
             1.0,
             lambda conversation, values: None,
             lambda task: None,
@@ -127,8 +180,7 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         opportunity = source.due_opportunities()[0]
         self.assertIs(opportunity.origin, CognitionOrigin.WORK_COMPLETED)
 
-        reader = QodoReviewContentProvider("owner/repo", "token")
-        executor = build_review_content_executors(reader.read, lambda: "read-1")
+        executor = build_review_content_executors(provider.read, lambda: "read-1")
         attempts: list[CapabilityAttempt] = []
 
         def dispatch(call, state):

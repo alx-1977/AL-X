@@ -603,8 +603,6 @@ class NoReplyWorkflowTests(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class AskingIsFreeTests(unittest.TestCase):
@@ -1126,3 +1124,7 @@ class AttentionAndTidyingGuidanceTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef) and node.name == "send_reply":
                 rendered = ast.unparse(node)
                 self.assertNotIn("trash", rendered.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

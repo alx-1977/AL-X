@@ -357,8 +357,6 @@ class ScanReportsDisappearanceTest(unittest.TestCase):
         self.assertEqual(self.state.pending_vanished(), ())
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class VanishedIsNeverAnArrivalTest(unittest.TestCase):
@@ -521,3 +519,7 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
             next_arrival(self.state),
             "a pending row already known gone was promoted and offered",
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

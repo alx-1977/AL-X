@@ -503,8 +503,6 @@ class ScenariosNotApplicableTests(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
 
 
 class SearchThenReadTests(unittest.TestCase):
@@ -697,3 +695,7 @@ class SearchThenReadTests(unittest.TestCase):
         self.assertEqual(capabilities, [ASK_WEB_SEARCH, ASK_WEB_PAGE])
         ids = [item.call.call_id for item in outcome.snapshot.state.attempts]
         self.assertEqual(ids, ["call-s1", "call-p1"])
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

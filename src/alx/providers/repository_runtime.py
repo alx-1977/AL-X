@@ -169,7 +169,7 @@ class CanonicalRepositoryRuntime:
         origin = self._text(_ORIGIN_URL, "origin", "origin_missing")
         if _normalised_origin(origin) != self._origin:
             raise RepositoryRuntimeError("origin_mismatch", "origin")
-        if _origin_identity(origin) != self._identity:
+        if origin_identity(origin) != self._identity:
             raise RepositoryRuntimeError("repository_identity_mismatch", "identity")
         branch = self._text(_BRANCH, "head", "head_detached")
         if branch != "main":
@@ -228,7 +228,13 @@ def _normalised_origin(value: str) -> str:
     return value.strip().rstrip("/").removesuffix(".git").lower()
 
 
-def _origin_identity(value: str) -> str:
+def origin_identity(value: str) -> str:
+    """The `owner/name` a GitHub remote URL names, or "" if it names none.
+
+    Shared with publication, which has to prove its checkout pushes to the
+    same repository the pull request is opened against. One spelling of what
+    counts as the same repository, rather than two that must agree.
+    """
     origin = _normalised_origin(value)
     if origin.startswith("git@github.com:"):
         return origin.split(":", 1)[1]

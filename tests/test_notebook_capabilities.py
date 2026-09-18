@@ -214,8 +214,6 @@ class NotebookCapabilityTest(NotebookFixture):
                     self.assertNotIn(forbidden, name)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ProvenanceThroughCapabilitiesTest(NotebookFixture):
@@ -406,3 +404,7 @@ class RetrievalBoundsTest(NotebookFixture):
         self.assertEqual(
             len(self.store.read_entry("e-1").revisions), MAX_ENTRY_REVISIONS
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -88,7 +88,7 @@ def one_instruction() -> ConversationSnapshot:
         (
             _turn("turn-1", ConversationOrigin.ALX_RESPONSE, "Ready.", None),
             _turn("turn-2", ConversationOrigin.TYPED,
-                  "Please ask Qodo to review PR 21.", "friedl"),
+                  "Please ask for a review of PR 21.", "friedl"),
         ),
         2,
         RETENTION,
@@ -102,7 +102,7 @@ def a_second_instruction() -> ConversationSnapshot:
         (
             _turn("turn-1", ConversationOrigin.ALX_RESPONSE, "Ready.", None),
             _turn("turn-2", ConversationOrigin.TYPED,
-                  "Please ask Qodo to review PR 21.", "friedl"),
+                  "Please ask for a review of PR 21.", "friedl"),
             _turn("turn-3", ConversationOrigin.ALX_RESPONSE, "Requested.", None),
             _turn("turn-4", ConversationOrigin.TYPED,
                   "Please review it again now.", "friedl"),
@@ -630,7 +630,7 @@ class PolicyDerivationTests(unittest.TestCase):
         from alx.bootstrap.review import build_review_runtime
 
         class Provider:
-            reviewer = "qodo"
+            reviewer = "coderabbit"
 
             def request(self, review):  # pragma: no cover - never called
                 raise AssertionError("no provider contact in this test")

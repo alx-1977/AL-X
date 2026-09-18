@@ -36,10 +36,11 @@ from alx.contracts.review_content import (  # noqa: E402
     ReviewContentRequest,
     ReviewReadError,
 )
-from alx.providers import qodo_review_content  # noqa: E402
-from alx.providers.qodo_review_content import (  # noqa: E402
+from alx.contracts.review_provider import ReviewProvider, profile_for  # noqa: E402
+from alx.providers import github_review  # noqa: E402
+from alx.providers.github_review import (  # noqa: E402
     NO_REVIEW_FOR_REVISION,
-    QodoReviewContentProvider,
+    GitHubReviewProvider,
 )
 from alx.tools.review_content import (  # noqa: E402
     DEFINITION,
@@ -50,43 +51,84 @@ from alx.tools.review_content import (  # noqa: E402
 
 HEAD = "a" * 40
 STALE = "b" * 40
-QODO = 151058649
-SOMEONE_ELSE = 999
+REVIEWER_LOGIN = "coderabbitai[bot]"
+SOMEONE_ELSE = "alx-1977"
 
 
-def _review(sha: str, body: str, review_id: int = 7, user: int = QODO) -> dict:
+def _review(
+    sha: str, body: str, review_id: int = 7, user: str = REVIEWER_LOGIN
+) -> dict:
+    """One reviewer summary, as GitHub returns it.
+
+    The body names the revision, which is how a reviewer says what it looked
+    at and how the production path binds a review to a head.
+    """
     return {
         "id": review_id,
-        "user": {"id": user},
+        "user": {"login": user},
+        # The revision is named in the body because that is how a reviewer
+        # states what it looked at, and how the production path binds a review
+        # to a head. Tests about content compare against `body` itself.
+        "body": f"{body}\n\nReviewed up to {sha}.",
+        "state": "COMMENTED",
+        # The commit the review was submitted against. Unlike a comment's
+        # anchor, GitHub never moves this, which is what the inline findings
+        # are bound through.
         "commit_id": sha,
-        "body": body,
         "submitted_at": "2026-09-06T20:11:00Z",
     }
 
 
-class FakeGitHub:
-    """The two read endpoints, and a record of everything asked of them."""
+def summary_of(body: str, sha: str) -> str:
+    """The full summary text `_review` publishes for this content."""
+    return f"{body}\n\nReviewed up to {sha}."
 
-    def __init__(self, reviews: list, comments: dict[int, list] | None = None) -> None:
+
+class FakeGitHub:
+    """The read endpoints the production provider actually calls.
+
+    Written against those paths rather than a reconstruction of them, so a
+    change in how reviews are read shows up here as an unanswered call instead
+    of a quietly different result.
+    """
+
+    def __init__(
+        self,
+        reviews: list,
+        comments: dict[int, list] | None = None,
+        issue_comments: list | None = None,
+    ) -> None:
         self._reviews = reviews
-        self._comments = comments or {}
+        # The issue thread, where reviewers publish their summary prose.
+        self.issue_comments = list(issue_comments or [])
+        # Inline comments, flattened: the provider reads a pull request's
+        # comments directly rather than per review.
+        self._comments = [
+            item for group in (comments or {}).values() for item in group
+        ]
         self.requested: list[str] = []
 
-    def get(self, url: str, **_kwargs):
+    def request(self, method: str, url: str, **keywords):
         self.requested.append(url)
+        if method != "GET":
+            raise AssertionError(f"the reader must not {method}")
         base = url.split("?")[0]
+        first = "page=1" in url
         if base.endswith("/reviews"):
-            return _Response(self._reviews if "page=1" in url else [])
-        if "/reviews/" in base and base.endswith("/comments"):
-            review_id = int(base.rsplit("/reviews/", 1)[1].split("/")[0])
-            body = self._comments.get(review_id, [])
-            return _Response(body if "page=1" in url else [])
+            return _Response(self._reviews if first else [])
+        if "/issues/" in base and base.endswith("/comments"):
+            return _Response(self.issue_comments if first else [])
+        if base.endswith("/pulls/") or "/pulls/" in base and base.endswith("/comments"):
+            return _Response(self._comments if first else [])
+        if "/issues/" in base and base.endswith("/comments"):
+            return _Response(self.issue_comments if first else [])
         return _Response([])
 
 
 class _Response:
     def __init__(self, payload) -> None:
         self.status_code = 200
+        self.headers: dict = {}
         self._payload = payload
 
     def json(self):
@@ -94,12 +136,14 @@ class _Response:
 
 
 class ProviderTestCase(unittest.TestCase):
-    def provider(self, reviews, comments=None) -> QodoReviewContentProvider:
+    def provider(self, reviews, comments=None) -> GitHubReviewProvider:
         self.github = FakeGitHub(reviews, comments)
-        original = qodo_review_content.httpx.get
-        qodo_review_content.httpx.get = self.github.get
-        self.addCleanup(setattr, qodo_review_content.httpx, "get", original)
-        return QodoReviewContentProvider("owner/repo", "token")
+        original = github_review.httpx.request
+        github_review.httpx.request = self.github.request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        return GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        )
 
 
 class FindingsWithoutEmailTests(ProviderTestCase):
@@ -110,11 +154,17 @@ class FindingsWithoutEmailTests(ProviderTestCase):
         comments = {
             7: [
                 {
+                    "user": {"login": REVIEWER_LOGIN},
+                    "commit_id": HEAD,
+                    "pull_request_review_id": 7,
                     "body": "Completed reviews can be suppressed after interruption.",
                     "path": "src/alx/continuity/completed_work_source.py",
                     "line": 52,
                 },
                 {
+                    "user": {"login": REVIEWER_LOGIN},
+                    "commit_id": HEAD,
+                    "pull_request_review_id": 7,
                     "body": "Fast reviews can remain pending.",
                     "path": "src/alx/bootstrap/live_voice.py",
                     "line": 381,
@@ -127,7 +177,7 @@ class FindingsWithoutEmailTests(ProviderTestCase):
 
         self.assertTrue(content.available)
         self.assertEqual(content.head_sha, HEAD)
-        self.assertEqual(content.summary, "Three medium issues found.")
+        self.assertEqual(content.summary, summary_of("Three medium issues found.", HEAD))
         self.assertEqual(len(content.comments), 2)
         self.assertIn("suppressed after interruption", content.comments[0].body)
         self.assertEqual(
@@ -137,7 +187,7 @@ class FindingsWithoutEmailTests(ProviderTestCase):
         for url in self.github.requested:
             self.assertIn("/repos/owner/repo/", url)
             self.assertTrue(
-                "/pulls/21/reviews" in url or "/issues/21/comments" in url
+                "/pulls/21" in url or "/issues/21/comments" in url
             )
 
     def test_a_clean_review_is_retrieved_the_same_way(self) -> None:
@@ -147,7 +197,7 @@ class FindingsWithoutEmailTests(ProviderTestCase):
         )
 
         self.assertTrue(content.available)
-        self.assertEqual(content.summary, "No issues found.")
+        self.assertEqual(content.summary, summary_of("No issues found.", HEAD))
         self.assertEqual(content.comments, ())
         # Available with nothing to report is not the same as no review, and
         # the record keeps them apart without judging either.
@@ -159,40 +209,8 @@ class FindingsWithoutEmailTests(ProviderTestCase):
             ReviewContentRequest(21, HEAD)
         )
         self.assertTrue(content.available)
-        self.assertEqual(content.summary, "Looks fine.")
+        self.assertEqual(content.summary, summary_of("Looks fine.", HEAD))
         self.assertEqual(content.comments, ())
-
-    def test_unreadable_comments_are_never_a_comment_free_review(self) -> None:
-        """The findings live in the comments, so losing them cannot read clean.
-
-        Qodo's review of 8a3eac6 had an empty summary and four findings, all
-        of them comments. Turning a failed comments listing into an empty list
-        would have reported that review as available with nothing found, which
-        is silence reading as approval.
-        """
-        reviews = [_review(HEAD, "")]
-
-        def get(url, **_kwargs):
-            if "/reviews/" in url.split("?")[0] and "comments" in url:
-                # The endpoint answers, but not with a list.
-                return _Response(None)
-            return _Response(reviews if "page=1" in url else [])
-
-        original = qodo_review_content.httpx.get
-        qodo_review_content.httpx.get = get
-        self.addCleanup(setattr, qodo_review_content.httpx, "get", original)
-        provider = QodoReviewContentProvider("owner/repo", "token")
-
-        with self.assertRaises(ReviewReadError) as raised:
-            provider.read(ReviewContentRequest(21, HEAD))
-        self.assertEqual(raised.exception.code, "review_unavailable")
-
-    def test_a_review_whose_id_cannot_be_read_is_unavailable(self) -> None:
-        """Without an id the comments cannot be fetched, so findings are unknown."""
-        review = _review(HEAD, "")
-        review["id"] = None
-        with self.assertRaises(ReviewReadError):
-            self.provider([review]).read(ReviewContentRequest(21, HEAD))
 
 
 class ExactRevisionTests(ProviderTestCase):
@@ -224,13 +242,22 @@ class ExactRevisionTests(ProviderTestCase):
     def test_an_unreadable_endpoint_is_not_reported_as_no_review(self) -> None:
         """"Could not read" and "there is none" must never collapse."""
 
-        def failing(url, **_kwargs):
-            return _Response(None)
+        class Broken:
+            status_code = 500
+            headers: dict = {}
 
-        original = qodo_review_content.httpx.get
-        qodo_review_content.httpx.get = failing
-        self.addCleanup(setattr, qodo_review_content.httpx, "get", original)
-        provider = QodoReviewContentProvider("owner/repo", "token")
+            def json(self):
+                raise ValueError("not json")
+
+        def failing(method, url, **_keywords):
+            return Broken()
+
+        original = github_review.httpx.request
+        github_review.httpx.request = failing
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        provider = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        )
 
         with self.assertRaises(ReviewReadError) as raised:
             provider.read(ReviewContentRequest(21, HEAD))
@@ -248,93 +275,100 @@ class ExactRevisionTests(ProviderTestCase):
         content = self.provider([later, earlier]).read(
             ReviewContentRequest(21, HEAD)
         )
-        self.assertEqual(content.summary, "Second pass, three findings.")
+        self.assertEqual(content.summary, summary_of("Second pass, three findings.", HEAD))
 
 
 class ReadOnlyTests(unittest.TestCase):
-    """The capability that reads must be incapable of anything else."""
+    """The capability that reads must be incapable of anything else.
 
-    def _source(self) -> str:
-        return "\n".join(
-            (
-                REPOSITORY_ROOT / relative
-            ).read_text()
-            for relative in (
-                "src/alx/providers/qodo_review_content.py",
-                "src/alx/providers/qodo_artifact.py",
-            )
-        )
+    Requesting and reading are now one provider, because both are GitHub calls
+    about the same pull request by the same reviewer and splitting them left
+    two places that had to agree on which reviewer was configured. That makes
+    this invariant sharper rather than weaker: the read path itself must be
+    unable to write, and the capability is wired to the bound `read` method
+    rather than to the object, so nothing it is given can post.
+    """
 
-    def test_the_provider_never_writes_to_github(self) -> None:
-        """Structural, not trusted: no verb but GET appears at all."""
-        tree = ast.parse(self._source())
-        called = {
-            node.func.attr
+    def _read_function(self) -> ast.FunctionDef:
+        source = (
+            REPOSITORY_ROOT / "src/alx/providers/github_review.py"
+        ).read_text()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.FunctionDef) and node.name == "read":
+                return node
+        raise AssertionError("the reader is missing from the provider")
+
+    def _reachable(self) -> set[str]:
+        """Every helper `read` calls, and every helper those call in turn."""
+        source = (
+            REPOSITORY_ROOT / "src/alx/providers/github_review.py"
+        ).read_text()
+        tree = ast.parse(source)
+        functions = {
+            node.name: node
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            if isinstance(node, ast.FunctionDef)
         }
-        for verb in ("post", "put", "patch", "delete"):
-            self.assertNotIn(verb, called, f"the reader must not {verb}")
-        self.assertIn("read", called)
-
-    def _literals(self) -> set[str]:
-        """Every string constant in the code, comments and docstrings aside.
-
-        Scanning raw text matched the module's own prose, which describes what
-        it cannot do. What matters is the strings it can actually build a
-        request from.
-        """
-        tree = ast.parse(self._source())
-        # The docstring node itself, by identity, so the raw constant is
-        # excluded rather than its cleaned text.
-        docstrings = set()
-        for node in ast.walk(tree):
-            if not isinstance(
-                node, (ast.Module, ast.ClassDef, ast.FunctionDef)
-            ):
+        seen: set[str] = set()
+        pending = ["read"]
+        while pending:
+            name = pending.pop()
+            if name in seen or name not in functions:
                 continue
-            body = getattr(node, "body", ())
-            if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                docstrings.add(id(body[0].value))
-        return {
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and id(node) not in docstrings
+            seen.add(name)
+            for node in ast.walk(functions[name]):
+                # `self.<name>(...)` only. `httpx.request` shares a name with
+                # the provider's own `request`, and following it would drag the
+                # whole write path in and report a reader that cannot write as
+                # one that can.
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "self"
+                ):
+                    pending.append(node.func.attr)
+        return seen
+
+    def test_the_read_path_never_writes_to_github(self) -> None:
+        """Structural, not trusted: no write verb is reachable from `read`."""
+        source = (
+            REPOSITORY_ROOT / "src/alx/providers/github_review.py"
+        ).read_text()
+        functions = {
+            node.name: node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef)
         }
+        literals: set[str] = set()
+        for name in self._reachable():
+            node = functions.get(name)
+            if node is None:
+                continue
+            for item in ast.walk(node):
+                if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                    literals.add(item.value)
+        for verb in ("POST", "PUT", "PATCH", "DELETE"):
+            self.assertNotIn(verb, literals, f"the read path must not {verb}")
+        self.assertIn("GET", literals)
 
-    def test_it_cannot_trigger_a_review(self) -> None:
-        """Qodo's trigger is a comment body posted to the issues endpoint."""
-        for literal in self._literals():
-            self.assertNotEqual(literal.strip(), "/review")
+    def test_the_read_path_cannot_trigger_a_review(self) -> None:
+        """A trigger is a comment body; the read path must not build one."""
+        self.assertNotIn("request", self._reachable())
 
-    def test_it_cannot_merge(self) -> None:
-        for literal in self._literals():
-            self.assertNotIn("merge", literal.lower())
+    def test_the_capability_is_given_the_method_not_the_provider(self) -> None:
+        """Wiring, not trust: the executor holds `read` and nothing else.
 
-    def test_it_imports_nothing_that_requests_or_merges(self) -> None:
-        tree = ast.parse(self._source())
-        imported = {
-            node.module
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module
-        }
-        for forbidden in (
-            "alx.providers.qodo_review",
-            "alx.providers.github_merge",
-            "alx.contracts.repository",
-        ):
-            self.assertNotIn(forbidden, imported)
+        Given the provider object it could reach `request`; given the bound
+        method it can only read.
+        """
+        source = (REPOSITORY_ROOT / "src/alx/bootstrap/review.py").read_text()
+        self.assertIn("build_review_content_executors(reader.read", source)
 
     def test_the_declaration_carries_no_authored_text(self) -> None:
+        from alx.tools.review_content import DEFINITION
+
         self.assertFalse(DEFINITION.transmits_authored_text)
-        self.assertIs(DEFINITION.side_effect, SideEffect.EFFECTFUL)
 
 
 class ExternalEvidenceTests(unittest.TestCase):
@@ -352,7 +386,7 @@ class ExternalEvidenceTests(unittest.TestCase):
         values = dict(
             pull_request_number=21,
             head_sha=HEAD,
-            reviewer="qodo",
+            reviewer="coderabbit",
             available=True,
             summary="Three medium issues.",
             comments=(ReviewComment("Handover can be lost.", "a.py", 3),),
@@ -480,7 +514,7 @@ class AuthorityTests(unittest.TestCase):
         from alx.bootstrap.review import build_review_runtime
 
         class Requester:
-            reviewer = "qodo"
+            reviewer = "coderabbit"
 
             def request(self, review):  # pragma: no cover - never called here
                 raise AssertionError("no review is requested in these tests")
@@ -537,6 +571,452 @@ class AuthorityTests(unittest.TestCase):
         runtime = self._runtime()
         for permission in runtime.permissions:
             self.assertNotIn("merge", permission)
+
+
+
+
+class InlineCommentReviewBindingTests(ProviderTestCase):
+    """A finding belongs to the review round it was submitted in.
+
+    The summary was bound to the requested head from the start; the inline
+    comments were not, so `ReviewContent` for one revision could carry findings
+    written about another.
+
+    The comment's own `commit_id` looks like the fix and is not one. GitHub
+    re-anchors it onto a newer head whenever the line it marks still exists
+    there, so an old round's findings arrive wearing the current SHA. Observed
+    on this repository: three comments submitted against one head were carried
+    onto the next, while the review object kept the commit it was submitted
+    against. `original_commit_id` fails the other way, staying on the authoring
+    revision. The review id is the only stable round identity, so that is the
+    binding.
+    """
+
+    A = "a" * 40   # the earlier head
+    B = "b" * 40   # the head under review
+
+    R1 = 71
+    R2 = 72
+
+    def inline(self, review_id: int, **overrides) -> dict:
+        """A reviewer comment, carrying the anchors GitHub really sets."""
+        item = {
+            "id": 900,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            # Re-anchored onto the current head, as GitHub does.
+            "commit_id": self.B,
+            "original_commit_id": self.A,
+            "pull_request_review_id": review_id,
+        }
+        item.update(overrides)
+        return item
+
+    def read(self, reviews, comments, head):
+        return self.provider(reviews, comments).read(ReviewContentRequest(21, head))
+
+    def test_a_review_s_own_comments_are_returned_for_its_head(self) -> None:
+        """1. Review R1 on head A, with R1's comments, read for A."""
+        content = self.read(
+            [_review(self.A, "Summary.", review_id=self.R1)],
+            {self.R1: [self.inline(self.R1, commit_id=self.A,
+                                   original_commit_id=self.A)]},
+            self.A,
+        )
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+    def test_a_re_anchored_comment_is_not_a_finding_about_the_new_head(self) -> None:
+        """2. R1's comment carried onto B must not answer for B.
+
+        This is the case the whole binding exists for: every anchor field on
+        the comment now says B.
+        """
+        stale = self.inline(self.R1, commit_id=self.B, original_commit_id=self.A)
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [stale]},
+            self.B,
+        )
+        self.assertEqual(content.comments, ())
+
+    def test_the_current_review_s_comments_are_returned(self) -> None:
+        """3. Review R2 on head B, with R2's own comments."""
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [self.inline(self.R2, body="about B")]},
+            self.B,
+        )
+        self.assertEqual([item.body for item in content.comments], ["about B"])
+
+    def test_mixed_rounds_keep_only_the_current_review_s(self) -> None:
+        """4. R1 and R2 comments present; only R2's are about B."""
+        content = self.read(
+            [
+                _review(self.A, "Earlier.", review_id=self.R1),
+                _review(self.B, "Summary.", review_id=self.R2),
+            ],
+            {self.R2: [
+                self.inline(self.R1, id=1, body="carried from R1"),
+                self.inline(self.R2, id=2, body="written in R2"),
+            ]},
+            self.B,
+        )
+        self.assertEqual(
+            [item.body for item in content.comments], ["written in R2"]
+        )
+
+    def test_an_attacker_comment_in_the_current_review_is_excluded(self) -> None:
+        """5. Round membership never substitutes for authorship."""
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [
+                self.inline(self.R2, id=1, user={"login": "attacker"}),
+                self.inline(self.R2, id=2,
+                            user={"login": "coderabbit-evil[bot]"}),
+            ]},
+            self.B,
+        )
+        self.assertEqual(content.comments, ())
+
+    def test_a_clean_current_review_honestly_reports_no_findings(self) -> None:
+        """6. A summary for B with no inline findings of its own.
+
+        The stale comments are present and re-anchored to B. Reporting them
+        would turn a clean review into a review with findings.
+        """
+        content = self.read(
+            [
+                _review(self.A, "Earlier.", review_id=self.R1),
+                _review(self.B, "No actionable comments.", review_id=self.R2),
+            ],
+            {self.R2: [self.inline(self.R1, id=1, body="carried from R1")]},
+            self.B,
+        )
+        self.assertTrue(content.available)
+        self.assertEqual(content.comments, ())
+
+    def test_a_comment_with_no_review_id_is_excluded_rather_than_guessed(self) -> None:
+        item = self.inline(self.R2)
+        del item["pull_request_review_id"]
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R2)],
+            {self.R2: [item]},
+            self.B,
+        )
+        self.assertEqual(content.comments, ())
+
+    def test_no_review_object_for_this_head_returns_no_findings(self) -> None:
+        """A summary can name a head with no readable review object.
+
+        There is then nothing to bind to, and importing whatever comments sit
+        on the pull request would be inventing their applicability.
+        """
+        content = self.provider(
+            [{
+                "id": 7,
+                "user": {"login": REVIEWER_LOGIN},
+                "body": f"Summary. Reviewed up to {self.B}.",
+                "submitted_at": "2026-09-06T20:11:00Z",
+            }],
+            {7: [self.inline(self.R1)]},
+        ).read(ReviewContentRequest(21, self.B))
+        self.assertTrue(content.available)
+        self.assertEqual(content.comments, ())
+
+    def test_a_pending_review_is_not_evidence(self) -> None:
+        """An unsubmitted draft is not something the reviewer has said."""
+        draft = _review(self.B, "Summary.", review_id=self.R2)
+        draft["state"] = "PENDING"
+        # Newest, so it is what selection would pick without the guard. With
+        # the same timestamp as R1 the assertion held whether the guard was
+        # there or not: `max` keeps the first of a tie, and the first was the
+        # submitted review.
+        draft["submitted_at"] = "2026-09-06T21:00:00Z"
+        content = self.read(
+            [_review(self.B, "Summary.", review_id=self.R1), draft],
+            {self.R2: [self.inline(self.R2, body="drafted")]},
+            self.B,
+        )
+        self.assertEqual(content.comments, ())
+
+    def test_the_binding_holds_for_greptile_too(self) -> None:
+        """8. Provider-neutral: the rule is the contract's, not one adapter's."""
+        self.github = FakeGitHub(
+            [_review(self.B, "Summary.", review_id=self.R2,
+                     user="greptile[bot]")],
+            {self.R2: [
+                self.inline(self.R2, id=1, user={"login": "greptile[bot]"},
+                            body="written in R2"),
+                self.inline(self.R1, id=2, user={"login": "greptile[bot]"},
+                            body="carried from R1"),
+            ]},
+        )
+        original = github_review.httpx.request
+        github_review.httpx.request = self.github.request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        content = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
+        ).read(ReviewContentRequest(21, self.B))
+        self.assertEqual(
+            [item.body for item in content.comments], ["written in R2"]
+        )
+
+
+class AuthoritativeHeadBindingTests(ProviderTestCase):
+    """The revision comes from GitHub's field, not from the summary's prose.
+
+    A review object carries the commit it was submitted against. Requiring the
+    body text to also spell out the SHA made prose the gate: a reviewer that
+    words its range differently, or omits it, had its review discarded along
+    with every finding linked to it, and `read` reported no review of a
+    revision that plainly had one.
+
+    Prose still binds a summary that has no review object behind it — an issue
+    comment naming the range is how those are recognised. It simply no longer
+    overrides the authoritative field.
+    """
+
+    A = "a" * 40
+    B = "b" * 40
+    R = 91
+
+    def test_a_bound_review_counts_though_its_body_omits_the_sha(self) -> None:
+        review = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "Actionable comments posted: 1",   # no revision in the text
+            "state": "COMMENTED",
+            "commit_id": self.B,
+            "submitted_at": "2026-09-06T20:11:00Z",
+        }
+        content = self.provider([review], {self.R: [{
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.B,
+            "pull_request_review_id": self.R,
+        }]}).read(ReviewContentRequest(21, self.B))
+
+        self.assertTrue(content.available)
+        self.assertEqual(content.summary, "Actionable comments posted: 1")
+        # The findings linked to it travel too, rather than being stranded.
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+
+    def test_an_empty_bodied_bound_review_does_not_hide_the_summary(self) -> None:
+        """A container review must not displace the prose beside it.
+
+        A reviewer may publish its summary as an issue comment and submit the
+        review object as the container for inline findings, leaving that
+        object's body empty. Admitting bound reviews as summaries — which is
+        what lets the authoritative binding outrank prose — made the empty one
+        eligible, and being newer it won. `ReviewContent` refuses to be
+        available carrying nothing readable, so a completed review surfaced as
+        `review_unavailable` and the watcher reported STATUS_UNKNOWN.
+        """
+        summary = {
+            "id": 9,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": f"Actionable comments posted: 1. Reviewed up to {self.B}.",
+            "created_at": "2026-09-18T09:00:00Z",
+        }
+        container = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": self.B,
+            # Newer than the summary, which is what made it win.
+            "submitted_at": "2026-09-18T09:06:00Z",
+        }
+        finding = {
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.B,
+            "pull_request_review_id": self.R,
+        }
+        self.github = FakeGitHub(
+            [container], {self.R: [finding]}, issue_comments=[summary]
+        )
+        original = github_review.httpx.request
+        github_review.httpx.request = self.github.request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        content = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        ).read(ReviewContentRequest(21, self.B))
+
+        self.assertTrue(content.available)
+        self.assertIn("Actionable comments posted", content.summary)
+        # The findings the container carried are still returned.
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+    def test_a_bound_review_with_findings_but_no_prose_is_still_available(
+        self,
+    ) -> None:
+        """Findings are readable content: silence is not the only reading."""
+        container = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": self.B,
+            "submitted_at": "2026-09-18T09:06:00Z",
+        }
+        content = self.provider([container], {self.R: [{
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.B,
+            "pull_request_review_id": self.R,
+        }]}).read(ReviewContentRequest(21, self.B))
+
+        self.assertTrue(content.available)
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+    def test_a_review_bound_to_another_head_is_refused_whatever_it_says(
+        self,
+    ) -> None:
+        """Prose must not rescue a review the field binds elsewhere."""
+        review = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            # The body names the requested head; the field says otherwise.
+            "body": f"Reviewed up to {self.B}.",
+            "state": "COMMENTED",
+            "commit_id": self.A,
+            "submitted_at": "2026-09-06T20:11:00Z",
+        }
+        content = self.provider([review], {self.R: [{
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.A,
+            "pull_request_review_id": self.R,
+        }]}).read(ReviewContentRequest(21, self.B))
+
+        # The summary is still recognised, because a reviewer saying it looked
+        # at this head is evidence. But no finding is imported from a review
+        # object submitted against a different commit.
+        self.assertEqual(content.comments, ())
+
+
+
+
+class PaginationFailsClosedTests(unittest.TestCase):
+    """A prefix of a review is not the review.
+
+    `_pages` stops at a fixed cap. It used to return whatever it had, so a
+    reviewer with more findings than the cap allows produced a partial read
+    that arrived wearing the shape of a complete one — and this is the
+    evidence AL/X weighs before a merge. However many findings did not fit
+    were simply absent, with nothing to say so.
+
+    Unreadable is the honest answer. The task keeps waiting rather than acting
+    on part of a review.
+    """
+
+    def _provider(self, pages_of):
+        """`pages_of(n)` answers page n of the inline comments."""
+        self.fetched = 0
+
+        class Response:
+            def __init__(self, payload) -> None:
+                self.status_code = 200
+                self.headers: dict = {}
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def request(method, url, **keywords):
+            base = url.split("?")[0]
+            page = int(url.rsplit("&page=", 1)[1])
+            if base.endswith("/reviews"):
+                return Response([_review(HEAD, "Summary.")] if page == 1 else [])
+            if "/issues/" in base:
+                return Response([])
+            if base.endswith("/comments"):
+                self.fetched += 1
+                return Response(pages_of(page))
+            return Response({"head": {"sha": HEAD}})
+
+        original = github_review.httpx.request
+        github_review.httpx.request = request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        return GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        )
+
+    @staticmethod
+    def _comment(index: int) -> dict:
+        return {
+            "id": index,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": f"finding {index}",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": HEAD,
+            "original_commit_id": HEAD,
+            "pull_request_review_id": 7,
+        }
+
+    def test_a_review_that_ends_before_the_cap_reads_normally(self) -> None:
+        """A short final page is GitHub saying there is no more."""
+        def pages_of(page: int) -> list:
+            if page == 1:
+                return [self._comment(index) for index in range(100)]
+            if page == 2:
+                return [self._comment(100)]      # short: the end
+            return []
+
+        content = self._provider(pages_of).read(ReviewContentRequest(21, HEAD))
+        self.assertTrue(content.available)
+        self.assertEqual(len(content.comments), 101)
+
+    def test_a_review_larger_than_the_cap_is_unavailable_not_partial(self) -> None:
+        """Every allowed page full: more remains, and it cannot be read."""
+        def pages_of(page: int) -> list:
+            return [
+                self._comment(page * 100 + index) for index in range(100)
+            ]
+
+        provider = self._provider(pages_of)
+        with self.assertRaises(ReviewReadError) as caught:
+            provider.read(ReviewContentRequest(21, HEAD))
+        self.assertEqual(caught.exception.code, "review_unavailable")
+        # The cap was honoured rather than the reader running on.
+        self.assertEqual(self.fetched, github_review.MAX_PAGES)
+
+    def test_a_full_final_page_is_never_reported_as_complete(self) -> None:
+        """The boundary case: exactly the cap, last page full.
+
+        Indistinguishable from a complete read unless the cap is treated as
+        the failure it is.
+        """
+        def pages_of(page: int) -> list:
+            if page <= github_review.MAX_PAGES:
+                return [
+                    self._comment(page * 100 + index) for index in range(100)
+                ]
+            return []
+
+        with self.assertRaises(ReviewReadError):
+            self._provider(pages_of).read(ReviewContentRequest(21, HEAD))
 
 
 if __name__ == "__main__":

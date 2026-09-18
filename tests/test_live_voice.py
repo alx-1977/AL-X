@@ -869,8 +869,6 @@ class BootstrapVoiceTests(unittest.TestCase):
         self.assertNotIn("IGNORED COMMAND", values)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class BudgetRecoveryReservationTests(unittest.IsolatedAsyncioTestCase):
@@ -1110,3 +1108,7 @@ class BudgetRecoveryReservationTests(unittest.IsolatedAsyncioTestCase):
         self._exhausted(recorder, budget, "conversation-1")
         # Reloading the page starts a new conversation id.
         recorder.check("conversation-2")  # must not raise
+
+
+if __name__ == "__main__":
+    unittest.main()

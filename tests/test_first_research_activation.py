@@ -458,8 +458,6 @@ class ReservationCoversWorstCaseTest(unittest.TestCase):
         self.assertLess(researcher._ledger.committed_usd(), 1.00)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ProviderBoundViolationTest(unittest.TestCase):
@@ -732,3 +730,7 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         for item in rendered:
             with self.subTest(task=item[:60]):
                 self.assertNotIn("research", item.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

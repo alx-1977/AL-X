@@ -20,7 +20,7 @@ from typing import Any
 from alx.continuity.tasks import SQLiteTaskStore, TaskStoreCorrupt
 from alx.contracts.task import ExternalTask
 from alx.interfaces.task_poller import TaskPoller
-from alx.providers.qodo_status import QodoStatusObserver
+from alx.providers.review_status import ReviewStatusObserver
 
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +46,9 @@ def build_task_runtime(
     completed: Callable[[ExternalTask], None],
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
     observers: dict[str, Any] | None = None,
+    # The reviewer being watched. Reused rather than rebuilt, so what counts as
+    # a readable review is one implementation instead of two that must agree.
+    review_provider: Any = None,
 ) -> TaskRuntime | None:
     """Compose the task store and its watcher, or leave both absent."""
     if storage_root is None:
@@ -62,9 +65,13 @@ def build_task_runtime(
         if not repository.strip() or not token.strip():
             LOGGER.info("No configured observer: external work is not watched")
             return None
+        if review_provider is None:
+            LOGGER.info("No configured reviewer: external work is not watched")
+            return None
         try:
-            observers = {"qodo": QodoStatusObserver(repository, token)}
-        except ValueError:
+            observer = ReviewStatusObserver(review_provider)
+            observers = {observer.service: observer}
+        except (TypeError, ValueError):
             LOGGER.warning("Task observer is misconfigured: work is not watched")
             return None
 

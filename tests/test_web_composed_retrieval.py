@@ -632,8 +632,6 @@ class ConcatenatedGzipTests(ComposedTestCase):
         self.assertEqual(caught.exception.code, PAGE_TOO_LARGE)
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
 
 
 class CanonicalMatrixTests(ComposedTestCase):
@@ -836,3 +834,7 @@ class OneAuthorityFormatterTests(unittest.TestCase):
     def test_the_authority_helper_has_exactly_one_definition(self) -> None:
         joined = "".join(self.sources().values())
         self.assertEqual(joined.count("def _authority"), 1)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

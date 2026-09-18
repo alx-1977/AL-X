@@ -1430,6 +1430,11 @@ class ReviewSettings:
     enabled: bool
     repository: str
     token: str
+    # Which reviewer watches this repository, as configured. A plain name
+    # rather than a contract value: `config` reads the environment and depends
+    # on nothing, so resolving the name to a provider belongs to the layer
+    # that composes them. Defaulted so an existing configuration keeps working.
+    reviewer: str = "coderabbit"
 
     @property
     def is_usable(self) -> bool:
@@ -1437,9 +1442,18 @@ class ReviewSettings:
 
 
 def review_settings(environment: Mapping[str, str]) -> ReviewSettings:
-    """Read review-request configuration, defaulting to off."""
+    """Read review-request configuration, defaulting to off.
+
+    The reviewer is configuration and nothing else. Every supported one watches
+    this repository through GitHub, so switching between them changes no
+    capability, no prompt and no merge behaviour. The name is carried as text
+    and resolved where the provider is composed; an unrecognised one falls back
+    to the default there rather than leaving review silently unavailable.
+    """
     return ReviewSettings(
         enabled=_boolean(environment, "ALX_REVIEW_REQUEST_ENABLED", False),
         repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
         token=environment.get("GITHUB_TOKEN", "").strip(),
+        reviewer=environment.get("ALX_REVIEW_PROVIDER", "").strip().lower()
+        or "coderabbit",
     )
