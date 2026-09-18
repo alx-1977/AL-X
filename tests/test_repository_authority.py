@@ -15,6 +15,7 @@ failure of the invariant destroys a fixture rather than this checkout.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,9 +46,30 @@ from alx.tools.repository_authority import (  # noqa: E402
 CANONICAL = "alx-1977/AL-X"
 
 
+# Git location variables the caller may have exported. Inherited, they point
+# every command below at that repository instead of the fixture, and the setup
+# would commit and push against the wrong checkout — the exact outcome this
+# module's fixtures exist to prevent. The provider already scrubs them; the
+# helper must too, or the tests prove less than they appear to.
+_GIT_LOCATION = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+)
+
+
+def _fixture_environment() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _GIT_LOCATION
+    }
+
+
 def git(root: Path, *arguments: str) -> str:
     completed = subprocess.run(
         ["git", *arguments], cwd=str(root),
+        env=_fixture_environment(),
         capture_output=True, text=True, check=True,
     )
     return completed.stdout.strip()
@@ -63,9 +85,9 @@ class RealRepositoryHarness(unittest.TestCase):
         self.remote = root / "remote.git"
         self.local = (root / "local").resolve()
         subprocess.run(["git", "init", "--bare", "-b", "main", str(self.remote)],
-                       capture_output=True, check=True)
+                       env=_fixture_environment(), capture_output=True, check=True)
         subprocess.run(["git", "clone", str(self.remote), str(self.local)],
-                       capture_output=True, check=True)
+                       env=_fixture_environment(), capture_output=True, check=True)
         git(self.local, "config", "user.email", "test@example.test")
         git(self.local, "config", "user.name", "Test")
         (self.local / "seed.txt").write_text("seed\n")
@@ -143,6 +165,38 @@ class SelfPreservationTests(RealRepositoryHarness):
             Operation.REMOVE_WORKTREE, path=str(self.local.parent)
         )
         self.assertEqual(outcome.failure_code, "self_preservation")
+
+
+    def test_reset_protects_the_checked_out_canonical_branch(self) -> None:
+        """The rewrite that names no branch still rewrites one.
+
+        `reset` takes a revision, not a branch, and acts on whatever is checked
+        out. Reading only the named arguments left the invariant with nothing
+        to protect, and `reset --hard <sha>` on the canonical checkout rewrote
+        canonical `main` and reported success.
+        """
+        self.commit("second.txt")
+        before = git(self.local, "rev-parse", "HEAD")
+        first = git(self.local, "rev-parse", "HEAD~1")
+        self.assertEqual(git(self.local, "symbolic-ref", "--short", "HEAD"), "main")
+
+        outcome = self.perform(Operation.RESET, revision=first, mode="hard")
+        self.assertEqual(outcome.failure_code, "self_preservation")
+        self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
+
+    def test_rebase_protects_the_checked_out_canonical_branch(self) -> None:
+        self.branch("fix/thing")
+        git(self.local, "checkout", "-q", "main")
+        outcome = self.perform(Operation.REBASE, onto="fix/thing")
+        self.assertEqual(outcome.failure_code, "self_preservation")
+
+    def test_reset_on_a_feature_branch_is_still_allowed(self) -> None:
+        """The guard must not reach past the canonical branch."""
+        self.branch("fix/thing")
+        before = git(self.local, "rev-parse", "HEAD~1")
+        outcome = self.perform(Operation.RESET, revision=before, mode="hard")
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
 
     def test_the_rule_cannot_be_avoided_by_spelling(self) -> None:
         """`main`, `refs/heads/main` and `origin/main` are one branch."""
@@ -312,6 +366,15 @@ class OrdinaryOperationTests(RealRepositoryHarness):
         self.assertTrue(merged.succeeded)
         reverted = self.perform(Operation.REVERT, revision=picked)
         self.assertTrue(reverted.succeeded)
+
+        # Cherry-pick, on its own branch so it has something to carry.
+        git(self.local, "checkout", "-q", "-b", "fix/other", "HEAD~2")
+        carried = self.perform(Operation.CHERRY_PICK, revision=picked)
+        self.assertTrue(carried.succeeded)
+        self.assertIn(
+            "fix-thing.txt",
+            git(self.local, "show", "--name-only", "--format=", "HEAD"),
+        )
 
     def test_fetch_and_status(self) -> None:
         self.assertTrue(self.perform(Operation.FETCH).succeeded)
@@ -505,6 +568,132 @@ class PathContainmentTests(RealRepositoryHarness):
         """`-A`, `-u` and `.` are not shapes: a job cannot sweep the tree."""
         with self.assertRaises(RepositoryAuthorityError):
             self.authority.perform(RepositoryRequest(Operation.STAGE, {"paths": []}))
+
+
+class RenameParsingTests(RealRepositoryHarness):
+    """A rename emits three fields where everything else emits two."""
+
+    def test_a_rename_reports_the_new_path_and_keeps_later_entries_aligned(
+        self,
+    ) -> None:
+        """Consuming two fields for a rename shifted every later entry.
+
+        `git diff --name-status -z` writes status, old path, new path for an
+        `R` or `C` entry. Reading two fields took the old path as the changed
+        one and left the next status paired with the wrong path, so a diff
+        containing a rename described files that had not changed.
+        """
+        (self.local / "other.txt").write_text("other\n")
+        git(self.local, "add", "other.txt")
+        git(self.local, "commit", "-m", "add other")
+        base = git(self.local, "rev-parse", "HEAD")
+
+        git(self.local, "checkout", "-q", "-b", "fix/rename")
+        git(self.local, "mv", "seed.txt", "renamed.txt")
+        (self.local / "other.txt").write_text("changed\n")
+        git(self.local, "add", "-A")
+        git(self.local, "commit", "-m", "rename and modify")
+
+        files = self.perform(
+            Operation.CHANGED_FILES, base=base, head="fix/rename"
+        ).values["files"]
+        by_path = {item["path"]: item for item in files}
+        self.assertIn("renamed.txt", by_path)
+        self.assertEqual(by_path["renamed.txt"]["previous_path"], "seed.txt")
+        # The entry after the rename is still described correctly.
+        self.assertIn("other.txt", by_path)
+        self.assertTrue(by_path["other.txt"]["status"].startswith("M"))
+
+
+class PullRequestOperationTests(RealRepositoryHarness):
+    """The GitHub half of the authority, reached through the same entry point.
+
+    The catalogue named these operations and nothing dispatched them, so every
+    call failed as an unusable argument before reaching GitHub: AL/X could not
+    revise a proposal, find one, read what a reviewer said or answer it. They
+    are part of the same job as pushing the branch, so they belong to the same
+    capability rather than to a second one.
+    """
+
+    class FakeGitHub:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def find(self, branch):
+            self.calls.append(("find", branch))
+            return None
+
+        def update(self, number, title="", body=""):
+            self.calls.append(("update", number, title, body))
+            from alx.contracts.github_pull_request import PullRequestOutcome
+            return PullRequestOutcome(number, "fix/thing", "a" * 40,
+                                      "main", "open", False)
+
+        def comment(self, number, body):
+            self.calls.append(("comment", number, body))
+            return True
+
+        def review_threads(self, number):
+            self.calls.append(("review_threads", number))
+            return ({"id": "T1", "isResolved": False},)
+
+        def resolve_review_thread(self, thread_id):
+            self.calls.append(("resolve", thread_id))
+            return True
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.github = self.FakeGitHub()
+        self.authority = RepositoryAuthority(
+            self.system, pull_requests=self.github
+        )
+
+    def test_a_pull_request_can_be_found(self) -> None:
+        outcome = self.perform(Operation.FIND_PULL_REQUEST, branch="fix/thing")
+        self.assertTrue(outcome.succeeded)
+        self.assertFalse(outcome.values["found"])
+        self.assertEqual(self.github.calls[0], ("find", "fix/thing"))
+
+    def test_a_pull_request_can_be_revised(self) -> None:
+        outcome = self.perform(
+            Operation.UPDATE_PULL_REQUEST,
+            pull_request_number=7, title="Better title",
+        )
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(outcome.values["pull_request_number"], 7)
+
+    def test_review_threads_can_be_read_and_resolved(self) -> None:
+        read = self.perform(Operation.READ_REVIEW_THREADS, pull_request_number=7)
+        self.assertEqual(read.values["count"], 1)
+        resolved = self.perform(
+            Operation.RESOLVE_REVIEW_THREAD, thread_id="T1"
+        )
+        self.assertTrue(resolved.values["resolved"])
+
+    def test_a_comment_can_be_left(self) -> None:
+        outcome = self.perform(
+            Operation.COMMENT_ON_PULL_REQUEST,
+            pull_request_number=7, body="addressed",
+        )
+        self.assertTrue(outcome.succeeded)
+
+    def test_without_github_the_operations_say_so(self) -> None:
+        """Configured absence is reported, not disguised as a bad argument."""
+        bare = RepositoryAuthority(self.system)
+        outcome = bare.perform(
+            RepositoryRequest(Operation.FIND_PULL_REQUEST, {"branch": "fix/x"})
+        )
+        self.assertEqual(outcome.failure_code, "repository_unavailable")
+        self.assertIn("GitHub", outcome.refusal_reason)
+
+    def test_a_pull_request_number_must_be_a_positive_integer(self) -> None:
+        for value in (0, -1, "7", True, None):
+            with self.subTest(value=value):
+                with self.assertRaises(RepositoryAuthorityError):
+                    self.authority.perform(RepositoryRequest(
+                        Operation.READ_REVIEW_THREADS,
+                        {"pull_request_number": value},
+                    ))
 
 
 if __name__ == "__main__":

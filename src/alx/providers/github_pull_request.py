@@ -199,8 +199,13 @@ class GitHubPullRequests:
         if not isinstance(data, dict):
             raise PullRequestError("pull_request_unavailable")
         head = data.get("head")
-        branch = head.get("ref") if isinstance(head, dict) else ""
-        return self._outcome(data, branch if isinstance(branch, str) else "", created=False)
+        branch = head.get("ref") if isinstance(head, dict) else None
+        # A blank branch would reach `PullRequestOutcome` and raise ValueError
+        # rather than the declared failure, so an incomplete answer is reported
+        # as one.
+        if not isinstance(branch, str) or not branch.strip():
+            raise PullRequestError("pull_request_unavailable")
+        return self._outcome(data, branch, created=False)
 
     def find(self, branch: str) -> PullRequestOutcome | None:
         """The open pull request for this branch, or None.
@@ -237,6 +242,10 @@ class GitHubPullRequests:
         try:
             nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
         except (KeyError, TypeError):
+            return ()
+        # `"nodes": null` parses fine and then fails on iteration, outside the
+        # malformed-response guard above.
+        if not isinstance(nodes, list):
             return ()
         return tuple(item for item in nodes if isinstance(item, dict))
 

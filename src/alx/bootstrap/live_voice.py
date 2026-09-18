@@ -675,6 +675,7 @@ async def run(repository_root: Path) -> None:
         repository_runtime_configuration.repository_identity,
         repository_runtime_configuration.timeout_seconds,
         lambda: current_call_id[0],
+        merge_configuration.token,
     )
     if repository_runtime is not None:
         for definition in repository_runtime.definitions:

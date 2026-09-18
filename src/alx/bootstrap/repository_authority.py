@@ -21,6 +21,7 @@ from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.contracts.repository_authority import CanonicalSystem
+from alx.providers.github_pull_request import GitHubPullRequests
 from alx.providers.repository_authority import RepositoryAuthority
 from alx.safety import AuthorityPolicy
 from alx.tools.repository_authority import (
@@ -50,6 +51,7 @@ def build_repository_authority_runtime(
     repository_identity: str,
     timeout_seconds: int,
     call_id_source: Callable[[], str],
+    github_token: str = "",
     authority: Any = None,
 ) -> RepositoryAuthorityRuntime | None:
     """Compose repository authority, or leave it unregistered."""
@@ -65,7 +67,25 @@ def build_repository_authority_runtime(
         # repository AL/X is from the current directory would mean a wrong
         # working directory silently disables the one protection that matters.
         system = CanonicalSystem(root, repository_identity.strip())
-        selected = authority or RepositoryAuthority(system, timeout_seconds)
+        # The pull request is where the work is proposed, reviewed and
+        # answered, so the GitHub side belongs to the same authority. Without a
+        # token it is absent, and those operations report that rather than
+        # appearing in the catalogue and failing as unusable arguments.
+        pull_requests = None
+        if github_token.strip():
+            try:
+                pull_requests = GitHubPullRequests(
+                    system.repository, github_token.strip()
+                )
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "GitHub is misconfigured: pull-request operations unavailable"
+                )
+        else:
+            LOGGER.info("No GitHub token: pull-request operations unavailable")
+        selected = authority or RepositoryAuthority(
+            system, timeout_seconds, pull_requests=pull_requests
+        )
     except (TypeError, ValueError) as error:
         LOGGER.warning(
             "Repository authority is misconfigured (%s): no repository capability",

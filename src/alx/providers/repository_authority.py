@@ -28,7 +28,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from alx.providers.repository_runtime import origin_identity
+from alx.contracts.github_pull_request import (
+    PullRequestError,
+    PullRequestRequest,
+)
 from alx.contracts.repository_authority import (
+    GITHUB_OPERATIONS,
     CanonicalSystem,
     Operation,
     READ_ONLY,
@@ -49,6 +54,8 @@ Runner = Callable[..., Any]
 ORIGIN = "origin"
 
 _ORIGIN_URL = ("git", "config", "--get", "remote.origin.url")
+# Which branch HEAD is on. `reset` and `rebase` rewrite it without naming it.
+_SYMBOLIC_REF = ("git", "symbolic-ref", "--quiet", "--short", "HEAD")
 
 _SAFE_GIT_CONFIG = {
     "core.hooksPath": os.devnull,
@@ -128,6 +135,7 @@ class RepositoryAuthority:
         system: CanonicalSystem,
         timeout_seconds: int = 120,
         runner: Runner = subprocess.run,
+        pull_requests: Any = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("repository timeout must be positive")
@@ -135,6 +143,10 @@ class RepositoryAuthority:
         self._root = system.root.resolve()
         self._timeout = timeout_seconds
         self._runner = runner
+        # The GitHub side of the same authority. Absent when GitHub is not
+        # configured, in which case those operations say so rather than
+        # appearing in the catalogue and failing as unusable arguments.
+        self._pull_requests = pull_requests
 
     # ---- process ---------------------------------------------------------
 
@@ -197,9 +209,29 @@ class RepositoryAuthority:
             or arguments.get("target")
             or ""
         ).strip()
+        # `reset` and `rebase` do not name the branch they rewrite: they take a
+        # revision to move to and act on whatever is checked out. Reading only
+        # the named arguments left the ref empty for both, so the invariant
+        # found nothing to protect and `reset --hard <sha>` on the canonical
+        # checkout rewrote canonical `main` without refusal — the one rule this
+        # authority has, silently unenforced. What they act on is HEAD, so HEAD
+        # is what the invariant must be asked about.
+        if not ref and operation in (Operation.RESET, Operation.REBASE):
+            ref = self._checked_out_branch()
         return refuse_if_self_destructive(
             self._system, operation, ref=ref, path=path
         )
+
+    def _checked_out_branch(self) -> str:
+        """The branch HEAD is on, or "" when detached.
+
+        A detached HEAD rewrites no branch, so there is nothing for the
+        invariant to protect and "" is the honest answer rather than a guess.
+        """
+        completed = self._run(_SYMBOLIC_REF)
+        if completed.returncode != 0:
+            return ""
+        return (completed.stdout or "").strip()
 
     # ---- argv ------------------------------------------------------------
 
@@ -385,10 +417,21 @@ class RepositoryAuthority:
                 entries = [item for item in (completed.stdout or "").split("\x00") if item]
                 files = []
                 index = 0
-                while index + 1 < len(entries) + 1 and index < len(entries):
+                while index + 1 < len(entries):
                     status = entries[index]
-                    if index + 1 >= len(entries):
-                        break
+                    # A rename or copy emits three fields — status, old path,
+                    # new path — where every other status emits two. Consuming
+                    # two for all of them reported the old path as the changed
+                    # one and shifted every later entry by a field, pairing the
+                    # remaining statuses with the wrong paths.
+                    if status[:1] in ("R", "C") and index + 2 < len(entries):
+                        files.append({
+                            "status": status,
+                            "path": entries[index + 2],
+                            "previous_path": entries[index + 1],
+                        })
+                        index += 3
+                        continue
                     files.append({"status": status, "path": entries[index + 1]})
                     index += 2
                 return {"files": tuple(files)}
@@ -421,6 +464,91 @@ class RepositoryAuthority:
                 return {"worktrees": tuple(trees)}
         return {}
 
+    # ---- the pull request ------------------------------------------------
+
+    def _perform_on_github(
+        self, operation: Operation, arguments: Mapping[str, Any]
+    ) -> RepositoryOutcome:
+        """The GitHub half of the same authority.
+
+        Separate from the git argv path because these are API calls rather than
+        commands, and part of the same capability because proposing, revising
+        and answering a review are parts of one job. Splitting them out would
+        be the narrow model again, one capability per verb.
+
+        The self-preservation invariant does not reach here: nothing this
+        boundary offers can destroy the canonical repository.
+        """
+
+        def outcome(succeeded: bool, **values: Any) -> RepositoryOutcome:
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=succeeded,
+                values=values,
+            )
+
+        if self._pull_requests is None:
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=False,
+                failure_code="repository_unavailable",
+                refusal_reason="GitHub is not configured",
+            )
+
+        def number() -> int:
+            value = arguments.get("pull_request_number")
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise RepositoryAuthorityError(
+                    "arguments_unusable", "pull_request_number must be positive"
+                )
+            return value
+
+        try:
+            match operation:
+                case Operation.FIND_PULL_REQUEST:
+                    found = self._pull_requests.find(_ref(arguments, "branch"))
+                    if found is None:
+                        return outcome(True, found=False)
+                    return outcome(True, found=True, **found.as_values())
+                case Operation.OPEN_PULL_REQUEST:
+                    opened = self._pull_requests.open(PullRequestRequest(
+                        _ref(arguments, "branch"),
+                        _text(arguments, "title"),
+                        str(arguments.get("body", "") or ""),
+                    ))
+                    return outcome(True, **opened.as_values())
+                case Operation.UPDATE_PULL_REQUEST:
+                    updated = self._pull_requests.update(
+                        number(),
+                        str(arguments.get("title", "") or ""),
+                        str(arguments.get("body", "") or ""),
+                    )
+                    return outcome(True, **updated.as_values())
+                case Operation.COMMENT_ON_PULL_REQUEST:
+                    posted = self._pull_requests.comment(
+                        number(), _text(arguments, "body")
+                    )
+                    return outcome(bool(posted), posted=bool(posted))
+                case Operation.READ_REVIEW_THREADS:
+                    threads = self._pull_requests.review_threads(number())
+                    return outcome(True, threads=threads, count=len(threads))
+                case Operation.RESOLVE_REVIEW_THREAD:
+                    resolved = self._pull_requests.resolve_review_thread(
+                        _text(arguments, "thread_id")
+                    )
+                    return outcome(bool(resolved), resolved=bool(resolved))
+        except PullRequestError as error:
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=False,
+                failure_code="operation_refused",
+                refusal_reason=error.code,
+            )
+        raise RepositoryAuthorityError("arguments_unusable", "unknown operation")
+
     # ---- the one entry point --------------------------------------------
 
     def perform(self, request: RepositoryRequest) -> RepositoryOutcome:
@@ -441,6 +569,9 @@ class RepositoryAuthority:
                 failure_code="self_preservation",
                 refusal_reason=refusal,
             )
+
+        if operation in GITHUB_OPERATIONS:
+            return self._perform_on_github(operation, arguments)
 
         command = self._argv(operation, arguments)
 

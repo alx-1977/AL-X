@@ -109,6 +109,17 @@ class Operation(str, Enum):
     PUSH = "push"
     FORCE_PUSH = "force_push"
 
+    # The pull request the work is proposed in. GitHub rather than git, but
+    # the same authority: revising a proposal, finding one, reading what a
+    # reviewer said and answering it are ordinary parts of the work, and
+    # splitting them into a second capability would be the narrow model again.
+    FIND_PULL_REQUEST = "find_pull_request"
+    OPEN_PULL_REQUEST = "open_pull_request"
+    UPDATE_PULL_REQUEST = "update_pull_request"
+    COMMENT_ON_PULL_REQUEST = "comment_on_pull_request"
+    READ_REVIEW_THREADS = "read_review_threads"
+    RESOLVE_REVIEW_THREAD = "resolve_review_thread"
+
     # Worktrees.
     ADD_WORKTREE = "add_worktree"
     REMOVE_WORKTREE = "remove_worktree"
@@ -131,6 +142,19 @@ READ_ONLY: frozenset[Operation] = frozenset({
     Operation.BRANCH_CONTAINS,
     Operation.STATUS,
     Operation.LIST_WORKTREES,
+    Operation.FIND_PULL_REQUEST,
+    Operation.READ_REVIEW_THREADS,
+})
+
+# Operations GitHub performs rather than git. They need a configured API
+# boundary; without one they are refused rather than silently absent.
+GITHUB_OPERATIONS: frozenset[Operation] = frozenset({
+    Operation.FIND_PULL_REQUEST,
+    Operation.OPEN_PULL_REQUEST,
+    Operation.UPDATE_PULL_REQUEST,
+    Operation.COMMENT_ON_PULL_REQUEST,
+    Operation.READ_REVIEW_THREADS,
+    Operation.RESOLVE_REVIEW_THREAD,
 })
 
 
@@ -360,6 +384,7 @@ def refuse_if_self_destructive(
 
 __all__ = [
     "CANONICAL_BRANCH",
+    "GITHUB_OPERATIONS",
     "CanonicalSystem",
     "Operation",
     "READ_ONLY",
