@@ -857,6 +857,62 @@ class PublicationRepositoryIdentityTests(RealRepositoryHarness):
         git(self.local, "remote", "remove", "origin")
         self.assertIsNone(self.build("alx-1977/AL-X"))
 
+
+    def test_an_unreadable_origin_withholds_rather_than_stopping_startup(
+        self,
+    ) -> None:
+        """Git failing is a publication problem, not an AL/X problem.
+
+        `build_publication_runtime` runs inside the composition root, where
+        every other failure returns None and startup continues. Reading the
+        origin runs git, and git can fail for reasons unrelated to this
+        decision — a missing binary, an unreadable checkout, a timeout. Those
+        raise `PublicationError`, and letting it escape turned "publication is
+        unavailable" into "AL/X does not start".
+        """
+        failures = (
+            OSError(2, "No such file or directory: 'git'"),
+            subprocess.SubprocessError("git died"),
+            subprocess.TimeoutExpired(cmd=["git"], timeout=120),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                def runner(*arguments, **keywords):
+                    raise failure
+
+                runtime = build_publication_runtime(
+                    True,
+                    "alx-1977/AL-X",
+                    "a-token",
+                    self.local,
+                    lambda: "call-1",
+                    publication=RepositoryPublication(self.local, runner=runner),
+                )
+                self.assertIsNone(runtime)
+
+    def test_a_failure_after_registration_is_still_the_provider_s_to_report(
+        self,
+    ) -> None:
+        """Withholding at composition must not mute failures at publish time.
+
+        The capability is absent when the origin cannot be read; it is not
+        made to swallow errors once it exists.
+        """
+        self.set_origin("https://github.com/alx-1977/AL-X.git")
+        runtime = self.build("alx-1977/AL-X")
+        self.assertIsNotNone(runtime)
+
+        sha = self.branch("fix/thing")
+
+        def runner(*arguments, **keywords):
+            raise OSError(2, "git vanished")
+
+        with self.assertRaises(PublicationError) as caught:
+            RepositoryPublication(self.local, runner=runner).publish(
+                PublicationRequest("fix/thing", sha)
+            )
+        self.assertEqual(caught.exception.code, "publication_unavailable")
+
     def test_a_mismatch_publishes_nothing_and_opens_nothing(self) -> None:
         """Withheld means withheld: no push, no pull request, no capability.
 

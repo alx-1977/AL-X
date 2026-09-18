@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
+from alx.contracts.publication import PublicationError
 from alx.providers.github_pull_request import GitHubPullRequests
 from alx.providers.repository_publication import RepositoryPublication
 from alx.safety import AuthorityPolicy
@@ -80,7 +81,20 @@ def build_publication_runtime(
     # misconfiguration, and the honest response is to withhold the capability
     # rather than to offer one that cannot complete. An origin that cannot be
     # identified is refused for the same reason — it is not proof of a match.
-    identity = branches.origin_identity()
+    # Reading the origin runs git, which can fail for reasons that have
+    # nothing to do with this decision: a missing binary, an unreadable
+    # checkout, a timeout. Those are answered the way every other failure here
+    # is — the capability is withheld and AL/X starts. Letting it escape made
+    # an unreadable origin stop the whole composition root, so a publication
+    # problem became no AL/X at all.
+    try:
+        identity = branches.origin_identity()
+    except PublicationError as error:
+        LOGGER.warning(
+            "Publication origin could not be read (%s): no publish capability",
+            error.code,
+        )
+        return None
     expected = repository.strip().lower()
     if not identity:
         LOGGER.warning(
