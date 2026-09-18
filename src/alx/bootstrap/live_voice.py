@@ -930,6 +930,11 @@ async def run(repository_root: Path) -> None:
         # opportunity here instead left a ledger row nothing consumed, so the
         # Core was never woken.
         lambda task: None,
+        # The reviewer being watched, reused rather than rebuilt. Without it
+        # the watcher is never composed, and a review AL/X successfully
+        # requests is recorded nowhere, polled by nothing, and never handed
+        # back to her: the request succeeds and the result never arrives.
+        review_provider=review_runtime.provider if review_runtime else None,
     )
 
     task_holder[0] = task_runtime

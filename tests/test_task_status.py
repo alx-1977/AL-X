@@ -23,6 +23,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+from alx.bootstrap.review import build_review_runtime  # noqa: E402
 from alx.bootstrap.tasks import build_task_runtime  # noqa: E402
 from alx.continuity.tasks import SQLiteTaskStore, TaskStoreCorrupt  # noqa: E402
 from alx.contracts.cognition import CognitionOrigin  # noqa: E402
@@ -1249,3 +1250,119 @@ class CompletionReachesCoreTest(unittest.TestCase):
         self.store.record(_task())
         source = CompletedWorkSource(self.store, self.Ledger(), enabled=True)
         self.assertEqual(source.due_opportunities(), ())
+
+
+class ProductionWatcherWiringTests(unittest.TestCase):
+    """The watcher must actually exist when a review is requested.
+
+    `build_task_runtime` composes its observer from the configured reviewer,
+    and returns None when there is none. The production call site left that
+    argument unset, so the runtime was never built: `_watch_review` found no
+    runtime, returned, and a review AL/X had successfully asked for was
+    recorded nowhere, polled by nothing, and never handed back to her. The
+    request succeeded and the result never arrived.
+
+    Every other test here passes `observers` explicitly, which is what let the
+    gap survive — that argument bypasses the branch that was broken. So this
+    composes the two runtimes the way production does, with no observers and a
+    configured reviewer, and asserts against the object the production call
+    site actually produces.
+    """
+
+    def build(self, review_provider) -> object:
+        """`build_task_runtime` exactly as the production call site invokes it."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return build_task_runtime(
+            Path(directory.name),
+            "alx-1977/AL-X",
+            "a-token",
+            lambda conversation_id, values: None,
+            lambda task: None,
+            review_provider=review_provider,
+        )
+
+    def review_runtime(self):
+        """The production review runtime, composed as live_voice composes it."""
+        runtime = build_review_runtime(
+            True,
+            "alx-1977/AL-X",
+            "a-token",
+            lambda: "call-1",
+            reviewer=REVIEWER,
+        )
+        self.assertIsNotNone(runtime)
+        return runtime
+
+    def test_the_production_review_provider_builds_a_watcher(self) -> None:
+        runtime = self.build(self.review_runtime().provider)
+        self.assertIsNotNone(runtime)
+
+    def test_without_the_wiring_nothing_watches(self) -> None:
+        """The same call with the argument omitted, which is what shipped.
+
+        This is what makes the test above meaningful: it fails for the reason
+        claimed rather than passing for some unrelated one.
+        """
+        self.assertIsNone(self.build(None))
+
+    def test_a_requested_review_is_recorded_through_that_runtime(self) -> None:
+        """The whole point: the request must become something watched."""
+        runtime = self.build(self.review_runtime().provider)
+        self.assertIsNotNone(runtime)
+        runtime.poller.record(_task())
+        outstanding = runtime.store.outstanding()
+        self.assertEqual(len(outstanding), 1)
+        self.assertEqual(outstanding[0].service, REVIEWER)
+        self.assertIs(outstanding[0].state, TaskState.REQUESTED)
+
+    def test_the_watcher_is_composed_for_the_configured_reviewer(self) -> None:
+        """The watcher and the recorded task must name the same reviewer.
+
+        A runtime watching some other service would leave the review
+        outstanding just as surely as no runtime at all.
+        """
+        runtime = self.build(self.review_runtime().provider)
+        observer = runtime.poller._observers.get(REVIEWER)
+        self.assertIsNotNone(observer)
+        self.assertEqual(observer.service, REVIEWER)
+
+    def test_the_production_call_site_passes_the_configured_reviewer(self) -> None:
+        """The composition root itself, not a reconstruction of it.
+
+        `build_task_runtime` is called once in production, inside `run()` — a
+        composition root that opens databases and sockets and cannot be invoked
+        from a test. The tests above prove what that call *produces* for each
+        argument, but they build the runtime themselves, so deleting the
+        argument from the real call site leaves them all passing. That is
+        exactly how the defect shipped.
+
+        So the call site is read where it lives. This fails if the production
+        wiring is removed, which is the invariant being protected.
+        """
+        tree = ast.parse(
+            (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
+        )
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "build_task_runtime"
+        ]
+        self.assertEqual(len(calls), 1, "one production call site is expected")
+        keywords = {keyword.arg for keyword in calls[0].keywords}
+        self.assertIn(
+            "review_provider",
+            keywords,
+            "without this the watcher is never composed and a requested "
+            "review is never handed back",
+        )
+        # The reviewer already composed for requesting, not a second one built
+        # here: two would be two places that must agree on who is configured.
+        passed = next(
+            keyword.value
+            for keyword in calls[0].keywords
+            if keyword.arg == "review_provider"
+        )
+        self.assertIn("review_runtime", ast.unparse(passed))

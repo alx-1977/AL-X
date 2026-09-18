@@ -247,6 +247,13 @@ class PublicationTests(RealRepositoryHarness):
         # Both sides named, so the destination cannot come from configuration
         # and cannot be a deletion, which is an empty source.
         self.assertIn("refs/heads/fix/thing:refs/heads/fix/thing", pushes[0])
+        # What the remote holds, it keeps. The argv is enumerated rather than
+        # passed through, so neither option has a shape it could take — but a
+        # successful push is where a force would actually do its damage, and
+        # this is the test that watches one happen.
+        self.assertNotIn("--force", pushes[0])
+        self.assertNotIn("-f", pushes[0])
+        self.assertNotIn("--force-with-lease", pushes[0])
 
 
 class FakeGitHub:
