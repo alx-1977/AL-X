@@ -506,8 +506,6 @@ class EveryOutboundCapabilityDeclaresItselfTests(unittest.TestCase):
                 )
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
 
 
 class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
@@ -691,3 +689,7 @@ class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.list_goals(), ())
         self.assertEqual(self.dispatched, [])
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

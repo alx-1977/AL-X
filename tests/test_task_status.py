@@ -931,8 +931,6 @@ class OneProducerForEveryOccasionTest(unittest.TestCase):
         self.assertFalse(combined.claim(stray))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class StoreUpgradeTest(unittest.TestCase):
@@ -1441,3 +1439,7 @@ class ProductionWatcherWiringTests(unittest.TestCase):
         passed = ast.unparse(calls[0].args[-1])
         self.assertIn("_reviewer_name", passed)
         self.assertNotIn("review_configuration.reviewer", passed)
+
+
+if __name__ == "__main__":
+    unittest.main()

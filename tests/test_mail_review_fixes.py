@@ -543,8 +543,6 @@ class TrashAuthorisationTests(unittest.TestCase):
         self.assertIn(SEEN, decisions)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class SpokenResponseGuidanceTests(unittest.TestCase):
@@ -909,3 +907,7 @@ class TransientRetentionGapTests(unittest.TestCase):
         mail_tools = (Path(__file__).resolve().parents[1]
                       / "src/alx/tools/mail.py").read_text("utf-8")
         self.assertIn("durable_values=durable", mail_tools)
+
+
+if __name__ == "__main__":
+    unittest.main()

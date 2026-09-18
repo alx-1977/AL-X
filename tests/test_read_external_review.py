@@ -92,8 +92,15 @@ class FakeGitHub:
     of a quietly different result.
     """
 
-    def __init__(self, reviews: list, comments: dict[int, list] | None = None) -> None:
+    def __init__(
+        self,
+        reviews: list,
+        comments: dict[int, list] | None = None,
+        issue_comments: list | None = None,
+    ) -> None:
         self._reviews = reviews
+        # The issue thread, where reviewers publish their summary prose.
+        self.issue_comments = list(issue_comments or [])
         # Inline comments, flattened: the provider reads a pull request's
         # comments directly rather than per review.
         self._comments = [
@@ -109,10 +116,12 @@ class FakeGitHub:
         first = "page=1" in url
         if base.endswith("/reviews"):
             return _Response(self._reviews if first else [])
+        if "/issues/" in base and base.endswith("/comments"):
+            return _Response(self.issue_comments if first else [])
         if base.endswith("/pulls/") or "/pulls/" in base and base.endswith("/comments"):
             return _Response(self._comments if first else [])
-        if base.endswith("/issues/") or base.endswith("/comments"):
-            return _Response([])
+        if "/issues/" in base and base.endswith("/comments"):
+            return _Response(self.issue_comments if first else [])
         return _Response([])
 
 
@@ -564,8 +573,6 @@ class AuthorityTests(unittest.TestCase):
             self.assertNotIn("merge", permission)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class InlineCommentReviewBindingTests(ProviderTestCase):
@@ -800,6 +807,84 @@ class AuthoritativeHeadBindingTests(ProviderTestCase):
         # The findings linked to it travel too, rather than being stranded.
         self.assertEqual([item.body for item in content.comments], ["a finding"])
 
+
+    def test_an_empty_bodied_bound_review_does_not_hide_the_summary(self) -> None:
+        """A container review must not displace the prose beside it.
+
+        A reviewer may publish its summary as an issue comment and submit the
+        review object as the container for inline findings, leaving that
+        object's body empty. Admitting bound reviews as summaries — which is
+        what lets the authoritative binding outrank prose — made the empty one
+        eligible, and being newer it won. `ReviewContent` refuses to be
+        available carrying nothing readable, so a completed review surfaced as
+        `review_unavailable` and the watcher reported STATUS_UNKNOWN.
+        """
+        summary = {
+            "id": 9,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": f"Actionable comments posted: 1. Reviewed up to {self.B}.",
+            "created_at": "2026-09-18T09:00:00Z",
+        }
+        container = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": self.B,
+            # Newer than the summary, which is what made it win.
+            "submitted_at": "2026-09-18T09:06:00Z",
+        }
+        finding = {
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.B,
+            "pull_request_review_id": self.R,
+        }
+        self.github = FakeGitHub(
+            [container], {self.R: [finding]}, issue_comments=[summary]
+        )
+        original = github_review.httpx.request
+        github_review.httpx.request = self.github.request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        content = GitHubReviewProvider(
+            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+        ).read(ReviewContentRequest(21, self.B))
+
+        self.assertTrue(content.available)
+        self.assertIn("Actionable comments posted", content.summary)
+        # The findings the container carried are still returned.
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
+    def test_a_bound_review_with_findings_but_no_prose_is_still_available(
+        self,
+    ) -> None:
+        """Findings are readable content: silence is not the only reading."""
+        container = {
+            "id": self.R,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "",
+            "state": "COMMENTED",
+            "commit_id": self.B,
+            "submitted_at": "2026-09-18T09:06:00Z",
+        }
+        content = self.provider([container], {self.R: [{
+            "id": 1,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "a finding",
+            "path": "x.py",
+            "line": 1,
+            "commit_id": self.B,
+            "original_commit_id": self.B,
+            "pull_request_review_id": self.R,
+        }]}).read(ReviewContentRequest(21, self.B))
+
+        self.assertTrue(content.available)
+        self.assertEqual([item.body for item in content.comments], ["a finding"])
+
     def test_a_review_bound_to_another_head_is_refused_whatever_it_says(
         self,
     ) -> None:
@@ -828,3 +913,7 @@ class AuthoritativeHeadBindingTests(ProviderTestCase):
         # at this head is evidence. But no finding is imported from a review
         # object submitted against a different commit.
         self.assertEqual(content.comments, ())
+
+
+if __name__ == "__main__":
+    unittest.main()

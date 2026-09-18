@@ -343,7 +343,24 @@ class GitHubReviewProvider:
                 unavailable_reason=NO_REVIEW_FOR_REVISION,
             )
 
-        latest = max(summaries, key=self._when)
+        # The newest summary that actually says something, and only if none
+        # does, the newest of them.
+        #
+        # A review object can be bound to this head and carry an empty body —
+        # a reviewer that publishes its prose as an issue comment and submits
+        # the review itself as the container for inline findings. Admitting
+        # bound reviews as summaries, which is what lets an authoritative
+        # binding outrank prose, made such a review eligible; being the newest,
+        # it then displaced the readable summary beside it, and `ReviewContent`
+        # refuses to be available with nothing readable in it. A completed
+        # review would have surfaced as `review_unavailable`, which is the
+        # reading this whole path exists to prevent.
+        #
+        # Every candidate here is already bound to this revision, so preferring
+        # a readable one chooses between evidence about this head rather than
+        # reaching back to an earlier one for text.
+        readable = [item for item in summaries if item["body"].strip()]
+        latest = max(readable or summaries, key=self._when)
         # The findings this reviewer published in its review of this revision,
         # identified by the review they were submitted under rather than by
         # where GitHub currently anchors them.

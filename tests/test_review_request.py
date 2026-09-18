@@ -497,9 +497,6 @@ class ConfiguredProviderTest(unittest.TestCase):
                     )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class RequestBoundaryTests(unittest.TestCase):
     """A review that lands while the request is going out still counts.
@@ -600,3 +597,7 @@ class RequestBoundaryTests(unittest.TestCase):
             subject_reference(21, HEAD), since=outcome.requested_at
         )
         self.assertIs(observed.state, TaskState.WAITING_FOR_RESULT)
+
+
+if __name__ == "__main__":
+    unittest.main()

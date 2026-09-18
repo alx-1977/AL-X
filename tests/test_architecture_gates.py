@@ -169,8 +169,6 @@ class GovernanceGateTests(unittest.TestCase):
             self.assertTrue(any("owner-approved amendment" in item for item in violations), violations)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class AlxAuthorshipBoundaryTests(ArchitectureGateTests):
@@ -532,3 +530,7 @@ class DiagnosticsPrivacyBoundaryTests(ArchitectureGateTests):
             if "prohibited diagnostic" in violation.message
         ]
         self.assertEqual([], messages)
+
+
+if __name__ == "__main__":
+    unittest.main()
