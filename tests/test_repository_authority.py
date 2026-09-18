@@ -677,6 +677,66 @@ class PullRequestOperationTests(RealRepositoryHarness):
         )
         self.assertTrue(outcome.succeeded)
 
+
+    def test_an_unreadable_thread_response_is_not_reported_as_no_threads(
+        self,
+    ) -> None:
+        """Silence and "none" must not look the same.
+
+        An empty tuple means the pull request has no unresolved threads, and
+        branch protection can require exactly that before a merge. A response
+        that could not be read returning the same value would let "I could not
+        see the threads" be acted on as "there are none".
+        """
+        class Unreadable:
+            def review_threads(self, number):
+                from alx.contracts.github_pull_request import PullRequestError
+                raise PullRequestError("pull_request_unavailable")
+
+        authority = RepositoryAuthority(self.system, pull_requests=Unreadable())
+        outcome = authority.perform(RepositoryRequest(
+            Operation.READ_REVIEW_THREADS, {"pull_request_number": 7}
+        ))
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(outcome.failure_code, "operation_refused")
+        self.assertEqual(outcome.refusal_reason, "pull_request_unavailable")
+
+    def test_no_threads_is_still_an_answer(self) -> None:
+        class Empty:
+            def review_threads(self, number):
+                return ()
+
+        authority = RepositoryAuthority(self.system, pull_requests=Empty())
+        outcome = authority.perform(RepositoryRequest(
+            Operation.READ_REVIEW_THREADS, {"pull_request_number": 7}
+        ))
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(outcome.values["count"], 0)
+
+    def test_a_branch_the_proposal_refuses_is_an_unusable_argument(self) -> None:
+        """Stricter validation downstream must not surface as a fault.
+
+        `PullRequestRequest` refuses a protected branch, which `_ref` accepts
+        as a well-formed name. It says so with `ValueError`, and unconverted
+        that reached the broker as an executor fault rather than as the
+        declared failure.
+        """
+        for branch in ("main", "master", "HEAD"):
+            with self.subTest(branch=branch):
+                with self.assertRaises(RepositoryAuthorityError) as caught:
+                    self.authority.perform(RepositoryRequest(
+                        Operation.OPEN_PULL_REQUEST,
+                        {"branch": branch, "title": "Proposal"},
+                    ))
+                self.assertEqual(caught.exception.code, "arguments_unusable")
+
+    def test_a_pull_request_needs_a_title(self) -> None:
+        with self.assertRaises(RepositoryAuthorityError) as caught:
+            self.authority.perform(RepositoryRequest(
+                Operation.OPEN_PULL_REQUEST, {"branch": "fix/thing"},
+            ))
+        self.assertEqual(caught.exception.code, "arguments_unusable")
+
     def test_without_github_the_operations_say_so(self) -> None:
         """Configured absence is reported, not disguised as a bad argument."""
         bare = RepositoryAuthority(self.system)

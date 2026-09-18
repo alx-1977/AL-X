@@ -237,16 +237,21 @@ class GitHubPullRequests:
             "query": query,
             "variables": {"owner": owner, "name": name, "number": number},
         })
+        # An empty tuple means the pull request has no unresolved threads, and
+        # that is a fact a caller may act on — branch protection can require
+        # every thread resolved before a merge. A response that could not be
+        # read is a different thing entirely, and returning `()` for both would
+        # let "I could not see the threads" be taken as "there are none".
         if not isinstance(data, dict):
-            return ()
+            raise PullRequestError("pull_request_unavailable")
         try:
             nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-        except (KeyError, TypeError):
-            return ()
+        except (KeyError, TypeError) as error:
+            raise PullRequestError("pull_request_unavailable") from error
         # `"nodes": null` parses fine and then fails on iteration, outside the
-        # malformed-response guard above.
+        # guard above.
         if not isinstance(nodes, list):
-            return ()
+            raise PullRequestError("pull_request_unavailable")
         return tuple(item for item in nodes if isinstance(item, dict))
 
     def resolve_review_thread(self, thread_id: str) -> bool:

@@ -513,11 +513,23 @@ class RepositoryAuthority:
                         return outcome(True, found=False)
                     return outcome(True, found=True, **found.as_values())
                 case Operation.OPEN_PULL_REQUEST:
-                    opened = self._pull_requests.open(PullRequestRequest(
-                        _ref(arguments, "branch"),
-                        _text(arguments, "title"),
-                        str(arguments.get("body", "") or ""),
-                    ))
+                    # `PullRequestRequest` validates more strictly than `_ref`
+                    # does — a protected branch is a usable ref and not a
+                    # publishable one — and it says so with `ValueError`, which
+                    # is outside the handler below. Unconverted it reached the
+                    # broker as an executor fault rather than as the declared
+                    # "these arguments cannot be used".
+                    try:
+                        proposal = PullRequestRequest(
+                            _ref(arguments, "branch"),
+                            _text(arguments, "title"),
+                            str(arguments.get("body", "") or ""),
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise RepositoryAuthorityError(
+                            "arguments_unusable", str(error)
+                        ) from error
+                    opened = self._pull_requests.open(proposal)
                     return outcome(True, **opened.as_values())
                 case Operation.UPDATE_PULL_REQUEST:
                     updated = self._pull_requests.update(
