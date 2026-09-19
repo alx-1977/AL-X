@@ -26,14 +26,6 @@ from alx.tools.repository import (
     MERGE_PULL_REQUEST,
     build_repository_executors,
 )
-from alx.tools.repository_runtime import (
-    INSPECT_DEFINITION,
-    INSPECT_REPOSITORY_STATE,
-    SYNCHRONIZE_DEFINITION,
-    SYNCHRONIZE_LOCAL_MAIN,
-    build_repository_runtime_executors,
-)
-from alx.providers.repository_runtime import CanonicalRepositoryRuntime
 
 
 LOGGER = logging.getLogger(__name__)
@@ -41,8 +33,6 @@ LOGGER = logging.getLogger(__name__)
 # Merging is its own authority. Holding it follows from no other permission,
 # and no other permission follows from it.
 REPOSITORY_MERGE_PERMISSION = "repository.merge"
-REPOSITORY_INSPECT_PERMISSION = "repository.inspect"
-REPOSITORY_SYNCHRONIZE_PERMISSION = "repository.synchronize"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,36 +87,4 @@ def build_repository_runtime(
         },
         executors=build_repository_executors(merge, call_id_source),
         permissions=frozenset({REPOSITORY_MERGE_PERMISSION}),
-    )
-
-
-def build_canonical_repository_runtime(
-    enabled: bool, root: Path | None, repository_identity: str, origin_url: str,
-    timeout_seconds: int, call_id_source: Callable[[], str], provider: Any = None,
-) -> RepositoryRuntime | None:
-    """Compose the two fixed lifecycle capabilities, or leave both absent."""
-    if not enabled:
-        return None
-    if root is None:
-        return None
-    try:
-        selected = provider or CanonicalRepositoryRuntime(
-            root, repository_identity, origin_url, timeout_seconds
-        )
-    except (TypeError, ValueError):
-        LOGGER.warning("Canonical repository lifecycle is misconfigured")
-        return None
-    return RepositoryRuntime(
-        provider=selected,
-        definitions=(INSPECT_DEFINITION, SYNCHRONIZE_DEFINITION),
-        policies={
-            INSPECT_REPOSITORY_STATE: AuthorityPolicy(
-                frozenset({REPOSITORY_INSPECT_PERMISSION}), approval_required=False),
-            SYNCHRONIZE_LOCAL_MAIN: AuthorityPolicy(
-                frozenset({REPOSITORY_SYNCHRONIZE_PERMISSION}), approval_required=False),
-        },
-        executors=build_repository_runtime_executors(
-            selected.inspect, selected.synchronize, call_id_source
-        ),
-        permissions=frozenset({REPOSITORY_INSPECT_PERMISSION, REPOSITORY_SYNCHRONIZE_PERMISSION}),
     )

@@ -21,8 +21,8 @@ from alx.bootstrap.mail import (
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.coding import build_coding_runtime
-from alx.bootstrap.publication import build_publication_runtime
-from alx.bootstrap.repository import build_repository_runtime, build_canonical_repository_runtime
+from alx.bootstrap.repository import build_repository_runtime
+from alx.bootstrap.repository_authority import build_repository_authority_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
 from alx.contracts.cognition import CognitionOrigin
@@ -659,31 +659,23 @@ async def run(repository_root: Path) -> None:
         executors.update(merge_runtime.executors)
         permissions.update(merge_runtime.permissions)
 
-    # Publishing a repair so it can be reviewed. AL/X's authority, never the
-    # Coding Agent's: a job commits in its worktree and cannot push.
-    publication_runtime = build_publication_runtime(
-        merge_configuration.is_usable,
-        merge_configuration.repository,
-        merge_configuration.token,
-        repository_runtime_configuration.root
-        if repository_runtime_configuration.is_usable
-        else None,
-        lambda: current_call_id[0],
-    )
-    if publication_runtime is not None:
-        for definition in publication_runtime.definitions:
-            registry.register(definition)
-        policies.update(publication_runtime.policies)
-        executors.update(publication_runtime.executors)
-        permissions.update(publication_runtime.permissions)
-
-    repository_runtime = build_canonical_repository_runtime(
+    # AL/X's repository authority. Hers, never the Coding Agent's: a job
+    # commits in the worktree it was given and cannot reach a remote by
+    # construction, so what is published, merged, reset or deleted is decided
+    # after she has seen what the job produced.
+    #
+    # One capability carrying one enumerated operation, replacing the narrow
+    # publication and canonical-sync capabilities that preceded it. Those were
+    # each correct and each was a separate thing to ask for; the surface was
+    # the problem rather than the safety, and a capability per verb meant an
+    # ordinary git question needed a merge before she could answer it.
+    repository_runtime = build_repository_authority_runtime(
         repository_runtime_configuration.is_usable,
         repository_runtime_configuration.root,
         repository_runtime_configuration.repository_identity,
-        repository_runtime_configuration.origin_url,
         repository_runtime_configuration.timeout_seconds,
         lambda: current_call_id[0],
+        merge_configuration.token,
     )
     if repository_runtime is not None:
         for definition in repository_runtime.definitions:

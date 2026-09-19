@@ -24,7 +24,7 @@ import re
 import httpx
 
 from alx.providers.github_http import unavailable
-from alx.contracts.publication import (
+from alx.contracts.github_pull_request import (
     PullRequestError,
     PullRequestOutcome,
     PullRequestRequest,
@@ -43,6 +43,11 @@ _SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # The whole request, not one socket operation.
 TIMEOUT_SECONDS = 30.0
+
+# Pages of review threads this will walk. A hundred per page, so this is ten
+# thousand threads — far past anything real, and a bound rather than a loop
+# that trusts the server to end it.
+MAX_THREAD_PAGES = 100
 
 
 class GitHubPullRequests:
@@ -140,7 +145,18 @@ class GitHubPullRequests:
         head = data.get("head")
         base = data.get("base")
         state = data.get("state")
-        if not isinstance(number, int) or not isinstance(head, dict):
+        # `bool` is a subclass of `int`, so `True` passes an isinstance check
+        # and then raises `TypeError` from `PullRequestOutcome` — past the
+        # handler, reaching the broker as an executor fault rather than the
+        # declared failure. A non-positive number does the same with
+        # `ValueError`. The same gap was closed for a blank `head.ref`, and
+        # `update` and `find` now reach this too.
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number <= 0
+            or not isinstance(head, dict)
+        ):
             raise PullRequestError("pull_request_unavailable")
         head_sha = head.get("sha")
         if not valid_sha(head_sha):
@@ -173,6 +189,172 @@ class GitHubPullRequests:
             },
         )
         return self._outcome(created, request.branch, created=True)
+
+    # ---- the rest of ordinary pull-request work -------------------------
+
+    def update(self, number: int, title: str = "", body: str = "") -> PullRequestOutcome:
+        """Change the title or body of a pull request that is already open.
+
+        Opening one is not the end of the work: a proposal is revised as the
+        work is, and rewriting the description used to mean asking Friedl to
+        do it. Nothing here touches the head, the base or the state — those are
+        decided by pushing and by merging, not by editing text.
+        """
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise PullRequestError("pull_request_refused")
+        payload: dict[str, str] = {}
+        if title.strip():
+            payload["title"] = title.strip()
+        if body.strip():
+            payload["body"] = body
+        if not payload:
+            raise PullRequestError("pull_request_refused")
+        data = self._request(
+            "PATCH", f"/repos/{self._repository}/pulls/{number}", payload
+        )
+        if not isinstance(data, dict):
+            raise PullRequestError("pull_request_unavailable")
+        head = data.get("head")
+        branch = head.get("ref") if isinstance(head, dict) else None
+        # A blank branch would reach `PullRequestOutcome` and raise ValueError
+        # rather than the declared failure, so an incomplete answer is reported
+        # as one.
+        if not isinstance(branch, str) or not branch.strip():
+            raise PullRequestError("pull_request_unavailable")
+        return self._outcome(data, branch, created=False)
+
+    def find(self, branch: str) -> PullRequestOutcome | None:
+        """The open pull request for this branch, or None.
+
+        The same head-and-base identity `open` uses, exposed because knowing
+        whether a proposal already exists is an ordinary question and used to
+        require opening one to find out.
+        """
+        existing = self._existing(branch)
+        if existing is None:
+            return None
+        return self._outcome(existing, branch, created=False)
+
+    def review_threads(self, number: int) -> tuple[dict, ...]:
+        """Unresolved review threads on this pull request.
+
+        Read through the GraphQL endpoint because REST does not expose thread
+        resolution state at all. What comes back is the reviewer's, so it is
+        returned as data for AL/X to read rather than judged here.
+        """
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
+            "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+            "reviewThreads(first:100,after:$after){"
+            "pageInfo{hasNextPage endCursor}"
+            "nodes{id isResolved isOutdated path line "
+            "comments(first:1){nodes{author{login} body}}}}}}}"
+        )
+        owner, _, name = self._repository.partition("/")
+        threads: list[dict] = []
+        cursor: str | None = None
+        # Every page, not the first hundred. A pull request with more threads
+        # than one page would otherwise report the unresolved ones it happened
+        # to see, and "none remain" from a truncated read is the answer AL/X
+        # acts on before merging.
+        for _ in range(MAX_THREAD_PAGES):
+            data = self._request("POST", "/graphql", {
+                "query": query,
+                "variables": {
+                    "owner": owner, "name": name,
+                    "number": number, "after": cursor,
+                },
+            })
+            # An empty tuple means the pull request has no unresolved threads,
+            # and that is a fact a caller may act on. A response that could not
+            # be read is a different thing entirely, and returning `()` for both
+            # would let "I could not see the threads" be taken as "there are
+            # none".
+            if not isinstance(data, dict):
+                raise PullRequestError("pull_request_unavailable")
+            try:
+                page = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+                nodes = page["nodes"]
+            except (KeyError, TypeError) as error:
+                raise PullRequestError("pull_request_unavailable") from error
+            # `"nodes": null` parses fine and then fails on iteration, outside
+            # the guard above.
+            if not isinstance(nodes, list):
+                raise PullRequestError("pull_request_unavailable")
+            # Unresolved threads carrying the identity needed to resolve them.
+            # A node without an `id` cannot be acted on, and a resolved one has
+            # already been dealt with — counting either would make "threads
+            # remain" true for a pull request that is fully addressed.
+            #
+            # A node whose `isResolved` cannot be read is neither. Dropping it
+            # quietly would subtract from the count, and the count is what says
+            # whether anything is outstanding before a merge — so an unreadable
+            # node would make a pull request look more finished than it is.
+            # The same reading as an unreadable `nodes` or `pageInfo`: not
+            # knowing is reported, never rendered as nothing.
+            for item in nodes:
+                if not isinstance(item, dict):
+                    raise PullRequestError("pull_request_unavailable")
+                identity = item.get("id")
+                if not isinstance(identity, str) or not identity.strip():
+                    continue
+                resolved = item.get("isResolved")
+                if not isinstance(resolved, bool):
+                    raise PullRequestError("pull_request_unavailable")
+                if not resolved:
+                    threads.append(item)
+            info = page.get("pageInfo")
+            # A missing or unreadable `pageInfo` is not "there are no more
+            # pages" — it is not knowing, and treating it as the end returns a
+            # possibly short list as a complete answer. That is exactly the
+            # undercount this walk exists to prevent, so it is reported the
+            # same way an unreadable `nodes` is.
+            if not isinstance(info, dict):
+                raise PullRequestError("pull_request_unavailable")
+            if not info.get("hasNextPage"):
+                return tuple(threads)
+            cursor = info.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise PullRequestError("pull_request_unavailable")
+        # More pages than the cap allows. Returning what was read would be the
+        # truncation this exists to prevent, so it is reported as unreadable.
+        raise PullRequestError("pull_request_unavailable")
+
+    def resolve_review_thread(self, thread_id: str) -> bool:
+        """Mark one review thread resolved.
+
+        Branch protection can require every thread resolved before a merge, so
+        without this a pull request AL/X has genuinely addressed cannot be
+        merged by her at all. Resolving is a statement that she has dealt with
+        the comment; what counts as dealing with it is her judgement.
+        """
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            raise PullRequestError("pull_request_refused")
+        data = self._request("POST", "/graphql", {
+            "query": (
+                "mutation($id:ID!){resolveReviewThread(input:{threadId:$id})"
+                "{thread{isResolved}}}"
+            ),
+            "variables": {"id": thread_id.strip()},
+        })
+        if not isinstance(data, dict):
+            return False
+        try:
+            return bool(data["data"]["resolveReviewThread"]["thread"]["isResolved"])
+        except (KeyError, TypeError):
+            return False
+
+    def comment(self, number: int, body: str) -> bool:
+        """Leave one comment on the pull request thread."""
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise PullRequestError("pull_request_refused")
+        if not body.strip():
+            raise PullRequestError("pull_request_refused")
+        data = self._request(
+            "POST", f"/repos/{self._repository}/issues/{number}/comments",
+            {"body": body},
+        )
+        return isinstance(data, dict)
 
 
 __all__ = ["API_ROOT", "BASE", "GitHubPullRequests"]
