@@ -163,6 +163,43 @@ class SQLiteTaskStore:
                 database.close()
         return self._valid_tasks(rows)
 
+    def verdict_already_consumed(
+        self, service: str, subject_reference: str, before: str
+    ) -> bool:
+        """Whether an earlier task already took a result for this exact subject.
+
+        Publication time alone cannot say whether a review is fresh. A reviewer
+        that reviews a new pull request unasked publishes before the request
+        that follows it, so a verdict older than its own request may simply be
+        one nobody has read yet. What distinguishes that from a stale answer is
+        whether a previous task already consumed it.
+
+        The subject carries the revision, so this asks about one pull request at
+        one head. `before` excludes the asking task itself and anything started
+        after it, because a later task cannot have consumed what this one is
+        about to.
+        """
+        with self._lock:
+            database = self._connect()
+            try:
+                row = database.execute(
+                    """
+                    SELECT 1
+                    FROM external_tasks
+                    WHERE service = ?
+                      AND subject_reference = ?
+                      AND state = ?
+                      AND requested_at < ?
+                    LIMIT 1
+                    """,
+                    (service, subject_reference, TaskState.COMPLETED.value, before),
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise TaskStoreCorrupt(str(error)) from error
+            finally:
+                database.close()
+        return row is not None
+
     def mark_handed_over(self, task_id: str) -> None:
         """Record that the Core has been given this completion."""
         with self._lock:

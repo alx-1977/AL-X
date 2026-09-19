@@ -17,6 +17,7 @@ D-012 permits. No finding text passes through here, because none reaches here.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import replace
@@ -26,6 +27,18 @@ from typing import Any
 from alx.contracts.task import ExternalTask, TaskState
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _accepts_consumption(observer: Any) -> bool:
+    """Whether this observer takes the consumption fact.
+
+    Only the review observer distinguishes a verdict nobody has read from one
+    already delivered; another service's observer has no such notion.
+    """
+    try:
+        return "already_consumed" in inspect.signature(observer.observe).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
 
 
 class TaskPoller:
@@ -109,7 +122,39 @@ class TaskPoller:
             )
             return
 
-        observation = observer.observe(task.subject_reference, task.requested_at)
+        # Whether an earlier task for this same subject and head already took a
+        # verdict. Publication time cannot tell a stale answer from one nobody
+        # has read: a reviewer that reviews a new pull request unasked
+        # publishes before the request that follows it. The store knows which
+        # it is, and the observer reads review evidence rather than its own
+        # history, so the fact is supplied here.
+        try:
+            already_consumed = self._store.verdict_already_consumed(
+                task.service,
+                task.subject_reference,
+                task.requested_at.isoformat(),
+            )
+        except Exception:  # noqa: BLE001 - the store is injected; any failure reads the same
+            # Unreadable history is not permission to reuse a verdict. The
+            # stricter reading holds until the store can answer, so a broken
+            # store delays a completion rather than inventing one.
+            LOGGER.warning("Task history unreadable: treating verdict as consumed")
+            already_consumed = True
+        # Passed only to an observer that declares it. An observer for another
+        # service has no notion of a consumed verdict, and the poller must not
+        # require every one of them to carry the argument. Asked of the
+        # signature rather than by catching TypeError, which would also swallow
+        # a genuine argument fault raised inside the observer itself.
+        if _accepts_consumption(observer):
+            observation = observer.observe(
+                task.subject_reference,
+                task.requested_at,
+                already_consumed=already_consumed,
+            )
+        else:
+            observation = observer.observe(
+                task.subject_reference, task.requested_at
+            )
         if observation.state in (TaskState.COMPLETED, TaskState.FAILED):
             resolved_subject = observation.subject_reference or task.subject_reference
             settled = replace(
