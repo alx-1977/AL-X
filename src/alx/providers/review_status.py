@@ -11,9 +11,17 @@ It reuses the same provider that reads reviews, so the account matching, the
 head binding and the notion of "available" are one implementation rather than
 two that have to agree. Watching a different reviewer is configuration.
 
-Completion is also bound in time. A review published before the request was
-made is the answer to the previous request, and letting it complete the new one
-reports a review as finished the moment it is asked for.
+Completion is also bound in time, but time alone was the wrong test. A review
+published before the request was made is usually the answer to the previous
+request, and letting it complete the new one reports a review as finished the
+moment it is asked for. It is not always that, though: a reviewer that reviews
+a new pull request unasked publishes before the request that follows it, and
+that verdict is about this revision and has been read by nobody. Waiting for a
+second one leaves the task stuck on a revision already reviewed.
+
+What separates the two is not when the verdict arrived but whether anything has
+already taken it. So the caller may supply that fact, and an older verdict for
+this exact revision completes the task when no earlier task consumed it.
 
 Nothing here reads the review's meaning. It answers whether there is something
 to read, and AL/X reads it.
@@ -52,7 +60,19 @@ class ReviewStatusObserver:
         """The reviewer being watched, as the task store records it."""
         return self._provider.reviewer
 
-    def observe(self, subject: str, since: datetime | None = None) -> TaskObservation:
+    def observe(
+        self,
+        subject: str,
+        since: datetime | None = None,
+        already_consumed: bool = False,
+    ) -> TaskObservation:
+        """Whether a readable verdict exists for this exact revision.
+
+        `already_consumed` says an earlier task for this same subject and head
+        already took a verdict. The caller knows that — it holds the durable
+        task history — and this stays a reader of review evidence rather than
+        of its own past.
+        """
         now = self._now()
         match = _SUBJECT.match(subject)
         if match is None:
@@ -75,14 +95,20 @@ class ReviewStatusObserver:
             return TaskObservation(TaskState.STATUS_UNKNOWN, now)
         if not content.available:
             return TaskObservation(TaskState.WAITING_FOR_RESULT, now)
-        if since is not None and content.submitted_at is not None:
-            # A review published before this request was made answers the
-            # previous one. Asking again for an unchanged revision is a new
-            # occasion, and without this the old answer completes the new
-            # request the moment it is made — a review reported as done that
-            # never ran.
-            if content.submitted_at <= since:
-                return TaskObservation(TaskState.WAITING_FOR_RESULT, now)
+        # Available means the reader bound this verdict to the exact revision
+        # asked about: the reviewer's prose names the forty-character sha, or
+        # it is the review object GitHub records that commit against. Nothing
+        # else becomes available.
+        if (
+            already_consumed
+            and since is not None
+            and content.submitted_at is not None
+            and content.submitted_at <= since
+        ):
+            # An earlier task already took this verdict, so asking again is a
+            # request for a second look at an unchanged revision. Handing back
+            # what was already delivered would report a review that never ran.
+            return TaskObservation(TaskState.WAITING_FOR_RESULT, now)
         return TaskObservation(TaskState.COMPLETED, now)
 
 

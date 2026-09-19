@@ -680,6 +680,10 @@ class ReviewFindingRegressions(unittest.TestCase):
 
         Without this the previous answer completes the new request the moment
         it is made, and the terminal reports a review that never ran.
+
+        What makes it the previous answer is that something already took it:
+        an earlier task for this same subject and head completed on it. The
+        caller supplies that fact, because it holds the durable history.
         """
         asked = datetime.now(UTC)
         observer = self._observer(
@@ -692,7 +696,9 @@ class ReviewFindingRegressions(unittest.TestCase):
             }],
         )
         self.assertIs(
-            observer.observe(subject_reference(21, HEAD), asked).state,
+            observer.observe(
+                subject_reference(21, HEAD), asked, already_consumed=True
+            ).state,
             TaskState.WAITING_FOR_RESULT,
         )
 
@@ -1439,6 +1445,241 @@ class ProductionWatcherWiringTests(unittest.TestCase):
         passed = ast.unparse(calls[0].args[-1])
         self.assertIn("_reviewer_name", passed)
         self.assertNotIn("review_configuration.reviewer", passed)
+
+
+class ConsumedVerdictTests(unittest.TestCase):
+    """Freshness is whether a verdict has been read, not when it arrived.
+
+    A reviewer that reviews a new pull request unasked publishes before the
+    request that follows it. Judging staleness by publication time alone
+    discarded that verdict, and the durable task waited for a second one that
+    would never come — on a revision already reviewed.
+
+    What separates it from a genuinely stale answer is whether anything already
+    took it. These exercise that distinction through the real store, the real
+    poller and the real observer.
+    """
+
+    HEAD = "a" * 40
+    OTHER = "b" * 40
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.sqlite3"
+        self.store = SQLiteTaskStore(self.path)
+
+    def observer(self, summaries, comments=()):
+        """The production observer over the production provider."""
+        class Response:
+            def __init__(self, payload) -> None:
+                self.status_code = 200
+                self.headers: dict = {}
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def request(method, url, **keywords):
+            if method != "GET":
+                raise AssertionError("the observer must not write")
+            base = url.split("?")[0]
+            first = "page=1" in url
+            if base.endswith("/reviews"):
+                return Response(list(summaries) if first else [])
+            if base.endswith("/issues/51/comments"):
+                return Response(list(comments) if first else [])
+            if base.endswith("/comments"):
+                return Response([])
+            return Response({"head": {"sha": self.HEAD}})
+
+        original = github_review.httpx.request
+        github_review.httpx.request = request
+        self.addCleanup(setattr, github_review.httpx, "request", original)
+        return ReviewStatusObserver(
+            GitHubReviewProvider(
+                "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            )
+        )
+
+    def summary(self, head: str, when: str, body: str = "Reviewed") -> dict:
+        return {
+            "id": 5,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": f"{body} up to {head}.",
+            "submitted_at": when,
+            "commit_id": head,
+            "state": "COMMENTED",
+        }
+
+    def record(self, task_id: str, state: TaskState, requested: str,
+               head: str) -> None:
+        self.store.record(ExternalTask(
+            task_id=task_id,
+            kind="external_review",
+            service=REVIEWER,
+            subject_reference=subject_reference(51, head),
+            state=state,
+            requested_at=datetime.fromisoformat(requested),
+            conversation_id="conversation-1",
+            completed_at=(
+                datetime.fromisoformat(requested) + timedelta(minutes=1)
+                if state is TaskState.COMPLETED else None
+            ),
+        ))
+
+    # ---- the cases -------------------------------------------------------
+
+    def test_an_unconsumed_earlier_verdict_completes_the_task(self) -> None:
+        asked = datetime(2026, 9, 19, 14, 7, 57, tzinfo=UTC)
+        observer = self.observer(
+            [self.summary(self.HEAD, "2026-09-19T14:05:38Z")]
+        )
+        self.assertIs(
+            observer.observe(
+                subject_reference(51, self.HEAD), asked, already_consumed=False
+            ).state,
+            TaskState.COMPLETED,
+        )
+
+    def test_the_pull_request_51_ordering(self) -> None:
+        """The real timestamps: auto-review 140 seconds before the request."""
+        verdict = "2026-09-19T14:05:38Z"
+        asked = datetime(2026, 9, 19, 14, 7, 57, 887897, tzinfo=UTC)
+        self.assertLess(datetime.fromisoformat(verdict.replace("Z", "+00:00")), asked)
+        observer = self.observer([self.summary(self.HEAD, verdict)])
+        consumed = self.store.verdict_already_consumed(
+            REVIEWER, subject_reference(51, self.HEAD), asked.isoformat()
+        )
+        self.assertFalse(consumed, "nothing had taken this verdict")
+        self.assertIs(
+            observer.observe(
+                subject_reference(51, self.HEAD), asked,
+                already_consumed=consumed,
+            ).state,
+            TaskState.COMPLETED,
+        )
+
+    def test_an_unconsumed_earlier_verdict_with_findings_completes(self) -> None:
+        asked = datetime(2026, 9, 19, 14, 7, 57, tzinfo=UTC)
+        observer = self.observer([
+            self.summary(self.HEAD, "2026-09-19T14:05:38Z",
+                         body="Actionable comments posted: 2. Reviewed"),
+        ])
+        self.assertIs(
+            observer.observe(
+                subject_reference(51, self.HEAD), asked, already_consumed=False
+            ).state,
+            TaskState.COMPLETED,
+        )
+
+    def test_a_verdict_already_consumed_does_not_complete_a_new_request(
+        self,
+    ) -> None:
+        """The protection: an already-delivered answer is not a new review."""
+        asked = datetime(2026, 9, 19, 15, 0, tzinfo=UTC)
+        observer = self.observer(
+            [self.summary(self.HEAD, "2026-09-19T14:05:38Z")]
+        )
+        self.assertIs(
+            observer.observe(
+                subject_reference(51, self.HEAD), asked, already_consumed=True
+            ).state,
+            TaskState.WAITING_FOR_RESULT,
+        )
+
+    def test_an_older_verdict_for_another_head_never_completes(self) -> None:
+        asked = datetime(2026, 9, 19, 14, 7, 57, tzinfo=UTC)
+        observer = self.observer(
+            [self.summary(self.OTHER, "2026-09-19T14:05:38Z")]
+        )
+        self.assertIs(
+            observer.observe(
+                subject_reference(51, self.HEAD), asked, already_consumed=False
+            ).state,
+            TaskState.WAITING_FOR_RESULT,
+        )
+
+    def test_an_unbound_older_verdict_never_completes(self) -> None:
+        """A summary naming no revision binds to nothing."""
+        asked = datetime(2026, 9, 19, 14, 7, 57, tzinfo=UTC)
+        observer = self.observer([{
+            "id": 5,
+            "user": {"login": REVIEWER_LOGIN},
+            "body": "Looks fine to me.",
+            "submitted_at": "2026-09-19T14:05:38Z",
+        }])
+        self.assertIs(
+            observer.observe(
+                subject_reference(51, self.HEAD), asked, already_consumed=False
+            ).state,
+            TaskState.WAITING_FOR_RESULT,
+        )
+
+    def test_a_verdict_after_the_request_completes_as_before(self) -> None:
+        asked = datetime(2026, 9, 19, 14, 0, tzinfo=UTC)
+        observer = self.observer(
+            [self.summary(self.HEAD, "2026-09-19T14:05:38Z")]
+        )
+        for consumed in (False, True):
+            with self.subTest(already_consumed=consumed):
+                self.assertIs(
+                    observer.observe(
+                        subject_reference(51, self.HEAD), asked,
+                        already_consumed=consumed,
+                    ).state,
+                    TaskState.COMPLETED,
+                )
+
+    # ---- the durable half ------------------------------------------------
+
+    def test_consumption_history_survives_a_restart(self) -> None:
+        """The fact is durable, so a restart does not re-deliver a verdict."""
+        self.record("review:51:first", TaskState.COMPLETED,
+                    "2026-09-19T14:07:57+00:00", self.HEAD)
+
+        # A second store over the same file: what one process recorded, the
+        # next one reads, so a restart does not re-deliver a verdict.
+        reopened = SQLiteTaskStore(self.path)
+        self.assertTrue(reopened.verdict_already_consumed(
+            REVIEWER, subject_reference(51, self.HEAD),
+            "2026-09-19T15:00:00+00:00",
+        ))
+
+    def test_only_an_earlier_completed_task_counts_as_consumption(self) -> None:
+        subject = subject_reference(51, self.HEAD)
+        asked = "2026-09-19T14:07:57+00:00"
+        # Nothing yet.
+        self.assertFalse(
+            self.store.verdict_already_consumed(REVIEWER, subject, asked)
+        )
+        # A task still waiting has consumed nothing.
+        self.record("review:51:waiting", TaskState.WAITING_FOR_RESULT,
+                    "2026-09-19T14:00:00+00:00", self.HEAD)
+        self.assertFalse(
+            self.store.verdict_already_consumed(REVIEWER, subject, asked)
+        )
+        # A completed one for another head is about another revision.
+        self.record("review:51:other", TaskState.COMPLETED,
+                    "2026-09-19T14:00:00+00:00", self.OTHER)
+        self.assertFalse(
+            self.store.verdict_already_consumed(REVIEWER, subject, asked)
+        )
+        # A completed one for this head, earlier, is the consumption.
+        self.record("review:51:done", TaskState.COMPLETED,
+                    "2026-09-19T14:00:00+00:00", self.HEAD)
+        self.assertTrue(
+            self.store.verdict_already_consumed(REVIEWER, subject, asked)
+        )
+
+    def test_a_later_task_is_not_consumption_of_an_earlier_one(self) -> None:
+        """A task started after this one cannot have consumed its verdict."""
+        subject = subject_reference(51, self.HEAD)
+        self.record("review:51:later", TaskState.COMPLETED,
+                    "2026-09-19T16:00:00+00:00", self.HEAD)
+        self.assertFalse(self.store.verdict_already_consumed(
+            REVIEWER, subject, "2026-09-19T14:07:57+00:00"
+        ))
 
 
 if __name__ == "__main__":

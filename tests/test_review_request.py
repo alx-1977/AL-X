@@ -584,7 +584,14 @@ class RequestBoundaryTests(unittest.TestCase):
         self.assertIs(observed.state, TaskState.COMPLETED)
 
     def test_a_review_from_before_the_request_still_does_not_count(self) -> None:
-        """The rule it protects is unchanged: an older review answers an older ask."""
+        """The rule it protects is unchanged: an older review answers an older ask.
+
+        What makes it the older answer is that something already took it. An
+        earlier verdict nobody has read is a different case — a reviewer that
+        reviews a new pull request unasked publishes before the request that
+        follows it — so the consumption is stated here rather than inferred
+        from the clock.
+        """
         begin = datetime(2026, 9, 7, 6, 15, 0, tzinfo=UTC)
         earlier = datetime(2026, 9, 7, 5, 0, 0, tzinfo=UTC)
         provider = self._provider(
@@ -594,7 +601,8 @@ class RequestBoundaryTests(unittest.TestCase):
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         observer = ReviewStatusObserver(provider)
         observed = observer.observe(
-            subject_reference(21, HEAD), since=outcome.requested_at
+            subject_reference(21, HEAD), since=outcome.requested_at,
+            already_consumed=True,
         )
         self.assertIs(observed.state, TaskState.WAITING_FOR_RESULT)
 
