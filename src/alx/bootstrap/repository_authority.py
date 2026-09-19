@@ -89,10 +89,10 @@ def build_repository_authority_runtime(
         probe = authority or RepositoryAuthority(system, timeout_seconds)
         verified_remote = ""
         try:
-            identity = probe.origin_identity()
-            # The URL behind that identity, kept so the push names it rather
-            # than the mutable `origin`.
-            verified_remote = probe.origin_url()
+            # One read: the URL kept for pushing and the identity checked
+            # against configuration describe the same value, so what was
+            # verified is what gets used.
+            verified_remote, identity = probe.origin()
         except Exception as error:  # noqa: BLE001 - reading git may fail many ways
             LOGGER.warning(
                 "Repository origin could not be read (%s): local operations only",

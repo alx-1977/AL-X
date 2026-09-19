@@ -207,23 +207,28 @@ class RepositoryAuthority:
         """
         return self._verified_remote or ORIGIN
 
-    def origin_url(self) -> str:
-        """The URL `origin` currently names, or "" when it cannot be read."""
-        completed = self._run(_ORIGIN_URL)
-        if completed.returncode != 0:
-            return ""
-        return (completed.stdout or "").strip()
+    def origin(self) -> tuple[str, str]:
+        """The origin URL and the `owner/name` it resolves to, from one read.
 
-    def origin_identity(self) -> str:
-        """The `owner/name` this checkout's origin points at, or "".
+        Both together, because they must describe the same value. Reading the
+        configuration twice — once to check the identity and once to keep the
+        URL — leaves a window in which `.git/config` can change between them,
+        and the URL that gets stored is then not the one whose identity was
+        verified. The check and the thing checked have to come from the same
+        answer.
 
         Empty when there is no origin, when it cannot be read, or when it is
         not a GitHub remote in a form this system recognises.
         """
         completed = self._run(_ORIGIN_URL)
         if completed.returncode != 0:
-            return ""
-        return origin_identity((completed.stdout or "").strip())
+            return "", ""
+        url = (completed.stdout or "").strip()
+        return url, origin_identity(url)
+
+    def origin_identity(self) -> str:
+        """The `owner/name` this checkout's origin points at, or ""."""
+        return self.origin()[1]
 
     # ---- the invariant ---------------------------------------------------
 

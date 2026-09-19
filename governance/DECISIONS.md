@@ -1824,7 +1824,7 @@ No open design questions remain in this proposal.
   exchange, and the three follow-up confirmations recorded below.
 
 **Decision.** AL/X manages her repositories the way an engineer does. One
-capability, `repository_operation`, carries one of thirty-two enumerated
+capability, `repository_operation`, carries one of the enumerated
 operations — inspection, synchronisation, branch lifecycle, commit work,
 publication and worktrees — and the GitHub boundary covers the pull-request
 work that goes with them. The single restriction is that she may not
@@ -1870,7 +1870,8 @@ prevent every mistake would be the permission system this decision removes.
 
 **D-030 is superseded.** `inspect_repository_state` and `synchronize_local_main`
 existed solely because AL/X lacked general repository authority. They are two
-operations among thirty-two now, and keeping them beside the general service
+operations among the enumerated set now, and keeping them beside the general
+service
 would be a second authority path to the same outcome.
 
 **The mandatory merge-approval requirement in D-026 is superseded.** D-026's

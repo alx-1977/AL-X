@@ -4,11 +4,12 @@ Reached the way every capability is: AL/X proposes a structured call, the broker
 validates it, the safety gate authorises it, and the executor performs one
 bounded operation.
 
-One capability rather than thirty-two. The alternative was tried: a capability
-per verb meant the catalogue grew whenever she met an ordinary git question, and
-each addition needed design, review and a merge before she could answer it. What
-she is choosing between is operations on one repository, not between unrelated
-authorities, so the operation is an argument and the authority is the capability.
+One capability rather than one per operation. The alternative was tried: a
+capability per verb meant the catalogue grew whenever she met an ordinary git
+question, and each addition needed design, review and a merge before she could
+answer it. What she is choosing between is operations on one repository, not
+between unrelated authorities, so the operation is an argument and the authority
+is the capability.
 
 The catalogue entry names every operation, so nothing here is hidden from her:
 she is choosing from a list she can read, not guessing at a command language.

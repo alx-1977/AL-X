@@ -273,10 +273,19 @@ class SelfPreservationTests(RealRepositoryHarness):
         elsewhere = RepositoryAuthority(
             CanonicalSystem(self.local, CANONICAL, branch="trunk")
         )
+        # Off `main` first: git refuses to delete a checked-out branch, so
+        # leaving it checked out made this pass on `operation_refused` without
+        # the invariant ever being consulted. A regression that protected every
+        # branch called `main` would have passed too.
+        git(self.local, "branch", "trunk")
+        git(self.local, "checkout", "-q", "trunk")
         ordinary = elsewhere.perform(
             RepositoryRequest(Operation.DELETE_BRANCH, {"branch": "main"})
         )
-        self.assertNotEqual(ordinary.failure_code, "self_preservation")
+        self.assertTrue(ordinary.succeeded)
+        self.assertNotIn(
+            "main", git(self.local, "branch", "--format=%(refname:short)")
+        )
         protected = elsewhere.perform(
             RepositoryRequest(Operation.DELETE_BRANCH, {"branch": "trunk"})
         )
