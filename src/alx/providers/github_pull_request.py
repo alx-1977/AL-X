@@ -252,13 +252,16 @@ class GitHubPullRequests:
         # guard above.
         if not isinstance(nodes, list):
             raise PullRequestError("pull_request_unavailable")
-        # Only nodes carrying the identity a caller needs to resolve them. A
-        # node without an `id` cannot be acted on, and counting it would make
-        # "threads remain" true for something nobody can address.
+        # Unresolved threads carrying the identity needed to resolve them.
+        # A node without an `id` cannot be acted on, and a resolved one has
+        # already been dealt with — counting either would make "threads remain"
+        # true for a pull request that is fully addressed, which is the
+        # question AL/X asks this to answer before merging.
         return tuple(
             item for item in nodes
-            if isinstance(item, dict) and isinstance(item.get("id"), str)
-            and item["id"].strip()
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str) and item["id"].strip()
+            and item.get("isResolved") is False
         )
 
     def resolve_review_thread(self, thread_id: str) -> bool:

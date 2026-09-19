@@ -323,7 +323,13 @@ class RepositoryAuthority:
             case Operation.LIST_WORKTREES:
                 return ("git", "worktree", "list", "--porcelain")
             case Operation.FETCH:
-                return ("git", "fetch", "--prune", self._remote())
+                # The refspec is named because the remote is a URL. Naming
+                # `origin` would carry its configured fetch refspec with it; a
+                # URL carries none, so git wrote FETCH_HEAD and left
+                # `refs/remotes/origin/*` untouched — the fetch reported
+                # success and `pull_fast_forward` then merged stale state.
+                return ("git", "fetch", "--prune", self._remote(),
+                        f"+refs/heads/*:refs/remotes/{ORIGIN}/*")
             case Operation.PULL_FAST_FORWARD:
                 # `git merge` advances whatever is checked out, not the branch
                 # named. Naming `main` while `fix/x` was checked out advanced
@@ -382,11 +388,26 @@ class RepositoryAuthority:
                         f"refs/heads/{branch}:refs/heads/{branch}")
             case Operation.FORCE_PUSH:
                 branch = _ref(arguments, "branch")
-                # `--force-with-lease` rather than `--force`: it still replaces
-                # the branch, and it refuses when the remote holds something
-                # this checkout has never seen, which is somebody else's work
-                # rather than AL/X's own.
-                return ("git", "push", "--force-with-lease", self._remote(),
+                # `--force-with-lease` rather than `--force`: it still
+                # replaces the branch, and it refuses when the remote holds
+                # something this checkout has never seen, which is somebody
+                # else's work rather than AL/X's own.
+                #
+                # The expected revision is named because the remote is a URL.
+                # The bare form derives its lease from the tracking ref, and a
+                # URL does not select one — so the lease would be empty and the
+                # protection silently absent. Without a tracking ref there is
+                # nothing to lease against, and the operation is refused rather
+                # than performed as an unguarded force.
+                tracking = self._sha_of(f"refs/remotes/{ORIGIN}/{branch}")
+                if not tracking:
+                    raise RepositoryAuthorityError(
+                        "arguments_unusable",
+                        f"no tracking ref for {branch}; fetch before forcing",
+                    )
+                return ("git", "push",
+                        f"--force-with-lease={branch}:{tracking}",
+                        self._remote(),
                         f"refs/heads/{branch}:refs/heads/{branch}")
             case Operation.ADD_WORKTREE:
                 return ("git", "worktree", "add", "-b", _ref(arguments, "branch"),

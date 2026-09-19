@@ -969,5 +969,102 @@ class AuditRecordTests(RealRepositoryHarness):
         self.assertNotIn("origin", push)
 
 
+class RemoteRefspecTests(RealRepositoryHarness):
+    """A URL carries no configured refspec, so what is wanted must be named.
+
+    Binding remote operations to the verified URL closed a redirection gap and
+    opened this one: `origin` brings its configured fetch refspec and its
+    tracking ref with it, and a URL brings neither. The operations that relied
+    on those have to say what they mean explicitly.
+    """
+
+    def advance_remote(self) -> str:
+        """Another clone pushes, so the remote is ahead of this checkout."""
+        other = Path(self.directory.name) / "other"
+        subprocess.run(
+            ["git", "clone", str(self.remote), str(other)],
+            env=_fixture_environment(), capture_output=True, check=True,
+        )
+        git(other, "config", "user.email", "other@example.test")
+        git(other, "config", "user.name", "Other")
+        (other / "theirs.txt").write_text("theirs\n")
+        git(other, "add", "theirs.txt")
+        git(other, "commit", "-m", "their work")
+        git(other, "push", "origin", "main")
+        return git(other, "rev-parse", "HEAD")
+
+    def url_bound(self):
+        return RepositoryAuthority(
+            self.system, verified_remote=str(self.remote)
+        )
+
+    def test_a_fetch_updates_the_tracking_refs(self) -> None:
+        """Otherwise it reports success and leaves the checkout stale.
+
+        Git writes FETCH_HEAD either way, so the fetch succeeds while
+        `refs/remotes/origin/*` stays where it was — and the fast-forward that
+        follows merges old state believing it is current.
+        """
+        theirs = self.advance_remote()
+        before = git(self.local, "rev-parse", "refs/remotes/origin/main")
+        self.assertNotEqual(before, theirs)
+
+        outcome = self.url_bound().perform(RepositoryRequest(Operation.FETCH, {}))
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(
+            git(self.local, "rev-parse", "refs/remotes/origin/main"), theirs
+        )
+
+    def test_a_fast_forward_after_fetching_lands_the_remote_work(self) -> None:
+        theirs = self.advance_remote()
+        authority = self.url_bound()
+        authority.perform(RepositoryRequest(Operation.FETCH, {}))
+        outcome = authority.perform(
+            RepositoryRequest(Operation.PULL_FAST_FORWARD, {"branch": "main"})
+        )
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(git(self.local, "rev-parse", "HEAD"), theirs)
+
+    def test_a_force_push_names_the_revision_it_expects(self) -> None:
+        """The bare lease derives from a tracking ref a URL does not select.
+
+        Without the expected revision the lease is empty, so the protection is
+        silently absent and the force is unguarded.
+        """
+        sha = self.branch("fix/thing")
+        authority = self.url_bound()
+        authority.perform(RepositoryRequest(Operation.PUSH, {"branch": "fix/thing"}))
+        authority.perform(RepositoryRequest(Operation.FETCH, {}))
+
+        commands: list[list[str]] = []
+        real = subprocess.run
+
+        def runner(argv, **keywords):
+            commands.append(list(argv))
+            return real(argv, **keywords)
+
+        watched = RepositoryAuthority(
+            self.system, runner=runner, verified_remote=str(self.remote)
+        )
+        git(self.local, "reset", "--hard", "HEAD~1")
+        self.commit("different.txt")
+        outcome = watched.perform(
+            RepositoryRequest(Operation.FORCE_PUSH, {"branch": "fix/thing"})
+        )
+        self.assertTrue(outcome.succeeded)
+        push = next(command for command in commands if "push" in command)
+        lease = next(item for item in push if item.startswith("--force-with-lease"))
+        self.assertEqual(lease, f"--force-with-lease=fix/thing:{sha}")
+
+    def test_forcing_without_a_tracking_ref_is_refused(self) -> None:
+        """Nothing to lease against is not a reason to force unguarded."""
+        self.branch("fix/unpushed")
+        with self.assertRaises(RepositoryAuthorityError) as caught:
+            self.url_bound().perform(
+                RepositoryRequest(Operation.FORCE_PUSH, {"branch": "fix/unpushed"})
+            )
+        self.assertEqual(caught.exception.code, "arguments_unusable")
+
+
 if __name__ == "__main__":
     unittest.main()
