@@ -37,6 +37,7 @@ from alx.contracts.repository_authority import (
     REMOTE_OPERATIONS,
     CanonicalSystem,
     Operation,
+    normalised_arguments,
     READ_ONLY,
     RepositoryAuthorityError,
     RepositoryOutcome,
@@ -674,7 +675,9 @@ class RepositoryAuthority:
     def perform(self, request: RepositoryRequest) -> RepositoryOutcome:
         """Run one operation and report what it did."""
         operation = request.operation
-        arguments = request.arguments
+        # Under the names this operation declares, so a caller who said `head`
+        # for a pull request's source branch is not refused for the word.
+        arguments = normalised_arguments(operation, request.arguments)
 
         refusal = self._refuse_if_self_destructive(operation, arguments)
         if refusal:

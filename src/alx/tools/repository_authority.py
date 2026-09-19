@@ -32,6 +32,7 @@ from alx.contracts import (
 from alx.contracts.repository_authority import (
     REPOSITORY_FAILURES,
     Operation,
+    describe_operations,
     RepositoryAuthorityError,
     RepositoryRequest,
 )
@@ -46,18 +47,16 @@ _OBJECT = StructuredSchema(ValueKind.OBJECT, extra_properties=True)
 
 _PURPOSE = (
     "Perform one repository operation on the configured checkout and report "
-    "what it did, including where the affected ref started and ended. "
-    "Operations: "
-    + ", ".join(sorted(item.value for item in Operation))
-    + ". Arguments depend on the operation: a revision or ref is named by "
-    "`revision`, `base`, `head`, `branch`, `start_point`, `onto` or "
-    "`ancestor`/`descendant`; `paths` names files to stage; `message` carries "
-    "a commit message; `mode` selects soft, mixed or hard for reset; `path` "
-    "names a worktree. Ordinary destructive work is permitted — a feature "
-    "branch may be deleted, force-pushed, reset or rebased. The single "
-    "refusal is an operation that would irrecoverably destroy the canonical "
-    "AL/X system itself, which is reported as `self_preservation`. Decides "
-    "nothing about whether an operation is a good idea."
+    "what it did, including where the affected ref started and ended. The "
+    "repository is the configured canonical one and is never an argument; a "
+    "pull request is always opened into the default branch. "
+    "Operations and their arguments — "
+    + describe_operations()
+    + ". Ordinary destructive work is permitted: a feature branch may be "
+    "deleted, force-pushed, reset or rebased. The single refusal is an "
+    "operation that would irrecoverably destroy the canonical AL/X system "
+    "itself, reported as `self_preservation`. Decides nothing about whether "
+    "an operation is a good idea."
 )
 
 
