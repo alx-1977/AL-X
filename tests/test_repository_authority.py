@@ -867,5 +867,107 @@ class UnverifiedRemoteTests(RealRepositoryHarness):
         self.assertTrue(outcome.succeeded)
 
 
+class AnswerQualityTests(RealRepositoryHarness):
+    """An answer must be an answer, not a guess dressed as one."""
+
+    def test_an_unreadable_ancestry_question_is_a_failure(self) -> None:
+        """`--is-ancestor` exits 1 for "no" and something else for "broken".
+
+        Treating every non-zero code as "no" turned "I could not tell" into a
+        confident negative on the question AL/X uses to decide whether work is
+        already merged — she would read an unknown ref as unmerged work.
+        """
+        outcome = self.perform(
+            Operation.IS_ANCESTOR, ancestor="nosuchref", descendant="main"
+        )
+        self.assertFalse(outcome.succeeded)
+        self.assertNotIn("is_ancestor", outcome.values)
+
+    def test_a_real_ancestry_question_still_answers_both_ways(self) -> None:
+        base = git(self.local, "rev-parse", "HEAD")
+        self.branch("fix/thing")
+        yes = self.perform(
+            Operation.IS_ANCESTOR, ancestor=base, descendant="fix/thing"
+        )
+        self.assertTrue(yes.succeeded)
+        self.assertTrue(yes.values["is_ancestor"])
+        no = self.perform(
+            Operation.IS_ANCESTOR, ancestor="fix/thing", descendant="main"
+        )
+        self.assertTrue(no.succeeded)
+        self.assertFalse(no.values["is_ancestor"])
+
+    def test_a_fast_forward_acts_on_the_branch_it_names(self) -> None:
+        """`git merge` advances what is checked out, not what was named.
+
+        Naming `main` while `fix/x` was checked out advanced `fix/x` and
+        recorded `main` as the affected ref — a record describing an operation
+        that did not happen.
+        """
+        self.branch("fix/thing")
+        before = git(self.local, "rev-parse", "HEAD")
+        with self.assertRaises(RepositoryAuthorityError) as caught:
+            self.authority.perform(
+                RepositoryRequest(Operation.PULL_FAST_FORWARD, {"branch": "main"})
+            )
+        self.assertEqual(caught.exception.code, "arguments_unusable")
+        self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
+
+
+class AuditRecordTests(RealRepositoryHarness):
+    """A refusal is evidence too, and must say what it refused."""
+
+    def test_a_self_preservation_refusal_names_the_ref_and_commit(self) -> None:
+        outcome = self.perform(Operation.DELETE_BRANCH, branch="main")
+        record = outcome.as_values()
+        self.assertEqual(record["failure_code"], "self_preservation")
+        self.assertEqual(record["source_ref"], "main")
+        self.assertEqual(len(record["source_sha"]), 40)
+        self.assertTrue(record["refusal_reason"])
+
+    def test_a_failed_operation_names_what_it_was_acting_on(self) -> None:
+        self.branch("fix/thing")
+        outcome = self.perform(Operation.PUSH, branch="fix/thing")
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(outcome.remote, self.authority._remote())
+
+    def test_an_unverified_remote_refusal_carries_the_ref(self) -> None:
+        blocked = RepositoryAuthority(self.system, remote_verified=False)
+        self.branch("fix/thing")
+        outcome = blocked.perform(
+            RepositoryRequest(Operation.PUSH, {"branch": "fix/thing"})
+        )
+        record = outcome.as_values()
+        self.assertEqual(record["source_ref"], "fix/thing")
+        self.assertEqual(len(record["source_sha"]), 40)
+        self.assertEqual(record["remote"], "origin")
+
+    def test_a_push_names_the_verified_url_not_the_remote_name(self) -> None:
+        """A name is resolved when the command runs, which is after the check.
+
+        Anything able to write `.git/config` between composition and the push
+        could point `origin` elsewhere, so the destination that was verified is
+        the one named.
+        """
+        verified = RepositoryAuthority(
+            self.system, verified_remote=str(self.remote)
+        )
+        commands: list[list[str]] = []
+        real = subprocess.run
+
+        def runner(argv, **keywords):
+            commands.append(list(argv))
+            return real(argv, **keywords)
+
+        verified = RepositoryAuthority(
+            self.system, runner=runner, verified_remote=str(self.remote)
+        )
+        self.branch("fix/thing")
+        verified.perform(RepositoryRequest(Operation.PUSH, {"branch": "fix/thing"}))
+        push = next(command for command in commands if "push" in command)
+        self.assertIn(str(self.remote), push)
+        self.assertNotIn("origin", push)
+
+
 if __name__ == "__main__":
     unittest.main()

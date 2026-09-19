@@ -138,6 +138,7 @@ class RepositoryAuthority:
         runner: Runner = subprocess.run,
         pull_requests: Any = None,
         remote_verified: bool = True,
+        verified_remote: str = "",
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("repository timeout must be positive")
@@ -153,6 +154,11 @@ class RepositoryAuthority:
         # False leaves local work available and refuses everything that reaches
         # the remote: an unverified origin is not somewhere AL/X's work may go.
         self._remote_verified = remote_verified
+        # The URL confirmed to be the configured repository. A push names this
+        # rather than `origin`, because a name is a lookup in `.git/config`
+        # that git performs when the command runs — after the check — and
+        # anything able to write that file could point it elsewhere in between.
+        self._verified_remote = verified_remote
 
     # ---- process ---------------------------------------------------------
 
@@ -183,6 +189,27 @@ class RepositoryAuthority:
     def _sha_of(self, revision: str) -> str:
         """What this revision points at now, or "" when it names nothing."""
         completed = self._run(("git", "rev-parse", "--verify", f"{revision}^{{commit}}"))
+        if completed.returncode != 0:
+            return ""
+        return (completed.stdout or "").strip()
+
+    def _remote_for(self, operation: Operation) -> str:
+        """The remote this operation involves, for the audit record."""
+        return self._remote() if operation in REMOTE_OPERATIONS else ""
+
+    def _remote(self) -> str:
+        """Where a remote operation may go.
+
+        The verified URL when composition captured one, and otherwise the
+        `origin` name. The name is only reached in tests and in a checkout
+        whose origin was never confirmed — and in that case every remote
+        operation is refused before this is consulted.
+        """
+        return self._verified_remote or ORIGIN
+
+    def origin_url(self) -> str:
+        """The URL `origin` currently names, or "" when it cannot be read."""
+        completed = self._run(_ORIGIN_URL)
         if completed.returncode != 0:
             return ""
         return (completed.stdout or "").strip()
@@ -296,10 +323,24 @@ class RepositoryAuthority:
             case Operation.LIST_WORKTREES:
                 return ("git", "worktree", "list", "--porcelain")
             case Operation.FETCH:
-                return ("git", "fetch", "--prune", ORIGIN)
+                return ("git", "fetch", "--prune", self._remote())
             case Operation.PULL_FAST_FORWARD:
+                # `git merge` advances whatever is checked out, not the branch
+                # named. Naming `main` while `fix/x` was checked out advanced
+                # `fix/x` and reported `main` as the affected ref — the record
+                # describing an operation that did not happen. The branch must
+                # be the one HEAD is on, and a mismatch is refused rather than
+                # silently applied somewhere else.
+                branch = _ref(arguments, "branch")
+                current = self._checked_out_branch()
+                if current != branch:
+                    raise RepositoryAuthorityError(
+                        "arguments_unusable",
+                        f"{branch} is not checked out ({current or 'detached'} is); "
+                        "switch to it first",
+                    )
                 return ("git", "merge", "--ff-only",
-                        f"refs/remotes/{ORIGIN}/{_ref(arguments, 'branch')}")
+                        f"refs/remotes/{ORIGIN}/{branch}")
             case Operation.CREATE_BRANCH:
                 return ("git", "branch", _ref(arguments, "branch"),
                         _revision(arguments, "start_point"))
@@ -312,7 +353,7 @@ class RepositoryAuthority:
                 return ("git", "branch", "-D", _ref(arguments, "branch"))
             case Operation.DELETE_REMOTE_BRANCH:
                 branch = _ref(arguments, "branch")
-                return ("git", "push", ORIGIN, f":refs/heads/{branch}")
+                return ("git", "push", self._remote(), f":refs/heads/{branch}")
             case Operation.STAGE:
                 paths = self._paths(arguments)
                 return ("git", "add", "--", *paths)
@@ -337,7 +378,7 @@ class RepositoryAuthority:
                 return ("git", "reset", f"--{mode}", _revision(arguments, "revision"))
             case Operation.PUSH:
                 branch = _ref(arguments, "branch")
-                return ("git", "push", ORIGIN,
+                return ("git", "push", self._remote(),
                         f"refs/heads/{branch}:refs/heads/{branch}")
             case Operation.FORCE_PUSH:
                 branch = _ref(arguments, "branch")
@@ -345,7 +386,7 @@ class RepositoryAuthority:
                 # the branch, and it refuses when the remote holds something
                 # this checkout has never seen, which is somebody else's work
                 # rather than AL/X's own.
-                return ("git", "push", "--force-with-lease", ORIGIN,
+                return ("git", "push", "--force-with-lease", self._remote(),
                         f"refs/heads/{branch}:refs/heads/{branch}")
             case Operation.ADD_WORKTREE:
                 return ("git", "worktree", "add", "-b", _ref(arguments, "branch"),
@@ -491,10 +532,20 @@ class RepositoryAuthority:
         """
 
         def outcome(succeeded: bool, **values: Any) -> RepositoryOutcome:
+            # A pull-request mutation is as auditable as a git one: the branch
+            # it concerns and the revision that branch pointed at, so the
+            # record says which proposal moved rather than only that one did.
+            branch = str(values.get("branch") or "")
+            head = str(values.get("head_sha") or "")
             return RepositoryOutcome(
                 repository=self._system.repository,
                 operation=operation,
                 succeeded=succeeded,
+                source_ref=branch,
+                source_sha=head,
+                resulting_ref=branch,
+                resulting_sha=head,
+                remote=ORIGIN if operation not in READ_ONLY else "",
                 values=values,
             )
 
@@ -584,10 +635,16 @@ class RepositoryAuthority:
                 "Repository operation refused to protect AL/X: %s (%s)",
                 operation.value, refusal,
             )
+            ref = str(
+                arguments.get("branch") or arguments.get("ref") or ""
+            ).strip() or self._checked_out_branch()
             return RepositoryOutcome(
                 repository=self._system.repository,
                 operation=operation,
                 succeeded=False,
+                source_ref=ref,
+                source_sha=self._sha_of(ref) if ref else "",
+                remote=self._remote_for(operation),
                 failure_code="self_preservation",
                 refusal_reason=refusal,
             )
@@ -597,10 +654,14 @@ class RepositoryAuthority:
                 "Repository operation refused: %s reaches an unverified remote",
                 operation.value,
             )
+            ref = str(arguments.get("branch") or "").strip()
             return RepositoryOutcome(
                 repository=self._system.repository,
                 operation=operation,
                 succeeded=False,
+                source_ref=ref,
+                source_sha=self._sha_of(ref) if ref else "",
+                remote=ORIGIN,
                 failure_code="operation_refused",
                 refusal_reason=(
                     "the checkout's origin is not the configured repository, "
@@ -623,9 +684,12 @@ class RepositoryAuthority:
 
         completed = self._run(command)
 
-        # `is_ancestor` answers with its exit code; a non-zero one is the
-        # answer "no", not a failure.
-        if operation is Operation.IS_ANCESTOR:
+        # `merge-base --is-ancestor` answers with its exit code: 0 is yes and 1
+        # is no, and both are answers. Anything else is git failing — an
+        # unknown ref, an unreadable repository — and treating every non-zero
+        # code as "no" turned "I could not tell" into a confident negative on
+        # the question AL/X uses to decide whether work is already merged.
+        if operation is Operation.IS_ANCESTOR and completed.returncode in (0, 1):
             return RepositoryOutcome(
                 repository=self._system.repository,
                 operation=operation,
@@ -664,16 +728,14 @@ class RepositoryAuthority:
                 succeeded=False,
                 source_ref=source_ref,
                 source_sha=source_sha,
+                remote=self._remote_for(operation),
                 failure_code=code,
                 refusal_reason=(completed.stderr or "").strip()[:400],
             )
 
         resulting_ref = named_ref or ("HEAD" if operation not in READ_ONLY else "")
         resulting_sha = self._sha_of(resulting_ref) if resulting_ref else ""
-        remote = ORIGIN if operation in (
-            Operation.PUSH, Operation.FORCE_PUSH,
-            Operation.DELETE_REMOTE_BRANCH, Operation.FETCH,
-        ) else ""
+        remote = self._remote_for(operation)
 
         outcome = RepositoryOutcome(
             repository=self._system.repository,

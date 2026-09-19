@@ -87,8 +87,12 @@ def build_repository_authority_runtime(
         # constructed once knowing whether the remote is confirmed rather than
         # being adjusted afterwards.
         probe = authority or RepositoryAuthority(system, timeout_seconds)
+        verified_remote = ""
         try:
             identity = probe.origin_identity()
+            # The URL behind that identity, kept so the push names it rather
+            # than the mutable `origin`.
+            verified_remote = probe.origin_url()
         except Exception as error:  # noqa: BLE001 - reading git may fail many ways
             LOGGER.warning(
                 "Repository origin could not be read (%s): local operations only",
@@ -114,6 +118,7 @@ def build_repository_authority_runtime(
             system, timeout_seconds,
             pull_requests=pull_requests,
             remote_verified=remote_verified,
+            verified_remote=verified_remote if remote_verified else "",
         )
     except (TypeError, ValueError) as error:
         LOGGER.warning(

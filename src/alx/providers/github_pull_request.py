@@ -252,7 +252,14 @@ class GitHubPullRequests:
         # guard above.
         if not isinstance(nodes, list):
             raise PullRequestError("pull_request_unavailable")
-        return tuple(item for item in nodes if isinstance(item, dict))
+        # Only nodes carrying the identity a caller needs to resolve them. A
+        # node without an `id` cannot be acted on, and counting it would make
+        # "threads remain" true for something nobody can address.
+        return tuple(
+            item for item in nodes
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+            and item["id"].strip()
+        )
 
     def resolve_review_thread(self, thread_id: str) -> bool:
         """Mark one review thread resolved.
