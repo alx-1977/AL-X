@@ -60,7 +60,20 @@ _SYMBOLIC_REF = ("git", "symbolic-ref", "--quiet", "--short", "HEAD")
 
 _SAFE_GIT_CONFIG = {
     "core.hooksPath": os.devnull,
+    # Reset first: an empty value discards every helper the system and global
+    # configuration would otherwise contribute, so nothing AL/X did not choose
+    # can answer a credential prompt.
     "credential.helper": "",
+    # Then one helper, for one host. Without this she could read and commit but
+    # never push: the environment above deliberately removes the machine's
+    # `osxkeychain` helper, and with no helper at all git has nothing to ask.
+    #
+    # `gh auth git-credential` resolves the credential from the GitHub CLI's
+    # own keyring at the moment it is needed. No token is written here, stored
+    # in configuration, or passed through the environment — this names a
+    # program, and the program holds the secret. Scoped to github.com so it
+    # answers for that host and no other.
+    "credential.https://github.com.helper": "!gh auth git-credential",
 }
 
 

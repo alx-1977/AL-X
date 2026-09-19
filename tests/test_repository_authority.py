@@ -1146,5 +1146,90 @@ class RemoteRefspecTests(RealRepositoryHarness):
         self.assertEqual(caught.exception.code, "arguments_unusable")
 
 
+class GitEnvironmentCredentialTests(unittest.TestCase):
+    """How AL/X authenticates to push, and what she still cannot inherit.
+
+    The environment these commands run under deliberately reads neither system
+    nor global git configuration, which is what stops an inherited helper,
+    editor or config injection reaching them. That also removed the machine's
+    own credential helper, so she could read and commit but never push: with no
+    helper at all, git has nothing to ask for a credential.
+
+    One helper is therefore named here, for one host. No token is written, in
+    code or configuration — the value names a program, and the GitHub CLI holds
+    the secret in its own keyring and answers when asked.
+    """
+
+    def environment(self) -> dict[str, str]:
+        from alx.providers.repository_authority import _git_environment
+
+        return _git_environment()
+
+    def resolved(self, *arguments: str) -> str:
+        """What git resolves, under exactly the environment AL/X uses."""
+        completed = subprocess.run(
+            ["git", "config", *arguments],
+            cwd=str(REPOSITORY_ROOT), env=self.environment(),
+            capture_output=True, text=True,
+        )
+        return completed.stdout.strip()
+
+    def test_inherited_helpers_are_still_unavailable(self) -> None:
+        """System and global configuration are not read at all."""
+        environment = self.environment()
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+
+    def test_the_generic_credential_helper_remains_reset(self) -> None:
+        """An empty value discards every helper configuration would add."""
+        self.assertEqual(self.resolved("--get-all", "credential.helper"), "")
+
+    def test_github_resolves_to_the_command_line_helper(self) -> None:
+        self.assertEqual(
+            self.resolved("--get-urlmatch", "credential.helper",
+                          "https://github.com"),
+            "!gh auth git-credential",
+        )
+
+    def test_another_host_receives_no_helper(self) -> None:
+        """Scoped to github.com: nothing else is answered for."""
+        for host in ("https://gitlab.com", "https://example.test",
+                     "https://github.com.evil.test"):
+            with self.subTest(host=host):
+                self.assertEqual(
+                    self.resolved("--get-urlmatch", "credential.helper", host),
+                    "",
+                )
+
+    def test_terminal_prompting_stays_disabled(self) -> None:
+        """An unanswerable credential fails rather than waiting for a person."""
+        environment = self.environment()
+        self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(environment["GIT_ASKPASS"], os.devnull)
+        self.assertEqual(environment["SSH_ASKPASS"], os.devnull)
+
+    def test_the_environment_carries_no_secret_material(self) -> None:
+        """The helper names a program; it never carries a credential.
+
+        A token written into configuration would reach every child process and
+        any log that records an environment. What is here is the name of a
+        command that knows how to ask.
+        """
+        environment = self.environment()
+        rendered = " ".join(f"{name}={value}" for name, value in environment.items())
+        for marker in ("ghp_", "gho_", "ghu_", "ghs_", "github_pat_",
+                       "Authorization", "Bearer", "password", "token"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, rendered)
+
+    def test_the_helper_is_a_command_rather_than_a_credential(self) -> None:
+        from alx.providers.repository_authority import _SAFE_GIT_CONFIG
+
+        helper = _SAFE_GIT_CONFIG["credential.https://github.com.helper"]
+        # `!` is git's marker for "run this"; the value is an invocation.
+        self.assertTrue(helper.startswith("!"))
+        self.assertEqual(helper, "!gh auth git-credential")
+
+
 if __name__ == "__main__":
     unittest.main()
