@@ -44,6 +44,11 @@ _SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 # The whole request, not one socket operation.
 TIMEOUT_SECONDS = 30.0
 
+# Pages of review threads this will walk. A hundred per page, so this is ten
+# thousand threads — far past anything real, and a bound rather than a loop
+# that trusts the server to end it.
+MAX_THREAD_PAGES = 100
+
 
 class GitHubPullRequests:
     """Open and find pull requests for one repository."""
@@ -227,42 +232,63 @@ class GitHubPullRequests:
         returned as data for AL/X to read rather than judged here.
         """
         query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
+            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
             "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-            "reviewThreads(first:100){nodes{id isResolved isOutdated path line "
+            "reviewThreads(first:100,after:$after){"
+            "pageInfo{hasNextPage endCursor}"
+            "nodes{id isResolved isOutdated path line "
             "comments(first:1){nodes{author{login} body}}}}}}}"
         )
         owner, _, name = self._repository.partition("/")
-        data = self._request("POST", "/graphql", {
-            "query": query,
-            "variables": {"owner": owner, "name": name, "number": number},
-        })
-        # An empty tuple means the pull request has no unresolved threads, and
-        # that is a fact a caller may act on — branch protection can require
-        # every thread resolved before a merge. A response that could not be
-        # read is a different thing entirely, and returning `()` for both would
-        # let "I could not see the threads" be taken as "there are none".
-        if not isinstance(data, dict):
-            raise PullRequestError("pull_request_unavailable")
-        try:
-            nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-        except (KeyError, TypeError) as error:
-            raise PullRequestError("pull_request_unavailable") from error
-        # `"nodes": null` parses fine and then fails on iteration, outside the
-        # guard above.
-        if not isinstance(nodes, list):
-            raise PullRequestError("pull_request_unavailable")
-        # Unresolved threads carrying the identity needed to resolve them.
-        # A node without an `id` cannot be acted on, and a resolved one has
-        # already been dealt with — counting either would make "threads remain"
-        # true for a pull request that is fully addressed, which is the
-        # question AL/X asks this to answer before merging.
-        return tuple(
-            item for item in nodes
-            if isinstance(item, dict)
-            and isinstance(item.get("id"), str) and item["id"].strip()
-            and item.get("isResolved") is False
-        )
+        threads: list[dict] = []
+        cursor: str | None = None
+        # Every page, not the first hundred. A pull request with more threads
+        # than one page would otherwise report the unresolved ones it happened
+        # to see, and "none remain" from a truncated read is the answer AL/X
+        # acts on before merging.
+        for _ in range(MAX_THREAD_PAGES):
+            data = self._request("POST", "/graphql", {
+                "query": query,
+                "variables": {
+                    "owner": owner, "name": name,
+                    "number": number, "after": cursor,
+                },
+            })
+            # An empty tuple means the pull request has no unresolved threads,
+            # and that is a fact a caller may act on. A response that could not
+            # be read is a different thing entirely, and returning `()` for both
+            # would let "I could not see the threads" be taken as "there are
+            # none".
+            if not isinstance(data, dict):
+                raise PullRequestError("pull_request_unavailable")
+            try:
+                page = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+                nodes = page["nodes"]
+            except (KeyError, TypeError) as error:
+                raise PullRequestError("pull_request_unavailable") from error
+            # `"nodes": null` parses fine and then fails on iteration, outside
+            # the guard above.
+            if not isinstance(nodes, list):
+                raise PullRequestError("pull_request_unavailable")
+            # Unresolved threads carrying the identity needed to resolve them.
+            # A node without an `id` cannot be acted on, and a resolved one has
+            # already been dealt with — counting either would make "threads
+            # remain" true for a pull request that is fully addressed.
+            threads.extend(
+                item for item in nodes
+                if isinstance(item, dict)
+                and isinstance(item.get("id"), str) and item["id"].strip()
+                and item.get("isResolved") is False
+            )
+            info = page.get("pageInfo")
+            if not isinstance(info, dict) or not info.get("hasNextPage"):
+                return tuple(threads)
+            cursor = info.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise PullRequestError("pull_request_unavailable")
+        # More pages than the cap allows. Returning what was read would be the
+        # truncation this exists to prevent, so it is reported as unreadable.
+        raise PullRequestError("pull_request_unavailable")
 
     def resolve_review_thread(self, thread_id: str) -> bool:
         """Mark one review thread resolved.
