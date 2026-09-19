@@ -274,6 +274,33 @@ class SelfPreservationTests(RealRepositoryHarness):
                     git(self.local, "branch", "--format=%(refname:short)"),
                 )
 
+
+    def test_a_refusal_names_the_ref_the_command_would_touch(self) -> None:
+        """The record must describe the operation the decision was about.
+
+        `reset` and `rebase` act on whatever is checked out, so the invariant
+        ignores a named branch — but the audit record read it, and a refusal
+        could name a decoy the command would never have touched. Two places
+        answering "which ref" separately is how they diverged.
+        """
+        self.commit("second.txt")
+        git(self.local, "branch", "fix/decoy")
+        first = git(self.local, "rev-parse", "HEAD~1")
+        self.assertEqual(git(self.local, "symbolic-ref", "--short", "HEAD"), "main")
+
+        outcome = self.perform(
+            Operation.RESET, revision=first, mode="hard", branch="fix/decoy"
+        )
+        self.assertEqual(outcome.failure_code, "self_preservation")
+        # The branch it would have rewritten, not the one the request named.
+        self.assertEqual(outcome.source_ref, "main")
+
+    def test_other_operations_still_record_the_ref_they_name(self) -> None:
+        """The change must not reach past reset and rebase."""
+        outcome = self.perform(Operation.DELETE_BRANCH, branch="main")
+        self.assertEqual(outcome.failure_code, "self_preservation")
+        self.assertEqual(outcome.source_ref, "main")
+
     def test_a_refusal_names_what_it_protected(self) -> None:
         """Evidence, not a bare no: she has to be able to choose differently."""
         outcome = self.perform(Operation.FORCE_PUSH, branch=CANONICAL_BRANCH)

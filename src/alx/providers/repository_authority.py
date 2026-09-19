@@ -232,6 +232,27 @@ class RepositoryAuthority:
 
     # ---- the invariant ---------------------------------------------------
 
+    def _affected_ref(
+        self, operation: Operation, arguments: Mapping[str, Any]
+    ) -> str:
+        """The ref this operation would actually touch.
+
+        One answer, used both to decide the refusal and to record it. They were
+        computed separately, and diverged: `reset` and `rebase` act on whatever
+        is checked out, so the invariant already ignored the named arguments —
+        but the audit record still read them, and a refusal could name a decoy
+        branch the command would never have touched. The record has to describe
+        the same operation the decision was about.
+        """
+        if operation in (Operation.RESET, Operation.REBASE):
+            return self._checked_out_branch()
+        return str(
+            arguments.get("branch")
+            or arguments.get("ref")
+            or arguments.get("target")
+            or ""
+        ).strip()
+
     def _refuse_if_self_destructive(
         self, operation: Operation, arguments: Mapping[str, Any]
     ) -> str:
@@ -241,25 +262,12 @@ class RepositoryAuthority:
         if isinstance(raw_path, (str, Path)) and str(raw_path).strip():
             candidate = Path(str(raw_path)).expanduser()
             path = candidate if candidate.is_absolute() else self._root / candidate
-        ref = str(
-            arguments.get("branch")
-            or arguments.get("ref")
-            or arguments.get("target")
-            or ""
-        ).strip()
-        # `reset` and `rebase` do not name the branch they rewrite: they take a
-        # revision to move to and act on whatever is checked out. So for these
-        # two the checked-out branch is the *only* thing the invariant may be
-        # asked about, and any selector the caller supplied is discarded.
-        #
-        # Falling back to HEAD only when no selector was given was not enough,
-        # and was itself a bypass: `arguments` accepts arbitrary keys, `_argv`
-        # ignores `branch` for both operations, so a request carrying a valid
-        # `revision` and an unrelated `branch` had the invariant examine the
-        # decoy while the command rewrote canonical `main`. What is protected
-        # must be what is acted on, not what the request says it is.
-        if operation in (Operation.RESET, Operation.REBASE):
-            ref = self._checked_out_branch()
+        # What the command acts on, never what the request names it. `reset`
+        # and `rebase` take a revision and rewrite whatever is checked out, so
+        # a request carrying a valid revision and an unrelated `branch` would
+        # otherwise have the invariant examine the decoy while the command
+        # rewrote canonical `main`.
+        ref = self._affected_ref(operation, arguments)
         return refuse_if_self_destructive(
             self._system, operation, ref=ref, path=path
         )
@@ -661,9 +669,7 @@ class RepositoryAuthority:
                 "Repository operation refused to protect AL/X: %s (%s)",
                 operation.value, refusal,
             )
-            ref = str(
-                arguments.get("branch") or arguments.get("ref") or ""
-            ).strip() or self._checked_out_branch()
+            ref = self._affected_ref(operation, arguments)
             return RepositoryOutcome(
                 repository=self._system.repository,
                 operation=operation,
