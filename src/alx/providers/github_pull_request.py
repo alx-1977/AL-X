@@ -292,7 +292,14 @@ class GitHubPullRequests:
                 and item.get("isResolved") is False
             )
             info = page.get("pageInfo")
-            if not isinstance(info, dict) or not info.get("hasNextPage"):
+            # A missing or unreadable `pageInfo` is not "there are no more
+            # pages" — it is not knowing, and treating it as the end returns a
+            # possibly short list as a complete answer. That is exactly the
+            # undercount this walk exists to prevent, so it is reported the
+            # same way an unreadable `nodes` is.
+            if not isinstance(info, dict):
+                raise PullRequestError("pull_request_unavailable")
+            if not info.get("hasNextPage"):
                 return tuple(threads)
             cursor = info.get("endCursor")
             if not isinstance(cursor, str) or not cursor:

@@ -254,6 +254,26 @@ class SelfPreservationTests(RealRepositoryHarness):
                 outcome = self.perform(Operation.DELETE_BRANCH, branch=spelling)
                 self.assertEqual(outcome.failure_code, "self_preservation")
 
+
+    def test_a_branch_merely_ending_in_the_canonical_name_is_ordinary(self) -> None:
+        """`fix/main` is a feature branch, not the canonical history.
+
+        Reducing a ref to its last path segment matched every branch whose
+        name happens to end that way, so `fix/main`, `feat/main` and the rest
+        were refused as though they carried AL/X's history. Fail-closed, so
+        nothing was lost — but the invariant is meant to be narrow, and one
+        that cannot tell these apart is not.
+        """
+        for name in ("fix/main", "feat/main", "alx/main", "release/main"):
+            with self.subTest(branch=name):
+                git(self.local, "branch", name)
+                outcome = self.perform(Operation.DELETE_BRANCH, branch=name)
+                self.assertTrue(outcome.succeeded)
+                self.assertNotIn(
+                    name,
+                    git(self.local, "branch", "--format=%(refname:short)"),
+                )
+
     def test_a_refusal_names_what_it_protected(self) -> None:
         """Evidence, not a bare no: she has to be able to choose differently."""
         outcome = self.perform(Operation.FORCE_PUSH, branch=CANONICAL_BRANCH)

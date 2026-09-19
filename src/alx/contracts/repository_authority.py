@@ -376,9 +376,20 @@ def refuse_if_self_destructive(
     if not named:
         return ""
     # `refs/heads/main`, `origin/main` and `main` are the same branch said
-    # three ways, and the invariant must not be avoidable by spelling.
-    simple = named.rsplit("/", 1)[-1]
-    if simple != system.branch:
+    # three ways, and the invariant must not be avoidable by spelling. The
+    # spellings are named rather than derived: taking the last path segment
+    # also caught `fix/main`, `feat/main` and every other branch whose name
+    # happens to end that way, so ordinary work on any of them was refused as
+    # though it were the canonical history. Fail-closed, so nothing was lost —
+    # but the invariant is supposed to be narrow, and a rule that cannot tell
+    # `fix/main` from `main` is not.
+    if named not in {
+        system.branch,
+        f"refs/heads/{system.branch}",
+        f"remotes/origin/{system.branch}",
+        f"refs/remotes/origin/{system.branch}",
+        f"origin/{system.branch}",
+    }:
         return ""
 
     if operation in (Operation.DELETE_BRANCH, Operation.DELETE_REMOTE_BRANCH):

@@ -152,6 +152,31 @@ class ReviewThreadTests(unittest.TestCase):
             provider.review_threads(48)
         self.assertEqual(len(self.requests), module.MAX_THREAD_PAGES)
 
+    def test_an_unreadable_page_marker_is_not_the_last_page(self) -> None:
+        """Not knowing whether more pages exist is not "there are none".
+
+        Returning what was collected would hand back a possibly short list as
+        a complete answer, which is the undercount this walk exists to stop.
+        """
+        for marker in (None, "", [], {"endCursor": "C1"}):
+            with self.subTest(pageInfo=marker):
+                provider = self.transport([
+                    {"nodes": [_thread("T1")], "pageInfo": marker},
+                ])
+                if isinstance(marker, dict):
+                    # A dictionary without `hasNextPage` genuinely says there
+                    # is no next page, so this one is a complete answer.
+                    self.assertEqual(
+                        [item["id"] for item in provider.review_threads(48)],
+                        ["T1"],
+                    )
+                    continue
+                with self.assertRaises(PullRequestError) as caught:
+                    provider.review_threads(48)
+                self.assertEqual(
+                    caught.exception.code, "pull_request_unavailable"
+                )
+
 
 class MalformedResponseTests(unittest.TestCase):
     """A response that cannot be read stays a declared failure.
