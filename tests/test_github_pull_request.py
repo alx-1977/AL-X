@@ -153,5 +153,52 @@ class ReviewThreadTests(unittest.TestCase):
         self.assertEqual(len(self.requests), module.MAX_THREAD_PAGES)
 
 
+class MalformedResponseTests(unittest.TestCase):
+    """A response that cannot be read stays a declared failure.
+
+    `_outcome` builds the record every caller returns, so a value GitHub
+    should never send has to be refused there rather than reaching
+    `PullRequestOutcome` and raising something the capability boundary does
+    not catch. The broker would report an executor fault, which says the
+    system broke rather than that GitHub answered strangely.
+    """
+
+    def provider(self, payload):
+        def request(method, url, **keywords):
+            return _Response(payload)
+
+        original = module.httpx.request
+        module.httpx.request = request
+        self.addCleanup(setattr, module.httpx, "request", original)
+        return GitHubPullRequests("owner/repo", "token")
+
+    def test_an_unusable_pull_request_number_is_a_declared_failure(self) -> None:
+        """`bool` is an `int`, so `True` passed the old check."""
+        for number in (True, False, 0, -1, "7", None):
+            with self.subTest(number=number):
+                provider = self.provider({
+                    "number": number,
+                    "state": "open",
+                    "head": {"ref": "fix/thing", "sha": "a" * 40},
+                    "base": {"ref": "main"},
+                })
+                with self.assertRaises(PullRequestError) as caught:
+                    provider.update(7, title="Revised")
+                self.assertEqual(
+                    caught.exception.code, "pull_request_unavailable"
+                )
+
+    def test_a_usable_response_still_builds_the_record(self) -> None:
+        provider = self.provider({
+            "number": 48,
+            "state": "open",
+            "head": {"ref": "fix/thing", "sha": "a" * 40},
+            "base": {"ref": "main"},
+        })
+        outcome = provider.update(48, title="Revised")
+        self.assertEqual(outcome.pull_request_number, 48)
+        self.assertEqual(outcome.branch, "fix/thing")
+
+
 if __name__ == "__main__":
     unittest.main()

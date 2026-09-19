@@ -145,7 +145,18 @@ class GitHubPullRequests:
         head = data.get("head")
         base = data.get("base")
         state = data.get("state")
-        if not isinstance(number, int) or not isinstance(head, dict):
+        # `bool` is a subclass of `int`, so `True` passes an isinstance check
+        # and then raises `TypeError` from `PullRequestOutcome` — past the
+        # handler, reaching the broker as an executor fault rather than the
+        # declared failure. A non-positive number does the same with
+        # `ValueError`. The same gap was closed for a blank `head.ref`, and
+        # `update` and `find` now reach this too.
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number <= 0
+            or not isinstance(head, dict)
+        ):
             raise PullRequestError("pull_request_unavailable")
         head_sha = head.get("sha")
         if not valid_sha(head_sha):
