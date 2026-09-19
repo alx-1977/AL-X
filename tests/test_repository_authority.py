@@ -275,6 +275,30 @@ class SelfPreservationTests(RealRepositoryHarness):
                 )
 
 
+
+    def test_a_successful_reset_records_the_branch_it_moved(self) -> None:
+        """The success record had the same decoy mismatch as the refusal.
+
+        Three places worked out which ref an operation concerned — the
+        invariant, the refusal record and the success record — and the third
+        still read the request's arguments. A reset carrying a decoy `branch`
+        therefore reported moving a branch that had not moved, with the sha of
+        one it never touched.
+        """
+        self.branch("fix/work")
+        git(self.local, "branch", "fix/decoy")
+        before = git(self.local, "rev-parse", "HEAD")
+        first = git(self.local, "rev-parse", "HEAD~1")
+
+        outcome = self.perform(
+            Operation.RESET, revision=first, mode="hard", branch="fix/decoy"
+        )
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(outcome.source_ref, "fix/work")
+        self.assertEqual(outcome.resulting_ref, "fix/work")
+        self.assertEqual(outcome.source_sha, before)
+        self.assertEqual(outcome.resulting_sha, first)
+
     def test_a_refusal_names_the_ref_the_command_would_touch(self) -> None:
         """The record must describe the operation the decision was about.
 

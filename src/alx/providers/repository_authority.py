@@ -707,10 +707,11 @@ class RepositoryAuthority:
         command = self._argv(operation, arguments)
 
         # Where the affected ref stood before, so the evidence can say what
-        # changed rather than only that something ran.
-        named_ref = str(
-            arguments.get("branch") or arguments.get("ref") or ""
-        ).strip()
+        # changed rather than only that something ran. The same answer the
+        # invariant and the refusal record use: a third copy of this resolution
+        # is how a successful reset came to report the branch the request named
+        # rather than the one it moved.
+        named_ref = self._affected_ref(operation, arguments)
         source_ref = named_ref or ("HEAD" if operation not in READ_ONLY else "")
         source_sha = self._sha_of(source_ref) if source_ref else ""
 
