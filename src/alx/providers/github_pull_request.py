@@ -285,12 +285,24 @@ class GitHubPullRequests:
             # A node without an `id` cannot be acted on, and a resolved one has
             # already been dealt with — counting either would make "threads
             # remain" true for a pull request that is fully addressed.
-            threads.extend(
-                item for item in nodes
-                if isinstance(item, dict)
-                and isinstance(item.get("id"), str) and item["id"].strip()
-                and item.get("isResolved") is False
-            )
+            #
+            # A node whose `isResolved` cannot be read is neither. Dropping it
+            # quietly would subtract from the count, and the count is what says
+            # whether anything is outstanding before a merge — so an unreadable
+            # node would make a pull request look more finished than it is.
+            # The same reading as an unreadable `nodes` or `pageInfo`: not
+            # knowing is reported, never rendered as nothing.
+            for item in nodes:
+                if not isinstance(item, dict):
+                    raise PullRequestError("pull_request_unavailable")
+                identity = item.get("id")
+                if not isinstance(identity, str) or not identity.strip():
+                    continue
+                resolved = item.get("isResolved")
+                if not isinstance(resolved, bool):
+                    raise PullRequestError("pull_request_unavailable")
+                if not resolved:
+                    threads.append(item)
             info = page.get("pageInfo")
             # A missing or unreadable `pageInfo` is not "there are no more
             # pages" — it is not knowing, and treating it as the end returns a

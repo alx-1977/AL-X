@@ -152,6 +152,48 @@ class ReviewThreadTests(unittest.TestCase):
             provider.review_threads(48)
         self.assertEqual(len(self.requests), module.MAX_THREAD_PAGES)
 
+
+    def test_a_resolution_flag_that_cannot_be_read_is_unavailable(self) -> None:
+        """Not knowing whether a thread is resolved is not "it is resolved".
+
+        Dropping such a node quietly subtracts from the count, and the count
+        is what says whether anything is outstanding before a merge — so an
+        unreadable node would make a pull request look more finished than it
+        is. The same reading as an unreadable `nodes` or `pageInfo`.
+        """
+        for flag in ({}, {"isResolved": None}, {"isResolved": "false"},
+                     {"isResolved": 0}, {"isResolved": 1}, {"isResolved": []}):
+            with self.subTest(flag=flag):
+                node = {"id": "T1", **flag}
+                provider = self.transport([self.page([node])])
+                with self.assertRaises(PullRequestError) as caught:
+                    provider.review_threads(48)
+                self.assertEqual(
+                    caught.exception.code, "pull_request_unavailable"
+                )
+
+    def test_an_unreadable_node_does_not_hide_behind_a_readable_one(self) -> None:
+        """One bad node makes the whole answer untrustworthy, not shorter."""
+        provider = self.transport([self.page([
+            _thread("T1"), {"id": "T2", "isResolved": None},
+        ])])
+        with self.assertRaises(PullRequestError):
+            provider.review_threads(48)
+
+    def test_a_node_that_is_not_a_mapping_is_unavailable(self) -> None:
+        provider = self.transport([self.page(["not-a-thread"])])
+        with self.assertRaises(PullRequestError):
+            provider.review_threads(48)
+
+    def test_the_two_readable_answers_are_unchanged(self) -> None:
+        """`False` is outstanding, `True` is dealt with."""
+        provider = self.transport([self.page([_thread("T1")])])
+        self.assertEqual(
+            [item["id"] for item in provider.review_threads(48)], ["T1"]
+        )
+        provider = self.transport([self.page([_thread("T2", resolved=True)])])
+        self.assertEqual(provider.review_threads(48), ())
+
     def test_an_unreadable_page_marker_is_not_the_last_page(self) -> None:
         """Not knowing whether more pages exist is not "there are none".
 
