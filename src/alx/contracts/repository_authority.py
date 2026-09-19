@@ -328,6 +328,171 @@ class CanonicalSystem:
             raise ValueError("the canonical repository must be named")
 
 
+# What each operation takes, as data rather than as prose.
+#
+# The capability exposed one free-form `arguments` object and described the
+# argument names in a sentence, which listed `base`, `head` and `branch`
+# together as ways of naming a ref. Opening a pull request accepts only
+# `branch`, so every ordinary spelling — `head`, `base`, `source_branch`,
+# `repository` — was refused before reaching GitHub, and the only way to learn
+# the accepted name was to guess it. AL/X guessed four times and stopped.
+#
+# Declaring it makes the contract answerable: what an operation requires, what
+# it accepts, and what each field means, readable from the capability itself.
+ARGUMENTS: dict[Operation, dict[str, tuple[str, bool]]] = {
+    # name -> (what it means, required)
+    Operation.RESOLVE: {"revision": ("a commit, branch or tag", True)},
+    Operation.SHOW_COMMIT: {"revision": ("a commit, branch or tag", True)},
+    Operation.LIST_BRANCHES: {},
+    Operation.LIST_TAGS: {},
+    Operation.LOG: {
+        "revision": ("where to start from", True),
+        "limit": ("how many commits, at most 200", False),
+    },
+    Operation.DIFF: {
+        "base": ("the revision to compare from", True),
+        "head": ("the revision to compare to", True),
+    },
+    Operation.CHANGED_FILES: {
+        "base": ("the revision to compare from", True),
+        "head": ("the revision to compare to", True),
+    },
+    Operation.MERGE_BASE: {
+        "base": ("one revision", True),
+        "head": ("the other revision", True),
+    },
+    Operation.AHEAD_BEHIND: {
+        "base": ("the revision to measure against", True),
+        "head": ("the revision being measured", True),
+    },
+    Operation.IS_ANCESTOR: {
+        "ancestor": ("the revision that may be contained", True),
+        "descendant": ("the revision that may contain it", True),
+    },
+    Operation.BRANCH_CONTAINS: {"revision": ("the commit to look for", True)},
+    Operation.STATUS: {},
+    Operation.LIST_WORKTREES: {},
+    Operation.FETCH: {},
+    Operation.PULL_FAST_FORWARD: {
+        "branch": ("the branch to advance; it must be checked out", True),
+    },
+    Operation.CREATE_BRANCH: {
+        "branch": ("the name to create", True),
+        "start_point": ("the revision it starts from", True),
+    },
+    Operation.SWITCH_BRANCH: {"branch": ("the branch to check out", True)},
+    Operation.DELETE_BRANCH: {"branch": ("the local branch to delete", True)},
+    Operation.DELETE_REMOTE_BRANCH: {
+        "branch": ("the branch to delete on the remote", True),
+    },
+    Operation.STAGE: {"paths": ("the files to stage, named individually", True)},
+    Operation.COMMIT: {"message": ("the commit message", True)},
+    Operation.AMEND: {"message": ("the replacement commit message", True)},
+    Operation.CHERRY_PICK: {"revision": ("the commit to carry over", True)},
+    Operation.REVERT: {"revision": ("the commit to undo", True)},
+    Operation.LOCAL_MERGE: {"revision": ("the revision to merge in", True)},
+    Operation.REBASE: {"onto": ("the revision to replay onto", True)},
+    Operation.RESET: {
+        "revision": ("the revision to move to", True),
+        "mode": ("soft, mixed or hard; mixed by default", False),
+    },
+    Operation.PUSH: {"branch": ("the branch to publish", True)},
+    Operation.FORCE_PUSH: {"branch": ("the branch to replace on the remote", True)},
+    Operation.ADD_WORKTREE: {
+        "branch": ("the branch to create for it", True),
+        "path": ("where the worktree goes", True),
+        "start_point": ("the revision it starts from", True),
+    },
+    Operation.REMOVE_WORKTREE: {"path": ("the worktree to remove", True)},
+    Operation.PRUNE_WORKTREES: {},
+    # The pull request. The repository is the configured one and is never an
+    # argument, and the base is always the default branch — a proposal into
+    # somewhere else is a review nobody performs.
+    Operation.FIND_PULL_REQUEST: {
+        "branch": ("the source branch whose pull request to find", True),
+    },
+    Operation.OPEN_PULL_REQUEST: {
+        "branch": ("the source branch to propose; it must already be pushed", True),
+        "title": ("the pull request title", True),
+        "body": ("the pull request description", False),
+    },
+    Operation.UPDATE_PULL_REQUEST: {
+        "pull_request_number": ("which pull request to revise", True),
+        "title": ("a replacement title", False),
+        "body": ("a replacement description", False),
+    },
+    Operation.COMMENT_ON_PULL_REQUEST: {
+        "pull_request_number": ("which pull request to comment on", True),
+        "body": ("the comment", True),
+    },
+    Operation.READ_REVIEW_THREADS: {
+        "pull_request_number": ("which pull request to read", True),
+    },
+    Operation.RESOLVE_REVIEW_THREAD: {
+        "thread_id": ("the thread to mark resolved", True),
+    },
+}
+
+
+# Spellings an operation's argument is commonly given, mapped to the one it
+# uses. These are not alternative parameters: the declared name is what the
+# provider reads, and this only saves a caller who said `head` for a pull
+# request's source branch from being refused for a word rather than a fact.
+# Every entry here was a shape AL/X actually tried.
+SYNONYMS: dict[Operation, dict[str, str]] = {
+    Operation.OPEN_PULL_REQUEST: {
+        "head": "branch",
+        "source_branch": "branch",
+        "head_branch": "branch",
+    },
+    Operation.FIND_PULL_REQUEST: {
+        "head": "branch",
+        "source_branch": "branch",
+        "head_branch": "branch",
+    },
+}
+
+
+def normalised_arguments(
+    operation: Operation, arguments: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The arguments under the names this operation declares.
+
+    A caller who named a pull request's source branch `head` meant the branch,
+    and refusing that is refusing a word rather than a fact. The declared name
+    still wins where both are given: the synonym is a courtesy, not a second
+    way to say something different.
+    """
+    synonyms = SYNONYMS.get(operation, {})
+    if not synonyms:
+        return dict(arguments)
+    resolved = dict(arguments)
+    for spoken, declared in synonyms.items():
+        if spoken in resolved and declared not in resolved:
+            resolved[declared] = resolved.pop(spoken)
+    return resolved
+
+
+def describe_operations() -> str:
+    """Every operation and its arguments, for the capability catalogue.
+
+    Generated from `ARGUMENTS` rather than written beside it, so the sentence
+    AL/X reads and the values the provider accepts cannot drift apart.
+    """
+    lines = []
+    for operation in Operation:
+        fields = ARGUMENTS.get(operation, {})
+        if not fields:
+            lines.append(f"`{operation.value}` takes no arguments")
+            continue
+        rendered = "; ".join(
+            f"`{name}` ({meaning})" + ("" if required else " [optional]")
+            for name, (meaning, required) in fields.items()
+        )
+        lines.append(f"`{operation.value}`: {rendered}")
+    return ". ".join(lines)
+
+
 def refuse_if_self_destructive(
     system: CanonicalSystem,
     operation: Operation,
@@ -411,6 +576,7 @@ def refuse_if_self_destructive(
 
 
 __all__ = [
+    "ARGUMENTS",
     "CANONICAL_BRANCH",
     "GITHUB_OPERATIONS",
     "REMOTE_OPERATIONS",
@@ -421,6 +587,9 @@ __all__ = [
     "RepositoryAuthorityError",
     "RepositoryOutcome",
     "RepositoryRequest",
+    "SYNONYMS",
+    "describe_operations",
+    "normalised_arguments",
     "refuse_if_self_destructive",
     "valid_ref",
     "valid_revision",

@@ -1231,5 +1231,162 @@ class GitEnvironmentCredentialTests(unittest.TestCase):
         self.assertEqual(helper, "!gh auth git-credential")
 
 
+class CapabilityContractTests(unittest.TestCase):
+    """What the capability promises must be what the provider accepts.
+
+    AL/X published a branch and then could not propose it. `open_pull_request`
+    accepts `branch`, the catalogue described argument names in a sentence that
+    listed `base`, `head` and `branch` together as ways of naming a ref, and
+    `arguments` was a free-form object that validated nothing. Every ordinary
+    spelling was refused before reaching GitHub, and the only way to learn the
+    accepted name was to guess it. She guessed four times and stopped.
+
+    These hold the schema and the provider to one declaration.
+    """
+
+    def test_every_operation_declares_its_arguments(self) -> None:
+        """A new operation cannot ship without saying what it takes."""
+        from alx.contracts.repository_authority import ARGUMENTS
+
+        missing = [item.value for item in Operation if item not in ARGUMENTS]
+        self.assertEqual(missing, [])
+
+    def test_the_catalogue_names_every_operation_and_its_arguments(self) -> None:
+        """She reads this; it has to be the whole answer."""
+        from alx.contracts.repository_authority import ARGUMENTS
+
+        purpose = DEFINITION.purpose
+        for operation in Operation:
+            with self.subTest(operation=operation.value):
+                self.assertIn(f"`{operation.value}`", purpose)
+                for name in ARGUMENTS[operation]:
+                    self.assertIn(f"`{name}`", purpose)
+
+    def test_opening_a_pull_request_is_documented_completely(self) -> None:
+        """The case she could not solve, stated in the catalogue."""
+        purpose = DEFINITION.purpose
+        index = purpose.index("`open_pull_request`")
+        described = purpose[index:index + 220]
+        self.assertIn("`branch`", described)
+        self.assertIn("`title`", described)
+        self.assertIn("`body`", described)
+        self.assertIn("optional", described)
+        # And what she must not have to supply.
+        self.assertIn("repository is the configured canonical one", purpose)
+        self.assertIn("never an argument", purpose)
+
+    def test_optional_arguments_are_marked_and_required_ones_are_not(self) -> None:
+        from alx.contracts.repository_authority import describe_operations
+
+        described = describe_operations()
+        self.assertIn("`body` (the pull request description) [optional]", described)
+        self.assertIn("`title` (the pull request title)", described)
+        self.assertNotIn("`title` (the pull request title) [optional]", described)
+
+
+class PullRequestArgumentShapeTests(RealRepositoryHarness):
+    """The shapes AL/X actually tried, through the shipped capability."""
+
+    class Recording:
+        def __init__(self) -> None:
+            self.opened: list = []
+
+        def open(self, request):
+            self.opened.append(request)
+            from alx.contracts.github_pull_request import PullRequestOutcome
+            return PullRequestOutcome(
+                7, request.branch, "a" * 40, "main", "open", True
+            )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.github = self.Recording()
+        self.authority = RepositoryAuthority(
+            self.system, pull_requests=self.github
+        )
+
+    def executor(self):
+        """The capability as registered, not the provider directly."""
+        from alx.tools.repository_authority import (
+            REPOSITORY_OPERATION,
+            build_repository_operation_executors,
+        )
+
+        return build_repository_operation_executors(
+            self.authority, lambda: "call-1"
+        )[REPOSITORY_OPERATION]
+
+    def test_the_declared_shape_opens_a_pull_request(self) -> None:
+        result = self.executor()({
+            "operation": "open_pull_request",
+            "arguments": {
+                "branch": "fix/review-status-surfacing-4",
+                "title": "Surface local-review failures",
+                "body": "Body.",
+            },
+        })
+        self.assertEqual(result.values["pull_request_number"], 7)
+        self.assertEqual(
+            self.github.opened[0].branch, "fix/review-status-surfacing-4"
+        )
+
+    def test_the_shapes_she_tried_reach_github(self) -> None:
+        """`head`, `source_branch` and a redundant `repository` and `base`.
+
+        Refusing these was refusing a word rather than a fact: each named the
+        same branch, and the repository and base are fixed by the capability.
+        """
+        for arguments in (
+            {"head": "fix/review-status-surfacing-4", "title": "T"},
+            {"source_branch": "fix/review-status-surfacing-4", "title": "T"},
+            {"head_branch": "fix/review-status-surfacing-4", "title": "T"},
+            {"repository": "alx-1977/AL-X", "base": "main",
+             "head": "fix/review-status-surfacing-4", "title": "T", "body": "B"},
+        ):
+            with self.subTest(arguments=sorted(arguments)):
+                self.github.opened.clear()
+                result = self.executor()({
+                    "operation": "open_pull_request", "arguments": arguments,
+                })
+                self.assertEqual(result.values["pull_request_number"], 7)
+                self.assertEqual(
+                    self.github.opened[0].branch,
+                    "fix/review-status-surfacing-4",
+                )
+
+    def test_the_declared_name_wins_over_a_synonym(self) -> None:
+        """A courtesy, not a second way to say something different."""
+        self.executor()({
+            "operation": "open_pull_request",
+            "arguments": {"branch": "fix/declared", "head": "fix/synonym",
+                          "title": "T"},
+        })
+        self.assertEqual(self.github.opened[0].branch, "fix/declared")
+
+    def test_a_missing_title_is_still_refused(self) -> None:
+        """Clearer arguments are not looser ones."""
+        result = self.executor()({
+            "operation": "open_pull_request",
+            "arguments": {"branch": "fix/thing"},
+        })
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+
+    def test_a_missing_branch_is_still_refused(self) -> None:
+        result = self.executor()({
+            "operation": "open_pull_request",
+            "arguments": {"title": "T"},
+        })
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+
+    def test_synonyms_do_not_leak_into_other_operations(self) -> None:
+        """`head` is a revision for a diff, not a branch to be renamed."""
+        from alx.contracts.repository_authority import normalised_arguments
+
+        arguments = normalised_arguments(
+            Operation.DIFF, {"base": "main", "head": "fix/thing"}
+        )
+        self.assertEqual(arguments, {"base": "main", "head": "fix/thing"})
+
+
 if __name__ == "__main__":
     unittest.main()
