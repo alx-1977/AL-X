@@ -98,6 +98,18 @@ function codingSeconds(value) {
 }
 
 
+// A `vscode://file` link for one absolute worktree path.
+//
+// Built through `URL.pathname` rather than `encodeURI`, which leaves `#` and
+// `?` unescaped: a path containing either would truncate the link at that
+// character and open the wrong directory, or nothing. Both are legal in a
+// directory name. Found in review on PR #56.
+function vscodeLink(worktree) {
+  const url = new URL("vscode://file/");
+  url.pathname = worktree;
+  return url.href;
+}
+
 // Retained worktrees, listed compactly under the active row. One line each:
 // what ended, on which branch, and a way in. Not a dashboard — the point is
 // only that a directory beside the canonical checkout is never a mystery.
@@ -129,7 +141,7 @@ function paintRetained() {
 
     const open = document.createElement("a");
     open.className = "worktree__open";
-    open.href = `vscode://file${encodeURI(item.worktree)}`;
+    open.href = vscodeLink(item.worktree);
     open.append(document.createTextNode("Open in VS Code"));
     line.append(open);
 
@@ -193,9 +205,7 @@ function paintWorktree(message) {
     // or switches an editor on its own.
     const open = document.createElement("a");
     open.className = "worktree__open";
-    // `vscode://file` expects the absolute path appended directly, so an
-    // already-rooted path must not gain a second slash.
-    open.href = `vscode://file${encodeURI(worktree)}`;
+    open.href = vscodeLink(worktree);
     open.append(document.createTextNode("Open in VS Code"));
     row.append(open);
 
