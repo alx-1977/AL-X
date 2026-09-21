@@ -163,6 +163,27 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# pytest's "no tests were collected". A suite that collected nothing did not
+# fail: there was nothing there to fail. Reading it as a failure made a Python
+# change in a repository without tests permanently uncommittable — which is the
+# same shape as the defect this whole change removes, one class of verification
+# standing in for verification itself. The check is recorded as run and passed,
+# and the absence of tests is visible in the command record's own exit status.
+_PYTEST_NOTHING_COLLECTED = 5
+
+
+def _check_passed(record: CodingCommandRecord) -> bool:
+    """Whether one verification command's result counts as passing."""
+    if record.timed_out:
+        return False
+    if record.exit_status == 0:
+        return True
+    return (
+        is_test_command(record.argv)
+        and record.exit_status == _PYTEST_NOTHING_COLLECTED
+    )
+
+
 def _strings(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
@@ -937,7 +958,7 @@ class CodingAgent:
                 results.append(check)
                 continue
             commands.append(record)
-            passed = record.exit_status == 0 and not record.timed_out
+            passed = _check_passed(record)
             results.append(replace(check, ran=True, passed=passed))
             if is_test_command(record.argv):
                 tests_run = True

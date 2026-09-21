@@ -777,6 +777,48 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertIn("diff_check", values["verification"]["ran"])
 
+    def test_a_suite_that_collected_nothing_is_not_a_failed_suite(self) -> None:
+        """pytest exit 5 means there was nothing to run, not that it failed.
+
+        A Python change in a worktree holding no tests escalates to the full
+        suite, which collects nothing and exits 5. Reading that as a failure
+        made such a change permanently uncommittable — the same shape as the
+        defect this module's rewrite removes, one class of verification
+        standing in for verification itself. Found by CI on PR #54, where a
+        fixture repository with no tests failed for exactly this reason.
+        """
+        from alx.providers.coding_agent import _check_passed
+
+        collected_nothing = CodingCommandRecord(
+            ("python", "-m", "pytest", "-q"), 5, "no tests ran", "", False, True
+        )
+        self.assertTrue(_check_passed(collected_nothing))
+        # A genuine test failure is still a failure.
+        self.assertFalse(
+            _check_passed(
+                CodingCommandRecord(
+                    ("python", "-m", "pytest", "-q"), 1, "", "", False, True
+                )
+            )
+        )
+        # And exit 5 is forgiven only for a test command; a gate exiting 5 is
+        # a gate that failed.
+        self.assertFalse(
+            _check_passed(
+                CodingCommandRecord(
+                    ("python", "scripts/check_governance.py"), 5, "", "", False, True
+                )
+            )
+        )
+        # A timeout is never a pass, whatever it exited with.
+        self.assertFalse(
+            _check_passed(
+                CodingCommandRecord(
+                    ("python", "-m", "pytest", "-q"), 5, "", "", True, True
+                )
+            )
+        )
+
     def test_supplied_test_guidance_cannot_choose_the_verification(self) -> None:
         """Verification is derived from files, never from prose in the request.
 
