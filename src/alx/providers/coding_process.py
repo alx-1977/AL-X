@@ -34,10 +34,24 @@ _GIT_FLAGS = {
     # concrete files only, so a collapsed directory entry would name something
     # it must refuse.
     "status": frozenset({"--porcelain", "--porcelain=v1", "-z", "-uall"}),
-    "diff": frozenset({"--stat", "--name-only", "--cached", "--no-color"}),
+    # `--check` makes `git diff` report whitespace errors and conflict markers
+    # instead of printing a patch. It writes nothing, so it belongs with the
+    # other read-only diff forms, and it is the one check every coding job runs
+    # whatever it changed.
+    "diff": frozenset({"--stat", "--name-only", "--cached", "--no-color", "--check"}),
     "log": frozenset({"--oneline", "--no-color"}),
 }
 _PYTHON_NAMES = frozenset({"python", "python3"})
+# The repository's own law gates, named exactly. `python <path>` is otherwise
+# refused outright, because a script path is arbitrary code chosen by whoever
+# supplied the path; these two are permitted as literal argv forms with no
+# arguments at all, so the permission cannot be widened by appending a flag or
+# pointed at a different file by changing the spelling. They are read-only
+# checks that already run in CI.
+_GATE_SCRIPTS = frozenset({
+    "scripts/check_governance.py",
+    "scripts/check_architecture.py",
+})
 _PYTEST_FLAGS = frozenset({
     "-q", "-v", "-x", "--tb=short", "--tb=line", "--tb=no",
 })
@@ -84,6 +98,11 @@ def command_permitted(
     if executable in _PYTHON_NAMES:
         if len(rest) >= 2 and rest[0] == "-m" and rest[1] in {"pytest", "unittest"}:
             return _pytest_args_permitted(rest[2:], worktree, blocked_paths)
+        # Exactly `python scripts/check_governance.py`, with nothing after it.
+        # The gate must also be the worktree's own, not a path climbing out of
+        # it or one the job's blocked paths cover.
+        if len(rest) == 1 and rest[0] in _GATE_SCRIPTS:
+            return _path_in_worktree(rest[0], worktree, blocked_paths)
         return False
     if executable == "pytest":
         return _pytest_args_permitted(rest, worktree, blocked_paths)

@@ -52,6 +52,9 @@ from alx.contracts.coding import (  # noqa: E402
     CodingRequest,
     CodingSessionResult,
 )
+from alx.contracts.coding_verification import (  # noqa: E402
+    required_verification,
+)
 from alx.providers import coding_containment  # noqa: E402
 from alx.providers.coding_process import command_permitted  # noqa: E402
 from alx.providers.coding_session import (  # noqa: E402
@@ -748,7 +751,90 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("no terminal", briefing)
 
     def test_alx_verifies_with_its_own_bounded_executor(self) -> None:
-        """13. Tests are run by AL/X after the session, through the allowlist."""
+        """13. Checks are run by AL/X after the session, through the allowlist.
+
+        The commands are now chosen by the deterministic policy rather than
+        parsed out of `test_guidance`. A Python change is still verified by
+        running Python tests; what changed is that the job no longer gets to
+        nominate the command.
+        """
+        worktree = _worktree(self.root)
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            PlanningModel(),
+            session,
+            task="fix add",
+            worktree=str(worktree),
+        )
+        values = attempt.result.values
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(values["tests_run"])
+        self.assertTrue(values["tests_passed"])
+        self.assertTrue(values["all_required_verification_passed"])
+        # The diff check runs for every job, whatever it changed.
+        self.assertEqual(
+            tuple(values["commands"][0]["argv"]), ("git", "diff", "--check")
+        )
+        self.assertIn("diff_check", values["verification"]["ran"])
+
+    def test_a_suite_that_collected_nothing_is_not_a_failed_suite(self) -> None:
+        """pytest exit 5 means there was nothing to run, not that it failed.
+
+        A Python change in a worktree holding no tests escalates to the full
+        suite, which collects nothing and exits 5. Reading that as a failure
+        made such a change permanently uncommittable — the same shape as the
+        defect this module's rewrite removes, one class of verification
+        standing in for verification itself. Found by CI on PR #54, where a
+        fixture repository with no tests failed for exactly this reason.
+        """
+        from alx.providers.coding_agent import _check_passed
+
+        collected_nothing = CodingCommandRecord(
+            ("python", "-m", "pytest", "-q"), 5, "no tests ran", "", False, True
+        )
+        self.assertTrue(_check_passed(collected_nothing, "pytest_full"))
+        # But a *targeted* run collecting nothing is a failure: the basis for
+        # running those files instead of the suite is that they cover the
+        # change, and collecting nothing proves that basis false. Accepting it
+        # would let a job commit having executed no test at all.
+        self.assertFalse(_check_passed(collected_nothing, "pytest_targeted"))
+        # A genuine test failure is still a failure.
+        self.assertFalse(
+            _check_passed(
+                CodingCommandRecord(
+                    ("python", "-m", "pytest", "-q"), 1, "", "", False, True
+                ),
+                "pytest_full",
+            )
+        )
+        # And exit 5 is forgiven only for a test command; a gate exiting 5 is
+        # a gate that failed.
+        self.assertFalse(
+            _check_passed(
+                CodingCommandRecord(
+                    ("python", "scripts/check_governance.py"), 5, "", "", False, True
+                ),
+                "governance_gate",
+            )
+        )
+        # A timeout is never a pass, whatever it exited with.
+        self.assertFalse(
+            _check_passed(
+                CodingCommandRecord(
+                    ("python", "-m", "pytest", "-q"), 5, "", "", True, True
+                ),
+                "pytest_full",
+            )
+        )
+
+    def test_supplied_test_guidance_cannot_choose_the_verification(self) -> None:
+        """Verification is derived from files, never from prose in the request.
+
+        `test_guidance` used to be scanned for command-shaped lines, which made
+        the thing being verified a contributor to its own verification policy.
+        It is still carried to the session as advice; it no longer reaches the
+        executor.
+        """
         worktree = _worktree(self.root)
         session = RecordingSession(edits={"app.py": _FIXED})
         attempt = self._run(
@@ -758,32 +844,34 @@ class NativeExecutionTests(unittest.TestCase):
             worktree=str(worktree),
             test_guidance="python -m unittest -q test_app",
         )
-        values = attempt.result.values
-        self.assertTrue(values["tests_run"])
-        self.assertTrue(values["tests_passed"])
-        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
-        argv = tuple(values["commands"][0]["argv"])
-        self.assertEqual(argv[:3], ("python", "-m", "unittest"))
+        argv_run = [tuple(item["argv"]) for item in attempt.result.values["commands"]]
+        self.assertTrue(
+            all("unittest" not in argv for argv in argv_run), argv_run
+        )
 
     def test_changed_test_modules_are_preferred_to_the_full_suite(self) -> None:
-        """The native session's own regression is the first test evidence."""
+        """A changed test module is its own verification, not the whole suite."""
         worktree = _worktree(self.root)
-        agent = coding_agent_module.CodingAgent(
-            PlanningModel(), RecordingSession(), PlanningModel()
-        )
-        commands = agent._verification_commands(
-            CodingRequest(task="fix add", job_id="job-1", worktree=str(worktree)),
-            _plan(),
-            ("app.py", "test_app.py"),
-            root=worktree,
-        )
+        # `test_app.py` alone: a changed test module is its own mapping, so
+        # nothing is left uncovered and the suite is not needed.
+        policy = required_verification(("test_app.py",), worktree)
         self.assertEqual(
-            commands,
-            (("python", "-m", "pytest", "-q", "test_app.py"),),
+            policy.commands,
+            (
+                ("git", "diff", "--check"),
+                ("python", "-m", "pytest", "-q", "test_app.py"),
+            ),
         )
         self.assertNotIn(
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
-            commands,
+            policy.commands,
+        )
+        # Adding an unmapped Python file escalates the whole set, rather than
+        # letting the mapped file's test speak for the unmapped one.
+        mixed = required_verification(("app.py", "test_app.py"), worktree)
+        self.assertIn(
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
+            mixed.commands,
         )
 
     def test_changed_pytest_module_can_verify_a_successful_job(self) -> None:
@@ -802,9 +890,11 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(attempt.result.values["tests_passed"])
+        # `app.py` changed too and maps to no test in this flat fixture, so the
+        # set escalates rather than letting `test_app.py` cover both.
         self.assertEqual(
-            tuple(attempt.result.values["commands"][0]["argv"]),
-            ("python", "-m", "pytest", "-q", "test_app.py"),
+            tuple(attempt.result.values["commands"][1]["argv"]),
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
         )
 
     def test_a_correction_only_file_selects_the_targeted_verification(self) -> None:
@@ -850,35 +940,47 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         # The correction-only file reaches the reviewed/evidence set...
         self.assertIn("test_parallel.py", values["files_changed"])
-        # ...and the same set chooses the targeted verification command.
+        # ...and the same set chooses the verification. `app.py` is also in
+        # it and maps to nothing here, so the set escalates; what this test
+        # holds is that the correction-only file reached the policy at all.
         self.assertEqual(
-            tuple(values["commands"][0]["argv"]),
-            ("python", "-m", "pytest", "-q", "test_parallel.py"),
+            tuple(values["commands"][1]["argv"]),
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
         )
         self.assertTrue(values["tests_run"])
         self.assertTrue(values["tests_passed"])
 
     def test_verification_timeout_remains_failed_bounded_evidence(self) -> None:
         """A realistic bound does not turn a genuine timeout into success."""
+        from alx.contracts.coding import FULL_SUITE_COMMAND_SECONDS
+
         worktree = _worktree(self.root)
         session = RecordingSession(edits={"app.py": _FIXED})
+        bounds: dict[tuple[str, ...], int] = {}
 
         def timed_out(argv, *_args, **kwargs):
-            self.assertEqual(
-                kwargs["timeout_seconds"], DEFAULT_VERIFICATION_COMMAND_SECONDS
-            )
+            bounds[tuple(argv)] = kwargs["timeout_seconds"]
             return CodingCommandRecord(tuple(argv), -1, "partial", "", True, True)
 
         with patch.object(coding_agent_module, "run_permitted_command", timed_out):
             attempt = self._run(
                 PlanningModel(), session, task="fix add", worktree=str(worktree),
-                test_guidance="python -m unittest -q test_app",
             )
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertFalse(attempt.result.values["tests_passed"])
+        self.assertFalse(attempt.result.values["all_required_verification_passed"])
         command = attempt.result.values["commands"][0]
         self.assertTrue(command["timed_out"])
         self.assertEqual(command["stdout"], "partial")
+        # The full suite gets its own longer bound; every other check keeps the
+        # shared one. `app.py` maps to no test here, so the suite is selected.
+        self.assertEqual(
+            bounds[("python", "-m", "pytest", "-q", "-p", "no:cacheprovider")],
+            FULL_SUITE_COMMAND_SECONDS,
+        )
+        self.assertEqual(
+            bounds[("git", "diff", "--check")],
+            DEFAULT_VERIFICATION_COMMAND_SECONDS,
+        )
 
     def test_failing_tests_defeat_a_confident_session_report(self) -> None:
         """A session claiming success cannot outrank a failing suite."""

@@ -91,6 +91,42 @@ _COMMIT_RECORD = StructuredSchema(
     extra_properties=False,
 )
 
+_VERIFICATION_CHECK = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "name": _STRING,
+        "argv": _STRING_ARRAY,
+        "reason": _STRING,
+        "ran": _BOOLEAN,
+        "passed": _BOOLEAN,
+        # "command" ran through the allowlisted executor; "content" was
+        # performed in process over the job's own files, which is the half
+        # `git diff --check` cannot see because a new file is still untracked.
+        "kind": _STRING,
+        # What a failed content check found, so Core is told why rather than
+        # having to infer it from a bare false.
+        "findings": _STRING_ARRAY,
+    },
+    ("name", "argv", "reason", "ran", "passed", "kind", "findings"),
+    extra_properties=False,
+)
+
+# What the job was required to verify and how each check ended. Core reads
+# this to know why a change was or was not committed; `tests_run` and
+# `tests_passed` remain beside it as the test-specific facts.
+_VERIFICATION = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "required": _STRING_ARRAY,
+        "ran": _STRING_ARRAY,
+        "failed": _STRING_ARRAY,
+        "all_required_passed": _BOOLEAN,
+        "checks": StructuredSchema(ValueKind.ARRAY, items=_VERIFICATION_CHECK),
+    },
+    ("required", "ran", "failed", "all_required_passed", "checks"),
+    extra_properties=False,
+)
+
 
 DEFINITION = CapabilityDefinition(
     RUN_CODING_TASK,
@@ -112,7 +148,10 @@ DEFINITION = CapabilityDefinition(
     "repair_branch is optional: give it to name the branch the work is carried "
     "out on. Left unset, a branch is named automatically. "
     "commit_message is optional and requires repair_branch: give both to have "
-    "the job's own changed files committed on that branch once its tests pass, "
+    "the job's own changed files committed on that branch once every "
+    "verification check its changed files require has passed — which may or "
+    "may not include tests, and includes the law gates when the change touches "
+    "the paths they govern, "
     "returning branch and commit_sha. Only files this job changed are "
     "committed: the commit is refused rather than widened if the index or the "
     "resulting tree holds any path outside that authorised set. It still does "
@@ -145,6 +184,8 @@ DEFINITION = CapabilityDefinition(
             "commands": StructuredSchema(ValueKind.ARRAY, items=_COMMAND),
             "tests_run": _BOOLEAN,
             "tests_passed": _BOOLEAN,
+            "verification": _VERIFICATION,
+            "all_required_verification_passed": _BOOLEAN,
             "git_status": _STRING,
             "git_diff": _STRING,
             "unresolved_issues": _STRING_ARRAY,
@@ -197,6 +238,7 @@ _OUTCOME_ISSUE_CODES = (
     "review_failed",
     "local_review_material_findings",
     "unrelated_changes_staged",
+    "required_verification_failed",
     "git_refused",
     "git_unavailable",
 )

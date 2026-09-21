@@ -393,23 +393,26 @@ class CommittingIsRefusedRatherThanWidened(GitOutcome):
         self.assertNotIn("commit_sha", result.values)
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
 
-    def test_a_job_that_ran_no_verification_is_not_committed(self) -> None:
+    def test_a_job_whose_required_check_could_not_run_is_not_committed(self) -> None:
         """D-029 authorises a commit after the job passed its verification.
 
-        A job that ran *no* verification has not passed it; it skipped it.
-        Before this was fixed, the status derivation only failed a job on
-        `tests_run and tests_passed is False`, so a job where no candidate
-        command survived the allowlist reached "succeeded" with tests_run
-        False and was committed. An unverified commit reads downstream exactly
-        like a verified one, which is what makes the gap worth closing.
+        A job whose required check never ran has not passed it; it skipped it.
+        The predicate used to be `tests_run and tests_passed`, so a job where no
+        candidate command survived the allowlist reached "succeeded" having
+        verified nothing and was committed anyway. An unverified commit reads
+        downstream exactly like a verified one, which is what makes the gap
+        worth closing — and the gap is unchanged by the checks becoming
+        deterministic, so it is still proved here.
         """
         from unittest.mock import patch
 
         from alx.providers import coding_agent as agent_module
 
         before = self.git("rev-parse", "HEAD").strip()
+        # Every required command is refused, so each check is required, none
+        # runs, and `all_required_passed` is false.
         with patch.object(
-            agent_module.CodingAgent, "_verification_commands", return_value=()
+            agent_module, "command_permitted", return_value=False
         ):
             result = self.run_job(
                 RecordingSession(edits={"app.py": _FIXED}),
@@ -419,14 +422,22 @@ class CommittingIsRefusedRatherThanWidened(GitOutcome):
                 commit_message="repair addition",
             )
 
-        self.assertFalse(result.values["tests_run"])
+        self.assertFalse(result.values["all_required_verification_passed"])
         self.assertNotIn("commit_sha", result.values)
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
         # Said plainly, so Core knows why there is no SHA rather than having
         # to infer it from an absent field.
         self.assertIn(
-            "unverified_not_committed", result.values["unresolved_issues"]
+            "required_verification_failed", result.values["unresolved_issues"]
         )
+        # And the evidence says which checks were owed and which did not run.
+        # The content check is performed in process, so refusing every command
+        # does not stop it; what matters is that the refused ones are recorded
+        # as required and not run, which is enough to withhold the commit.
+        evidence = result.values["verification"]
+        self.assertIn("diff_check", evidence["failed"])
+        self.assertNotIn("diff_check", evidence["ran"])
+        self.assertIn("content_check", evidence["required"])
         # The work is not thrown away: it is still there as a diff.
         self.assertEqual(list(result.values["files_changed"]), ["app.py"])
 
@@ -580,6 +591,218 @@ class TheSessionStillHasNoGitAuthority(GitOutcome):
             self.assertFalse(
                 command_permitted(argv, self.root), " ".join(argv)
             )
+
+
+
+class VerificationIsProportionateToTheChange(GitOutcome):
+    """The corrected commit predicate, dispatched the way Core dispatches.
+
+    `tests/test_coding_verification.py` proves the policy in isolation. This
+    covers the half that matters to Core: that a job whose changed files owe no
+    test is verified, committed and reported as verified, and that a job whose
+    required check fails is not committed at all.
+    """
+
+    def test_a_documentation_only_job_is_committed_without_any_test(self) -> None:
+        """9. All required verification passed, and no pytest was required.
+
+        This is the incident, reproduced end to end. Before the correction the
+        commit predicate was `tests_run and tests_passed`, so this job — which
+        has nothing to prove by running pytest — could not be committed however
+        correct it was.
+        """
+        result = self.run_job(
+            RecordingSession(edits={"NOTES.md": "# Notes\n\nOne line.\n"}),
+            task="add a notes file",
+            repair_branch="docs/notes",
+            commit_message="add notes",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["all_required_verification_passed"])
+        # Committed, with a real SHA, on the strength of a diff check alone.
+        self.assertIn("commit_sha", result.values)
+        self.assertTrue(result.values["commit_sha"])
+        self.assertEqual(result.values["branch"], "docs/notes")
+        # No test was required, and none was claimed to have run.
+        self.assertFalse(result.values["tests_run"])
+        self.assertNotIn("tests_passed", result.values)
+        evidence = result.values["verification"]
+        self.assertEqual(
+            tuple(evidence["required"]), ("diff_check", "content_check")
+        )
+        self.assertEqual(
+            tuple(evidence["ran"]), ("diff_check", "content_check")
+        )
+        self.assertEqual(tuple(evidence["failed"]), ())
+        # And in particular the full suite was never selected.
+        argv_run = [tuple(item["argv"]) for item in result.values["commands"]]
+        self.assertEqual(argv_run, [("git", "diff", "--check")])
+
+    def test_a_job_whose_required_check_fails_is_not_committed(self) -> None:
+        """8. A failing required check refuses the commit and fails the job.
+
+        The diff check is made to fail by writing a real conflict marker, so
+        the refusal comes from the check itself rather than from a patched
+        predicate.
+        """
+        before = self.git("rev-parse", "HEAD").strip()
+        conflicted = (
+            "def add(a, b):\n"
+            "<<<<<<< HEAD\n"
+            "    return a + b\n"
+            "=======\n"
+            "    return a - b\n"
+            ">>>>>>> other\n"
+        )
+        result = self.run_job(
+            RecordingSession(edits={"app.py": conflicted}),
+            task="repair the addition",
+            repair_branch="repair/add",
+            commit_message="repair addition",
+        )
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertFalse(result.values["all_required_verification_passed"])
+        self.assertIn("diff_check", result.values["verification"]["failed"])
+        self.assertIn(
+            "required_verification_failed", result.values["unresolved_issues"]
+        )
+        # Nothing was committed, and the work is still in the worktree.
+        self.assertNotIn("commit_sha", result.values)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
+        self.assertIn("app.py", result.values["files_changed"])
+
+    def test_a_malformed_new_file_is_not_committed(self) -> None:
+        """The untracked half of the structural check.
+
+        `git diff --check` inspects tracked changes only, and a file the job
+        newly created is still untracked when verification runs — staging
+        happens later, inside the commit. So a new file carrying leftover
+        conflict markers passed the diff check and was committed. Found in
+        review on PR #54. The content check reads the job's own final files
+        directly, which is the same question asked where git cannot see.
+        """
+        before = self.git("rev-parse", "HEAD").strip()
+        conflicted = (
+            "def helper():\n"
+            "<<<<<<< HEAD\n"
+            "    return 1\n"
+            "=======\n"
+            "    return 2\n"
+            ">>>>>>> other\n"
+        )
+        result = self.run_job(
+            RecordingSession(edits={"helper.py": conflicted}),
+            task="add a helper",
+            repair_branch="feat/helper",
+            commit_message="add helper",
+        )
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertFalse(result.values["all_required_verification_passed"])
+        # The diff check saw nothing wrong, because the file is untracked...
+        checks = {item["name"]: item for item in result.values["verification"]["checks"]}
+        self.assertTrue(checks["diff_check"]["passed"])
+        # ...and the content check is what caught it.
+        self.assertFalse(checks["content_check"]["passed"])
+        self.assertTrue(
+            any(
+                "conflict marker" in finding
+                for finding in checks["content_check"]["findings"]
+            ),
+            checks["content_check"]["findings"],
+        )
+        # Nothing was committed.
+        self.assertNotIn("commit_sha", result.values)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
+
+    def test_a_clean_new_file_still_passes_and_commits(self) -> None:
+        """The content check must not fail honest jobs that create files.
+
+        A documentation file rather than a Python one, so this isolates the
+        content check: a new `.py` module with no mapped test legitimately
+        escalates to the full suite, which is a different requirement and is
+        covered separately.
+        """
+        result = self.run_job(
+            RecordingSession(edits={"HELPER.md": "# Helper\n\nOne line.\n"}),
+            task="add a helper note",
+            repair_branch="feat/helper",
+            commit_message="add helper note",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["all_required_verification_passed"])
+        self.assertTrue(result.values["commit_sha"])
+
+    def test_verification_follows_the_file_set_after_review_corrections(self) -> None:
+        """7. The policy reads the final files, not the ones first planned.
+
+        The initial session changes a documentation file only. The reviewer
+        then requires a Python regression, and the correction adds one. The
+        required checks must be those of the *final* set — which now owes a
+        test — rather than the documentation-only set the job started with.
+        """
+        from test_coding_agent import CodingSessionResult
+
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "the change has no regression",
+                "evidence": "nothing covers the documented behaviour",
+                "correction": "add a regression module",
+            }]},
+            {"findings": []},
+        ])
+
+        class CorrectingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                if len(self.calls) == 1:
+                    (root / "NOTES.md").write_text("# Notes\n", encoding="utf-8")
+                else:
+                    (root / "test_notes.py").write_text(
+                        "def test_notes():\n    assert True\n", encoding="utf-8"
+                    )
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        session = CorrectingSession()
+        # `run_job` builds its own reviewer and this test needs one that makes
+        # a finding, so the dispatch is spelled out here. It is the same
+        # registry, broker and Safety Gate path.
+        runtime = build_coding_runtime(
+            True, PlanningModel(), lambda: "call-1",
+            session=session, reviewer=reviewer,
+            allocator=_allocator(self.parent, self.root),
+        )
+        broker = CapabilityBroker(
+            CapabilityRegistry(runtime.definitions),
+            SafetyGate(runtime.policies),
+            runtime.executors,
+        )
+        result = broker.dispatch(
+            CapabilityCall("call-1", RUN_CODING_TASK, {
+                "task": "document the helper",
+                "repair_branch": "docs/notes",
+                "commit_message": "document the helper",
+            }),
+            AuthorityContext(
+                "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
+            ),
+        ).result
+
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 2)
+        # The correction-only Python file is in the final set...
+        self.assertIn("test_notes.py", result.values["files_changed"])
+        # ...so the job now owes a test it did not owe when it started.
+        required = tuple(result.values["verification"]["required"])
+        self.assertEqual(
+            required, ("diff_check", "content_check", "pytest_targeted")
+        )
+        self.assertIn(
+            ("python", "-m", "pytest", "-q", "test_notes.py"),
+            [tuple(item["argv"]) for item in result.values["commands"]],
+        )
+        self.assertTrue(result.values["all_required_verification_passed"])
+        self.assertTrue(result.values["tests_run"])
 
 
 if __name__ == "__main__":
