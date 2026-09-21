@@ -138,8 +138,21 @@ class CodexSubscriptionReasoningModel:
                 raise _CodexProtocolError(
                     self._failure_code(completed.stderr, completed.stdout),
                     exit_status=completed.returncode,
+                    stdout_characters=len(completed.stdout or ""),
+                    stderr_characters=len(completed.stderr or ""),
                 )
-            output, usage = self._parse(completed.stdout)
+            try:
+                output, usage = self._parse(completed.stdout)
+            except _CodexProtocolError as error:
+                error.details.setdefault("stdout_characters", len(completed.stdout or ""))
+                error.details.setdefault("stderr_characters", len(completed.stderr or ""))
+                raise
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+                raise _CodexProtocolError(
+                    "response_invalid",
+                    stdout_characters=len(completed.stdout or ""),
+                    stderr_characters=len(completed.stderr or ""),
+                ) from error
             completion = ModelCompletion(PROVIDER_NAME, self._model, output, usage)
             self._emit(request, "reasoning.completed", started_at, usage)
             return completion

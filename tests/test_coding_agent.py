@@ -544,6 +544,64 @@ class NativeExecutionTests(unittest.TestCase):
             ["alx_coding_plan"],
         )
 
+    def test_local_review_failure_retains_only_sanitised_diagnostics(self) -> None:
+        """Every unusable reviewer category stays diagnosable without its payload."""
+        cases = (
+            ("cli_failed", {"exit_status": 17, "stdout_characters": 41, "stderr_characters": 83}, {}),
+            ("reasoning_timeout", {"stdout_characters": 0, "stderr_characters": 0}, {"timed_out": True}),
+            ("structured_output_missing", {"stdout_characters": 0, "stderr_characters": 0}, {"parse_category": "empty_response"}),
+            ("structured_output_not_object", {"stdout_characters": 9, "stderr_characters": 0}, {"parse_category": "malformed_structured_output"}),
+            ("response_invalid", {"stdout_characters": 12, "stderr_characters": 0}, {"parse_category": "parser_failure"}),
+        )
+
+        class FailingReviewer(PlanningModel):
+            _model = "reviewer-model"
+
+            def __init__(self, reason, details):
+                super().__init__()
+                self.reason = reason
+                self.details = details
+
+            def complete(self, request):
+                if request.output_schema_name == "alx_coding_local_review":
+                    raise ProviderError(
+                        "codex_subscription", self.reason,
+                        {**self.details, "access_token": "must-not-survive", "stderr": "cookie=must-not-survive"},
+                    )
+                return super().complete(request)
+
+        for index, (reason, details, expected) in enumerate(cases):
+            with self.subTest(reason=reason):
+                attempt = self._run(
+                    PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+                    reviewer=FailingReviewer(reason, details), task="fix add",
+                    worktree=str(_worktree(self.root, f"diagnostic-{index}")),
+                )
+                self.assertEqual(attempt.result.failure["code"], "review_failed")
+                failure = attempt.result.failure
+                self.assertEqual(failure["phase"], "local_review")
+                self.assertEqual(failure["provider"], "codex_subscription")
+                self.assertEqual(failure["model"], "reviewer-model")
+                self.assertEqual(failure["reason_code"], reason)
+                for key, value in details.items():
+                    self.assertEqual(failure[key], value)
+                self.assertEqual({key: failure[key] for key in expected}, expected)
+                persisted = json.dumps(dict(failure))
+                self.assertNotIn("must-not-survive", persisted)
+                self.assertNotIn("access_token", failure)
+                self.assertNotIn("stderr", failure)
+
+    def test_schema_invalid_local_review_retains_schema_category(self) -> None:
+        worktree = _worktree(self.root, "schema-invalid")
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(reviews=[{"findings": "not-a-list"}]),
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.failure["code"], "review_failed")
+        self.assertEqual(attempt.result.failure["reason_code"], "review_schema_invalid")
+        self.assertEqual(attempt.result.failure["parse_category"], "schema_invalid")
+
     def test_review_status_codes_are_declared_on_the_coding_contract(self) -> None:
         declared = DEFINITION.possible_failure_codes
         self.assertEqual(declared, CODING_FAILURES)
