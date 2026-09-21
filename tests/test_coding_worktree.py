@@ -27,6 +27,7 @@ repository, and a mock cannot be wrong about it in the way that matters.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -1561,60 +1562,78 @@ class TheWorkspaceRefusesAMainCheckout(Repository):
 
 
 class TheDefaultWorktreeRootIsAlwaysExternal(unittest.TestCase):
-    """The shipped configuration must not put worktrees inside the repository.
+    """One hidden directory beside the checkout, whatever else is configured.
 
-    `ALX_RUNTIME_STORAGE_ROOT` is relative in the shipped `.env` (`.alx/runtime`),
-    and a relative storage root resolves against the repository. Defaulting the
-    coding-worktree root to `storage_root / "coding-worktrees"` therefore landed
-    it inside the checkout, where D-031's containment check refuses it — so the
-    capability would never have registered at all.
+    The default is a single sibling of the repository, so it is outside the
+    checkout D-031 protects by construction — no setting can move it back
+    inside. It is dotted so the canonical repository stays the only visible
+    AL/X folder beside it.
+
+    The earlier default derived this from `ALX_RUNTIME_STORAGE_ROOT`, which is
+    relative in the shipped `.env` (`.alx/runtime`) and therefore resolved
+    against the repository, landing worktrees inside the checkout where the
+    containment check refuses them. That derivation is gone rather than
+    guarded: one outcome, one path.
     """
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        enclosing = Path(self.directory.name).resolve()
-        self.repository = enclosing / "repo"
+        self.enclosing = Path(self.directory.name).resolve()
+        self.repository = self.enclosing / "repo"
         self.repository.mkdir()
 
-    def _default(self, storage_root: Path) -> Path:
+    def _default(self) -> Path:
         from alx.bootstrap.live_voice import default_coding_worktree_root
 
-        return default_coding_worktree_root(storage_root, self.repository)
+        return default_coding_worktree_root(self.repository)
 
     def _inside(self, path: Path) -> bool:
         return path == self.repository or str(path).startswith(
             str(self.repository) + "/"
         )
 
-    def test_a_relative_storage_root_does_not_land_inside(self) -> None:
-        """The shipped `.env` case."""
-        root = self._default(Path(".alx/runtime"))
+    def test_it_is_the_hidden_sibling_of_the_repository(self) -> None:
+        from alx.bootstrap.live_voice import CODING_WORKTREE_ROOT_NAME
+
+        root = self._default()
+
+        self.assertEqual(root, self.enclosing / ".alx-worktrees")
+        self.assertEqual(root.name, CODING_WORKTREE_ROOT_NAME)
+
+    def test_it_is_hidden_from_normal_directory_listings(self) -> None:
+        """The UX requirement: it must not read as a project folder."""
+        self.assertTrue(self._default().name.startswith("."))
+
+    def test_it_is_absolute_and_outside_the_repository(self) -> None:
+        root = self._default()
 
         self.assertTrue(root.is_absolute())
         self.assertFalse(self._inside(root))
 
-    def test_a_storage_root_resolving_inside_does_not_land_inside(self) -> None:
-        root = self._default(self.repository / ".alx" / "runtime")
+    def test_a_relative_repository_root_still_resolves_outside(self) -> None:
+        """A relative repository path cannot fold the root back inside."""
+        from alx.bootstrap.live_voice import default_coding_worktree_root
+
+        previous = Path.cwd()
+        os.chdir(self.enclosing)
+        self.addCleanup(os.chdir, previous)
+
+        root = default_coding_worktree_root(Path("repo"))
 
         self.assertTrue(root.is_absolute())
         self.assertFalse(self._inside(root))
+        self.assertEqual(root, self.enclosing / ".alx-worktrees")
 
-    def test_an_external_absolute_storage_root_is_used(self) -> None:
-        external = Path(self.directory.name).resolve() / "runtime"
-        root = self._default(external)
+    def test_a_symlinked_repository_root_resolves_before_siblings(self) -> None:
+        link = self.enclosing / "linked-repo"
+        link.symlink_to(self.repository)
 
-        self.assertEqual(root, external / "coding-worktrees")
-        self.assertFalse(self._inside(root))
+        from alx.bootstrap.live_voice import default_coding_worktree_root
 
-    def test_a_symlinked_storage_root_resolving_inside_is_rejected(self) -> None:
-        inside = self.repository / "runtime"
-        inside.mkdir(parents=True)
-        link = Path(self.directory.name).resolve() / "linked-runtime"
-        link.symlink_to(inside)
+        root = default_coding_worktree_root(link)
 
-        root = self._default(link)
-
+        self.assertEqual(root, self.enclosing / ".alx-worktrees")
         self.assertFalse(self._inside(root))
 
     def test_the_derived_default_passes_the_containment_check(self) -> None:
@@ -1626,16 +1645,29 @@ class TheDefaultWorktreeRootIsAlwaysExternal(unittest.TestCase):
         git(self.repository, "add", "-A")
         git(self.repository, "commit", "-qm", "base")
 
-        root = self._default(Path(".alx/runtime"))
+        root = self._default()
         allocator = CodingWorktreeAllocator(root, self.repository)
 
         self.assertEqual(allocator.root, root.resolve())
 
-    def test_the_default_is_deterministic(self) -> None:
-        first = self._default(Path(".alx/runtime"))
-        second = self._default(Path(".alx/runtime"))
+    def test_it_does_not_depend_on_the_runtime_storage_root(self) -> None:
+        """The superseded derivation is gone, not merely defaulted around.
 
-        self.assertEqual(first, second)
+        `default_coding_worktree_root` took the storage root as its first
+        argument. Nothing about the storage root may reach this path again.
+        """
+        import inspect
+
+        from alx.bootstrap.live_voice import default_coding_worktree_root
+
+        signature = inspect.signature(default_coding_worktree_root)
+
+        self.assertEqual(list(signature.parameters), ["repository_root"])
+        source = inspect.getsource(default_coding_worktree_root)
+        self.assertNotIn("storage_root", source.split('"""')[-1])
+
+    def test_the_default_is_deterministic(self) -> None:
+        self.assertEqual(self._default(), self._default())
 
 
 class TheDurableOutcomeIsReadFromTheGoalStore(Repository):

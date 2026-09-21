@@ -177,39 +177,37 @@ def _coding_outcome_source(goal_store: SQLiteGoalStore):
     return status_of
 
 
-def default_coding_worktree_root(storage_root: Path, repository_root: Path) -> Path:
+# The one directory every coding worktree lives under when nothing configured
+# a location. A dotted name because worktrees are an internal containment
+# mechanism, not a project: Finder and VS Code hide it by default, so the
+# canonical checkout stays the only AL/X folder visible beside it. Branches
+# remain the user-facing git concept; this directory is where their isolation
+# happens to be stored.
+CODING_WORKTREE_ROOT_NAME = ".alx-worktrees"
+
+
+def default_coding_worktree_root(repository_root: Path) -> Path:
     """Where coding worktrees live when nothing configured a location.
 
     D-031 requires the resolved root to lie outside the canonical repository.
-    The runtime storage root is the natural neighbour for it, but that setting
-    is commonly relative — the shipped `.env` uses `.alx/runtime` — and a
-    relative storage root resolves against the repository, which would put
-    every coding worktree back inside the checkout D-031 exists to keep them
-    out of. The containment check would then refuse and the capability would
-    never register at all.
+    One sibling directory beside the repository satisfies that by
+    construction: it is deterministic, absolute, and outside whatever the
+    runtime storage root happens to be set to.
 
-    So the default is taken from the storage root only when that resolves
-    outside the repository. Otherwise it is placed beside the repository, as a
-    sibling directory named for it, which is deterministic, absolute, and
-    outside by construction. `ALX_CODING_WORKTREE_ROOT` overrides this
-    entirely; nothing here invents a second setting.
+    Deriving this from the storage root is what the earlier version did, and
+    it could not be kept alongside this one. That setting is commonly relative
+    — the shipped `.env` uses `.alx/runtime` — and a relative storage root
+    resolves against the repository, landing every worktree back inside the
+    checkout D-031 exists to keep them out of. The containment check would
+    then refuse and the capability would never register at all. Guarding that
+    case meant two ways to derive one path, and which applied depended on a
+    setting that has nothing to do with worktrees.
+
+    `ALX_CODING_WORKTREE_ROOT` overrides this entirely; nothing here invents a
+    second setting.
     """
     repository = Path(repository_root).expanduser().resolve()
-    resolved_storage = Path(storage_root).expanduser()
-    if not resolved_storage.is_absolute():
-        resolved_storage = (repository / resolved_storage)
-    resolved_storage = resolved_storage.resolve()
-    if resolved_storage != repository and not _within(resolved_storage, repository):
-        return resolved_storage / "coding-worktrees"
-    return repository.parent / f"{repository.name}-coding-worktrees"
-
-
-def _within(candidate: Path, ancestor: Path) -> bool:
-    try:
-        candidate.relative_to(ancestor)
-    except ValueError:
-        return False
-    return True
+    return repository.parent / CODING_WORKTREE_ROOT_NAME
 
 
 def _build_coding_allocator(root: Path, repository_root: Path, outcome_source=None):
@@ -577,12 +575,12 @@ async def run(repository_root: Path) -> None:
     # a separate authority from sandbox.execute: the sandbox cannot touch a
     # repository, and this cannot merge, push, deploy or request a review.
     # D-031 requires one AL/X-controlled worktree root that resolves outside
-    # the canonical repository. It defaults beside the runtime storage root,
-    # which is already outside the checkout, and a configured root that
-    # resolves back inside refuses rather than being silently accepted.
+    # the canonical repository. It defaults to one hidden directory beside the
+    # checkout, and a configured root that resolves back inside refuses rather
+    # than being silently accepted.
     coding_allocator = _build_coding_allocator(
         voice_settings.coding_worktree_root
-        or default_coding_worktree_root(storage_root, repository_root),
+        or default_coding_worktree_root(repository_root),
         repository_root,
         _coding_outcome_source(goal_store),
     )
