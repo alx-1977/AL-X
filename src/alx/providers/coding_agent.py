@@ -347,6 +347,12 @@ class CodingAgent:
             if correction_cycle is None else correction_cycle,
             in_flight=in_flight, waiting=waiting, terminal=terminal,
             outcome=outcome, transition=transition,
+            # Read off this run's own allocation, for the same reason the job
+            # id is: a concurrent job would have moved anything shared. Absent
+            # until `_run` allocates, so the first PLAN observation reports no
+            # worktree and every later one reports the real directory.
+            worktree=str(state.allocated.path) if state.allocated is not None else "",
+            branch=state.allocated.branch if state.allocated is not None else "",
         )
         try:
             self._telemetry_sink(telemetry)

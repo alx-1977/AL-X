@@ -152,6 +152,20 @@ class CodingTelemetry:
     terminal: bool = False
     outcome: str = ""
     transition: str = ""
+    # Where this job is working, and on which branch. Structural facts about
+    # the job, not words about it: a path and a ref name.
+    #
+    # The Coding Agent has always known both — the allocator hands them over
+    # before anything else runs — but they reached the person only in the final
+    # outcome, after the work was over. While a job ran, the diagnostic panel
+    # could say a job was active and not where, so the canonical checkout sat
+    # on main showing nothing while the real edits happened in a directory
+    # whose name was only discoverable through `git worktree list`.
+    #
+    # Empty before allocation, which is a real state: a job that failed to get
+    # a worktree has no path to report, and reporting one would be a lie.
+    worktree: str = ""
+    branch: str = ""
 
     def __post_init__(self) -> None:
         _required(self.job_id, "job_id")
