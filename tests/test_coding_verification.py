@@ -132,6 +132,22 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             ("diff_check", "content_check", "governance_gate", "architecture_gate"),
         )
 
+    def test_changing_a_gate_script_runs_that_gate(self) -> None:
+        """A gate must be exercised by the change that edits it.
+
+        Neither script is a canonical document nor sits under the architecture
+        source root, so nothing else selected them: editing one escalated to
+        the full suite, which runs neither gate and so never exercised the
+        edit. Found in review on PR #54.
+        """
+        governance = _names(("scripts/check_governance.py",))
+        self.assertIn("governance_gate", governance)
+        architecture = _names(("scripts/check_architecture.py",))
+        self.assertIn("architecture_gate", architecture)
+        # Still Python, so it still owes a runtime check as well.
+        self.assertIn("pytest_full", governance)
+        self.assertIn("pytest_full", architecture)
+
     def test_a_python_module_with_a_mapped_test_selects_that_test(self) -> None:
         """4. `src/alx/…` maps to its conventional test, which exists."""
         changed = ("src/alx/contracts/coding_verification.py",)
@@ -299,6 +315,24 @@ class TheContentCheckSeesWhatGitCannot(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("trailing whitespace", findings[0])
         self.assertIn("notes.md:3", findings[0])
+
+    def test_space_before_tab_in_indent_is_a_finding(self) -> None:
+        """Git's own `--check` reports this by default, so this must too.
+
+        The two checks answer one question over different halves of the
+        change, so a rule git enforces on a tracked file must not go
+        unenforced on a new one. Found in review on PR #54.
+        """
+        name = self.write("indent.py", "def f():\n \treturn 1\n")
+        findings = content_violations((name,), self.root)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("space before tab in indent", findings[0])
+        self.assertIn("indent.py:2", findings[0])
+
+    def test_a_space_then_tab_outside_the_indent_is_not_a_finding(self) -> None:
+        """Git reports it in the initial indent, not mid-line."""
+        name = self.write("prose.md", "A sentence with a space \tand a tab.\n")
+        self.assertEqual(content_violations((name,), self.root), ())
 
     def test_clean_content_is_no_finding(self) -> None:
         for name, text in (

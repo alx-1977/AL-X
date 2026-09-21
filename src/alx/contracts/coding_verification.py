@@ -65,6 +65,7 @@ FULL_SUITE: tuple[str, ...] = ("python", "-m", "pytest", "-q", "-p", "no:cachepr
 # architecture gate declares the tree it governs. The source root below is only
 # a fallback for a worktree whose manifest cannot be read.
 _GOVERNANCE_SCRIPT = "scripts/check_governance.py"
+_ARCHITECTURE_SCRIPT = "scripts/check_architecture.py"
 _ARCHITECTURE_MANIFEST = "architecture/boundaries.toml"
 _ARCHITECTURE_SOURCE_ROOT = "src/alx"
 
@@ -379,6 +380,12 @@ def content_violations(
                 )
             elif line.rstrip("\r\n") != line.rstrip():
                 findings.append(f"{relative}:{number}: trailing whitespace")
+            elif " \t" in line[: len(line) - len(line.lstrip())]:
+                # Git's own `--check` reports this by default. Matching what it
+                # reports is the point: the two checks answer one question over
+                # different halves of the change, so a rule git enforces on a
+                # tracked file must not go unenforced on a new one.
+                findings.append(f"{relative}:{number}: space before tab in indent")
     return tuple(findings)
 
 
@@ -407,11 +414,23 @@ def required_verification(
         ),
     ]
 
+    # A change to a gate script runs that gate. Nothing else selects it: the
+    # scripts are not canonical documents and do not sit under the architecture
+    # source root, so editing one otherwise escalated to the full suite, which
+    # does not run either gate and so never exercised the edit. Found in review
+    # on PR #54.
+    gate_scripts = {
+        _GOVERNANCE_SCRIPT: ("governance_gate", GOVERNANCE_GATE),
+        _ARCHITECTURE_SCRIPT: ("architecture_gate", ARCHITECTURE_GATE),
+    }
+
     documents = _governed_documents(root)
     governance_paths = tuple(
         name
         for name in changed
-        if name in documents or name.startswith("governance/")
+        if name in documents
+        or name.startswith("governance/")
+        or name == _GOVERNANCE_SCRIPT
     )
     if governance_paths:
         checks.append(
@@ -428,6 +447,7 @@ def required_verification(
         name
         for name in changed
         if name == _ARCHITECTURE_MANIFEST
+        or name == _ARCHITECTURE_SCRIPT
         or name.startswith(f"{source_root}/")
     )
     if architecture_paths:
