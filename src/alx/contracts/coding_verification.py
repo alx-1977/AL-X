@@ -298,6 +298,12 @@ def _path_exists(root: Path | None, relative: str) -> bool:
 MAX_CONTENT_FINDINGS = 20
 # A job's own source file. Larger than any file the repository holds, and a
 # bound rather than an unbounded read of whatever the job produced.
+#
+# Exceeding it is a finding, not a truncation. Checking only a prefix would let
+# a conflict marker past the limit through unexamined while the check reported
+# success, which is the failure mode this whole module exists to remove: an
+# unverified thing must never read as a verified one. A file this large in a
+# bounded repair is itself worth stopping for.
 MAX_CONTENT_CHARACTERS = 2_000_000
 
 
@@ -325,8 +331,20 @@ def content_violations(
             target = _as_path(root) / relative
             if not target.is_file():
                 continue
-            text = target.read_text(encoding="utf-8")[:MAX_CONTENT_CHARACTERS]
+            # Read one character past the bound rather than the whole file and
+            # slice afterwards: `read_text()` loads everything before any slice
+            # applies, so the slice bounded the string and not the read.
+            with target.open("r", encoding="utf-8") as handle:
+                text = handle.read(MAX_CONTENT_CHARACTERS + 1)
         except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if len(text) > MAX_CONTENT_CHARACTERS:
+            # Fails closed: the rest was never examined, so the file cannot be
+            # reported clean on the strength of its prefix.
+            findings.append(
+                f"{relative}: larger than {MAX_CONTENT_CHARACTERS} characters "
+                "and was not checked"
+            )
             continue
         for number, line in enumerate(text.splitlines(), start=1):
             if len(findings) >= MAX_CONTENT_FINDINGS:

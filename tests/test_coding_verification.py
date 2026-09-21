@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts.coding_verification import (  # noqa: E402
     ARCHITECTURE_GATE,
+    MAX_CONTENT_CHARACTERS,
     MAX_CONTENT_FINDINGS,
     DIFF_CHECK,
     FULL_SUITE,
@@ -290,6 +291,28 @@ class TheContentCheckSeesWhatGitCannot(unittest.TestCase):
         self.assertEqual(
             len(content_violations((name,), self.root)), MAX_CONTENT_FINDINGS
         )
+
+    def test_a_file_past_the_character_bound_fails_rather_than_passing(self) -> None:
+        """Fails closed: an unchecked remainder must not read as clean.
+
+        The bound used to slice the text after reading it whole, so a conflict
+        marker past the limit was silently skipped *and* the read had no memory
+        bound. Clean content spans the limit here, with the violation placed
+        after it, so an implementation that checked only the prefix would report
+        the file clean and fail this test. Found in review on PR #54.
+        """
+        filler = "clean line\n" * ((MAX_CONTENT_CHARACTERS // 11) + 10)
+        self.assertGreater(len(filler), MAX_CONTENT_CHARACTERS)
+        name = self.write("huge.txt", filler + "<<<<<<< HEAD\n")
+        findings = content_violations((name,), self.root)
+        self.assertTrue(findings)
+        self.assertIn("was not checked", findings[0])
+        self.assertIn("huge.txt", findings[0])
+
+    def test_a_file_at_the_bound_is_still_checked_normally(self) -> None:
+        """The bound is a ceiling, not an off-by-one that refuses valid files."""
+        name = self.write("atlimit.txt", "a" * MAX_CONTENT_CHARACTERS)
+        self.assertEqual(content_violations((name,), self.root), ())
 
     def test_no_root_means_no_finding_rather_than_a_crash(self) -> None:
         self.assertEqual(content_violations(("x.md",), None), ())
