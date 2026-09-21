@@ -33,10 +33,25 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 
-# The always-required structural check. A diff carrying whitespace errors or a
-# conflict marker is malformed whatever it touches, and the check costs
-# milliseconds, so every job runs it regardless of what it changed.
+# The always-required structural checks. Malformed content is malformed whatever
+# it touches, and both cost milliseconds, so every job runs them regardless of
+# what it changed.
+#
+# Two checks rather than one, because `git diff --check` inspects *tracked*
+# changes only. A file the job newly created is untracked at verification time —
+# staging happens later, inside the commit — so a new file carrying leftover
+# conflict markers passed the diff check and was committed. Found in review on
+# PR #54, and reproduced: `git diff --check` exits 0 on an untracked file whose
+# content is plainly broken.
+#
+# `content_check` closes that by reading the job's own final files directly. It
+# is deterministic with one correct answer, so under Law 2 it is code rather
+# than a command, and it needs no addition to the command allowlist.
 DIFF_CHECK: tuple[str, ...] = ("git", "diff", "--check")
+
+# Markers git's own `--check` looks for. Seven characters at the start of a
+# line is the conflict-marker shape git uses; it is matched here the same way.
+_CONFLICT_MARKERS = ("<" * 7, "=" * 7, ">" * 7, "|" * 7)
 
 GOVERNANCE_GATE: tuple[str, ...] = ("python", "scripts/check_governance.py")
 ARCHITECTURE_GATE: tuple[str, ...] = ("python", "scripts/check_architecture.py")
@@ -68,6 +83,14 @@ class VerificationCheck:
     reason: str
     ran: bool = False
     passed: bool = False
+    # "command" runs through the allowlisted executor. "content" is performed
+    # in process by `content_violations` below, because reading the job's own
+    # files needs no subprocess and no addition to the command allowlist.
+    kind: str = "command"
+    # What a failed content check found, so the evidence says why rather than
+    # leaving Core to infer it. Bounded: the first few findings are enough to
+    # act on, and this is durable state.
+    findings: tuple[str, ...] = ()
 
     def as_values(self) -> dict[str, object]:
         return {
@@ -76,6 +99,8 @@ class VerificationCheck:
             "reason": self.reason,
             "ran": self.ran,
             "passed": self.passed,
+            "kind": self.kind,
+            "findings": list(self.findings),
         }
 
 
@@ -87,7 +112,10 @@ class VerificationPolicy:
 
     @property
     def commands(self) -> tuple[tuple[str, ...], ...]:
-        return tuple(check.argv for check in self.checks)
+        """The argv forms only. A content check has none and is excluded."""
+        return tuple(
+            check.argv for check in self.checks if check.kind == "command"
+        )
 
     def requires_tests(self) -> bool:
         return any(check.name.startswith("pytest") for check in self.checks)
@@ -267,6 +295,51 @@ def _path_exists(root: Path | None, relative: str) -> bool:
         return False
 
 
+MAX_CONTENT_FINDINGS = 20
+# A job's own source file. Larger than any file the repository holds, and a
+# bound rather than an unbounded read of whatever the job produced.
+MAX_CONTENT_CHARACTERS = 2_000_000
+
+
+def content_violations(
+    changed_files: Iterable[str], root: Path | None
+) -> tuple[str, ...]:
+    """Leftover conflict markers and whitespace errors in the job's own files.
+
+    What `git diff --check` reports, computed over the job's final files rather
+    than over the tracked diff, so a newly created file is inspected too. Only
+    the job's own paths are read: this is a check on the change, not an audit of
+    the worktree.
+
+    A file that cannot be read as text is not a finding. Binary content and an
+    unreadable path are ordinary, and inventing a violation from them would fail
+    honest jobs; the concern here is malformed *text* the job wrote.
+    """
+    findings: list[str] = []
+    if root is None:
+        return ()
+    for relative in _normalise(changed_files):
+        if len(findings) >= MAX_CONTENT_FINDINGS:
+            break
+        try:
+            target = _as_path(root) / relative
+            if not target.is_file():
+                continue
+            text = target.read_text(encoding="utf-8")[:MAX_CONTENT_CHARACTERS]
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            if len(findings) >= MAX_CONTENT_FINDINGS:
+                break
+            if line.startswith(_CONFLICT_MARKERS):
+                findings.append(
+                    f"{relative}:{number}: leftover conflict marker"
+                )
+            elif line.rstrip("\r\n") != line.rstrip():
+                findings.append(f"{relative}:{number}: trailing whitespace")
+    return tuple(findings)
+
+
 def required_verification(
     changed_files: Iterable[str], root: Path | None = None
 ) -> VerificationPolicy:
@@ -280,7 +353,16 @@ def required_verification(
     checks: list[VerificationCheck] = [
         VerificationCheck(
             "diff_check", DIFF_CHECK, "every change is checked for a malformed diff"
-        )
+        ),
+        # The same question asked of the job's own files rather than of the
+        # tracked diff, so a file the job created is inspected too.
+        VerificationCheck(
+            "content_check",
+            (),
+            "every changed file is checked for conflict markers and "
+            "whitespace errors, including files the job newly created",
+            kind="content",
+        ),
     ]
 
     documents = _governed_documents(root)
@@ -350,6 +432,8 @@ __all__ = [
     "DIFF_CHECK",
     "FULL_SUITE",
     "GOVERNANCE_GATE",
+    "MAX_CONTENT_FINDINGS",
+    "content_violations",
     "VerificationCheck",
     "VerificationEvidence",
     "VerificationPolicy",

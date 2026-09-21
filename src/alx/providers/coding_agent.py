@@ -54,6 +54,7 @@ from alx.contracts.coding import (
 from alx.contracts.coding_verification import (
     VerificationCheck,
     VerificationEvidence,
+    content_violations,
     required_verification,
 )
 from alx.providers.coding_process import (
@@ -888,7 +889,29 @@ class CodingAgent:
         results: list[VerificationCheck] = []
         tests_run = False
         tests_passed: bool | None = None
-        for check in policy.checks[:MAX_VERIFICATION_COMMANDS]:
+        # The bound is a ceiling on work, never a reason to drop a requirement.
+        # Truncating the list would leave the dropped checks out of the evidence
+        # entirely, so a partly-verified job would read as fully passed. The
+        # policy emits at most four checks against a ceiling of eight, so this
+        # is unreachable today; it fails closed rather than depending on that
+        # headroom surviving a future check class.
+        checks = policy.checks
+        if len(checks) > MAX_VERIFICATION_COMMANDS:
+            return VerificationEvidence(checks), False, None
+        for check in checks:
+            if check.kind == "content":
+                # Performed here rather than through the executor: reading the
+                # job's own files is deterministic with one correct answer, so
+                # under Law 2 it is code, and it needs no command allowlisted.
+                # It is also the half `git diff --check` cannot see, because a
+                # file the job created is still untracked at this point.
+                findings = content_violations(changed_files, workspace.root)
+                results.append(
+                    replace(
+                        check, ran=True, passed=not findings, findings=findings
+                    )
+                )
+                continue
             argv = list(check.argv)
             if not command_permitted(argv, worktree, blocked):
                 commands.append(

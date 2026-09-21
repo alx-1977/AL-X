@@ -23,11 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts.coding_verification import (  # noqa: E402
     ARCHITECTURE_GATE,
+    MAX_CONTENT_FINDINGS,
     DIFF_CHECK,
     FULL_SUITE,
     GOVERNANCE_GATE,
     VerificationCheck,
     VerificationEvidence,
+    content_violations,
     required_verification,
 )
 from alx.providers.coding_process import command_permitted  # noqa: E402
@@ -54,7 +56,8 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         what turned a correct one-line documentation edit into a timeout and a
         refused commit.
         """
-        self.assertEqual(_names(("TODO.md",)), ("diff_check",))
+        self.assertEqual(_names(("TODO.md",)), ("diff_check", "content_check"))
+        # One command; the content check is performed in process and has none.
         self.assertEqual(_commands(("TODO.md",)), (DIFF_CHECK,))
         self.assertNotIn(FULL_SUITE, _commands(("TODO.md",)))
         self.assertFalse(required_verification(("TODO.md",), REPOSITORY_ROOT).requires_tests())
@@ -62,7 +65,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
     def test_a_canonical_governance_document_requires_the_governance_gate(self) -> None:
         """2. `governance/DECISIONS.md` owes the diff check and that gate."""
         names = _names(("governance/DECISIONS.md",))
-        self.assertEqual(names, ("diff_check", "governance_gate"))
+        self.assertEqual(names, ("diff_check", "content_check", "governance_gate"))
         self.assertEqual(
             _commands(("governance/DECISIONS.md",)), (DIFF_CHECK, GOVERNANCE_GATE)
         )
@@ -125,7 +128,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         # module invented.
         self.assertEqual(
             _names(("architecture/boundaries.toml",)),
-            ("diff_check", "governance_gate", "architecture_gate"),
+            ("diff_check", "content_check", "governance_gate", "architecture_gate"),
         )
 
     def test_a_python_module_with_a_mapped_test_selects_that_test(self) -> None:
@@ -133,7 +136,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         changed = ("src/alx/contracts/coding_verification.py",)
         names = _names(changed)
         self.assertEqual(
-            names, ("diff_check", "architecture_gate", "pytest_targeted")
+            names, ("diff_check", "content_check", "architecture_gate", "pytest_targeted")
         )
         self.assertIn(
             ("python", "-m", "pytest", "-q", "tests/test_coding_verification.py"),
@@ -144,7 +147,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
     def test_a_changed_test_file_selects_itself(self) -> None:
         """5. A changed test module is its own targeted verification."""
         changed = ("tests/test_coding_agent.py",)
-        self.assertEqual(_names(changed), ("diff_check", "pytest_targeted"))
+        self.assertEqual(_names(changed), ("diff_check", "content_check", "pytest_targeted"))
         self.assertEqual(
             _commands(changed),
             (DIFF_CHECK, ("python", "-m", "pytest", "-q", "tests/test_coding_agent.py")),
@@ -167,7 +170,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
                 check.name for check in required_verification(changed, root).checks
             )
             self.assertEqual(
-                names, ("diff_check", "architecture_gate", "pytest_full")
+                names, ("diff_check", "content_check", "architecture_gate", "pytest_full")
             )
             self.assertIn(FULL_SUITE, required_verification(changed, root).commands)
 
@@ -216,6 +219,112 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
                         command_permitted(list(argv), REPOSITORY_ROOT),
                         f"policy proposed a command the allowlist refuses: {argv}",
                     )
+
+
+class TheContentCheckSeesWhatGitCannot(unittest.TestCase):
+    """`git diff --check` inspects tracked changes; a new file is untracked.
+
+    Reproduced on PR #54: `git diff --check` exits 0 on an untracked file whose
+    content carries leftover conflict markers, so such a file passed
+    verification and was committed.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def write(self, name: str, text: str) -> str:
+        target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return name
+
+    def test_a_leftover_conflict_marker_is_a_finding(self) -> None:
+        name = self.write(
+            "new.py",
+            "def f():\n<<<<<<< HEAD\n    return 1\n=======\n"
+            "    return 2\n>>>>>>> other\n",
+        )
+        findings = content_violations((name,), self.root)
+        self.assertTrue(findings)
+        self.assertTrue(all("new.py:" in item for item in findings))
+        self.assertTrue(any("conflict marker" in item for item in findings))
+
+    def test_trailing_whitespace_is_a_finding(self) -> None:
+        name = self.write("notes.md", "# Notes\n\nA line with a space \n")
+        findings = content_violations((name,), self.root)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("trailing whitespace", findings[0])
+        self.assertIn("notes.md:3", findings[0])
+
+    def test_clean_content_is_no_finding(self) -> None:
+        for name, text in (
+            ("clean.md", "# Notes\n\nOne line.\n"),
+            ("clean.py", "def f():\n    return 1\n"),
+            ("empty.txt", ""),
+            ("crlf.txt", "a line\r\nanother\r\n"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    content_violations((self.write(name, text),), self.root), ()
+                )
+
+    def test_only_the_job_s_own_files_are_read(self) -> None:
+        """A check on the change, not an audit of the worktree."""
+        self.write("mine.md", "# Fine\n")
+        self.write("theirs.md", "trailing space \n")
+        self.assertEqual(content_violations(("mine.md",), self.root), ())
+
+    def test_unreadable_and_binary_content_is_not_invented_into_a_finding(self) -> None:
+        """Binary and missing files are ordinary, not violations."""
+        (self.root / "image.bin").write_bytes(b"\x00\x01\xfe\xff" * 64)
+        self.assertEqual(content_violations(("image.bin",), self.root), ())
+        self.assertEqual(content_violations(("absent.md",), self.root), ())
+        # A directory named as a changed path is skipped, not read.
+        (self.root / "adir").mkdir()
+        self.assertEqual(content_violations(("adir",), self.root), ())
+
+    def test_findings_are_bounded(self) -> None:
+        name = self.write("many.txt", "bad \n" * (MAX_CONTENT_FINDINGS * 3))
+        self.assertEqual(
+            len(content_violations((name,), self.root)), MAX_CONTENT_FINDINGS
+        )
+
+    def test_no_root_means_no_finding_rather_than_a_crash(self) -> None:
+        self.assertEqual(content_violations(("x.md",), None), ())
+
+
+class TheBoundNeverSilentlyDropsARequirement(unittest.TestCase):
+    """A ceiling on work is not permission to skip a required check."""
+
+    def test_the_policy_fits_well_inside_the_command_bound(self) -> None:
+        from alx.contracts.coding import MAX_VERIFICATION_COMMANDS
+
+        widest = required_verification(
+            (
+                "governance/DECISIONS.md",
+                "architecture/boundaries.toml",
+                "src/alx/core/loop.py",
+                "tests/test_coding_agent.py",
+                "TODO.md",
+            ),
+            REPOSITORY_ROOT,
+        )
+        self.assertLessEqual(len(widest.checks), MAX_VERIFICATION_COMMANDS)
+
+    def test_an_oversized_policy_would_verify_nothing_rather_than_part(self) -> None:
+        """Fails closed: a truncated policy must not read as fully passed."""
+        from alx.contracts.coding import MAX_VERIFICATION_COMMANDS
+
+        oversized = VerificationEvidence(
+            tuple(
+                VerificationCheck(f"check-{index}", ("x",), "because")
+                for index in range(MAX_VERIFICATION_COMMANDS + 1)
+            )
+        )
+        self.assertFalse(oversized.all_required_passed)
+        self.assertEqual(len(oversized.failed), MAX_VERIFICATION_COMMANDS + 1)
 
 
 class TheAllowlistStaysNarrow(unittest.TestCase):

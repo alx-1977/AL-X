@@ -430,10 +430,14 @@ class CommittingIsRefusedRatherThanWidened(GitOutcome):
         self.assertIn(
             "required_verification_failed", result.values["unresolved_issues"]
         )
-        # And the evidence says which checks were owed and that none ran.
+        # And the evidence says which checks were owed and which did not run.
+        # The content check is performed in process, so refusing every command
+        # does not stop it; what matters is that the refused ones are recorded
+        # as required and not run, which is enough to withhold the commit.
         evidence = result.values["verification"]
-        self.assertEqual(tuple(evidence["ran"]), ())
-        self.assertEqual(tuple(evidence["failed"]), tuple(evidence["required"]))
+        self.assertIn("diff_check", evidence["failed"])
+        self.assertNotIn("diff_check", evidence["ran"])
+        self.assertIn("content_check", evidence["required"])
         # The work is not thrown away: it is still there as a diff.
         self.assertEqual(list(result.values["files_changed"]), ["app.py"])
 
@@ -623,8 +627,12 @@ class VerificationIsProportionateToTheChange(GitOutcome):
         self.assertFalse(result.values["tests_run"])
         self.assertNotIn("tests_passed", result.values)
         evidence = result.values["verification"]
-        self.assertEqual(tuple(evidence["required"]), ("diff_check",))
-        self.assertEqual(tuple(evidence["ran"]), ("diff_check",))
+        self.assertEqual(
+            tuple(evidence["required"]), ("diff_check", "content_check")
+        )
+        self.assertEqual(
+            tuple(evidence["ran"]), ("diff_check", "content_check")
+        )
         self.assertEqual(tuple(evidence["failed"]), ())
         # And in particular the full suite was never selected.
         argv_run = [tuple(item["argv"]) for item in result.values["commands"]]
@@ -662,6 +670,67 @@ class VerificationIsProportionateToTheChange(GitOutcome):
         self.assertNotIn("commit_sha", result.values)
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
         self.assertIn("app.py", result.values["files_changed"])
+
+    def test_a_malformed_new_file_is_not_committed(self) -> None:
+        """The untracked half of the structural check.
+
+        `git diff --check` inspects tracked changes only, and a file the job
+        newly created is still untracked when verification runs — staging
+        happens later, inside the commit. So a new file carrying leftover
+        conflict markers passed the diff check and was committed. Found in
+        review on PR #54. The content check reads the job's own final files
+        directly, which is the same question asked where git cannot see.
+        """
+        before = self.git("rev-parse", "HEAD").strip()
+        conflicted = (
+            "def helper():\n"
+            "<<<<<<< HEAD\n"
+            "    return 1\n"
+            "=======\n"
+            "    return 2\n"
+            ">>>>>>> other\n"
+        )
+        result = self.run_job(
+            RecordingSession(edits={"helper.py": conflicted}),
+            task="add a helper",
+            repair_branch="feat/helper",
+            commit_message="add helper",
+        )
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertFalse(result.values["all_required_verification_passed"])
+        # The diff check saw nothing wrong, because the file is untracked...
+        checks = {item["name"]: item for item in result.values["verification"]["checks"]}
+        self.assertTrue(checks["diff_check"]["passed"])
+        # ...and the content check is what caught it.
+        self.assertFalse(checks["content_check"]["passed"])
+        self.assertTrue(
+            any(
+                "conflict marker" in finding
+                for finding in checks["content_check"]["findings"]
+            ),
+            checks["content_check"]["findings"],
+        )
+        # Nothing was committed.
+        self.assertNotIn("commit_sha", result.values)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
+
+    def test_a_clean_new_file_still_passes_and_commits(self) -> None:
+        """The content check must not fail honest jobs that create files.
+
+        A documentation file rather than a Python one, so this isolates the
+        content check: a new `.py` module with no mapped test legitimately
+        escalates to the full suite, which is a different requirement and is
+        covered separately.
+        """
+        result = self.run_job(
+            RecordingSession(edits={"HELPER.md": "# Helper\n\nOne line.\n"}),
+            task="add a helper note",
+            repair_branch="feat/helper",
+            commit_message="add helper note",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["all_required_verification_passed"])
+        self.assertTrue(result.values["commit_sha"])
 
     def test_verification_follows_the_file_set_after_review_corrections(self) -> None:
         """7. The policy reads the final files, not the ones first planned.
@@ -725,7 +794,9 @@ class VerificationIsProportionateToTheChange(GitOutcome):
         self.assertIn("test_notes.py", result.values["files_changed"])
         # ...so the job now owes a test it did not owe when it started.
         required = tuple(result.values["verification"]["required"])
-        self.assertEqual(required, ("diff_check", "pytest_targeted"))
+        self.assertEqual(
+            required, ("diff_check", "content_check", "pytest_targeted")
+        )
         self.assertIn(
             ("python", "-m", "pytest", "-q", "test_notes.py"),
             [tuple(item["argv"]) for item in result.values["commands"]],

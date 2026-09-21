@@ -99,8 +99,15 @@ _VERIFICATION_CHECK = StructuredSchema(
         "reason": _STRING,
         "ran": _BOOLEAN,
         "passed": _BOOLEAN,
+        # "command" ran through the allowlisted executor; "content" was
+        # performed in process over the job's own files, which is the half
+        # `git diff --check` cannot see because a new file is still untracked.
+        "kind": _STRING,
+        # What a failed content check found, so Core is told why rather than
+        # having to infer it from a bare false.
+        "findings": _STRING_ARRAY,
     },
-    ("name", "argv", "reason", "ran", "passed"),
+    ("name", "argv", "reason", "ran", "passed", "kind", "findings"),
     extra_properties=False,
 )
 
