@@ -44,6 +44,7 @@ from alx.contracts.coding import (
     MAX_LOCAL_REVIEW_CYCLES,
     MAX_VERIFICATION_COMMANDS,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
+    FULL_SUITE_COMMAND_SECONDS,
     CodingCommandRecord,
     CodingError,
     CodingOutcome,
@@ -959,7 +960,13 @@ class CodingAgent:
             try:
                 record = run_permitted_command(
                     argv, workspace.root,
-                    timeout_seconds=DEFAULT_VERIFICATION_COMMAND_SECONDS,
+                    # The full suite is the one check the shared bound cannot
+                    # accommodate; everything else keeps it.
+                    timeout_seconds=(
+                        FULL_SUITE_COMMAND_SECONDS
+                        if check.name == "pytest_full"
+                        else DEFAULT_VERIFICATION_COMMAND_SECONDS
+                    ),
                     blocked_paths=workspace.blocked_paths,
                 )
             except CodingError as error:

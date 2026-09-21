@@ -254,7 +254,13 @@ def _normalise(changed_files: Iterable[str]) -> tuple[str, ...]:
         # the untracked file either. Malformed content reached the commit
         # unexamined. Git permits leading and trailing spaces in a path.
         # Found in review on PR #54.
-        candidate = item.replace("\\", "/")
+        # A backslash is not rewritten: on POSIX `broken\\file.py` is one
+        # valid filename, and turning it into `broken/file.py` had the content
+        # check skip the real file while `git diff --check` could not see it
+        # either. `Path` already treats a backslash as a separator on Windows,
+        # so preserving the exact value is right on both. Found in review on
+        # PR #54.
+        candidate = item
         while candidate.startswith("./") or candidate.startswith("/"):
             candidate = candidate[2:] if candidate.startswith("./") else candidate[1:]
         if not candidate or candidate in names:

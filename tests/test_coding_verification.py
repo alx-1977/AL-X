@@ -131,6 +131,11 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
 
         self.assertEqual(_normalise(("broken.py ",)), ("broken.py ",))
         self.assertEqual(_normalise((" lead.py",)), (" lead.py",))
+        # A backslash is one valid POSIX filename character, not a
+        # separator: rewriting it had the content check skip the real file.
+        self.assertEqual(
+            _normalise(("broken\\file.py",)), ("broken\\file.py",)
+        )
         # The relative prefixes are still removed.
         self.assertEqual(_normalise(("./TODO.md",)), ("TODO.md",))
         self.assertEqual(_normalise((".github/x.yml",)), (".github/x.yml",))
@@ -467,6 +472,37 @@ class TheBoundNeverSilentlyDropsARequirement(unittest.TestCase):
         )
         self.assertFalse(oversized.all_required_passed)
         self.assertEqual(len(oversized.failed), MAX_VERIFICATION_COMMANDS + 1)
+
+
+class TheFullSuiteCanActuallyFinish(unittest.TestCase):
+    """A check that cannot finish inside its bound is not a check.
+
+    The suite measures ~190 seconds against a shared 180-second bound, so every
+    unmapped Python change selected `pytest_full` and was guaranteed to time
+    out — it could never be committed. Raised in review on PR #54.
+    """
+
+    def test_the_full_suite_bound_exceeds_the_measured_runtime(self) -> None:
+        from alx.contracts.coding import (
+            DEFAULT_VERIFICATION_COMMAND_SECONDS,
+            FULL_SUITE_COMMAND_SECONDS,
+            MAX_COMMAND_SECONDS,
+        )
+
+        # Measured at ~190s on 2026-09-21. The bound carries real headroom over
+        # that rather than a margin that erodes as the suite grows.
+        self.assertGreater(FULL_SUITE_COMMAND_SECONDS, 190)
+        self.assertGreater(
+            FULL_SUITE_COMMAND_SECONDS, DEFAULT_VERIFICATION_COMMAND_SECONDS
+        )
+        # And the executor's own ceiling must permit it, or it is refused.
+        self.assertLessEqual(FULL_SUITE_COMMAND_SECONDS, MAX_COMMAND_SECONDS)
+
+    def test_every_other_check_keeps_the_shorter_bound(self) -> None:
+        """Only the suite needs the longer one; nothing else inherits it."""
+        from alx.contracts.coding import DEFAULT_VERIFICATION_COMMAND_SECONDS
+
+        self.assertEqual(DEFAULT_VERIFICATION_COMMAND_SECONDS, 180)
 
 
 class TheAllowlistStaysNarrow(unittest.TestCase):

@@ -41,7 +41,18 @@ DEFAULT_COMMAND_SECONDS = 60
 # Python change with no safe targeted mapping, and whether its bound should
 # rise for that case is a separate question from this one.
 DEFAULT_VERIFICATION_COMMAND_SECONDS = 180
-MAX_COMMAND_SECONDS = 180
+# The full suite gets its own bound, because it is the one check the shared
+# bound cannot accommodate: at ~190 seconds measured it exceeds 180, so every
+# unmapped Python change selected a check that was guaranteed to time out and
+# could never be committed. Raised in review on PR #54.
+#
+# This is not the documentation-job fix. That was not a timeout problem and was
+# not solved with one: the policy simply no longer selects the suite for a
+# change that has no reason to run it. This makes the deliberately narrow
+# fallback that remains actually able to finish, with real headroom over the
+# measurement rather than a margin that erodes as the suite grows.
+FULL_SUITE_COMMAND_SECONDS = 600
+MAX_COMMAND_SECONDS = 600
 MAX_FILE_CHARACTERS = 256_000
 MAX_COMMAND_OUTPUT_CHARACTERS = 16_000
 MAX_DIFF_CHARACTERS = 32_000
@@ -552,6 +563,7 @@ __all__ = [
     "required_verification",
     "DEFAULT_COMMAND_SECONDS",
     "DEFAULT_VERIFICATION_COMMAND_SECONDS",
+    "FULL_SUITE_COMMAND_SECONDS",
     "DEFAULT_STEP_BUDGET",
     "MAX_COMMAND_OUTPUT_CHARACTERS",
     "MAX_COMMAND_SECONDS",

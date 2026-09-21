@@ -952,25 +952,35 @@ class NativeExecutionTests(unittest.TestCase):
 
     def test_verification_timeout_remains_failed_bounded_evidence(self) -> None:
         """A realistic bound does not turn a genuine timeout into success."""
+        from alx.contracts.coding import FULL_SUITE_COMMAND_SECONDS
+
         worktree = _worktree(self.root)
         session = RecordingSession(edits={"app.py": _FIXED})
+        bounds: dict[tuple[str, ...], int] = {}
 
         def timed_out(argv, *_args, **kwargs):
-            self.assertEqual(
-                kwargs["timeout_seconds"], DEFAULT_VERIFICATION_COMMAND_SECONDS
-            )
+            bounds[tuple(argv)] = kwargs["timeout_seconds"]
             return CodingCommandRecord(tuple(argv), -1, "partial", "", True, True)
 
         with patch.object(coding_agent_module, "run_permitted_command", timed_out):
             attempt = self._run(
                 PlanningModel(), session, task="fix add", worktree=str(worktree),
-                test_guidance="python -m unittest -q test_app",
             )
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertFalse(attempt.result.values["tests_passed"])
+        self.assertFalse(attempt.result.values["all_required_verification_passed"])
         command = attempt.result.values["commands"][0]
         self.assertTrue(command["timed_out"])
         self.assertEqual(command["stdout"], "partial")
+        # The full suite gets its own longer bound; every other check keeps the
+        # shared one. `app.py` maps to no test here, so the suite is selected.
+        self.assertEqual(
+            bounds[("python", "-m", "pytest", "-q", "-p", "no:cacheprovider")],
+            FULL_SUITE_COMMAND_SECONDS,
+        )
+        self.assertEqual(
+            bounds[("git", "diff", "--check")],
+            DEFAULT_VERIFICATION_COMMAND_SECONDS,
+        )
 
     def test_failing_tests_defeat_a_confident_session_report(self) -> None:
         """A session claiming success cannot outrank a failing suite."""
