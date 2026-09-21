@@ -792,13 +792,19 @@ class NativeExecutionTests(unittest.TestCase):
         collected_nothing = CodingCommandRecord(
             ("python", "-m", "pytest", "-q"), 5, "no tests ran", "", False, True
         )
-        self.assertTrue(_check_passed(collected_nothing))
+        self.assertTrue(_check_passed(collected_nothing, "pytest_full"))
+        # But a *targeted* run collecting nothing is a failure: the basis for
+        # running those files instead of the suite is that they cover the
+        # change, and collecting nothing proves that basis false. Accepting it
+        # would let a job commit having executed no test at all.
+        self.assertFalse(_check_passed(collected_nothing, "pytest_targeted"))
         # A genuine test failure is still a failure.
         self.assertFalse(
             _check_passed(
                 CodingCommandRecord(
                     ("python", "-m", "pytest", "-q"), 1, "", "", False, True
-                )
+                ),
+                "pytest_full",
             )
         )
         # And exit 5 is forgiven only for a test command; a gate exiting 5 is
@@ -807,7 +813,8 @@ class NativeExecutionTests(unittest.TestCase):
             _check_passed(
                 CodingCommandRecord(
                     ("python", "scripts/check_governance.py"), 5, "", "", False, True
-                )
+                ),
+                "governance_gate",
             )
         )
         # A timeout is never a pass, whatever it exited with.
@@ -815,7 +822,8 @@ class NativeExecutionTests(unittest.TestCase):
             _check_passed(
                 CodingCommandRecord(
                     ("python", "-m", "pytest", "-q"), 5, "", "", True, True
-                )
+                ),
+                "pytest_full",
             )
         )
 
@@ -844,7 +852,9 @@ class NativeExecutionTests(unittest.TestCase):
     def test_changed_test_modules_are_preferred_to_the_full_suite(self) -> None:
         """A changed test module is its own verification, not the whole suite."""
         worktree = _worktree(self.root)
-        policy = required_verification(("app.py", "test_app.py"), worktree)
+        # `test_app.py` alone: a changed test module is its own mapping, so
+        # nothing is left uncovered and the suite is not needed.
+        policy = required_verification(("test_app.py",), worktree)
         self.assertEqual(
             policy.commands,
             (
@@ -855,6 +865,13 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertNotIn(
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
             policy.commands,
+        )
+        # Adding an unmapped Python file escalates the whole set, rather than
+        # letting the mapped file's test speak for the unmapped one.
+        mixed = required_verification(("app.py", "test_app.py"), worktree)
+        self.assertIn(
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
+            mixed.commands,
         )
 
     def test_changed_pytest_module_can_verify_a_successful_job(self) -> None:
@@ -873,9 +890,11 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(attempt.result.values["tests_passed"])
+        # `app.py` changed too and maps to no test in this flat fixture, so the
+        # set escalates rather than letting `test_app.py` cover both.
         self.assertEqual(
             tuple(attempt.result.values["commands"][1]["argv"]),
-            ("python", "-m", "pytest", "-q", "test_app.py"),
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
         )
 
     def test_a_correction_only_file_selects_the_targeted_verification(self) -> None:
@@ -921,10 +940,12 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         # The correction-only file reaches the reviewed/evidence set...
         self.assertIn("test_parallel.py", values["files_changed"])
-        # ...and the same set chooses the targeted verification command.
+        # ...and the same set chooses the verification. `app.py` is also in
+        # it and maps to nothing here, so the set escalates; what this test
+        # holds is that the correction-only file reached the policy at all.
         self.assertEqual(
             tuple(values["commands"][1]["argv"]),
-            ("python", "-m", "pytest", "-q", "test_parallel.py"),
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
         )
         self.assertTrue(values["tests_run"])
         self.assertTrue(values["tests_passed"])

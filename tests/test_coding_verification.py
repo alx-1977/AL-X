@@ -175,6 +175,47 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             )
             self.assertIn(FULL_SUITE, required_verification(changed, root).commands)
 
+    def test_one_mapped_file_does_not_speak_for_an_unmapped_one(self) -> None:
+        """Every changed Python path must be covered, not merely one of them.
+
+        `_targeted_tests` combined mappings across the whole set and the policy
+        asked only whether any existed, so a job changing a covered module and
+        an uncovered one ran the covered module's test and called the pair
+        verified. Found in review on PR #54.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src" / "alx" / "core").mkdir(parents=True)
+            (root / "tests").mkdir()
+            for name in ("mapped.py", "unmapped.py"):
+                (root / "src" / "alx" / "core" / name).write_text("x = 1\n")
+            (root / "tests" / "test_core_mapped.py").write_text(
+                "def test_x():\n    pass\n"
+            )
+            mapped_only = required_verification(
+                ("src/alx/core/mapped.py",), root
+            )
+            self.assertIn(
+                ("python", "-m", "pytest", "-q", "tests/test_core_mapped.py"),
+                mapped_only.commands,
+            )
+            self.assertNotIn(FULL_SUITE, mapped_only.commands)
+
+            mixed = required_verification(
+                ("src/alx/core/mapped.py", "src/alx/core/unmapped.py"), root
+            )
+            self.assertIn(FULL_SUITE, mixed.commands)
+            names = tuple(check.name for check in mixed.checks)
+            self.assertIn("pytest_full", names)
+            self.assertNotIn("pytest_targeted", names)
+            # The reason names the path that forced the escalation.
+            reason = next(
+                check.reason for check in mixed.checks
+                if check.name == "pytest_full"
+            )
+            self.assertIn("unmapped.py", reason)
+            self.assertNotIn("mapped.py,", reason)
+
     def test_a_non_python_change_never_escalates_to_the_suite(self) -> None:
         """The escalation is reachable only from a Python change."""
         for changed in (

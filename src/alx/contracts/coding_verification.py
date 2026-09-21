@@ -259,8 +259,15 @@ def _targeted_tests(
     changed: tuple[str, ...],
     root: Path | None,
     exists: Callable[[Path | None, str], bool],
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Test modules a changed path maps to mechanically, never by name guessing.
+
+    Returns the mapped tests and the changed Python paths that mapped to
+    nothing. Both halves matter: the caller may use targeted tests only when
+    *every* changed Python path is covered. Combining the mappings and asking
+    only whether any existed let one mapped file speak for an unmapped one, so
+    a job changing a covered module and an uncovered one ran the covered
+    module's test and called the pair verified. Found in review on PR #54.
 
     Two mappings only, both structural: a changed test module is its own test,
     and a changed `src/alx/…` module has the conventional test paths derived
@@ -268,6 +275,7 @@ def _targeted_tests(
     module with no test yields nothing rather than a command that would error.
     """
     tests: list[str] = []
+    unmapped: list[str] = []
     for relative in changed:
         path = PurePosixPath(relative)
         if path.suffix != ".py":
@@ -280,10 +288,15 @@ def _targeted_tests(
             if module_parts:
                 candidates.append(f"tests/test_{'_'.join(module_parts)}.py")
                 candidates.append(f"tests/test_{path.stem}.py")
+        found = False
         for candidate in candidates:
-            if candidate not in tests and exists(root, candidate):
-                tests.append(candidate)
-    return tuple(tests)
+            if exists(root, candidate):
+                found = True
+                if candidate not in tests:
+                    tests.append(candidate)
+        if not found:
+            unmapped.append(relative)
+    return tuple(tests), tuple(unmapped)
 
 
 def _path_exists(root: Path | None, relative: str) -> bool:
@@ -429,8 +442,9 @@ def required_verification(
 
     python_paths = tuple(name for name in changed if name.endswith(".py"))
     if python_paths:
-        targeted = _targeted_tests(changed, root, _path_exists)
-        if targeted:
+        targeted, unmapped = _targeted_tests(changed, root, _path_exists)
+        # Every changed Python path must be covered, not merely one of them.
+        if targeted and not unmapped:
             checks.append(
                 VerificationCheck(
                     "pytest_targeted",
@@ -449,7 +463,7 @@ def required_verification(
                     "pytest_full",
                     FULL_SUITE,
                     "changed Python modules with no safe targeted test mapping: "
-                    + ", ".join(python_paths[:8]),
+                    + ", ".join((unmapped or python_paths)[:8]),
                 )
             )
 

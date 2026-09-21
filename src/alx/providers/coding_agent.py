@@ -17,7 +17,10 @@ it cannot commit, push, merge, deploy or request a review, and it cannot run a
 test either. AL/X runs verification afterwards through the allowlisted command
 executor, which is the only site in this package that starts a development
 process. The agent's own report is treated as an account, never as evidence:
-the repository diff and the test results are what Core is given.
+the repository diff and the verification results are what Core is given.
+
+What verification *means* is decided by `alx.contracts.coding_verification`
+from the job's final changed files, not by whether pytest happened to run.
 """
 
 from __future__ import annotations
@@ -87,8 +90,9 @@ PLAN_INSTRUCTION = (
     "requested structured plan. You will carry the plan out yourself in an "
     "assigned worktree using ordinary file reading, searching and editing, so "
     "plan real code changes. You will not have a terminal: do not plan shell "
-    "commands, and describe verification as the tests that should be run "
-    "rather than as commands you will run. You are in PLAN mode."
+    "commands. Verification is not yours to choose: AL/X derives the required "
+    "checks from the files the job actually changes and runs them herself. "
+    "You are in PLAN mode."
 )
 
 PLAN_SCHEMA: dict[str, Any] = {
@@ -163,23 +167,31 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# pytest's "no tests were collected". A suite that collected nothing did not
-# fail: there was nothing there to fail. Reading it as a failure made a Python
-# change in a repository without tests permanently uncommittable — which is the
-# same shape as the defect this whole change removes, one class of verification
-# standing in for verification itself. The check is recorded as run and passed,
-# and the absence of tests is visible in the command record's own exit status.
+# pytest's "no tests were collected". What it means depends entirely on what
+# was asked for.
+#
+# For the full suite it is not a failure: a repository with no tests has nothing
+# there to fail, and reading it as failure made a Python change in such a
+# repository permanently uncommittable — the same shape as the defect this whole
+# change removes, one class of verification standing in for verification itself.
+#
+# For a *targeted* run it is a failure. The whole basis for running targeted
+# tests instead of the suite is that these specific files cover the change; if
+# they collect nothing, that basis was false and nothing was verified. Accepting
+# it there would let a job commit having executed no test at all. Found in
+# review on PR #54.
 _PYTEST_NOTHING_COLLECTED = 5
 
 
-def _check_passed(record: CodingCommandRecord) -> bool:
+def _check_passed(record: CodingCommandRecord, check_name: str = "") -> bool:
     """Whether one verification command's result counts as passing."""
     if record.timed_out:
         return False
     if record.exit_status == 0:
         return True
     return (
-        is_test_command(record.argv)
+        check_name == "pytest_full"
+        and is_test_command(record.argv)
         and record.exit_status == _PYTEST_NOTHING_COLLECTED
     )
 
@@ -241,9 +253,11 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
         "",
         "# Boundaries",
         "- You have no terminal in this task. You cannot run commands or tests.",
-        "  AL/X runs the tests after you finish and reads the result itself.",
+        "  AL/X runs the required checks after you finish and reads the results",
+        "  herself. Which checks those are follows from the files you changed.",
         "- Do not commit, push, merge, deploy, or request a code review. AL/X",
-        "  manages the branch and the commit herself after the tests pass.",
+        "  manages the branch and the commit herself once every required check",
+        "  has passed.",
         "- Stay inside this worktree. Git metadata, environment files and",
         "  credential files are denied by the operating system, not by you.",
         "- Change only what this task requires.",
@@ -958,7 +972,7 @@ class CodingAgent:
                 results.append(check)
                 continue
             commands.append(record)
-            passed = _check_passed(record)
+            passed = _check_passed(record, check.name)
             results.append(replace(check, ran=True, passed=passed))
             if is_test_command(record.argv):
                 tests_run = True
