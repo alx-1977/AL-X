@@ -329,7 +329,18 @@ def content_violations(
             break
         try:
             target = _as_path(root) / relative
-            if not target.is_file():
+            # A symlink is not read. `is_file()` follows one, so a changed
+            # symlink inside the worktree would have this read a regular file
+            # outside it — whitespace in somebody else's file failing the job's
+            # required check, and a path this module has no business reading.
+            # Containment is enforced everywhere else in the coding package;
+            # this was the one place that bypassed it. Found in review on
+            # PR #54. Not a finding either: a symlink the job legitimately
+            # created is not malformed text.
+            if target.is_symlink() or not target.is_file():
+                continue
+            resolved = target.resolve()
+            if not resolved.is_relative_to(_as_path(root).resolve()):
                 continue
             # Read one character past the bound rather than the whole file and
             # slice afterwards: `read_text()` loads everything before any slice

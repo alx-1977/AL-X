@@ -292,6 +292,27 @@ class TheContentCheckSeesWhatGitCannot(unittest.TestCase):
             len(content_violations((name,), self.root)), MAX_CONTENT_FINDINGS
         )
 
+    def test_a_symlink_is_not_followed_out_of_the_worktree(self) -> None:
+        """Containment: this reads the job's files, not what they point at.
+
+        `Path.is_file()` follows symlinks, so a changed symlink inside the
+        worktree would have had this read a regular file outside it — trailing
+        whitespace in somebody else's file failing the job's required check,
+        and a path this module has no business reading. Every other read in the
+        coding package is contained; this one was not. Found in review on
+        PR #54.
+        """
+        outside = self.root.parent / "outside.txt"
+        outside.write_text("trailing space \n", encoding="utf-8")
+        (self.root / "link.txt").symlink_to(outside)
+        self.assertEqual(content_violations(("link.txt",), self.root), ())
+
+    def test_a_symlink_inside_the_worktree_is_also_skipped(self) -> None:
+        """A symlink is not malformed text, wherever it points."""
+        self.write("real.md", "# Fine\n")
+        (self.root / "alias.md").symlink_to(self.root / "real.md")
+        self.assertEqual(content_violations(("alias.md",), self.root), ())
+
     def test_a_file_past_the_character_bound_fails_rather_than_passing(self) -> None:
         """Fails closed: an unchecked remainder must not read as clean.
 
