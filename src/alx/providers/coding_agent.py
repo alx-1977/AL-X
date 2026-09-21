@@ -51,6 +51,11 @@ from alx.contracts.coding import (
     CodingTelemetry,
     GitWorkspaceState,
 )
+from alx.contracts.coding_verification import (
+    VerificationCheck,
+    VerificationEvidence,
+    required_verification,
+)
 from alx.providers.coding_process import (
     command_permitted,
     files_from_git_status,
@@ -554,31 +559,9 @@ class CodingAgent:
         # session never did, and that file must select tests like any other.
         self._report_activity(state, "reasoning")
         self._report_telemetry(state, "test", transition="TEST started")
-        tests_run = False
-        tests_passed: bool | None = None
-        for argv in self._verification_commands(request, plan, reviewed_files):
-            try:
-                record = run_permitted_command(
-                    list(argv), workspace.root,
-                    timeout_seconds=DEFAULT_VERIFICATION_COMMAND_SECONDS,
-                    blocked_paths=workspace.blocked_paths,
-                )
-            except CodingError as error:
-                commands.append(
-                    CodingCommandRecord(
-                        tuple(argv), -1, "", error.code, False,
-                        error.code != "command_not_permitted",
-                    )
-                )
-                continue
-            commands.append(record)
-            if is_test_command(record.argv):
-                tests_run = True
-                passed = record.exit_status == 0 and not record.timed_out
-                if not passed:
-                    tests_passed = False
-                elif tests_passed is None:
-                    tests_passed = True
+        verification, tests_run, tests_passed = self._verify(
+            request, workspace, reviewed_files, commands
+        )
 
         self._report_telemetry(state, "verify", transition="TEST completed")
 
@@ -601,22 +584,34 @@ class CodingAgent:
             # done the job. V1 treated an unchanged worktree the same way.
             status = "failed"
             issues.append("no_files_changed")
-        elif tests_run and tests_passed is False:
+        elif not verification.all_required_passed:
+            # A required check that failed, or that never ran because its
+            # command was refused, is a failed job. This used to read
+            # `tests_run and tests_passed is False`, which let a job whose only
+            # candidate command was refused reach "succeeded" having verified
+            # nothing at all.
             status = "failed"
+            issues.append("required_verification_failed")
 
         # Only a job that actually succeeded is committed. A failed one leaves
         # its work in the worktree for AL/X to read as a diff: committing it
         # would turn evidence Core still has to judge into a branch and a SHA
         # that read as a finished repair.
         #
-        # `tests_run` is required, not merely `tests_passed is not False`.
         # D-029 authorises a commit "after the job has passed its required
-        # verification", and a job that ran no verification has not passed it —
-        # it skipped it. That is reachable whenever no candidate command
-        # survives the allowlist, and the difference matters precisely because
-        # an unverified commit reads downstream exactly like a verified one.
-        # The job still succeeds and its work stays in the worktree; what it
-        # does not get is a commit asserting it was checked.
+        # verification". `all_required_passed` is that sentence: every check the
+        # repository's rules attach to a path this job actually changed ran and
+        # exited zero. A check that was refused or never ran is not a check that
+        # passed, so an unverified job still gets no commit — the difference
+        # matters precisely because an unverified commit reads downstream
+        # exactly like a verified one.
+        #
+        # What changed is the definition, not the strictness. It used to be
+        # `tests_run and tests_passed`, which made pytest the meaning of
+        # verification rather than one class of it: a documentation-only job
+        # had no test to run, so it could never satisfy the predicate however
+        # correct it was. Now a job is required to pass exactly the checks its
+        # own changed files call for, and must pass all of them.
         commit: CodingCommit | None = None
         wanted_commit = status == "succeeded" and request.commit_message.strip()
         # `files` is clipped to MAX_REPORTED_FILES for reporting. Committing
@@ -648,7 +643,14 @@ class CodingAgent:
         ) > MAX_STAGED_FILES:
             issues.append("too_many_files_to_commit")
             wanted_commit = False
-        if wanted_commit and not (tests_run and tests_passed):
+        # The status derivation above has already failed a job whose required
+        # verification did not pass, so `wanted_commit` is false by then and
+        # this guard does not fire in that case. It is kept because it is the
+        # commit site's own precondition rather than a restatement of the
+        # status: D-029 authorises the commit, and the condition D-029 names is
+        # checked where the commit is made. If a later change ever lets an
+        # unverified job reach "succeeded", the commit still does not happen.
+        if wanted_commit and not verification.all_required_passed:
             issues.append("unverified_not_committed")
         elif wanted_commit:
             try:
@@ -684,6 +686,7 @@ class CodingAgent:
             commands=commands,
             tests_run=tests_run,
             tests_passed=tests_passed,
+            verification=verification,
             git_status=git_status,
             git_diff=git_diff,
             issues=tuple(issues),
@@ -854,86 +857,72 @@ class CodingAgent:
             findings.append(finding)
         return tuple(findings)
 
-    def _verification_commands(
+    def _verify(
         self,
         request: CodingRequest,
-        plan: Mapping[str, Any],
-        changed_files: tuple[str, ...] = (),
-        root: Path | None = None,
-    ) -> tuple[tuple[str, ...], ...]:
-        """The bounded checks AL/X runs after the session finishes.
-
-        Explicit test guidance and the accepted plan come first. The session's
-        changed test modules and deterministic source-to-test neighbours follow.
-        Each is accepted only if `command_permitted` already allows it, so this
-        cannot widen the allowlist; only an absence of targeted evidence falls
-        back to the worktree's broader suite.
-        """
-        chosen: list[tuple[str, ...]] = []
-        seen: set[tuple[str, ...]] = set()
-        worktree = root if root is not None else self._root(request)
-
-        def choose(argv: tuple[str, ...]) -> bool:
-            if argv in seen:
-                return False
-            if not command_permitted(
-                list(argv), worktree, tuple(request.blocked_paths)
-            ):
-                return False
-            seen.add(argv)
-            chosen.append(argv)
-            return len(chosen) >= MAX_VERIFICATION_COMMANDS
-
-        for text in (request.test_guidance, *_strings(plan.get("verification"))):
-            for argv in self._candidate_arguments(text):
-                if choose(argv):
-                    return tuple(chosen)
-        derived = self._changed_test_modules(request, changed_files, worktree)
-        if derived and choose(("python", "-m", "pytest", "-q", *derived)):
-            return tuple(chosen)
-        if not chosen:
-            fallback = ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider")
-            choose(fallback)
-        return tuple(chosen)
-
-    def _changed_test_modules(
-        self,
-        request: CodingRequest,
+        workspace: CodingWorkspace,
         changed_files: tuple[str, ...],
-        root: Path | None = None,
-    ) -> tuple[str, ...]:
-        """Test files changed by the job or mechanically adjacent to its source.
+        commands: list[CodingCommandRecord],
+    ) -> tuple[VerificationEvidence, bool, bool | None]:
+        """Run every check this job's final file set requires, and record each.
 
-        No name is invented from task language. A source module has only the
-        conventional test candidates derived from its path, and a candidate is
-        returned only when it already exists inside the assigned worktree.
+        The policy is derived from `changed_files` — the set after the local
+        reviewer's corrections landed — and from nothing else. Task wording and
+        the model's own plan used to seed candidate commands here; they no
+        longer do. A required check is one the repository's rules attach to a
+        path that actually changed, which is a fact, whereas a command parsed
+        out of prose is a suggestion from the thing being verified.
+
+        Each command is still passed through `command_permitted`. The policy
+        cannot widen the allowlist: a check whose command the allowlist refuses
+        is recorded as required and not run, and a job with such a check has not
+        passed its verification.
+
+        `tests_run` and `tests_passed` are preserved alongside the new evidence
+        because they are a real, separately meaningful fact about the job, and
+        Core and the durable record already read them.
         """
-        root = root if root is not None else self._root(request)
-        tests: list[str] = []
-        for relative in changed_files:
-            path = Path(relative)
-            candidates: list[Path] = []
-            if path.suffix == ".py" and path.name.startswith("test_"):
-                candidates.append(path)
-            if path.suffix == ".py" and path.parts[:2] == ("src", "alx"):
-                module_parts = path.with_suffix("").parts[2:]
-                candidates.extend((
-                    Path("tests") / f"test_{'_'.join(module_parts)}.py",
-                    Path("tests") / f"test_{path.stem}.py",
-                ))
-            for candidate in candidates:
-                name = candidate.as_posix()
-                if (
-                    name not in tests
-                    and (root / candidate).is_file()
-                    and command_permitted(
-                        ["python", "-m", "pytest", "-q", name],
-                        root,
-                        tuple(request.blocked_paths),
+        worktree = self._root(request)
+        policy = required_verification(changed_files, worktree)
+        blocked = tuple(request.blocked_paths)
+        results: list[VerificationCheck] = []
+        tests_run = False
+        tests_passed: bool | None = None
+        for check in policy.checks[:MAX_VERIFICATION_COMMANDS]:
+            argv = list(check.argv)
+            if not command_permitted(argv, worktree, blocked):
+                commands.append(
+                    CodingCommandRecord(
+                        check.argv, -1, "", "command_not_permitted", False, False
                     )
-                ):
-                    tests.append(name)
-        return tuple(tests)
+                )
+                results.append(check)
+                continue
+            try:
+                record = run_permitted_command(
+                    argv, workspace.root,
+                    timeout_seconds=DEFAULT_VERIFICATION_COMMAND_SECONDS,
+                    blocked_paths=workspace.blocked_paths,
+                )
+            except CodingError as error:
+                commands.append(
+                    CodingCommandRecord(
+                        check.argv, -1, "", error.code, False,
+                        error.code != "command_not_permitted",
+                    )
+                )
+                results.append(check)
+                continue
+            commands.append(record)
+            passed = record.exit_status == 0 and not record.timed_out
+            results.append(replace(check, ran=True, passed=passed))
+            if is_test_command(record.argv):
+                tests_run = True
+                if not passed:
+                    tests_passed = False
+                elif tests_passed is None:
+                    tests_passed = True
+        return VerificationEvidence(tuple(results)), tests_run, tests_passed
 
     @staticmethod
     def _root(request: CodingRequest) -> Path:
@@ -948,31 +937,6 @@ class CodingAgent:
         if not request.worktree.strip():
             raise CodingError("worktree_unusable", reason_code="worktree_not_allocated")
         return Path(request.worktree).expanduser().resolve()
-
-    @staticmethod
-    def _candidate_arguments(text: str) -> tuple[tuple[str, ...], ...]:
-        """Read command-shaped lines out of guidance text.
-
-        This never executes what it finds. A candidate only becomes a command
-        after the allowlist accepts it, so a wrong guess is discarded rather
-        than run.
-        """
-        if not isinstance(text, str) or not text.strip():
-            return ()
-        found: list[tuple[str, ...]] = []
-        for line in text.splitlines():
-            stripped = line.strip().strip("`").strip()
-            if not stripped:
-                continue
-            for prefix in ("$ ", "- ", "* "):
-                if stripped.startswith(prefix):
-                    stripped = stripped[len(prefix):].strip()
-            parts = stripped.split()
-            if not parts:
-                continue
-            if parts[0].lower() in ("pytest", "python", "python3", "git"):
-                found.append(tuple(parts))
-        return tuple(found)
 
     def _planning_phase(
         self, request: CodingRequest, workspace: CodingWorkspace
@@ -1198,6 +1162,7 @@ class CodingAgent:
         git_diff: str,
         issues: tuple[str, ...],
         review: bool,
+        verification: VerificationEvidence | None = None,
         failure_status: bool = False,
         diagnostics: dict[str, object] | None = None,
         plan_summary: str = "",
@@ -1235,4 +1200,5 @@ class CodingAgent:
             allocated.job_id if allocated is not None else "",
             str(allocated.path) if allocated is not None else "",
             True,
+            verification,
         )

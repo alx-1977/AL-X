@@ -14,6 +14,13 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Protocol
 
+from alx.contracts.coding_verification import (
+    VerificationCheck,
+    VerificationEvidence,
+    VerificationPolicy,
+    required_verification,
+)
+
 
 DEFAULT_STEP_BUDGET = 16
 MAX_STEP_BUDGET = 32
@@ -22,8 +29,17 @@ MAX_PLANNING_ATTEMPTS = 3
 # turns. What remains bounded is the verification AL/X performs afterwards.
 MAX_VERIFICATION_COMMANDS = 8
 DEFAULT_COMMAND_SECONDS = 60
-# The known full suite takes about 90 seconds. Verification keeps its own
-# realistic bound rather than inheriting the short default for inspection.
+# Verification keeps its own bound rather than inheriting the short default
+# meant for git inspection.
+#
+# This comment used to say the full suite takes about 90 seconds. Measured on
+# 2026-09-21 it takes about 190, so the claim was not merely stale but
+# inverted: the bound below cannot complete the suite at all. That is not
+# fixed by raising the number. Most jobs have no business running the whole
+# suite, and `coding_verification` now decides from the job's changed files
+# which checks it actually owes. The full suite remains the escalation for a
+# Python change with no safe targeted mapping, and whether its bound should
+# rise for that case is a separate question from this one.
 DEFAULT_VERIFICATION_COMMAND_SECONDS = 180
 MAX_COMMAND_SECONDS = 180
 MAX_FILE_CHARACTERS = 256_000
@@ -73,6 +89,10 @@ CODING_FAILURES = (
     "git_refused",
     "git_unavailable",
     "unrelated_changes_staged",
+    # A check the job's own changed files required did not pass, or could
+    # not be run. Distinct from a test failure: the failing check may be a
+    # law gate or the diff check, and no test need have been required.
+    "required_verification_failed",
     "sandbox_unusable",
     "session_failed",
     "task_failed",
@@ -444,6 +464,12 @@ class CodingOutcome:
     job_id: str = ""
     worktree: str = ""
     worktree_retained: bool = True
+    # What this job was required to verify, what ran, and how each check ended.
+    # `tests_run` and `tests_passed` above remain the test-specific facts they
+    # always were; this is the whole picture, and it is what decides whether the
+    # job may be committed. Absent on the failure paths that end before
+    # verification is reached, where nothing was required and nothing ran.
+    verification: "VerificationEvidence | None" = None
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "failed", "blocked"):
@@ -491,6 +517,14 @@ class CodingOutcome:
         }
         if self.tests_passed is not None:
             values["tests_passed"] = self.tests_passed
+        if self.verification is not None:
+            # Durable, because "which checks did this job have to pass"
+            # is the question a later reader of a commit will ask, and the
+            # answer is not reconstructable from the command list alone.
+            values["verification"] = self.verification.as_values()
+            values["all_required_verification_passed"] = (
+                self.verification.all_required_passed
+            )
         if self.baseline is not None:
             values["baseline"] = self.baseline.as_values()
         if self.commit is not None:
@@ -512,6 +546,10 @@ __all__ = [
     "CodingSession",
     "CodingSessionResult",
     "GitWorkspaceState",
+    "VerificationCheck",
+    "VerificationEvidence",
+    "VerificationPolicy",
+    "required_verification",
     "DEFAULT_COMMAND_SECONDS",
     "DEFAULT_VERIFICATION_COMMAND_SECONDS",
     "DEFAULT_STEP_BUDGET",

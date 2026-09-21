@@ -52,6 +52,9 @@ from alx.contracts.coding import (  # noqa: E402
     CodingRequest,
     CodingSessionResult,
 )
+from alx.contracts.coding_verification import (  # noqa: E402
+    required_verification,
+)
 from alx.providers import coding_containment  # noqa: E402
 from alx.providers.coding_process import command_permitted  # noqa: E402
 from alx.providers.coding_session import (  # noqa: E402
@@ -748,7 +751,40 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("no terminal", briefing)
 
     def test_alx_verifies_with_its_own_bounded_executor(self) -> None:
-        """13. Tests are run by AL/X after the session, through the allowlist."""
+        """13. Checks are run by AL/X after the session, through the allowlist.
+
+        The commands are now chosen by the deterministic policy rather than
+        parsed out of `test_guidance`. A Python change is still verified by
+        running Python tests; what changed is that the job no longer gets to
+        nominate the command.
+        """
+        worktree = _worktree(self.root)
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            PlanningModel(),
+            session,
+            task="fix add",
+            worktree=str(worktree),
+        )
+        values = attempt.result.values
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(values["tests_run"])
+        self.assertTrue(values["tests_passed"])
+        self.assertTrue(values["all_required_verification_passed"])
+        # The diff check runs for every job, whatever it changed.
+        self.assertEqual(
+            tuple(values["commands"][0]["argv"]), ("git", "diff", "--check")
+        )
+        self.assertIn("diff_check", values["verification"]["ran"])
+
+    def test_supplied_test_guidance_cannot_choose_the_verification(self) -> None:
+        """Verification is derived from files, never from prose in the request.
+
+        `test_guidance` used to be scanned for command-shaped lines, which made
+        the thing being verified a contributor to its own verification policy.
+        It is still carried to the session as advice; it no longer reaches the
+        executor.
+        """
         worktree = _worktree(self.root)
         session = RecordingSession(edits={"app.py": _FIXED})
         attempt = self._run(
@@ -758,32 +794,25 @@ class NativeExecutionTests(unittest.TestCase):
             worktree=str(worktree),
             test_guidance="python -m unittest -q test_app",
         )
-        values = attempt.result.values
-        self.assertTrue(values["tests_run"])
-        self.assertTrue(values["tests_passed"])
-        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
-        argv = tuple(values["commands"][0]["argv"])
-        self.assertEqual(argv[:3], ("python", "-m", "unittest"))
+        argv_run = [tuple(item["argv"]) for item in attempt.result.values["commands"]]
+        self.assertTrue(
+            all("unittest" not in argv for argv in argv_run), argv_run
+        )
 
     def test_changed_test_modules_are_preferred_to_the_full_suite(self) -> None:
-        """The native session's own regression is the first test evidence."""
+        """A changed test module is its own verification, not the whole suite."""
         worktree = _worktree(self.root)
-        agent = coding_agent_module.CodingAgent(
-            PlanningModel(), RecordingSession(), PlanningModel()
-        )
-        commands = agent._verification_commands(
-            CodingRequest(task="fix add", job_id="job-1", worktree=str(worktree)),
-            _plan(),
-            ("app.py", "test_app.py"),
-            root=worktree,
-        )
+        policy = required_verification(("app.py", "test_app.py"), worktree)
         self.assertEqual(
-            commands,
-            (("python", "-m", "pytest", "-q", "test_app.py"),),
+            policy.commands,
+            (
+                ("git", "diff", "--check"),
+                ("python", "-m", "pytest", "-q", "test_app.py"),
+            ),
         )
         self.assertNotIn(
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
-            commands,
+            policy.commands,
         )
 
     def test_changed_pytest_module_can_verify_a_successful_job(self) -> None:
@@ -803,7 +832,7 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(attempt.result.values["tests_passed"])
         self.assertEqual(
-            tuple(attempt.result.values["commands"][0]["argv"]),
+            tuple(attempt.result.values["commands"][1]["argv"]),
             ("python", "-m", "pytest", "-q", "test_app.py"),
         )
 
@@ -852,7 +881,7 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("test_parallel.py", values["files_changed"])
         # ...and the same set chooses the targeted verification command.
         self.assertEqual(
-            tuple(values["commands"][0]["argv"]),
+            tuple(values["commands"][1]["argv"]),
             ("python", "-m", "pytest", "-q", "test_parallel.py"),
         )
         self.assertTrue(values["tests_run"])

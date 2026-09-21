@@ -91,6 +91,35 @@ _COMMIT_RECORD = StructuredSchema(
     extra_properties=False,
 )
 
+_VERIFICATION_CHECK = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "name": _STRING,
+        "argv": _STRING_ARRAY,
+        "reason": _STRING,
+        "ran": _BOOLEAN,
+        "passed": _BOOLEAN,
+    },
+    ("name", "argv", "reason", "ran", "passed"),
+    extra_properties=False,
+)
+
+# What the job was required to verify and how each check ended. Core reads
+# this to know why a change was or was not committed; `tests_run` and
+# `tests_passed` remain beside it as the test-specific facts.
+_VERIFICATION = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "required": _STRING_ARRAY,
+        "ran": _STRING_ARRAY,
+        "failed": _STRING_ARRAY,
+        "all_required_passed": _BOOLEAN,
+        "checks": StructuredSchema(ValueKind.ARRAY, items=_VERIFICATION_CHECK),
+    },
+    ("required", "ran", "failed", "all_required_passed", "checks"),
+    extra_properties=False,
+)
+
 
 DEFINITION = CapabilityDefinition(
     RUN_CODING_TASK,
@@ -145,6 +174,8 @@ DEFINITION = CapabilityDefinition(
             "commands": StructuredSchema(ValueKind.ARRAY, items=_COMMAND),
             "tests_run": _BOOLEAN,
             "tests_passed": _BOOLEAN,
+            "verification": _VERIFICATION,
+            "all_required_verification_passed": _BOOLEAN,
             "git_status": _STRING,
             "git_diff": _STRING,
             "unresolved_issues": _STRING_ARRAY,
@@ -197,6 +228,7 @@ _OUTCOME_ISSUE_CODES = (
     "review_failed",
     "local_review_material_findings",
     "unrelated_changes_staged",
+    "required_verification_failed",
     "git_refused",
     "git_unavailable",
 )

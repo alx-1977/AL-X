@@ -121,5 +121,40 @@ class CodingRetryFuseTests(unittest.TestCase):
             self.assertEqual(reworded_outcome.reason, "coding_retry_exhausted")
 
 
+class TheVerificationChangeDoesNotTouchTheRetryAccounting(unittest.TestCase):
+    """10. D-028's fuse counts failed executions, whatever made them fail.
+
+    The verification model changed underneath it: a job can now fail because a
+    law gate failed rather than because pytest did. The fuse is indifferent to
+    the reason — it counts failed coding executions on a goal — and this holds
+    that indifference explicitly, so a later change to the limits or to what
+    counts as a failure has to break a test that says so.
+    """
+
+    def test_the_allowance_and_its_limit_are_unchanged(self) -> None:
+        from alx.core.loop import _MAX_FAILED_CODING_EXECUTIONS
+
+        self.assertEqual(_MAX_FAILED_CODING_EXECUTIONS, 2)
+
+    def test_a_verification_failure_consumes_one_allowance_like_any_other(self) -> None:
+        """A required-check failure is one failed execution, not a new class."""
+        counted = CoreAgent._failed_coding_executions(
+            state(
+                attempt("first", failure_code="required_verification_failed"),
+                attempt("second", failure_code="task_failed"),
+            )
+        )
+        self.assertEqual(counted, 2)
+
+    def test_a_succeeded_unverified_job_still_consumes_nothing(self) -> None:
+        """Success is success; the fuse counts failures only."""
+        self.assertEqual(
+            CoreAgent._failed_coding_executions(
+                state(attempt("ok", failed=False), attempt("also-ok", failed=False))
+            ),
+            0,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
