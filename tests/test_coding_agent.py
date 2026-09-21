@@ -293,6 +293,54 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(telemetry[-1].outcome, "succeeded")
         self.assertTrue(any(item.in_flight for item in telemetry if item.phase == "execution"))
 
+    def test_telemetry_names_the_worktree_the_job_is_actually_editing(self) -> None:
+        """The panel can only show where the work is if the agent says so.
+
+        D-031 puts every job in an isolated worktree, so the canonical checkout
+        the person has open shows none of the edits. The allocation is already
+        on the job's own state; this proves it reaches the diagnostic channel
+        rather than only the final outcome.
+        """
+        worktree = _worktree(self.root)
+        telemetry = []
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(), telemetry_sink=telemetry.append,
+            task="fix add", worktree=str(worktree),
+        )
+        allocated = attempt.result.values["worktree"]
+        self.assertTrue(allocated)
+        # Every observation after allocation names the real directory, and it
+        # is the isolated worktree rather than the repository it was cut from.
+        reported = [item for item in telemetry if item.worktree]
+        self.assertTrue(reported)
+        self.assertEqual({item.worktree for item in reported}, {allocated})
+        self.assertNotEqual(Path(allocated).resolve(), worktree.resolve())
+        # The branch travels with it, and it is the job's own.
+        self.assertEqual(
+            {item.branch for item in reported},
+            {attempt.result.values["baseline"]["branch"]},
+        )
+        # Including the terminal observation, so the frontend can name the
+        # retained directory at the moment it clears the active row.
+        self.assertTrue(telemetry[-1].terminal)
+        self.assertEqual(telemetry[-1].worktree, allocated)
+
+    def test_telemetry_before_allocation_names_no_worktree(self) -> None:
+        """A job that never got a worktree has no path to report."""
+        telemetry = []
+        agent = coding_agent_module.CodingAgent(
+            PlanningModel(), RecordingSession(), PlanningModel(),
+            telemetry_sink=telemetry.append,
+        )
+        with self.assertRaises(CodingError):
+            # No allocator configured, so allocation fails before any worktree
+            # exists. The first observation is still published.
+            agent.run(CodingRequest(task="fix add", job_id="job-1"))
+        self.assertTrue(telemetry)
+        self.assertEqual(telemetry[0].worktree, "")
+        self.assertEqual(telemetry[0].branch, "")
+
     def test_failed_telemetry_delivery_keeps_the_original_elapsed_anchor(self) -> None:
         worktree = _worktree(self.root)
         delivered = []

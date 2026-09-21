@@ -6,6 +6,12 @@ const consoleForm = document.querySelector("#console-form");
 const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
+const worktreeRow = document.querySelector("#worktree-row");
+// Worktrees whose job has ended and which were not released, keyed by job
+// id so a repeated observation updates rather than duplicates. D-031
+// retains these deliberately so the work can be read afterwards; without
+// naming them here they are unexplained directories beside the checkout.
+const retainedWorktrees = new Map();
 const diagnosticClear = document.querySelector("#diagnostic-clear");
 const taskRows = document.querySelector("#task-rows");
 // Law 1: these name a system state and nothing more. First-person or
@@ -91,6 +97,130 @@ function codingSeconds(value) {
   return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
 }
 
+
+// A `vscode://file` link for one absolute worktree path.
+//
+// Built through `URL.pathname` rather than `encodeURI`, which leaves `#` and
+// `?` unescaped: a path containing either would truncate the link at that
+// character and open the wrong directory, or nothing. Both are legal in a
+// directory name. Found in review on PR #56.
+function vscodeLink(worktree) {
+  const url = new URL("vscode://file/");
+  url.pathname = worktree;
+  return url.href;
+}
+
+// Retained worktrees, listed compactly under the active row. One line each:
+// what ended, on which branch, and a way in. Not a dashboard — the point is
+// only that a directory beside the canonical checkout is never a mystery.
+//
+// This lists what this session observed end. A release happens through a
+// separate capability that emits no diagnostic, so a worktree released after
+// the fact stays listed until the page reloads, and worktrees retained before
+// this session started are not listed at all. Both are acceptable for a
+// visibility fix and neither is a claim about the filesystem: the line says a
+// job ended here, which stays true. Making the list authoritative would need a
+// release signal on the diagnostic channel, which is a larger change than the
+// problem being fixed.
+function paintRetained() {
+  for (const [jobId, item] of retainedWorktrees) {
+    const line = document.createElement("div");
+    line.className = "worktree__line worktree__line--retained";
+
+    const label = document.createElement("span");
+    label.className = "worktree__label";
+    label.append(document.createTextNode(`RETAINED ${item.outcome.toUpperCase()}`));
+    line.append(label);
+
+    if (item.branch) {
+      const ref = document.createElement("span");
+      ref.className = "worktree__branch";
+      ref.append(document.createTextNode(item.branch));
+      line.append(ref);
+    }
+
+    const open = document.createElement("a");
+    open.className = "worktree__open";
+    open.href = vscodeLink(item.worktree);
+    open.append(document.createTextNode("Open in VS Code"));
+    line.append(open);
+
+    const path = document.createElement("code");
+    path.className = "worktree__path";
+    path.append(document.createTextNode(item.worktree));
+    path.title = `${jobId} · ${item.worktree}`;
+    line.append(path);
+
+    worktreeRow.append(line);
+  }
+}
+
+// Where the coding agent is working, shown while it works there.
+//
+// The canonical checkout stays on main, so the editor window the person has
+// open shows none of this. Without the row the only way to answer "which
+// branch is this and where are the files" was `git worktree list`.
+//
+// Built as elements rather than markup: the path and branch come off the
+// transport, and text nodes cannot become markup whatever they contain. This
+// is structural state for the diagnostic panel, not wording about the job.
+function paintWorktree(message) {
+  const worktree = String(message.worktree ?? "");
+  const branch = String(message.branch ?? "");
+  // A terminal observation ends the job, so the active worktree is no longer
+  // active. Nothing is retained here: the row states what is happening now.
+  if (message.terminal || (!worktree && !branch)) {
+    if (message.terminal && worktree) {
+      // The job ended and its worktree was retained for inspection. Recorded
+      // before the active row clears, so it is named rather than vanishing.
+      retainedWorktrees.set(String(message.job_id ?? worktree), {
+        worktree,
+        branch,
+        outcome: String(message.outcome ?? "") || "ended",
+      });
+    }
+    worktreeRow.replaceChildren();
+    paintRetained();
+    worktreeRow.hidden = worktreeRow.childElementCount === 0;
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "worktree__line";
+
+  const label = document.createElement("span");
+  label.className = "worktree__label";
+  label.append(document.createTextNode("WORKTREE"));
+  row.append(label);
+
+  if (branch) {
+    const ref = document.createElement("span");
+    ref.className = "worktree__branch";
+    ref.append(document.createTextNode(branch));
+    row.append(ref);
+  }
+
+  if (worktree) {
+    // vscode://file/<path> is resolved by the OS, so no server endpoint and
+    // no subprocess is needed. The person chooses the moment: nothing opens
+    // or switches an editor on its own.
+    const open = document.createElement("a");
+    open.className = "worktree__open";
+    open.href = vscodeLink(worktree);
+    open.append(document.createTextNode("Open in VS Code"));
+    row.append(open);
+
+    const path = document.createElement("code");
+    path.className = "worktree__path";
+    path.append(document.createTextNode(worktree));
+    path.title = worktree;
+    row.append(path);
+  }
+
+  worktreeRow.replaceChildren(row);
+  paintRetained();
+  worktreeRow.hidden = false;
+}
+
 function showCodingStatus(message) {
   const phase = String(message.phase ?? "").toUpperCase();
   const provider = String(message.provider ?? "");
@@ -106,6 +236,7 @@ function showCodingStatus(message) {
     .filter(Boolean).join(" · ");
   diagnosticStage.textContent = details;
   stageStartedAt = performance.now() - Number(message.phase_elapsed_seconds ?? 0) * 1000;
+  paintWorktree(message);
   const transition = String(message.transition ?? "");
   const key = `${message.job_id ?? ""}:${transition}`;
   if (transition && key !== lastCodingTransition) {
