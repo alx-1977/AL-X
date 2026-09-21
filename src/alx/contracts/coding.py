@@ -417,6 +417,55 @@ class CodingCommit:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalReviewFinding:
+    """One advisory finding from the job's local reviewer.
+
+    The reviewer is advisory: it reads the job's diff and says what it thinks
+    is wrong. It cannot edit, run a command, commit or merge. A finding is
+    therefore evidence for AL/X to weigh, never a verdict.
+
+    These used to exist only as a local variable inside the review loop. They
+    were computed, used to brief the coding session for a correction, and then
+    discarded — so when findings survived the bounded cycle, AL/X was told the
+    job had failed review and never told what the reviewer had said. The
+    severity filter was a lossy read of a value nothing retained.
+    """
+
+    severity: str
+    title: str
+    evidence: str
+    correction: str
+
+    def __post_init__(self) -> None:
+        _required(self.severity, "severity")
+        _required(self.title, "title")
+        if self.severity not in ("low", "medium", "high"):
+            raise ValueError("severity must be low, medium or high")
+
+    @property
+    def material(self) -> bool:
+        """Whether this finding is one the reviewer considered substantive.
+
+        Materiality here is the reviewer's own severity label, not a judgement
+        this code makes about whether the finding matters to the job. Under
+        Law 3 that judgement is AL/X's, which is why a material finding is
+        reported to her rather than resolved here.
+        """
+        return self.severity in _MATERIAL_REVIEW_SEVERITIES
+
+    def as_values(self) -> dict[str, object]:
+        return {
+            "severity": self.severity,
+            "title": self.title,
+            "evidence": self.evidence,
+            "correction": self.correction,
+        }
+
+
+_MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high"})
+
+
+@dataclass(frozen=True, slots=True)
 class CodingCommandRecord:
     """One development command the job actually ran."""
 
@@ -481,6 +530,14 @@ class CodingOutcome:
     # job may be committed. Absent on the failure paths that end before
     # verification is reached, where nothing was required and nothing ran.
     verification: "VerificationEvidence | None" = None
+    # What the local reviewer said about this job's final candidate, whatever
+    # the outcome. Findings that survived the bounded correction cycle travel
+    # here with the commit rather than replacing it: AL/X reads the SHA, the
+    # diff and the reviewer's own words together, and decides whether to
+    # revise, push, or stop. Low-severity findings on an otherwise clean
+    # review ride along too, because "the reviewer had nothing material to say"
+    # and "the reviewer said nothing" are different facts.
+    review_findings: tuple["LocalReviewFinding", ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "failed", "blocked"):
@@ -493,6 +550,7 @@ class CodingOutcome:
         object.__setattr__(self, "unresolved_issues", tuple(self.unresolved_issues))
         object.__setattr__(self, "diagnostics", dict(self.diagnostics or {}))
         object.__setattr__(self, "plan_summary", str(self.plan_summary).strip())
+        object.__setattr__(self, "review_findings", tuple(self.review_findings))
         if self.tests_passed is not None and not self.tests_run:
             raise ValueError("tests cannot have passed or failed if none ran")
 
@@ -528,6 +586,16 @@ class CodingOutcome:
         }
         if self.tests_passed is not None:
             values["tests_passed"] = self.tests_passed
+        if self.review_findings:
+            # Durable, because "what did the reviewer actually say" is the
+            # question AL/X asks when she sees external_review_recommended,
+            # and a bare failure code never answered it.
+            values["review_findings"] = [
+                item.as_values() for item in self.review_findings
+            ]
+            values["material_review_findings"] = len(
+                [item for item in self.review_findings if item.material]
+            )
         if self.verification is not None:
             # Durable, because "which checks did this job have to pass"
             # is the question a later reader of a commit will ask, and the
@@ -557,6 +625,7 @@ __all__ = [
     "CodingSession",
     "CodingSessionResult",
     "GitWorkspaceState",
+    "LocalReviewFinding",
     "VerificationCheck",
     "VerificationEvidence",
     "VerificationPolicy",

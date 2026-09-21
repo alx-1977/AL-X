@@ -91,6 +91,20 @@ _COMMIT_RECORD = StructuredSchema(
     extra_properties=False,
 )
 
+# What the local reviewer said about this job's candidate. Advisory: a finding
+# is the reviewer's opinion for Core to weigh, not a verdict on the work.
+_REVIEW_FINDING = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "severity": _STRING,
+        "title": _STRING,
+        "evidence": _STRING,
+        "correction": _STRING,
+    },
+    ("severity", "title", "evidence", "correction"),
+    extra_properties=False,
+)
+
 _VERIFICATION_CHECK = StructuredSchema(
     ValueKind.OBJECT,
     {
@@ -155,7 +169,13 @@ DEFINITION = CapabilityDefinition(
     "returning branch and commit_sha. Only files this job changed are "
     "committed: the commit is refused rather than widened if the index or the "
     "resulting tree holds any path outside that authorised set. It still does "
-    "not push, merge, deploy, or request an external review.",
+    "not push, merge, deploy, or request an external review. "
+    "A local reviewer advises on the candidate and the job corrects what it "
+    "raises, but its findings never block the commit: findings it did not "
+    "resolve come back in review_findings with external_review_recommended "
+    "true and local_review_material_findings in unresolved_issues, so you "
+    "judge them against the committed work rather than being handed a refusal "
+    "in place of it.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -184,6 +204,10 @@ DEFINITION = CapabilityDefinition(
             "commands": StructuredSchema(ValueKind.ARRAY, items=_COMMAND),
             "tests_run": _BOOLEAN,
             "tests_passed": _BOOLEAN,
+            "review_findings": StructuredSchema(
+                ValueKind.ARRAY, items=_REVIEW_FINDING
+            ),
+            "material_review_findings": _INTEGER,
             "verification": _VERIFICATION,
             "all_required_verification_passed": _BOOLEAN,
             "git_status": _STRING,
