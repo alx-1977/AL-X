@@ -119,6 +119,22 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             _commands(("./TODO.md", "TODO.md")), (DIFF_CHECK,)
         )
 
+    def test_a_path_s_own_whitespace_is_preserved(self) -> None:
+        """Git permits leading and trailing spaces in a path.
+
+        `strip()` changed the path itself, so a file genuinely named
+        `broken.py ` became `broken.py`: the content check inspected a path
+        that did not exist and reported nothing, while `git diff --check` could
+        not see the untracked file either. Found in review on PR #54.
+        """
+        from alx.contracts.coding_verification import _normalise
+
+        self.assertEqual(_normalise(("broken.py ",)), ("broken.py ",))
+        self.assertEqual(_normalise((" lead.py",)), (" lead.py",))
+        # The relative prefixes are still removed.
+        self.assertEqual(_normalise(("./TODO.md",)), ("TODO.md",))
+        self.assertEqual(_normalise((".github/x.yml",)), (".github/x.yml",))
+
     def test_an_architecture_governed_file_requires_the_architecture_gate(self) -> None:
         """3. A path under the gate's declared source root selects it."""
         self.assertIn("architecture_gate", _names(("src/alx/core/loop.py",)))
@@ -345,6 +361,13 @@ class TheContentCheckSeesWhatGitCannot(unittest.TestCase):
                 self.assertEqual(
                     content_violations((self.write(name, text),), self.root), ()
                 )
+
+    def test_a_file_whose_name_ends_in_a_space_is_still_checked(self) -> None:
+        """The path the job changed, spelled exactly as the job changed it."""
+        name = self.write("broken.py ", "x = 1 \n")
+        findings = content_violations((name,), self.root)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("trailing whitespace", findings[0])
 
     def test_only_the_job_s_own_files_are_read(self) -> None:
         """A check on the change, not an audit of the worktree."""

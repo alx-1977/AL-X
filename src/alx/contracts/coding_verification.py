@@ -247,7 +247,14 @@ def _normalise(changed_files: Iterable[str]) -> tuple[str, ...]:
     for item in changed_files:
         if not isinstance(item, str):
             continue
-        candidate = item.strip().replace("\\", "/")
+        # Only the relative-path prefixes are removed. `strip()` here changed
+        # the path itself: a file genuinely named `broken.py ` became
+        # `broken.py`, so the content check inspected a path that did not
+        # exist and reported nothing, while `git diff --check` could not see
+        # the untracked file either. Malformed content reached the commit
+        # unexamined. Git permits leading and trailing spaces in a path.
+        # Found in review on PR #54.
+        candidate = item.replace("\\", "/")
         while candidate.startswith("./") or candidate.startswith("/"):
             candidate = candidate[2:] if candidate.startswith("./") else candidate[1:]
         if not candidate or candidate in names:
