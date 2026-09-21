@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -136,6 +137,20 @@ LOCAL_REVIEW_SCHEMA: dict[str, Any] = {
 }
 
 _MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high"})
+
+_LOCAL_REVIEW_DETAIL_KEYS = frozenset({
+    "provider", "reason_code", "exit_status",
+    "stdout_characters", "stderr_characters",
+})
+_LOCAL_REVIEW_PARSE_CATEGORIES = {
+    "structured_output_missing": "empty_response",
+    "structured_output_not_object": "malformed_structured_output",
+    "response_event_invalid": "parser_failure",
+    "response_invalid": "parser_failure",
+    "review_schema_invalid": "schema_invalid",
+}
+_SAFE_DIAGNOSTIC_CODE = re.compile(r"[a-z0-9_]{1,96}")
+_SAFE_DIAGNOSTIC_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 
 def _digest(text: str) -> str:
@@ -507,10 +522,11 @@ class CodingAgent:
         review_failure: str | None = None
         review_issues: tuple[str, ...] = ()
         reviewed_files = session_files
+        review_diagnostics: dict[str, object] = {}
         # There is no candidate to review when the native session reports a
         # failed execution. Preserve that failure for AL/X's normal outcome.
         if session.completed and session_files:
-            review_failure, review_issues, reviewed_files = self._local_review_loop(
+            review_failure, review_issues, reviewed_files, review_diagnostics = self._local_review_loop(
                 request, workspace, plan, session_files, preexisting_dirty,
                 preexisting_fingerprints, state,
             )
@@ -526,7 +542,7 @@ class CodingAgent:
                 tests_run=False, tests_passed=None, git_status=git_status,
                 git_diff=git_diff, issues=tuple(review_issues), review=False,
                 failure_status=True, plan_summary=plan_summary,
-                diagnostics={"phase": "local_review"},
+                diagnostics=review_diagnostics or {"phase": "local_review"},
                 baseline=baseline,
                 allocated=state.allocated,
             )
@@ -694,7 +710,7 @@ class CodingAgent:
         preexisting_dirty: tuple[str, ...],
         preexisting_fingerprints: Mapping[str, str | None],
         state: "_JobState",
-    ) -> tuple[str | None, tuple[str, ...], tuple[str, ...]]:
+    ) -> tuple[str | None, tuple[str, ...], tuple[str, ...], dict[str, object]]:
         """Review a candidate once, then re-review one bounded correction."""
         reviewed_files = initial_files
         for cycle in range(MAX_LOCAL_REVIEW_CYCLES):
@@ -718,19 +734,20 @@ class CodingAgent:
             self._report_telemetry(state, "review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
             try:
                 findings = self._review(request, workspace, plan, files, git_diff)
-            except CodingError:
+            except CodingError as error:
                 return (
                     "the local reviewer could not produce a usable result",
                     ("review_failed",), reviewed_files,
+                    self._local_review_diagnostics(error),
                 )
             material = [item for item in findings if item["severity"] in _MATERIAL_REVIEW_SEVERITIES]
             self._report_telemetry(state, "review", transition="REVIEW completed", correction_cycle=cycle)
             if not material:
-                return None, (), reviewed_files
+                return None, (), reviewed_files, {}
             if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
                 return (
                     "the local reviewer found unresolved material issues",
-                    ("local_review_material_findings",), reviewed_files,
+                    ("local_review_material_findings",), reviewed_files, {},
                 )
             before = (git_status, git_diff)
             briefing = build_briefing(request, plan) + "\n\n# Local reviewer findings\n" + "\n".join(
@@ -744,12 +761,12 @@ class CodingAgent:
             except CodingError:
                 return (
                     "the coding session could not correct local review findings",
-                    ("session_failed",), reviewed_files,
+                    ("session_failed",), reviewed_files, {},
                 )
             if not correction.completed:
                 return (
                     "the coding session could not correct local review findings",
-                    (correction.failure_code or "session_failed",), reviewed_files,
+                    (correction.failure_code or "session_failed",), reviewed_files, {},
                 )
             self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
@@ -765,10 +782,39 @@ class CodingAgent:
             if after == before:
                 return (
                     "the coding session did not change the reviewed candidate",
-                    ("local_review_material_findings",), reviewed_files,
+                    ("local_review_material_findings",), reviewed_files, {},
                 )
             reviewed_files = next_files
         raise AssertionError("local review loop must return within its bound")
+
+    def _local_review_diagnostics(self, error: CodingError) -> dict[str, object]:
+        """Project a reviewer failure into durable, non-sensitive evidence."""
+        details = dict(error.details)
+        values: dict[str, object] = {"phase": "local_review"}
+        for key in _LOCAL_REVIEW_DETAIL_KEYS:
+            value = details.get(key)
+            if key in ("exit_status", "stdout_characters", "stderr_characters"):
+                if isinstance(value, int) and value >= 0:
+                    values[key] = value
+            elif isinstance(value, str) and value.strip():
+                candidate = value.strip()
+                pattern = _SAFE_DIAGNOSTIC_CODE if key == "reason_code" else _SAFE_DIAGNOSTIC_ID
+                if pattern.fullmatch(candidate):
+                    values[key] = candidate
+        provider = values.get("provider")
+        model = getattr(self._reviewer, "_model", "")
+        if (provider and isinstance(model, str) and _SAFE_DIAGNOSTIC_ID.fullmatch(model.strip())):
+            values["model"] = model.strip()
+        reason = values.get("reason_code")
+        if not isinstance(reason, str) or not reason:
+            reason = error.code
+            values["reason_code"] = reason
+        if reason == "reasoning_timeout":
+            values["timed_out"] = True
+        category = _LOCAL_REVIEW_PARSE_CATEGORIES.get(reason)
+        if category is not None:
+            values["parse_category"] = category
+        return values
 
     def _review(
         self, request: CodingRequest, workspace: CodingWorkspace,

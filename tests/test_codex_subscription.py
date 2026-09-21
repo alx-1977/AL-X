@@ -83,6 +83,30 @@ class CodexSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(raised.exception.provider, "codex_subscription")
         self.assertEqual(raised.exception.reason, "subscription_unauthenticated")
 
+    def test_nonzero_exit_retains_only_bounded_process_metadata(self) -> None:
+        model = CodexSubscriptionReasoningModel(
+            "gpt-5.6-luna", 30,
+            runner=_Runner(stdout="ignored", stderr="credential=must-not-survive", returncode=17),
+        )
+        with self.assertRaises(ProviderError) as raised:
+            model.complete(_request())
+        self.assertEqual(raised.exception.reason, "cli_failed")
+        self.assertEqual(raised.exception.details, {
+            "exit_status": 17, "stdout_characters": 7, "stderr_characters": 27,
+        })
+
+    def test_parser_failure_retains_lengths_without_response_content(self) -> None:
+        model = CodexSubscriptionReasoningModel(
+            "gpt-5.6-luna", 30,
+            runner=_Runner(stdout="not-json", stderr="cookie=must-not-survive"),
+        )
+        with self.assertRaises(ProviderError) as raised:
+            model.complete(_request())
+        self.assertEqual(raised.exception.reason, "response_invalid")
+        self.assertEqual(raised.exception.details, {
+            "stdout_characters": 8, "stderr_characters": 23,
+        })
+
 
 class CodexSubscriptionReviewerCompositionTests(unittest.TestCase):
     def test_reviewer_selection_needs_no_openai_api_key_or_openai_adapter(self) -> None:
