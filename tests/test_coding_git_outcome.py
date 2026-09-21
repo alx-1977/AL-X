@@ -34,6 +34,7 @@ from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
 from test_coding_agent import (  # noqa: E402
     FIXTURE_BRANCH,
     NOW,
+    CodingSessionResult,
     PlanningModel,
     RecordingSession,
     _FIXED,
@@ -52,7 +53,7 @@ class GitOutcome(unittest.TestCase):
         self.parent = Path(self.directory.name)
         self.root = _worktree(self.parent)
 
-    def run_job(self, session, **arguments):
+    def run_job(self, session, reviewer=None, **arguments):
         # D-031: the job is allocated an isolated worktree cut from `self.root`,
         # which is the canonical repository here. `worktree` is no longer an
         # argument, so a test that still passes one is naming the repository.
@@ -60,7 +61,7 @@ class GitOutcome(unittest.TestCase):
         self.allocator = _allocator(self.parent, self.root)
         runtime = build_coding_runtime(
             True, PlanningModel(), lambda: "call-1",
-            session=session, reviewer=PlanningModel(),
+            session=session, reviewer=reviewer or PlanningModel(),
             allocator=self.allocator,
         )
         broker = CapabilityBroker(
@@ -740,8 +741,6 @@ class VerificationIsProportionateToTheChange(GitOutcome):
         required checks must be those of the *final* set — which now owes a
         test — rather than the documentation-only set the job started with.
         """
-        from test_coding_agent import CodingSessionResult
-
         reviewer = PlanningModel(reviews=[
             {"findings": [{
                 "severity": "high", "title": "the change has no regression",
@@ -803,6 +802,231 @@ class VerificationIsProportionateToTheChange(GitOutcome):
         )
         self.assertTrue(result.values["all_required_verification_passed"])
         self.assertTrue(result.values["tests_run"])
+
+
+class LocalReviewAdvisesAndDoesNotBlockTheCommit(GitOutcome):
+    """The local reviewer hands its opinion to AL/X beside the work.
+
+    The reviewer is advisory by construction: it cannot edit, run a command,
+    commit, push or merge. A finding it raises is therefore an opinion for AL/X
+    to weigh, not a verdict on the candidate.
+
+    It used to fail the job closed when a finding survived the bounded
+    correction cycle. That destroyed the artifact she needed in order to weigh
+    it — the candidate was left as an uncommitted diff in a retained worktree,
+    which is the evidence-reconstruction problem D-029 exists to remove — and
+    the findings themselves were discarded, so she was told a review had
+    rejected the work and never told what it said.
+
+    D-029 authorises the commit "after the job has passed its required
+    verification". That is deterministic verification, and it is unchanged
+    here: a job still commits only when every required check passed.
+    """
+
+    @staticmethod
+    def _reviewer(*rounds):
+        return PlanningModel(reviews=[{"findings": list(r)} for r in rounds])
+
+    @staticmethod
+    def _finding(severity, title):
+        return {
+            "severity": severity, "title": title,
+            "evidence": f"{title} observed in the diff",
+            "correction": f"address {title}",
+        }
+
+    def test_a_clean_review_verifies_and_commits(self) -> None:
+        """1. Nothing material: verify, then commit."""
+        result = self.run_job(
+            RecordingSession(edits={"NOTES.md": "# Notes\n\nOne line.\n"}),
+            reviewer=self._reviewer([]),
+            task="add notes", repair_branch="docs/clean",
+            commit_message="add notes",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["all_required_verification_passed"])
+        self.assertTrue(result.values["commit_sha"])
+        self.assertFalse(result.values["external_review_recommended"])
+        self.assertNotIn(
+            "local_review_material_findings", result.values["unresolved_issues"]
+        )
+
+    def test_corrected_findings_verify_and_commit(self) -> None:
+        """2. The session answers the findings; the job commits normally."""
+        reviewer = self._reviewer(
+            [self._finding("high", "missing detail")],
+            [],
+        )
+
+        class Correcting(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                text = _FIXED if len(self.calls) == 1 else _FIXED + "\n# corrected\n"
+                (root / "app.py").write_text(text, encoding="utf-8")
+                return CodingSessionResult(True, "done", turns=2)
+
+        session = Correcting()
+        result = self.run_job(
+            session, reviewer=reviewer, task="add notes",
+            repair_branch="docs/corrected", commit_message="add notes",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 2)
+        self.assertTrue(result.values["commit_sha"])
+        # The correction answered them, so nothing is outstanding.
+        self.assertFalse(result.values["external_review_recommended"])
+        self.assertNotIn(
+            "local_review_material_findings", result.values["unresolved_issues"]
+        )
+
+    def test_surviving_findings_still_commit_and_travel_with_the_work(self) -> None:
+        """3. The change this exists for: commit + durable findings + flag."""
+        reviewer = self._reviewer(
+            [self._finding("high", "unresolved concern")],
+            [self._finding("high", "unresolved concern")],
+        )
+
+        class Unhelpful(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                text = _FIXED if len(self.calls) == 1 else _FIXED + "\n# reworded\n"
+                (root / "app.py").write_text(text, encoding="utf-8")
+                return CodingSessionResult(True, "done", turns=2)
+
+        before = self.git("rev-parse", "HEAD").strip()
+        result = self.run_job(
+            Unhelpful(), reviewer=reviewer, task="add notes",
+            repair_branch="docs/surviving", commit_message="add notes",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        # The commit exists: AL/X gets a SHA to judge, not a dirty worktree.
+        sha = result.values["commit_sha"]
+        self.assertTrue(sha)
+        self.assertNotEqual(self.git("rev-parse", "docs/surviving").strip(), before)
+        self.assertEqual(self.git("rev-parse", "docs/surviving").strip(), sha)
+        # Verification still gated the commit.
+        self.assertTrue(result.values["all_required_verification_passed"])
+        # And the reviewer's opinion travels with it.
+        self.assertTrue(result.values["external_review_recommended"])
+        self.assertIn(
+            "local_review_material_findings", result.values["unresolved_issues"]
+        )
+        self.assertEqual(result.values["material_review_findings"], 1)
+
+    def test_a_reviewer_infrastructure_failure_is_still_a_hard_failure(self) -> None:
+        """4. No opinion at all is not the same as an unwelcome opinion."""
+        from unittest.mock import patch
+
+        from alx.contracts.coding import CodingError
+        from alx.providers import coding_agent as agent_module
+
+        before = self.git("rev-parse", "HEAD").strip()
+        with patch.object(
+            agent_module.CodingAgent, "_review",
+            side_effect=CodingError("review_failed", reason_code="provider_failed"),
+        ):
+            result = self.run_job(
+                RecordingSession(edits={"NOTES.md": "# Notes\n"}),
+                task="add notes", repair_branch="docs/broken-reviewer",
+                commit_message="add notes",
+            )
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "review_failed")
+        self.assertNotIn("commit_sha", result.values)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
+
+    def test_a_verification_failure_still_refuses_the_commit(self) -> None:
+        """5. D-029's actual condition is untouched by this change."""
+        before = self.git("rev-parse", "HEAD").strip()
+        conflicted = (
+            "# Notes\n"
+            "<<<<<<< HEAD\n"
+            "one\n"
+            "=======\n"
+            "two\n"
+            ">>>>>>> other\n"
+        )
+        result = self.run_job(
+            RecordingSession(edits={"NOTES.md": conflicted}),
+            reviewer=self._reviewer([]),
+            task="add notes", repair_branch="docs/unverified",
+            commit_message="add notes",
+        )
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertFalse(result.values["all_required_verification_passed"])
+        self.assertIn(
+            "required_verification_failed", result.values["unresolved_issues"]
+        )
+        self.assertNotIn("commit_sha", result.values)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
+
+    def test_alx_receives_the_findings_themselves_not_only_the_code(self) -> None:
+        """6. The repeated defect: findings were computed, then discarded.
+
+        A bare `local_review_material_findings` told AL/X that a reviewer had
+        objected and never what it objected to. The findings are structured
+        evidence now, so she can judge them.
+        """
+        reviewer = self._reviewer(
+            [
+                self._finding("high", "first concern"),
+                self._finding("low", "minor nit"),
+            ],
+            [
+                self._finding("high", "first concern"),
+                self._finding("low", "minor nit"),
+            ],
+        )
+
+        class Unhelpful(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                text = _FIXED if len(self.calls) == 1 else _FIXED + "\n# other\n"
+                (root / "app.py").write_text(text, encoding="utf-8")
+                return CodingSessionResult(True, "done", turns=2)
+
+        result = self.run_job(
+            Unhelpful(), reviewer=reviewer, task="add notes",
+            repair_branch="docs/findings", commit_message="add notes",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        findings = result.values["review_findings"]
+        self.assertEqual(len(findings), 2)
+        by_title = {item["title"]: item for item in findings}
+        self.assertEqual(
+            set(by_title), {"first concern", "minor nit"}
+        )
+        # Each carries the reviewer's own words, not a summary of them.
+        self.assertEqual(by_title["first concern"]["severity"], "high")
+        self.assertIn("observed in the diff", by_title["first concern"]["evidence"])
+        self.assertIn("address", by_title["first concern"]["correction"])
+        # Only the material one drives the recommendation; the nit still rides
+        # along, because "nothing worth blocking on" and "nothing said" are
+        # different facts and only AL/X should collapse them.
+        self.assertEqual(result.values["material_review_findings"], 1)
+        self.assertTrue(result.values["external_review_recommended"])
+
+    def test_low_severity_findings_reach_alx_on_an_otherwise_clean_review(self) -> None:
+        """A passing review is not a silent one."""
+        result = self.run_job(
+            RecordingSession(edits={"NOTES.md": "# Notes\n"}),
+            reviewer=self._reviewer([self._finding("low", "small wording nit")]),
+            task="add notes", repair_branch="docs/low-only",
+            commit_message="add notes",
+        )
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["commit_sha"])
+        # Nothing material, so no external review is recommended...
+        self.assertFalse(result.values["external_review_recommended"])
+        self.assertEqual(result.values["material_review_findings"], 0)
+        # ...but what the reviewer said is still on the record.
+        self.assertEqual(len(result.values["review_findings"]), 1)
+        self.assertEqual(
+            result.values["review_findings"][0]["title"], "small wording nit"
+        )
 
 
 if __name__ == "__main__":

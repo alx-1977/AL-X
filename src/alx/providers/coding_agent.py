@@ -54,6 +54,7 @@ from alx.contracts.coding import (
     CodingSessionResult,
     CodingTelemetry,
     GitWorkspaceState,
+    LocalReviewFinding,
 )
 from alx.contracts.coding_verification import (
     VerificationCheck,
@@ -146,8 +147,6 @@ LOCAL_REVIEW_SCHEMA: dict[str, Any] = {
     "required": ["findings"],
     "additionalProperties": False,
 }
-
-_MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high"})
 
 _LOCAL_REVIEW_DETAIL_KEYS = frozenset({
     "provider", "reason_code", "exit_status",
@@ -565,10 +564,14 @@ class CodingAgent:
         review_issues: tuple[str, ...] = ()
         reviewed_files = session_files
         review_diagnostics: dict[str, object] = {}
+        review_findings: tuple[LocalReviewFinding, ...] = ()
         # There is no candidate to review when the native session reports a
         # failed execution. Preserve that failure for AL/X's normal outcome.
         if session.completed and session_files:
-            review_failure, review_issues, reviewed_files, review_diagnostics = self._local_review_loop(
+            (
+                review_failure, review_issues, reviewed_files,
+                review_diagnostics, review_findings,
+            ) = self._local_review_loop(
                 request, workspace, plan, session_files, preexisting_dirty,
                 preexisting_fingerprints, state,
             )
@@ -582,7 +585,9 @@ class CodingAgent:
                     ),
                 ), preexisting_dirty=preexisting_dirty, commands=commands,
                 tests_run=False, tests_passed=None, git_status=git_status,
-                git_diff=git_diff, issues=tuple(review_issues), review=False,
+                git_diff=git_diff, issues=tuple(review_issues),
+                review=bool([f for f in review_findings if f.material]),
+                review_findings=review_findings,
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics=review_diagnostics or {"phase": "local_review"},
                 baseline=baseline,
@@ -727,7 +732,12 @@ class CodingAgent:
             git_status=git_status,
             git_diff=git_diff,
             issues=tuple(issues),
-            review=False,
+            # D-028 declares `external_review_recommended` as returned
+            # evidence; it was hardcoded False at every site and never once
+            # populated. A material finding the correction cycle did not
+            # answer is exactly the case it exists for.
+            review=bool([f for f in review_findings if f.material]),
+            review_findings=review_findings,
             plan_summary=plan_summary,
             baseline=baseline,
             commit=commit,
@@ -750,8 +760,29 @@ class CodingAgent:
         preexisting_dirty: tuple[str, ...],
         preexisting_fingerprints: Mapping[str, str | None],
         state: "_JobState",
-    ) -> tuple[str | None, tuple[str, ...], tuple[str, ...], dict[str, object]]:
-        """Review a candidate once, then re-review one bounded correction."""
+    ) -> tuple[
+        str | None,
+        tuple[str, ...],
+        tuple[str, ...],
+        dict[str, object],
+        tuple[LocalReviewFinding, ...],
+    ]:
+        """Review a candidate once, then re-review one bounded correction.
+
+        Returns a hard failure only when the reviewer itself could not produce
+        a result, or when the correction session broke. Findings the reviewer
+        raised and the correction did not resolve are *not* a failure: they are
+        returned as advisory evidence and travel with the job's commit.
+
+        That distinction is the point of this stage. The reviewer is advisory —
+        it cannot edit, run a command or commit — so a finding it raises is an
+        opinion for AL/X to weigh, not a verdict on the work. Blocking the
+        commit on one destroyed the artifact she needed in order to weigh it:
+        the candidate was left as an uncommitted diff in a retained worktree,
+        which is the evidence-reconstruction problem D-029 exists to remove.
+        Infrastructure failure stays hard, because then there is no opinion at
+        all and nothing was actually reviewed.
+        """
         reviewed_files = initial_files
         for cycle in range(MAX_LOCAL_REVIEW_CYCLES):
             # The reviewer judges this job's diff, not the worktree's. Same
@@ -775,23 +806,32 @@ class CodingAgent:
             try:
                 findings = self._review(request, workspace, plan, files, git_diff)
             except CodingError as error:
+                # Infrastructure failure: the reviewer produced no opinion at
+                # all, so nothing was reviewed. This stays a hard failure.
                 return (
                     "the local reviewer could not produce a usable result",
                     ("review_failed",), reviewed_files,
-                    self._local_review_diagnostics(error),
+                    self._local_review_diagnostics(error), (),
                 )
-            material = [item for item in findings if item["severity"] in _MATERIAL_REVIEW_SEVERITIES]
+            material = [item for item in findings if item.material]
             self._report_telemetry(state, "review", transition="REVIEW completed", correction_cycle=cycle)
             if not material:
-                return None, (), reviewed_files, {}
+                # Nothing material. Any low-severity findings still travel with
+                # the job: "nothing worth blocking on" and "nothing said" are
+                # different facts, and only AL/X should collapse them.
+                return None, (), reviewed_files, {}, findings
             if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
+                # Findings survived the bounded cycle. Advisory, not fatal:
+                # the job continues to verification and its commit, and these
+                # go to AL/X with the SHA so she can judge them against the
+                # actual artifact.
                 return (
-                    "the local reviewer found unresolved material issues",
-                    ("local_review_material_findings",), reviewed_files, {},
+                    None, ("local_review_material_findings",), reviewed_files,
+                    {}, findings,
                 )
             before = (git_status, git_diff)
             briefing = build_briefing(request, plan) + "\n\n# Local reviewer findings\n" + "\n".join(
-                f"- [{item['severity']}] {item['title']}: {item['evidence']} Correction: {item['correction']}"
+                f"- [{item.severity}] {item.title}: {item.evidence} Correction: {item.correction}"
                 for item in material
             )
             self._report_activity(state, "coding")
@@ -799,14 +839,16 @@ class CodingAgent:
             try:
                 correction = self._session.run_session(request, briefing)
             except CodingError:
+                # The session broke. That is infrastructure, not an opinion.
                 return (
                     "the coding session could not correct local review findings",
-                    ("session_failed",), reviewed_files, {},
+                    ("session_failed",), reviewed_files, {}, findings,
                 )
             if not correction.completed:
                 return (
                     "the coding session could not correct local review findings",
-                    (correction.failure_code or "session_failed",), reviewed_files, {},
+                    (correction.failure_code or "session_failed",), reviewed_files,
+                    {}, findings,
                 )
             self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
@@ -820,9 +862,12 @@ class CodingAgent:
             next_files = tuple(dict.fromkeys((*reviewed_files, *corrected_files)))
             after = self._git_evidence(workspace, next_files)
             if after == before:
+                # The correction changed nothing, so the findings stand
+                # unanswered. Same disposition as surviving them by exhausting
+                # the cycle: advisory evidence, and the job carries on.
                 return (
-                    "the coding session did not change the reviewed candidate",
-                    ("local_review_material_findings",), reviewed_files, {},
+                    None, ("local_review_material_findings",), reviewed_files,
+                    {}, findings,
                 )
             reviewed_files = next_files
         raise AssertionError("local review loop must return within its bound")
@@ -859,7 +904,7 @@ class CodingAgent:
     def _review(
         self, request: CodingRequest, workspace: CodingWorkspace,
         plan: Mapping[str, Any], files: tuple[str, ...], git_diff: str,
-    ) -> tuple[dict[str, str], ...]:
+    ) -> tuple[LocalReviewFinding, ...]:
         """Ask the configured coding model for bounded advisory findings only."""
         remaining = MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS
         context: dict[str, str] = {}
@@ -883,15 +928,23 @@ class CodingAgent:
         raw = values.get("findings")
         if not isinstance(raw, (list, tuple)):
             raise CodingError("review_failed", reason_code="review_schema_invalid")
-        findings: list[dict[str, str]] = []
+        findings: list[LocalReviewFinding] = []
         for item in raw:
             if not isinstance(item, Mapping):
                 raise CodingError("review_failed", reason_code="review_schema_invalid")
             finding = {key: str(item.get(key, "")).strip() for key in ("severity", "title", "evidence", "correction")}
             finding["severity"] = finding["severity"].lower()
-            if not all(finding.values()) or finding["severity"] not in {"low", "medium", "high"}:
+            if not all(finding.values()):
                 raise CodingError("review_failed", reason_code="review_schema_invalid")
-            findings.append(finding)
+            try:
+                # The severity vocabulary is the contract's, checked where the
+                # type is defined. Repeating the set here gave two places to
+                # change and one to forget.
+                findings.append(LocalReviewFinding(**finding))
+            except ValueError as error:
+                raise CodingError(
+                    "review_failed", reason_code="review_schema_invalid"
+                ) from error
         return tuple(findings)
 
     def _verify(
@@ -1227,6 +1280,7 @@ class CodingAgent:
         git_diff: str,
         issues: tuple[str, ...],
         review: bool,
+        review_findings: tuple[LocalReviewFinding, ...] = (),
         verification: VerificationEvidence | None = None,
         failure_status: bool = False,
         diagnostics: dict[str, object] | None = None,
@@ -1266,4 +1320,5 @@ class CodingAgent:
             str(allocated.path) if allocated is not None else "",
             True,
             verification,
+            review_findings,
         )

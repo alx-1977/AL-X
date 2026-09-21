@@ -641,7 +641,14 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertNotIn("no_files_changed", _OUTCOME_ISSUE_CODES)
 
     def test_reviewer_has_one_correction_and_one_recheck_bound(self) -> None:
-        """Material findings after one correction and recheck are named."""
+        """The cycle stays bounded; surviving findings no longer fail the job.
+
+        The bound is unchanged: one correction, one recheck. What changed is
+        the disposition of findings that survive it. They used to fail the job
+        closed, which destroyed the very artifact AL/X needed in order to judge
+        them — the candidate was left as an uncommitted diff in a retained
+        worktree. They are now advisory evidence returned beside the work.
+        """
         worktree = _worktree(self.root)
         model = PlanningModel()
         reviewer = PlanningModel(reviews=[
@@ -669,24 +676,28 @@ class NativeExecutionTests(unittest.TestCase):
         attempt = self._run(
             model, session, reviewer=reviewer, task="fix add", worktree=str(worktree)
         )
-        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(
-            attempt.result.failure["code"], "local_review_material_findings"
-        )
-        self.assertNotEqual(attempt.result.failure["code"], "task_failed")
+        # The bound itself is what this test guards: one correction, one
+        # recheck, and no more.
         self.assertEqual(len(session.calls), 2)
         self.assertEqual(
             [item.output_schema_name for item in reviewer.requests],
             ["alx_coding_local_review", "alx_coding_local_review"],
         )
+        # The job is no longer failed by the reviewer's opinion.
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        values = attempt.result.values
+        # It is still said plainly that findings remain.
         self.assertIn(
-            "local_review_material_findings",
-            attempt.result.values["unresolved_issues"],
+            "local_review_material_findings", values["unresolved_issues"]
         )
-        self.assertNotIn(
-            "task_failed",
-            attempt.result.values["unresolved_issues"],
+        self.assertNotIn("task_failed", values["unresolved_issues"])
+        self.assertTrue(values["external_review_recommended"])
+        # And the findings themselves reach AL/X, not just the code.
+        self.assertEqual(len(values["review_findings"]), 1)
+        self.assertEqual(
+            values["review_findings"][0]["title"], "still incomplete"
         )
+        self.assertEqual(values["material_review_findings"], 1)
 
     def test_clean_review_only_advises_and_proceeds_to_alx_verification(self) -> None:
         worktree = _worktree(self.root)
