@@ -82,6 +82,39 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         # And a document the gate does not declare canonical does not select it.
         self.assertNotIn("governance_gate", _names(("README.md",)))
 
+    def test_a_dot_directory_document_still_selects_the_governance_gate(self) -> None:
+        """A leading-dot directory is not a relative-path prefix.
+
+        Normalisation used to be `lstrip("./")`, which strips a character set
+        rather than a prefix, so `.github/workflows/law-gates.yml` became
+        `github/workflows/…` and matched no canonical document. A job changing
+        the CI workflow or the pull-request template would therefore have
+        skipped the governance gate that protects them. Found in review on
+        PR #54.
+        """
+        for name in (
+            ".github/workflows/law-gates.yml",
+            ".github/pull_request_template.md",
+            ".github/CODEOWNERS",
+            ".github/copilot-instructions.md",
+        ):
+            with self.subTest(name=name):
+                self.assertIn("governance_gate", _names((name,)), name)
+
+    def test_relative_prefixes_are_stripped_without_eating_the_path(self) -> None:
+        """`./x` and `x` are the same file; `.github` is not `github`."""
+        self.assertEqual(
+            _commands(("./governance/DECISIONS.md",)),
+            _commands(("governance/DECISIONS.md",)),
+        )
+        self.assertEqual(
+            _commands(("././TODO.md",)), _commands(("TODO.md",))
+        )
+        # And a repeated spelling of one file is still one file.
+        self.assertEqual(
+            _commands(("./TODO.md", "TODO.md")), (DIFF_CHECK,)
+        )
+
     def test_an_architecture_governed_file_requires_the_architecture_gate(self) -> None:
         """3. A path under the gate's declared source root selects it."""
         self.assertIn("architecture_gate", _names(("src/alx/core/loop.py",)))

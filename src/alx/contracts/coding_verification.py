@@ -205,12 +205,22 @@ def _as_path(root: Path) -> Path:
 
 
 def _normalise(changed_files: Iterable[str]) -> tuple[str, ...]:
-    """Worktree-relative POSIX paths, deduplicated, order preserved."""
+    """Worktree-relative POSIX paths, deduplicated, order preserved.
+
+    `./` prefixes and leading slashes are removed one segment at a time. This
+    used to be `lstrip("./")`, which strips a *set of characters* rather than a
+    prefix: `.github/workflows/law-gates.yml` came back as
+    `github/workflows/…`, so a job changing the CI workflow or the pull-request
+    template — both canonical documents — matched nothing and skipped the
+    governance gate that exists to protect them. Found in review on PR #54.
+    """
     names: list[str] = []
     for item in changed_files:
         if not isinstance(item, str):
             continue
-        candidate = item.strip().replace("\\", "/").lstrip("./")
+        candidate = item.strip().replace("\\", "/")
+        while candidate.startswith("./") or candidate.startswith("/"):
+            candidate = candidate[2:] if candidate.startswith("./") else candidate[1:]
         if not candidate or candidate in names:
             continue
         names.append(candidate)
