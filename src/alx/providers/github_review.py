@@ -217,10 +217,25 @@ class GitHubReviewProvider:
 
     # ---- reading --------------------------------------------------------
 
+    def pull_request_closed(self, number: int) -> bool:
+        """Whether GitHub has closed (including merged) this review's PR."""
+        try:
+            pull = self._call("GET", f"/repos/{self._repository}/pulls/{number}")
+        except (_Refused, _Unavailable) as error:
+            raise ReviewReadError("review_unavailable") from error
+        if not isinstance(pull, dict) or pull.get("state") not in ("open", "closed"):
+            raise ReviewReadError("review_unavailable")
+        return pull["state"] == "closed"
+
     @staticmethod
     def _when(item: dict) -> datetime:
         return (
             _moment(item.get("submitted_at"))
+            # Issue summaries are edited in place for later review rounds.
+            # Their creation time describes the first round, not the exact-
+            # head content being returned now. Submitted reviews retain their
+            # original submission time even if edited afterwards.
+            or _moment(item.get("updated_at"))
             or _moment(item.get("created_at"))
             or datetime.min.replace(tzinfo=UTC)
         )

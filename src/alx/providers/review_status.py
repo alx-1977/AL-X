@@ -24,7 +24,8 @@ already taken it. So the caller may supply that fact, and an older verdict for
 this exact revision completes the task when no earlier task consumed it.
 
 Nothing here reads the review's meaning. It answers whether there is something
-to read, and AL/X reads it.
+to read, and AL/X reads it. A closed or merged PR with no fresh readable result
+ends the outstanding request as failed; closure never certifies a review.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ def subject_reference(pull_request_number: int, head_sha: str = "") -> str:
 
 
 class ReviewStatusObserver:
-    """Report a review complete only when it can be read for that revision."""
+    """Observe exact-head completion or closure of an unresolved request."""
 
     def __init__(self, provider: Any, clock: Any = None) -> None:
         self._provider = provider
@@ -59,6 +60,21 @@ class ReviewStatusObserver:
     def service(self) -> str:
         """The reviewer being watched, as the task store records it."""
         return self._provider.reviewer
+
+    def _unresolved(
+        self, number: int, now: datetime, state: TaskState
+    ) -> TaskObservation:
+        # Closing a PR ends its outstanding review request. It does not prove
+        # that this exact head was reviewed: report a terminal failure to
+        # obtain the requested result, never a fabricated review completion.
+        closed = getattr(self._provider, "pull_request_closed", None)
+        if closed is not None:
+            try:
+                if closed(number):
+                    return TaskObservation(TaskState.FAILED, now)
+            except (ReviewReadError, TypeError, ValueError):
+                pass
+        return TaskObservation(state, now)
 
     def observe(
         self,
@@ -77,24 +93,25 @@ class ReviewStatusObserver:
         match = _SUBJECT.match(subject)
         if match is None:
             return TaskObservation(TaskState.STATUS_UNKNOWN, now)
+        number = int(match.group("number"))
         head_sha = match.group("sha")
         if not head_sha:
             # Without a revision there is nothing to bind a review to, and a
             # review of some other head must never be reported as this one's.
-            return TaskObservation(TaskState.STATUS_UNKNOWN, now)
+            return self._unresolved(number, now, TaskState.STATUS_UNKNOWN)
         try:
             content = self._provider.read(
                 ReviewContentRequest(
-                    pull_request_number=int(match.group("number")),
+                    pull_request_number=number,
                     head_sha=head_sha,
                 )
             )
         except (ReviewReadError, TypeError, ValueError):
             # Unreadable is not incomplete: the review may be published and the
             # transport merely unavailable, so nothing is claimed either way.
-            return TaskObservation(TaskState.STATUS_UNKNOWN, now)
+            return self._unresolved(number, now, TaskState.STATUS_UNKNOWN)
         if not content.available:
-            return TaskObservation(TaskState.WAITING_FOR_RESULT, now)
+            return self._unresolved(number, now, TaskState.WAITING_FOR_RESULT)
         # Available means the reader bound this verdict to the exact revision
         # asked about: the reviewer's prose names the forty-character sha, or
         # it is the review object GitHub records that commit against. Nothing
@@ -108,7 +125,7 @@ class ReviewStatusObserver:
             # An earlier task already took this verdict, so asking again is a
             # request for a second look at an unchanged revision. Handing back
             # what was already delivered would report a review that never ran.
-            return TaskObservation(TaskState.WAITING_FOR_RESULT, now)
+            return self._unresolved(number, now, TaskState.WAITING_FOR_RESULT)
         return TaskObservation(TaskState.COMPLETED, now)
 
 

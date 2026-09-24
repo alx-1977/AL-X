@@ -1104,6 +1104,83 @@ class RemoteRefspecTests(RealRepositoryHarness):
         self.assertTrue(outcome.succeeded)
         self.assertEqual(git(self.local, "rev-parse", "HEAD"), theirs)
 
+    def test_fast_forward_fetches_stale_tracking_ref_without_a_separate_fetch(self):
+        before = git(self.local, "rev-parse", "main")
+        theirs = self.advance_remote()
+        self.assertEqual(git(self.local, "rev-parse", "origin/main"), before)
+        commands = []
+
+        def runner(argv, **keywords):
+            commands.append(argv)
+            return subprocess.run(argv, **keywords)
+
+        authority = RepositoryAuthority(
+            self.system, runner=runner, verified_remote=str(self.remote)
+        )
+        outcome = authority.perform(
+            RepositoryRequest(Operation.PULL_FAST_FORWARD, {"branch": "main"})
+        )
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(outcome.source_sha, before)
+        self.assertEqual(outcome.resulting_sha, theirs)
+        self.assertEqual(git(self.local, "rev-parse", "main"), theirs)
+        self.assertEqual(git(self.local, "rev-parse", "origin/main"), theirs)
+        fetch = ["git", "fetch", "--no-tags", str(self.remote),
+                 "+refs/heads/main:refs/remotes/origin/main"]
+        merge = ["git", "merge", "--ff-only", theirs]
+        self.assertLess(commands.index(fetch), commands.index(merge))
+
+    def test_failed_fetch_cannot_merge_a_stale_tracking_ref(self):
+        self.advance_remote()
+        before = git(self.local, "rev-parse", "main")
+        commands = []
+
+        def runner(argv, **keywords):
+            commands.append(argv)
+            if argv[1] == "fetch":
+                return subprocess.CompletedProcess(argv, 1, "", "unavailable")
+            return subprocess.run(argv, **keywords)
+
+        authority = RepositoryAuthority(self.system, runner=runner)
+        with self.assertRaises(RepositoryAuthorityError):
+            authority.perform(
+                RepositoryRequest(Operation.PULL_FAST_FORWARD, {"branch": "main"})
+            )
+        self.assertFalse(any(argv[1] == "merge" for argv in commands))
+        self.assertEqual(git(self.local, "rev-parse", "main"), before)
+
+    def test_fetch_tracking_mismatch_is_refused_before_merge(self):
+        before = git(self.local, "rev-parse", "main")
+        self.advance_remote()
+        commands = []
+
+        def runner(argv, **keywords):
+            commands.append(argv)
+            result = subprocess.run(argv, **keywords)
+            if argv[1] == "fetch":
+                git(self.local, "update-ref", "refs/remotes/origin/main", before)
+            return result
+
+        authority = RepositoryAuthority(self.system, runner=runner)
+        with self.assertRaises(RepositoryAuthorityError):
+            authority.perform(
+                RepositoryRequest(Operation.PULL_FAST_FORWARD, {"branch": "main"})
+            )
+        self.assertFalse(any(argv[1] == "merge" for argv in commands))
+        self.assertEqual(git(self.local, "rev-parse", "main"), before)
+
+    def test_local_ahead_is_not_reported_as_reaching_the_remote_commit(self):
+        remote_sha = git(self.local, "rev-parse", "origin/main")
+        self.commit("local.txt")
+        local_sha = git(self.local, "rev-parse", "main")
+        self.assertNotEqual(local_sha, remote_sha)
+        outcome = self.url_bound().perform(
+            RepositoryRequest(Operation.PULL_FAST_FORWARD, {"branch": "main"})
+        )
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(outcome.resulting_sha, local_sha)
+        self.assertEqual(git(self.local, "rev-parse", "main"), local_sha)
+
     def test_a_force_push_names_the_revision_it_expects(self) -> None:
         """The bare lease derives from a tracking ref a URL does not select.
 
