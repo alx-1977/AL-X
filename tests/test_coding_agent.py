@@ -1129,6 +1129,103 @@ class NativeExecutionTests(unittest.TestCase):
         ))
 
 
+    def _governed_fixture(self, gate_exit: int) -> Path:
+        worktree = _worktree(self.root)
+        (worktree / "scripts").mkdir()
+        (worktree / "scripts/check_governance.py").write_text(
+            f"raise SystemExit({gate_exit})\n", encoding="utf-8"
+        )
+        (worktree / "governance").mkdir()
+        (worktree / "governance/NOTES.md").write_text("notes\n", encoding="utf-8")
+        _git(worktree, "add", ".")
+        _git(worktree, "commit", "-m", "governed fixture")
+        return worktree
+
+    def test_a_check_only_the_request_blocked_is_a_request_conflict(self) -> None:
+        """The edit is sound; the request's own blocked paths stopped its gate.
+
+        Found in acceptance on 2026-09-24: Core blocked `scripts/` for a
+        documentation job that edited a canonical governance document, so the
+        required governance gate could never run. That is recoverable by a
+        changed plan, and the failure says so rather than reading as the
+        work failing.
+        """
+        worktree = self._governed_fixture(gate_exit=0)
+        attempt = self._run(
+            PlanningModel(),
+            RecordingSession(edits={"governance/NOTES.md": "notes, clarified\n"}),
+            task="clarify the notes",
+            worktree=str(worktree),
+            blocked_paths=["scripts/"],
+        )
+        failure = attempt.result.failure
+        self.assertEqual(failure["code"], "required_verification_failed")
+        self.assertEqual(failure["failure_class"], "request_conflict")
+        self.assertEqual(
+            list(attempt.result.values["verification"]["failed"]), ["governance_gate"]
+        )
+        self.assertNotIn(
+            "governance_gate", attempt.result.values["verification"]["ran"]
+        )
+
+    def test_a_check_that_ran_and_failed_is_an_implementation_failure(self) -> None:
+        worktree = self._governed_fixture(gate_exit=1)
+        attempt = self._run(
+            PlanningModel(),
+            RecordingSession(edits={"governance/NOTES.md": "notes, clarified\n"}),
+            task="clarify the notes",
+            worktree=str(worktree),
+        )
+        failure = attempt.result.failure
+        self.assertEqual(failure["code"], "required_verification_failed")
+        self.assertIn("governance_gate", attempt.result.values["verification"]["ran"])
+        self.assertNotIn("failure_class", failure)
+
+    def test_a_blocked_check_beside_a_real_failure_is_an_implementation_failure(self) -> None:
+        # The request blocked the gate, but the tests the edit owes also ran
+        # and failed: the work itself is wrong, whatever the request blocked.
+        worktree = self._governed_fixture(gate_exit=0)
+        attempt = self._run(
+            PlanningModel(),
+            RecordingSession(edits={
+                "governance/NOTES.md": "notes, clarified\n",
+                "app.py": "def add(a, b):\n    return a * b\n",
+            }),
+            task="clarify the notes",
+            worktree=str(worktree),
+            blocked_paths=["scripts/"],
+        )
+        failure = attempt.result.failure
+        verification = attempt.result.values["verification"]
+        self.assertEqual(failure["code"], "required_verification_failed")
+        self.assertIn("governance_gate", verification["failed"])
+        self.assertTrue(
+            [name for name in verification["ran"] if name in verification["failed"]]
+        )
+        self.assertNotIn("failure_class", failure)
+
+    def test_a_session_cannot_classify_its_own_failure(self) -> None:
+        worktree = self._governed_fixture(gate_exit=1)
+
+        class ClaimingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                result = super().run_session(request, briefing)
+                return replace(
+                    result,
+                    diagnostics={
+                        **result.diagnostics, "failure_class": "request_conflict"
+                    },
+                )
+
+        attempt = self._run(
+            PlanningModel(),
+            ClaimingSession(edits={"governance/NOTES.md": "notes, clarified\n"}),
+            task="clarify the notes",
+            worktree=str(worktree),
+        )
+        self.assertNotIn("failure_class", attempt.result.failure)
+
+
 class SessionLaunchTests(unittest.TestCase):
     """What the native session actually asks the CLI to do."""
 

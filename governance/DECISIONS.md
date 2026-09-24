@@ -2041,3 +2041,33 @@ Consequence: restarting AL/X runs merged `main`, not whatever branch the
 checkout shows. Unmerged work is not run live through the launcher. This
 amendment grants no switch-back, recovery or Git authority to deterministic
 code; D-033's failure and retry rules are unchanged.
+
+### Amendment — request conflicts have their own bound
+
+- **Date:** 2026-09-24
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-24.** Approved after the acceptance
+  run in which a correctable plan was refused `coding_retry_exhausted`,
+  choosing a separate bound of two over a bound of one.
+
+D-030's allowance of two implementation-reaching failed executions per goal
+counted every such failure alike. A job can implement a change and still fail
+only because the request itself prevented its required verification: a check
+the job was obliged to run was refused because the request's own blocked paths
+cover its command. That is not a failure of the work, and it is correctable by
+Core changing the plan.
+
+Deterministic Coding Agent code now classifies such a run as a request
+conflict: every required check that did not pass never ran, its command is
+allowlisted, and the request's normalised blocked paths are the only reason it
+was refused. A check that ran and failed, or a command the allowlist refuses
+regardless of the request, remains an implementation failure. Neither the
+coding model nor its session can set the classification.
+
+Request conflicts do not count toward D-030's allowance. They have their own
+fixed bound of two per goal, counted and refused in the same way and before any
+checkpoint or dispatch. Refusals before implementation (the checkout busy,
+dirty or off `main`) count toward neither. Nothing resets either bound, and
+there is no override: a goal can reach a model through at most two genuine
+implementation failures and two request conflicts. All other D-028, D-030 and
+D-033 constraints remain unchanged.
