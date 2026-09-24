@@ -274,8 +274,6 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             subprocess.run(
                 ["git", *argv], cwd=root, check=True, capture_output=True
             )
-        from alx.providers.coding_worktree import CodingWorktreeAllocator
-
         runner = _Recorder(_envelope(DECISION))
         model = GrokSubscriptionReasoningModel(
             "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
@@ -285,9 +283,7 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             reviewer=GrokSubscriptionReasoningModel(
                 "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
             ),
-            allocator=CodingWorktreeAllocator(
-                parent / "coding-worktrees", root
-            ),
+            repository=root,
         )
         broker = CapabilityBroker(
             CapabilityRegistry(runtime.definitions),
@@ -298,7 +294,8 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             CapabilityCall(
                 "call-1",
                 RUN_CODING_TASK,
-                {"task": "inspect"},
+                {"task": "inspect", "repair_branch": "fix/inspect",
+                 "commit_message": "inspect repository"},
             ),
             AuthorityContext("friedl", runtime.permissions, NOW),
         )

@@ -61,25 +61,17 @@ class TheStepBudgetCeilingIsVisible(unittest.TestCase):
         self.assertIn("MAX_STEP_BUDGET", source)
 
 
-class TheWorktreeIsNotSomethingCoreNames(unittest.TestCase):
-    """D-031 removed the path field rather than constraining it.
-
-    This class previously asserted the opposite: that the catalogue described
-    `worktree` as a filesystem path and named `"."` as the value that works.
-    That description was accurate and was the defect — `"."` is the live AL/X
-    checkout, so the capability was documenting the way to point a coding job
-    at the repository it runs from.
-    """
+class TheCheckoutIsNotSomethingCoreNames(unittest.TestCase):
 
     def test_the_catalogue_offers_no_path_at_all(self) -> None:
         purpose = catalogue_entry()["purpose"]
         self.assertNotIn("filesystem path to an existing directory", purpose)
         self.assertNotIn('"."', purpose)
 
-    def test_the_catalogue_says_the_worktree_is_allocated(self) -> None:
+    def test_the_catalogue_says_the_checkout_is_configured(self) -> None:
         purpose = catalogue_entry()["purpose"]
-        self.assertIn("allocated automatically", purpose)
-        self.assertIn("never the live repository", purpose)
+        self.assertIn("configured canonical checkout", purpose)
+        self.assertIn("No repository path is accepted", purpose)
 
     def test_no_repository_name_is_hard_coded_as_canonical(self) -> None:
         """No alias, no fuzzy match, no single blessed identifier."""
@@ -140,7 +132,10 @@ class ExistingValidCallsAreUnchanged(unittest.TestCase):
         """
         entry = catalogue_entry()
         schema = entry["input_schema"]
-        self.assertEqual(sorted(schema["required"]), ["task"])
+        self.assertEqual(
+            sorted(schema["required"]),
+            ["commit_message", "repair_branch", "task"],
+        )
         self.assertIn("step_budget", schema["properties"])
         self.assertEqual(schema["properties"]["step_budget"]["kind"], "integer")
         self.assertNotIn("worktree", schema["properties"])

@@ -162,40 +162,29 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
         values.update(changes)
         return CodingTelemetry(**values)
 
-    def test_the_snapshot_says_where_the_job_is_working(self) -> None:
-        """The canonical checkout stays on main, so the panel must say where.
-
-        The Coding Agent always knew the worktree and branch; they reached the
-        person only in the final outcome, after the work was over. A running
-        job could therefore be visibly active and give no way to find its
-        files short of `git worktree list`.
-        """
+    def test_the_snapshot_says_which_visible_branch_is_active(self) -> None:
         activity = VoiceActivityStatus()
         activity.publish_coding(self._telemetry(
-            worktree="/tmp/wt/case-7", branch="fix/thing",
+            branch="fix/thing",
         ))
         snapshot = activity.coding_snapshot(NOW)
-        self.assertEqual(snapshot["worktree"], "/tmp/wt/case-7")
         self.assertEqual(snapshot["branch"], "fix/thing")
 
-    def test_a_job_without_an_allocation_reports_no_worktree(self) -> None:
-        """Empty is a real state, and must not be filled in with a guess."""
+    def test_a_job_before_branch_creation_reports_no_branch(self) -> None:
         activity = VoiceActivityStatus()
         activity.publish_coding(self._telemetry())
         snapshot = activity.coding_snapshot(NOW)
-        self.assertEqual(snapshot["worktree"], "")
         self.assertEqual(snapshot["branch"], "")
 
-    def test_a_terminal_observation_still_carries_its_worktree(self) -> None:
-        """The frontend needs it to name the retained directory as it clears."""
+    def test_a_terminal_observation_still_carries_its_branch(self) -> None:
         activity = VoiceActivityStatus()
         activity.publish_coding(self._telemetry(
             terminal=True, outcome="failed",
-            worktree="/tmp/wt/case-7", branch="fix/thing",
+            branch="fix/thing",
         ))
         snapshot = activity.coding_snapshot(NOW)
         self.assertTrue(snapshot["terminal"])
-        self.assertEqual(snapshot["worktree"], "/tmp/wt/case-7")
+        self.assertEqual(snapshot["branch"], "fix/thing")
 
     def test_snapshot_uses_runtime_timestamps_not_console_text(self) -> None:
         activity = VoiceActivityStatus()

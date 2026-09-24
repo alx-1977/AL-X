@@ -152,22 +152,18 @@ class ReadingTheAssignedWorktree(Worktree):
 
 
 class BranchNamesTheCapabilityMayUse(Worktree):
-    """The branch grammar, unchanged by D-031.
+    """The narrow branch grammar and creation authority."""
 
-    D-031 moved branch *creation* into the worktree allocator, where the
-    collision behaviour D-029 fixed is exercised against the allocator itself
-    in `tests/test_coding_worktree.py`. What stays here is the name grammar,
-    which is shared by both and belongs beside the other git-authority checks.
-    """
-
-    def test_switching_is_not_an_available_shape_at_all(self) -> None:
-        """Dead authority is removed, not documented.
-
-        Plain `switch` went on 2026-09-12 and `switch -c` on 2026-09-16: once
-        `worktree add -b` creates the branch, nothing builds either.
-        """
+    def test_only_feature_branch_creation_is_an_available_switch_shape(self) -> None:
         self.assertFalse(git_write_permitted(["git", "switch", "main"]))
-        self.assertFalse(git_write_permitted(["git", "switch", "-c", "repair/x"]))
+        self.assertTrue(
+            git_write_permitted(
+                ["git", "switch", "-c", "repair/x", self.base_sha]
+            )
+        )
+        self.assertFalse(
+            git_write_permitted(["git", "switch", "-c", "repair/x"])
+        )
 
     def test_a_branch_name_reaching_another_ref_namespace_is_refused(self) -> None:
         for name in ("refs/heads/main", "HEAD", "main@{1}", "a/../b"):
@@ -1087,45 +1083,24 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         branch name is refused, nothing called it, and a dead shape is granted
         authority nobody uses.
 
-        D-031 changed the branch half of this on 2026-09-16. It added one read
-        of where the repository's common git directory is (`rev-parse
-        --git-common-dir`), used to prove a linked worktree belongs to the
-        canonical repository, and the two worktree shapes that allocate and
-        release a coding job's isolated worktree. `worktree add -b` creates the
-        branch and the worktree in one command, so `switch -c` was removed for
-        the same reason plain `switch` was: nothing built it afterwards.
-
-        One further read was added the same day when release verification was
-        hardened: `cat-file -e` asks whether a recorded start point is a commit
-        this repository actually has, so a persisted claim is checked against
-        git rather than against the file making the claim.
+        D-033 removes linked-worktree allocation and release. The common git
+        directory read now locates the repository-scoped exclusivity lock,
+        and `switch -c <feature> <verified-main-sha>` is the sole branch
+        creation shape.
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 17)
+        self.assertEqual(len(_WRITE_SHAPES), 15)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
             {"rev-parse", "symbolic-ref", "status", "diff", "show",
              "check-attr", "check-ignore", "ls-files", "add",
-             "reset", "commit", "worktree", "cat-file"},
+             "reset", "commit", "switch"},
         )
-        # `cat-file` may only test for existence. The shapes that print an
-        # object's contents (`-p`, `blob`, a `rev:path`) are not entries.
-        self.assertEqual(
-            {prefix for prefix in _WRITE_SHAPES if prefix[0] == "cat-file"},
-            {("cat-file", "-e")},
-        )
-        # Branch creation has exactly one shape, and it is the atomic one.
-        self.assertNotIn(("switch", "-c"), _WRITE_SHAPES)
-        # D-031 grants add and remove only. `prune`, `move`, `lock`, `repair`
-        # and every flag-bearing variant are absent, so they cannot be built.
-        worktree_shapes = {
-            prefix for prefix in _WRITE_SHAPES if prefix[0] == "worktree"
-        }
-        self.assertEqual(
-            worktree_shapes,
-            {("worktree", "add", "-b"), ("worktree", "remove")},
+        self.assertIn(("switch", "-c"), _WRITE_SHAPES)
+        self.assertFalse(
+            any(prefix[0] in {"worktree", "cat-file"} for prefix in _WRITE_SHAPES)
         )
         # Every read-shaped addition must stay a read. `check-attr` takes
         # paths because it is asked about specific paths, but it only reports;

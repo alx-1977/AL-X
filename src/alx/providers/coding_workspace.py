@@ -1,4 +1,4 @@
-"""Path bound for one assigned coding worktree.
+"""Path bound for the canonical Coding Agent checkout.
 
 The coding session edits the worktree with its own native tools, so this is no
 longer the site that performs each read and write. What remains is the path
@@ -67,23 +67,14 @@ def diagnose_worktree(worktree: str) -> dict[str, object] | None:
             "resolved": _safe_resolved(root),
             **_safe_received(worktree),
         }
-    # D-031 defence in depth. A linked worktree's `.git` is a *file* pointing
-    # at the parent repository; a main checkout's is a directory. Refusing the
-    # directory form is what stops the canonical checkout being used as a
-    # workspace even if a caller regression ever put it here again — the
-    # allocator already cannot produce it, and this is the second lock.
+    # D-033 defence in depth. The Coding Agent must use the canonical checkout,
+    # whose `.git` is a directory. A linked worktree has a pointer file here;
+    # accepting that would silently restore the superseded execution path.
     pointer = root / ".git"
-    if pointer.is_dir():
+    if not pointer.is_dir():
         return {
-            "reason_code": "not_a_linked_worktree",
-            "detail": "worktree is a main checkout, not a linked worktree",
-            "resolved": _safe_resolved(root),
-            **_safe_received(worktree),
-        }
-    if not pointer.is_file():
-        return {
-            "reason_code": "not_a_linked_worktree",
-            "detail": "worktree is not a linked git worktree",
+            "reason_code": "not_canonical_checkout",
+            "detail": "coding workspace is not the canonical git checkout",
             "resolved": _safe_resolved(root),
             **_safe_received(worktree),
         }

@@ -171,61 +171,6 @@ html, body {
 
 .diagnostics__task time { color: rgba(255, 255, 255, .6); }
 
-/* Where the coding agent is working. The canonical checkout stays on main, so
-   the editor window shows none of this; one compact line per worktree is
-   enough to answer "which branch, and where". */
-.diagnostics__worktree {
-  border-top: 1px solid rgba(255, 255, 255, .08);
-  background: rgba(167, 139, 250, .08);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: .72rem;
-}
-
-.worktree__line {
-  display: flex;
-  align-items: center;
-  gap: .5rem;
-  padding: .45rem 1rem;
-  color: #e3dbff;
-}
-
-.worktree__line--retained {
-  border-top: 1px solid rgba(255, 255, 255, .06);
-  color: rgba(227, 219, 255, .62);
-}
-
-.worktree__label {
-  flex: none;
-  letter-spacing: .06em;
-  color: rgba(227, 219, 255, .7);
-}
-
-.worktree__branch {
-  flex: none;
-  font-weight: 600;
-}
-
-.worktree__open {
-  flex: none;
-  color: #a78bfa;
-  text-decoration: none;
-  border-bottom: 1px dotted rgba(167, 139, 250, .6);
-}
-
-.worktree__open:hover { color: #c4b5fd; }
-
-/* The path is the least important thing on the line and the longest, so it
-   takes the remaining width and truncates rather than wrapping the row. */
-.worktree__path {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-  color: rgba(227, 219, 255, .55);
-}
-
 .diagnostics__log {
   position: relative;
   height: 10.5rem;

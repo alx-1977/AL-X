@@ -107,10 +107,6 @@ CODING_FAILURES = (
     "sandbox_unusable",
     "session_failed",
     "task_failed",
-    # D-031. A workspace release refuses when the job it names did not finish
-    # successfully, which is a different fact from the workspace being
-    # unusable: the directory is fine, the job is not.
-    "job_not_successful",
 )
 
 
@@ -152,19 +148,8 @@ class CodingTelemetry:
     terminal: bool = False
     outcome: str = ""
     transition: str = ""
-    # Where this job is working, and on which branch. Structural facts about
-    # the job, not words about it: a path and a ref name.
-    #
-    # The Coding Agent has always known both — the allocator hands them over
-    # before anything else runs — but they reached the person only in the final
-    # outcome, after the work was over. While a job ran, the diagnostic panel
-    # could say a job was active and not where, so the canonical checkout sat
-    # on main showing nothing while the real edits happened in a directory
-    # whose name was only discoverable through `git worktree list`.
-    #
-    # Empty before allocation, which is a real state: a job that failed to get
-    # a worktree has no path to report, and reporting one would be a lie.
-    worktree: str = ""
+    # The visible branch this job created in the canonical checkout. Empty
+    # until deterministic preflight has created and switched it.
     branch: str = ""
 
     def __post_init__(self) -> None:
@@ -262,18 +247,10 @@ def _aware(value: datetime, name: str) -> None:
 class CodingRequest:
     """One bounded coding job Core has decided to delegate.
 
-    `job_id` is not a model-supplied field. Under D-031 the executor injects
-    the broker's durable capability call ID, and the worktree that identity
-    allocates is where the job runs. Core names no filesystem path at all:
-    the field it used to supply resolved against the runtime's own working
-    directory, so `"."` was the live AL/X checkout and the kernel sandbox
-    faithfully made the whole repository writable.
-
-    `worktree` remains on this record because the session has to be told where
-    to work, but it is no longer an input: it is written here by the Coding
-    Agent after the allocator created it, so the only value it can hold is one
-    AL/X generated. It is absent from the capability schema entirely, and an
-    argument spelled `worktree` is refused rather than ignored.
+    `job_id` is not a model-supplied field; the executor injects the broker's
+    durable capability call ID. `worktree` is an internal compatibility name
+    for the configured canonical checkout passed to native coding sessions.
+    It is never a capability argument and never selects another directory.
     """
 
     task: str
@@ -532,12 +509,6 @@ class CodingOutcome:
     plan_summary: str = ""
     baseline: "GitWorkspaceState | None" = None
     commit: "CodingCommit | None" = None
-    # D-031 audit evidence: where this job ran, and whether that directory is
-    # still there afterwards. Reported for every job regardless of outcome, so
-    # retained stale state is visible rather than merely present.
-    job_id: str = ""
-    worktree: str = ""
-    worktree_retained: bool = True
     # What this job was required to verify, what ran, and how each check ended.
     # `tests_run` and `tests_passed` above remain the test-specific facts they
     # always were; this is the whole picture, and it is what decides whether the
@@ -594,9 +565,6 @@ class CodingOutcome:
             "finished_at": self.finished_at.isoformat(),
             "plan_summary": self.plan_summary,
             "commands": [item.durable_values() for item in self.commands],
-            "job_id": self.job_id,
-            "worktree": self.worktree,
-            "worktree_retained": self.worktree_retained,
         }
         if self.tests_passed is not None:
             values["tests_passed"] = self.tests_passed

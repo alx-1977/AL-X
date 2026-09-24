@@ -301,7 +301,10 @@ def inspect_git(
     # bounding is what makes truncation visible rather than inferred.
     text = diff.stdout
     return GitEvidence(
-        _bound(status.stdout or status.stderr, MAX_COMMAND_OUTPUT_CHARACTERS),
+        # Porcelain status is stdout only. A host warning on stderr is
+        # diagnostic text, never a filename; treating it as status made a
+        # clean checkout appear dirty when stdout was empty.
+        _bound(status.stdout, MAX_COMMAND_OUTPUT_CHARACTERS),
         _bound(text, MAX_DIFF_CHARACTERS),
         len(text),
     )

@@ -600,14 +600,14 @@ class CodingAgentAuthorityTests(unittest.TestCase):
 
     AL/X's repository authority is hers because she is the one who decides
     what should happen to the repository. A job carries out an instruction
-    inside a worktree; giving it push, merge or branch deletion would let an
+    on a prepared feature branch; giving it push, merge or branch deletion would let an
     implementation capability publish and merge its own work, and a reviewer
     would then be looking at whatever the job decided to send.
     """
 
     SOURCE = REPOSITORY_ROOT / "src" / "alx" / "providers"
 
-    def test_the_coding_agent_git_verbs_are_unchanged(self) -> None:
+    def test_the_coding_agent_git_verbs_remain_narrow(self) -> None:
         import ast
 
         tree = ast.parse((self.SOURCE / "coding_git.py").read_text())
@@ -623,8 +623,7 @@ class CodingAgentAuthorityTests(unittest.TestCase):
         }
         self.assertEqual(verbs, {
             "rev-parse", "symbolic-ref", "status", "diff", "show", "check-attr",
-            "check-ignore", "ls-files", "add", "commit", "reset", "cat-file",
-            "worktree",
+            "check-ignore", "ls-files", "add", "commit", "reset", "switch",
         })
 
     def test_the_coding_agent_cannot_reach_a_remote(self) -> None:
