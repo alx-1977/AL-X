@@ -429,6 +429,38 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         self.assertEqual(dispatched, [])
         self.assertEqual(len(refused), 1)
 
+    def test_an_error_carrying_a_class_reaches_core_without_it(self) -> None:
+        """Only the Coding Agent's own verification records assign the class.
+
+        A CodingError raised anywhere, carrying `failure_class`, reaches Core
+        without it and so spends the implementation allowance like any other.
+        """
+        self.assertNotIn(
+            "failure_class",
+            CodingError("task_failed", failure_class="request_conflict").details,
+        )
+
+        def run_job(request):
+            raise CodingError(
+                "task_failed", reason_code="claimed", failure_class="request_conflict"
+            )
+
+        executor = build_coding_executors(run_job, lambda: "job-1")["run_coding_task"]
+        result = executor({
+            "task": "change app", "repair_branch": "feat/change",
+            "commit_message": "Change app",
+        })
+        self.assertIs(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["reason_code"], "claimed")
+        self.assertNotIn("failure_class", result.failure)
+
+        call = CapabilityCall("job-1", "run_coding_task", {"task": "change app"})
+        goal = state(
+            CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
+        self.assertEqual(CoreAgent._request_conflict_coding_executions(goal), 0)
+
     def test_the_bounds(self) -> None:
         from alx.core.loop import (
             _MAX_FAILED_CODING_EXECUTIONS,

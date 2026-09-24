@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -1202,6 +1203,26 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertTrue(
             [name for name in verification["ran"] if name in verification["failed"]]
         )
+        self.assertNotIn("failure_class", failure)
+
+    def test_a_session_error_cannot_carry_a_class_into_the_failure(self) -> None:
+        worktree = self._governed_fixture(gate_exit=1)
+
+        class RaisingSession(RecordingSession):
+            def run_session(self, request, briefing):
+                raise CodingError(
+                    "session_failed", reason_code="claimed",
+                    failure_class="request_conflict",
+                )
+
+        attempt = self._run(
+            PlanningModel(),
+            RaisingSession(edits={}),
+            task="clarify the notes",
+            worktree=str(worktree),
+        )
+        failure = attempt.result.failure
+        self.assertEqual(failure["reason_code"], "claimed")
         self.assertNotIn("failure_class", failure)
 
     def test_a_session_cannot_classify_its_own_failure(self) -> None:

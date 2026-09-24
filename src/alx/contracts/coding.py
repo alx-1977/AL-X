@@ -117,10 +117,13 @@ class CodingError(Exception):
         if code not in CODING_FAILURES:
             raise ValueError("coding failures must be declared")
         self.code = code
+        # `failure_class` is assigned only by the Coding Agent from its own
+        # verification records, never carried in by an error: whatever raised
+        # this cannot choose which retry allowance its failure spends.
         self.details = {
             key: value
             for key, value in details.items()
-            if value is not None
+            if value is not None and key != "failure_class"
         }
         super().__init__(code)
 
