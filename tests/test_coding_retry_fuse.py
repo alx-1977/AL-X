@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,8 +17,12 @@ from alx.contracts import (  # noqa: E402
     SuccessCriterion, AgentDecision, CapabilityDefinition, ConversationOrigin,
     ConversationSnapshot, ConversationTurn, SideEffect, StructuredSchema, ValueKind,
 )
+from alx.contracts.coding import CodingError, CodingRequest  # noqa: E402
 from alx.core import CoreAgent  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
+from alx.providers.coding_agent import CodingAgent  # noqa: E402
+from alx.providers.coding_git import coding_job_lock  # noqa: E402
+from alx.tools.coding import build_coding_executors  # noqa: E402
 
 
 def attempt(call_id: str, *, failed=True, invoked=True, disposition=CapabilityAttemptDisposition.EXECUTED, failure_code="task_failed", arguments=None):
@@ -119,6 +124,171 @@ class CodingRetryFuseTests(unittest.TestCase):
             self.assertEqual(len(refusals), 1)
             self.assertEqual(outcome.reason, "coding_retry_exhausted")
             self.assertEqual(reworded_outcome.reason, "coding_retry_exhausted")
+
+
+def git(repository: Path, *argv: str) -> str:
+    return subprocess.run(
+        ["git", *argv], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout
+
+
+class RecordingModel:
+    """Records whether implementation was reached; never plans anything."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, request):
+        self.calls += 1
+        raise RuntimeError("implementation reached")
+
+
+class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
+    """A checkout refused before its feature branch exists spent nothing.
+
+    D-030's amendment counts implementation-reaching failures. A checkout that
+    is off main, dirty, or held by another job refuses before any model is
+    asked anything, so two such refusals must not exhaust the goal.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        git(self.root, "init", "-q", "-b", "main")
+        git(self.root, "config", "user.email", "test@example.test")
+        git(self.root, "config", "user.name", "test")
+        (self.root / "app.py").write_text("value = 1\n", encoding="utf-8")
+        git(self.root, "add", "app.py")
+        git(self.root, "commit", "-qm", "base")
+        self.model = RecordingModel()
+        self.agent = CodingAgent(
+            self.model, None, self.model, repository=self.root
+        )
+
+    def request(self, job_id: str = "job-1") -> CodingRequest:
+        return CodingRequest(
+            task="change app", job_id=job_id,
+            repair_branch="feat/change", commit_message="Change app",
+        )
+
+    def refusal(self) -> CodingError:
+        with self.assertRaises(CodingError) as caught:
+            self.agent.run(self.request())
+        self.assertEqual(self.model.calls, 0)
+        self.assertIs(caught.exception.details["implementation_reached"], False)
+        return caught.exception
+
+    def test_every_checkout_precondition_is_marked_before_implementation(self) -> None:
+        git(self.root, "switch", "-q", "-c", "left-behind")
+        self.assertEqual(
+            self.refusal().details["reason_code"], "canonical_checkout_not_on_main"
+        )
+        git(self.root, "switch", "-q", "main")
+        (self.root / "notes.txt").write_text("mine\n", encoding="utf-8")
+        self.assertEqual(
+            self.refusal().details["reason_code"], "canonical_checkout_dirty"
+        )
+        (self.root / "notes.txt").unlink()
+        with coding_job_lock(self.root):
+            self.assertEqual(
+                self.refusal().details["reason_code"], "coding_job_active"
+            )
+
+    def test_refusals_leave_the_goal_able_to_dispatch_once_restored(self) -> None:
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        retention = now + timedelta(days=1)
+        executor = None
+        dispatched: list[str] = []
+        root = self.root
+
+        def dispatch(call, authority):
+            dispatched.append(call.call_id)
+            result = executor(call.arguments)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True, result
+            )
+
+        executor = build_coding_executors(
+            self.agent.run, lambda: dispatched[-1]
+        )["run_coding_task"]
+        arguments = {
+            "task": "change app",
+            "repair_branch": "feat/change",
+            "commit_message": "Change app",
+        }
+
+        class Reasoner:
+            def __init__(self):
+                self.decisions = 0
+
+            def decide(self, context):
+                self.decisions += 1
+                if self.decisions == 3:
+                    # Friedl, or AL/X's repository authority, restores main.
+                    git(root, "switch", "-q", "main")
+                if self.decisions <= 3:
+                    return AgentDecision(
+                        call=CapabilityCall(
+                            f"job-{self.decisions}", "run_coding_task", arguments
+                        ),
+                        goal_id="goal-a",
+                    )
+                return AgentDecision(response="done", goal_id="goal-a")
+
+        git(self.root, "switch", "-q", "-c", "left-behind")
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            self.addCleanup(store.close)
+            store.create(state(), "conversation", retention)
+            schema = StructuredSchema(ValueKind.OBJECT)
+            capability = CapabilityDefinition(
+                "run_coding_task", "bounded job", schema, schema,
+                SideEffect.EFFECTFUL,
+            )
+            agent = CoreAgent(
+                store, Reasoner(), dispatch, (capability,), clock=lambda: now
+            )
+            conversation = ConversationSnapshot("conversation", (
+                ConversationTurn(
+                    "conversation", "t", ConversationOrigin.TYPED, "continue",
+                    now, "friedl",
+                ),
+            ), 1, retention)
+            agent.process(conversation, retention, 6)
+            attempts = store.load("goal-a").state.attempts
+
+        self.assertEqual(dispatched, ["job-1", "job-2", "job-3"])
+        self.assertNotIn(
+            "coding_retry_exhausted", [item.reason_code for item in attempts]
+        )
+        refused = [item.result.failure for item in attempts[:2]]
+        self.assertEqual(
+            [item["reason_code"] for item in refused],
+            ["canonical_checkout_not_on_main"] * 2,
+        )
+        # The third job reached implementation, and it alone is counted.
+        self.assertEqual(self.model.calls, 1)
+        self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 1)
+
+    def test_an_implementation_reaching_failure_still_counts(self) -> None:
+        reached = attempt("reached", failure_code="provider_failed")
+        refused = CapabilityAttempt(
+            CapabilityCall("refused", "run_coding_task", {"task": "x"}),
+            CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(
+                "refused", "run_coding_task", CapabilityResultState.FAILED,
+                failure={
+                    "code": "git_refused",
+                    "reason_code": "canonical_checkout_dirty",
+                    "implementation_reached": False,
+                },
+            ),
+        )
+        self.assertEqual(
+            CoreAgent._failed_coding_executions(state(refused, refused, reached)), 1
+        )
+
 
 
 class TheVerificationChangeDoesNotTouchTheRetryAccounting(unittest.TestCase):

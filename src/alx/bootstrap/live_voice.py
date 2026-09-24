@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from contextvars import ContextVar
 import logging
@@ -146,9 +147,14 @@ def _completed(attempt) -> bool:
 def _coding_repository_root(
     repository_root: Path, authority_root: Path | None
 ) -> Path | None:
-    """Use the checkout AL/X can later publish, recover, and switch."""
+    """Use the checkout AL/X can later publish, recover, and switch.
+
+    No repository authority means no coding: nothing could switch a failed
+    job's feature branch back to main, so the process checkout is not a
+    fallback.
+    """
     if authority_root is None:
-        return repository_root
+        return None
     try:
         if repository_root.resolve() == authority_root.resolve():
             return repository_root.resolve()
@@ -231,6 +237,12 @@ def _watch_review(
         LOGGER.warning(
             "A requested review could not be watched: %s", type(error).__name__
         )
+
+
+# The tree this process imported: `scripts/alx` extracts committed main here,
+# so the laws, identity and frontend AL/X runs under are the ones merged with
+# her code, never whatever a feature branch in the checkout currently holds.
+CODE_ROOT = Path(__file__).resolve().parents[3]
 
 
 async def run(repository_root: Path) -> None:
@@ -489,38 +501,6 @@ async def run(repository_root: Path) -> None:
         executors.update(sandbox_runtime.executors)
         permissions.update(sandbox_runtime.permissions)
 
-    # D-028 authorises one bounded coding job in the configured checkout. It is
-    # a separate authority from sandbox.execute: the sandbox cannot touch a
-    # repository, and this cannot merge, push, deploy or request a review.
-    # D-033 fixes that checkout to the canonical repository. The capability
-    # creates and switches its feature branch there before implementation.
-    coding_repository = _coding_repository_root(
-        repository_root,
-        repository_runtime_configuration.root
-        if repository_runtime_configuration.is_usable
-        else None,
-    )
-    if coding_repository is None:
-        LOGGER.warning(
-            "Coding checkout differs from repository authority: no coding capability"
-        )
-    coding_runtime = build_coding_runtime(
-        provider_settings.coding.enabled,
-        providers.coding,
-        lambda: current_call_id[0],
-        session=providers.coding_session,
-        reviewer=providers.coding_reviewer,
-        activity_sink=activity.set,
-        telemetry_sink=activity.publish_coding,
-        repository=coding_repository,
-    )
-    if coding_runtime is not None:
-        for definition in coding_runtime.definitions:
-            registry.register(definition)
-        policies.update(coding_runtime.policies)
-        executors.update(coding_runtime.executors)
-        permissions.update(coding_runtime.permissions)
-
     # Requesting an external review is effectful and may spend review credits,
     # so its policy requires an approval grounded in Friedl's own turn.
     # The watcher is composed later, beside the transport, so the review path
@@ -602,6 +582,39 @@ async def run(repository_root: Path) -> None:
         policies.update(repository_runtime.policies)
         executors.update(repository_runtime.executors)
         permissions.update(repository_runtime.permissions)
+
+    # D-028 authorises one bounded coding job in the configured checkout. It is
+    # a separate authority from sandbox.execute: the sandbox cannot touch a
+    # repository, and this cannot merge, push, deploy or request a review.
+    # D-033 fixes that checkout to the canonical repository. The capability
+    # creates and switches its feature branch there before implementation.
+    # Composed after repository authority and only against its root: a job
+    # that fails leaves its feature branch for AL/X to recover and switch
+    # back to main, and without that authority nothing could.
+    coding_repository = _coding_repository_root(
+        repository_root,
+        repository_runtime.root if repository_runtime is not None else None,
+    )
+    if provider_settings.coding.enabled and coding_repository is None:
+        LOGGER.warning(
+            "Coding checkout lacks repository authority: no coding capability"
+        )
+    coding_runtime = build_coding_runtime(
+        provider_settings.coding.enabled,
+        providers.coding,
+        lambda: current_call_id[0],
+        session=providers.coding_session,
+        reviewer=providers.coding_reviewer,
+        activity_sink=activity.set,
+        telemetry_sink=activity.publish_coding,
+        repository=coding_repository,
+    )
+    if coding_runtime is not None:
+        for definition in coding_runtime.definitions:
+            registry.register(definition)
+        policies.update(coding_runtime.policies)
+        executors.update(coding_runtime.executors)
+        permissions.update(coding_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
@@ -732,14 +745,14 @@ async def run(repository_root: Path) -> None:
     # fallback would spend on a Core nobody selected and record the result as
     # if the experiment had run.
     conversational_reasoner = build_model_reasoner(
-        providers.reasoning, repository_root
+        providers.reasoning, CODE_ROOT
     )
     reasoner = OriginSelectedReasoner(
         conversational_reasoner,
         None if providers.autonomous is None
         else build_model_reasoner(
             providers.autonomous,
-            repository_root,
+            CODE_ROOT,
             AUTONOMOUS_MAX_OUTPUT_TOKENS,
             AUTONOMOUS_MAX_INPUT_TOKENS,
             # The bounds and the budget arrive together; ModelReasoner refuses
@@ -840,7 +853,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.host,
         voice_settings.port,
         provider_settings.speech_to_text.sample_rate_hz,
-        repository_root / "src/alx/interfaces/assets",
+        CODE_ROOT / "src/alx/interfaces/assets",
     )
     # The due-cognition tick lives for the life of the process, beside the
     # transport rather than inside it. Voice is how she is heard, not what
@@ -999,8 +1012,13 @@ async def run(repository_root: Path) -> None:
         goal_store.close()
 
 
-def main() -> None:
-    repository_root = Path(__file__).resolve().parents[3]
+def main(argv: list[str] | None = None) -> None:
+    # The checkout is named, not inferred from this file: the launcher runs
+    # code extracted from committed main, which lives outside the checkout
+    # whose .env, storage and repository authority the runtime serves.
+    parser = argparse.ArgumentParser(prog="alx.bootstrap.live_voice")
+    parser.add_argument("--checkout", type=Path, required=True)
+    repository_root = parser.parse_args(argv).checkout.resolve()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

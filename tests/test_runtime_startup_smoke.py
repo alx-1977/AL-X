@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -316,6 +317,84 @@ class StartupSmokeTest(unittest.TestCase):
         """Cancellation must unwind composition without raising."""
         observed = self._run_runtime(self._commissioning())
         self.assertTrue(observed["served"])
+
+
+class CodingNeedsRepositoryAuthority(unittest.TestCase):
+    """Coding composes only beside the authority that can recover its branch.
+
+    A failed job leaves its feature branch in the canonical checkout, and only
+    AL/X's repository authority can switch that checkout back to main. Without
+    that authority the process checkout is not a fallback: `run_coding_task`
+    is not registered at all.
+    """
+
+    _run_runtime = StartupSmokeTest._run_runtime
+
+    def _composed_coding(self, overrides: dict[str, str]) -> tuple[list, list]:
+        from alx.bootstrap.coding import build_coding_runtime
+        from alx.capabilities import CapabilityRegistry
+
+        checkouts: list = []
+        registered: list[str] = []
+        register = CapabilityRegistry.register
+
+        class Agent:
+            def run(self, request):
+                raise AssertionError("startup must not run a coding job")
+
+        def coding(enabled, model, call_id_source, **kwargs):
+            checkouts.append(kwargs["repository"])
+            # The real composition, given an inert agent so no model is built.
+            return build_coding_runtime(
+                enabled, model, call_id_source,
+                agent=Agent(), repository=kwargs["repository"],
+            )
+
+        def recording_register(registry, definition):
+            registered.append(definition.capability_id)
+            return register(registry, definition)
+
+        with mock.patch.object(live_voice, "build_coding_runtime", coding), \
+                mock.patch.object(CapabilityRegistry, "register", recording_register):
+            observed = self._run_runtime({"ALX_CODING_ENABLED": "true", **overrides})
+        self.assertTrue(observed["served"])
+        return checkouts, registered
+
+    def test_missing_repository_authority_registers_no_coding(self) -> None:
+        checkouts, registered = self._composed_coding(
+            {"ALX_REPOSITORY_RUNTIME_ENABLED": "false"}
+        )
+        self.assertEqual(checkouts, [None])
+        self.assertNotIn("run_coding_task", registered)
+        self.assertNotIn("repository_operation", registered)
+
+    def test_partially_configured_repository_authority_registers_no_coding(self) -> None:
+        # Enabled, but with no root: the settings are not usable, and the
+        # checkout the process runs from must not stand in for one.
+        checkouts, registered = self._composed_coding({
+            "ALX_REPOSITORY_RUNTIME_ENABLED": "true",
+            "ALX_REPOSITORY_RUNTIME_ROOT": "",
+            "ALX_REPOSITORY_RUNTIME_IDENTITY": "alx-1977/AL-X",
+            "ALX_REPOSITORY_RUNTIME_ORIGIN": "https://github.com/alx-1977/AL-X.git",
+        })
+        self.assertEqual(checkouts, [None])
+        self.assertNotIn("run_coding_task", registered)
+
+    def test_usable_repository_authority_registers_coding_on_its_root(self) -> None:
+        checkouts, registered = self._composed_coding({
+            "ALX_REPOSITORY_RUNTIME_ENABLED": "true",
+            "ALX_REPOSITORY_RUNTIME_ROOT": str(ROOT),
+            "ALX_REPOSITORY_RUNTIME_IDENTITY": "alx-1977/AL-X",
+            "ALX_REPOSITORY_RUNTIME_ORIGIN": "https://github.com/alx-1977/AL-X.git",
+        })
+        self.assertEqual(checkouts, [ROOT.resolve()])
+        self.assertIn("repository_operation", registered)
+        self.assertIn("run_coding_task", registered)
+        # Authority first: coding is composed only after it exists.
+        self.assertLess(
+            registered.index("repository_operation"),
+            registered.index("run_coding_task"),
+        )
 
 
 if __name__ == "__main__":

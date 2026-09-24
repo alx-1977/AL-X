@@ -61,9 +61,8 @@ class CodingRepositoryRootTests(unittest.TestCase):
                 _coding_repository_root(Path(first), Path(second))
             )
 
-    def test_absent_authority_configuration_keeps_the_runtime_checkout(self) -> None:
-        root = Path("repository")
-        self.assertEqual(_coding_repository_root(root, None), root)
+    def test_absent_authority_disables_coding_rather_than_falling_back(self) -> None:
+        self.assertIsNone(_coding_repository_root(Path("repository"), None))
 
 
 class FakeTranscriber:

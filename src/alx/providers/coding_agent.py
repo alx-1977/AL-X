@@ -32,6 +32,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable
+from contextlib import ExitStack
 from typing import Any, Mapping
 
 from alx.contracts import ModelMessage, ModelRequest, ModelRole, ReasoningModel
@@ -164,6 +165,17 @@ _SAFE_DIAGNOSTIC_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _before_implementation(error: CodingError) -> CodingError:
+    """Mark a refusal raised before the feature branch existed.
+
+    D-028's fuse counts implementation-reaching failures. A checkout that is
+    busy, dirty or off main refuses before any model is asked anything, and
+    Core reads this structured fact rather than guessing from the code.
+    """
+    error.details["implementation_reached"] = False
+    return error
 
 
 # pytest's "no tests were collected". What it means depends entirely on what
@@ -407,7 +419,11 @@ class CodingAgent:
             # mechanism. It covers branch preflight through commit and is
             # released automatically on every return, exception or process
             # exit; there is no queue or scheduling state.
-            with coding_job_lock(self._repository):
+            with ExitStack() as held:
+                try:
+                    held.enter_context(coding_job_lock(self._repository))
+                except CodingError as error:
+                    raise _before_implementation(error)
                 outcome = self._run(request, state)
                 return outcome
         finally:
@@ -425,10 +441,15 @@ class CodingAgent:
         # main and create/switch the feature branch before any implementation.
         # Validate the checkout shape first so a linked checkout cannot be
         # switched and only then refused.
-        workspace = CodingWorkspace(str(self._repository), request.blocked_paths)
-        branch = prepare_feature_branch(
-            self._repository, request.repair_branch.strip()
-        )
+        try:
+            workspace = CodingWorkspace(
+                str(self._repository), request.blocked_paths
+            )
+            branch = prepare_feature_branch(
+                self._repository, request.repair_branch.strip()
+            )
+        except CodingError as error:
+            raise _before_implementation(error)
         state.branch = branch
         request = replace(
             request,

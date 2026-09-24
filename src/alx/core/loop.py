@@ -1876,6 +1876,9 @@ class CoreAgent:
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
             and (item.result.failure or {}).get("code") != "arguments_unusable"
+            # A checkout refused before the feature branch existed: nothing
+            # was implemented, so nothing of the allowance was spent.
+            and (item.result.failure or {}).get("implementation_reached") is not False
         )
 
     @staticmethod

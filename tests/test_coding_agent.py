@@ -1667,6 +1667,12 @@ class LiveCoreCatalogueTests(unittest.TestCase):
                 "ALX_CODING_MODEL": "grok-4.6",
                 "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
                 "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
+                # Coding composes only beside the repository authority that
+                # can recover its branch.
+                "ALX_REPOSITORY_RUNTIME_ENABLED": "true",
+                "ALX_REPOSITORY_RUNTIME_ROOT": str(REPOSITORY_ROOT),
+                "ALX_REPOSITORY_RUNTIME_IDENTITY": "alx-1977/AL-X",
+                "ALX_REPOSITORY_RUNTIME_ORIGIN": "https://github.com/alx-1977/AL-X.git",
             }
         )
         ids = captured["ids"]

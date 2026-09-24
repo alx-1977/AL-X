@@ -2012,3 +2012,27 @@ Revisit if a Coding Agent edits while `main` is checked out, if two Coding
 Agent implementations overlap, if a job can choose the repository path, if
 the lock grows into scheduling machinery, or before any Coding Agent remote,
 pull-request, review, merge, deployment, or switch-back authority is proposed.
+
+### Amendment — the runtime starts from committed main
+
+- **Date:** 2026-09-24
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-24.** Approved in the PR #58
+  review-fix conversation, choosing "main only" over an explicit
+  launch-ref option.
+
+A failed job can leave broken Python on the feature branch in the one
+checkout AL/X imported from, so a restart could fail before her repository
+authority was available to recover it. The launcher (`scripts/alx`) therefore
+starts AL/X from committed local `main`, extracted with `git archive` into the
+repository's git directory, never from the checkout's working files. The
+extraction uses git alone and imports nothing first. It does not switch,
+reset, stash or otherwise touch the branch, index or working tree, and it is
+not a worktree. The laws, identity and frontend assets the runtime reads come
+from that same extracted commit. The checkout is still what `.env`, storage,
+repository authority and the Coding Agent use, and it is named explicitly.
+
+Consequence: restarting AL/X runs merged `main`, not whatever branch the
+checkout shows. Unmerged work is not run live through the launcher. This
+amendment grants no switch-back, recovery or Git authority to deterministic
+code; D-033's failure and retry rules are unchanged.

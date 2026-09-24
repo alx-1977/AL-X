@@ -43,6 +43,9 @@ class RepositoryAuthorityRuntime:
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
+    # The canonical checkout this authority recovers and switches back to
+    # main. Coding composes only against this root, never a fallback.
+    root: Path
 
 
 def build_repository_authority_runtime(
@@ -147,6 +150,7 @@ def build_repository_authority_runtime(
         policies={REPOSITORY_OPERATION: policy},
         executors=build_repository_operation_executors(selected, call_id_source),
         permissions=frozenset({REPOSITORY_PERMISSION}),
+        root=system.root,
     )
 
 
