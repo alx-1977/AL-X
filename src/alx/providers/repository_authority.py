@@ -372,8 +372,8 @@ class RepositoryAuthority:
                         f"{branch} is not checked out ({current or 'detached'} is); "
                         "switch to it first",
                     )
-                return ("git", "merge", "--ff-only",
-                        f"refs/remotes/{ORIGIN}/{branch}")
+                return ("git", "fetch", "--no-tags", self._remote(),
+                        f"+refs/heads/{branch}:refs/remotes/{ORIGIN}/{branch}")
             case Operation.CREATE_BRANCH:
                 return ("git", "branch", _ref(arguments, "branch"),
                         _revision(arguments, "start_point"))
@@ -731,6 +731,22 @@ class RepositoryAuthority:
         source_ref = named_ref or ("HEAD" if operation not in READ_ONLY else "")
         source_sha = self._sha_of(source_ref) if source_ref else ""
 
+        expected_sha = ""
+        if operation is Operation.PULL_FAST_FORWARD:
+            # A successful merge of a cached tracking ref says nothing about
+            # synchronisation. Fetch only the named branch from the verified
+            # remote, and bind this operation to the commit actually fetched.
+            tracking = f"refs/remotes/{ORIGIN}/{named_ref}"
+            self._text_of(command, "operation_refused")
+            expected_sha = self._sha_of("FETCH_HEAD")
+            if not expected_sha or self._sha_of(tracking) != expected_sha:
+                raise RepositoryAuthorityError(
+                    "operation_refused", "fetched and tracking revisions differ"
+                )
+            # Merge the verified snapshot rather than a ref another fetch can
+            # move between verification and merge.
+            command = ("git", "merge", "--ff-only", expected_sha)
+
         completed = self._run(command)
 
         # `merge-base --is-ancestor` answers with its exit code: 0 is yes and 1
@@ -785,6 +801,24 @@ class RepositoryAuthority:
         resulting_ref = named_ref or ("HEAD" if operation not in READ_ONLY else "")
         resulting_sha = self._sha_of(resulting_ref) if resulting_ref else ""
         remote = self._remote_for(operation)
+
+        if expected_sha and (
+            resulting_sha != expected_sha
+            or self._checked_out_branch() != named_ref
+            or self._sha_of("HEAD") != expected_sha
+        ):
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=False,
+                source_ref=source_ref,
+                source_sha=source_sha,
+                resulting_ref=resulting_ref,
+                resulting_sha=resulting_sha,
+                remote=remote,
+                failure_code="operation_refused",
+                refusal_reason="local branch did not reach the fetched revision",
+            )
 
         outcome = RepositoryOutcome(
             repository=self._system.repository,

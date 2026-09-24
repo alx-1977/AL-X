@@ -498,7 +498,8 @@ class ReviewObserverTests(unittest.TestCase):
     protocol it described.
     """
 
-    def _observer(self, reviews, comments, provider=ReviewProvider.CODERABBIT):
+    def _observer(self, reviews, comments, provider=ReviewProvider.CODERABBIT,
+                  pull_state="open", merged=False):
         normalised = []
         for index, review in enumerate(reviews, 1):
             item = dict(review)
@@ -527,7 +528,8 @@ class ReviewObserverTests(unittest.TestCase):
                 return Response(comments if first else [])
             if base.endswith("/comments"):
                 return Response([])
-            return Response({"head": {"sha": HEAD}})
+            return Response({"head": {"sha": HEAD}, "state": pull_state,
+                             "merged": merged})
 
         original = github_review.httpx.request
         github_review.httpx.request = request
@@ -661,6 +663,89 @@ class ReviewObserverTests(unittest.TestCase):
         """Without a head there is nothing to bind a review to."""
         observed = self._observer([], []).observe(subject_reference(21))
         self.assertIs(observed.state, TaskState.STATUS_UNKNOWN)
+
+
+class ReviewCleanupRegressions(PollerHarness):
+    """Edited summaries and closed PRs must settle durable display state."""
+
+    def test_an_edited_exact_head_summary_settles_a_second_request_after_restart(self):
+        asked = datetime(2026, 9, 24, 17, 41, 39, tzinfo=UTC)
+        self.store.record(_task(
+            task_id="earlier", subject_reference=subject_reference(21, HEAD),
+            requested_at=asked - timedelta(minutes=21),
+            state=TaskState.COMPLETED,
+            completed_at=asked - timedelta(minutes=20),
+        ))
+        self.store.record(_task(
+            task_id="second", subject_reference=subject_reference(21, HEAD),
+            requested_at=asked, state=TaskState.WAITING_FOR_RESULT,
+        ))
+        observer = ReviewObserverTests._observer(self, [], [{
+            "id": 5, "user": {"login": REVIEWER_LOGIN},
+            "body": f"Reviewed up to {HEAD}.",
+            "created_at": "2026-09-24T17:20:42Z",
+            "updated_at": "2026-09-24T17:44:16Z",
+        }])
+        self.store = SQLiteTaskStore(Path(self.directory.name) / "tasks.sqlite3")
+        self._poller(observer).tick()
+        self.assertEqual(self.store.outstanding(), ())
+        self.assertEqual(self.lines[-1][1]["state"], "completed")
+        self.assertEqual(self.woken[-1].task_id, "second")
+        reopened = SQLiteTaskStore(Path(self.directory.name) / "tasks.sqlite3")
+        second = next(task for task in reopened.completed_unhandled()
+                      if task.task_id == "second")
+        self.assertEqual(second.state, TaskState.COMPLETED)
+
+    def test_a_recent_edit_does_not_make_another_head_reviewed(self):
+        observer = ReviewObserverTests._observer(self, [], [{
+            "id": 5, "user": {"login": REVIEWER_LOGIN},
+            "body": f"Reviewed up to {OTHER_HEAD}.",
+            "created_at": "2026-09-24T17:20:42Z",
+            "updated_at": "2026-09-24T17:44:16Z",
+        }])
+        self.assertIs(observer.observe(subject_reference(21, HEAD)).state,
+                      TaskState.WAITING_FOR_RESULT)
+
+    def test_editing_a_submitted_review_does_not_change_its_submission_time(self):
+        observer = ReviewObserverTests._observer(self, [{
+            "user": {"login": REVIEWER_LOGIN}, "commit_id": HEAD,
+            "submitted_at": "2026-09-24T17:20:42Z",
+            "updated_at": "2026-09-24T17:44:16Z",
+        }], [])
+        self.assertIs(observer.observe(
+            subject_reference(21, HEAD),
+            datetime(2026, 9, 24, 17, 41, 39, tzinfo=UTC),
+            already_consumed=True,
+        ).state, TaskState.WAITING_FOR_RESULT)
+
+    def test_closed_or_merged_pr_settles_without_claiming_a_review(self):
+        for merged in (False, True):
+            with self.subTest(merged=merged):
+                observer = ReviewObserverTests._observer(
+                    self, [], [], pull_state="closed", merged=merged
+                )
+                self.store.record(_task(
+                    task_id=f"closed-{merged}",
+                    subject_reference=subject_reference(21, HEAD),
+                ))
+                self._poller(observer).tick()
+                self.assertEqual(self.store.outstanding(), ())
+                self.assertEqual(self.lines[-1][1]["state"], "failed")
+                self.assertIs(self.woken[-1].state, TaskState.FAILED)
+
+    def test_closure_settles_even_when_review_content_cannot_be_read(self):
+        observer = ReviewObserverTests._observer(self, [], [], pull_state="closed")
+
+        def unreadable(request):
+            raise ReviewReadError("review_unavailable")
+
+        observer._provider.read = unreadable
+        self.assertIs(observer.observe(subject_reference(21, HEAD)).state,
+                      TaskState.FAILED)
+        # A request whose head could not be bound still cannot linger after
+        # its PR closes, and cannot be marked reviewed either.
+        self.assertIs(observer.observe(subject_reference(21)).state,
+                      TaskState.FAILED)
 
 
 class ReviewFindingRegressions(unittest.TestCase):
