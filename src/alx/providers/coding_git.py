@@ -484,6 +484,10 @@ def canonical_repository_root(repository: Path) -> Path:
         raise CodingError(
             "git_refused", reason_code="repository_is_not_root"
         )
+    if not (root / ".git").is_dir():
+        raise CodingError(
+            "git_refused", reason_code="not_canonical_checkout"
+        )
     return root
 
 

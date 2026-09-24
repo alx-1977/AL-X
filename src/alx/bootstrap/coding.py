@@ -20,7 +20,7 @@ from alx.contracts import (
     ReasoningModel,
     StructuredData,
 )
-from alx.contracts.coding import CodingRequest, CodingTelemetry
+from alx.contracts.coding import CodingError, CodingRequest, CodingTelemetry
 from alx.providers.coding_agent import CodingAgent
 from alx.safety import AuthorityPolicy
 from alx.tools.coding import (
@@ -83,10 +83,17 @@ def build_coding_runtime(
     if repository is None:
         LOGGER.info("Coding agent has no canonical checkout: no coding capability")
         return None
-    selected = agent or CodingAgent(
-        model, session, reviewer, activity_sink, telemetry_sink,
-        repository=repository,
-    )
+    try:
+        selected = agent or CodingAgent(
+            model, session, reviewer, activity_sink, telemetry_sink,
+            repository=repository,
+        )
+    except CodingError as error:
+        LOGGER.warning(
+            "Coding agent checkout is unusable (%s): no coding capability",
+            error.details.get("reason_code", error.code),
+        )
+        return None
 
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)

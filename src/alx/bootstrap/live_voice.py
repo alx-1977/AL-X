@@ -143,6 +143,20 @@ def _completed(attempt) -> bool:
     return bool(values and values.get("completed") is True)
 
 
+def _coding_repository_root(
+    repository_root: Path, authority_root: Path | None
+) -> Path | None:
+    """Use the checkout AL/X can later publish, recover, and switch."""
+    if authority_root is None:
+        return repository_root
+    try:
+        if repository_root.resolve() == authority_root.resolve():
+            return repository_root.resolve()
+    except OSError:
+        return None
+    return None
+
+
 def migrate_legacy_conversations(
     goal_store: SQLiteGoalStore,
     conversation_store: SQLiteConversationStore,
@@ -480,6 +494,16 @@ async def run(repository_root: Path) -> None:
     # repository, and this cannot merge, push, deploy or request a review.
     # D-033 fixes that checkout to the canonical repository. The capability
     # creates and switches its feature branch there before implementation.
+    coding_repository = _coding_repository_root(
+        repository_root,
+        repository_runtime_configuration.root
+        if repository_runtime_configuration.is_usable
+        else None,
+    )
+    if coding_repository is None:
+        LOGGER.warning(
+            "Coding checkout differs from repository authority: no coding capability"
+        )
     coding_runtime = build_coding_runtime(
         provider_settings.coding.enabled,
         providers.coding,
@@ -488,7 +512,7 @@ async def run(repository_root: Path) -> None:
         reviewer=providers.coding_reviewer,
         activity_sink=activity.set,
         telemetry_sink=activity.publish_coding,
-        repository=repository_root,
+        repository=coding_repository,
     )
     if coding_runtime is not None:
         for definition in coding_runtime.definitions:

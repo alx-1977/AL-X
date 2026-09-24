@@ -81,13 +81,24 @@ class CanonicalCheckout(unittest.TestCase):
         self.assertEqual(caught.exception.details["reason_code"], "coding_job_active")
 
     def test_linked_worktree_is_not_accepted_as_the_canonical_checkout(self) -> None:
-        linked = self.root.parent / "linked"
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        linked = Path(parent.name).resolve() / "linked"
         git(self.root, "worktree", "add", "-q", "-b", "linked-test", str(linked))
         self.addCleanup(
             lambda: subprocess.run(
                 ["git", "worktree", "remove", "--force", str(linked)],
                 cwd=self.root, capture_output=True, text=True,
             )
+        )
+        with self.assertRaises(CodingError) as preflight:
+            prepare_feature_branch(linked, "feat/change")
+        self.assertEqual(
+            preflight.exception.details["reason_code"], "not_canonical_checkout"
+        )
+        self.assertEqual(
+            git(linked, "rev-parse", "--abbrev-ref", "HEAD").strip(),
+            "linked-test",
         )
         with self.assertRaises(CodingError) as caught:
             CodingWorkspace(str(linked))

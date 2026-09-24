@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.live_voice import (  # noqa: E402
-    load_environment, migrate_legacy_conversations,
+    _coding_repository_root, load_environment, migrate_legacy_conversations,
 )
 from alx.contracts import (  # noqa: E402
     AudioChunk,
@@ -47,6 +47,23 @@ from alx.goals.store import _goal_to_data  # noqa: E402
 
 
 NOW = datetime(2026, 8, 28, 9, 30, tzinfo=UTC)
+
+
+class CodingRepositoryRootTests(unittest.TestCase):
+    def test_matching_resolved_authority_root_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            self.assertEqual(_coding_repository_root(root, root / "."), root)
+
+    def test_different_authority_root_disables_coding(self) -> None:
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            self.assertIsNone(
+                _coding_repository_root(Path(first), Path(second))
+            )
+
+    def test_absent_authority_configuration_keeps_the_runtime_checkout(self) -> None:
+        root = Path("repository")
+        self.assertEqual(_coding_repository_root(root, None), root)
 
 
 class FakeTranscriber:

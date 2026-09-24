@@ -423,6 +423,9 @@ class CodingAgent:
     def _run(self, request: CodingRequest, state: "_JobState") -> CodingOutcome:
         # D-033: while holding the repository lock, require clean canonical
         # main and create/switch the feature branch before any implementation.
+        # Validate the checkout shape first so a linked checkout cannot be
+        # switched and only then refused.
+        workspace = CodingWorkspace(str(self._repository), request.blocked_paths)
         branch = prepare_feature_branch(
             self._repository, request.repair_branch.strip()
         )
@@ -435,7 +438,6 @@ class CodingAgent:
         self._report_telemetry(
             state, "plan", in_flight=True, transition="BRANCH prepared"
         )
-        workspace = CodingWorkspace(str(self._repository), request.blocked_paths)
         commands: list[CodingCommandRecord] = []
         preexisting_status, _ = self._git_evidence(workspace)
         preexisting_dirty = files_from_git_status(preexisting_status)

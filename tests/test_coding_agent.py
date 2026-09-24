@@ -1117,6 +1117,17 @@ class NativeExecutionTests(unittest.TestCase):
             build_coding_runtime(True, PlanningModel(), lambda: "call-1")
         )
 
+    def test_capability_is_unregistered_for_a_non_repository_checkout(self) -> None:
+        """A bad checkout disables coding without taking down the runtime."""
+        self.assertIsNone(build_coding_runtime(
+            True,
+            PlanningModel(),
+            lambda: "call-1",
+            session=RecordingSession(),
+            reviewer=PlanningModel(),
+            repository=self.root,
+        ))
+
 
 class SessionLaunchTests(unittest.TestCase):
     """What the native session actually asks the CLI to do."""
