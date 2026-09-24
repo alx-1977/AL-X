@@ -29,6 +29,10 @@ LOGGER = logging.getLogger(__name__)
 
 _RUN_CODING_TASK = "run_coding_task"
 _MAX_FAILED_CODING_EXECUTIONS = 2
+# A job that implemented but whose required verification only the request's
+# own constraints blocked. Recoverable by a changed plan, so it does not spend
+# the implementation allowance, but it has its own bound so it cannot loop.
+_MAX_REQUEST_CONFLICT_CODING_EXECUTIONS = 2
 
 
 class CoreState(str, Enum):
@@ -795,7 +799,12 @@ class CoreAgent:
                 )
             if (
                 decision.call.capability_id == _RUN_CODING_TASK
-                and self._failed_coding_executions(snapshot.state) >= _MAX_FAILED_CODING_EXECUTIONS
+                and (
+                    self._failed_coding_executions(snapshot.state)
+                    >= _MAX_FAILED_CODING_EXECUTIONS
+                    or self._request_conflict_coding_executions(snapshot.state)
+                    >= _MAX_REQUEST_CONFLICT_CODING_EXECUTIONS
+                )
             ):
                 # The durable goal, not model-authored task wording or call
                 # identifiers, is the retry identity.  This occurs before a
@@ -1865,10 +1874,10 @@ class CoreAgent:
         )
 
     @staticmethod
-    def _failed_coding_executions(state: GoalState) -> int:
-        """Count only durable Coding Agent runs that reached implementation."""
-        return sum(
-            1
+    def _coding_execution_failures(state: GoalState) -> list[Mapping[str, Any]]:
+        """Failures of durable Coding Agent runs that reached implementation."""
+        return [
+            item.result.failure or {}
             for item in state.attempts
             if item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
@@ -1879,6 +1888,22 @@ class CoreAgent:
             # A checkout refused before the feature branch existed: nothing
             # was implemented, so nothing of the allowance was spent.
             and (item.result.failure or {}).get("implementation_reached") is not False
+        ]
+
+    @classmethod
+    def _failed_coding_executions(cls, state: GoalState) -> int:
+        """Count genuine implementation failures: D-028's allowance."""
+        return sum(
+            1 for failure in cls._coding_execution_failures(state)
+            if failure.get("failure_class") != "request_conflict"
+        )
+
+    @classmethod
+    def _request_conflict_coding_executions(cls, state: GoalState) -> int:
+        """Count runs whose verification only the request's constraints blocked."""
+        return sum(
+            1 for failure in cls._coding_execution_failures(state)
+            if failure.get("failure_class") == "request_conflict"
         )
 
     @staticmethod

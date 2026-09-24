@@ -291,6 +291,186 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
 
 
 
+def conflict(call_id: str):
+    """A run that implemented but whose required check only the request blocked."""
+    call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+    result = CapabilityResult(
+        call_id, "run_coding_task", CapabilityResultState.FAILED,
+        failure={
+            "code": "required_verification_failed",
+            "failure_class": "request_conflict",
+        },
+    )
+    return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+
+
+def before_implementation(call_id: str):
+    call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+    result = CapabilityResult(
+        call_id, "run_coding_task", CapabilityResultState.FAILED,
+        failure={
+            "code": "git_refused",
+            "reason_code": "canonical_checkout_dirty",
+            "implementation_reached": False,
+        },
+    )
+    return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+
+
+class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
+    """Three classes, two bounds, no reset.
+
+    Genuine implementation failures spend D-028's allowance of two. A run whose
+    required verification only the request's own blocked paths stopped is a
+    request conflict: Core can correct the plan and dispatch again, but at most
+    two per goal. A refusal before implementation spends neither.
+    """
+
+    def process(self, attempts, calls):
+        """Run Core once over a goal holding `attempts`; return what it did."""
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        retention = now + timedelta(days=1)
+        dispatched: list[str] = []
+
+        def dispatch(call, authority):
+            dispatched.append(call.call_id)
+            result = CapabilityResult(
+                call.call_id, "run_coding_task", CapabilityResultState.SUCCEEDED,
+                {"status": "succeeded"},
+            )
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True, result
+            )
+
+        class Reasoner:
+            def __init__(self):
+                self.decisions = [
+                    AgentDecision(
+                        call=CapabilityCall(
+                            call_id, "run_coding_task", {"task": f"changed plan {call_id}"}
+                        ),
+                        goal_id="goal-a",
+                    )
+                    for call_id in calls
+                ] + [AgentDecision(response="done", goal_id="goal-a")]
+
+            def decide(self, context):
+                return self.decisions.pop(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            self.addCleanup(store.close)
+            store.create(state(*attempts), "conversation", retention)
+            schema = StructuredSchema(ValueKind.OBJECT)
+            capability = CapabilityDefinition(
+                "run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL
+            )
+            agent = CoreAgent(store, Reasoner(), dispatch, (capability,), clock=lambda: now)
+            conversation = ConversationSnapshot("conversation", (
+                ConversationTurn(
+                    "conversation", "t", ConversationOrigin.TYPED, "continue", now, "friedl"
+                ),
+            ), 1, retention)
+            agent.process(conversation, retention, len(calls) + 2)
+            final = store.load("goal-a").state.attempts
+        refused = [item for item in final if item.reason_code == "coding_retry_exhausted"]
+        return dispatched, refused
+
+    def test_the_classes_are_counted_apart(self) -> None:
+        goal = state(
+            conflict("c1"), attempt("i1"), before_implementation("p1"), conflict("c2")
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
+        self.assertEqual(CoreAgent._request_conflict_coding_executions(goal), 2)
+
+    def test_genuine_implementation_failures_still_exhaust_the_allowance(self) -> None:
+        dispatched, refused = self.process(
+            [conflict("c1"), attempt("i1"), attempt("i2")], ["next"]
+        )
+        self.assertEqual(dispatched, [])
+        self.assertEqual(len(refused), 1)
+
+    def test_refusals_before_implementation_spend_nothing(self) -> None:
+        dispatched, refused = self.process(
+            [before_implementation(f"p{n}") for n in range(4)], ["next"]
+        )
+        self.assertEqual(dispatched, ["next"])
+        self.assertEqual(refused, [])
+
+    def test_a_request_conflict_can_be_corrected_and_dispatched_again(self) -> None:
+        """The acceptance run of 2026-09-24, replayed.
+
+        Planning failed (a genuine failure), then an edit to a governed document
+        could not be verified because the request blocked the gate's script.
+        Core changed the plan; that third job must dispatch.
+        """
+        dispatched, refused = self.process(
+            [attempt("plan", failure_code="planning_failed"), conflict("gate-blocked")],
+            ["corrected"],
+        )
+        self.assertEqual(dispatched, ["corrected"])
+        self.assertEqual(refused, [])
+
+    def test_repeated_request_conflicts_cannot_loop(self) -> None:
+        # Two conflicts reach the bound whatever the wording of the next plan,
+        # and the refusal is recorded once, however often Core asks again.
+        dispatched, refused = self.process(
+            [conflict("c1"), conflict("c2")], ["reworded", "reworded-again"]
+        )
+        self.assertEqual(dispatched, [])
+        self.assertEqual(len(refused), 1)
+
+    def test_each_bound_refuses_on_its_own(self) -> None:
+        dispatched, _ = self.process([conflict("c1"), attempt("i1")], ["next"])
+        self.assertEqual(dispatched, ["next"])
+        dispatched, refused = self.process(
+            [conflict("c1"), attempt("i1"), conflict("c2")], ["next"]
+        )
+        self.assertEqual(dispatched, [])
+        self.assertEqual(len(refused), 1)
+
+    def test_an_error_carrying_a_class_reaches_core_without_it(self) -> None:
+        """Only the Coding Agent's own verification records assign the class.
+
+        A CodingError raised anywhere, carrying `failure_class`, reaches Core
+        without it and so spends the implementation allowance like any other.
+        """
+        self.assertNotIn(
+            "failure_class",
+            CodingError("task_failed", failure_class="request_conflict").details,
+        )
+
+        def run_job(request):
+            raise CodingError(
+                "task_failed", reason_code="claimed", failure_class="request_conflict"
+            )
+
+        executor = build_coding_executors(run_job, lambda: "job-1")["run_coding_task"]
+        result = executor({
+            "task": "change app", "repair_branch": "feat/change",
+            "commit_message": "Change app",
+        })
+        self.assertIs(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["reason_code"], "claimed")
+        self.assertNotIn("failure_class", result.failure)
+
+        call = CapabilityCall("job-1", "run_coding_task", {"task": "change app"})
+        goal = state(
+            CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
+        self.assertEqual(CoreAgent._request_conflict_coding_executions(goal), 0)
+
+    def test_the_bounds(self) -> None:
+        from alx.core.loop import (
+            _MAX_FAILED_CODING_EXECUTIONS,
+            _MAX_REQUEST_CONFLICT_CODING_EXECUTIONS,
+        )
+
+        self.assertEqual(_MAX_FAILED_CODING_EXECUTIONS, 2)
+        self.assertEqual(_MAX_REQUEST_CONFLICT_CODING_EXECUTIONS, 2)
+
+
 class TheVerificationChangeDoesNotTouchTheRetryAccounting(unittest.TestCase):
     """10. D-028's fuse counts failed executions, whatever made them fail.
 

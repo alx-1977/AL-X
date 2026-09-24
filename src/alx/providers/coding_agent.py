@@ -606,6 +606,7 @@ class CodingAgent:
         issues = list(_strings(session.diagnostics.get("unresolved_issues")))
         issues.extend(review_issues)
         status = "succeeded"
+        failure_class: dict[str, str] = {}
         if not session.completed:
             status = "failed"
             if session.failure_code:
@@ -625,6 +626,10 @@ class CodingAgent:
             # nothing at all.
             status = "failed"
             issues.append("required_verification_failed")
+            if self._blocked_by_request(workspace, verification):
+                # The work may be sound; the request made verifying it
+                # impossible. Core's fuse counts this class on its own bound.
+                failure_class = {"failure_class": "request_conflict"}
 
         # Only a job that actually succeeded is committed. A failed one leaves
         # its work in the worktree for AL/X to read as a diff: committing it
@@ -739,9 +744,34 @@ class CodingAgent:
                 **{
                     key: value
                     for key, value in session.diagnostics.items()
-                    if key != "unresolved_issues"
+                    if key not in ("unresolved_issues", "failure_class")
                 },
+                **failure_class,
             },
+        )
+
+    @staticmethod
+    def _blocked_by_request(
+        workspace: CodingWorkspace, verification: VerificationEvidence
+    ) -> bool:
+        """Whether only the request's own blocked paths stopped verification.
+
+        True when every required check that did not pass never ran, and its
+        command is one the allowlist accepts but this request's blocked paths
+        refuse. A check that ran and failed is a failure of the work, and so is
+        a command the allowlist refuses whatever the request says. Judged
+        with the same root and normalised blocked paths the executor refused
+        it with.
+        """
+        worktree = Path(workspace.root)
+        blocked = tuple(workspace.blocked_paths)
+        unpassed = [check for check in verification.checks if not check.passed]
+        return bool(unpassed) and all(
+            not check.ran
+            and check.kind == "command"
+            and command_permitted(list(check.argv), worktree, ())
+            and not command_permitted(list(check.argv), worktree, blocked)
+            for check in unpassed
         )
 
     def _local_review_loop(
