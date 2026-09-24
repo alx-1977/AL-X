@@ -39,11 +39,15 @@ cd "$ROOT" || exit 1
 # stop AL/X restarting, and takes effect once merged. If a branch breaks these
 # lines themselves, the same thing needs only committed main:
 #
-#   bash -c "$(git show main:scripts/alx)" scripts/alx restart
+#   bash <(git show main:scripts/alx) restart
+#
+# The script arrives on a file descriptor, never as an argument: its text
+# names the runtime, so on a command line `pids` would mistake the launcher
+# for the AL/X it is meant to stop.
 if ! (return 0 2>/dev/null) && [ -z "${ALX_LAUNCHER_COMMITTED:-}" ]; then
-  launcher="$(git show refs/heads/main:scripts/alx)" \
+  git cat-file -e refs/heads/main:scripts/alx 2>/dev/null \
     || { echo "no scripts/alx on local main" >&2; exit 1; }
-  ALX_LAUNCHER_COMMITTED=1 exec bash -c "$launcher" scripts/alx "$@"
+  ALX_LAUNCHER_COMMITTED=1 exec bash <(git show refs/heads/main:scripts/alx) "$@"
 fi
 
 URL="http://127.0.0.1:8765"

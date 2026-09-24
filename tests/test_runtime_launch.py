@@ -234,17 +234,31 @@ class LauncherItselfComesFromCommittedMain(unittest.TestCase):
         )
 
         # The documented recovery: the exact command the header runs.
-        self.assertIn(
-            'bash -c "$(git show main:scripts/alx)" scripts/alx restart',
-            self.committed,
-        )
+        self.assertIn("bash <(git show main:scripts/alx) restart", self.committed)
         completed = self.run_launcher(
-            "bash", "-c", 'bash -c "$(git show main:scripts/alx)" scripts/alx status',
+            "bash", "-c", "bash <(git show main:scripts/alx) status",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertNotIn("HIJACKED", completed.stdout)
         self.assertIn("stopped", completed.stdout)
+
+    def test_the_relaunched_command_line_cannot_look_like_the_runtime(self) -> None:
+        # pids() finds AL/X by command line. Passing main's launcher as an
+        # argument put its whole text, runtime module name included, on the
+        # launcher's own command line, so it counted itself as running.
+        git(self.root, "switch", "-q", "main")
+        self.launcher.write_text("ps -o args= -p $$\n", encoding="utf-8")
+        git(self.root, "commit", "-qam", "probe")
+        git(self.root, "switch", "-q", "feat/launcher")
+        git(self.root, "checkout", "-q", "main~1", "--", "scripts/alx")
+
+        completed = self.run_launcher("bash", "scripts/alx", "status")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("/dev/fd/", completed.stdout)
+        self.assertNotIn("alx.bootstrap.live_voice", completed.stdout)
+        self.assertNotIn("alx_coding_job", completed.stdout)
 
     def test_without_a_committed_launcher_nothing_runs(self) -> None:
         git(self.root, "switch", "-q", "main")

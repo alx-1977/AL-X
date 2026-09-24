@@ -356,7 +356,16 @@ class CodingNeedsRepositoryAuthority(unittest.TestCase):
 
         with mock.patch.object(live_voice, "build_coding_runtime", coding), \
                 mock.patch.object(CapabilityRegistry, "register", recording_register):
-            observed = self._run_runtime({"ALX_CODING_ENABLED": "true", **overrides})
+            observed = self._run_runtime({
+                "ALX_CODING_ENABLED": "true",
+                # A provider that composes without its CLI installed, so this
+                # runs wherever the suite does; the job itself is inert above.
+                "ALX_CODING_PROVIDER": "grok_subscription",
+                "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+                "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
+                **overrides,
+            })
         self.assertTrue(observed["served"])
         return checkouts, registered
 
