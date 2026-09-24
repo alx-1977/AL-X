@@ -2,9 +2,16 @@
 # Start, stop, restart or inspect the AL/X live-voice runtime.
 #
 # The runtime is one process: `python -m alx.bootstrap.live_voice`, run from
-# the repository root with PYTHONPATH=src, serving on 127.0.0.1:8765. This
-# script exists so a restart after a code or .env change is one command
-# instead of a remembered sequence.
+# the repository root, serving on 127.0.0.1:8765. This script exists so a
+# restart after a code or .env change is one command instead of a remembered
+# sequence.
+#
+# It runs committed local `main`, never the working files. The Coding Agent
+# edits this same checkout on a feature branch (D-033), so importing `src/`
+# from it would let a failed edit leave AL/X unable to start, and so unable
+# to recover the checkout. `main` is extracted with `git archive` into the git
+# directory, where the Coding Agent cannot reach, without touching the branch,
+# index or working tree.
 #
 #   scripts/alx restart     stop it, start it, wait until it answers
 #   scripts/alx start
@@ -17,14 +24,37 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# This file's checkout; or, when running as committed main's text (below),
+# the checkout it was started in.
+if [ -f "${BASH_SOURCE[0]:-}" ]; then
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+else
+  ROOT="$(git rev-parse --show-toplevel)" || exit 1
+fi
+cd "$ROOT" || exit 1
+
+# The launcher that runs is committed main's, like the runtime it starts. Bash
+# runs a script as it reads it, so this re-executes main's copy before the
+# rest of this file is even parsed: a feature branch's edit below here cannot
+# stop AL/X restarting, and takes effect once merged. If a branch breaks these
+# lines themselves, the same thing needs only committed main:
+#
+#   bash <(git show main:scripts/alx) restart
+#
+# The script arrives on a file descriptor, never as an argument: its text
+# names the runtime, so on a command line `pids` would mistake the launcher
+# for the AL/X it is meant to stop.
+if ! (return 0 2>/dev/null) && [ -z "${ALX_LAUNCHER_COMMITTED:-}" ]; then
+  git cat-file -e refs/heads/main:scripts/alx 2>/dev/null \
+    || { echo "no scripts/alx on local main" >&2; exit 1; }
+  ALX_LAUNCHER_COMMITTED=1 exec bash <(git show refs/heads/main:scripts/alx) "$@"
+fi
+
 URL="http://127.0.0.1:8765"
 LOG="$ROOT/.alx/runtime/live_voice.log"
 STAMP="$ROOT/.alx/runtime/live_voice.config"
 PYTHON="${ALX_PYTHON:-python3}"
 PATTERN="alx.bootstrap.live_voice"
-
-cd "$ROOT" || exit 1
 
 # Only this checkout's runtime. `pgrep -f` alone matches the same module in
 # any clone on the machine, so a restart here would kill a second checkout's
@@ -71,13 +101,15 @@ start() {
     echo "already running: $(pids | tr '\n' ' ')"
     return 1
   fi
+  local code; code="$(runtime_code)" || return 1
   mkdir -p "$(dirname "$LOG")"
   [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev"
   rm -f "$STAMP"
-  PYTHONPATH=src nohup "$PYTHON" -m "$PATTERN" >"$LOG" 2>&1 &
+  PYTHONPATH="$code/src" nohup "$PYTHON" -m "$PATTERN" --checkout "$ROOT" \
+    >"$LOG" 2>&1 &
   local pid=$!
-  echo "started pid $pid"
-  record_config "$pid"
+  echo "started pid $pid (main@$(basename "$code"))"
+  record_config "$pid" "$code"
   for _ in $(seq 1 30); do
     sleep 1
     # The endpoint is shared, so a healthy answer alone proves only that
@@ -92,6 +124,35 @@ start() {
   echo "FAILED to come up. Last lines of $LOG:"
   grep -v "connection rejected" "$LOG" 2>/dev/null | tail -15
   return 1
+}
+
+# Extract committed local main and print where. Only git and tar run here:
+# nothing from the checkout is imported, so a broken feature branch cannot
+# stop this. One snapshot per commit, marked complete before it is renamed
+# into place, so an installed snapshot is always whole and is never replaced.
+# Nothing else is deleted: another AL/X process may still be running from an
+# older snapshot, and only this process's own unfinished extraction is ours.
+runtime_code() {
+  local sha common base target staging
+  sha="$(git -C "$ROOT" rev-parse --verify --quiet 'refs/heads/main^{commit}')" \
+    || { echo "no local main commit to run" >&2; return 1; }
+  common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)" \
+    || return 1
+  base="$common/alx-runtime"
+  target="$base/$sha"
+  if [ ! -e "$target" ]; then
+    staging="$base/.staging-$$"
+    rm -rf "$staging" && mkdir -p "$staging" || return 1
+    if git -C "$ROOT" archive "$sha" src LAWS_OF_ALX.md IDENTITY_AND_MEMORY.md \
+        | tar -x -C "$staging" && touch "$staging/.complete"; then
+      # A concurrent start may have installed it first; then keep theirs.
+      [ -e "$target" ] || mv "$staging" "$target" 2>/dev/null
+    fi
+    rm -rf "$staging" "$target/.staging-$$"
+  fi
+  [ -f "$target/.complete" ] \
+    || { echo "could not extract main@$sha" >&2; return 1; }
+  printf '%s\n' "$target"
 }
 
 show_config() {
@@ -119,9 +180,10 @@ show_config() {
 # Called by start once the process exists, so the record can never outlive or
 # misattribute the process it describes.
 record_config() {
-  local pid="$1"
+  local pid="$1" code="$2"
   printf 'pid=%s %s\n' "$pid" "$(started_at "$pid")" >"$STAMP"
-  PYTHONPATH=src "$PYTHON" - <<'PY' 2>/dev/null >>"$STAMP"
+  printf '  code: main@%s\n' "$(basename "$code")" >>"$STAMP"
+  PYTHONPATH="$code/src" "$PYTHON" - <<'PY' 2>/dev/null >>"$STAMP"
 from pathlib import Path
 from alx.bootstrap.live_voice import load_environment
 from alx.config.settings import _coding_settings
@@ -147,6 +209,9 @@ status() {
   [ -n "$found" ] && show_config
   return 0
 }
+
+# Sourcing defines the functions without acting, so they can be tested.
+if (return 0 2>/dev/null); then return 0; fi
 
 case "${1:-restart}" in
   restart) stop; start ;;

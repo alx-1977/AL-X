@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from alx.contracts import (
@@ -19,23 +20,20 @@ from alx.contracts import (
     ReasoningModel,
     StructuredData,
 )
-from alx.contracts.coding import CodingRequest, CodingTelemetry
+from alx.contracts.coding import CodingError, CodingRequest, CodingTelemetry
 from alx.providers.coding_agent import CodingAgent
-from alx.providers.coding_worktree import CodingWorktreeAllocator
 from alx.safety import AuthorityPolicy
 from alx.tools.coding import (
     DEFINITION as CODING_DEFINITION,
-    RELEASE_CODING_WORKSPACE,
-    RELEASE_DEFINITION,
     RUN_CODING_TASK,
     build_coding_executors,
-    build_release_executors,
 )
 
 
 LOGGER = logging.getLogger(__name__)
 
-# Editing an assigned worktree is its own authority under D-028. Holding it
+# Editing the canonical checkout on a prepared feature branch is its own
+# authority under D-028 and D-033. Holding it
 # follows from no other permission: sandbox.execute grants isolated experiments
 # with no repository access, repository.merge grants merge of a reviewed head,
 # and review.request spends on an external reviewer. None of those follows
@@ -63,17 +61,12 @@ def build_coding_runtime(
     reviewer: ReasoningModel | None = None,
     activity_sink: Callable[[str], None] | None = None,
     telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
-    allocator: CodingWorktreeAllocator | None = None,
+    repository: Path | None = None,
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
 
-    Three halves are required now: a model to plan with, a session to carry the
-    plan out, and under D-031 an allocator to give it somewhere isolated to do
-    that. Without the session the capability is registered but every job fails
-    at execution, which is a worse answer than the capability being honestly
-    absent. Without the allocator there is nowhere a job may safely run, and
-    the same reasoning applies more strongly: the alternative to an isolated
-    worktree is the live checkout.
+    Planning, execution, review and the configured canonical repository are
+    all required. Missing any one leaves the capability honestly absent.
     """
     if not enabled:
         LOGGER.info("Coding agent is not enabled: no coding capability")
@@ -87,39 +80,34 @@ def build_coding_runtime(
     if agent is None and session is None:
         LOGGER.info("Coding agent has no session: no coding capability")
         return None
-    if allocator is None:
-        LOGGER.info("Coding agent has no worktree root: no coding capability")
+    if repository is None:
+        LOGGER.info("Coding agent has no canonical checkout: no coding capability")
         return None
-    selected = agent or CodingAgent(
-        model, session, reviewer, activity_sink, telemetry_sink,
-        allocator=allocator,
-    )
+    try:
+        selected = agent or CodingAgent(
+            model, session, reviewer, activity_sink, telemetry_sink,
+            repository=repository,
+        )
+    except CodingError as error:
+        LOGGER.warning(
+            "Coding agent checkout is unusable (%s): no coding capability",
+            error.details.get("reason_code", error.code),
+        )
+        return None
 
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)
 
-    def release(job_id: str) -> Mapping[str, Any]:
-        return allocator.release_authorised(job_id)
-
     executors = dict(build_coding_executors(run_job, call_id_source))
-    executors.update(build_release_executors(release, call_id_source))
 
     LOGGER.info(
-        "Coding agent enabled: %s, %s", RUN_CODING_TASK, RELEASE_CODING_WORKSPACE
+        "Coding agent enabled: %s", RUN_CODING_TASK
     )
     return CodingRuntime(
         agent=selected,
-        definitions=(CODING_DEFINITION, RELEASE_DEFINITION),
+        definitions=(CODING_DEFINITION,),
         policies={
             RUN_CODING_TASK: AuthorityPolicy(
-                frozenset({CODING_EXECUTE_PERMISSION}),
-                approval_required=False,
-            ),
-            # Releasing a workspace is the same authority as creating one: it
-            # removes only what a coding job created, and only after that job
-            # succeeded. It is a separate capability so that Core must choose
-            # it deliberately, not a separate permission.
-            RELEASE_CODING_WORKSPACE: AuthorityPolicy(
                 frozenset({CODING_EXECUTE_PERMISSION}),
                 approval_required=False,
             ),

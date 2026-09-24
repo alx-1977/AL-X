@@ -1,7 +1,7 @@
-"""Bounded git state management for one assigned coding worktree.
+"""Bounded git state management for one Coding Agent feature branch.
 
 The Coding Agent must be able to hand back a repair as a branch and a commit
-SHA rather than as a dirty worktree AL/X has to interpret. That requires git
+SHA rather than as a dirty checkout AL/X has to interpret. That requires git
 commands that write, and `coding_process.py` deliberately permits only reads.
 This module is the one production site that runs a writing git command, and it
 is reachable only from `CodingAgent`.
@@ -29,16 +29,19 @@ Three further properties matter:
   compared against the authorised set. A single unauthorised staged path
   aborts before `git commit` runs, and the index is restored to what it was.
 
-Nothing here interprets Friedl or decides what the job should do. It turns an
-assigned worktree and a job-owned file list into a branch and a commit SHA.
+Nothing here interprets Friedl or decides what the job should do. It turns the
+prepared canonical checkout and a job-owned file list into a commit SHA.
 """
 
 from __future__ import annotations
 
 import os
 import subprocess  # noqa: S404 - the one coding-job git-write site
+import fcntl
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from alx.contracts.coding import (
     MAX_INSPECTED_ENTRIES,
@@ -62,7 +65,7 @@ GIT_TIMEOUT_SECONDS = 60
 # never a reason to widen the git authority or ask git to reuse a ref.
 MAX_REPAIR_BRANCH_ATTEMPTS = 100
 
-# Every argv the Coding Agent may run against its worktree's git, as a fixed
+# Every argv the Coding Agent may run against the canonical checkout's git, as a fixed
 # prefix plus how the remainder is checked. A shape absent from this mapping
 # cannot be built, which is what makes push, merge, rebase, reset, stash and
 # remote manipulation impossible rather than merely discouraged.
@@ -71,17 +74,8 @@ MAX_REPAIR_BRANCH_ATTEMPTS = 100
 # "value"  - exactly one further argument, checked by the caller that built it
 # "paths"  - a `--` separator followed by one or more worktree-relative paths,
 #            none of which may be spelled as a ref
-# "triple" - exactly three further arguments, none option-shaped: the D-031
-#            worktree allocation `-b <branch> <path> <base>`. Checked by the
-#            allocator that built it, which holds the branch to
-#            `branch_name_permitted` and the path to its own generated root.
-#            This is the only shape that creates a branch. The `switch -c`
-#            shape was removed on 2026-09-16 when D-031 made branch and
-#            worktree one allocation: nothing built it afterwards, and a dead
-#            shape is granted authority nobody uses.
-# "single" - exactly one further argument, not option-shaped: the D-031
-#            worktree path to release. The allocator proves ownership of that
-#            path before the shape is ever built.
+# "pair"   - exactly two values: the feature branch and the already verified
+#            main commit used by `switch -c`.
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("rev-parse", "HEAD"): "none",
     ("rev-parse", "--show-toplevel"): "none",
@@ -94,20 +88,12 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("check-ignore", "-q", "--"): "paths",
     ("ls-files", "-z", "--error-unmatch", "--"): "paths",
     ("diff", "--cached", "--name-status", "-z"): "none",
-    # Whether one commit object exists. A read: it resolves no ref, writes
-    # nothing, and its argument is held to hexadecimal by its caller before
-    # the shape is built.
-    ("cat-file", "-e"): "value",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
     ("commit", "--quiet", "-m"): "value",
-    # D-031. Branch and worktree are allocated by one command, so a Coding
-    # Agent job's branch is never created by the `switch -c` shape above.
-    # `worktree remove` carries no `--force`: a worktree holding uncommitted
-    # work refuses to be removed, which is the retention behaviour D-031
-    # requires rather than something this code has to implement itself.
-    ("worktree", "add", "-b"): "triple",
-    ("worktree", "remove"): "single",
+    # D-033. The branch is created and checked out in the visible canonical
+    # checkout before the coding session receives write access.
+    ("switch", "-c"): "pair",
 }
 
 # A branch name this capability may create or switch to. Deliberately narrower
@@ -156,10 +142,8 @@ def git_write_permitted(argv: list[str] | tuple[str, ...]) -> bool:
             return len(tail) == 1 and not tail[0].startswith("-")
         if remainder == "paths":
             return bool(tail) and all(_pathspec_permitted(item) for item in tail)
-        if remainder == "triple":
-            return len(tail) == 3 and not any(item.startswith("-") for item in tail)
-        if remainder == "single":
-            return len(tail) == 1 and not tail[0].startswith("-")
+        if remainder == "pair":
+            return len(tail) == 2 and not any(item.startswith("-") for item in tail)
     return False
 
 
@@ -478,7 +462,7 @@ def assert_assigned_worktree(worktree: Path) -> Path:
 
 
 def canonical_repository_root(repository: Path) -> Path:
-    """Resolve the repository a coding job's worktrees are linked to.
+    """Resolve the canonical repository configured for coding jobs.
 
     The canonical repository is the one the runtime is running from, not a
     path a caller chose. Proving git agrees it is a top level keeps a
@@ -500,7 +484,83 @@ def canonical_repository_root(repository: Path) -> Path:
         raise CodingError(
             "git_refused", reason_code="repository_is_not_root"
         )
+    if not (root / ".git").is_dir():
+        raise CodingError(
+            "git_refused", reason_code="not_canonical_checkout"
+        )
     return root
+
+
+@contextmanager
+def coding_job_lock(repository: Path) -> Iterator[Path]:
+    """Hold the one small, repository-scoped Coding Agent lock.
+
+    `flock` is released by the operating system on process exit, so this needs
+    no lease records, recovery worker, queue, or scheduler. The file lives in
+    the repository's own git directory and is never exposed to the coding
+    model, whose sandbox continues to deny all Git metadata.
+    """
+    root = canonical_repository_root(repository)
+    common = _common_git_dir(root)
+    if common is None:
+        raise CodingError("git_unavailable", reason_code="git_common_dir_unreadable")
+    lock_path = common / "alx-coding-agent.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as error:
+        raise CodingError("git_unavailable", reason_code="coding_lock_unavailable") from error
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise CodingError("git_refused", reason_code="coding_job_active") from error
+        yield root
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def prepare_feature_branch(repository: Path, requested_branch: str) -> str:
+    """From clean canonical main, create and switch to one new feature branch."""
+    root = canonical_repository_root(repository)
+    base_branch = requested_branch.strip()
+    if not branch_name_permitted(base_branch) or base_branch == "main":
+        raise CodingError("git_refused", reason_code="branch_name_not_permitted")
+    current = worktree_branch(root)
+    if current != "main":
+        raise CodingError(
+            "git_refused", reason_code="canonical_checkout_not_on_main",
+            current_branch=current,
+        )
+    if _dirty_paths(root):
+        raise CodingError("git_refused", reason_code="canonical_checkout_dirty")
+    base = read_head_sha(root)
+    for attempt in range(1, MAX_REPAIR_BRANCH_ATTEMPTS + 1):
+        suffix = "" if attempt == 1 else f"-{attempt}"
+        branch = f"{base_branch}{suffix}"
+        if not branch_name_permitted(branch):
+            raise CodingError("git_refused", reason_code="branch_name_not_permitted")
+        created = _run(root, ["git", "switch", "-c", branch, base])
+        if created.exit_status == 0:
+            if worktree_branch(root) != branch or read_head_sha(root) != base:
+                raise CodingError("git_refused", reason_code="branch_switch_unverified")
+            return branch
+        if created.stderr.rstrip().endswith(
+            f"fatal: a branch named '{branch}' already exists"
+        ):
+            continue
+        raise CodingError(
+            "git_refused",
+            reason_code="branch_not_created",
+            exit_status=created.exit_status,
+        )
+    raise CodingError(
+        "git_refused",
+        reason_code="branch_attempts_exhausted",
+        attempts=MAX_REPAIR_BRANCH_ATTEMPTS,
+    )
 
 
 def read_head_sha(worktree: Path) -> str:
@@ -510,12 +570,7 @@ def read_head_sha(worktree: Path) -> str:
 
 
 def _common_git_dir(worktree: Path) -> Path | None:
-    """Where this worktree's shared git metadata lives, or None if unreadable.
-
-    A linked worktree reports the *main* repository's git directory here,
-    which is what makes this the question to ask when proving a directory
-    belongs to the canonical repository rather than to some other one.
-    """
+    """Where the repository's shared git metadata lives, or None if unreadable."""
     result = _run(worktree, ["git", "rev-parse", "--git-common-dir"])
     if result.exit_status != 0:
         return None
@@ -531,53 +586,6 @@ def _common_git_dir(worktree: Path) -> Path | None:
         return None
 
 
-def worktree_belongs_to_repository(worktree: Path, repository: Path) -> bool:
-    """Whether this directory is a linked worktree of that repository.
-
-    Two facts together, both read from git rather than inferred from the
-    filesystem: the directory is its own git top level, and its shared git
-    directory is the canonical repository's. A directory that merely sits in
-    the right place, or a checkout of an unrelated repository, satisfies
-    neither.
-    """
-    try:
-        root = Path(worktree).expanduser().resolve()
-        target = Path(repository).expanduser().resolve()
-    except OSError:
-        return False
-    if not root.is_dir():
-        return False
-    if root == target:
-        return False
-    toplevel = _run(root, ["git", "rev-parse", "--show-toplevel"])
-    if toplevel.exit_status != 0 or Path(toplevel.stdout.strip() or ".") != root:
-        return False
-    common = _common_git_dir(root)
-    if common is None:
-        return False
-    expected = _common_git_dir(target)
-    if expected is None:
-        return False
-    return common == expected
-
-
-def commit_exists(repository: Path, commit: str) -> bool:
-    """Whether this exact commit object is in the canonical repository.
-
-    Used to check a persisted start point against the repository rather than
-    against the file that claims it. The SHA is held to hexadecimal before it
-    reaches git, so nothing option-shaped or revision-shaped can be passed
-    through this, and `cat-file -e` neither writes nor resolves a ref.
-    """
-    candidate = str(commit).strip()
-    if not candidate or len(candidate) > 64:
-        return False
-    if any(character not in "0123456789abcdefABCDEF" for character in candidate):
-        return False
-    root = Path(repository).expanduser().resolve()
-    return _run(root, ["git", "cat-file", "-e", candidate]).exit_status == 0
-
-
 def worktree_branch(worktree: Path) -> str:
     """The branch checked out in this worktree, or "" if it is detached.
 
@@ -589,82 +597,6 @@ def worktree_branch(worktree: Path) -> str:
     if reference.exit_status != 0:
         return ""
     return reference.stdout.strip()
-
-
-def allocate_job_worktree(
-    repository: Path, path: Path, branch: str, base: str
-) -> bool:
-    """Create one linked worktree and its branch in a single git command.
-
-    Returns False when the branch name or the path was already taken, which is
-    the one condition D-031 retries under D-029's suffix scheme. Every other
-    failure raises: a lock, a permission problem or an unrecognised diagnostic
-    must not be hidden behind a suffix search.
-
-    The command runs from the canonical repository because that is the
-    repository the new worktree is linked to. It is the only command in this
-    module whose `cwd` is not the worktree being operated on, and it cannot
-    reach anywhere else: the path is generated by the allocator, the branch is
-    held to `branch_name_permitted`, and no global option is a permitted shape.
-    """
-    if not branch_name_permitted(branch):
-        raise CodingError("git_refused", reason_code="branch_name_not_permitted")
-    root = Path(repository).expanduser().resolve()
-    target = Path(path)
-    if not target.is_absolute():
-        raise CodingError("worktree_unusable", reason_code="worktree_not_absolute")
-    parent = target.parent
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise CodingError(
-            "worktree_unusable", reason_code="worktree_root_not_writable"
-        ) from error
-    created = _run(
-        root, ["git", "worktree", "add", "-b", branch, str(target), base]
-    )
-    if created.exit_status == 0:
-        return True
-    if _worktree_name_already_exists(created.stderr, branch, target):
-        return False
-    raise CodingError(
-        "git_refused",
-        reason_code="worktree_not_created",
-        exit_status=created.exit_status,
-    )
-
-
-def _worktree_name_already_exists(stderr: str, branch: str, path: Path) -> bool:
-    """Whether a failed `worktree add` is the collision D-031 may retry.
-
-    D-029's classification principle applies unchanged: only an occupied name
-    is retried, and the diagnostic is matched rather than guessed at. Two
-    names can collide here because one command allocates both, so both of
-    git's diagnostics are recognised and nothing else is.
-    """
-    if stderr.rstrip().endswith(
-        f"fatal: a branch named '{branch}' already exists"
-    ):
-        return True
-    return stderr.rstrip().endswith(f"fatal: '{path}' already exists")
-
-
-def release_job_worktree(repository: Path, path: Path) -> None:
-    """Remove one worktree this capability allocated.
-
-    No `--force`. A worktree still holding uncommitted work refuses to be
-    removed, and that refusal is the retention D-031 asks for: work nobody has
-    accounted for is not discarded because a release was requested.
-    """
-    root = Path(repository).expanduser().resolve()
-    target = Path(path).expanduser().resolve()
-    removed = _run(root, ["git", "worktree", "remove", str(target)])
-    if removed.exit_status != 0:
-        raise CodingError(
-            "git_refused",
-            reason_code="worktree_not_removed",
-            exit_status=removed.exit_status,
-        )
 
 
 def read_workspace_state(
@@ -1295,17 +1227,15 @@ __all__ = [
     "COMMIT_AUTHOR_NAME",
     "GIT_TIMEOUT_SECONDS",
     "MAX_REPAIR_BRANCH_ATTEMPTS",
-    "allocate_job_worktree",
     "assert_assigned_worktree",
     "branch_name_permitted",
     "canonical_repository_root",
-    "commit_exists",
+    "coding_job_lock",
     "commit_job_changes",
     "deleted_paths",
     "git_write_permitted",
+    "prepare_feature_branch",
     "read_head_sha",
     "read_workspace_state",
-    "release_job_worktree",
-    "worktree_belongs_to_repository",
     "worktree_branch",
 ]

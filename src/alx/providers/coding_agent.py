@@ -32,6 +32,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable
+from contextlib import ExitStack
 from typing import Any, Mapping
 
 from alx.contracts import ModelMessage, ModelRequest, ModelRole, ReasoningModel
@@ -69,13 +70,12 @@ from alx.providers.coding_process import (
     is_test_command,
     run_permitted_command,
 )
-from alx.providers.coding_worktree import (
-    CodingWorktree,
-    CodingWorktreeAllocator,
-)
 from alx.providers.coding_git import (
+    canonical_repository_root,
+    coding_job_lock,
     commit_job_changes,
     deleted_paths,
+    prepare_feature_branch,
     read_workspace_state,
 )
 from alx.providers.coding_workspace import CodingWorkspace
@@ -165,6 +165,17 @@ _SAFE_DIAGNOSTIC_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _before_implementation(error: CodingError) -> CodingError:
+    """Mark a refusal raised before the feature branch existed.
+
+    D-028's fuse counts implementation-reaching failures. A checkout that is
+    busy, dirty or off main refuses before any model is asked anything, and
+    Core reads this structured fact rather than guessing from the code.
+    """
+    error.details["implementation_reached"] = False
+    return error
 
 
 # pytest's "no tests were collected". What it means depends entirely on what
@@ -280,11 +291,11 @@ class _JobState:
     through it.
     """
 
-    __slots__ = ("job_id", "allocated", "telemetry", "activity")
+    __slots__ = ("job_id", "branch", "telemetry", "activity")
 
     def __init__(self, job_id: str) -> None:
         self.job_id = job_id or "coding-job"
-        self.allocated: CodingWorktree | None = None
+        self.branch = ""
         self.telemetry: CodingTelemetry | None = None
         self.activity: str | None = None
 
@@ -297,7 +308,7 @@ class CodingAgent:
         reviewer: ReasoningModel, activity_sink: Callable[[str], None] | None = None,
         telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
         clock: Callable[[], datetime] | None = None,
-        allocator: CodingWorktreeAllocator | None = None,
+        repository: Path | None = None,
     ) -> None:
         self._model = model
         self._session = session
@@ -305,16 +316,15 @@ class CodingAgent:
         self._activity_sink = activity_sink or (lambda _activity: None)
         self._telemetry_sink = telemetry_sink or (lambda _telemetry: None)
         self._clock = clock or (lambda: datetime.now(UTC))
-        # D-031. Without an allocator there is no isolated worktree to run in,
-        # and running somewhere else is the thing that decision exists to
-        # prevent, so a job fails closed rather than falling back to a path.
-        self._allocator = allocator
+        if repository is None:
+            raise ValueError("coding agent requires the canonical repository")
+        self._repository = canonical_repository_root(repository)
         # Per-run state lives in `_JobState`, created by `run` and threaded
         # explicitly from there. It used to live here, as three instance
         # attributes, which meant two overlapping jobs on one agent shared a
-        # worktree pointer, a telemetry anchor and an activity cache: whichever
+        # checkout pointer, a telemetry anchor and an activity cache: whichever
         # ran second overwrote the first, so the first could resolve the
-        # second's worktree, report its elapsed time, and write its outcome.
+        # second's checkout and report its elapsed time.
         # Nothing job-authoritative belongs on the agent itself.
 
     def _report_telemetry(
@@ -347,12 +357,7 @@ class CodingAgent:
             if correction_cycle is None else correction_cycle,
             in_flight=in_flight, waiting=waiting, terminal=terminal,
             outcome=outcome, transition=transition,
-            # Read off this run's own allocation, for the same reason the job
-            # id is: a concurrent job would have moved anything shared. Absent
-            # until `_run` allocates, so the first PLAN observation reports no
-            # worktree and every later one reports the real directory.
-            worktree=str(state.allocated.path) if state.allocated is not None else "",
-            branch=state.allocated.branch if state.allocated is not None else "",
+            branch=state.branch,
         )
         try:
             self._telemetry_sink(telemetry)
@@ -410,14 +415,18 @@ class CodingAgent:
             state, "plan", in_flight=True, transition="CASE started"
         )
         try:
-            outcome = self._run(request, state)
-            return outcome
+            # D-033. One non-blocking OS lock is the entire concurrency
+            # mechanism. It covers branch preflight through commit and is
+            # released automatically on every return, exception or process
+            # exit; there is no queue or scheduling state.
+            with ExitStack() as held:
+                try:
+                    held.enter_context(coding_job_lock(self._repository))
+                except CodingError as error:
+                    raise _before_implementation(error)
+                outcome = self._run(request, state)
+                return outcome
         finally:
-            # D-031. How the job ended is recorded beside its worktree, from the
-            # one place that runs for every ending: success, declared failure,
-            # and the exception path a crash takes. An unrecorded outcome leaves
-            # a workspace that refuses release, which is the safe direction.
-            self._record_worktree_outcome(state, outcome)
             self._report_telemetry(
                 state,
                 "complete" if outcome is not None and outcome.status == "succeeded" else "failed",
@@ -427,47 +436,29 @@ class CodingAgent:
             )
             self._report_activity(state, "reasoning")
 
-    def _record_worktree_outcome(
-        self, state: "_JobState", outcome: CodingOutcome | None
-    ) -> None:
-        """Note the job's ending on its allocation record. Never fail the job."""
-        allocated = state.allocated
-        if allocated is None or self._allocator is None:
-            return
-        status = outcome.status if outcome is not None else "failed"
-        try:
-            self._allocator.record_outcome(allocated.job_id, status)
-        except Exception as error:  # noqa: BLE001 - bookkeeping, not the job
-            LOGGER.warning(
-                "Coding worktree outcome not recorded (%s); the job is unaffected",
-                type(error).__name__,
-            )
-
     def _run(self, request: CodingRequest, state: "_JobState") -> CodingOutcome:
-        # D-031: branch and worktree are allocated together, before anything
-        # else touches a filesystem, from the job's own identity. This replaces
-        # both the Core-supplied path and the separate `create_repair_branch`
-        # step: one command creates both, so they cannot disagree about which
-        # collision suffix won.
-        if self._allocator is None:
-            raise CodingError(
-                "worktree_unusable", reason_code="allocator_not_configured"
+        # D-033: while holding the repository lock, require clean canonical
+        # main and create/switch the feature branch before any implementation.
+        # Validate the checkout shape first so a linked checkout cannot be
+        # switched and only then refused.
+        try:
+            workspace = CodingWorkspace(
+                str(self._repository), request.blocked_paths
             )
-        allocated = self._allocator.allocate(
-            request.job_id, request.repair_branch.strip()
-        )
-        state.allocated = allocated
-        # The branch git actually created is authoritative: D-029's scheme may
-        # have suffixed the requested base name, and every later step must use
-        # the name that exists rather than the one that was asked for. The
-        # worktree is written here for the same reason — the session needs a
-        # directory, and this is the only place one can come from.
+            branch = prepare_feature_branch(
+                self._repository, request.repair_branch.strip()
+            )
+        except CodingError as error:
+            raise _before_implementation(error)
+        state.branch = branch
         request = replace(
             request,
-            repair_branch=allocated.branch,
-            worktree=str(allocated.path),
+            repair_branch=branch,
+            worktree=str(self._repository),
         )
-        workspace = CodingWorkspace(str(allocated.path), request.blocked_paths)
+        self._report_telemetry(
+            state, "plan", in_flight=True, transition="BRANCH prepared"
+        )
         commands: list[CodingCommandRecord] = []
         preexisting_status, _ = self._git_evidence(workspace)
         preexisting_dirty = files_from_git_status(preexisting_status)
@@ -493,10 +484,8 @@ class CodingAgent:
         # Read once, here, so a file missing at the baseline can never become
         # this job's deletion merely by still being missing afterwards.
         inherited_deleted = self._deletions(workspace)
-        # No separate branch-creation step remains. `git worktree add -b`
-        # above created the branch and checked it out in the same command, so
-        # the session's edits already land on the job's own branch and there is
-        # no window in which a branch exists without its worktree.
+        # The session starts only after the visible checkout is on the feature
+        # branch. It has no Git authority and cannot change that branch.
 
         plan, planning_failure = self._planning_phase(request, workspace)
         if plan is None:
@@ -514,7 +503,6 @@ class CodingAgent:
                 git_diff=git_diff, issues=(issue,), review=False,
                 failure_status=True, diagnostics=planning_failure,
                 baseline=baseline,
-                allocated=state.allocated,
             )
         plan_summary = str(plan["problem_understanding"])
         self._report_telemetry(state, "execution", transition="PLAN completed")
@@ -530,7 +518,6 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "execution", "reason_code": "no_session"},
                 baseline=baseline,
-                allocated=state.allocated,
             )
 
         self._report_activity(state, "coding")
@@ -556,7 +543,6 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "execution", **error.details},
                 baseline=baseline,
-                allocated=state.allocated,
             )
 
         self._report_telemetry(state, "execution", transition="EXECUTION completed")
@@ -597,7 +583,6 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics=review_diagnostics or {"phase": "local_review"},
                 baseline=baseline,
-                allocated=state.allocated,
             )
 
         # Verification is AL/X's, not the session's. The agent has no terminal,
@@ -757,7 +742,6 @@ class CodingAgent:
                     if key != "unresolved_issues"
                 },
             },
-            allocated=state.allocated,
         )
 
     def _local_review_loop(
@@ -784,7 +768,7 @@ class CodingAgent:
         it cannot edit, run a command or commit — so a finding it raises is an
         opinion for AL/X to weigh, not a verdict on the work. Blocking the
         commit on one destroyed the artifact she needed in order to weigh it:
-        the candidate was left as an uncommitted diff in a retained worktree,
+        the candidate was left as an uncommitted diff,
         which is the evidence-reconstruction problem D-029 exists to remove.
         Infrastructure failure stays hard, because then there is no opinion at
         all and nothing was actually reviewed.
@@ -1050,16 +1034,9 @@ class CodingAgent:
 
     @staticmethod
     def _root(request: CodingRequest) -> Path:
-        """The worktree allocated to this job.
-
-        Read from the request, which `_run` rewrote with the allocated path
-        before anything else saw it. The request is a frozen value local to one
-        `run`, so two overlapping jobs cannot resolve to each other's worktree;
-        this used to consult a mutable attribute on the agent, which they
-        could.
-        """
+        """The configured canonical checkout injected by `_run`."""
         if not request.worktree.strip():
-            raise CodingError("worktree_unusable", reason_code="worktree_not_allocated")
+            raise CodingError("worktree_unusable", reason_code="checkout_not_configured")
         return Path(request.worktree).expanduser().resolve()
 
     def _planning_phase(
@@ -1293,7 +1270,6 @@ class CodingAgent:
         plan_summary: str = "",
         baseline: GitWorkspaceState | None = None,
         commit: CodingCommit | None = None,
-        allocated: CodingWorktree | None = None,
     ) -> CodingOutcome:
         if status not in ("succeeded", "failed", "blocked"):
             status = "failed"
@@ -1317,14 +1293,6 @@ class CodingAgent:
             plan_summary,
             baseline,
             commit,
-            # D-031. Reported for every job: the worktree is retained until an
-            # explicit release, so `worktree_retained` is true whenever a job
-            # ends. Release is a later, separate capability call. Passed in
-            # from the run that owns it rather than read off the agent, which
-            # a concurrent job would have moved.
-            allocated.job_id if allocated is not None else "",
-            str(allocated.path) if allocated is not None else "",
-            True,
             verification,
             review_findings,
         )

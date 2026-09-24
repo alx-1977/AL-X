@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.live_voice import (  # noqa: E402
-    load_environment, migrate_legacy_conversations,
+    _coding_repository_root, load_environment, migrate_legacy_conversations,
 )
 from alx.contracts import (  # noqa: E402
     AudioChunk,
@@ -47,6 +47,22 @@ from alx.goals.store import _goal_to_data  # noqa: E402
 
 
 NOW = datetime(2026, 8, 28, 9, 30, tzinfo=UTC)
+
+
+class CodingRepositoryRootTests(unittest.TestCase):
+    def test_matching_resolved_authority_root_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            self.assertEqual(_coding_repository_root(root, root / "."), root)
+
+    def test_different_authority_root_disables_coding(self) -> None:
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            self.assertIsNone(
+                _coding_repository_root(Path(first), Path(second))
+            )
+
+    def test_absent_authority_disables_coding_rather_than_falling_back(self) -> None:
+        self.assertIsNone(_coding_repository_root(Path("repository"), None))
 
 
 class FakeTranscriber:
@@ -162,40 +178,29 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
         values.update(changes)
         return CodingTelemetry(**values)
 
-    def test_the_snapshot_says_where_the_job_is_working(self) -> None:
-        """The canonical checkout stays on main, so the panel must say where.
-
-        The Coding Agent always knew the worktree and branch; they reached the
-        person only in the final outcome, after the work was over. A running
-        job could therefore be visibly active and give no way to find its
-        files short of `git worktree list`.
-        """
+    def test_the_snapshot_says_which_visible_branch_is_active(self) -> None:
         activity = VoiceActivityStatus()
         activity.publish_coding(self._telemetry(
-            worktree="/tmp/wt/case-7", branch="fix/thing",
+            branch="fix/thing",
         ))
         snapshot = activity.coding_snapshot(NOW)
-        self.assertEqual(snapshot["worktree"], "/tmp/wt/case-7")
         self.assertEqual(snapshot["branch"], "fix/thing")
 
-    def test_a_job_without_an_allocation_reports_no_worktree(self) -> None:
-        """Empty is a real state, and must not be filled in with a guess."""
+    def test_a_job_before_branch_creation_reports_no_branch(self) -> None:
         activity = VoiceActivityStatus()
         activity.publish_coding(self._telemetry())
         snapshot = activity.coding_snapshot(NOW)
-        self.assertEqual(snapshot["worktree"], "")
         self.assertEqual(snapshot["branch"], "")
 
-    def test_a_terminal_observation_still_carries_its_worktree(self) -> None:
-        """The frontend needs it to name the retained directory as it clears."""
+    def test_a_terminal_observation_still_carries_its_branch(self) -> None:
         activity = VoiceActivityStatus()
         activity.publish_coding(self._telemetry(
             terminal=True, outcome="failed",
-            worktree="/tmp/wt/case-7", branch="fix/thing",
+            branch="fix/thing",
         ))
         snapshot = activity.coding_snapshot(NOW)
         self.assertTrue(snapshot["terminal"])
-        self.assertEqual(snapshot["worktree"], "/tmp/wt/case-7")
+        self.assertEqual(snapshot["branch"], "fix/thing")
 
     def test_snapshot_uses_runtime_timestamps_not_console_text(self) -> None:
         activity = VoiceActivityStatus()

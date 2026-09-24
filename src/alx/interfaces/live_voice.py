@@ -214,11 +214,7 @@ class VoiceActivityStatus:
             "terminal": telemetry.terminal, "outcome": telemetry.outcome,
             "owner_alive": owner_running, "unresponsive": unresponsive,
             "stalled": stalled, "transition": telemetry.transition,
-            # Where the work is happening. Structural state for the diagnostic
-            # panel — a filesystem path and a ref name — never wording about
-            # the job. Empty while a job has no allocation yet, and the panel
-            # renders nothing rather than an empty row.
-            "worktree": telemetry.worktree, "branch": telemetry.branch,
+            "branch": telemetry.branch,
         }
 
     def subscribe(

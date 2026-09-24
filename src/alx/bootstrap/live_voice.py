@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from contextvars import ContextVar
 import logging
@@ -136,109 +137,30 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
     return values
 
 
-def _coding_outcome_source(goal_store: SQLiteGoalStore):
-    """Answer what the broker durably recorded for one coding job.
-
-    D-031 requires release to establish terminal success from the durable
-    execution outcome rather than from the allocation record, which is a file
-    beside the workspace that anything able to write there can edit. The job's
-    identity *is* its capability call id, so the durable result is found by
-    matching that against the recorded attempts.
-
-    Returns the job's status, or "" when no durable outcome exists for it —
-    which the allocator treats as a refusal, not as permission.
-    """
-    from alx.contracts import CapabilityResultState
-    from alx.tools.coding import RUN_CODING_TASK
-
-    def status_of(job_id: str) -> str:
-        if not job_id:
-            return ""
-        for snapshot in goal_store.list_goals():
-            # `completed_actions` is on the goal *state*, not the snapshot that
-            # wraps it. Reading it off the snapshot raised AttributeError,
-            # which the allocator caught as `durable_outcome_unreadable`, so
-            # no release could ever succeed — a fail-closed bug, but a bug.
-            for result in snapshot.state.completed_actions:
-                if result.capability_id != RUN_CODING_TASK:
-                    continue
-                if result.call_id != job_id:
-                    continue
-                # Both halves must agree. The broker's own state is what it
-                # decided about the call; the recorded status is what the job
-                # reported about itself. A job is releasable only when the
-                # result succeeded *and* says so.
-                if result.state is not CapabilityResultState.SUCCEEDED:
-                    return str(result.state.value)
-                values = result.durable_values or {}
-                return str(values.get("status") or "")
-        return ""
-
-    return status_of
-
-
-def default_coding_worktree_root(storage_root: Path, repository_root: Path) -> Path:
-    """Where coding worktrees live when nothing configured a location.
-
-    D-031 requires the resolved root to lie outside the canonical repository.
-    The runtime storage root is the natural neighbour for it, but that setting
-    is commonly relative — the shipped `.env` uses `.alx/runtime` — and a
-    relative storage root resolves against the repository, which would put
-    every coding worktree back inside the checkout D-031 exists to keep them
-    out of. The containment check would then refuse and the capability would
-    never register at all.
-
-    So the default is taken from the storage root only when that resolves
-    outside the repository. Otherwise it is placed beside the repository, as a
-    sibling directory named for it, which is deterministic, absolute, and
-    outside by construction. `ALX_CODING_WORKTREE_ROOT` overrides this
-    entirely; nothing here invents a second setting.
-    """
-    repository = Path(repository_root).expanduser().resolve()
-    resolved_storage = Path(storage_root).expanduser()
-    if not resolved_storage.is_absolute():
-        resolved_storage = (repository / resolved_storage)
-    resolved_storage = resolved_storage.resolve()
-    if resolved_storage != repository and not _within(resolved_storage, repository):
-        return resolved_storage / "coding-worktrees"
-    return repository.parent / f"{repository.name}-coding-worktrees"
-
-
-def _within(candidate: Path, ancestor: Path) -> bool:
-    try:
-        candidate.relative_to(ancestor)
-    except ValueError:
-        return False
-    return True
-
-
-def _build_coding_allocator(root: Path, repository_root: Path, outcome_source=None):
-    """The D-031 worktree allocator, or none if its root cannot be used.
-
-    A root that resolves inside the canonical repository is a configuration
-    error, not a runtime condition to work around: it would put every coding
-    job back inside the checkout this decision exists to keep them out of. The
-    capability is therefore left unregistered and the reason is logged, which
-    is the same shape as a missing coding model.
-    """
-    from alx.contracts.coding import CodingError
-    from alx.providers.coding_worktree import CodingWorktreeAllocator
-
-    try:
-        return CodingWorktreeAllocator(root, repository_root, outcome_source)
-    except CodingError as error:
-        LOGGER.warning(
-            "Coding worktree root unusable (%s): no coding capability",
-            error.details.get("reason_code", error.code),
-        )
-        return None
-
-
 def _completed(attempt) -> bool:
     """True only when a capture actually finished its work."""
     result = getattr(attempt, "result", None)
     values = getattr(result, "values", None)
     return bool(values and values.get("completed") is True)
+
+
+def _coding_repository_root(
+    repository_root: Path, authority_root: Path | None
+) -> Path | None:
+    """Use the checkout AL/X can later publish, recover, and switch.
+
+    No repository authority means no coding: nothing could switch a failed
+    job's feature branch back to main, so the process checkout is not a
+    fallback.
+    """
+    if authority_root is None:
+        return None
+    try:
+        if repository_root.resolve() == authority_root.resolve():
+            return repository_root.resolve()
+    except OSError:
+        return None
+    return None
 
 
 def migrate_legacy_conversations(
@@ -315,6 +237,12 @@ def _watch_review(
         LOGGER.warning(
             "A requested review could not be watched: %s", type(error).__name__
         )
+
+
+# The tree this process imported: `scripts/alx` extracts committed main here,
+# so the laws, identity and frontend AL/X runs under are the ones merged with
+# her code, never whatever a feature branch in the checkout currently holds.
+CODE_ROOT = Path(__file__).resolve().parents[3]
 
 
 async def run(repository_root: Path) -> None:
@@ -573,36 +501,6 @@ async def run(repository_root: Path) -> None:
         executors.update(sandbox_runtime.executors)
         permissions.update(sandbox_runtime.permissions)
 
-    # D-028 authorises one bounded coding job in an assigned worktree. It is
-    # a separate authority from sandbox.execute: the sandbox cannot touch a
-    # repository, and this cannot merge, push, deploy or request a review.
-    # D-031 requires one AL/X-controlled worktree root that resolves outside
-    # the canonical repository. It defaults beside the runtime storage root,
-    # which is already outside the checkout, and a configured root that
-    # resolves back inside refuses rather than being silently accepted.
-    coding_allocator = _build_coding_allocator(
-        voice_settings.coding_worktree_root
-        or default_coding_worktree_root(storage_root, repository_root),
-        repository_root,
-        _coding_outcome_source(goal_store),
-    )
-    coding_runtime = build_coding_runtime(
-        provider_settings.coding.enabled,
-        providers.coding,
-        lambda: current_call_id[0],
-        session=providers.coding_session,
-        reviewer=providers.coding_reviewer,
-        activity_sink=activity.set,
-        telemetry_sink=activity.publish_coding,
-        allocator=coding_allocator,
-    )
-    if coding_runtime is not None:
-        for definition in coding_runtime.definitions:
-            registry.register(definition)
-        policies.update(coding_runtime.policies)
-        executors.update(coding_runtime.executors)
-        permissions.update(coding_runtime.permissions)
-
     # Requesting an external review is effectful and may spend review credits,
     # so its policy requires an approval grounded in Friedl's own turn.
     # The watcher is composed later, beside the transport, so the review path
@@ -660,7 +558,8 @@ async def run(repository_root: Path) -> None:
         permissions.update(merge_runtime.permissions)
 
     # AL/X's repository authority. Hers, never the Coding Agent's: a job
-    # commits in the worktree it was given and cannot reach a remote by
+    # commits on the feature branch prepared in the canonical checkout and
+    # cannot reach a remote by
     # construction, so what is published, merged, reset or deleted is decided
     # after she has seen what the job produced.
     #
@@ -683,6 +582,39 @@ async def run(repository_root: Path) -> None:
         policies.update(repository_runtime.policies)
         executors.update(repository_runtime.executors)
         permissions.update(repository_runtime.permissions)
+
+    # D-028 authorises one bounded coding job in the configured checkout. It is
+    # a separate authority from sandbox.execute: the sandbox cannot touch a
+    # repository, and this cannot merge, push, deploy or request a review.
+    # D-033 fixes that checkout to the canonical repository. The capability
+    # creates and switches its feature branch there before implementation.
+    # Composed after repository authority and only against its root: a job
+    # that fails leaves its feature branch for AL/X to recover and switch
+    # back to main, and without that authority nothing could.
+    coding_repository = _coding_repository_root(
+        repository_root,
+        repository_runtime.root if repository_runtime is not None else None,
+    )
+    if provider_settings.coding.enabled and coding_repository is None:
+        LOGGER.warning(
+            "Coding checkout lacks repository authority: no coding capability"
+        )
+    coding_runtime = build_coding_runtime(
+        provider_settings.coding.enabled,
+        providers.coding,
+        lambda: current_call_id[0],
+        session=providers.coding_session,
+        reviewer=providers.coding_reviewer,
+        activity_sink=activity.set,
+        telemetry_sink=activity.publish_coding,
+        repository=coding_repository,
+    )
+    if coding_runtime is not None:
+        for definition in coding_runtime.definitions:
+            registry.register(definition)
+        policies.update(coding_runtime.policies)
+        executors.update(coding_runtime.executors)
+        permissions.update(coding_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
@@ -813,14 +745,14 @@ async def run(repository_root: Path) -> None:
     # fallback would spend on a Core nobody selected and record the result as
     # if the experiment had run.
     conversational_reasoner = build_model_reasoner(
-        providers.reasoning, repository_root
+        providers.reasoning, CODE_ROOT
     )
     reasoner = OriginSelectedReasoner(
         conversational_reasoner,
         None if providers.autonomous is None
         else build_model_reasoner(
             providers.autonomous,
-            repository_root,
+            CODE_ROOT,
             AUTONOMOUS_MAX_OUTPUT_TOKENS,
             AUTONOMOUS_MAX_INPUT_TOKENS,
             # The bounds and the budget arrive together; ModelReasoner refuses
@@ -921,7 +853,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.host,
         voice_settings.port,
         provider_settings.speech_to_text.sample_rate_hz,
-        repository_root / "src/alx/interfaces/assets",
+        CODE_ROOT / "src/alx/interfaces/assets",
     )
     # The due-cognition tick lives for the life of the process, beside the
     # transport rather than inside it. Voice is how she is heard, not what
@@ -1080,8 +1012,13 @@ async def run(repository_root: Path) -> None:
         goal_store.close()
 
 
-def main() -> None:
-    repository_root = Path(__file__).resolve().parents[3]
+def main(argv: list[str] | None = None) -> None:
+    # The checkout is named, not inferred from this file: the launcher runs
+    # code extracted from committed main, which lives outside the checkout
+    # whose .env, storage and repository authority the runtime serves.
+    parser = argparse.ArgumentParser(prog="alx.bootstrap.live_voice")
+    parser.add_argument("--checkout", type=Path, required=True)
+    repository_root = parser.parse_args(argv).checkout.resolve()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

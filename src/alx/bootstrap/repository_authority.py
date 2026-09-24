@@ -4,11 +4,11 @@ Returning None leaves the capability unregistered, so she cannot act on the
 repository at all. That is the difference between the authority being withheld
 and every operation failing.
 
-This is AL/X's, never the Coding Agent's. A job commits inside the worktree it
-was given and cannot reach a remote by construction; what is published, merged,
-reset or deleted is decided after she has seen what the job produced. Composing
-this here rather than inside the coding runtime is what keeps those authorities
-apart.
+This is AL/X's, never the Coding Agent's. A job commits on its prepared feature
+branch in the canonical checkout and cannot reach a remote by construction;
+what is published, merged, reset or deleted is decided after she has seen what
+the job produced. Composing this here rather than inside the coding runtime is
+what keeps those authorities apart.
 """
 
 from __future__ import annotations
@@ -43,6 +43,9 @@ class RepositoryAuthorityRuntime:
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
+    # The canonical checkout this authority recovers and switches back to
+    # main. Coding composes only against this root, never a fallback.
+    root: Path
 
 
 def build_repository_authority_runtime(
@@ -147,6 +150,7 @@ def build_repository_authority_runtime(
         policies={REPOSITORY_OPERATION: policy},
         executors=build_repository_operation_executors(selected, call_id_source),
         permissions=frozenset({REPOSITORY_PERMISSION}),
+        root=system.root,
     )
 
 

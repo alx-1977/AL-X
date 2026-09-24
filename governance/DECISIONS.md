@@ -1941,3 +1941,103 @@ blocked it. This is observability rather than approval: it is what lets AL/X
 check that an effect was the one she intended.
 
 No open design questions remain in this decision.
+
+---
+
+## D-033 — One visible checkout for Coding Agent work
+
+- **Date:** 2026-09-24
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-24.** Friedl directed that Git
+  worktrees be removed from the normal Coding Agent workflow, approved the
+  branch-only design, and instructed implementation to begin from clean
+  canonical `main` on one migration feature branch.
+
+**Decision.** A Coding Agent job works in the single configured canonical
+checkout. Before any implementation begins, deterministic code requires that
+checkout to be clean, attached to `main`, and at the `main` commit; it then
+creates and switches to the job's feature branch. The coding session edits the
+same files VS Code displays. Deterministic verification and the bounded commit
+step run there. After the commit, AL/X alone decides and performs publication,
+pull-request work, external-review handling, merge, and the eventual switch
+back to `main` through her existing repository authority.
+
+**One outcome, one path.** The production outcome remains one bounded
+Core-delegated coding job returning verified evidence through
+`run_coding_task`. The linked-worktree allocator, ownership sidecars, stale
+retention, workspace-release capability, configurable worktree root, and
+Coding-Agent `git worktree add/remove` commands are superseded and deleted.
+They are not retained as recovery or optional paths.
+
+**Exclusive implementation.** Only one Coding Agent implementation may own
+the canonical checkout at a time. A single repository-scoped, non-blocking
+file lock is held from preflight through implementation, local review,
+verification, and commit. Contention fails closed with structured evidence.
+This lock is only mutual exclusion; it is not a scheduler, queue, lease
+service, or new orchestration state machine.
+
+**Narrow Coding Agent Git authority.** Deterministic Coding Agent code may:
+
+- inspect the configured canonical checkout;
+- from clean attached `main`, create and switch to the requested feature
+  branch, using D-029's bounded numeric suffix rule for a collision;
+- stage only job-owned paths and create one non-amending commit after all
+  required verification passes.
+
+It may not switch to an existing branch, switch back to `main`, push, fetch,
+pull, open or update a pull request, request an external review, merge, delete
+a branch, rewrite history, deploy, or widen the task. The coding model still
+cannot access Git metadata or a terminal. AL/X's authority is not transitive.
+
+**Failure and retry.** A failed job leaves its visible feature branch and
+working files in the canonical checkout as evidence. Deterministic code does
+not reset, discard, hide, move, or automatically retry that state. AL/X must
+judge how to preserve or resolve it before the checkout can return to clean
+`main`. D-028's durable allowance of at most two implementation-reaching
+failed executions per goal remains unchanged and is not reset by branch work
+or process restart.
+
+**Governance effect.** This decision supersedes D-031 in full and supersedes
+only the linked-worktree assumptions in D-028 and D-029. D-029's bounded
+branch naming, staging, verification-before-commit, hook/filter safeguards,
+path-scoped index rollback, and prohibition on remote operations remain.
+D-032 remains AL/X's repository lifecycle authority, but its statement that
+D-031 stood unchanged is historical as of this later decision. Existing
+worktrees are migration evidence outside the new production path; none may be
+deleted without first establishing whether it contains unique work.
+
+### Review condition
+
+Revisit if a Coding Agent edits while `main` is checked out, if two Coding
+Agent implementations overlap, if a job can choose the repository path, if
+the lock grows into scheduling machinery, or before any Coding Agent remote,
+pull-request, review, merge, deployment, or switch-back authority is proposed.
+
+### Amendment — the runtime starts from committed main
+
+- **Date:** 2026-09-24
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-24.** Approved in the PR #58
+  review-fix conversation, choosing "main only" over an explicit
+  launch-ref option.
+
+A failed job can leave broken Python on the feature branch in the one
+checkout AL/X imported from, so a restart could fail before her repository
+authority was available to recover it. The launcher (`scripts/alx`) therefore
+starts AL/X from committed local `main`, extracted with `git archive` into the
+repository's git directory, never from the checkout's working files. The
+extraction uses git alone and imports nothing first. It does not switch,
+reset, stash or otherwise touch the branch, index or working tree, and it is
+not a worktree. The laws, identity and frontend assets the runtime reads come
+from that same extracted commit. The checkout is still what `.env`, storage,
+repository authority and the Coding Agent use, and it is named explicitly.
+The launcher itself follows the same rule: its first lines re-execute
+committed `main`'s `scripts/alx` before the rest of the checkout's copy is
+read, so a branch's edit to the launcher takes effect only once merged. If a
+branch breaks those lines, `bash <(git show main:scripts/alx) restart` needs
+nothing but committed `main`.
+
+Consequence: restarting AL/X runs merged `main`, not whatever branch the
+checkout shows. Unmerged work is not run live through the launcher. This
+amendment grants no switch-back, recovery or Git authority to deterministic
+code; D-033's failure and retry rules are unchanged.
