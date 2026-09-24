@@ -76,6 +76,7 @@ from alx.providers.coding_git import (
     commit_job_changes,
     deleted_paths,
     prepare_feature_branch,
+    continue_feature_branch,
     read_workspace_state,
 )
 from alx.providers.coding_workspace import CodingWorkspace
@@ -437,17 +438,23 @@ class CodingAgent:
             self._report_activity(state, "reasoning")
 
     def _run(self, request: CodingRequest, state: "_JobState") -> CodingOutcome:
-        # D-033: while holding the repository lock, require clean canonical
-        # main and create/switch the feature branch before any implementation.
+        # D-033: under the repository lock, prepare a new feature branch
+        # or verify a goal-owned continuation before any implementation.
         # Validate the checkout shape first so a linked checkout cannot be
         # switched and only then refused.
         try:
             workspace = CodingWorkspace(
                 str(self._repository), request.blocked_paths
             )
-            branch = prepare_feature_branch(
-                self._repository, request.repair_branch.strip()
-            )
+            if request.continuation is not None:
+                branch = continue_feature_branch(
+                    self._repository, request.continuation.branch,
+                    request.continuation.permitted_heads,
+                )
+            else:
+                branch = prepare_feature_branch(
+                    self._repository, request.repair_branch.strip()
+                )
         except CodingError as error:
             raise _before_implementation(error)
         state.branch = branch
@@ -457,7 +464,8 @@ class CodingAgent:
             worktree=str(self._repository),
         )
         self._report_telemetry(
-            state, "plan", in_flight=True, transition="BRANCH prepared"
+            state, "plan", in_flight=True,
+            transition="BRANCH continued" if request.continuation else "BRANCH prepared"
         )
         commands: list[CodingCommandRecord] = []
         preexisting_status, _ = self._git_evidence(workspace)

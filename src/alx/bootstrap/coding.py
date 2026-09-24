@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from alx.contracts import (
+    GoalState,
     CapabilityDefinition,
     CapabilityResult,
     CodingSession,
@@ -62,6 +63,7 @@ def build_coding_runtime(
     activity_sink: Callable[[str], None] | None = None,
     telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
     repository: Path | None = None,
+    goal_state_source: Callable[[], GoalState | None] = lambda: None,
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
 
@@ -98,7 +100,7 @@ def build_coding_runtime(
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)
 
-    executors = dict(build_coding_executors(run_job, call_id_source))
+    executors = dict(build_coding_executors(run_job, call_id_source, goal_state_source))
 
     LOGGER.info(
         "Coding agent enabled: %s", RUN_CODING_TASK

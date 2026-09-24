@@ -310,7 +310,7 @@ async def run(repository_root: Path) -> None:
     registry = CapabilityRegistry()
     current_call_id = [""]
     current_goal_state: ContextVar[Any] = ContextVar(
-        "alx_current_notebook_goal_state", default=None
+        "alx_current_goal_state", default=None
     )
     mail_settings = MailSettings.from_environment(environment)
     mail_runtime = build_mail_runtime(
@@ -608,6 +608,7 @@ async def run(repository_root: Path) -> None:
         activity_sink=activity.set,
         telemetry_sink=activity.publish_coding,
         repository=coding_repository,
+        goal_state_source=current_goal_state.get,
     )
     if coding_runtime is not None:
         for definition in coding_runtime.definitions:
