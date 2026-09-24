@@ -31,10 +31,12 @@ The first permanent interface is voice-only. A temporary one-time **Start AL/X**
 Start the local runtime from the repository root:
 
 ```bash
-PYTHONPATH=src python3 -m alx.bootstrap.live_voice
+scripts/alx start
 ```
 
-Then open `http://127.0.0.1:8765`. Runtime policy, provider selection, models, voice, turn-detection profile, and the new runtime's isolated storage location all come from `.env`; none are selected by frontend code.
+The launcher runs committed local main and passes this checkout as --checkout.
+
+Then open `http://127.0.0.1:8765`, the default interface address. Runtime policy, provider selection, models, voice, turn-detection profile, and the runtime's isolated storage location all come from `.env`; none are selected by frontend code.
 
 ## Source of authority
 
