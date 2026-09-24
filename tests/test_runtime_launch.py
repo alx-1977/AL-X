@@ -118,6 +118,81 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         self.assertFalse(first.exists())
 
 
+class LauncherItselfComesFromCommittedMain(unittest.TestCase):
+    """A feature branch's edit to scripts/alx cannot stop AL/X restarting."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        git(self.root, "init", "-q", "-b", "main")
+        git(self.root, "config", "user.email", "test@example.test")
+        git(self.root, "config", "user.name", "test")
+        (self.root / "scripts").mkdir()
+        self.committed = (ROOT / "scripts/alx").read_text(encoding="utf-8")
+        self.launcher = self.root / "scripts/alx"
+        self.launcher.write_text(self.committed, encoding="utf-8")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-qm", "base")
+        git(self.root, "switch", "-q", "-c", "feat/launcher")
+        self.environment = {
+            key: value for key, value in os.environ.items()
+            if key != "ALX_LAUNCHER_COMMITTED"
+        }
+
+    def run_launcher(self, *argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            list(argv), cwd=self.root, capture_output=True, text=True,
+            env=self.environment, timeout=60,
+        )
+
+    def test_a_broken_edit_below_the_header_never_runs(self) -> None:
+        # Committed on the branch and left in the working files alike.
+        broken = self.committed.replace(
+            "status() {",
+            "status() { echo HIJACKED; exit 99; }\nif then fi (( \nstatus_() {",
+            1,
+        )
+        self.assertNotEqual(broken, self.committed)
+        self.launcher.write_text(broken, encoding="utf-8")
+        git(self.root, "commit", "-qam", "broken launcher")
+
+        completed = self.run_launcher("bash", "scripts/alx", "status")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("HIJACKED", completed.stdout)
+        self.assertIn("stopped", completed.stdout)
+        self.assertEqual(git(self.root, "branch", "--show-current"), "feat/launcher")
+
+    def test_a_broken_header_is_recovered_from_committed_main_alone(self) -> None:
+        self.launcher.write_text("echo HIJACKED; exit 99\n", encoding="utf-8")
+        self.assertIn(
+            "HIJACKED", self.run_launcher("bash", "scripts/alx", "status").stdout
+        )
+
+        # The documented recovery: the exact command the header runs.
+        self.assertIn(
+            'bash -c "$(git show main:scripts/alx)" scripts/alx restart',
+            self.committed,
+        )
+        completed = self.run_launcher(
+            "bash", "-c", 'bash -c "$(git show main:scripts/alx)" scripts/alx status',
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("HIJACKED", completed.stdout)
+        self.assertIn("stopped", completed.stdout)
+
+    def test_without_a_committed_launcher_nothing_runs(self) -> None:
+        git(self.root, "switch", "-q", "main")
+        git(self.root, "rm", "-q", "scripts/alx")
+        git(self.root, "commit", "-qm", "no launcher")
+        git(self.root, "switch", "-q", "feat/launcher")
+        completed = self.run_launcher("bash", "scripts/alx", "status")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("no scripts/alx on local main", completed.stderr)
+
+
 class RuntimeEntryNamesItsCheckout(unittest.TestCase):
     def test_the_checkout_is_required_and_passed_through(self) -> None:
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):

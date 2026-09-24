@@ -2031,6 +2031,11 @@ reset, stash or otherwise touch the branch, index or working tree, and it is
 not a worktree. The laws, identity and frontend assets the runtime reads come
 from that same extracted commit. The checkout is still what `.env`, storage,
 repository authority and the Coding Agent use, and it is named explicitly.
+The launcher itself follows the same rule: its first lines re-execute
+committed `main`'s `scripts/alx` before the rest of the checkout's copy is
+read, so a branch's edit to the launcher takes effect only once merged. If a
+branch breaks those lines, `bash -c "$(git show main:scripts/alx)"
+scripts/alx restart` needs nothing but committed `main`.
 
 Consequence: restarting AL/X runs merged `main`, not whatever branch the
 checkout shows. Unmerged work is not run live through the launcher. This
