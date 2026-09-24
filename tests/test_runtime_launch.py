@@ -24,9 +24,31 @@ sys.path.insert(0, str(ROOT / "src"))
 from alx.bootstrap import live_voice  # noqa: E402
 
 
+def isolated_environment(**extra: str) -> dict[str, str]:
+    """The caller's environment without anything that relocates Git.
+
+    Run from a hook, or by the Coding Agent's own verification, the suite can
+    inherit GIT_DIR, GIT_INDEX_FILE and the like, which would point these
+    temp-repository commands at the real one. Git names those variables
+    itself; the launcher's own re-exec marker is dropped as well.
+    """
+    local = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"],
+        capture_output=True, text=True, check=True,
+        env={"PATH": os.environ.get("PATH", "")},
+    ).stdout.split()
+    dropped = {*local, "ALX_LAUNCHER_COMMITTED"}
+    environment = {
+        key: value for key, value in os.environ.items() if key not in dropped
+    }
+    environment.update(extra)
+    return environment
+
+
 def git(repository: Path, *argv: str) -> str:
     return subprocess.run(
-        ["git", *argv], cwd=repository, check=True, capture_output=True, text=True
+        ["git", *argv], cwd=repository, check=True, capture_output=True,
+        text=True, env=isolated_environment(),
     ).stdout.strip()
 
 
@@ -64,6 +86,7 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         completed = subprocess.run(
             ["bash", "-c", 'source scripts/alx && runtime_code'],
             cwd=self.root, capture_output=True, text=True, check=True,
+            env=isolated_environment(),
         )
         return Path(completed.stdout.strip())
 
@@ -71,7 +94,7 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         return subprocess.run(
             [sys.executable, "-c",
              "import alx.probe, alx.startup; print(alx.probe.VALUE)"],
-            env={**os.environ, "PYTHONPATH": str(source)},
+            env=isolated_environment(PYTHONPATH=str(source)),
             capture_output=True, text=True,
         )
 
@@ -106,8 +129,8 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         self.assertEqual(first.parent, common / "alx-runtime")
         self.assertEqual(self.runtime_code(), first)
 
-        # main moves on (a merge AL/X synchronised); the next start follows it
-        # and the superseded snapshot does not linger.
+        # main moves on (a merge AL/X synchronised); the next start follows it.
+        # The older snapshot stays: another AL/X may still be running from it.
         advanced = git(
             self.root, "commit-tree", f"{self.main}^{{tree}}", "-p", self.main,
             "-m", "merged",
@@ -115,7 +138,51 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         git(self.root, "update-ref", "refs/heads/main", advanced)
         second = self.runtime_code()
         self.assertEqual(second.name, advanced)
-        self.assertFalse(first.exists())
+        self.assertTrue((first / ".complete").is_file())
+        self.assertTrue((first / "src/alx/probe.py").is_file())
+
+    def test_only_its_own_unfinished_extraction_is_cleaned(self) -> None:
+        base = Path(
+            git(self.root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        ) / "alx-runtime"
+        # Another start's extraction, still in progress.
+        theirs = base / ".staging-999999"
+        theirs.mkdir(parents=True)
+        code = self.runtime_code()
+        self.assertTrue(theirs.is_dir())
+        self.assertEqual(
+            sorted(path.name for path in base.iterdir()),
+            sorted([".staging-999999", code.name]),
+        )
+
+    def test_an_installed_snapshot_is_never_replaced(self) -> None:
+        code = self.runtime_code()
+        marker = code / "in-use"
+        marker.write_text("a running AL/X\n", encoding="utf-8")
+        self.assertEqual(self.runtime_code(), code)
+        self.assertTrue(marker.is_file())
+
+
+class TempRepositoriesIgnoreTheCallersGit(unittest.TestCase):
+    def test_inherited_git_location_cannot_redirect_a_temp_repository(self) -> None:
+        # A decoy stands in for the caller's repository, so a regression
+        # here can never touch the real one.
+        with tempfile.TemporaryDirectory() as decoy_directory, \
+                tempfile.TemporaryDirectory() as directory:
+            decoy = Path(decoy_directory).resolve()
+            git(decoy, "init", "-q", "-b", "main")
+            overrides = {
+                "GIT_DIR": str(decoy / ".git"),
+                "GIT_WORK_TREE": str(decoy),
+                "GIT_INDEX_FILE": str(decoy / ".git/index"),
+            }
+            with mock.patch.dict(os.environ, overrides):
+                self.assert_isolated(Path(directory).resolve())
+
+    def assert_isolated(self, root: Path) -> None:
+        git(root, "init", "-q", "-b", "main")
+        self.assertEqual(git(root, "rev-parse", "--show-toplevel"), str(root))
+        self.assertNotIn("GIT_INDEX_FILE", isolated_environment())
 
 
 class LauncherItselfComesFromCommittedMain(unittest.TestCase):
@@ -135,15 +202,11 @@ class LauncherItselfComesFromCommittedMain(unittest.TestCase):
         git(self.root, "add", ".")
         git(self.root, "commit", "-qm", "base")
         git(self.root, "switch", "-q", "-c", "feat/launcher")
-        self.environment = {
-            key: value for key, value in os.environ.items()
-            if key != "ALX_LAUNCHER_COMMITTED"
-        }
 
     def run_launcher(self, *argv: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             list(argv), cwd=self.root, capture_output=True, text=True,
-            env=self.environment, timeout=60,
+            env=isolated_environment(), timeout=60,
         )
 
     def test_a_broken_edit_below_the_header_never_runs(self) -> None:
