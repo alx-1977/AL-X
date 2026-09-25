@@ -291,6 +291,32 @@ class RepositoryOutcome:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RepositoryCheckoutStatus:
+    """Where the configured checkout stands, read and not changed.
+
+    `branch` is the short name HEAD is on. A detached HEAD names no branch,
+    so `branch` is empty and `detached` is true — the same indication a
+    rewrite already uses when there is no branch to protect. `head_sha` is
+    the full commit HEAD resolves to. `clean` is the absence of any status
+    entry, including an untracked file.
+    """
+
+    branch: str
+    detached: bool
+    head_sha: str
+    clean: bool
+
+    def as_values(self) -> dict[str, Any]:
+        """The four facts, flat enough to log and read back."""
+        return {
+            "branch": self.branch,
+            "detached": self.detached,
+            "head_sha": self.head_sha,
+            "clean": self.clean,
+        }
+
+
 # ---- the one invariant ----------------------------------------------------
 
 # Operations that destroy history or files rather than adding to them. Only
@@ -585,6 +611,7 @@ __all__ = [
     "READ_ONLY",
     "REPOSITORY_FAILURES",
     "RepositoryAuthorityError",
+    "RepositoryCheckoutStatus",
     "RepositoryOutcome",
     "RepositoryRequest",
     "SYNONYMS",

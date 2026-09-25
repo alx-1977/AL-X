@@ -31,6 +31,7 @@ from alx.contracts.repository_authority import (  # noqa: E402
     Operation,
     READ_ONLY,
     RepositoryAuthorityError,
+    RepositoryCheckoutStatus,
     RepositoryRequest,
     refuse_if_self_destructive,
     valid_ref,
@@ -1462,6 +1463,98 @@ class PullRequestArgumentShapeTests(RealRepositoryHarness):
             Operation.DIFF, {"base": "main", "head": "fix/thing"}
         )
         self.assertEqual(arguments, {"base": "main", "head": "fix/thing"})
+
+
+class CheckoutStatusTests(RealRepositoryHarness):
+    """The configured checkout, read without changing HEAD, the branch or the tree."""
+
+    _READS = {
+        ("git", "symbolic-ref", "--quiet", "--short", "HEAD"),
+        ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+        ("git", "status", "--porcelain=v1", "-z", "-uall"),
+    }
+
+    def _git(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=str(self.local),
+            env=_fixture_environment(),
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def _snapshot(self) -> tuple[str, str, str]:
+        """HEAD, the branch ref, and porcelain, so a read can be shown to change none."""
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        reference = self._git("symbolic-ref", "HEAD", check=False)
+        branch_ref = reference.stdout.strip() if reference.returncode == 0 else ""
+        porcelain = self._git("status", "--porcelain").stdout
+        return head, branch_ref, porcelain
+
+    def _watch(self) -> list[tuple[str, ...]]:
+        seen: list[tuple[str, ...]] = []
+        original = self.authority._runner
+
+        def runner(command, *args, **kwargs):
+            argv = tuple(command)
+            self.assertIn(argv, self._READS)
+            seen.append(argv)
+            return original(command, *args, **kwargs)
+
+        self.authority._runner = runner
+        return seen
+
+    def _assert_only_those_reads(self, seen: list[tuple[str, ...]]) -> None:
+        self.assertEqual(set(seen), self._READS)
+        self.assertEqual(len(seen), len(self._READS))
+
+    def test_a_clean_main_checkout_names_its_branch_and_commit(self) -> None:
+        before = self._snapshot()
+        seen = self._watch()
+        status = self.authority.read_checkout_status()
+        head = git(self.local, "rev-parse", "HEAD")
+        self.assertIsInstance(status, RepositoryCheckoutStatus)
+        self.assertEqual(status.branch, "main")
+        self.assertFalse(status.detached)
+        self.assertEqual(status.head_sha, head)
+        self.assertTrue(status.clean)
+        self.assertEqual(status.as_values(), {
+            "branch": "main",
+            "detached": False,
+            "head_sha": head,
+            "clean": True,
+        })
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_a_dirty_tree_is_unclean_at_the_same_commit(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        (self.local / "seed.txt").write_text("changed\n")
+        before = self._snapshot()
+        seen = self._watch()
+        status = self.authority.read_checkout_status()
+        self.assertEqual(status.branch, "main")
+        self.assertFalse(status.detached)
+        self.assertEqual(status.head_sha, head)
+        self.assertFalse(status.clean)
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_a_detached_head_names_no_branch(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        git(self.local, "checkout", "--detach")
+        before = self._snapshot()
+        seen = self._watch()
+        status = self.authority.read_checkout_status()
+        self.assertTrue(status.detached)
+        self.assertEqual(status.branch, "")
+        self.assertEqual(status.head_sha, head)
+        self.assertTrue(status.clean)
+        self.assertEqual(before[0], head)
+        self.assertEqual(before[1], "")
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
 
 
 if __name__ == "__main__":

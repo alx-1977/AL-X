@@ -40,11 +40,13 @@ from alx.contracts.repository_authority import (
     normalised_arguments,
     READ_ONLY,
     RepositoryAuthorityError,
+    RepositoryCheckoutStatus,
     RepositoryOutcome,
     RepositoryRequest,
     refuse_if_self_destructive,
     valid_ref,
     valid_revision,
+    valid_sha,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -669,6 +671,30 @@ class RepositoryAuthority:
                 refusal_reason=error.code,
             )
         raise RepositoryAuthorityError("arguments_unusable", "unknown operation")
+
+    # ---- checkout status -------------------------------------------------
+
+    def read_checkout_status(self) -> RepositoryCheckoutStatus:
+        """Branch, full HEAD and cleanliness of the configured checkout.
+
+        The checkout is the canonical root fixed at construction. This only
+        reads which branch HEAD is on, the commit that name resolves to, and
+        whether the tree is clean. It does not stage, commit, fetch or switch.
+        """
+        branch = self._checked_out_branch()
+        head_sha = self._sha_of("HEAD")
+        if not valid_sha(head_sha):
+            raise RepositoryAuthorityError("ref_unknown")
+        completed = self._run(self._argv(Operation.STATUS, {}))
+        if completed.returncode != 0:
+            raise RepositoryAuthorityError("repository_unavailable")
+        values = self._values(Operation.STATUS, completed)
+        return RepositoryCheckoutStatus(
+            branch=branch,
+            detached=branch == "",
+            head_sha=head_sha,
+            clean=values["clean"],
+        )
 
     # ---- the one entry point --------------------------------------------
 
