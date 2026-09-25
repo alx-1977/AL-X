@@ -55,6 +55,12 @@ class CoreOutcome:
     # None means nothing was proposed or everything proposed was stored.
     memory_state: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.state is CoreState.RESPONDED and (
+            not isinstance(self.response, str) or not self.response.strip()
+        ):
+            raise ValueError("responded outcomes require nonblank response text")
+
 
 # The whole conversation is stored and never rewritten, but sending all of it
 # on every call made each reasoning turn slower than the last: at 71 turns the
@@ -685,6 +691,11 @@ class CoreAgent:
                 memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                if decision.selects_only:
+                    # Selection with proposals is still an intermediate step.
+                    # Its writes have used the canonical persistence path above;
+                    # continue within this turn's existing budget and attempts.
+                    continue
                 snapshot, deferred = self._defer_or_park_premature_end(
                     snapshot,
                     approved_dispatches,
