@@ -1376,8 +1376,11 @@ class ModelReasoner:
             return AgentDecision(memory_proposals=memory_proposals, memory_query=query,
                                  goal_proposal=proposal, goal_id=goal_id)
         if disposition == "respond":
+            response = action["response"]
+            if not isinstance(response, str) or not response.strip():
+                raise ValueError("respond.response must be a nonblank string")
             return AgentDecision(
-                response=action["response"],
+                response=response,
                 goal_proposal=proposal,
                 response_requires_goal_commit=action["response_requires_goal_commit"],
                 memory_proposals=memory_proposals,

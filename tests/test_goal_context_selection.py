@@ -524,7 +524,10 @@ class SelectionUsesTheCanonicalPathTests(Fixture):
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Carrying on.")
+        self.assertEqual(len(reasoner.contexts), 2)
         stored = self.store.load("goal-a")
+        self.assertEqual(stored.revision, 2)
         self.assertEqual(stored.state.objective.summary, "refined objective")
         # The goal's own origins survived into what replaced it.
         self.assertIn(ContentOrigin.EXTERNAL, stored.provenance.origins)

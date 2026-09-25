@@ -127,6 +127,16 @@ class ModelReasonerTests(unittest.TestCase):
             ),
         )
 
+    def test_respond_requires_nonblank_text_even_with_a_goal_id(self) -> None:
+        for goal_id in (None, "goal-1"):
+            for response in (None, "", " \n\t", 0, False, [], {}):
+                with self.subTest(goal_id=goal_id, response=response):
+                    model = FakeModel(base_output(goal_id=goal_id, response=response))
+                    with self.assertRaisesRegex(
+                        DecisionValidationError, "respond.response must be a nonblank string"
+                    ):
+                        ModelReasoner(model, "laws", "identity").decide(self.context())
+
     def test_ordinary_response_has_no_required_goal_metadata(self) -> None:
         model = FakeModel(base_output())
         decision = ModelReasoner(model, "Approved Laws", "Approved identity").decide(
