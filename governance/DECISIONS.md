@@ -2071,3 +2071,12 @@ dirty or off `main`) count toward neither. Nothing resets either bound, and
 there is no override: a goal can reach a model through at most two genuine
 implementation failures and two request conflicts. All other D-028, D-030 and
 D-033 constraints remain unchanged.
+
+### Amendment — development-goal branch continuation
+
+- **Date:** 2026-09-24
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-24.** Approved with the narrow
+  development-goal branch continuation implementation plan.
+
+When Core sets `continue_goal_branch`, deterministic code may start a job on the currently checked-out branch instead of clean `main`, only if (a) that branch is the one this active goal's own most recent successful Coding Agent commit landed on, as recorded in the durable goal, (b) HEAD is a commit this goal's Coding Agent jobs recorded on it, and (c) the checkout is clean. The Coding Agent gains no git command; it never switches branches. AL/X positions the checkout with her D-032 authority. Refusals occur before implementation and don't count toward D-030's allowance or the request-conflict bound. The D-030 allowance stays per goal and is shared across that goal's jobs. All other D-028, D-029, D-030 and D-033 constraints are unchanged.

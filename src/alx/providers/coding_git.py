@@ -45,10 +45,10 @@ from typing import Iterator
 
 from alx.contracts.coding import (
     MAX_INSPECTED_ENTRIES,
-    MAX_BRANCH_NAME_CHARACTERS,
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_COMMAND_OUTPUT_CHARACTERS,
     MAX_STAGED_FILES,
+    branch_name_permitted,
     CodingCommit,
     CodingError,
     GitWorkspaceState,
@@ -95,15 +95,6 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     # checkout before the coding session receives write access.
     ("switch", "-c"): "pair",
 }
-
-# A branch name this capability may create or switch to. Deliberately narrower
-# than git's own rules: no `..`, no leading dash, no refspec or option
-# punctuation, so a name can never be read as a flag or reach another ref
-# namespace. `refs/` and `HEAD` are excluded for the same reason.
-_BRANCH_ALLOWED = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-_."
-)
-
 
 @dataclass(frozen=True, slots=True)
 class _GitResult:
@@ -168,26 +159,6 @@ def _pathspec_permitted(item: str) -> bool:
     if any(token in item for token in ("@{", "..", "~", "^")):
         return False
     if item.startswith(":"):
-        return False
-    return True
-
-
-def branch_name_permitted(name: str) -> bool:
-    """Whether a branch name is one this capability may create or switch to."""
-    if not isinstance(name, str):
-        return False
-    candidate = name.strip()
-    if not candidate or len(candidate) > MAX_BRANCH_NAME_CHARACTERS:
-        return False
-    if candidate != name:
-        return False
-    if any(character not in _BRANCH_ALLOWED for character in candidate):
-        return False
-    if candidate.startswith(("-", "/", ".")) or candidate.endswith(("/", ".", ".lock")):
-        return False
-    if ".." in candidate or "//" in candidate or "@{" in candidate:
-        return False
-    if candidate == "HEAD" or candidate.startswith("refs/"):
         return False
     return True
 
@@ -561,6 +532,26 @@ def prepare_feature_branch(repository: Path, requested_branch: str) -> str:
         reason_code="branch_attempts_exhausted",
         attempts=MAX_REPAIR_BRANCH_ATTEMPTS,
     )
+
+
+def continue_feature_branch(
+    repository: Path, branch: str, permitted_heads: frozenset[str]
+) -> str:
+    """Verify a goal-owned continuation without changing any Git state."""
+    root = canonical_repository_root(repository)
+    if not branch_name_permitted(branch) or branch == "main":
+        raise CodingError("git_refused", reason_code="branch_name_not_permitted")
+    current = worktree_branch(root)
+    if current != branch:
+        raise CodingError(
+            "git_refused", reason_code="continuation_branch_mismatch",
+            current_branch=current,
+        )
+    if read_head_sha(root) not in permitted_heads:
+        raise CodingError("git_refused", reason_code="continuation_head_not_owned")
+    if _dirty_paths(root):
+        raise CodingError("git_refused", reason_code="canonical_checkout_dirty")
+    return branch
 
 
 def read_head_sha(worktree: Path) -> str:
@@ -1232,6 +1223,7 @@ __all__ = [
     "canonical_repository_root",
     "coding_job_lock",
     "commit_job_changes",
+    "continue_feature_branch",
     "deleted_paths",
     "git_write_permitted",
     "prepare_feature_branch",

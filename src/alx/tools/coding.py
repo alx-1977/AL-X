@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
 from alx.contracts import (
+    CapabilityAttemptDisposition,
+    GoalState,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -37,6 +40,7 @@ from alx.contracts.coding import (
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_STEP_BUDGET,
     MAX_TASK_CHARACTERS,
+    BranchContinuation,
     CodingError,
     CodingRequest,
     job_id_permitted,
@@ -151,9 +155,13 @@ DEFINITION = CapabilityDefinition(
     # rather than written out, so the stated ceiling cannot drift from the one
     # the executor applies.
     "Execute one bounded software-engineering job in the configured canonical "
-    "checkout. It refuses unless that checkout is clean and on main, then "
+    "checkout. By default it requires clean main, then "
     "creates and switches to the requested new feature branch before the coding "
-    "session may edit. Only one implementation job may hold the checkout at a "
+    "session may edit. With continue_goal_branch=true, it instead verifies the "
+    "checked-out branch and HEAD belong to this active goal's successful coding "
+    "commits and the checkout is clean; repair_branch must match that branch. "
+    "AL/X must position the checkout first. Only one implementation job may hold "
+    "the checkout at a "
     "time. No repository path is accepted. repair_branch and commit_message are "
     "required; the job's own changed files are committed on that branch once every "
     f"required check passes. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}. "
@@ -181,6 +189,7 @@ DEFINITION = CapabilityDefinition(
             "blocked_paths": _STRING_ARRAY,
             "repair_branch": _STRING,
             "commit_message": _STRING,
+            "continue_goal_branch": _BOOLEAN,
         },
         ("task", "repair_branch", "commit_message"),
         extra_properties=False,
@@ -234,6 +243,7 @@ DEFINITION = CapabilityDefinition(
     CODING_FAILURES,
     durable_input_fields=(
         "task", "blocked_paths", "repair_branch", "commit_message",
+        "continue_goal_branch",
     ),
 )
 
@@ -256,9 +266,41 @@ _OUTCOME_ISSUE_CODES = (
 )
 
 
+def goal_coding_branch(state: GoalState | None) -> BranchContinuation | None:
+    """Derive ownership solely from this goal's durable successful CA commits."""
+    commits: list[tuple[str, str]] = []
+    for attempt in (() if state is None else state.attempts):
+        result = attempt.result
+        if (
+            attempt.disposition is not CapabilityAttemptDisposition.EXECUTED
+            or not attempt.implementation_invoked
+            or attempt.call is None
+            or attempt.call.capability_id != RUN_CODING_TASK
+            or result is None
+            or result.state is not CapabilityResultState.SUCCEEDED
+        ):
+            continue
+        commit = result.durable_values.get("commit")
+        if not isinstance(commit, Mapping):
+            continue
+        branch, sha = commit.get("branch"), commit.get("commit_sha")
+        try:
+            validated = BranchContinuation(branch, frozenset({sha}))
+        except (TypeError, ValueError):
+            return None
+        commits.append((validated.branch, sha))
+    if not commits:
+        return None
+    branch = commits[-1][0]
+    return BranchContinuation(
+        branch, frozenset(sha for name, sha in commits if name == branch)
+    )
+
+
 def build_coding_executors(
     run_job: Callable[[CodingRequest], Any],
     call_id_source: Callable[[], str],
+    goal_state_source: Callable[[], GoalState | None] = lambda: None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Wire the one coding outcome to its structured capability result."""
 
@@ -268,6 +310,16 @@ def build_coding_executors(
         request, argument_failure = parse_coding_arguments(arguments, call_id)
         if argument_failure is not None:
             return _failed(call_id, "arguments_unusable", **argument_failure)
+
+        if arguments.get("continue_goal_branch", False):
+            continuation = goal_coding_branch(goal_state_source())
+            if continuation is None or request.repair_branch != continuation.branch:
+                return _failed(
+                    call_id, "git_refused",
+                    reason_code="continuation_ownership_unproven",
+                    implementation_reached=False,
+                )
+            request = replace(request, continuation=continuation)
 
         try:
             outcome = run_job(request)
@@ -335,13 +387,17 @@ def parse_coding_arguments(
         return None, _argument_failure(
             None, "not_object", "arguments must be an object"
         )
-    for reserved in ("worktree", "job_id"):
+    for reserved in ("worktree", "job_id", "continuation"):
         if reserved in arguments:
             return None, _argument_failure(
                 reserved,
                 "not_accepted",
                 f"{reserved} is assigned by AL/X and cannot be supplied",
             )
+    if not isinstance(arguments.get("continue_goal_branch", False), bool):
+        return None, _argument_failure(
+            "continue_goal_branch", "not_boolean", "continue_goal_branch must be a boolean"
+        )
     if not isinstance(job_id, str) or not job_id.strip():
         return None, _argument_failure(
             "job_id", "missing", "job_id was not assigned"

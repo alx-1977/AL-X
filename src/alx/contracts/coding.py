@@ -151,8 +151,8 @@ class CodingTelemetry:
     terminal: bool = False
     outcome: str = ""
     transition: str = ""
-    # The visible branch this job created in the canonical checkout. Empty
-    # until deterministic preflight has created and switched it.
+    # The visible branch this job created or continued in the canonical
+    # checkout. Empty until deterministic preflight has verified it.
     branch: str = ""
 
     def __post_init__(self) -> None:
@@ -246,6 +246,51 @@ def _aware(value: datetime, name: str) -> None:
         raise ValueError(f"{name} must be timezone-aware")
 
 
+# A branch name this capability may create or switch to. Deliberately narrower
+# than git's own rules: no `..`, no leading dash, no refspec or option
+# punctuation, so a name can never be read as a flag or reach another ref
+# namespace. `refs/` and `HEAD` are excluded for the same reason.
+_BRANCH_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-_."
+)
+
+
+def branch_name_permitted(name: str) -> bool:
+    """Whether a branch name is one this capability may create or switch to."""
+    if not isinstance(name, str):
+        return False
+    candidate = name.strip()
+    if not candidate or len(candidate) > MAX_BRANCH_NAME_CHARACTERS:
+        return False
+    if candidate != name:
+        return False
+    if any(character not in _BRANCH_ALLOWED for character in candidate):
+        return False
+    if candidate.startswith(("-", "/", ".")) or candidate.endswith(("/", ".", ".lock")):
+        return False
+    if ".." in candidate or "//" in candidate or "@{" in candidate:
+        return False
+    if candidate == "HEAD" or candidate.startswith("refs/"):
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class BranchContinuation:
+    """Goal-derived branch ownership, injected only by the executor."""
+
+    branch: str
+    permitted_heads: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not branch_name_permitted(self.branch) or self.branch == "main":
+            raise ValueError("continuation branch is not permitted")
+        heads = frozenset(self.permitted_heads)
+        if not heads or any(not isinstance(head, str) or not head.strip() for head in heads):
+            raise ValueError("continuation requires recorded commit SHAs")
+        object.__setattr__(self, "permitted_heads", heads)
+
+
 @dataclass(frozen=True, slots=True)
 class CodingRequest:
     """One bounded coding job Core has decided to delegate.
@@ -271,6 +316,7 @@ class CodingRequest:
     # about what this repair is, so it does not belong in deterministic code.
     repair_branch: str = ""
     commit_message: str = ""
+    continuation: BranchContinuation | None = None
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
