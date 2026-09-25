@@ -29,6 +29,7 @@ LOGGER = logging.getLogger(__name__)
 
 _RUN_CODING_TASK = "run_coding_task"
 _MAX_FAILED_CODING_EXECUTIONS = 2
+_MAX_PLANNING_CODING_FAILURES = 2
 # A job that implemented but whose required verification only the request's
 # own constraints blocked. Recoverable by a changed plan, so it does not spend
 # the implementation allowance, but it has its own bound so it cannot loop.
@@ -761,6 +762,40 @@ class CoreAgent:
                 transient_attempts = (*transient_attempts, attempt)
                 continuation_notice_issued = False
                 continue
+            coding_exhaustion = (
+                self._coding_exhaustion_reason(snapshot.state)
+                if decision.call.capability_id == _RUN_CODING_TASK
+                else None
+            )
+            if coding_exhaustion is not None:
+                # A bounded Coding Agent path is already closed. Treat even a
+                # repeated call identifier as the same capability refusal so
+                # it cannot escalate into a Core-level call-id failure.
+                if not self._coding_retry_already_exhausted(
+                    snapshot.state, coding_exhaustion
+                ):
+                    refusal = CapabilityAttempt(
+                        decision.call,
+                        CapabilityAttemptDisposition.REJECTED,
+                        False,
+                        reason_code=coding_exhaustion,
+                    )
+                    snapshot = self._store.replace(
+                        replace(
+                            snapshot.state,
+                            attempts=(*snapshot.state.attempts, refusal),
+                        ),
+                        snapshot.retention_until,
+                        snapshot.revision,
+                        decision_provenance,
+                    )
+                refused_calls = (*refused_calls, {
+                    "call_id": decision.call.call_id,
+                    "capability_id": decision.call.capability_id,
+                    "reason": coding_exhaustion,
+                    "subject": coding_exhaustion,
+                })
+                continue
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 if self._already_refused(
                     refused_calls, "call_id_reused", decision.call.call_id
@@ -808,38 +843,6 @@ class CoreAgent:
                     snapshot,
                     reason="approval_capability_already_dispatched",
                 )
-            if (
-                decision.call.capability_id == _RUN_CODING_TASK
-                and (
-                    self._failed_coding_executions(snapshot.state)
-                    >= _MAX_FAILED_CODING_EXECUTIONS
-                    or self._request_conflict_coding_executions(snapshot.state)
-                    >= _MAX_REQUEST_CONFLICT_CODING_EXECUTIONS
-                )
-            ):
-                # The durable goal, not model-authored task wording or call
-                # identifiers, is the retry identity.  This occurs before a
-                # checkpoint, broker call, or approval claim, so exhaustion
-                # cannot create a pending job or consume authority.
-                if self._coding_retry_already_exhausted(snapshot.state):
-                    return CoreOutcome(
-                        CoreState.CHECKPOINTED,
-                        snapshot,
-                        reason="coding_retry_exhausted",
-                    )
-                refusal = CapabilityAttempt(
-                    decision.call,
-                    CapabilityAttemptDisposition.REJECTED,
-                    False,
-                    reason_code="coding_retry_exhausted",
-                )
-                snapshot = self._store.replace(
-                    replace(snapshot.state, attempts=(*snapshot.state.attempts, refusal)),
-                    snapshot.retention_until,
-                    snapshot.revision,
-                    decision_provenance,
-                )
-                continue
             if self._repeats_rejected_call(snapshot.state, decision.call, now):
                 return CoreOutcome(
                     CoreState.ERROR,
@@ -1896,6 +1899,8 @@ class CoreAgent:
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
             and (item.result.failure or {}).get("code") != "arguments_unusable"
+            and (item.result.failure or {}).get("code") != "planning_failed"
+            and (item.result.failure or {}).get("phase") != "planning"
             # A checkout refused before the feature branch existed: nothing
             # was implemented, so nothing of the allowance was spent.
             and (item.result.failure or {}).get("implementation_reached") is not False
@@ -1918,12 +1923,44 @@ class CoreAgent:
         )
 
     @staticmethod
-    def _coding_retry_already_exhausted(state: GoalState) -> bool:
+    def _planning_coding_failures(state: GoalState) -> int:
+        """Count failed jobs that ended before an implementation session."""
+        return sum(
+            1
+            for item in state.attempts
+            if item.call is not None
+            and item.call.capability_id == _RUN_CODING_TASK
+            and item.implementation_invoked is True
+            and item.result is not None
+            and item.result.state is CapabilityResultState.FAILED
+            and (
+                (item.result.failure or {}).get("code") == "planning_failed"
+                or (item.result.failure or {}).get("phase") == "planning"
+            )
+        )
+
+    @classmethod
+    def _coding_exhaustion_reason(cls, state: GoalState) -> str | None:
+        if cls._failed_coding_executions(state) >= _MAX_FAILED_CODING_EXECUTIONS:
+            return "coding_retry_exhausted"
+        if cls._planning_coding_failures(state) >= _MAX_PLANNING_CODING_FAILURES:
+            return "coding_planning_exhausted"
+        if (
+            cls._request_conflict_coding_executions(state)
+            >= _MAX_REQUEST_CONFLICT_CODING_EXECUTIONS
+        ):
+            return "coding_retry_exhausted"
+        return None
+
+    @staticmethod
+    def _coding_retry_already_exhausted(
+        state: GoalState, reason_code: str
+    ) -> bool:
         """Whether this durable goal already recorded the fixed refusal."""
         return any(
             item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
-            and item.reason_code == "coding_retry_exhausted"
+            and item.reason_code == reason_code
             for item in state.attempts
         )
 

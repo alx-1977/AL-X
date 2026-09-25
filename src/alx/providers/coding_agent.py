@@ -91,10 +91,12 @@ PLAN_INSTRUCTION = (
     "assigned software-engineering job. You are not AL/X and have no product, "
     "merge, deploy, push, review or governance authority. Produce only the "
     "requested structured plan. You will carry the plan out yourself in an "
-    "assigned worktree using ordinary file reading, searching and editing, so "
+    "assigned repository checkout using ordinary file reading, searching and "
+    "editing, so "
     "plan real code changes. You will not have a terminal: do not plan shell "
     "commands. Verification is not yours to choose: AL/X derives the required "
     "checks from the files the job actually changes and runs them herself. "
+    "Every inspection_targets entry must be a repository-relative path. "
     "You are in PLAN mode."
 )
 
@@ -225,7 +227,7 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
     """
     lines = [
         "You are completing one assigned software-engineering task inside a git",
-        "worktree that has already been prepared for you. Work directly: read,",
+        "repository checkout that has already been prepared for you. Work directly: read,",
         "search and edit files with your normal tools until the task is done.",
         "",
         "# Task",
@@ -255,7 +257,7 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
         lines += [
             "",
             "# Branch",
-            f"This worktree is already on the branch {request.repair_branch.strip()},",
+            f"This checkout is already on the branch {request.repair_branch.strip()},",
             "prepared for you. Do not attempt to change it.",
         ]
     if request.blocked_paths:
@@ -509,7 +511,11 @@ class CodingAgent:
                 files=(), preexisting_dirty=preexisting_dirty, commands=commands,
                 tests_run=False, tests_passed=None, git_status=git_status,
                 git_diff=git_diff, issues=(issue,), review=False,
-                failure_status=True, diagnostics=planning_failure,
+                failure_status=True,
+                diagnostics={
+                    **planning_failure,
+                    "implementation_reached": False,
+                },
                 baseline=baseline,
             )
         plan_summary = str(plan["problem_understanding"])
@@ -1100,7 +1106,12 @@ class CodingAgent:
                 # invalid plan receives bounded corrective feedback.
                 if error.code == "provider_failed":
                     return None, last
-                feedback.append("plan_validation_error:" + str(last["reason_code"]))
+                feedback_item = "plan_validation_error:" + str(last["reason_code"])
+                if "inspection_target" in last:
+                    feedback_item += " inspection_target=" + json.dumps(
+                        last["inspection_target"], ensure_ascii=True
+                    )
+                feedback.append(feedback_item)
         return None, last
 
     def _plan(
@@ -1110,11 +1121,10 @@ class CodingAgent:
         material = {
             "phase": "planning",
             "task": request.task,
-            "worktree": str(workspace.root),
             # A bounded, blocked-path-filtered root listing grounds the plan in
             # the assigned repository without granting the planning turn a
             # shell or an unbounded file search.
-            "worktree_entries": list(workspace.list_dir(".")),
+            "repository_entries": list(workspace.list_dir(".")),
             "acceptance_criteria": list(request.acceptance_criteria),
             "context": request.context,
             "test_guidance": request.test_guidance,
@@ -1142,12 +1152,23 @@ class CodingAgent:
                               for item in values[field])
                        for field in required_lists)):
             raise CodingError("plan_unusable", reason_code="plan_schema_invalid")
-        try:
-            for target in values["inspection_targets"]:
-                workspace.validate_inspection_target(target)
-        except CodingError as error:
-            raise CodingError("plan_unusable", reason_code=error.code) from error
-        return values
+        normalized_targets: list[str] = []
+        for target in values["inspection_targets"]:
+            try:
+                normalized_targets.append(
+                    workspace.validate_inspection_target(target)
+                )
+            except CodingError as error:
+                safe_target = "".join(
+                    character if character.isprintable() else "�"
+                    for character in target
+                )[:512]
+                raise CodingError(
+                    "plan_unusable",
+                    reason_code=error.code,
+                    inspection_target=safe_target,
+                ) from error
+        return {**values, "inspection_targets": normalized_targets}
 
     def _complete(
         self, instruction: str, material: Mapping[str, Any], affinity: str,

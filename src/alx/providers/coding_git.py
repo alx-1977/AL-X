@@ -52,7 +52,7 @@ from alx.contracts.coding import (
     CodingCommit,
     CodingError,
     GitWorkspaceState,
-    lexical_worktree_path,
+    lexical_repository_path,
     path_matches_blocked,
 )
 
@@ -643,7 +643,7 @@ def _authorised_deletions(
     reported_deleted = deleted_paths(root)
     authorised: list[str] = []
     for item in deleted:
-        lexical = lexical_worktree_path(item)
+        lexical = lexical_repository_path(item)
         if not lexical:
             raise CodingError("git_refused", reason_code="path_is_worktree_root")
         if path_matches_blocked(lexical, blocked_paths):
@@ -706,7 +706,7 @@ def _authorised_paths(
     inherited = {item for item in inherited_dirty}
     authorised: list[str] = []
     for item in files:
-        lexical = lexical_worktree_path(item)
+        lexical = lexical_repository_path(item)
         if not lexical:
             raise CodingError("git_refused", reason_code="path_is_worktree_root")
         if path_matches_blocked(lexical, blocked_paths):
@@ -717,7 +717,7 @@ def _authorised_paths(
         try:
             resolved.relative_to(root)
         except ValueError as error:
-            raise CodingError("path_outside_worktree") from error
+            raise CodingError("path_outside_repository", path=item) from error
         # One concrete regular file, checked before resolution follows a link.
         # A directory, a symlink, a device or a missing path each has no single
         # correct answer about what should be committed, so each is refused by

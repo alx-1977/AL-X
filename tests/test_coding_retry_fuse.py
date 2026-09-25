@@ -19,6 +19,7 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.contracts.coding import CodingError, CodingRequest  # noqa: E402
 from alx.core import CoreAgent  # noqa: E402
+from alx.conversation import ConversationGateway, SQLiteConversationStore  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.providers.coding_agent import CodingAgent  # noqa: E402
 from alx.providers.coding_git import coding_job_lock  # noqa: E402
@@ -100,7 +101,8 @@ class CodingRetryFuseTests(unittest.TestCase):
             def __init__(self):
                 self.decisions = [
                     AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."}), goal_id="goal-a"),
-                    AgentDecision(call=CapabilityCall("same", "run_coding_task", {"task": "first", "worktree": "."}), goal_id="goal-a"),
+                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."}), goal_id="goal-a"),
+                    AgentDecision(response="The coding path is exhausted.", goal_id="goal-a"),
                 ]
             def decide(self, context):
                 return self.decisions.pop(0)
@@ -122,8 +124,8 @@ class CodingRetryFuseTests(unittest.TestCase):
             reworded_outcome = reworded.process(conversation, retention, 1)
             refusals = [item for item in store.load("goal-a").state.attempts if item.reason_code == "coding_retry_exhausted"]
             self.assertEqual(len(refusals), 1)
-            self.assertEqual(outcome.reason, "coding_retry_exhausted")
-            self.assertEqual(reworded_outcome.reason, "coding_retry_exhausted")
+            self.assertEqual(outcome.response, "The coding path is exhausted.")
+            self.assertEqual(reworded_outcome.reason, "budget_exhausted")
 
 
 def git(repository: Path, *argv: str) -> str:
@@ -267,9 +269,11 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
             [item["reason_code"] for item in refused],
             ["canonical_checkout_not_on_main"] * 2,
         )
-        # The third job reached implementation, and it alone is counted.
+        # The third job reached planning and failed there, so neither allowance
+        # is spent as if a coding session had run.
         self.assertEqual(self.model.calls, 1)
-        self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 1)
+        self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 0)
+        self.assertEqual(CoreAgent._planning_coding_failures(state(*attempts)), 1)
 
     def test_an_implementation_reaching_failure_still_counts(self) -> None:
         reached = attempt("reached", failure_code="provider_failed")
@@ -371,9 +375,15 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
                     "conversation", "t", ConversationOrigin.TYPED, "continue", now, "friedl"
                 ),
             ), 1, retention)
-            agent.process(conversation, retention, len(calls) + 2)
+            self.last_outcome = agent.process(conversation, retention, len(calls) + 2)
             final = store.load("goal-a").state.attempts
-        refused = [item for item in final if item.reason_code == "coding_retry_exhausted"]
+        refused = [
+            item for item in final
+            if item.reason_code in {
+                "coding_retry_exhausted",
+                "coding_planning_exhausted",
+            }
+        ]
         return dispatched, refused
 
     def test_the_classes_are_counted_apart(self) -> None:
@@ -389,6 +399,8 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         )
         self.assertEqual(dispatched, [])
         self.assertEqual(len(refused), 1)
+        self.assertEqual(refused[0].reason_code, "coding_retry_exhausted")
+        self.assertEqual(self.last_outcome.response, "done")
 
     def test_refusals_before_implementation_spend_nothing(self) -> None:
         dispatched, refused = self.process(
@@ -400,7 +412,7 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
     def test_a_request_conflict_can_be_corrected_and_dispatched_again(self) -> None:
         """The acceptance run of 2026-09-24, replayed.
 
-        Planning failed (a genuine failure), then an edit to a governed document
+        Planning failed before implementation, then an edit to a governed document
         could not be verified because the request blocked the gate's script.
         Core changed the plan; that third job must dispatch.
         """
@@ -411,6 +423,94 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         self.assertEqual(dispatched, ["corrected"])
         self.assertEqual(refused, [])
 
+    def test_planning_and_implementation_allowances_are_independent(self) -> None:
+        planning = attempt("plan", failure_code="planning_failed")
+        goal = state(attempt("implementation"), planning)
+        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
+        self.assertEqual(CoreAgent._planning_coding_failures(goal), 1)
+        dispatched, refused = self.process(
+            [attempt("implementation"), planning], ["next-implementation"]
+        )
+        self.assertEqual(dispatched, ["next-implementation"])
+        self.assertEqual(refused, [])
+
+    def test_two_planning_jobs_exhaust_only_the_planning_allowance(self) -> None:
+        planning = [
+            attempt("plan-1", failure_code="planning_failed"),
+            attempt("plan-2", failure_code="planning_failed"),
+        ]
+        dispatched, refused = self.process(planning, ["reworded-plan"])
+        self.assertEqual(dispatched, [])
+        self.assertEqual(
+            [item.reason_code for item in refused],
+            ["coding_planning_exhausted"],
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(state(*planning)), 0)
+        self.assertEqual(self.last_outcome.state.value, "responded")
+        self.assertEqual(self.last_outcome.response, "done")
+
+    def test_gateway_delivers_the_answer_after_planning_exhaustion(self) -> None:
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        retention = now + timedelta(days=1)
+
+        class Reasoner:
+            def __init__(self) -> None:
+                self.decisions = [
+                    AgentDecision(
+                        call=CapabilityCall(
+                            "reworded", "run_coding_task", {"task": "try again"}
+                        ),
+                        goal_id="goal-a",
+                    ),
+                    AgentDecision(
+                        response="The coding planner is bounded; I can still help.",
+                        goal_id="goal-a",
+                    ),
+                ]
+
+            def decide(self, context):
+                return self.decisions.pop(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            goals = SQLiteGoalStore(root / "goals.sqlite3")
+            conversations = SQLiteConversationStore(root / "conversations.sqlite3")
+            self.addCleanup(goals.close)
+            self.addCleanup(conversations.close)
+            goals.create(
+                state(
+                    attempt("plan-1", failure_code="planning_failed"),
+                    attempt("plan-2", failure_code="planning_failed"),
+                ),
+                "conversation",
+                retention,
+            )
+            schema = StructuredSchema(ValueKind.OBJECT)
+            capability = CapabilityDefinition(
+                "run_coding_task", "bounded job", schema, schema,
+                SideEffect.EFFECTFUL,
+            )
+            core = CoreAgent(
+                goals, Reasoner(), lambda *_: self.fail("must not dispatch"),
+                (capability,), clock=lambda: now,
+            )
+            gateway = ConversationGateway(
+                core, conversations, identifier_factory=lambda: "alx-response",
+                clock=lambda: now,
+            )
+            outcome = gateway.receive_conversation_turn(
+                ConversationTurn(
+                    "conversation", "person-turn", ConversationOrigin.TYPED,
+                    "Continue", now, "friedl",
+                ),
+                3,
+                retention,
+            )
+            persisted = conversations.load("conversation")
+
+        self.assertEqual(outcome.response, "The coding planner is bounded; I can still help.")
+        self.assertEqual(persisted.turns[-1].content, outcome.response)
+
     def test_repeated_request_conflicts_cannot_loop(self) -> None:
         # Two conflicts reach the bound whatever the wording of the next plan,
         # and the refusal is recorded once, however often Core asks again.
@@ -419,6 +519,10 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         )
         self.assertEqual(dispatched, [])
         self.assertEqual(len(refused), 1)
+        self.assertEqual(
+            refused[0].reason_code, "coding_retry_exhausted"
+        )
+        self.assertEqual(self.last_outcome.response, "done")
 
     def test_each_bound_refuses_on_its_own(self) -> None:
         dispatched, _ = self.process([conflict("c1"), attempt("i1")], ["next"])
@@ -428,6 +532,7 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         )
         self.assertEqual(dispatched, [])
         self.assertEqual(len(refused), 1)
+        self.assertEqual(self.last_outcome.response, "done")
 
     def test_an_error_carrying_a_class_reaches_core_without_it(self) -> None:
         """Only the Coding Agent's own verification records assign the class.
@@ -464,10 +569,12 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
     def test_the_bounds(self) -> None:
         from alx.core.loop import (
             _MAX_FAILED_CODING_EXECUTIONS,
+            _MAX_PLANNING_CODING_FAILURES,
             _MAX_REQUEST_CONFLICT_CODING_EXECUTIONS,
         )
 
         self.assertEqual(_MAX_FAILED_CODING_EXECUTIONS, 2)
+        self.assertEqual(_MAX_PLANNING_CODING_FAILURES, 2)
         self.assertEqual(_MAX_REQUEST_CONFLICT_CODING_EXECUTIONS, 2)
 
 
