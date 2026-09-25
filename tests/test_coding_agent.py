@@ -517,6 +517,28 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "path_outside_repository")
             self.assertEqual(caught.exception.details["path"], target)
 
+    def test_planner_rejects_nul_paths_as_repository_path_errors(self) -> None:
+        worktree = _worktree(self.root)
+        target = str(worktree / "invalid\x00target.py")
+        workspace = CodingWorkspace(str(worktree))
+
+        with self.assertRaises(CodingError) as caught:
+            workspace.validate_inspection_target(target)
+
+        self.assertEqual(caught.exception.code, "path_outside_repository")
+        self.assertEqual(caught.exception.details["path"], target)
+
+        model = PlanningModel(plan=_plan(inspection_targets=[target]))
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(model, session, task="fix add", worktree=str(worktree))
+        self.assertEqual(len(model.requests), 3)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(attempt.result.failure["code"], "planning_failed")
+        self.assertEqual(
+            attempt.result.failure["reason_code"], "path_outside_repository"
+        )
+        self.assertNotIn("\x00", attempt.result.failure["inspection_target"])
+
     def test_rejected_target_reaches_retry_feedback_and_durable_failure(self) -> None:
         target = "/tmp/outside.py"
         model = PlanningModel(plan=_plan(inspection_targets=[target]))

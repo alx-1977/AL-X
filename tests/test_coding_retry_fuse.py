@@ -34,6 +34,25 @@ def attempt(call_id: str, *, failed=True, invoked=True, disposition=CapabilityAt
     return CapabilityAttempt(call, disposition, invoked, result, "executor_error" if disposition is CapabilityAttemptDisposition.BROKER_FAILURE else None)
 
 
+def planning_failure(call_id: str):
+    call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+    result = CapabilityResult(
+        call_id,
+        "run_coding_task",
+        CapabilityResultState.FAILED,
+        failure={
+            "code": "planning_failed",
+            "phase": "planning",
+            "planning_attempts": 3,
+            "structured_output_received": True,
+            "parsing_succeeded": True,
+            "validation_succeeded": False,
+            "implementation_reached": False,
+        },
+    )
+    return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+
+
 def state(*attempts):
     return GoalState("goal-a", Objective("turn:t", "bounded work"), (SuccessCriterion("c", "done"),), attempts=attempts)
 
@@ -269,11 +288,11 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
             [item["reason_code"] for item in refused],
             ["canonical_checkout_not_on_main"] * 2,
         )
-        # The third job reached planning and failed there, so neither allowance
-        # is spent as if a coding session had run.
+        # The third job reached the planning provider and failed before a plan
+        # reached deterministic validation, so neither allowance is spent.
         self.assertEqual(self.model.calls, 1)
         self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 0)
-        self.assertEqual(CoreAgent._planning_coding_failures(state(*attempts)), 1)
+        self.assertEqual(CoreAgent._planning_coding_failures(state(*attempts)), 0)
 
     def test_an_implementation_reaching_failure_still_counts(self) -> None:
         reached = attempt("reached", failure_code="provider_failed")
@@ -417,14 +436,14 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         Core changed the plan; that third job must dispatch.
         """
         dispatched, refused = self.process(
-            [attempt("plan", failure_code="planning_failed"), conflict("gate-blocked")],
+            [planning_failure("plan"), conflict("gate-blocked")],
             ["corrected"],
         )
         self.assertEqual(dispatched, ["corrected"])
         self.assertEqual(refused, [])
 
     def test_planning_and_implementation_allowances_are_independent(self) -> None:
-        planning = attempt("plan", failure_code="planning_failed")
+        planning = planning_failure("plan")
         goal = state(attempt("implementation"), planning)
         self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
         self.assertEqual(CoreAgent._planning_coding_failures(goal), 1)
@@ -434,10 +453,40 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         self.assertEqual(dispatched, ["next-implementation"])
         self.assertEqual(refused, [])
 
+    def test_nonvalidation_planning_errors_do_not_consume_the_allowance(self) -> None:
+        failures = []
+        for call_id, code in (
+            ("provider", "provider_failed"),
+            ("transport", "transport_failed"),
+            ("parsing", "plan_parse_failed"),
+            ("persistence", "persistence_failed"),
+        ):
+            call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+            result = CapabilityResult(
+                call_id,
+                "run_coding_task",
+                CapabilityResultState.FAILED,
+                failure={
+                    "code": code,
+                    "phase": "planning",
+                    "implementation_reached": False,
+                },
+            )
+            failures.append(
+                CapabilityAttempt(
+                    call, CapabilityAttemptDisposition.EXECUTED, True, result
+                )
+            )
+
+        self.assertEqual(CoreAgent._planning_coding_failures(state(*failures)), 0)
+        dispatched, refused = self.process(failures, ["next-plan"])
+        self.assertEqual(dispatched, ["next-plan"])
+        self.assertEqual(refused, [])
+
     def test_two_planning_jobs_exhaust_only_the_planning_allowance(self) -> None:
         planning = [
-            attempt("plan-1", failure_code="planning_failed"),
-            attempt("plan-2", failure_code="planning_failed"),
+            planning_failure("plan-1"),
+            planning_failure("plan-2"),
         ]
         dispatched, refused = self.process(planning, ["reworded-plan"])
         self.assertEqual(dispatched, [])
@@ -479,8 +528,8 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
             self.addCleanup(conversations.close)
             goals.create(
                 state(
-                    attempt("plan-1", failure_code="planning_failed"),
-                    attempt("plan-2", failure_code="planning_failed"),
+                    planning_failure("plan-1"),
+                    planning_failure("plan-2"),
                 ),
                 "conversation",
                 retention,

@@ -2085,7 +2085,8 @@ When Core sets `continue_goal_branch`, deterministic code may start a job on the
 
 - **Date:** 2026-09-25
 - **Decision owner:** Friedl
-- **Status: PROPOSED — implementation prepared; awaiting Friedl approval.**
+- **Status: APPROVED by Friedl, 2026-09-25.** Approved with the planning-failure
+  allowance and Core-recovery implementation for PR #64.
 
 A Coding Agent job that exhausts its three internal planning attempts without
 starting an implementation session is a planning failure, not an implementation

@@ -1924,7 +1924,7 @@ class CoreAgent:
 
     @staticmethod
     def _planning_coding_failures(state: GoalState) -> int:
-        """Count failed jobs that ended before an implementation session."""
+        """Count jobs classified as exhausted deterministic plan validation."""
         return sum(
             1
             for item in state.attempts
@@ -1933,10 +1933,7 @@ class CoreAgent:
             and item.implementation_invoked is True
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
-            and (
-                (item.result.failure or {}).get("code") == "planning_failed"
-                or (item.result.failure or {}).get("phase") == "planning"
-            )
+            and (item.result.failure or {}).get("code") == "planning_failed"
         )
 
     @classmethod

@@ -190,6 +190,8 @@ class CodingWorkspace:
     def validate_inspection_target(self, relative: str) -> str:
         """Validate a plan's proposed inspection path without reading it."""
         original = relative
+        if isinstance(relative, str) and "\x00" in relative:
+            raise CodingError("path_outside_repository", path=original)
         if isinstance(relative, str) and Path(relative).is_absolute():
             resolved = Path(relative).resolve()
             try:

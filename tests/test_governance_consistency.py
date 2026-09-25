@@ -48,6 +48,14 @@ class ConsistencyGateTests(unittest.TestCase):
     def test_the_unmodified_repository_passes(self) -> None:
         self.assertEqual(self.violations(), [])
 
+    def test_planning_failure_amendment_records_friedls_approval(self) -> None:
+        decisions = (REPOSITORY_ROOT / "governance/DECISIONS.md").read_text(
+            encoding="utf-8"
+        )
+        heading = "### Amendment — planning failures and Core recovery"
+        amendment = decisions.split(heading, 1)[1].split("\n### ", 1)[0]
+        self.assertIn("Status: APPROVED by Friedl, 2026-09-25.", amendment)
+
     def test_a_gate_for_a_law_that_does_not_exist_is_rejected(self) -> None:
         """The exact contradiction the rewrite left behind."""
         self.rewrite(
