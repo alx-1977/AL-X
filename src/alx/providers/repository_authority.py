@@ -694,6 +694,7 @@ class RepositoryAuthority:
             detached=branch == "",
             head_sha=head_sha,
             clean=values["clean"],
+            entries=tuple(values["entries"]),
         )
 
     # ---- the one entry point --------------------------------------------
@@ -745,6 +746,26 @@ class RepositoryAuthority:
 
         if operation in GITHUB_OPERATIONS:
             return self._perform_on_github(operation, arguments)
+
+        # One checkout read. Falling through to `_argv` would run porcelain
+        # again and derive branch, HEAD and cleanliness from a second copy.
+        if operation is Operation.STATUS:
+            try:
+                checkout = self.read_checkout_status()
+            except RepositoryAuthorityError as error:
+                return RepositoryOutcome(
+                    repository=self._system.repository,
+                    operation=operation,
+                    succeeded=False,
+                    failure_code=error.code,
+                    refusal_reason=error.detail,
+                )
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=True,
+                values={**checkout.as_values(), "entries": checkout.entries},
+            )
 
         command = self._argv(operation, arguments)
 

@@ -676,6 +676,20 @@ class CapabilityExecutorTests(RealRepositoryHarness):
         self.assertEqual(result.failure["code"], "self_preservation")
         self.assertTrue(result.values["refusal_reason"])
 
+    def test_status_carries_the_checkout_read(self) -> None:
+        """Branch, detachment, HEAD, cleanliness and entries, from one read."""
+        (self.local / "dirty.txt").write_text("x\n")
+        checkout = self.authority.read_checkout_status()
+        result = self.executor()({"operation": "status", "arguments": {}})
+        values = result.values
+        self.assertEqual(values["branch"], checkout.branch)
+        self.assertEqual(values["detached"], checkout.detached)
+        self.assertEqual(values["head_sha"], checkout.head_sha)
+        self.assertEqual(values["clean"], checkout.clean)
+        self.assertEqual(tuple(values["entries"]), checkout.entries)
+        self.assertFalse(values["clean"])
+        self.assertTrue(values["entries"])
+
 
 class PathContainmentTests(RealRepositoryHarness):
     """Staging names files inside the checkout, and cannot sweep or escape."""
@@ -1360,6 +1374,38 @@ class CapabilityContractTests(unittest.TestCase):
         self.assertIn("`title` (the pull request title)", described)
         self.assertNotIn("`title` (the pull request title) [optional]", described)
 
+    def test_status_declares_branch_detachment_head_cleanliness_and_entries(self) -> None:
+        """The status result is the checkout record plus its porcelain tokens.
+
+        `branch`, `detached`, `head_sha` and `clean` are the checkout facts.
+        `entries` is the nul-separated porcelain tuple from that same read.
+        They travel in the operation's values. The shared result schema covers
+        every operation, so these stay out of its required properties.
+        """
+        declared = ("branch", "detached", "head_sha", "clean", "entries")
+        self.assertEqual(
+            tuple(RepositoryCheckoutStatus.__dataclass_fields__), declared
+        )
+        record = RepositoryCheckoutStatus(
+            branch="main",
+            detached=False,
+            head_sha="a" * 40,
+            clean=False,
+            entries=("?? dirty.txt",),
+        )
+        values = {**record.as_values(), "entries": record.entries}
+        self.assertEqual(tuple(values), declared)
+        self.assertEqual(
+            set(record.as_values()),
+            {"branch", "detached", "head_sha", "clean"},
+        )
+        self.assertEqual(
+            DEFINITION.output_schema.required,
+            ("repository", "operation", "succeeded"),
+        )
+        for name in declared:
+            self.assertNotIn(name, DEFINITION.output_schema.required)
+
 
 class PullRequestArgumentShapeTests(RealRepositoryHarness):
     """The shapes AL/X actually tried, through the shipped capability."""
@@ -1509,6 +1555,35 @@ class CheckoutStatusTests(RealRepositoryHarness):
         self.assertEqual(set(seen), self._READS)
         self.assertEqual(len(seen), len(self._READS))
 
+    def _porcelain_entries(self) -> tuple[str, ...]:
+        raw = self._git("status", "--porcelain=v1", "-z", "-uall").stdout
+        return tuple(item for item in raw.split("\x00") if item)
+
+    def _perform_status(self) -> dict:
+        """One status operation, watched, and shown to leave the checkout as it was."""
+        before = self._snapshot()
+        checkout = self.authority.read_checkout_status()
+        entries = self._porcelain_entries()
+        seen = self._watch()
+        outcome = self.perform(Operation.STATUS)
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(outcome.operation, Operation.STATUS)
+        self.assertEqual(outcome.source_ref, "")
+        self.assertEqual(outcome.source_sha, "")
+        self.assertEqual(outcome.remote, "")
+        values = dict(outcome.values)
+        self.assertEqual(
+            [values[name] for name in ("branch", "detached", "head_sha", "clean")],
+            [checkout.branch, checkout.detached, checkout.head_sha, checkout.clean],
+        )
+        self.assertEqual(values["entries"], checkout.entries)
+        self.assertEqual(values["entries"], entries)
+        self.assertIsInstance(values["entries"], tuple)
+        self.assertEqual(values["clean"], entries == ())
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
+        return values
+
     def test_a_clean_main_checkout_names_its_branch_and_commit(self) -> None:
         before = self._snapshot()
         seen = self._watch()
@@ -1555,6 +1630,36 @@ class CheckoutStatusTests(RealRepositoryHarness):
         self.assertEqual(before[1], "")
         self._assert_only_those_reads(seen)
         self.assertEqual(self._snapshot(), before)
+
+    def test_status_on_a_clean_branch_names_that_branch_and_commit(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        values = self._perform_status()
+        self.assertEqual(values["branch"], "main")
+        self.assertFalse(values["detached"])
+        self.assertEqual(values["head_sha"], head)
+        self.assertTrue(values["clean"])
+        self.assertEqual(values["entries"], ())
+
+    def test_status_on_a_dirty_tree_keeps_the_porcelain_entries(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        (self.local / "seed.txt").write_text("changed\n")
+        (self.local / "extra.txt").write_text("extra\n")
+        values = self._perform_status()
+        self.assertEqual(values["branch"], "main")
+        self.assertFalse(values["detached"])
+        self.assertEqual(values["head_sha"], head)
+        self.assertFalse(values["clean"])
+        self.assertGreaterEqual(len(values["entries"]), 2)
+
+    def test_status_on_a_detached_head_names_no_branch(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        git(self.local, "checkout", "--detach")
+        values = self._perform_status()
+        self.assertEqual(values["branch"], "")
+        self.assertTrue(values["detached"])
+        self.assertEqual(values["head_sha"], head)
+        self.assertTrue(values["clean"])
+        self.assertEqual(values["entries"], ())
 
 
 if __name__ == "__main__":

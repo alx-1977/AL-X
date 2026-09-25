@@ -299,13 +299,16 @@ class RepositoryCheckoutStatus:
     so `branch` is empty and `detached` is true — the same indication a
     rewrite already uses when there is no branch to protect. `head_sha` is
     the full commit HEAD resolves to. `clean` is the absence of any status
-    entry, including an untracked file.
+    entry, including an untracked file. `entries` is that porcelain, kept as
+    the nul-separated tokens the status operation already returns. It travels
+    beside `as_values()`: those four facts are the checkout record.
     """
 
     branch: str
     detached: bool
     head_sha: str
     clean: bool
+    entries: tuple[str, ...] = ()
 
     def as_values(self) -> dict[str, Any]:
         """The four facts, flat enough to log and read back."""
