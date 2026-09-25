@@ -87,7 +87,7 @@ CODING_FAILURES = (
     "arguments_unusable",
     "coding_unavailable",
     "worktree_unusable",
-    "path_outside_worktree",
+    "path_outside_repository",
     "path_not_permitted",
     "file_too_large",
     "command_not_permitted",
@@ -196,26 +196,26 @@ def job_id_permitted(job_id: str) -> bool:
     return True
 
 
-def lexical_worktree_path(relative: str) -> str:
-    """Collapse . and .. without leaving the worktree. Absolute paths refuse.
+def lexical_repository_path(relative: str) -> str:
+    """Collapse . and .. without leaving the repository. Absolute paths refuse.
 
     Purely lexical, so it is safe before a path exists and shared by the
     workspace bound and the sandbox-profile generator.
     """
     if not isinstance(relative, str) or not relative.strip():
-        raise CodingError("path_outside_worktree")
+        raise CodingError("path_outside_repository", path=relative)
     if "\x00" in relative:
-        raise CodingError("path_outside_worktree")
+        raise CodingError("path_outside_repository", path=relative)
     path = PurePosixPath(relative.replace("\\", "/"))
     if path.is_absolute():
-        raise CodingError("path_outside_worktree")
+        raise CodingError("path_outside_repository", path=relative)
     parts: list[str] = []
     for part in path.parts:
         if part in ("", "."):
             continue
         if part == "..":
             if not parts:
-                raise CodingError("path_outside_worktree")
+                raise CodingError("path_outside_repository", path=relative)
             parts.pop()
             continue
         parts.append(part)
@@ -684,6 +684,6 @@ __all__ = [
     "MAX_BLOCKED_PATH_CHARACTERS",
     "MAX_JOB_ID_CHARACTERS",
     "job_id_permitted",
-    "lexical_worktree_path",
+    "lexical_repository_path",
     "path_matches_blocked",
 ]

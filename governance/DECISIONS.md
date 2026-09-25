@@ -2080,3 +2080,25 @@ D-033 constraints remain unchanged.
   development-goal branch continuation implementation plan.
 
 When Core sets `continue_goal_branch`, deterministic code may start a job on the currently checked-out branch instead of clean `main`, only if (a) that branch is the one this active goal's own most recent successful Coding Agent commit landed on, as recorded in the durable goal, (b) HEAD is a commit this goal's Coding Agent jobs recorded on it, and (c) the checkout is clean. The Coding Agent gains no git command; it never switches branches. AL/X positions the checkout with her D-032 authority. Refusals occur before implementation and don't count toward D-030's allowance or the request-conflict bound. The D-030 allowance stays per goal and is shared across that goal's jobs. All other D-028, D-029, D-030 and D-033 constraints are unchanged.
+
+### Amendment — planning failures and Core recovery
+
+- **Date:** 2026-09-25
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-25.** Approved with the planning-failure
+  allowance and Core-recovery implementation for PR #64.
+
+A Coding Agent job that exhausts its three internal planning attempts without
+starting an implementation session is a planning failure, not an implementation
+failure. Planning failures do not consume D-030's implementation allowance or
+the request-conflict allowance. They have a separate fixed bound of two failed
+planning jobs per durable goal, derived from that goal's recorded
+`run_coding_task` attempts and refused before another planning-model invocation.
+Rewording, restart, branch changes, and successful planning do not reset or
+consume this bound.
+
+A refusal at any Coding Agent bound is durable structured capability evidence
+returned to Core; it does not terminate the Core turn or conversation. Core may
+reason again and choose another safe action or explain the blocker. All existing
+implementation, request-conflict, checkout-precondition, approval, and Git
+authority constraints remain unchanged.

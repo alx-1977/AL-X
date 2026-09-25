@@ -25,7 +25,7 @@ from __future__ import annotations
 import subprocess  # noqa: S404 - reads git metadata locations, never model input
 from pathlib import Path
 
-from alx.contracts.coding import CodingError, lexical_worktree_path
+from alx.contracts.coding import CodingError, lexical_repository_path
 
 
 PROFILE_NAME = "alx_coding_job"
@@ -126,7 +126,7 @@ def deny_entries(
             raise CodingError(
                 "sandbox_unusable", reason_code="blocked_path_not_expressible"
             )
-        lexical = lexical_worktree_path(item)
+        lexical = lexical_repository_path(item)
         if not lexical:
             raise CodingError(
                 "sandbox_unusable", reason_code="blocked_path_is_worktree_root"

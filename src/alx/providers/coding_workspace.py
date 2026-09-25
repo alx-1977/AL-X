@@ -20,7 +20,7 @@ from pathlib import Path
 from alx.contracts.coding import (
     MAX_REPORTED_FILES,
     CodingError,
-    lexical_worktree_path,
+    lexical_repository_path,
     path_matches_blocked,
 )
 
@@ -112,14 +112,14 @@ class CodingWorkspace:
         names: list[str] = []
         seen: set[str] = set()
         for item in blocked_paths:
-            lexical = lexical_worktree_path(item)
+            lexical = lexical_repository_path(item)
             keys = {lexical}
             candidate = self.root.joinpath(*lexical.split("/")) if lexical else self.root
             resolved = candidate.resolve()
             try:
                 resolved_relative = resolved.relative_to(self.root).as_posix()
             except ValueError as error:
-                raise CodingError("path_outside_worktree") from error
+                raise CodingError("path_outside_repository", path=item) from error
             if resolved_relative != ".":
                 keys.add(resolved_relative)
             for key in keys:
@@ -131,13 +131,13 @@ class CodingWorkspace:
 
     def resolve(self, relative: str) -> Path:
         """Return a child of the worktree, or refuse."""
-        lexical = lexical_worktree_path(relative)
+        lexical = lexical_repository_path(relative)
         candidate = self.root.joinpath(*lexical.split("/")) if lexical else self.root
         resolved = candidate.resolve()
         try:
             resolved.relative_to(self.root)
         except ValueError as error:
-            raise CodingError("path_outside_worktree") from error
+            raise CodingError("path_outside_repository", path=relative) from error
         return resolved
 
     def relative_of(self, path: Path) -> str:
@@ -156,7 +156,7 @@ class CodingWorkspace:
         return any(self._blocked_name(part) for part in Path(relative).parts)
 
     def _scope_blocked(self, relative: str, resolved: Path) -> bool:
-        lexical = lexical_worktree_path(relative)
+        lexical = lexical_repository_path(relative)
         resolved_relative = self.relative_of(resolved)
         return path_matches_blocked(
             lexical, self.blocked_paths
@@ -171,7 +171,7 @@ class CodingWorkspace:
         path = self.resolve(requested)
         self._refuse_if_blocked(requested, path)
         if not path.is_dir():
-            raise CodingError("path_outside_worktree")
+            raise CodingError("path_outside_repository", path=relative)
         names = []
         for child in sorted(path.iterdir()):
             try:
@@ -189,6 +189,17 @@ class CodingWorkspace:
 
     def validate_inspection_target(self, relative: str) -> str:
         """Validate a plan's proposed inspection path without reading it."""
+        original = relative
+        if isinstance(relative, str) and "\x00" in relative:
+            raise CodingError("path_outside_repository", path=original)
+        if isinstance(relative, str) and Path(relative).is_absolute():
+            resolved = Path(relative).resolve()
+            try:
+                relative = resolved.relative_to(self.root).as_posix()
+            except ValueError as error:
+                raise CodingError(
+                    "path_outside_repository", path=original
+                ) from error
         path = self.resolve(relative)
         self._refuse_if_blocked(relative, path)
         return self.relative_of(path)

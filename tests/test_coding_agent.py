@@ -480,6 +480,86 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
         self.assertEqual(session.calls, [])
         self.assertEqual(attempt.result.failure["code"], "planning_failed")
+        self.assertIs(attempt.result.failure["implementation_reached"], False)
+
+    def test_planner_paths_are_repository_relative_and_inside_absolute_is_normalized(self) -> None:
+        worktree = _worktree(self.root)
+        model = PlanningModel(plan=_plan(inspection_targets=[
+            "app.py", str(worktree / "test_app.py"),
+        ]))
+        agent = coding_agent_module.CodingAgent(
+            model, RecordingSession(), PlanningModel(), repository=worktree
+        )
+        plan = agent._plan(
+            CodingRequest(task="inspect", job_id="job-1"),
+            CodingWorkspace(str(worktree)),
+            [],
+        )
+        self.assertEqual(plan["inspection_targets"], ["app.py", "test_app.py"])
+        payload = json.loads(model.requests[0].messages[-1].content)
+        self.assertNotIn("worktree", payload)
+        self.assertIn("repository_entries", payload)
+        self.assertIn(
+            "repository-relative path", model.requests[0].messages[0].content
+        )
+
+    def test_planner_rejects_absolute_paths_outside_the_repository(self) -> None:
+        worktree = _worktree(self.root)
+        workspace = CodingWorkspace(str(worktree))
+        for target in (
+            "/usr/bin/claude",
+            str(Path.home() / "private.py"),
+            "/tmp/outside.py",
+            "/var/arbitrary/outside.py",
+        ):
+            with self.subTest(target=target), self.assertRaises(CodingError) as caught:
+                workspace.validate_inspection_target(target)
+            self.assertEqual(caught.exception.code, "path_outside_repository")
+            self.assertEqual(caught.exception.details["path"], target)
+
+    def test_planner_rejects_nul_paths_as_repository_path_errors(self) -> None:
+        worktree = _worktree(self.root)
+        target = str(worktree / "invalid\x00target.py")
+        workspace = CodingWorkspace(str(worktree))
+
+        with self.assertRaises(CodingError) as caught:
+            workspace.validate_inspection_target(target)
+
+        self.assertEqual(caught.exception.code, "path_outside_repository")
+        self.assertEqual(caught.exception.details["path"], target)
+
+        model = PlanningModel(plan=_plan(inspection_targets=[target]))
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(model, session, task="fix add", worktree=str(worktree))
+        self.assertEqual(len(model.requests), 3)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(attempt.result.failure["code"], "planning_failed")
+        self.assertEqual(
+            attempt.result.failure["reason_code"], "path_outside_repository"
+        )
+        self.assertNotIn("\x00", attempt.result.failure["inspection_target"])
+
+    def test_rejected_target_reaches_retry_feedback_and_durable_failure(self) -> None:
+        target = "/tmp/outside.py"
+        model = PlanningModel(plan=_plan(inspection_targets=[target]))
+        session = RecordingSession(edits={"app.py": _FIXED})
+        worktree = _worktree(self.root)
+        attempt = self._run(model, session, task="fix add", worktree=str(worktree))
+
+        self.assertEqual(len(model.requests), 3)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(attempt.result.failure["code"], "planning_failed")
+        self.assertEqual(attempt.result.failure["reason_code"], "path_outside_repository")
+        self.assertEqual(attempt.result.failure["inspection_target"], target)
+        second_payload = json.loads(model.requests[1].messages[-1].content)
+        self.assertIn(target, second_payload["planning_feedback"][0])
+
+    def test_production_no_longer_emits_the_worktree_path_error_name(self) -> None:
+        for path in PRODUCTION_ROOT.rglob("*.py"):
+            self.assertNotIn(
+                "path_outside_worktree", path.read_text(encoding="utf-8"),
+                path.as_posix(),
+            )
 
     def test_local_reviewer_catches_an_adjacent_unfixed_path_and_rechecks(self) -> None:
         """A plausible one-line repair is not accepted while its twin is wrong."""
