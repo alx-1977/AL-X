@@ -31,6 +31,7 @@ from alx.contracts.repository_authority import (  # noqa: E402
     Operation,
     READ_ONLY,
     RepositoryAuthorityError,
+    RepositoryCheckoutStatus,
     RepositoryRequest,
     refuse_if_self_destructive,
     valid_ref,
@@ -674,6 +675,20 @@ class CapabilityExecutorTests(RealRepositoryHarness):
         })
         self.assertEqual(result.failure["code"], "self_preservation")
         self.assertTrue(result.values["refusal_reason"])
+
+    def test_status_carries_the_checkout_read(self) -> None:
+        """Branch, detachment, HEAD, cleanliness and entries, from one read."""
+        (self.local / "dirty.txt").write_text("x\n")
+        checkout = self.authority.read_checkout_status()
+        result = self.executor()({"operation": "status", "arguments": {}})
+        values = result.values
+        self.assertEqual(values["branch"], checkout.branch)
+        self.assertEqual(values["detached"], checkout.detached)
+        self.assertEqual(values["head_sha"], checkout.head_sha)
+        self.assertEqual(values["clean"], checkout.clean)
+        self.assertEqual(tuple(values["entries"]), checkout.entries)
+        self.assertFalse(values["clean"])
+        self.assertTrue(values["entries"])
 
 
 class PathContainmentTests(RealRepositoryHarness):
@@ -1359,6 +1374,38 @@ class CapabilityContractTests(unittest.TestCase):
         self.assertIn("`title` (the pull request title)", described)
         self.assertNotIn("`title` (the pull request title) [optional]", described)
 
+    def test_status_declares_branch_detachment_head_cleanliness_and_entries(self) -> None:
+        """The status result is the checkout record plus its porcelain tokens.
+
+        `branch`, `detached`, `head_sha` and `clean` are the checkout facts.
+        `entries` is the nul-separated porcelain tuple from that same read.
+        They travel in the operation's values. The shared result schema covers
+        every operation, so these stay out of its required properties.
+        """
+        declared = ("branch", "detached", "head_sha", "clean", "entries")
+        self.assertEqual(
+            tuple(RepositoryCheckoutStatus.__dataclass_fields__), declared
+        )
+        record = RepositoryCheckoutStatus(
+            branch="main",
+            detached=False,
+            head_sha="a" * 40,
+            clean=False,
+            entries=("?? dirty.txt",),
+        )
+        values = {**record.as_values(), "entries": record.entries}
+        self.assertEqual(tuple(values), declared)
+        self.assertEqual(
+            set(record.as_values()),
+            {"branch", "detached", "head_sha", "clean"},
+        )
+        self.assertEqual(
+            DEFINITION.output_schema.required,
+            ("repository", "operation", "succeeded"),
+        )
+        for name in declared:
+            self.assertNotIn(name, DEFINITION.output_schema.required)
+
 
 class PullRequestArgumentShapeTests(RealRepositoryHarness):
     """The shapes AL/X actually tried, through the shipped capability."""
@@ -1462,6 +1509,157 @@ class PullRequestArgumentShapeTests(RealRepositoryHarness):
             Operation.DIFF, {"base": "main", "head": "fix/thing"}
         )
         self.assertEqual(arguments, {"base": "main", "head": "fix/thing"})
+
+
+class CheckoutStatusTests(RealRepositoryHarness):
+    """The configured checkout, read without changing HEAD, the branch or the tree."""
+
+    _READS = {
+        ("git", "symbolic-ref", "--quiet", "--short", "HEAD"),
+        ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+        ("git", "status", "--porcelain=v1", "-z", "-uall"),
+    }
+
+    def _git(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=str(self.local),
+            env=_fixture_environment(),
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def _snapshot(self) -> tuple[str, str, str]:
+        """HEAD, the branch ref, and porcelain, so a read can be shown to change none."""
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        reference = self._git("symbolic-ref", "HEAD", check=False)
+        branch_ref = reference.stdout.strip() if reference.returncode == 0 else ""
+        porcelain = self._git("status", "--porcelain").stdout
+        return head, branch_ref, porcelain
+
+    def _watch(self) -> list[tuple[str, ...]]:
+        seen: list[tuple[str, ...]] = []
+        original = self.authority._runner
+
+        def runner(command, *args, **kwargs):
+            argv = tuple(command)
+            self.assertIn(argv, self._READS)
+            seen.append(argv)
+            return original(command, *args, **kwargs)
+
+        self.authority._runner = runner
+        return seen
+
+    def _assert_only_those_reads(self, seen: list[tuple[str, ...]]) -> None:
+        self.assertEqual(set(seen), self._READS)
+        self.assertEqual(len(seen), len(self._READS))
+
+    def _porcelain_entries(self) -> tuple[str, ...]:
+        raw = self._git("status", "--porcelain=v1", "-z", "-uall").stdout
+        return tuple(item for item in raw.split("\x00") if item)
+
+    def _perform_status(self) -> dict:
+        """One status operation, watched, and shown to leave the checkout as it was."""
+        before = self._snapshot()
+        checkout = self.authority.read_checkout_status()
+        entries = self._porcelain_entries()
+        seen = self._watch()
+        outcome = self.perform(Operation.STATUS)
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(outcome.operation, Operation.STATUS)
+        self.assertEqual(outcome.source_ref, "")
+        self.assertEqual(outcome.source_sha, "")
+        self.assertEqual(outcome.remote, "")
+        values = dict(outcome.values)
+        self.assertEqual(
+            [values[name] for name in ("branch", "detached", "head_sha", "clean")],
+            [checkout.branch, checkout.detached, checkout.head_sha, checkout.clean],
+        )
+        self.assertEqual(values["entries"], checkout.entries)
+        self.assertEqual(values["entries"], entries)
+        self.assertIsInstance(values["entries"], tuple)
+        self.assertEqual(values["clean"], entries == ())
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
+        return values
+
+    def test_a_clean_main_checkout_names_its_branch_and_commit(self) -> None:
+        before = self._snapshot()
+        seen = self._watch()
+        status = self.authority.read_checkout_status()
+        head = git(self.local, "rev-parse", "HEAD")
+        self.assertIsInstance(status, RepositoryCheckoutStatus)
+        self.assertEqual(status.branch, "main")
+        self.assertFalse(status.detached)
+        self.assertEqual(status.head_sha, head)
+        self.assertTrue(status.clean)
+        self.assertEqual(status.as_values(), {
+            "branch": "main",
+            "detached": False,
+            "head_sha": head,
+            "clean": True,
+        })
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_a_dirty_tree_is_unclean_at_the_same_commit(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        (self.local / "seed.txt").write_text("changed\n")
+        before = self._snapshot()
+        seen = self._watch()
+        status = self.authority.read_checkout_status()
+        self.assertEqual(status.branch, "main")
+        self.assertFalse(status.detached)
+        self.assertEqual(status.head_sha, head)
+        self.assertFalse(status.clean)
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_a_detached_head_names_no_branch(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        git(self.local, "checkout", "--detach")
+        before = self._snapshot()
+        seen = self._watch()
+        status = self.authority.read_checkout_status()
+        self.assertTrue(status.detached)
+        self.assertEqual(status.branch, "")
+        self.assertEqual(status.head_sha, head)
+        self.assertTrue(status.clean)
+        self.assertEqual(before[0], head)
+        self.assertEqual(before[1], "")
+        self._assert_only_those_reads(seen)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_status_on_a_clean_branch_names_that_branch_and_commit(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        values = self._perform_status()
+        self.assertEqual(values["branch"], "main")
+        self.assertFalse(values["detached"])
+        self.assertEqual(values["head_sha"], head)
+        self.assertTrue(values["clean"])
+        self.assertEqual(values["entries"], ())
+
+    def test_status_on_a_dirty_tree_keeps_the_porcelain_entries(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        (self.local / "seed.txt").write_text("changed\n")
+        (self.local / "extra.txt").write_text("extra\n")
+        values = self._perform_status()
+        self.assertEqual(values["branch"], "main")
+        self.assertFalse(values["detached"])
+        self.assertEqual(values["head_sha"], head)
+        self.assertFalse(values["clean"])
+        self.assertGreaterEqual(len(values["entries"]), 2)
+
+    def test_status_on_a_detached_head_names_no_branch(self) -> None:
+        head = git(self.local, "rev-parse", "HEAD")
+        git(self.local, "checkout", "--detach")
+        values = self._perform_status()
+        self.assertEqual(values["branch"], "")
+        self.assertTrue(values["detached"])
+        self.assertEqual(values["head_sha"], head)
+        self.assertTrue(values["clean"])
+        self.assertEqual(values["entries"], ())
 
 
 if __name__ == "__main__":
