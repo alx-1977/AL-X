@@ -45,6 +45,7 @@ from alx.contracts.coding import (
     MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS,
     MAX_LOCAL_REVIEW_CYCLES,
     MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS,
+    REVIEW_PROVIDER_UNAVAILABLE_REASONS,
     MAX_TEST_INFRASTRUCTURE_ATTEMPTS,
     MAX_REVIEW_RAW_EXCERPT_CHARACTERS,
     MAX_VERIFICATION_COMMANDS,
@@ -88,6 +89,7 @@ from alx.providers.coding_git import (
 )
 from alx.providers.coding_process import (
     CodingCancellation, bind_cancellation, reset_cancellation, check_cancelled,
+    bind_provider_observer, reset_provider_observer,
 )
 from alx.providers.coding_workspace import CodingWorkspace
 from alx.providers.errors import ProviderError
@@ -452,8 +454,13 @@ class CodingAgent:
         self, state: "_JobState", phase: str, *, in_flight: bool = False,
         waiting: bool = False, terminal: bool = False, outcome: str = "",
         transition: str = "", correction_cycle: int | None = None,
+        provider_state: str = "",
     ) -> None:
-        """Publish a lifecycle fact; telemetry failure never changes the job."""
+        """Publish a lifecycle fact; telemetry failure never changes the job.
+
+        `provider_state` is set only from an observed provider event, so
+        `last_activity_at` on such a report is a real heartbeat.
+        """
         now = self._clock()
         previous = state.telemetry
         started = previous.started_at if previous is not None else now
@@ -462,8 +469,12 @@ class CodingAgent:
             if previous is not None and previous.phase == phase
             else now
         )
-        provider = str(getattr(self._session, "provider_name", "") or "")
-        model = str(getattr(self._session, "model_name", "") or "")
+        # The review is the reviewer's call, not the session's. Naming the
+        # session's provider there showed Grok as the thing being waited on
+        # while a Codex child sat idle.
+        source = self._reviewer if phase == "review" else self._session
+        provider = str(getattr(source, "provider_name", "") or "")
+        model = str(getattr(source, "model_name", "") or "")
         # This job's own identity, carried on its state. Telemetry used to read
         # a shared `job_id_source` callable — the runtime's in-flight call ID —
         # which a concurrent job moves, so two overlapping jobs both reported
@@ -478,7 +489,7 @@ class CodingAgent:
             if correction_cycle is None else correction_cycle,
             in_flight=in_flight, waiting=waiting, terminal=terminal,
             outcome=outcome, transition=transition,
-            branch=state.branch,
+            branch=state.branch, provider_state=provider_state,
         )
         try:
             self._telemetry_sink(telemetry)
@@ -1149,7 +1160,14 @@ class CodingAgent:
             # again, and a material finding is not a failure of this kind.
             findings: tuple[LocalReviewFinding, ...] | None = None
             last_error: CodingError | None = None
+            unavailable = False
             for _attempt in range(1, MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS + 1):
+                observed = bind_provider_observer(
+                    lambda provider_state, cycle=cycle: self._report_telemetry(
+                        state, "review", in_flight=True,
+                        provider_state=provider_state, correction_cycle=cycle,
+                    )
+                )
                 try:
                     findings = self._review(request, workspace, plan, files, git_diff)
                 except CodingError as error:
@@ -1159,7 +1177,15 @@ class CodingAgent:
                     carried_failures.append(
                         self._review_attempt_record(len(carried_failures) + 1, error)
                     )
+                    # A provider that cannot begin will not begin on the next
+                    # attempt either. Spending the retries on it only held the
+                    # job in REVIEW while nothing was being reviewed.
+                    if error.details.get("reason_code") in REVIEW_PROVIDER_UNAVAILABLE_REASONS:
+                        unavailable = True
+                        break
                     continue
+                finally:
+                    reset_provider_observer(observed)
                 break
             if findings is None:
                 # Retries exhausted. Leave the branch and the uncommitted diff
@@ -1178,7 +1204,20 @@ class CodingAgent:
                 diagnostics["review_attempts"] = [
                     record.as_values() for record in carried_failures
                 ]
+                if unavailable:
+                    diagnostics["provider_unavailable"] = True
+                self._report_telemetry(
+                    state, "review", correction_cycle=cycle,
+                    provider_state="unavailable" if unavailable else "",
+                    transition=(
+                        f"REVIEW provider unavailable ({diagnostics['reason_code']})"
+                        if unavailable else "REVIEW failed"
+                    ),
+                )
                 return (
+                    "the local reviewer provider is unavailable; "
+                    "the branch and uncommitted diff were preserved"
+                    if unavailable else
                     "the local reviewer could not produce a usable result; "
                     "the branch and uncommitted diff were preserved",
                     ("review_failed",), reviewed_files, diagnostics, (),

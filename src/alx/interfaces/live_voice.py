@@ -199,7 +199,17 @@ class VoiceActivityStatus:
         unresponsive = (
             not telemetry.terminal and telemetry.in_flight and not owner_running
         )
-        stalled = unresponsive or (
+        # An in-flight call used to be exempt from stall detection, because
+        # nothing inside it was observed: a reviewer child idle in a provider
+        # wait read as active until its timeout. A call whose provider reports
+        # its own events carries a real heartbeat, so it stalls when that
+        # heartbeat stops.
+        heartbeat_lost = (
+            not telemetry.terminal and telemetry.in_flight
+            and telemetry.provider_state in {"connecting", "active"}
+            and age >= CODING_STALL_SECONDS
+        )
+        stalled = unresponsive or heartbeat_lost or (
             not telemetry.terminal and not telemetry.in_flight and not telemetry.waiting
             and age >= CODING_STALL_SECONDS
         )
@@ -214,7 +224,7 @@ class VoiceActivityStatus:
             "terminal": telemetry.terminal, "outcome": telemetry.outcome,
             "owner_alive": owner_running, "unresponsive": unresponsive,
             "stalled": stalled, "transition": telemetry.transition,
-            "branch": telemetry.branch,
+            "branch": telemetry.branch, "provider_state": telemetry.provider_state,
         }
 
     def subscribe(

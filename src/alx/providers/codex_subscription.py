@@ -20,6 +20,8 @@ from time import monotonic
 from typing import Any
 
 from alx.contracts import ModelCompletion, ModelRequest, ModelRole, normalise_usage
+from alx.contracts.coding import PROVIDER_IDLE_SECONDS
+from alx.providers.coding_process import report_provider_state, run_observed_subprocess
 from alx.providers.errors import raise_provider_failure
 
 
@@ -53,10 +55,66 @@ class _CodexProtocolError(ValueError):
         super().__init__(code)
 
 
+class _CodexStreamWatch:
+    """What the Codex child is observably doing, read from its own events.
+
+    `codex exec --json` writes one JSON event per line as the turn proceeds.
+    Before any `item.*` event the child has produced no work: it is connecting
+    or waiting on the provider. Any other event is progress and resets the
+    idle clock, except `error`, which Codex also uses for retry notices and
+    which is therefore not progress. `turn.failed` is the provider refusing
+    the turn, and ends the call at once rather than when the child exits.
+    """
+
+    def __init__(self, idle_seconds: float, clock: Callable[[], float]) -> None:
+        self._idle_seconds = idle_seconds
+        self._clock = clock
+        self._last_progress = clock()
+        self.working = False
+        report_provider_state("connecting")
+
+    def line(self, text: str) -> None:
+        try:
+            event = json.loads(text)
+        except json.JSONDecodeError:
+            # Not an event. The whole stream is parsed once the child exits,
+            # and an unparseable line fails there as response_invalid.
+            return
+        if not isinstance(event, Mapping):
+            return
+        kind = event.get("type")
+        if kind == "turn.failed":
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, Mapping) else None
+            raise _CodexProtocolError(
+                CodexSubscriptionReasoningModel._failure_code(
+                    message if isinstance(message, str) else "", ""
+                ),
+                provider_event="turn.failed",
+            )
+        if kind == "error":
+            return
+        if isinstance(kind, str) and kind.startswith("item."):
+            self.working = True
+        self._last_progress = self._clock()
+        report_provider_state("active" if self.working else "connecting")
+
+    def tick(self) -> None:
+        if self._clock() - self._last_progress < self._idle_seconds:
+            return
+        # A child that never produced work could not begin; one that went
+        # silent after working stalled. Only the second is worth a retry.
+        raise _CodexProtocolError(
+            "provider_stalled" if self.working else "provider_unresponsive",
+            idle_seconds=int(self._idle_seconds),
+        )
+
+
 class CodexSubscriptionReasoningModel:
     """Complete one schema-constrained reviewer request through Codex CLI."""
 
     supports_bounded_research = False
+    provider_name = PROVIDER_NAME
 
     def __init__(
         self,
@@ -65,9 +123,10 @@ class CodexSubscriptionReasoningModel:
         *,
         executable: str = "codex",
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
-        runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
         effort: str = "",
+        idle_seconds: float = PROVIDER_IDLE_SECONDS,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -77,9 +136,14 @@ class CodexSubscriptionReasoningModel:
         self._timeout_seconds = timeout_seconds
         self._executable = executable
         self._telemetry_sink = telemetry_sink
-        self._runner = runner or subprocess.run
+        self._idle_seconds = idle_seconds
+        self._clock = clock
         self._environment = os.environ if environment is None else environment
         self._effort = effort.strip()
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
     def child_environment(self) -> dict[str, str]:
         """Keep Codex's subscription login, never a metered API credential."""
@@ -123,17 +187,16 @@ class CodexSubscriptionReasoningModel:
                 schema_path = os.path.join(root, "schema.json")
                 with open(schema_path, "w", encoding="utf-8") as schema_file:
                     json.dump(_json_value(request.output_schema), schema_file, sort_keys=True)
-                from alx.providers.coding_process import run_coding_subprocess
-                completed = run_coding_subprocess(self._runner,
+                prompt = self._prompt(request)
+                watch = _CodexStreamWatch(self._idle_seconds, self._clock)
+                completed = run_observed_subprocess(
                     self.command(request, schema_path, root),
-                    input=self._prompt(request),
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout_seconds,
+                    input=prompt,
                     env=self.child_environment(),
                     cwd=root,
-                    shell=False,
-                    check=False,
+                    timeout=self._timeout_seconds,
+                    on_line=watch.line,
+                    on_tick=watch.tick,
                 )
             if completed.returncode != 0:
                 raise _CodexProtocolError(

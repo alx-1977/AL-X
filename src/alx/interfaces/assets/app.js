@@ -108,11 +108,14 @@ function showCodingStatus(message) {
   const phase = String(message.phase ?? "").toUpperCase();
   const provider = String(message.provider ?? "");
   const model = String(message.model ?? "");
+  const providerState = String(message.provider_state ?? "");
   const mode = message.terminal
     ? (String(message.outcome ?? "").toUpperCase() || "COMPLETE")
-    : message.stalled ? "STALLED?"
-      : message.in_flight ? "ACTIVE"
-        : message.waiting ? "WAITING" : "WORKING";
+    : providerState === "unavailable" ? "PROVIDER UNAVAILABLE"
+      : message.stalled ? "STALLED?"
+        : providerState === "connecting" ? "CONNECTING"
+          : message.in_flight ? "ACTIVE"
+            : message.waiting ? "WAITING" : "WORKING";
   const details = ["CODING", phase, [provider, model].filter(Boolean).join(" / "), mode,
     `${codingSeconds(message.elapsed_seconds)} elapsed`,
     `last activity ${codingSeconds(message.last_activity_seconds)} ago`]
@@ -122,7 +125,7 @@ function showCodingStatus(message) {
   const transition = String(message.transition ?? "");
   const key = `${message.job_id ?? ""}:${transition}`;
   if (transition && key !== lastCodingTransition) {
-    diagnostic(`${message.job_id ?? "CASE"} · ${transition}`, message.terminal || message.stalled ? "error" : "active", "CODING");
+    diagnostic(`${message.job_id ?? "CASE"} · ${transition}`, message.terminal || message.stalled || providerState === "unavailable" ? "error" : "active", "CODING");
     lastCodingTransition = key;
   }
 }

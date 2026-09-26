@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import os
+import stat
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -36,47 +38,69 @@ def _request() -> ModelRequest:
     )
 
 
-class _Runner:
-    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-        self.calls: list[dict] = []
-
-    def __call__(self, command, **kwargs):
-        self.calls.append({"command": command, **kwargs})
-        return subprocess.CompletedProcess(command, self.returncode, self.stdout, self.stderr)
+def _codex(directory: Path, body: str) -> Path:
+    """A scripted `codex` child; the transport starts it like the real CLI."""
+    script = directory / "codex"
+    script.write_text(
+        f"#!{sys.executable}\nimport json, os, sys\n"
+        f"record = {str(directory / 'launch.json')!r}\n"
+        "json.dump({'argv': sys.argv, 'env': dict(os.environ),"
+        " 'stdin': sys.stdin.read()}, open(record, 'w'))\n" + body,
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
 
 
 class CodexSubscriptionTransportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name)
+
+    def _model(self, body: str, **options) -> CodexSubscriptionReasoningModel:
+        return CodexSubscriptionReasoningModel(
+            "gpt-5.6-luna", 30, executable=str(_codex(self.directory, body)),
+            **options,
+        )
+
     def test_subscription_reviewer_uses_codex_cli_without_an_api_key(self) -> None:
-        runner = _Runner("\n".join((
+        events = "\n".join((
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
             json.dumps({
                 "type": "item.completed",
                 "item": {"type": "agent_message", "text": '{"findings": []}'},
             }),
             json.dumps({"type": "turn.completed", "usage": {"input_tokens": 3}}),
-        )))
-        model = CodexSubscriptionReasoningModel(
-            "gpt-5.6-luna", 30, runner=runner,
-            environment={"PATH": "/bin", "HOME": "/home/friedl", "OPENAI_API_KEY": "must-not-pass"},
+        ))
+        model = self._model(
+            f"print({events!r})\n",
+            environment={"PATH": os.environ.get("PATH", ""), "HOME": "/home/friedl",
+                         "OPENAI_API_KEY": "must-not-pass"},
             effort="high",
         )
         completion = model.complete(_request())
 
         self.assertEqual(completion.provider, "codex_subscription")
         self.assertEqual(dict(completion.output), {"findings": ()})
-        call = runner.calls[0]
-        self.assertNotIn("OPENAI_API_KEY", call["env"])
-        self.assertEqual(call["command"][:4], ["codex", "exec", "--json", "--ephemeral"])
-        self.assertIn('model_reasoning_effort="high"', call["command"])
-        self.assertNotIn("openai", " ".join(call["command"]).lower())
+        launch = json.loads((self.directory / "launch.json").read_text())
+        self.assertNotIn("OPENAI_API_KEY", launch["env"])
+        self.assertEqual(launch["argv"][1:4], ["exec", "--json", "--ephemeral"])
+        self.assertIn('model_reasoning_effort="high"', launch["argv"])
+        self.assertNotIn("openai", " ".join(launch["argv"][1:]).lower())
+        # The turn travels on stdin, never in the argument vector.
+        self.assertEqual(launch["argv"][-1], "-")
+        self.assertIn('{"candidate": "review"}', launch["stdin"])
+        self.assertEqual(
+            CodexSubscriptionReasoningModel("gpt-5.6-luna", 30).command(
+                _request(), "schema.json", "."
+            )[0],
+            "codex",
+        )
 
     def test_unavailable_subscription_auth_fails_closed(self) -> None:
-        model = CodexSubscriptionReasoningModel(
-            "gpt-5.6-luna", 30,
-            runner=_Runner(stderr="Not logged in to ChatGPT", returncode=1),
+        model = self._model(
+            "sys.stderr.write('Not logged in to ChatGPT')\nsys.exit(1)\n"
         )
         with self.assertRaises(ProviderError) as raised:
             model.complete(_request())
@@ -84,9 +108,9 @@ class CodexSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "subscription_unauthenticated")
 
     def test_nonzero_exit_retains_only_bounded_process_metadata(self) -> None:
-        model = CodexSubscriptionReasoningModel(
-            "gpt-5.6-luna", 30,
-            runner=_Runner(stdout="ignored", stderr="credential=must-not-survive", returncode=17),
+        model = self._model(
+            "sys.stdout.write('ignored')\n"
+            "sys.stderr.write('credential=must-not-survive')\nsys.exit(17)\n"
         )
         with self.assertRaises(ProviderError) as raised:
             model.complete(_request())
@@ -96,9 +120,8 @@ class CodexSubscriptionTransportTests(unittest.TestCase):
         })
 
     def test_parser_failure_retains_lengths_without_response_content(self) -> None:
-        model = CodexSubscriptionReasoningModel(
-            "gpt-5.6-luna", 30,
-            runner=_Runner(stdout="not-json", stderr="cookie=must-not-survive"),
+        model = self._model(
+            "sys.stdout.write('not-json')\nsys.stderr.write('cookie=must-not-survive')\n"
         )
         with self.assertRaises(ProviderError) as raised:
             model.complete(_request())

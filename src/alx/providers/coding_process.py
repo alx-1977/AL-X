@@ -11,7 +11,8 @@ from __future__ import annotations
 import os
 import signal
 from contextvars import ContextVar
-from threading import Event, Lock
+from queue import Empty, Queue
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any, Callable
 from collections.abc import Sequence
@@ -128,6 +129,119 @@ def check_cancelled() -> None:
 def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
     current = _CURRENT.get()
     return runner(argv, **kwargs) if current is None else current.run(runner, argv, **kwargs)
+
+
+# Where a provider reports what its child process is observably doing. Bound
+# by the Coding Agent around a provider call, the same way cancellation is, so
+# the provider needs no reference to the job that asked for it.
+_PROVIDER_OBSERVER: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "alx_coding_provider_observer", default=None
+)
+
+
+def bind_provider_observer(observer: Callable[[str], None]):
+    return _PROVIDER_OBSERVER.set(observer)
+
+
+def reset_provider_observer(token: Any) -> None:
+    _PROVIDER_OBSERVER.reset(token)
+
+
+def report_provider_state(provider_state: str) -> None:
+    """Report one observed provider event. Never affects the provider call."""
+    observer = _PROVIDER_OBSERVER.get()
+    if observer is None:
+        return
+    try:
+        observer(provider_state)
+    except Exception:  # noqa: BLE001 - reporting is not part of the outcome
+        pass
+
+
+def run_observed_subprocess(
+    argv: list[str], *, input: str, env: dict[str, str], cwd: str,
+    timeout: float, on_line: Callable[[str], None], on_tick: Callable[[], None],
+    tick_seconds: float = 0.5,
+) -> subprocess.CompletedProcess[str]:
+    """Run a provider CLI whose stdout is a live event stream, observing it.
+
+    `communicate` only returns once the child exits, so a child that sat idle
+    in a provider wait was indistinguishable from one doing work until the
+    whole timeout had passed. Here every stdout line reaches `on_line` as it
+    arrives and `on_tick` runs at least every `tick_seconds`; either may raise
+    to end the call, and the child's process group is then stopped. The
+    overall timeout and cooperative cancellation still hold.
+    """
+    check_cancelled()
+    process = subprocess.Popen(  # noqa: S603 - argv, never shell
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env, cwd=cwd, shell=False,
+        start_new_session=True,
+    )
+    lines: Queue[str | None] = Queue()
+    stdout: list[str] = []
+    stderr: list[str] = []
+
+    def feed() -> None:
+        try:
+            process.stdin.write(input)
+            process.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    def pump() -> None:
+        try:
+            for line in process.stdout:
+                lines.put(line)
+        except (OSError, ValueError):
+            pass
+        lines.put(None)
+
+    def drain() -> None:
+        try:
+            stderr.append(process.stderr.read())
+        except (OSError, ValueError):
+            pass
+
+    threads = [Thread(target=target, daemon=True) for target in (feed, pump, drain)]
+    for thread in threads:
+        thread.start()
+    deadline = monotonic() + timeout
+    try:
+        ended = False
+        while True:
+            check_cancelled()
+            if monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            if not ended:
+                try:
+                    line = lines.get(timeout=tick_seconds)
+                except Empty:
+                    line = ""
+                if line is None:
+                    ended = True
+                elif line:
+                    stdout.append(line)
+                    on_line(line)
+            else:
+                try:
+                    process.wait(timeout=tick_seconds)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+            on_tick()
+        threads[2].join(timeout=2)
+        return subprocess.CompletedProcess(
+            argv, process.returncode, "".join(stdout), "".join(stderr)
+        )
+    finally:
+        _stop(process)
+        for pipe in (process.stdout, process.stderr, process.stdin):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
 
 
 def bind_cancellation(cancellation: CodingCancellation):

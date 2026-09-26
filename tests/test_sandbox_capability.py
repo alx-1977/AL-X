@@ -849,15 +849,73 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self._assert_repository_runtime_process_boundary(source + mutation)
 
+    def _assert_observed_transport_boundary(self, source: str) -> None:
+        """The Codex reviewer starts no process; the coding process site does.
+
+        It used to bind `subprocess.run` and block on it, which left a child
+        idle in a provider wait indistinguishable from one doing work. Its one
+        call now goes through the coding process site's observed runner.
+        """
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                self.assertFalse(
+                    node.value.id in ("subprocess", "os")
+                    and node.attr in self.EXECUTION_NAMES
+                    or node.value.id == "asyncio"
+                    and node.attr in self.ASYNCIO_EXECUTION_NAMES,
+                    "the Codex transport must not start a process itself",
+                )
+            dynamic = (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in {"subprocess", "os", "asyncio"}
+            )
+            self.assertFalse(dynamic, "the Codex transport must not reach a launcher dynamically")
+        model_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "CodexSubscriptionReasoningModel"
+        )
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "run_observed_subprocess"
+        ]
+        self.assertEqual(len(calls), 1)
+        completion = next(
+            node for node in model_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "complete"
+        )
+        self.assertIn(calls[0], tuple(ast.walk(completion)))
+        keywords = {keyword.arg for keyword in calls[0].keywords}
+        for name in ("input", "timeout", "env", "cwd", "on_line", "on_tick"):
+            self.assertIn(name, keywords)
+
+    def test_a_second_codex_launch_site_fails(self) -> None:
+        source = CODEX_TRANSPORT_SITE.read_text()
+        for mutation in (
+            "\n\ndef second():\n    return subprocess.run(['codex'])\n",
+            "\n\ndef second():\n    return subprocess.Popen(['codex'])\n",
+            "\n\ndef second():\n    return run_observed_subprocess(['codex'], input='',"
+            " env={}, cwd='.', timeout=1, on_line=print, on_tick=print)\n",
+        ):
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(AssertionError):
+                    self._assert_observed_transport_boundary(source + mutation)
+
     def test_the_reasoning_transport_has_one_approved_runner_site(self) -> None:
+        self._assert_observed_transport_boundary(CODEX_TRANSPORT_SITE.read_text())
         for site, model_class_name in (
             (REASONING_TRANSPORT_SITE, "ClaudeSubscriptionReasoningModel"),
             (CODEX_TRANSPORT_SITE, "CodexSubscriptionReasoningModel"),
         ):
             source = site.read_text()
-            self._assert_reasoning_transport_process_boundary(
-                source, site, model_class_name
-            )
+            if site == REASONING_TRANSPORT_SITE:
+                self._assert_reasoning_transport_process_boundary(
+                    source, site, model_class_name
+                )
             tree = ast.parse(source)
             for node in ast.walk(tree):
                 names = []

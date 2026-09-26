@@ -85,7 +85,25 @@ MAX_STAGED_FILES = MAX_REPORTED_FILES
 # exceeding it fails closed. Well above any real worktree; the live incident
 # that motivated the git capability involved roughly 2,000 dirty paths.
 MAX_INSPECTED_ENTRIES = 10_000
+# Heartbeat age after which an in-flight provider call is shown as stalled.
+# Heartbeats are the provider's own observed events, never elapsed time.
 CODING_STALL_SECONDS = 120
+# How long a reviewer provider may go without an observed progress event
+# before the call is ended. A 2026-09-26 review sat idle in a provider wait
+# for the full 1,200 second call timeout, three times over.
+PROVIDER_IDLE_SECONDS = 300
+# Reviewer failures that mean the provider cannot begin useful work at all.
+# Retrying the same provider within the job cannot help, so the review stops
+# at once, preserves the diff, and returns the reason to AL/X.
+REVIEW_PROVIDER_UNAVAILABLE_REASONS = frozenset({
+    "subscription_usage_exhausted",
+    "subscription_unauthenticated",
+    "cli_not_installed",
+    "cli_unavailable",
+    "provider_unresponsive",
+})
+# The observed state of an in-flight provider call, as the telemetry reports it.
+PROVIDER_STATES = frozenset({"", "connecting", "active", "unavailable"})
 
 
 # Broker-accepted CapabilityResult failure codes. Review outcomes must be
@@ -162,10 +180,17 @@ class CodingTelemetry:
     # The visible branch this job created or continued in the canonical
     # checkout. Empty until deterministic preflight has verified it.
     branch: str = ""
+    # What the provider child is observably doing, set only by its own events:
+    # `connecting` before it has produced any work, `active` once it has, and
+    # `unavailable` when it cannot begin. Empty when nothing is observed, and
+    # then `last_activity_at` is a lifecycle boundary rather than a heartbeat.
+    provider_state: str = ""
 
     def __post_init__(self) -> None:
         _required(self.job_id, "job_id")
         _required(self.phase, "phase")
+        if self.provider_state not in PROVIDER_STATES:
+            raise ValueError("provider_state is not a known provider state")
         for name in ("started_at", "phase_started_at", "last_activity_at"):
             _aware(getattr(self, name), name)
         if self.attempt < 1 or self.correction_cycle < 0:
@@ -760,6 +785,8 @@ __all__ = [
     "MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS",
     "MAX_LOCAL_REVIEW_CYCLES",
     "MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS",
+    "PROVIDER_IDLE_SECONDS",
+    "REVIEW_PROVIDER_UNAVAILABLE_REASONS",
     "MAX_REVIEW_RAW_EXCERPT_CHARACTERS",
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
