@@ -275,8 +275,7 @@ class CodingRecoveryTests(unittest.TestCase):
                     "step_budget": 7,
                 })
             else:
-                arguments.update({"resume_job_id": "job-1",
-                                  "repair_branch": "fix/job-1-2"})
+                arguments = {"resume_job_id": "job-1"}
             durable = {
                 key: arguments[key] for key in runtime.definitions[0].durable_input_fields
                 if key in arguments

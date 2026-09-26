@@ -147,7 +147,7 @@ LOCAL_REVIEW_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "severity": {"type": "string"},
+                    "severity": {"type": ["string", "null"]},
                     "title": {"type": "string"},
                     "evidence": {"type": "string"},
                     "correction": {"type": "string"},
@@ -1333,14 +1333,11 @@ class CodingAgent:
         for item in raw:
             if not isinstance(item, Mapping):
                 _reject_review_output(values, "finding is not an object")
-            finding = {key: str(item.get(key, "")).strip() for key in ("severity", "title", "evidence", "correction")}
-            finding["severity"] = finding["severity"].lower()
+            finding = {key: str(item.get(key, "")).strip() for key in ("title", "evidence", "correction")}
             if not all(finding.values()):
                 _reject_review_output(values, "finding is missing a required field")
+            finding["severity"] = item.get("severity")
             try:
-                # The severity vocabulary is the contract's, checked where the
-                # type is defined. Repeating the set here gave two places to
-                # change and one to forget.
                 findings.append(LocalReviewFinding(**finding))
             except ValueError as error:
                 _reject_review_output(values, str(error))

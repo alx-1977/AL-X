@@ -843,6 +843,7 @@ class ReconciliationCannotStrandAClaimedOccasion(unittest.TestCase):
         ]
         self.assertEqual(len(observed), 1, "the observation survived the race")
         self.assertEqual(observed[0].data["uid"], "2")
+        self.assertEqual(observed[0].kind, "mail.message_vanished")
 
     def test_no_synthetic_only_turn_occurs(self) -> None:
         """A turn with no mail event is a turn reasoning about nothing."""

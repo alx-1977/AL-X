@@ -51,8 +51,7 @@ class Ownership(unittest.TestCase):
             'acceptance_criteria': ['specific result'], 'test_guidance': 'run focused tests',
             'step_budget': 7, 'repair_branch': 'feat/a', 'commit_message': 'repair',
         }
-        resumed = {'task': 'repair', 'repair_branch': 'feat/a-2',
-                   'commit_message': 'repair', 'resume_job_id': 'job-1'}
+        resumed = {'resume_job_id': 'job-1'}
 
         def failed(job_id, arguments):
             call = CapabilityCall(job_id, 'run_coding_task', arguments)

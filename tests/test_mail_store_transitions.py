@@ -3,11 +3,10 @@
 Greptile found two P1 defects in the first version of this branch, both from
 treating the store as if one writer owned it.
 
-`pending` was settled silently on the premise that it had never been announced.
-That premise held when the branch began and stopped holding two commits later,
-when `mail.message_waiting` began showing pending observations to the Core. A
-message AL/X had been shown could then disappear with no way for her to account
-for it.
+`pending` is settled silently when it is absent or Seen, including after it
+has been shown as waiting context. Waiting exposure is not a vanished debt.
+A current or presented row that has left the mailbox is reported once, and
+that report is what a claimed occasion owes.
 
 And reconciliation read a row's state in one transaction and wrote it in
 another with no state predicate, so a session could promote and announce a row
@@ -84,7 +83,19 @@ class Harness(unittest.TestCase):
 
 
 class ExposedPendingAuthorityTest(Harness):
-    """P1 #1 — what the Core has been shown is hers to account for."""
+    """Waiting exposure is not a vanished debt.
+
+    A pending row the Core has been shown is still pending. Its absence, or
+    a Seen flag, settles it to done and reports nothing. A vanished report
+    is owed for a current or presented row that has left the mailbox.
+    """
+
+    def waiting(self) -> list[str]:
+        return [
+            event.data["uid"]
+            for event in self.state.contextual_events()
+            if event.kind == "mail.message_waiting"
+        ]
 
     def test_a_pending_observation_never_shown_vanishes_silently(self) -> None:
         self.discover(1, 2)
@@ -92,38 +103,34 @@ class ExposedPendingAuthorityTest(Harness):
         self.assertEqual(self.rows()[2][0], "done")
         self.assertEqual(self.state.pending_vanished(), ())
 
-    def test_a_pending_observation_shown_as_waiting_reaches_her(self) -> None:
+    def test_a_pending_observation_shown_as_waiting_is_released(self) -> None:
         self.discover(1, 2)
         self.state.contextual_events()          # uid 2 is shown as waiting
-        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1,)), 1)
-        self.assertEqual(
-            [event.data["uid"] for event in self.state.pending_vanished()], ["2"],
-            "she was shown it, so its disappearance is hers to account for",
-        )
-        self.assertEqual(
-            self.rows()[2][0], "pending",
-            "and it keeps its state until she releases it",
-        )
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1,)), 0)
+        self.assertEqual(self.rows()[2][0], "done")
+        self.assertEqual(self.state.pending_vanished(), ())
+        self.assertNotIn("2", self.waiting())
 
-    def test_an_exposed_disappearance_reaches_her_exactly_once(self) -> None:
+    def test_a_waiting_absence_is_not_reported_again(self) -> None:
         self.discover(1, 2)
         self.state.contextual_events()
         self.state.reconcile("INBOX", VALIDITY, (1,))
         self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1,)), 0)
-        event = self.state.pending_vanished()[0]
-        self.state.record_vanished_delivery(event.event_id)
+        self.assertEqual(self.rows()[2][0], "done")
         self.assertEqual(self.state.pending_vanished(), ())
 
-    def test_exposure_survives_a_restart(self) -> None:
+    def test_a_waiting_absence_stays_settled_across_restart(self) -> None:
         self.discover(1, 2)
         self.state.contextual_events()
         self.state.close()
         restarted = SQLiteMailObservationState(self.path)
         self.addCleanup(restarted.close)
-        self.assertEqual(restarted.reconcile("INBOX", VALIDITY, (1,)), 1)
-        self.assertEqual(
-            [event.data["uid"] for event in restarted.pending_vanished()], ["2"],
-        )
+        self.assertEqual(restarted.reconcile("INBOX", VALIDITY, (1,)), 0)
+        self.assertEqual(restarted.pending_vanished(), ())
+        row = restarted._connection.execute(
+            "SELECT state FROM mail_observations WHERE uid = 2"
+        ).fetchone()
+        self.assertEqual(row[0], "done")
 
     def test_exposure_never_reverts(self) -> None:
         self.discover(1, 2)
@@ -138,26 +145,165 @@ class ExposedPendingAuthorityTest(Harness):
         self.assertEqual(next_arrival(self.state).data["uid"], "1")
 
     def test_exposure_is_recorded_before_the_turn_runs(self) -> None:
-        """A deliberate direction to err in, not an oversight.
+        """Seeing the queue marks the row, and the row stays pending.
 
-        The mark is written as context is built. A turn that then fails leaves
-        a row marked exposed that AL/X never evaluated, so a later
-        disappearance gives her one fact she did not strictly need. The
-        alternative -- marking only after a successful turn -- loses the mark
-        when a turn that *did* show her the mail fails afterwards, and the
-        disappearance is then settled silently. An unnecessary fact costs one
-        reasoning call she can dismiss; a missing one leaves her unable to
-        account for something she may have raised.
+        The mark is written as context is built. A pending absence afterwards
+        is still a silent release: waiting exposure is not a vanished debt.
         """
         self.discover(1, 2)
         self.state.contextual_events()          # the turn has not run yet
-        self.assertEqual(self.rows()[2][1], 1)
-        # The turn now fails and uid 2 later leaves the mailbox.
-        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1,)), 1)
+        self.assertEqual(self.rows()[2], ("pending", 1, 0))
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, (1,)), 0)
+        self.assertEqual(self.rows()[2][0], "done")
+        self.assertEqual(self.state.pending_vanished(), ())
+        self.assertNotIn("2", self.waiting())
+
+    def test_a_seen_pending_row_is_released_beside_an_unseen_sibling(self) -> None:
+        self.discover(1, 2)
+        self.state.contextual_events()
         self.assertEqual(
-            [event.data["uid"] for event in self.state.pending_vanished()], ["2"],
-            "she is given the fact rather than losing it",
+            self.state.reconcile("INBOX", VALIDITY, ((1, False), (2, True))),
+            0,
         )
+        self.assertEqual(self.rows()[1][0], "pending")
+        self.assertEqual(self.rows()[2][0], "done")
+        self.assertEqual(self.state.pending_vanished(), ())
+        self.assertEqual(self.waiting(), ["1"])
+
+    def test_a_failed_listing_writes_nothing(self) -> None:
+        self.discover(1, 2)
+        before = self.rows()
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, None), 0)
+        self.assertEqual(self.rows(), before)
+        self.assertEqual(self.state.pending_vanished(), ())
+
+    def test_a_current_absence_is_reported_once_across_repeats_and_restart(self) -> None:
+        self.discover(1)
+        self.assertTrue(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.assertEqual(self.rows()[1][0], "current")
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), 1)
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), 0)
+        state, _exposed, vanished = self.rows()[1]
+        self.assertEqual((state, vanished), ("current", 1))
+        self.assertEqual(len(self.state.pending_vanished()), 1)
+        self.state.close()
+        restarted = SQLiteMailObservationState(self.path)
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.reconcile("INBOX", VALIDITY, ()), 0)
+        self.assertEqual(
+            [event.data["uid"] for event in restarted.pending_vanished()], ["1"],
+        )
+
+    def test_a_seen_current_row_that_is_still_present_is_left_alone(self) -> None:
+        self.discover(1)
+        self.assertTrue(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.assertEqual(
+            self.state.reconcile("INBOX", VALIDITY, ((1, True),)), 0,
+        )
+        self.assertEqual(self.rows()[1], ("current", 1, 0))
+        self.assertEqual(self.state.pending_vanished(), ())
+
+    def test_mark_claimed_promotes_pending_to_current(self) -> None:
+        self.discover(1)
+        self.assertTrue(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.assertEqual(self.rows()[1], ("current", 1, 0))
+        # Already current: the update matches nothing, the read-back is live.
+        self.assertTrue(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.assertEqual(self.rows()[1][0], "current")
+
+    def test_mark_claimed_does_not_rewrite_a_presented_row(self) -> None:
+        self.discover(1)
+        self.state.contextual_events()
+        event = next_arrival(self.state)
+        self.assertTrue(self.state.record_delivery(event.event_id))
+        self.assertEqual(self.rows()[1][0], "presented")
+        self.assertTrue(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.assertEqual(self.rows()[1][0], "presented")
+
+    def test_mark_claimed_is_false_when_nothing_live_remains(self) -> None:
+        self.discover(1)
+        self.state.acknowledge(MailReference("INBOX", VALIDITY, "1"))
+        self.assertFalse(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+
+    def test_a_new_uid_validity_deletes_no_observation_rows(self) -> None:
+        self.discover(1, 2)
+        self.assertEqual(self.state.new_identifiers("INBOX", "888", (4,)), ())
+        self.assertEqual(set(self.rows()), {1, 2})
+        self.assertEqual(self.rows()[1][0], "done")
+        self.assertEqual(self.state.unclaimed_arrivals(), ())
+        self.assertEqual(self.state.contextual_events(), ())
+        cursor = self.state._connection.execute(
+            "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
+            ("INBOX",),
+        ).fetchone()
+        self.assertEqual(cursor, ("888", 4))
+
+    def test_a_new_generation_reports_old_claimed_mail_once(self) -> None:
+        self.discover(1, 2)
+        self.assertTrue(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.state.new_identifiers("INBOX", "888", (1,))
+        self.assertEqual(self.rows()[1], ("current", 1, 1))
+        self.assertEqual(self.rows()[2][0], "done")
+        self.assertEqual(self.state.unclaimed_arrivals(), ())
+        self.assertEqual(
+            [event.kind for event in self.state.contextual_events()],
+            ["mail.message_vanished"],
+        )
+        self.assertEqual(
+            [event.data["uid"] for event in self.state.pending_vanished()],
+            ["1"],
+        )
+        self.state.new_identifiers("INBOX", "888", (1,))
+        self.assertEqual(len(self.state.pending_vanished()), 1)
+        self.assertFalse(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.state.record_vanished_delivery(f"mail:{VALIDITY}:1:vanished")
+        self.assertEqual(self.state.contextual_events(), ())
+
+    def test_a_different_cursor_generation_reconciles_only_this_one(self) -> None:
+        self.discover(1)
+        self.state._connection.execute(
+            "INSERT INTO mail_observations "
+            "(mailbox_id, uid_validity, uid, event_json, state) "
+            "VALUES ('INBOX', '999', 4, '{}', 'current')"
+        )
+        self.state._connection.commit()
+        self.state.new_identifiers("INBOX", "999", ())
+        self.assertEqual(self.state.reconcile("INBOX", VALIDITY, ()), 0)
+        self.assertEqual(self.rows()[1][0], "done")
+        self.assertEqual(self.rows()[4][0], "current")
+        self.assertEqual(self.state.pending_vanished(), ())
+
+    def test_a_pending_row_already_marked_vanished_is_not_waiting(self) -> None:
+        self.discover(1)
+        self.state._connection.execute(
+            "UPDATE mail_observations SET reported_vanished = 1 WHERE uid = 1"
+        )
+        self.state._connection.commit()
+        self.assertEqual(self.waiting(), [])
+        self.assertEqual(
+            [event.data["uid"] for event in self.state.pending_vanished()],
+            ["1"],
+        )
+
+    def test_reconciliation_settles_a_pending_row_with_an_old_vanished_mark(self) -> None:
+        self.discover(1, 2)
+        self.state._connection.execute(
+            "UPDATE mail_observations SET reported_vanished = 1 WHERE uid = 1"
+        )
+        self.state._connection.execute(
+            "UPDATE mail_observations SET reported_vanished = 2 WHERE uid = 2"
+        )
+        self.state._connection.commit()
+        self.state.reconcile("INBOX", VALIDITY, (1, 2))
+        self.assertEqual(self.rows()[1][0], "done")
+        self.assertEqual(self.rows()[2][0], "done")
+        self.assertEqual(self.state.unclaimed_arrivals(), ())
+        self.assertEqual(self.state.pending_vanished(), ())
+
+    def test_one_reconcile_and_no_observation_delete(self) -> None:
+        text = SOURCE.read_text()
+        self.assertEqual(text.count("\n    def reconcile("), 1)
+        self.assertNotIn("DELETE FROM mail_observations", text)
 
     def test_the_branch_reads_no_subject_or_sender(self) -> None:
         """Law 1: the choice is made from state, never from content."""
