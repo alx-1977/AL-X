@@ -648,7 +648,10 @@ class SQLiteMailObservationState:
         with self._lock, self._connection:
             self._connection.execute(
                 "UPDATE mail_observations SET state = 'current', context_exposed = 1 "
-                "WHERE uid_validity = ? AND uid = ? AND state = 'pending'",
+                "WHERE uid_validity = ? AND uid = ? AND state = 'pending' "
+                "AND EXISTS (SELECT 1 FROM mail_cursor c WHERE "
+                "c.mailbox_id = mail_observations.mailbox_id AND "
+                "c.uid_validity = mail_observations.uid_validity)",
                 (uid_validity, uid),
             )
             # Read back rather than trusting the update's rowcount, so an
@@ -657,7 +660,10 @@ class SQLiteMailObservationState:
                 "SELECT 1 FROM mail_observations "
                 "WHERE uid_validity = ? AND uid = ? "
                 "AND state IN ('pending', 'current', 'presented') "
-                "AND context_exposed = 1",
+                "AND context_exposed = 1 "
+                "AND EXISTS (SELECT 1 FROM mail_cursor c WHERE "
+                "c.mailbox_id = mail_observations.mailbox_id AND "
+                "c.uid_validity = mail_observations.uid_validity)",
                 (uid_validity, uid),
             ).fetchone()
         return row is not None
@@ -869,16 +875,30 @@ class SQLiteMailObservationState:
         what a later absence means.
         """
         with self._lock:
+            # A claimed occasion may already be in flight when UIDVALIDITY
+            # changes. Keep its queued disappearance in that turn's context,
+            # while never presenting the old message as a live arrival.
+            vanished = self._connection.execute(
+                "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references "
+                "FROM mail_observations "
+                "WHERE state IN ('current', 'presented') "
+                "AND reported_vanished = ? "
+                "AND NOT EXISTS (SELECT 1 FROM mail_cursor c WHERE "
+                "c.mailbox_id = mail_observations.mailbox_id AND "
+                "c.uid_validity = mail_observations.uid_validity) "
+                "ORDER BY uid DESC LIMIT ?",
+                (self._VANISHED_UNDELIVERED, self.CONTEXTUAL_EVENT_LIMIT),
+            ).fetchall()
             rows = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
                 "WHERE state IN ('current', 'presented') "
-                "AND COALESCE(reported_vanished, 0) = ? "
                 "AND EXISTS (SELECT 1 FROM mail_cursor c WHERE "
                 "c.mailbox_id = mail_observations.mailbox_id AND "
                 "c.uid_validity = mail_observations.uid_validity) "
                 "ORDER BY uid DESC LIMIT ?",
-                (self._NOT_VANISHED, self.CONTEXTUAL_EVENT_LIMIT),
+                (max(0, self.CONTEXTUAL_EVENT_LIMIT - len(vanished)),),
             ).fetchall()
             waiting = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
@@ -899,6 +919,7 @@ class SQLiteMailObservationState:
                             (row[0], row[1], int(row[2])),
                         )
         return (
+            *(self._vanished_event(row) for row in vanished),
             *(self._event(row) for row in rows),
             *(self._waiting_event(row) for row in waiting),
         )
