@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from dataclasses import FrozenInstanceError, replace
 from datetime import timedelta
 from pathlib import Path
@@ -23,7 +24,7 @@ from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.providers.coding_git import continue_feature_branch, _WRITE_SHAPES
 from alx.safety import AuthorityContext, SafetyGate
-from alx.tools.coding import DEFINITION, goal_coding_branch, parse_coding_arguments
+from alx.tools.coding import DEFINITION, build_coding_executors, goal_coding_branch, parse_coding_arguments
 from test_coding_agent import NOW, PlanningModel, RecordingSession, _FIXED, _worktree
 
 
@@ -44,6 +45,44 @@ def recorded(branch, sha, identity='record', *, capability='run_coding_task',
 
 
 class Ownership(unittest.TestCase):
+    def test_repeated_resume_recovers_original_request_fields(self):
+        original = {
+            'task': 'repair', 'context': 'original context',
+            'acceptance_criteria': ['specific result'], 'test_guidance': 'run focused tests',
+            'step_budget': 7, 'repair_branch': 'feat/a', 'commit_message': 'repair',
+        }
+        resumed = {'task': 'repair', 'repair_branch': 'feat/a-2',
+                   'commit_message': 'repair', 'resume_job_id': 'job-1'}
+
+        def failed(job_id, arguments):
+            call = CapabilityCall(job_id, 'run_coding_task', arguments)
+            result = CapabilityResult(
+                job_id, 'run_coding_task', CapabilityResultState.FAILED,
+                failure={'code': 'review_failed'},
+                durable_values={'checkpoint': json.dumps({
+                    'job_id': job_id, 'branch': 'feat/a-2', 'stage': 'review',
+                })},
+            )
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+
+        state = goal(failed('job-1', original), failed('job-2', resumed))
+        captured = []
+
+        def run_job(request):
+            captured.append(request)
+            raise CodingError('coding_unavailable')
+
+        result = build_coding_executors(
+            run_job, lambda: 'job-3', lambda: state,
+        )['run_coding_task']({**resumed, 'resume_job_id': 'job-2'})
+        self.assertEqual(result.failure['code'], 'coding_unavailable')
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].context, 'original context')
+        self.assertEqual(captured[0].acceptance_criteria, ('specific result',))
+        self.assertEqual(captured[0].test_guidance, 'run focused tests')
+        self.assertEqual(captured[0].step_budget, 7)
+        self.assertEqual(captured[0].resume_checkpoint['job_id'], 'job-2')
+
     def test_latest_successful_commit_owns_branch_and_all_its_heads(self):
         state = goal(recorded('feat/a', 'a', '1'), recorded('feat/b', 'b', '2'),
                      recorded('feat/a', 'c', '3'),
@@ -85,10 +124,10 @@ class Ownership(unittest.TestCase):
             ('symbolic-ref', '--quiet', '--short', 'HEAD'): 'none',
             ('status', '--porcelain=v1', '-z', '-uall'): 'none',
             ('diff', '--cached', '--name-only', '-z'): 'none',
-            ('show', '--name-only', '--pretty=format:', '-z', 'HEAD'): 'none',
+            ('show', '--name-status', '--pretty=format:', '-z'): 'sha',
             ('check-attr', '-z', 'filter', '--'): 'paths',
             ('check-ignore', '-q', '--'): 'paths',
-            ('ls-files', '-z', '--error-unmatch', '--'): 'paths',
+            ('ls-files', '--stage', '-z'): 'none',
             ('diff', '--cached', '--name-status', '-z'): 'none',
             ('add', '--'): 'paths', ('reset', '--quiet', '--'): 'paths',
             ('commit', '--quiet', '-m'): 'value', ('switch', '-c'): 'pair',

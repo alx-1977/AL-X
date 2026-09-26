@@ -505,7 +505,7 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         )
 
         source = inspect.getsource(_verify_committed_tree)
-        self.assertIn("_committed_paths(root)", source)
+        self.assertIn("_committed_change_set(root, after.head_sha)", source)
         self.assertIn("commit_contains_unauthorised_paths", source)
         # And the phase is actually reached: a helper nothing calls proves
         # nothing. Asserted here because this check is the last thing standing
@@ -513,6 +513,34 @@ class AuthorisationReadsTheWholeTruth(Worktree):
         self.assertIn(
             "_verify_committed_tree(", inspect.getsource(commit_job_changes)
         )
+
+    def test_preserved_commit_verification_refuses_concurrent_head_move(self) -> None:
+        from alx.providers import coding_git
+
+        checkout_branch(self.root, "repair/target")
+        self.write("target.py", "repaired\n")
+        created = commit_job_changes(
+            self.root, "repair/target", "repair target", ("target.py",)
+        )
+        original = coding_git._committed_change_set
+        inspected = []
+
+        def move_head_after_read(root, commit_sha):
+            inspected.append(commit_sha)
+            changes = original(root, commit_sha)
+            git(root, "commit", "--allow-empty", "-qm", "another commit")
+            return changes
+
+        with unittest.mock.patch.object(coding_git, "_committed_change_set",
+                                     side_effect=move_head_after_read):
+            with self.assertRaises(CodingError) as caught:
+                coding_git.verify_preserved_job_commit(
+                    self.root, "repair/target", created.commit_sha,
+                    ("target.py",), (),
+                )
+        self.assertEqual(inspected, [created.commit_sha])
+        self.assertEqual(caught.exception.details["reason_code"],
+                         "preserved_commit_changed")
 
 
 class NarrowedRefusalsUnderD029V1(Worktree):
@@ -1104,11 +1132,12 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         )
         # Every read-shaped addition must stay a read. `check-attr` takes
         # paths because it is asked about specific paths, but it only reports;
-        # the rest may take neither a value nor a path, so none can be pointed
-        # somewhere by an argument.
+        # the remaining reads cannot be pointed at another repository.
         for prefix, remainder in _WRITE_SHAPES.items():
-            if prefix[0] in ("rev-parse", "symbolic-ref", "status", "diff", "show"):
+            if prefix[0] in ("rev-parse", "symbolic-ref", "status", "diff"):
                 self.assertEqual(remainder, "none", " ".join(prefix))
+        self.assertEqual(_WRITE_SHAPES[("show", "--name-status", "--pretty=format:", "-z")], "sha")
+        self.assertFalse(git_write_permitted(("git", "show", "--name-status", "--pretty=format:", "-z", "HEAD")))
 
 
 class OperatingOutsideTheAssignedWorktree(Worktree):

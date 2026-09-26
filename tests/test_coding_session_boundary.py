@@ -113,7 +113,7 @@ class ContainmentStaysWithTheAdapter(unittest.TestCase):
     def test_containment_is_installed_before_the_process_starts(self) -> None:
         source = inspect.getsource(SubscriptionCodingSession.run_session)
         self.assertLess(
-            source.index("prepare_home"), source.index("self._runner("),
+            source.index("prepare_home"), source.index("run_coding_subprocess(self._runner"),
             "containment must be installed before the CLI is launched",
         )
 

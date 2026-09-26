@@ -9,6 +9,11 @@ review invocation are refused here even if a coding model asks for them.
 from __future__ import annotations
 
 import os
+import signal
+from contextvars import ContextVar
+from threading import Event, Lock
+from time import monotonic
+from typing import Any, Callable
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +29,113 @@ from alx.contracts.coding import (
     CodingError,
     path_matches_blocked,
 )
+
+
+_CURRENT: ContextVar["CodingCancellation | None"] = ContextVar(
+    "alx_coding_cancellation", default=None
+)
+
+
+class CodingCancellation:
+    def __init__(self) -> None:
+        self.requested = Event()
+        self._lock = Lock()
+        self._process: subprocess.Popen[Any] | None = None
+
+    def cancel(self) -> None:
+        self.requested.set()
+
+    def check(self) -> None:
+        if self.requested.is_set():
+            raise CodingError("coding_cancelled")
+
+    def run(self, runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
+        self.check()
+        if runner is not subprocess.run:
+            result = runner(argv, **kwargs)
+            self.check()
+            return result
+        timeout = kwargs.pop("timeout", None)
+        capture = kwargs.pop("capture_output", False)
+        if capture:
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.PIPE
+        supplied_input = kwargs.pop("input", None)
+        if supplied_input is not None:
+            kwargs["stdin"] = subprocess.PIPE
+        kwargs.pop("check", None)
+        kwargs["start_new_session"] = True
+        process = subprocess.Popen(argv, **kwargs)
+        with self._lock:
+            self._process = process
+        try:
+            self.check()
+            deadline = None if timeout is None else monotonic() + timeout
+            first = True
+            while True:
+                remaining = None if deadline is None else max(0, deadline - monotonic())
+                if remaining == 0:
+                    _stop(process)
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    stdout, stderr = process.communicate(
+                        input=supplied_input if first else None,
+                        timeout=min(0.1, remaining) if remaining is not None else 0.1,
+                    )
+                    self.check()
+                    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired:
+                    first = False
+                    self.check()
+        finally:
+            with self._lock:
+                self._process = None
+            if process.poll() is None:
+                _stop(process)
+            try:
+                process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                # A grandchild that escaped its parent's process group may
+                # still hold a pipe open. It must not hold the Core worker.
+                for pipe in (process.stdout, process.stderr, process.stdin):
+                    if pipe is not None:
+                        pipe.close()
+
+
+def _stop(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def check_cancelled() -> None:
+    current = _CURRENT.get()
+    if current is not None:
+        current.check()
+
+
+def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
+    current = _CURRENT.get()
+    return runner(argv, **kwargs) if current is None else current.run(runner, argv, **kwargs)
+
+
+def bind_cancellation(cancellation: CodingCancellation):
+    return _CURRENT.set(cancellation)
+
+
+def reset_cancellation(token: Any) -> None:
+    _CURRENT.reset(token)
 
 
 _GIT_INSPECT = frozenset({"status", "diff", "log"})
@@ -220,7 +332,7 @@ def run_permitted_command(
         # PATH still runs the assigned tests.
         bound[0] = sys.executable
     try:
-        completed = subprocess.run(  # noqa: S603 - argv, never shell
+        completed = run_coding_subprocess(subprocess.run,  # noqa: S603 - argv, never shell
             bound,
             cwd=worktree,
             env=_clean_environment(),

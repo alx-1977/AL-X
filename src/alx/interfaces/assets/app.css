@@ -57,6 +57,17 @@ html, body {
 }
 
 #begin[hidden] { display: none; }
+#coding-cancel {
+  position: relative;
+  margin: .5rem 1rem;
+  border: 1px solid rgba(255, 150, 150, .6);
+  border-radius: .6rem;
+  padding: .35rem .7rem;
+  background: rgba(50, 12, 16, .75);
+  color: #fff;
+  cursor: pointer;
+}
+#coding-cancel[hidden] { display: none; }
 .activation[hidden] { display: none; }
 
 .diagnostics {

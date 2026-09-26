@@ -17,6 +17,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from typing import Any
+from collections.abc import Callable
 
 from alx.contracts import AudioChunk, ResponseDelivery
 from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
@@ -51,6 +52,7 @@ LOGGER = logging.getLogger(__name__)
 # "audio.end" in the other direction; it names a frame format and never a
 # meaning, and nothing branches on what the frame carries.
 TYPED_FRAME = "person.text"
+CODING_CANCEL_FRAME = "coding.cancel"
 
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
     {
@@ -90,12 +92,16 @@ class LiveVoiceServer:
         port: int,
         sample_rate_hz: int,
         asset_root: Path,
+        cancel_coding: Callable[[str, str], bool] | None = None,
     ) -> None:
         self._session = session
         self._host = host
         self._port = port
         self._sample_rate_hz = sample_rate_hz
         self._asset_root = asset_root.resolve()
+        self._cancel_coding = cancel_coding
+        # Only the socket whose turn acquired Core may stop its active job.
+        self._active_turn_connection: ServerConnection | None = None
         # Set when a mid-exchange recovery happens, cleared by the next audio
         # frame. It proves the microphone iterator survived the recovery.
         self._await_audio_confirmation = False
@@ -299,6 +305,8 @@ class LiveVoiceServer:
                 self._audio(connection, conversation_id),
                 self._delivery_queue(conversation_id),
                 self._typed_queue(conversation_id),
+                turn_started=lambda: setattr(self, "_active_turn_connection", connection),
+                turn_finished=lambda: self._finish_turn(connection),
             ):
                 if event.kind is VoiceEventKind.AUDIO:
                     assert event.audio is not None
@@ -396,6 +404,10 @@ class LiveVoiceServer:
             )
         return False
 
+    def _finish_turn(self, connection: ServerConnection) -> None:
+        if self._active_turn_connection is connection:
+            self._active_turn_connection = None
+
     async def _audio(
         self,
         connection: ServerConnection,
@@ -404,6 +416,25 @@ class LiveVoiceServer:
         sequence = 0
         async for payload in connection:
             if isinstance(payload, str):
+                try:
+                    frame = json.loads(payload)
+                except (ValueError, TypeError):
+                    frame = None
+                if isinstance(frame, dict) and frame.get("type") == CODING_CANCEL_FRAME:
+                    job_id = frame.get("job_id")
+                    accepted = False
+                    if (connection is self._active_turn_connection
+                            and self._cancel_coding is not None and isinstance(job_id, str)
+                            and len(job_id) <= 128):
+                        accepted = await asyncio.to_thread(
+                            self._cancel_coding, job_id, stream_id
+                        )
+                    await connection.send(json.dumps({
+                        "type": "coding.cancel.ack",
+                        "job_id": job_id if isinstance(job_id, str) and len(job_id) <= 128 else "",
+                        "accepted": bool(accepted),
+                    }))
+                    continue
                 # The only non-audio frame the socket accepts. It carries what
                 # Friedl typed and nothing else: no command, no destination, no
                 # grammar. Where it goes is decided here, not by what it says.

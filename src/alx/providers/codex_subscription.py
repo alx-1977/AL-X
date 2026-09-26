@@ -123,7 +123,8 @@ class CodexSubscriptionReasoningModel:
                 schema_path = os.path.join(root, "schema.json")
                 with open(schema_path, "w", encoding="utf-8") as schema_file:
                     json.dump(_json_value(request.output_schema), schema_file, sort_keys=True)
-                completed = self._runner(
+                from alx.providers.coding_process import run_coding_subprocess
+                completed = run_coding_subprocess(self._runner,
                     self.command(request, schema_path, root),
                     input=self._prompt(request),
                     capture_output=True,

@@ -36,6 +36,9 @@ prepared canonical checkout and a job-owned file list into a commit SHA.
 from __future__ import annotations
 
 import os
+import hashlib
+import re
+import stat
 import subprocess  # noqa: S404 - the one coding-job git-write site
 import fcntl
 from contextlib import contextmanager
@@ -48,6 +51,7 @@ from alx.contracts.coding import (
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_COMMAND_OUTPUT_CHARACTERS,
     MAX_STAGED_FILES,
+    MAX_REPAIR_BRANCH_ATTEMPTS,
     branch_name_permitted,
     CodingCommit,
     CodingError,
@@ -59,11 +63,51 @@ from alx.contracts.coding import (
 
 GIT_TIMEOUT_SECONDS = 60
 
+
+def coding_checkpoint(root: Path) -> dict[str, str]:
+    """Hash complete checkout evidence without storing source or secret bytes.
+
+    The status listing includes untracked files. Index stage entries cover a
+    partially staged commit, while lstat and file bytes cover the visible diff.
+    A resume requires an exact match of all three facts.
+    """
+    state = read_workspace_state(root)
+    if state.detached or not state.branch or state.branch == "main":
+        raise CodingError("git_refused", reason_code="resume_checkout_unsafe")
+    digest = hashlib.sha256()
+    status = _run(root, ["git", "status", "--porcelain=v1", "-z", "-uall"], bounded=False)
+    index = _run(root, ["git", "ls-files", "--stage", "-z"], bounded=False)
+    if status.exit_status or index.exit_status:
+        raise CodingError("git_unavailable", reason_code="checkpoint_unreadable")
+    digest.update(status.stdout.encode("utf-8", "surrogateescape"))
+    digest.update(index.stdout.encode("utf-8", "surrogateescape"))
+    for name in state.inherited_dirty:
+        encoded = name.encode("utf-8", "surrogateescape")
+        digest.update(len(encoded).to_bytes(8, "big") + encoded)
+        target = root / name
+        if target.exists() or target.is_symlink():
+            digest.update(stat.S_IMODE(target.lstat().st_mode).to_bytes(4, "big"))
+        if target.is_symlink():
+            link = os.readlink(target).encode("utf-8", "surrogateescape")
+            digest.update(b"link\0" + len(link).to_bytes(8, "big") + link)
+        elif target.is_file():
+            digest.update(b"file\0")
+            content = hashlib.sha256()
+            with target.open("rb") as source:
+                for chunk in iter(lambda: source.read(64 * 1024), b""):
+                    content.update(chunk)
+            digest.update(content.digest())
+        elif target.exists():
+            digest.update(b"other\0")
+        else:
+            digest.update(b"missing\0")
+    return {"branch": state.branch, "head_sha": state.head_sha,
+            "state_digest": digest.hexdigest()}
+
 # D-029 fixes the suffix order; this bound fixes the maximum local work the
 # capability may spend looking for an unused name.  It counts the requested
 # name as the first attempt, then -2 through -100.  Exhaustion is a refusal,
 # never a reason to widen the git authority or ask git to reuse a ref.
-MAX_REPAIR_BRANCH_ATTEMPTS = 100
 
 # Every argv the Coding Agent may run against the canonical checkout's git, as a fixed
 # prefix plus how the remainder is checked. A shape absent from this mapping
@@ -74,6 +118,7 @@ MAX_REPAIR_BRANCH_ATTEMPTS = 100
 # "value"  - exactly one further argument, checked by the caller that built it
 # "paths"  - a `--` separator followed by one or more worktree-relative paths,
 #            none of which may be spelled as a ref
+# "sha"    - exactly one full commit SHA, never a ref or revision expression
 # "pair"   - exactly two values: the feature branch and the already verified
 #            main commit used by `switch -c`.
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
@@ -83,10 +128,10 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("symbolic-ref", "--quiet", "--short", "HEAD"): "none",
     ("status", "--porcelain=v1", "-z", "-uall"): "none",
     ("diff", "--cached", "--name-only", "-z"): "none",
-    ("show", "--name-only", "--pretty=format:", "-z", "HEAD"): "none",
+    ("show", "--name-status", "--pretty=format:", "-z"): "sha",
     ("check-attr", "-z", "filter", "--"): "paths",
     ("check-ignore", "-q", "--"): "paths",
-    ("ls-files", "-z", "--error-unmatch", "--"): "paths",
+    ("ls-files", "--stage", "-z"): "none",
     ("diff", "--cached", "--name-status", "-z"): "none",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
@@ -131,6 +176,8 @@ def git_write_permitted(argv: list[str] | tuple[str, ...]) -> bool:
             return not tail
         if remainder == "value":
             return len(tail) == 1 and not tail[0].startswith("-")
+        if remainder == "sha":
+            return len(tail) == 1 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tail[0]) is not None
         if remainder == "paths":
             return bool(tail) and all(_pathspec_permitted(item) for item in tail)
         if remainder == "pair":
@@ -1052,8 +1099,8 @@ def _verify_committed_tree(
     returns to AL/X is the truth: a commit exists, it contains something this
     job did not authorise, and its SHA is here for her to act on.
     """
-    committed = _committed_paths(root)
-    undeleted = _still_tracked(root, authorised_deletions)
+    committed, deleted = _committed_change_set(root, after.head_sha)
+    undeleted = tuple(path for path in authorised_deletions if path not in deleted)
     if undeleted:
         raise CodingError(
             "unrelated_changes_staged",
@@ -1109,6 +1156,32 @@ def commit_job_changes(
     )
 
 
+def verify_preserved_job_commit(
+    root: Path, branch: str, commit_sha: str,
+    expected_files: tuple[str, ...], deleted_files: tuple[str, ...],
+) -> CodingCommit:
+    """Resolve a post-commit readback failure without creating another commit.
+
+    Only a SHA that the original commit attempt reported may reach this helper.
+    The caller has already proved the unchanged checkout checkpoint. A mismatch
+    returns to Core; this path has no Git write.
+    """
+    state = read_workspace_state(root)
+    if (state.detached or state.branch != branch or state.head_sha != commit_sha
+            or not state.clean):
+        raise CodingError("git_refused", reason_code="preserved_commit_changed")
+    expected = tuple(dict.fromkeys((*expected_files, *deleted_files)))
+    committed = _verify_committed_tree(root, expected, deleted_files, state)
+    if set(committed) != set(expected):
+        raise CodingError("git_refused", reason_code="preserved_commit_incomplete",
+                          commit_sha=commit_sha)
+    current = read_workspace_state(root)
+    if (current.detached or current.branch != branch or current.head_sha != commit_sha
+            or not current.clean):
+        raise CodingError("git_refused", reason_code="preserved_commit_changed")
+    return CodingCommit(branch, commit_sha, committed, True)
+
+
 def _unstage(worktree: Path, paths: tuple[str, ...]) -> None:
     """Take named paths back out of the index, leaving their content alone.
 
@@ -1162,39 +1235,27 @@ def _reconcile_after_commit(
     )
 
 
-def _still_tracked(worktree: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
-    """Which of these paths HEAD's tree still tracks, asked about by name.
-
-    Scoped to the paths in question rather than listing the repository: the
-    question is only ever "is this authorised deletion actually gone", and a
-    whole-repository listing would be a large read to answer it. Exit status 1
-    with `--error-unmatch` means none of them is tracked, which is the
-    expected answer after a successful deletion.
-    """
-    if not paths:
-        return ()
-    result = _run(
-        worktree, ["git", "ls-files", "-z", "--error-unmatch", "--", *paths],
-        bounded=False,
-    )
-    if result.exit_status not in (0, 1):
-        raise CodingError(
-            "git_unavailable",
-            reason_code="tracked_paths_unreadable",
-            exit_status=result.exit_status,
-        )
-    return _bounded_entries(result.stdout, "tracked_listing_too_large")
-
-
-def _committed_paths(worktree: Path) -> tuple[str, ...]:
-    """The paths HEAD's own commit touched, read back after it was created."""
+def _committed_change_set(worktree: Path, commit_sha: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Read changed paths and deletions from one pinned commit, never live HEAD."""
     listed = _require(
         worktree,
-        ["git", "show", "--name-only", "--pretty=format:", "-z", "HEAD"],
+        ["git", "show", "--name-status", "--pretty=format:", "-z", commit_sha],
         "commit_unreadable",
         bounded=False,
     )
-    return _bounded_entries(listed, "commit_too_large")
+    fields = _nul_paths(listed)
+    if len(fields) % 2 or len(fields) // 2 > MAX_INSPECTED_ENTRIES:
+        raise CodingError("git_refused", reason_code="commit_too_large",
+                          entry_count=len(fields) // 2)
+    paths: list[str] = []
+    deleted: set[str] = set()
+    for status, path in zip(fields[::2], fields[1::2]):
+        if status not in {"A", "M", "D", "T"} or not path:
+            raise CodingError("git_refused", reason_code="commit_change_unreadable")
+        paths.append(path)
+        if status == "D":
+            deleted.add(path)
+    return tuple(paths), frozenset(deleted)
 
 
 def _staged_paths(worktree: Path) -> tuple[str, ...]:
@@ -1221,6 +1282,7 @@ __all__ = [
     "assert_assigned_worktree",
     "branch_name_permitted",
     "canonical_repository_root",
+    "coding_checkpoint",
     "coding_job_lock",
     "commit_job_changes",
     "continue_feature_branch",
@@ -1229,5 +1291,6 @@ __all__ = [
     "prepare_feature_branch",
     "read_head_sha",
     "read_workspace_state",
+    "verify_preserved_job_commit",
     "worktree_branch",
 ]

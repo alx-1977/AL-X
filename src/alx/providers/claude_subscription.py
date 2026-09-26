@@ -318,7 +318,8 @@ class ClaudeSubscriptionReasoningModel:
             command = self.command(request)
             try:
                 with TemporaryDirectory(prefix="alx-claude-") as working_directory:
-                    completed = self._runner(
+                    from alx.providers.coding_process import run_coding_subprocess
+                    completed = run_coding_subprocess(self._runner,
                         command,
                         input=prompt,
                         capture_output=True,

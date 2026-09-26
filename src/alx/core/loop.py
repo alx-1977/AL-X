@@ -1901,6 +1901,14 @@ class CoreAgent:
             and (item.result.failure or {}).get("code") != "arguments_unusable"
             and (item.result.failure or {}).get("code") != "planning_failed"
             and (item.result.failure or {}).get("phase") != "planning"
+            and (item.result.failure or {}).get("code") != "coding_cancelled"
+            and not (
+                (item.result.failure or {}).get("code") == "review_failed"
+                and (item.result.failure or {}).get("review_classification") == "infrastructure"
+            )
+            and (item.result.failure or {}).get("failure_class") not in {
+                "test_infrastructure", "commit_infrastructure"
+            }
             # A checkout refused before the feature branch existed: nothing
             # was implemented, so nothing of the allowance was spent.
             and (item.result.failure or {}).get("implementation_reached") is not False

@@ -11,6 +11,7 @@ It does not merge, push, deploy, or request a review.
 from __future__ import annotations
 
 import logging
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -39,6 +40,7 @@ from alx.contracts.coding import (
     MAX_BRANCH_NAME_CHARACTERS,
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_STEP_BUDGET,
+    MAX_REPAIR_BRANCH_ATTEMPTS,
     MAX_TASK_CHARACTERS,
     BranchContinuation,
     CodingError,
@@ -98,6 +100,18 @@ _COMMIT_RECORD = StructuredSchema(
 
 # What the local reviewer said about this job's candidate. Advisory: a finding
 # is the reviewer's opinion for Core to weigh, not a verdict on the work.
+_REVIEW_ATTEMPT = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "attempt": _INTEGER,
+        "reason": _STRING,
+        "error_message": _STRING,
+        "raw_excerpt": _STRING,
+    },
+    ("attempt", "reason", "error_message", "raw_excerpt"),
+    extra_properties=False,
+)
+
 _REVIEW_FINDING = StructuredSchema(
     ValueKind.OBJECT,
     {
@@ -177,7 +191,17 @@ DEFINITION = CapabilityDefinition(
     "resolve come back in review_findings with external_review_recommended "
     "true and local_review_material_findings in unresolved_issues, so you "
     "judge them against the committed work rather than being handed a refusal "
-    "in place of it.",
+    "in place of it. A reviewer schema, timeout, or provider failure is not a "
+    "finding: review_classification is infrastructure, that same diff is "
+    "reviewed again up to two more times. review_attempts carries each failed "
+    "attempt's reason, error_message, and bounded raw_excerpt, including when "
+    "a later attempt succeeds and the job commits. If those attempts are "
+    "exhausted the job stays uncommitted with diff_preserved and the branch "
+    "name. AL/X may set resume_job_id to the failed or cancelled call ID "
+    "from this active goal to retry only its recorded stage after the checkout "
+    "matches the durable branch, HEAD, and full state digest. The user can "
+    "stop an active job through the structured coding cancellation control; "
+    "cancellation preserves its branch and diff and returns a checkpoint.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -190,6 +214,7 @@ DEFINITION = CapabilityDefinition(
             "repair_branch": _STRING,
             "commit_message": _STRING,
             "continue_goal_branch": _BOOLEAN,
+            "resume_job_id": _STRING,
         },
         ("task", "repair_branch", "commit_message"),
         extra_properties=False,
@@ -224,6 +249,16 @@ DEFINITION = CapabilityDefinition(
             "commit": _COMMIT_RECORD,
             "branch": _STRING,
             "commit_sha": _STRING,
+            # Set when a review attempt failed for schema, timeout, or provider
+            # reasons, including when a later attempt succeeded. Absent when
+            # the only review evidence is advisory findings.
+            "review_classification": _STRING,
+            "diff_preserved": _BOOLEAN,
+            "uncommitted": _BOOLEAN,
+            "review_attempts": StructuredSchema(
+                ValueKind.ARRAY, items=_REVIEW_ATTEMPT
+            ),
+            "checkpoint": _STRING,
         },
         (
             "status",
@@ -242,8 +277,10 @@ DEFINITION = CapabilityDefinition(
     SideEffect.EFFECTFUL,
     CODING_FAILURES,
     durable_input_fields=(
-        "task", "blocked_paths", "repair_branch", "commit_message",
+        "task", "context", "acceptance_criteria", "test_guidance",
+        "step_budget", "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
+        "resume_job_id",
     ),
 )
 
@@ -251,6 +288,7 @@ DEFINITION = CapabilityDefinition(
 # sit late there and would invert this order. task_failed is the fallback
 # for undeclared issues such as no_files_changed, not an entry.
 _OUTCOME_ISSUE_CODES = (
+    "coding_cancelled",
     "sandbox_unusable",
     "session_failed",
     "coding_unavailable",
@@ -311,7 +349,74 @@ def build_coding_executors(
         if argument_failure is not None:
             return _failed(call_id, "arguments_unusable", **argument_failure)
 
-        if arguments.get("continue_goal_branch", False):
+        resume_id = arguments.get("resume_job_id")
+        if resume_id:
+            state = goal_state_source()
+            recorded = {
+                item.call.call_id: item
+                for item in (() if state is None else state.attempts)
+                if item.call is not None and item.call.capability_id == RUN_CODING_TASK
+                and item.result is not None
+                and item.result.state is CapabilityResultState.FAILED
+            }
+            previous = recorded.get(resume_id)
+            if previous is None:
+                return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                               implementation_reached=False)
+            raw_checkpoint = previous.result.durable_values.get("checkpoint")
+            try:
+                checkpoint = json.loads(raw_checkpoint)
+            except (TypeError, ValueError):
+                checkpoint = None
+            # A resumed attempt records only what Core supplied on that call.
+            # Walk its durable same-goal ancestry to recover the complete
+            # original request, while using the immediate attempt's checkpoint
+            # for the current stage and checkout proof.
+            origin = previous
+            seen: set[str] = set()
+            while True:
+                origin_id = origin.call.call_id
+                if origin_id in seen:
+                    return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                                   implementation_reached=False)
+                seen.add(origin_id)
+                parent_id = origin.call.arguments.get("resume_job_id")
+                if not parent_id:
+                    break
+                if not isinstance(parent_id, str) or not job_id_permitted(parent_id):
+                    return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                                   implementation_reached=False)
+                origin = recorded.get(parent_id)
+                if origin is None:
+                    return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                                   implementation_reached=False)
+            original = origin.call.arguments
+            original_request, original_failure = parse_coding_arguments(original, call_id)
+            if original_failure is not None or original_request is None:
+                return _failed(call_id, "git_refused", reason_code="resume_original_request_invalid",
+                               implementation_reached=False)
+            requested_branch = original_request.repair_branch.strip()
+            prepared_branches = {requested_branch} | {
+                f"{requested_branch}-{number}"
+                for number in range(2, MAX_REPAIR_BRANCH_ATTEMPTS + 1)
+            }
+            if (not isinstance(checkpoint, dict) or checkpoint.get("job_id") != resume_id
+                    or checkpoint.get("branch") not in prepared_branches
+                    or checkpoint.get("stage") not in {"planning", "execution", "review", "test", "commit"}
+                    or arguments.get("continue_goal_branch", False)):
+                return _failed(call_id, "git_refused", reason_code="resume_checkpoint_invalid",
+                               implementation_reached=False)
+            for field in ("task", "context", "acceptance_criteria", "test_guidance",
+                          "step_budget", "blocked_paths", "commit_message"):
+                if field in arguments and getattr(request, field) != getattr(original_request, field):
+                    return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
+                                   implementation_reached=False)
+            if request.repair_branch.strip() not in {requested_branch, checkpoint["branch"]}:
+                return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
+                               implementation_reached=False)
+            request = replace(original_request, repair_branch=checkpoint["branch"],
+                              resume_checkpoint=checkpoint)
+        elif arguments.get("continue_goal_branch", False):
             continuation = goal_coding_branch(goal_state_source())
             if continuation is None or request.repair_branch != continuation.branch:
                 return _failed(
@@ -398,6 +503,11 @@ def parse_coding_arguments(
         return None, _argument_failure(
             "continue_goal_branch", "not_boolean", "continue_goal_branch must be a boolean"
         )
+    if "resume_job_id" in arguments and (
+        not isinstance(arguments["resume_job_id"], str)
+        or not job_id_permitted(arguments["resume_job_id"])
+    ):
+        return None, _argument_failure("resume_job_id", "unsafe", "resume_job_id is invalid")
     if not isinstance(job_id, str) or not job_id.strip():
         return None, _argument_failure(
             "job_id", "missing", "job_id was not assigned"

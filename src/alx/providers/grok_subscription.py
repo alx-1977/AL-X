@@ -247,7 +247,8 @@ class GrokSubscriptionReasoningModel:
                     environment = self.child_environment()
                     environment["GROK_HOME"] = str(grok_home)
                     command = self.command(request, str(prompt_path), str(cwd))
-                    completed = self._runner(
+                    from alx.providers.coding_process import run_coding_subprocess
+                    completed = run_coding_subprocess(self._runner,
                         command,
                         capture_output=True,
                         text=True,

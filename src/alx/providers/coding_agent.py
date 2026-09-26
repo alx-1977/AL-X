@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable
 from contextlib import ExitStack
+from threading import Lock
 from typing import Any, Mapping
 
 from alx.contracts import ModelMessage, ModelRequest, ModelRole, ReasoningModel
@@ -43,6 +44,9 @@ from alx.contracts.coding import (
     MAX_STAGED_FILES,
     MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS,
     MAX_LOCAL_REVIEW_CYCLES,
+    MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS,
+    MAX_TEST_INFRASTRUCTURE_ATTEMPTS,
+    MAX_REVIEW_RAW_EXCERPT_CHARACTERS,
     MAX_VERIFICATION_COMMANDS,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
     FULL_SUITE_COMMAND_SECONDS,
@@ -56,6 +60,7 @@ from alx.contracts.coding import (
     CodingTelemetry,
     GitWorkspaceState,
     LocalReviewFinding,
+    ReviewInfrastructureAttempt,
 )
 from alx.contracts.coding_verification import (
     VerificationCheck,
@@ -71,13 +76,18 @@ from alx.providers.coding_process import (
     run_permitted_command,
 )
 from alx.providers.coding_git import (
+    coding_checkpoint,
     canonical_repository_root,
     coding_job_lock,
     commit_job_changes,
+    verify_preserved_job_commit,
     deleted_paths,
     prepare_feature_branch,
     continue_feature_branch,
     read_workspace_state,
+)
+from alx.providers.coding_process import (
+    CodingCancellation, bind_cancellation, reset_cancellation, check_cancelled,
 )
 from alx.providers.coding_workspace import CodingWorkspace
 from alx.providers.errors import ProviderError
@@ -216,6 +226,97 @@ def _strings(value: object) -> tuple[str, ...]:
     return tuple(str(item) for item in value if str(item).strip())
 
 
+def _bounded_review_excerpt(raw: object) -> str:
+    """Keep malformed output's shape and types, never its untrusted values."""
+    def shape(value: object, depth: int = 0) -> object:
+        if depth >= 5:
+            return "<depth-limit>"
+        if isinstance(value, Mapping):
+            return {
+                key if isinstance(key, str) and key in {
+                    "findings", "severity", "title", "evidence", "correction"
+                }
+                else "<redacted-key>": shape(item, depth + 1)
+                for key, item in list(value.items())[:16]
+            }
+        if isinstance(value, (list, tuple)):
+            return [shape(item, depth + 1) for item in value[:16]]
+        if isinstance(value, str):
+            return f"<redacted:string:{len(value)}>"
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return f"<redacted:{type(value).__name__}>"
+        return f"<redacted:{type(value).__name__}>"
+    try:
+        rendered = json.dumps(shape(raw), ensure_ascii=True)
+    except (TypeError, ValueError):
+        rendered = ""
+    rendered = rendered.replace("\x00", "")
+    return rendered[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS]
+
+
+def _infrastructure_review_diagnostics(
+    records: list[ReviewInfrastructureAttempt],
+) -> dict[str, object]:
+    """Failed reviewer attempts a later opinion still has to report.
+
+    A schema, timeout, or provider failure that a retry then overcomes is
+    still evidence. The job may commit; Core still sees why the first
+    attempts were not a review.
+    """
+    if not records:
+        return {}
+    return {
+        "phase": "local_review",
+        "review_classification": "infrastructure",
+        "review_attempts": [record.as_values() for record in records],
+    }
+
+
+def _review_infrastructure_attempts(
+    raw: object,
+) -> tuple[ReviewInfrastructureAttempt, ...]:
+    """Rebuild attempt records from the diagnostics already bounded at source."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    records: list[ReviewInfrastructureAttempt] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        attempt = item.get("attempt")
+        reason = item.get("reason")
+        message = item.get("error_message")
+        excerpt = item.get("raw_excerpt")
+        if (
+            not isinstance(attempt, int)
+            or isinstance(attempt, bool)
+            or not isinstance(reason, str)
+            or not isinstance(message, str)
+            or not isinstance(excerpt, str)
+        ):
+            continue
+        records.append(
+            ReviewInfrastructureAttempt(
+                attempt=attempt,
+                reason=reason,
+                error_message=message[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
+                raw_excerpt=excerpt[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
+            )
+        )
+    return tuple(records)
+
+
+def _reject_review_output(raw: object, message: str) -> None:
+    """The reviewer returned output that is not a review."""
+    raise CodingError(
+        "review_failed",
+        reason_code="review_schema_invalid",
+        error_message=message[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
+        raw_excerpt=_bounded_review_excerpt(raw),
+    )
+
+
 def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
     """The human-language instruction handed to the native coding session.
 
@@ -294,13 +395,28 @@ class _JobState:
     through it.
     """
 
-    __slots__ = ("job_id", "branch", "telemetry", "activity")
+    __slots__ = ("job_id", "branch", "telemetry", "activity", "cancellation",
+                 "stage", "plan", "files", "session_report", "review_findings",
+                 "verification", "request", "preexisting_dirty", "commands",
+                 "commit_candidate_sha", "deleted_files")
 
     def __init__(self, job_id: str) -> None:
         self.job_id = job_id or "coding-job"
         self.branch = ""
         self.telemetry: CodingTelemetry | None = None
         self.activity: str | None = None
+        self.cancellation = CodingCancellation()
+        self.stage = "planning"
+        self.plan: Mapping[str, Any] | None = None
+        self.files: tuple[str, ...] = ()
+        self.session_report = ""
+        self.review_findings: tuple[LocalReviewFinding, ...] = ()
+        self.verification: VerificationEvidence | None = None
+        self.request: CodingRequest | None = None
+        self.preexisting_dirty: tuple[str, ...] = ()
+        self.commands: list[CodingCommandRecord] = []
+        self.commit_candidate_sha = ""
+        self.deleted_files: tuple[str, ...] = ()
 
 
 class CodingAgent:
@@ -322,6 +438,8 @@ class CodingAgent:
         if repository is None:
             raise ValueError("coding agent requires the canonical repository")
         self._repository = canonical_repository_root(repository)
+        self._active_lock = Lock()
+        self._active: _JobState | None = None
         # Per-run state lives in `_JobState`, created by `run` and threaded
         # explicitly from there. It used to live here, as three instance
         # attributes, which meant two overlapping jobs on one agent shared a
@@ -408,12 +526,23 @@ class CodingAgent:
             return
         state.activity = activity
 
+    def cancel(self, job_id: str | None = None) -> bool:
+        """Stop only the active job's child process; preserve its checkout."""
+        with self._active_lock:
+            active = self._active
+        if (active is None or active.stage == "commit"
+                or (job_id is not None and active.job_id != job_id)):
+            return False
+        active.cancellation.cancel()
+        return True
+
     def run(self, request: CodingRequest) -> CodingOutcome:
         """Run one job and never leave runtime telemetry at a worker state."""
         outcome: CodingOutcome | None = None
         # One state object per call, so nothing this run touches is reachable
         # from another run on the same agent.
         state = _JobState(request.job_id)
+        cancellation_token = bind_cancellation(state.cancellation)
         self._report_telemetry(
             state, "plan", in_flight=True, transition="CASE started"
         )
@@ -427,15 +556,33 @@ class CodingAgent:
                     held.enter_context(coding_job_lock(self._repository))
                 except CodingError as error:
                     raise _before_implementation(error)
-                outcome = self._run(request, state)
+                with self._active_lock:
+                    self._active = state
+                try:
+                    outcome = self._run(request, state)
+                except CodingError as error:
+                    if error.code != "coding_cancelled":
+                        raise
+                    # Read-only checkpoint collection must continue after the
+                    # child was stopped. It runs on this worker, not the child.
+                    reset_cancellation(cancellation_token)
+                    cancellation_token = None
+                    outcome = self._cancelled_outcome(state)
                 return outcome
         finally:
+            if cancellation_token is not None:
+                reset_cancellation(cancellation_token)
+            with self._active_lock:
+                if self._active is state:
+                    self._active = None
             self._report_telemetry(
                 state,
-                "complete" if outcome is not None and outcome.status == "succeeded" else "failed",
+                "complete" if outcome is not None and outcome.status == "succeeded" else
+                "cancelled" if outcome is not None and outcome.status == "cancelled" else "failed",
                 terminal=True,
                 outcome=outcome.status if outcome is not None else "failed",
-                transition="COMPLETE" if outcome is not None and outcome.status == "succeeded" else "FAILED",
+                transition="COMPLETE" if outcome is not None and outcome.status == "succeeded" else
+                "CANCELLED" if outcome is not None and outcome.status == "cancelled" else "FAILED",
             )
             self._report_activity(state, "reasoning")
 
@@ -448,7 +595,14 @@ class CodingAgent:
             workspace = CodingWorkspace(
                 str(self._repository), request.blocked_paths
             )
-            if request.continuation is not None:
+            resume = request.resume_checkpoint
+            if resume is not None:
+                current = coding_checkpoint(self._repository)
+                if any(current.get(key) != resume.get(key)
+                       for key in ("branch", "head_sha", "state_digest")):
+                    raise CodingError("git_refused", reason_code="resume_state_changed")
+                branch = current["branch"]
+            elif request.continuation is not None:
                 branch = continue_feature_branch(
                     self._repository, request.continuation.branch,
                     request.continuation.permitted_heads,
@@ -465,13 +619,27 @@ class CodingAgent:
             repair_branch=branch,
             worktree=str(self._repository),
         )
+        state.request = request
+        if resume is not None:
+            state.stage = str(resume["stage"])
+            state.plan = resume.get("plan") if isinstance(resume.get("plan"), Mapping) else None
+            state.files = tuple(str(item) for item in resume.get("files", ()))
+            state.session_report = "resumed preserved implementation"
+            candidate = resume.get("commit_candidate_sha")
+            state.commit_candidate_sha = candidate if isinstance(candidate, str) else ""
+            state.deleted_files = tuple(str(item) for item in resume.get("deleted_files", ()))
+        check_cancelled()
         self._report_telemetry(
             state, "plan", in_flight=True,
             transition="BRANCH continued" if request.continuation else "BRANCH prepared"
         )
-        commands: list[CodingCommandRecord] = []
+        commands = state.commands
         preexisting_status, _ = self._git_evidence(workspace)
-        preexisting_dirty = files_from_git_status(preexisting_status)
+        preexisting_dirty = (
+            tuple(str(item) for item in resume.get("preexisting_dirty", ()))
+            if resume is not None else files_from_git_status(preexisting_status)
+        )
+        state.preexisting_dirty = preexisting_dirty
         preexisting_fingerprints = self._file_fingerprints(
             workspace, preexisting_dirty
         )
@@ -487,7 +655,7 @@ class CodingAgent:
         # that later reappears in status reads as job-owned. The baseline
         # reader has the complete listing, so authorisation uses that and falls
         # back only when git could not answer at all.
-        baseline_dirty = (
+        baseline_dirty = preexisting_dirty if resume is not None else (
             baseline.inherited_dirty if baseline is not None else preexisting_dirty
         )
         # Which paths were already deleted before this job touched anything.
@@ -497,7 +665,16 @@ class CodingAgent:
         # The session starts only after the visible checkout is on the feature
         # branch. It has no Git authority and cannot change that branch.
 
-        plan, planning_failure = self._planning_phase(request, workspace)
+        if resume is not None and resume["stage"] != "planning":
+            plan = resume.get("plan")
+            if not isinstance(plan, Mapping) or not isinstance(plan.get("problem_understanding"), str):
+                raise _before_implementation(CodingError("git_refused", reason_code="resume_plan_invalid"))
+            planning_failure = {}
+            state.files = tuple(str(item) for item in resume.get("files", ()))
+            state.session_report = "resumed preserved implementation"
+        else:
+            state.stage = "planning"
+            plan, planning_failure = self._planning_phase(request, workspace)
         if plan is None:
             git_status, git_diff = self._git_evidence(workspace)
             issue = (
@@ -517,8 +694,11 @@ class CodingAgent:
                     "implementation_reached": False,
                 },
                 baseline=baseline,
+                checkpoint=self._checkpoint(state),
             )
         plan_summary = str(plan["problem_understanding"])
+        state.plan = plan
+        state.stage = "execution"
         self._report_telemetry(state, "execution", transition="PLAN completed")
 
         if self._session is None:
@@ -534,46 +714,66 @@ class CodingAgent:
                 baseline=baseline,
             )
 
-        self._report_activity(state, "coding")
-        self._report_telemetry(state, "execution", in_flight=True, transition="EXECUTION started")
-        try:
-            session = self._session.run_session(
-                request, build_briefing(request, plan)
-            )
-        except CodingError as error:
-            git_status, git_diff = self._git_evidence(workspace)
-            return self._outcome(
-                status="failed",
-                summary="the coding session could not be started or completed",
-                files=self._files_changed(
-                    (), git_status, preexisting_dirty,
-                    self._modified_preexisting(
-                        workspace, preexisting_fingerprints
-                    ),
-                ),
-                preexisting_dirty=preexisting_dirty, commands=commands,
-                tests_run=False, tests_passed=None, git_status=git_status,
-                git_diff=git_diff, issues=(error.code,), review=False,
-                failure_status=True, plan_summary=plan_summary,
-                diagnostics={"phase": "execution", **error.details},
-                baseline=baseline,
-            )
+        if resume is not None and resume["stage"] in {"review", "test", "commit"}:
+            session = CodingSessionResult(True, state.session_report)
+            session_files = state.files
+        else:
+            state.stage = "execution"
+            self._report_activity(state, "coding")
+            self._report_telemetry(state, "execution", in_flight=True, transition="EXECUTION started")
+            try:
+                session = self._session.run_session(
+                    request, build_briefing(request, plan)
+                )
+            except CodingError as error:
+                if error.code == "coding_cancelled":
+                    raise
+                git_status, git_diff = self._git_evidence(workspace)
+                state.files = self._files_changed(
+                    state.files, git_status, preexisting_dirty,
+                    self._modified_preexisting(workspace, preexisting_fingerprints),
+                )
+                return self._outcome(
+                    status="failed", summary="the coding session could not be started or completed",
+                    files=state.files, preexisting_dirty=preexisting_dirty, commands=commands,
+                    tests_run=False, tests_passed=None, git_status=git_status,
+                    git_diff=git_diff, issues=(error.code,), review=False,
+                    failure_status=True, plan_summary=plan_summary,
+                    diagnostics={"phase": "execution", **error.details}, baseline=baseline,
+                    checkpoint=self._checkpoint(state),
+                    diff_preserved=bool(state.files),
+                    preserved_branch=branch if state.files else "",
+                )
 
-        self._report_telemetry(state, "execution", transition="EXECUTION completed")
-
-        post_session_status, _ = self._git_evidence(workspace)
-        session_files = self._files_changed(
-            (), post_session_status, preexisting_dirty,
-            self._modified_preexisting(workspace, preexisting_fingerprints),
-        )
+            if session.completed:
+                state.stage = "review"
+            self._report_telemetry(state, "execution", transition="EXECUTION completed")
+            state.session_report = session.report
+            post_session_status, _ = self._git_evidence(workspace)
+            session_files = self._files_changed(
+                state.files, post_session_status, preexisting_dirty,
+                self._modified_preexisting(workspace, preexisting_fingerprints),
+            )
+            state.files = session_files
         review_failure: str | None = None
         review_issues: tuple[str, ...] = ()
         reviewed_files = session_files
         review_diagnostics: dict[str, object] = {}
         review_findings: tuple[LocalReviewFinding, ...] = ()
+        if resume is not None and resume["stage"] in {"test", "commit"}:
+            try:
+                review_findings = tuple(
+                    LocalReviewFinding(**item) for item in resume.get("review_findings", ())
+                )
+            except (TypeError, ValueError):
+                raise _before_implementation(CodingError("git_refused", reason_code="resume_review_invalid"))
+            state.review_findings = review_findings
         # There is no candidate to review when the native session reports a
         # failed execution. Preserve that failure for AL/X's normal outcome.
-        if session.completed and session_files:
+        if session.completed and session_files and not (
+            resume is not None and resume["stage"] in {"test", "commit"}
+        ):
+            state.stage = "review"
             (
                 review_failure, review_issues, reviewed_files,
                 review_diagnostics, review_findings,
@@ -581,6 +781,22 @@ class CodingAgent:
                 request, workspace, plan, session_files, preexisting_dirty,
                 preexisting_fingerprints, state,
             )
+            state.files = reviewed_files
+            state.review_findings = review_findings
+        # Failed attempts stay on the result when a later attempt produced an
+        # opinion. Preservation is only the exhausted path: a commit still
+        # happens, and the branch is not reported as an uncommitted hold.
+        review_attempts = _review_infrastructure_attempts(
+            review_diagnostics.get("review_attempts")
+        )
+        preserved = (
+            review_diagnostics.get("review_classification") == "infrastructure"
+            and review_diagnostics.get("diff_preserved") is True
+        )
+        branch_name = review_diagnostics.get("branch")
+        if not isinstance(branch_name, str):
+            branch_name = ""
+        infrastructure = preserved or bool(review_attempts)
         if review_failure is not None:
             git_status, git_diff = self._git_evidence(workspace, reviewed_files)
             return self._outcome(
@@ -597,24 +813,58 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics=review_diagnostics or {"phase": "local_review"},
                 baseline=baseline,
+                review_classification="infrastructure" if infrastructure else "",
+                diff_preserved=preserved,
+                preserved_branch=branch_name if preserved else "",
+                review_attempts=review_attempts,
+                checkpoint=self._checkpoint(state),
             )
+        state.stage = "test"
 
         # Verification is AL/X's, not the session's. The agent has no terminal,
         # so every command below is chosen here and refused unless the
         # allowlist already permits it. The scope is `reviewed_files`, the job's
         # final file set: a reviewer correction can touch a file the initial
         # session never did, and that file must select tests like any other.
-        self._report_activity(state, "reasoning")
-        self._report_telemetry(state, "test", transition="TEST started")
-        verification, tests_run, tests_passed = self._verify(
-            request, workspace, reviewed_files, commands
-        )
-
-        self._report_telemetry(state, "verify", transition="TEST completed")
+        if resume is not None and resume["stage"] == "commit":
+            raw_verification = resume.get("verification")
+            if not isinstance(raw_verification, Mapping) or not isinstance(raw_verification.get("checks"), list):
+                raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_invalid"))
+            try:
+                verification = VerificationEvidence(tuple(
+                    VerificationCheck(
+                        name=item["name"], argv=tuple(item["argv"]), reason=item["reason"],
+                        ran=item["ran"], passed=item["passed"], kind=item["kind"],
+                        findings=tuple(item["findings"]),
+                    ) for item in raw_verification["checks"]
+                ))
+            except (KeyError, TypeError, ValueError):
+                raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_invalid"))
+            if not verification.all_required_passed or (
+                tuple((check.name, check.argv, check.kind, check.reason)
+                      for check in verification.checks)
+                != tuple((check.name, check.argv, check.kind, check.reason)
+                         for check in required_verification(reviewed_files, self._repository).checks)
+            ):
+                raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_unproven"))
+            tests_run = any(check.ran and check.name.startswith("pytest") for check in verification.checks)
+            tests_passed = True if tests_run else None
+        else:
+            state.stage = "test"
+            self._report_activity(state, "reasoning")
+            self._report_telemetry(state, "test", in_flight=True, transition="TEST started")
+            verification, tests_run, tests_passed = self._verify(
+                request, workspace, reviewed_files, commands
+            )
+            self._report_telemetry(
+                state, "verify", transition="TEST completed" if verification.all_required_passed
+                else "TEST failed"
+            )
+        state.verification = verification
 
         git_status, git_diff = self._git_evidence(workspace, reviewed_files)
         files = self._files_changed(
-            (), git_status, preexisting_dirty,
+            state.files, git_status, preexisting_dirty,
             self._modified_preexisting(workspace, preexisting_fingerprints),
         )
         issues = list(_strings(session.diagnostics.get("unresolved_issues")))
@@ -644,6 +894,15 @@ class CodingAgent:
                 # The work may be sound; the request made verifying it
                 # impossible. Core's fuse counts this class on its own bound.
                 failure_class = {"failure_class": "request_conflict"}
+            elif all(
+                check.kind == "command" and (
+                    (last := next((record for record in reversed(commands)
+                                   if record.argv == check.argv), None)) is not None
+                    and (last.timed_out or last.stderr == "coding_unavailable")
+                )
+                for check in verification.checks if not check.passed
+            ):
+                failure_class = {"failure_class": "test_infrastructure"}
 
         # Only a job that actually succeeded is committed. A failed one leaves
         # its work in the worktree for AL/X to read as a diff: committing it
@@ -687,6 +946,9 @@ class CodingAgent:
             name for name in complete_files
             if name in currently_deleted and name not in inherited_deleted
         )
+        if state.commit_candidate_sha:
+            job_deleted = state.deleted_files
+        state.deleted_files = job_deleted
         complete_files = tuple(
             name for name in complete_files if name not in job_deleted
         )
@@ -695,6 +957,7 @@ class CodingAgent:
         ) > MAX_STAGED_FILES:
             issues.append("too_many_files_to_commit")
             wanted_commit = False
+            status = "failed"
         # The status derivation above has already failed a job whose required
         # verification did not pass, so `wanted_commit` is false by then and
         # this guard does not fire in that case. It is kept because it is the
@@ -705,17 +968,34 @@ class CodingAgent:
         if wanted_commit and not verification.all_required_passed:
             issues.append("unverified_not_committed")
         elif wanted_commit:
+            state.stage = "commit"
+            check_cancelled()
+            if (resume is not None and resume["stage"] == "commit"
+                    and not state.commit_candidate_sha and not git_status):
+                raise _before_implementation(CodingError(
+                    "git_refused", reason_code="preserved_commit_requires_alx_review"
+                ))
+            self._report_telemetry(state, "commit", in_flight=True, transition="COMMIT started")
             try:
-                commit = commit_job_changes(
-                    workspace.root,
-                    request.repair_branch.strip(),
-                    request.commit_message.strip(),
-                    complete_files,
-                    baseline_dirty,
-                    workspace.blocked_paths,
-                    job_deleted,
-                    inherited_deleted,
-                )
+                if state.commit_candidate_sha:
+                    expected_files = tuple(
+                        name for name in state.files if name not in set(job_deleted)
+                    )
+                    commit = verify_preserved_job_commit(
+                        workspace.root, request.repair_branch.strip(),
+                        state.commit_candidate_sha, expected_files, job_deleted,
+                    )
+                else:
+                    commit = commit_job_changes(
+                        workspace.root,
+                        request.repair_branch.strip(),
+                        request.commit_message.strip(),
+                        complete_files,
+                        baseline_dirty,
+                        workspace.blocked_paths,
+                        job_deleted,
+                        inherited_deleted,
+                    )
             except CodingError as error:
                 # A refused commit is a failed job, not a succeeded one with a
                 # footnote. `unrelated_changes_staged` is the case this exists
@@ -723,11 +1003,25 @@ class CodingAgent:
                 # repair, nothing is committed and Core is told why.
                 status = "failed"
                 issues.append(error.code)
+                reason = str(error.details.get("reason_code", error.code))
+                candidate = error.details.get("commit_sha")
+                if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40,64}", candidate):
+                    failure_class["commit_sha"] = candidate
+                    if reason == "commit_created_but_unverified":
+                        state.commit_candidate_sha = candidate
+                if error.code == "git_unavailable" or reason in {
+                    "commit_failed", "timeout", "git_not_runnable"
+                }:
+                    failure_class.update({"failure_class": "commit_infrastructure",
+                                          "reason_code": reason})
+                else:
+                    failure_class["reason_code"] = reason
                 git_status, git_diff = self._git_evidence(workspace, reviewed_files)
             else:
                 # Re-read after the commit: the files are now in history, so
                 # the diff and status Core sees must describe what is left.
                 git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+                self._report_telemetry(state, "commit", transition="COMMIT completed")
 
         summary = session.report.strip() or "the coding session returned no report"
         return self._outcome(
@@ -751,8 +1045,10 @@ class CodingAgent:
             plan_summary=plan_summary,
             baseline=baseline,
             commit=commit,
+            review_classification="infrastructure" if infrastructure else "",
+            review_attempts=review_attempts,
             diagnostics={
-                "phase": "execution",
+                "phase": state.stage,
                 "session_turns": session.turns,
                 "session_completed": session.completed,
                 **{
@@ -762,6 +1058,9 @@ class CodingAgent:
                 },
                 **failure_class,
             },
+            checkpoint=self._checkpoint(state) if status != "succeeded" else "",
+            diff_preserved=status != "succeeded" and bool(git_status) and bool(files),
+            preserved_branch=request.repair_branch if status != "succeeded" and git_status and files else "",
         )
 
     @staticmethod
@@ -804,9 +1103,12 @@ class CodingAgent:
         """Review a candidate once, then re-review one bounded correction.
 
         Returns a hard failure only when the reviewer itself could not produce
-        a result, or when the correction session broke. Findings the reviewer
-        raised and the correction did not resolve are *not* a failure: they are
-        returned as advisory evidence and travel with the job's commit.
+        a result after its bounded retries, or when the correction session
+        broke. A schema, timeout, or provider failure retries this review
+        against the same diff and, once exhausted, preserves the branch.
+        Findings the reviewer raised and the correction did not resolve are
+        *not* a failure: they are returned as advisory evidence and travel
+        with the job's commit.
 
         That distinction is the point of this stage. The reviewer is advisory —
         it cannot edit, run a command or commit — so a finding it raises is an
@@ -814,10 +1116,15 @@ class CodingAgent:
         commit on one destroyed the artifact she needed in order to weigh it:
         the candidate was left as an uncommitted diff,
         which is the evidence-reconstruction problem D-029 exists to remove.
-        Infrastructure failure stays hard, because then there is no opinion at
-        all and nothing was actually reviewed.
+        Infrastructure failure stays hard once its retries are exhausted,
+        because then there is no opinion at all and nothing was actually
+        reviewed. The diff stays in the worktree so that missing opinion can
+        still be judged against the repair.
         """
         reviewed_files = initial_files
+        # Across correction cycles. A failure on an earlier pass is still a
+        # review attempt after a later pass returns an opinion.
+        carried_failures: list[ReviewInfrastructureAttempt] = []
         for cycle in range(MAX_LOCAL_REVIEW_CYCLES):
             # The reviewer judges this job's diff, not the worktree's. Same
             # scoping as the outcome evidence, so both see the same thing.
@@ -837,23 +1144,55 @@ class CodingAgent:
             )))
             self._report_activity(state, "reviewing")
             self._report_telemetry(state, "review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
-            try:
-                findings = self._review(request, workspace, plan, files, git_diff)
-            except CodingError as error:
-                # Infrastructure failure: the reviewer produced no opinion at
-                # all, so nothing was reviewed. This stays a hard failure.
+            # Same diff, same files. A schema, timeout, or provider failure
+            # retries this call only. Planning and implementation do not run
+            # again, and a material finding is not a failure of this kind.
+            findings: tuple[LocalReviewFinding, ...] | None = None
+            last_error: CodingError | None = None
+            for _attempt in range(1, MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS + 1):
+                try:
+                    findings = self._review(request, workspace, plan, files, git_diff)
+                except CodingError as error:
+                    if error.code == "coding_cancelled":
+                        raise
+                    last_error = error
+                    carried_failures.append(
+                        self._review_attempt_record(len(carried_failures) + 1, error)
+                    )
+                    continue
+                break
+            if findings is None:
+                # Retries exhausted. Leave the branch and the uncommitted diff
+                # where they are: resetting, cleaning, or deleting the branch
+                # would destroy the repair the reviewer never managed to judge.
+                if last_error is None:
+                    last_error = CodingError(
+                        "review_failed", reason_code="review_schema_invalid",
+                        error_message="the local reviewer produced no result",
+                    )
+                diagnostics = self._local_review_diagnostics(last_error)
+                diagnostics["review_classification"] = "infrastructure"
+                diagnostics["diff_preserved"] = True
+                diagnostics["uncommitted"] = True
+                diagnostics["branch"] = request.repair_branch
+                diagnostics["review_attempts"] = [
+                    record.as_values() for record in carried_failures
+                ]
                 return (
-                    "the local reviewer could not produce a usable result",
-                    ("review_failed",), reviewed_files,
-                    self._local_review_diagnostics(error), (),
+                    "the local reviewer could not produce a usable result; "
+                    "the branch and uncommitted diff were preserved",
+                    ("review_failed",), reviewed_files, diagnostics, (),
                 )
+            # The opinion stands. Earlier infrastructure failures stay attached
+            # so a commit does not erase them.
+            carried = _infrastructure_review_diagnostics(carried_failures)
             material = [item for item in findings if item.material]
             self._report_telemetry(state, "review", transition="REVIEW completed", correction_cycle=cycle)
             if not material:
                 # Nothing material. Any low-severity findings still travel with
                 # the job: "nothing worth blocking on" and "nothing said" are
                 # different facts, and only AL/X should collapse them.
-                return None, (), reviewed_files, {}, findings
+                return None, (), reviewed_files, carried, findings
             if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
                 # Findings survived the bounded cycle. Advisory, not fatal:
                 # the job continues to verification and its commit, and these
@@ -861,7 +1200,7 @@ class CodingAgent:
                 # actual artifact.
                 return (
                     None, ("local_review_material_findings",), reviewed_files,
-                    {}, findings,
+                    carried, findings,
                 )
             before = (git_status, git_diff)
             briefing = build_briefing(request, plan) + "\n\n# Local reviewer findings\n" + "\n".join(
@@ -872,17 +1211,19 @@ class CodingAgent:
             self._report_telemetry(state, "correction", in_flight=True, transition="CORRECTION cycle", correction_cycle=cycle + 1)
             try:
                 correction = self._session.run_session(request, briefing)
-            except CodingError:
+            except CodingError as error:
+                if error.code == "coding_cancelled":
+                    raise
                 # The session broke. That is infrastructure, not an opinion.
                 return (
                     "the coding session could not correct local review findings",
-                    ("session_failed",), reviewed_files, {}, findings,
+                    ("session_failed",), reviewed_files, carried, findings,
                 )
             if not correction.completed:
                 return (
                     "the coding session could not correct local review findings",
                     (correction.failure_code or "session_failed",), reviewed_files,
-                    {}, findings,
+                    carried, findings,
                 )
             self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
@@ -901,7 +1242,7 @@ class CodingAgent:
                 # the cycle: advisory evidence, and the job carries on.
                 return (
                     None, ("local_review_material_findings",), reviewed_files,
-                    {}, findings,
+                    carried, findings,
                 )
             reviewed_files = next_files
         raise AssertionError("local review loop must return within its bound")
@@ -935,6 +1276,32 @@ class CodingAgent:
             values["parse_category"] = category
         return values
 
+    def _review_attempt_record(
+        self, attempt: int, error: CodingError
+    ) -> ReviewInfrastructureAttempt:
+        """Retain only safe schema detail and coded provider diagnostics."""
+        details = error.details
+        reason = details.get("reason_code")
+        if not isinstance(reason, str) or _SAFE_DIAGNOSTIC_CODE.fullmatch(reason) is None:
+            reason = error.code
+        message = details.get("error_message") if error.code == "review_failed" else None
+        if not isinstance(message, str) or not message.strip():
+            provider = details.get("provider")
+            if isinstance(provider, str) and _SAFE_DIAGNOSTIC_ID.fullmatch(provider):
+                message = f"{provider} provider failure: {reason}"
+            else:
+                message = reason
+        excerpt = details.get("raw_excerpt") if error.code == "review_failed" else None
+        if not isinstance(excerpt, str):
+            excerpt = ""
+        limit = MAX_REVIEW_RAW_EXCERPT_CHARACTERS
+        return ReviewInfrastructureAttempt(
+            attempt=attempt,
+            reason=reason,
+            error_message=message[:limit],
+            raw_excerpt=excerpt[:limit],
+        )
+
     def _review(
         self, request: CodingRequest, workspace: CodingWorkspace,
         plan: Mapping[str, Any], files: tuple[str, ...], git_diff: str,
@@ -961,24 +1328,22 @@ class CodingAgent:
         }, "alx_coding_local_review", LOCAL_REVIEW_SCHEMA, model=self._reviewer)
         raw = values.get("findings")
         if not isinstance(raw, (list, tuple)):
-            raise CodingError("review_failed", reason_code="review_schema_invalid")
+            _reject_review_output(values, "findings is not a list")
         findings: list[LocalReviewFinding] = []
         for item in raw:
             if not isinstance(item, Mapping):
-                raise CodingError("review_failed", reason_code="review_schema_invalid")
+                _reject_review_output(values, "finding is not an object")
             finding = {key: str(item.get(key, "")).strip() for key in ("severity", "title", "evidence", "correction")}
             finding["severity"] = finding["severity"].lower()
             if not all(finding.values()):
-                raise CodingError("review_failed", reason_code="review_schema_invalid")
+                _reject_review_output(values, "finding is missing a required field")
             try:
                 # The severity vocabulary is the contract's, checked where the
                 # type is defined. Repeating the set here gave two places to
                 # change and one to forget.
                 findings.append(LocalReviewFinding(**finding))
             except ValueError as error:
-                raise CodingError(
-                    "review_failed", reason_code="review_schema_invalid"
-                ) from error
+                _reject_review_output(values, str(error))
         return tuple(findings)
 
     def _verify(
@@ -1044,28 +1409,32 @@ class CodingAgent:
                 )
                 results.append(check)
                 continue
-            try:
-                record = run_permitted_command(
-                    argv, workspace.root,
-                    # The full suite is the one check the shared bound cannot
-                    # accommodate; everything else keeps it.
-                    timeout_seconds=(
-                        FULL_SUITE_COMMAND_SECONDS
-                        if check.name == "pytest_full"
-                        else DEFAULT_VERIFICATION_COMMAND_SECONDS
-                    ),
-                    blocked_paths=workspace.blocked_paths,
-                )
-            except CodingError as error:
-                commands.append(
-                    CodingCommandRecord(
+            record: CodingCommandRecord | None = None
+            for _ in range(MAX_TEST_INFRASTRUCTURE_ATTEMPTS):
+                check_cancelled()
+                try:
+                    record = run_permitted_command(
+                        argv, workspace.root,
+                        timeout_seconds=(
+                            FULL_SUITE_COMMAND_SECONDS if check.name == "pytest_full"
+                            else DEFAULT_VERIFICATION_COMMAND_SECONDS
+                        ),
+                        blocked_paths=workspace.blocked_paths,
+                    )
+                except CodingError as error:
+                    if error.code == "coding_cancelled":
+                        raise
+                    record = CodingCommandRecord(
                         check.argv, -1, "", error.code, False,
                         error.code != "command_not_permitted",
                     )
-                )
+                commands.append(record)
+                if not record.timed_out and record.stderr != "coding_unavailable":
+                    break
+            assert record is not None
+            if not record.permitted or (record.exit_status == -1 and not record.timed_out):
                 results.append(check)
                 continue
-            commands.append(record)
             passed = _check_passed(record, check.name)
             results.append(replace(check, ran=True, passed=passed))
             if is_test_command(record.argv):
@@ -1092,6 +1461,8 @@ class CodingAgent:
             try:
                 return self._plan(request, workspace, feedback), {}
             except CodingError as error:
+                if error.code == "coding_cancelled":
+                    raise
                 last = {
                     "phase": "planning",
                     "failure_code": error.code,
@@ -1187,7 +1558,15 @@ class CodingAgent:
         )
         details: dict[str, object] = {}
         try:
+            check_cancelled()
             completion = model.complete(model_request)
+            check_cancelled()
+        except CodingError as error:
+            if error.code == "coding_cancelled":
+                raise
+            # A model adapter is outside the Coding Agent trust boundary.
+            # Its arbitrary CodingError details must not become Core evidence.
+            details = {"reason_code": "provider_failed"}
         except ProviderError as error:
             details = {
                 "reason_code": error.reason,
@@ -1281,6 +1660,47 @@ class CodingAgent:
                 names.append(item)
         return tuple(names if limit is None else names[:limit])
 
+    def _checkpoint(self, state: _JobState) -> str:
+        """Durable, content-free evidence for a stage-only resume."""
+        if not state.branch or state.request is None:
+            return ""
+        try:
+            repository = coding_checkpoint(self._repository)
+        except (CodingError, OSError, UnicodeError):
+            # The work remains in the checkout; an unreadable checkpoint may
+            # not be treated as proof for a later automatic resume.
+            return ""
+        return json.dumps({
+            "job_id": state.job_id, "stage": state.stage,
+            **repository,
+            "plan": dict(state.plan or {}), "files": list(state.files),
+            "review_findings": [item.as_values() for item in state.review_findings],
+            "verification": state.verification.as_values() if state.verification else None,
+            "commit_candidate_sha": state.commit_candidate_sha,
+            "deleted_files": list(state.deleted_files),
+            "preexisting_dirty": list(state.preexisting_dirty),
+        }, ensure_ascii=True, sort_keys=True)
+
+    def _cancelled_outcome(self, state: _JobState) -> CodingOutcome:
+        workspace = CodingWorkspace(str(self._repository),
+                                    state.request.blocked_paths if state.request else ())
+        git_status, git_diff = self._git_evidence(workspace, state.files)
+        files = self._files_changed(state.files, git_status, state.preexisting_dirty)
+        state.files = files
+        return self._outcome(
+            status="cancelled", summary="coding job cancelled",
+            files=files, preexisting_dirty=state.preexisting_dirty,
+            commands=state.commands, tests_run=False, tests_passed=None,
+            git_status=git_status, git_diff=git_diff,
+            issues=("coding_cancelled",), review=False,
+            review_findings=state.review_findings,
+            diagnostics={"phase": state.stage, "cancelled_stage": state.stage,
+                         "diff_preserved": bool(files), "branch": state.branch},
+            plan_summary=str((state.plan or {}).get("problem_understanding", "")),
+            diff_preserved=bool(files), preserved_branch=state.branch,
+            checkpoint=self._checkpoint(state),
+        )
+
     @staticmethod
     def _file_fingerprints(
         workspace: CodingWorkspace, paths: tuple[str, ...]
@@ -1329,8 +1749,13 @@ class CodingAgent:
         plan_summary: str = "",
         baseline: GitWorkspaceState | None = None,
         commit: CodingCommit | None = None,
+        review_classification: str = "",
+        diff_preserved: bool = False,
+        preserved_branch: str = "",
+        review_attempts: tuple[ReviewInfrastructureAttempt, ...] = (),
+        checkpoint: str = "",
     ) -> CodingOutcome:
-        if status not in ("succeeded", "failed", "blocked"):
+        if status not in ("succeeded", "failed", "blocked", "cancelled"):
             status = "failed"
         if failure_status:
             status = "failed"
@@ -1354,4 +1779,9 @@ class CodingAgent:
             commit,
             verification,
             review_findings,
+            review_classification=review_classification,
+            diff_preserved=diff_preserved,
+            preserved_branch=preserved_branch,
+            review_attempts=review_attempts,
+            checkpoint=checkpoint,
         )
