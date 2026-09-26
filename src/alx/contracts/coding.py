@@ -66,6 +66,11 @@ MAX_BLOCKED_PATHS = 32
 MAX_BLOCKED_PATH_CHARACTERS = 512
 MAX_LOCAL_REVIEW_CYCLES = 2
 MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS = 16_000
+# Schema, timeout, and provider failures of the local reviewer. One attempt
+# plus two retries, against the same diff. Material findings are not in this
+# bound: they stay advisory and do not retry the review.
+MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS = 3
+MAX_REVIEW_RAW_EXCERPT_CHARACTERS = 2_000
 MAX_BRANCH_NAME_CHARACTERS = 200
 MAX_COMMIT_MESSAGE_CHARACTERS = 4_000
 # One commit per job. Staging is a named path list, and a job that touched
@@ -506,6 +511,42 @@ _MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high"})
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewInfrastructureAttempt:
+    """One reviewer infrastructure failure against an unchanged working diff.
+
+    Distinct from a code-review finding. A finding is the reviewer's opinion.
+    This record is the reviewer failing to produce an opinion: schema
+    validation, a timeout, or the provider. Core gets the reason, the error
+    message, and a bounded excerpt of the output that failed validation.
+    """
+
+    attempt: int
+    reason: str
+    error_message: str
+    raw_excerpt: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.attempt, int) or isinstance(self.attempt, bool) or self.attempt < 1:
+            raise ValueError("review attempt must be a positive integer")
+        _required(self.reason, "reason")
+        if not isinstance(self.error_message, str) or not isinstance(self.raw_excerpt, str):
+            raise ValueError("review attempt evidence must be text")
+        if (
+            len(self.error_message) > MAX_REVIEW_RAW_EXCERPT_CHARACTERS
+            or len(self.raw_excerpt) > MAX_REVIEW_RAW_EXCERPT_CHARACTERS
+        ):
+            raise ValueError("review attempt evidence exceeds its bound")
+
+    def as_values(self) -> dict[str, object]:
+        return {
+            "attempt": self.attempt,
+            "reason": self.reason,
+            "error_message": self.error_message,
+            "raw_excerpt": self.raw_excerpt,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CodingCommandRecord:
     """One development command the job actually ran."""
 
@@ -572,6 +613,17 @@ class CodingOutcome:
     # review ride along too, because "the reviewer had nothing material to say"
     # and "the reviewer said nothing" are different facts.
     review_findings: tuple["LocalReviewFinding", ...] = ()
+    # Set when a review attempt failed for schema, timeout, or provider
+    # reasons. That includes a later attempt that did produce an opinion:
+    # the job can still commit, and Core still sees the infrastructure
+    # classification. Material findings alone leave this empty.
+    review_classification: str = ""
+    # The branch and uncommitted diff are still in the checkout. Set when
+    # review infrastructure retries are exhausted, which must not reset,
+    # clean, or delete that branch.
+    diff_preserved: bool = False
+    preserved_branch: str = ""
+    review_attempts: tuple["ReviewInfrastructureAttempt", ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "failed", "blocked"):
@@ -585,6 +637,18 @@ class CodingOutcome:
         object.__setattr__(self, "diagnostics", dict(self.diagnostics or {}))
         object.__setattr__(self, "plan_summary", str(self.plan_summary).strip())
         object.__setattr__(self, "review_findings", tuple(self.review_findings))
+        object.__setattr__(self, "review_attempts", tuple(self.review_attempts))
+        object.__setattr__(self, "preserved_branch", str(self.preserved_branch or ""))
+        if self.review_classification not in ("", "infrastructure"):
+            raise ValueError("review_classification must be infrastructure or absent")
+        if self.diff_preserved and self.review_classification != "infrastructure":
+            raise ValueError("a preserved diff is an infrastructure review outcome")
+        if any(
+            not isinstance(item, ReviewInfrastructureAttempt) for item in self.review_attempts
+        ):
+            raise ValueError("review attempts must be infrastructure records")
+        if self.review_attempts and self.review_classification != "infrastructure":
+            raise ValueError("review attempts are an infrastructure review outcome")
         if self.tests_passed is not None and not self.tests_run:
             raise ValueError("tests cannot have passed or failed if none ran")
 
@@ -643,6 +707,21 @@ class CodingOutcome:
             # on when it asks for the repair: a branch and the SHA on it.
             values["branch"] = self.commit.branch
             values["commit_sha"] = self.commit.commit_sha
+        elif self.diff_preserved and self.preserved_branch:
+            # No commit exists. The branch name is the checkout that still
+            # holds the uncommitted diff, not a SHA Core can check out later.
+            values["branch"] = self.preserved_branch
+        if self.review_classification == "infrastructure":
+            values["review_classification"] = self.review_classification
+        if self.diff_preserved:
+            values["diff_preserved"] = True
+            values["uncommitted"] = True
+        # Failed attempts travel with a later successful review as well as
+        # with an exhausted, uncommitted one. Preservation is the second case.
+        if self.diff_preserved or self.review_attempts:
+            values["review_attempts"] = [
+                item.as_values() for item in self.review_attempts
+            ]
         return values
 
 
@@ -657,6 +736,7 @@ __all__ = [
     "CodingSessionResult",
     "GitWorkspaceState",
     "LocalReviewFinding",
+    "ReviewInfrastructureAttempt",
     "VerificationCheck",
     "VerificationEvidence",
     "VerificationPolicy",
@@ -671,6 +751,8 @@ __all__ = [
     "MAX_FILE_CHARACTERS",
     "MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS",
     "MAX_LOCAL_REVIEW_CYCLES",
+    "MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS",
+    "MAX_REVIEW_RAW_EXCERPT_CHARACTERS",
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
     "MAX_STEP_BUDGET",

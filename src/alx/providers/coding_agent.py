@@ -43,6 +43,8 @@ from alx.contracts.coding import (
     MAX_STAGED_FILES,
     MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS,
     MAX_LOCAL_REVIEW_CYCLES,
+    MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS,
+    MAX_REVIEW_RAW_EXCERPT_CHARACTERS,
     MAX_VERIFICATION_COMMANDS,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
     FULL_SUITE_COMMAND_SECONDS,
@@ -56,6 +58,7 @@ from alx.contracts.coding import (
     CodingTelemetry,
     GitWorkspaceState,
     LocalReviewFinding,
+    ReviewInfrastructureAttempt,
 )
 from alx.contracts.coding_verification import (
     VerificationCheck,
@@ -214,6 +217,77 @@ def _strings(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(str(item) for item in value if str(item).strip())
+
+
+def _bounded_review_excerpt(raw: object) -> str:
+    """The reviewer output that failed validation, clipped before it is stored."""
+    try:
+        rendered = json.dumps(raw, ensure_ascii=True, default=str)
+    except (TypeError, ValueError):
+        rendered = ""
+    rendered = rendered.replace("\x00", "")
+    return rendered[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS]
+
+
+def _infrastructure_review_diagnostics(
+    records: list[ReviewInfrastructureAttempt],
+) -> dict[str, object]:
+    """Failed reviewer attempts a later opinion still has to report.
+
+    A schema, timeout, or provider failure that a retry then overcomes is
+    still evidence. The job may commit; Core still sees why the first
+    attempts were not a review.
+    """
+    if not records:
+        return {}
+    return {
+        "phase": "local_review",
+        "review_classification": "infrastructure",
+        "review_attempts": [record.as_values() for record in records],
+    }
+
+
+def _review_infrastructure_attempts(
+    raw: object,
+) -> tuple[ReviewInfrastructureAttempt, ...]:
+    """Rebuild attempt records from the diagnostics already bounded at source."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    records: list[ReviewInfrastructureAttempt] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        attempt = item.get("attempt")
+        reason = item.get("reason")
+        message = item.get("error_message")
+        excerpt = item.get("raw_excerpt")
+        if (
+            not isinstance(attempt, int)
+            or isinstance(attempt, bool)
+            or not isinstance(reason, str)
+            or not isinstance(message, str)
+            or not isinstance(excerpt, str)
+        ):
+            continue
+        records.append(
+            ReviewInfrastructureAttempt(
+                attempt=attempt,
+                reason=reason,
+                error_message=message[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
+                raw_excerpt=excerpt[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
+            )
+        )
+    return tuple(records)
+
+
+def _reject_review_output(raw: object, message: str) -> None:
+    """The reviewer returned output that is not a review."""
+    raise CodingError(
+        "review_failed",
+        reason_code="review_schema_invalid",
+        error_message=message[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
+        raw_excerpt=_bounded_review_excerpt(raw),
+    )
 
 
 def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
@@ -581,6 +655,20 @@ class CodingAgent:
                 request, workspace, plan, session_files, preexisting_dirty,
                 preexisting_fingerprints, state,
             )
+        # Failed attempts stay on the result when a later attempt produced an
+        # opinion. Preservation is only the exhausted path: a commit still
+        # happens, and the branch is not reported as an uncommitted hold.
+        review_attempts = _review_infrastructure_attempts(
+            review_diagnostics.get("review_attempts")
+        )
+        preserved = (
+            review_diagnostics.get("review_classification") == "infrastructure"
+            and review_diagnostics.get("diff_preserved") is True
+        )
+        branch_name = review_diagnostics.get("branch")
+        if not isinstance(branch_name, str):
+            branch_name = ""
+        infrastructure = preserved or bool(review_attempts)
         if review_failure is not None:
             git_status, git_diff = self._git_evidence(workspace, reviewed_files)
             return self._outcome(
@@ -597,6 +685,10 @@ class CodingAgent:
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics=review_diagnostics or {"phase": "local_review"},
                 baseline=baseline,
+                review_classification="infrastructure" if infrastructure else "",
+                diff_preserved=preserved,
+                preserved_branch=branch_name if preserved else "",
+                review_attempts=review_attempts,
             )
 
         # Verification is AL/X's, not the session's. The agent has no terminal,
@@ -751,6 +843,8 @@ class CodingAgent:
             plan_summary=plan_summary,
             baseline=baseline,
             commit=commit,
+            review_classification="infrastructure" if infrastructure else "",
+            review_attempts=review_attempts,
             diagnostics={
                 "phase": "execution",
                 "session_turns": session.turns,
@@ -804,9 +898,12 @@ class CodingAgent:
         """Review a candidate once, then re-review one bounded correction.
 
         Returns a hard failure only when the reviewer itself could not produce
-        a result, or when the correction session broke. Findings the reviewer
-        raised and the correction did not resolve are *not* a failure: they are
-        returned as advisory evidence and travel with the job's commit.
+        a result after its bounded retries, or when the correction session
+        broke. A schema, timeout, or provider failure retries this review
+        against the same diff and, once exhausted, preserves the branch.
+        Findings the reviewer raised and the correction did not resolve are
+        *not* a failure: they are returned as advisory evidence and travel
+        with the job's commit.
 
         That distinction is the point of this stage. The reviewer is advisory —
         it cannot edit, run a command or commit — so a finding it raises is an
@@ -814,10 +911,15 @@ class CodingAgent:
         commit on one destroyed the artifact she needed in order to weigh it:
         the candidate was left as an uncommitted diff,
         which is the evidence-reconstruction problem D-029 exists to remove.
-        Infrastructure failure stays hard, because then there is no opinion at
-        all and nothing was actually reviewed.
+        Infrastructure failure stays hard once its retries are exhausted,
+        because then there is no opinion at all and nothing was actually
+        reviewed. The diff stays in the worktree so that missing opinion can
+        still be judged against the repair.
         """
         reviewed_files = initial_files
+        # Across correction cycles. A failure on an earlier pass is still a
+        # review attempt after a later pass returns an opinion.
+        carried_failures: list[ReviewInfrastructureAttempt] = []
         for cycle in range(MAX_LOCAL_REVIEW_CYCLES):
             # The reviewer judges this job's diff, not the worktree's. Same
             # scoping as the outcome evidence, so both see the same thing.
@@ -837,23 +939,53 @@ class CodingAgent:
             )))
             self._report_activity(state, "reviewing")
             self._report_telemetry(state, "review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
-            try:
-                findings = self._review(request, workspace, plan, files, git_diff)
-            except CodingError as error:
-                # Infrastructure failure: the reviewer produced no opinion at
-                # all, so nothing was reviewed. This stays a hard failure.
+            # Same diff, same files. A schema, timeout, or provider failure
+            # retries this call only. Planning and implementation do not run
+            # again, and a material finding is not a failure of this kind.
+            findings: tuple[LocalReviewFinding, ...] | None = None
+            last_error: CodingError | None = None
+            for _attempt in range(1, MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS + 1):
+                try:
+                    findings = self._review(request, workspace, plan, files, git_diff)
+                except CodingError as error:
+                    last_error = error
+                    carried_failures.append(
+                        self._review_attempt_record(len(carried_failures) + 1, error)
+                    )
+                    continue
+                break
+            if findings is None:
+                # Retries exhausted. Leave the branch and the uncommitted diff
+                # where they are: resetting, cleaning, or deleting the branch
+                # would destroy the repair the reviewer never managed to judge.
+                if last_error is None:
+                    last_error = CodingError(
+                        "review_failed", reason_code="review_schema_invalid",
+                        error_message="the local reviewer produced no result",
+                    )
+                diagnostics = self._local_review_diagnostics(last_error)
+                diagnostics["review_classification"] = "infrastructure"
+                diagnostics["diff_preserved"] = True
+                diagnostics["uncommitted"] = True
+                diagnostics["branch"] = request.repair_branch
+                diagnostics["review_attempts"] = [
+                    record.as_values() for record in carried_failures
+                ]
                 return (
-                    "the local reviewer could not produce a usable result",
-                    ("review_failed",), reviewed_files,
-                    self._local_review_diagnostics(error), (),
+                    "the local reviewer could not produce a usable result; "
+                    "the branch and uncommitted diff were preserved",
+                    ("review_failed",), reviewed_files, diagnostics, (),
                 )
+            # The opinion stands. Earlier infrastructure failures stay attached
+            # so a commit does not erase them.
+            carried = _infrastructure_review_diagnostics(carried_failures)
             material = [item for item in findings if item.material]
             self._report_telemetry(state, "review", transition="REVIEW completed", correction_cycle=cycle)
             if not material:
                 # Nothing material. Any low-severity findings still travel with
                 # the job: "nothing worth blocking on" and "nothing said" are
                 # different facts, and only AL/X should collapse them.
-                return None, (), reviewed_files, {}, findings
+                return None, (), reviewed_files, carried, findings
             if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
                 # Findings survived the bounded cycle. Advisory, not fatal:
                 # the job continues to verification and its commit, and these
@@ -861,7 +993,7 @@ class CodingAgent:
                 # actual artifact.
                 return (
                     None, ("local_review_material_findings",), reviewed_files,
-                    {}, findings,
+                    carried, findings,
                 )
             before = (git_status, git_diff)
             briefing = build_briefing(request, plan) + "\n\n# Local reviewer findings\n" + "\n".join(
@@ -876,13 +1008,13 @@ class CodingAgent:
                 # The session broke. That is infrastructure, not an opinion.
                 return (
                     "the coding session could not correct local review findings",
-                    ("session_failed",), reviewed_files, {}, findings,
+                    ("session_failed",), reviewed_files, carried, findings,
                 )
             if not correction.completed:
                 return (
                     "the coding session could not correct local review findings",
                     (correction.failure_code or "session_failed",), reviewed_files,
-                    {}, findings,
+                    carried, findings,
                 )
             self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
@@ -901,7 +1033,7 @@ class CodingAgent:
                 # the cycle: advisory evidence, and the job carries on.
                 return (
                     None, ("local_review_material_findings",), reviewed_files,
-                    {}, findings,
+                    carried, findings,
                 )
             reviewed_files = next_files
         raise AssertionError("local review loop must return within its bound")
@@ -935,6 +1067,37 @@ class CodingAgent:
             values["parse_category"] = category
         return values
 
+    def _review_attempt_record(
+        self, attempt: int, error: CodingError
+    ) -> ReviewInfrastructureAttempt:
+        """One infrastructure failure, with its message and bounded raw output.
+
+        Provider details can carry credentials. Only the reason, the provider's
+        own short message, and the review output that failed schema validation
+        are kept. An excerpt is empty when the provider returned no output.
+        """
+        details = error.details
+        reason = details.get("reason_code")
+        if not isinstance(reason, str) or _SAFE_DIAGNOSTIC_CODE.fullmatch(reason) is None:
+            reason = error.code
+        message = details.get("error_message")
+        if not isinstance(message, str) or not message.strip():
+            provider = details.get("provider")
+            if isinstance(provider, str) and _SAFE_DIAGNOSTIC_ID.fullmatch(provider):
+                message = f"{provider} provider failure: {reason}"
+            else:
+                message = reason
+        excerpt = details.get("raw_excerpt")
+        if not isinstance(excerpt, str):
+            excerpt = ""
+        limit = MAX_REVIEW_RAW_EXCERPT_CHARACTERS
+        return ReviewInfrastructureAttempt(
+            attempt=attempt,
+            reason=reason,
+            error_message=message[:limit],
+            raw_excerpt=excerpt[:limit],
+        )
+
     def _review(
         self, request: CodingRequest, workspace: CodingWorkspace,
         plan: Mapping[str, Any], files: tuple[str, ...], git_diff: str,
@@ -961,24 +1124,22 @@ class CodingAgent:
         }, "alx_coding_local_review", LOCAL_REVIEW_SCHEMA, model=self._reviewer)
         raw = values.get("findings")
         if not isinstance(raw, (list, tuple)):
-            raise CodingError("review_failed", reason_code="review_schema_invalid")
+            _reject_review_output(values, "findings is not a list")
         findings: list[LocalReviewFinding] = []
         for item in raw:
             if not isinstance(item, Mapping):
-                raise CodingError("review_failed", reason_code="review_schema_invalid")
+                _reject_review_output(values, "finding is not an object")
             finding = {key: str(item.get(key, "")).strip() for key in ("severity", "title", "evidence", "correction")}
             finding["severity"] = finding["severity"].lower()
             if not all(finding.values()):
-                raise CodingError("review_failed", reason_code="review_schema_invalid")
+                _reject_review_output(values, "finding is missing a required field")
             try:
                 # The severity vocabulary is the contract's, checked where the
                 # type is defined. Repeating the set here gave two places to
                 # change and one to forget.
                 findings.append(LocalReviewFinding(**finding))
             except ValueError as error:
-                raise CodingError(
-                    "review_failed", reason_code="review_schema_invalid"
-                ) from error
+                _reject_review_output(values, str(error))
         return tuple(findings)
 
     def _verify(
@@ -1329,6 +1490,10 @@ class CodingAgent:
         plan_summary: str = "",
         baseline: GitWorkspaceState | None = None,
         commit: CodingCommit | None = None,
+        review_classification: str = "",
+        diff_preserved: bool = False,
+        preserved_branch: str = "",
+        review_attempts: tuple[ReviewInfrastructureAttempt, ...] = (),
     ) -> CodingOutcome:
         if status not in ("succeeded", "failed", "blocked"):
             status = "failed"
@@ -1354,4 +1519,8 @@ class CodingAgent:
             commit,
             verification,
             review_findings,
+            review_classification=review_classification,
+            diff_preserved=diff_preserved,
+            preserved_branch=preserved_branch,
+            review_attempts=review_attempts,
         )

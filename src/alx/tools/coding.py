@@ -98,6 +98,18 @@ _COMMIT_RECORD = StructuredSchema(
 
 # What the local reviewer said about this job's candidate. Advisory: a finding
 # is the reviewer's opinion for Core to weigh, not a verdict on the work.
+_REVIEW_ATTEMPT = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "attempt": _INTEGER,
+        "reason": _STRING,
+        "error_message": _STRING,
+        "raw_excerpt": _STRING,
+    },
+    ("attempt", "reason", "error_message", "raw_excerpt"),
+    extra_properties=False,
+)
+
 _REVIEW_FINDING = StructuredSchema(
     ValueKind.OBJECT,
     {
@@ -177,7 +189,13 @@ DEFINITION = CapabilityDefinition(
     "resolve come back in review_findings with external_review_recommended "
     "true and local_review_material_findings in unresolved_issues, so you "
     "judge them against the committed work rather than being handed a refusal "
-    "in place of it.",
+    "in place of it. A reviewer schema, timeout, or provider failure is not a "
+    "finding: review_classification is infrastructure, that same diff is "
+    "reviewed again up to two more times. review_attempts carries each failed "
+    "attempt's reason, error_message, and bounded raw_excerpt, including when "
+    "a later attempt succeeds and the job commits. If those attempts are "
+    "exhausted the job stays uncommitted with diff_preserved and the branch "
+    "name.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -224,6 +242,15 @@ DEFINITION = CapabilityDefinition(
             "commit": _COMMIT_RECORD,
             "branch": _STRING,
             "commit_sha": _STRING,
+            # Set when a review attempt failed for schema, timeout, or provider
+            # reasons, including when a later attempt succeeded. Absent when
+            # the only review evidence is advisory findings.
+            "review_classification": _STRING,
+            "diff_preserved": _BOOLEAN,
+            "uncommitted": _BOOLEAN,
+            "review_attempts": StructuredSchema(
+                ValueKind.ARRAY, items=_REVIEW_ATTEMPT
+            ),
         },
         (
             "status",

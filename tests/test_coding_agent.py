@@ -46,6 +46,9 @@ from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.contracts.coding import (  # noqa: E402
     CODING_FAILURES,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
+    MAX_LOCAL_REVIEW_CYCLES,
+    MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS,
+    MAX_REVIEW_RAW_EXCERPT_CHARACTERS,
     MAX_STEP_BUDGET,
     MAX_TASK_CHARACTERS,
     CodingCommandRecord,
@@ -146,7 +149,16 @@ class PlanningModel:
     def complete(self, request):
         self.requests.append(request)
         if request.output_schema_name == "alx_coding_local_review":
-            return ModelCompletion("xai", "scripted", self._reviews.pop(0))
+            if not self._reviews:
+                raise AssertionError("the reviewer was called with no scripted review")
+            # One scripted review is the reviewer's standing answer. The
+            # review stage retries infrastructure failures against that same
+            # answer; a longer script still plays in order, one call at a time.
+            if len(self._reviews) == 1:
+                review = self._reviews[0]
+            else:
+                review = self._reviews.pop(0)
+            return ModelCompletion("xai", "scripted", review)
         if request.output_schema_name != "alx_coding_plan":
             raise AssertionError(
                 "the native execution model must not ask the model for steps"
@@ -708,6 +720,234 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(attempt.result.failure["code"], "review_failed")
         self.assertEqual(attempt.result.failure["reason_code"], "review_schema_invalid")
         self.assertEqual(attempt.result.failure["parse_category"], "schema_invalid")
+
+    def test_review_schema_invalid_retries_then_commits(self) -> None:
+        """A schema failure retries the review only; the next valid one commits."""
+        worktree = _worktree(self.root, "schema-then-valid")
+        model = PlanningModel()
+        reviewer = PlanningModel(reviews=[
+            {"findings": "not-a-list"},
+            {"findings": []},
+        ])
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            model, session, reviewer=reviewer, task="fix add",
+            worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(
+            [item.output_schema_name for item in model.requests],
+            ["alx_coding_plan"],
+        )
+        self.assertEqual(
+            [item.output_schema_name for item in reviewer.requests],
+            ["alx_coding_local_review", "alx_coding_local_review"],
+        )
+        values = attempt.result.values
+        self.assertTrue(values["tests_run"])
+        self.assertTrue(values["all_required_verification_passed"])
+        self.assertTrue(values["commit_sha"])
+        self.assertEqual(values["branch"], "fix/call-1")
+        self.assertNotIn("diff_preserved", values)
+        self.assertNotIn("uncommitted", values)
+        self.assertEqual(values["review_classification"], "infrastructure")
+        self.assertIsNone(attempt.result.failure)
+        attempts = values["review_attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["attempt"], 1)
+        self.assertEqual(attempts[0]["reason"], "review_schema_invalid")
+        self.assertEqual(attempts[0]["error_message"], "findings is not a list")
+        self.assertIn("not-a-list", attempts[0]["raw_excerpt"])
+        self.assertLessEqual(
+            len(attempts[0]["raw_excerpt"]), MAX_REVIEW_RAW_EXCERPT_CHARACTERS
+        )
+        self.assertEqual(
+            list(attempt.result.durable_values["review_attempts"]),
+            list(attempts),
+        )
+        self.assertEqual(
+            attempt.result.durable_values["review_classification"],
+            "infrastructure",
+        )
+        self.assertNotIn("diff_preserved", attempt.result.durable_values)
+        log = subprocess.run(
+            ["git", "log", "-1", "--pretty=%s"],
+            cwd=worktree, check=True, capture_output=True, text=True,
+        )
+        self.assertEqual(log.stdout.strip(), "complete coding job")
+
+    def test_review_schema_invalid_preserves_diff_when_retries_are_exhausted(self) -> None:
+        """Three schema failures leave the branch and the uncommitted diff."""
+        worktree = _worktree(self.root, "schema-exhausted")
+        huge = "X" * (MAX_REVIEW_RAW_EXCERPT_CHARACTERS + 50)
+        model = PlanningModel()
+        reviewer = PlanningModel(reviews=[{"findings": huge}])
+        session = RecordingSession(edits={"app.py": _FIXED})
+        before = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        attempt = self._run(
+            model, session, reviewer=reviewer, task="fix add",
+            worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(
+            [item.output_schema_name for item in model.requests],
+            ["alx_coding_plan"],
+        )
+        self.assertEqual(
+            len(reviewer.requests), MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS
+        )
+        self.assertEqual(
+            [item.output_schema_name for item in reviewer.requests],
+            ["alx_coding_local_review"] * MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS,
+        )
+        failure = attempt.result.failure
+        self.assertEqual(failure["code"], "review_failed")
+        self.assertEqual(failure["reason_code"], "review_schema_invalid")
+        self.assertEqual(failure["review_classification"], "infrastructure")
+        self.assertIs(failure["diff_preserved"], True)
+        self.assertIs(failure["uncommitted"], True)
+        self.assertEqual(failure["branch"], "fix/call-1")
+        values = attempt.result.values
+        self.assertEqual(values["review_classification"], "infrastructure")
+        self.assertIs(values["diff_preserved"], True)
+        self.assertIs(values["uncommitted"], True)
+        self.assertEqual(values["branch"], "fix/call-1")
+        self.assertNotIn("commit_sha", values)
+        self.assertNotIn("commit", values)
+        self.assertIn("review_failed", values["unresolved_issues"])
+        self.assertNotIn("local_review_material_findings", values["unresolved_issues"])
+        self.assertFalse(values["external_review_recommended"])
+        self.assertFalse(values["tests_run"])
+        attempts = values["review_attempts"]
+        self.assertEqual(len(attempts), MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS)
+        self.assertEqual(list(attempt.result.durable_values["review_attempts"]), list(attempts))
+        self.assertEqual(
+            list(failure["review_attempts"]),
+            list(attempts),
+        )
+        for index, record in enumerate(attempts, start=1):
+            self.assertEqual(record["attempt"], index)
+            self.assertEqual(record["reason"], "review_schema_invalid")
+            self.assertEqual(record["error_message"], "findings is not a list")
+            self.assertLessEqual(len(record["raw_excerpt"]), MAX_REVIEW_RAW_EXCERPT_CHARACTERS)
+            self.assertEqual(len(record["raw_excerpt"]), MAX_REVIEW_RAW_EXCERPT_CHARACTERS)
+            self.assertIn("findings", record["raw_excerpt"])
+            self.assertNotIn(huge, record["raw_excerpt"])
+        self.assertEqual((worktree / "app.py").read_text(encoding="utf-8"), _FIXED)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=worktree, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=worktree, check=True, capture_output=True, text=True,
+        ).stdout
+        branches = subprocess.run(
+            ["git", "branch", "--list", "fix/call-1"],
+            cwd=worktree, check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(head, before)
+        self.assertEqual(branch, "fix/call-1")
+        self.assertIn("fix/call-1", branches)
+        self.assertIn("app.py", status)
+        self.assertIn("app.py", values["git_diff"])
+
+    def test_reviewer_timeout_preserves_diff_after_bounded_retries(self) -> None:
+        """A reviewer timeout is the same infrastructure outcome, not a finding."""
+
+        class TimingOutReviewer(PlanningModel):
+            _model = "reviewer-model"
+
+            def complete(self, request):
+                self.requests.append(request)
+                if request.output_schema_name == "alx_coding_local_review":
+                    raise ProviderError(
+                        "codex_subscription", "reasoning_timeout",
+                        {"stdout_characters": 0, "stderr_characters": 0},
+                    )
+                return super().complete(request)
+
+        worktree = _worktree(self.root, "review-timeout")
+        reviewer = TimingOutReviewer()
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            PlanningModel(), session, reviewer=reviewer, task="fix add",
+            worktree=str(worktree),
+        )
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(len(reviewer.requests), MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS)
+        failure = attempt.result.failure
+        self.assertEqual(failure["code"], "review_failed")
+        self.assertEqual(failure["reason_code"], "reasoning_timeout")
+        self.assertEqual(failure["review_classification"], "infrastructure")
+        self.assertIs(failure["diff_preserved"], True)
+        self.assertEqual(failure["branch"], "fix/call-1")
+        attempts = attempt.result.values["review_attempts"]
+        self.assertEqual(len(attempts), MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS)
+        for record in attempts:
+            self.assertEqual(record["reason"], "reasoning_timeout")
+            self.assertEqual(
+                record["error_message"],
+                "codex_subscription provider failure: reasoning_timeout",
+            )
+            self.assertEqual(record["raw_excerpt"], "")
+        self.assertEqual((worktree / "app.py").read_text(encoding="utf-8"), _FIXED)
+        self.assertNotIn("commit_sha", attempt.result.values)
+
+    def test_material_review_findings_stay_advisory_without_infrastructure_retry(self) -> None:
+        """A material finding is not an infrastructure failure and is not retried."""
+        worktree = _worktree(self.root, "material-advisory")
+        model = PlanningModel()
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "first material issue",
+                "evidence": "candidate is incomplete", "correction": "complete it",
+            }]},
+            {"findings": [{
+                "severity": "high", "title": "still incomplete",
+                "evidence": "candidate remains incomplete", "correction": "complete it",
+            }]},
+        ])
+
+        class OneCorrection(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                (root / "app.py").write_text(
+                    _FIXED if len(self.calls) == 1 else _FIXED + "\n# reviewer correction\n",
+                    encoding="utf-8",
+                )
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        session = OneCorrection()
+        attempt = self._run(
+            model, session, reviewer=reviewer, task="fix add",
+            worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(len(reviewer.requests), MAX_LOCAL_REVIEW_CYCLES)
+        self.assertIsNone(attempt.result.failure)
+        values = attempt.result.values
+        self.assertNotIn("review_classification", values)
+        self.assertNotIn("diff_preserved", values)
+        self.assertNotIn("review_attempts", values)
+        self.assertNotIn("uncommitted", values)
+        self.assertIn("local_review_material_findings", values["unresolved_issues"])
+        self.assertNotIn("review_failed", values["unresolved_issues"])
+        self.assertTrue(values["external_review_recommended"])
+        self.assertEqual(values["review_findings"][0]["title"], "still incomplete")
+        self.assertTrue(values["commit_sha"])
+        self.assertTrue(values["all_required_verification_passed"])
 
     def test_review_status_codes_are_declared_on_the_coding_contract(self) -> None:
         declared = DEFINITION.possible_failure_codes
