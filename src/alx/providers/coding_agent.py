@@ -40,6 +40,7 @@ from alx.contracts import ModelMessage, ModelRequest, ModelRole, ReasoningModel
 from alx.contracts.coding import (
     MAX_PLANNING_ATTEMPTS,
     MAX_REPORTED_COMMANDS,
+    MAX_COMMAND_OUTPUT_CHARACTERS,
     MAX_REPORTED_FILES,
     MAX_STAGED_FILES,
     MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS,
@@ -74,6 +75,7 @@ from alx.providers.coding_process import (
     inspect_git,
     is_test_command,
     run_permitted_command,
+    same_main_pytest_failure,
 )
 from alx.providers.coding_git import (
     coding_checkpoint,
@@ -836,6 +838,7 @@ class CodingAgent:
                         name=item["name"], argv=tuple(item["argv"]), reason=item["reason"],
                         ran=item["ran"], passed=item["passed"], kind=item["kind"],
                         findings=tuple(item["findings"]),
+                        baseline=str(item.get("baseline", "")),
                     ) for item in raw_verification["checks"]
                 ))
             except (KeyError, TypeError, ValueError):
@@ -1417,6 +1420,7 @@ class CodingAgent:
                             else DEFAULT_VERIFICATION_COMMAND_SECONDS
                         ),
                         blocked_paths=workspace.blocked_paths,
+                        output_characters=0 if check.name.startswith("pytest") else MAX_COMMAND_OUTPUT_CHARACTERS,
                     )
                 except CodingError as error:
                     if error.code == "coding_cancelled":
@@ -1425,7 +1429,9 @@ class CodingAgent:
                         check.argv, -1, "", error.code, False,
                         error.code != "command_not_permitted",
                     )
-                commands.append(record)
+                commands.append(replace(
+                    record, stdout=record.stdout[:MAX_COMMAND_OUTPUT_CHARACTERS]
+                ))
                 if not record.timed_out and record.stderr != "coding_unavailable":
                     break
             assert record is not None
@@ -1433,7 +1439,15 @@ class CodingAgent:
                 results.append(check)
                 continue
             passed = _check_passed(record, check.name)
-            results.append(replace(check, ran=True, passed=passed))
+            baseline = ""
+            if not passed and check.name.startswith("pytest"):
+                passed, baseline = same_main_pytest_failure(
+                    record, workspace.root,
+                    FULL_SUITE_COMMAND_SECONDS if check.name == "pytest_full"
+                    else DEFAULT_VERIFICATION_COMMAND_SECONDS,
+                    tuple((item.name, item.argv) for item in checks),
+                )
+            results.append(replace(check, ran=True, passed=passed, baseline=baseline))
             if is_test_command(record.argv):
                 tests_run = True
                 if not passed:

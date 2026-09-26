@@ -92,6 +92,7 @@ class VerificationCheck:
     # leaving Core to infer it. Bounded: the first few findings are enough to
     # act on, and this is durable state.
     findings: tuple[str, ...] = ()
+    baseline: str = ""
 
     def as_values(self) -> dict[str, object]:
         return {
@@ -102,6 +103,7 @@ class VerificationCheck:
             "passed": self.passed,
             "kind": self.kind,
             "findings": list(self.findings),
+            "baseline": self.baseline,
         }
 
 
@@ -165,6 +167,53 @@ class VerificationEvidence:
             "all_required_passed": self.all_required_passed,
             "checks": [check.as_values() for check in self.checks],
         }
+
+
+def pytest_failure_signature(
+    output: str, root: Path
+) -> tuple[tuple[str, str], ...] | None:
+    """Complete pytest failure bodies, with only the checkout location erased.
+
+    Pytest's progress, elapsed time and warning count are not failure meaning.
+    Every failure body and its short-summary identity must agree. An unfamiliar
+    or incomplete report cannot establish equivalence.
+    """
+    normalized_output = output.replace(str(root.resolve()), "<checkout>")
+    normalized_output = normalized_output.replace(str(root), "<checkout>")
+    lines = normalized_output.splitlines()
+    starts = [index for index, line in enumerate(lines)
+              if line.startswith("=") and line.endswith("=") and
+              (" FAILURES " in line or " ERRORS " in line)]
+    summaries = [index for index, line in enumerate(lines)
+                 if " short test summary info " in line and line.startswith("=")]
+    if not starts or len(summaries) != 1 or starts[0] >= summaries[0]:
+        return None
+    body = lines[starts[0]:summaries[0]]
+    # Warnings may follow the failures; they are not part of the verdict.
+    for index, line in enumerate(body):
+        if " warnings summary " in line and line.startswith("="):
+            body = body[:index]
+            break
+    short = []
+    for line in lines[summaries[0] + 1:]:
+        if line.startswith("FAILED ") or line.startswith("ERROR "):
+            short.append(line)
+        elif line.startswith("="):
+            break
+    if not short or len(body) == 0:
+        return None
+    # Section headings and details stay verbatim. Only decorative line widths
+    # differ when terminal settings change, which the environment key covers.
+    headings = [index for index, line in enumerate(body)
+                if line.startswith("_") and line.endswith("_")]
+    if len(headings) != len(short):
+        return None
+    signatures = []
+    for position, start in enumerate(headings):
+        end = headings[position + 1] if position + 1 < len(headings) else len(body)
+        section = "\n".join(line.rstrip() for line in body[start:end] if line.strip())
+        signatures.append((short[position], section))
+    return tuple(signatures)
 
 
 def _governed_documents(root: Path | None) -> frozenset[str]:

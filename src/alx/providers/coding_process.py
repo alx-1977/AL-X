@@ -9,12 +9,20 @@ review invocation are refused here even if a coding model asks for them.
 from __future__ import annotations
 
 import os
+import hashlib
+import io
+import json
+import platform
 import signal
+import tarfile
+import tempfile
+from importlib import metadata
 from contextvars import ContextVar
 from threading import Event, Lock
 from time import monotonic
 from typing import Any, Callable
 from collections.abc import Sequence
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess  # noqa: S404 - the one coding-job process site
@@ -29,6 +37,7 @@ from alx.contracts.coding import (
     CodingError,
     path_matches_blocked,
 )
+from alx.contracts.coding_verification import pytest_failure_signature
 
 
 _CURRENT: ContextVar["CodingCancellation | None"] = ContextVar(
@@ -364,6 +373,150 @@ def run_permitted_command(
         False,
         True,
     )
+
+
+def same_main_pytest_failure(
+    branch: CodingCommandRecord, checkout: Path, timeout_seconds: int,
+    check_set: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[bool, str]:
+    """Compare a failed pytest run with committed main without moving HEAD.
+
+    A temporary git archive is source evidence, never a second checkout. Cache
+    entries contain only a complete failure signature keyed to the exact main
+    commit, command and toolchain. Any uncertainty leaves the branch blocked.
+    """
+    if branch.timed_out or branch.exit_status != 1 or not branch.permitted:
+        return False, "branch_result_uncomparable"
+    branch_signature = pytest_failure_signature(branch.stdout, checkout)
+    if branch_signature is None:
+        return False, "branch_failure_unparsed"
+    try:
+        main = run_coding_subprocess(
+            subprocess.run, ["git", "rev-parse", "--verify", "refs/heads/main^{commit}"],
+            cwd=checkout, capture_output=True, text=True, timeout=15, check=False,
+        )
+        if main.returncode != 0:
+            return False, "main_unavailable"
+        sha = main.stdout.strip()
+        if len(sha) not in (40, 64) or any(c not in "0123456789abcdef" for c in sha):
+            return False, "main_identity_invalid"
+        origin = run_coding_subprocess(
+            subprocess.run, ["git", "remote", "get-url", "origin"], cwd=checkout,
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        origin_url = origin.stdout.strip() if origin.returncode == 0 else ""
+        # The same environment filtering is used by both actual test runs.
+        local_env = checkout / ".env"
+        toolchain = {
+            "python": sys.executable,
+            "version": sys.version,
+            "platform": platform.platform(),
+            "environment": _clean_environment(),
+            "packages": sorted((item.metadata.get("Name", ""), item.version)
+                               for item in metadata.distributions()),
+            "local_env_sha256": hashlib.sha256(local_env.read_bytes()).hexdigest()
+                                if local_env.is_file() else None,
+            "origin": origin_url,
+        }
+        # Executables reached through PATH can affect tests without appearing
+        # among Python distributions. Fingerprint all of them, with no list of
+        # favoured tools or known test failures.
+        executables: list[tuple[str, str, int, int]] = []
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            if not directory:
+                continue
+            try:
+                candidates = tuple(Path(directory).iterdir())
+            except FileNotFoundError:
+                continue
+            for candidate in candidates:
+                try:
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        stat = candidate.stat()
+                        executables.append((str(candidate), str(candidate.resolve()),
+                                            stat.st_size, stat.st_mtime_ns))
+                except (FileNotFoundError, PermissionError):
+                    # Unusable for this process; a disappearing entry also
+                    # cannot be the executable this verification invokes.
+                    continue
+        toolchain["executables"] = sorted(executables)
+        key = hashlib.sha256(json.dumps(
+            [sha, branch.argv, check_set, toolchain], sort_keys=True,
+        ).encode()).hexdigest()
+        cache = checkout / ".alx" / "runtime" / "verification-baselines" / f"{key}.json"
+        baseline_signature: tuple[tuple[str, str], ...] | None = None
+        if cache.is_file():
+            stored = json.loads(cache.read_text(encoding="utf-8"))
+            raw_signature = stored.get("signature")
+            if stored.get("key") == key and isinstance(raw_signature, list) \
+                    and all(isinstance(item, list) and len(item) == 2 and
+                            all(isinstance(part, str) for part in item)
+                            for item in raw_signature):
+                baseline_signature = tuple(tuple(item) for item in raw_signature)
+        if baseline_signature is None:
+            with tempfile.TemporaryDirectory(prefix="alx-main-verification-") as directory:
+                snapshot = Path(directory)
+                archive = run_coding_subprocess(
+                    subprocess.run, ["git", "archive", sha], cwd=checkout,
+                    capture_output=True, timeout=60, check=False,
+                )
+                if archive.returncode != 0:
+                    return False, "main_archive_failed"
+                with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as bundle:
+                    bundle.extractall(snapshot, filter="data")
+                # Some repository tests need a genuine .git directory. Give
+                # the temporary archive its own clean local identity, never a
+                # pointer into the canonical checkout's metadata.
+                commands = (
+                    ["git", "init", "-q", "-b", "main"],
+                    ["git", "config", "user.email", "baseline@example.invalid"],
+                    ["git", "config", "user.name", "Baseline"],
+                    ["git", "add", "-A"],
+                    ["git", "commit", "-qm", "committed main snapshot"],
+                )
+                for argv in commands:
+                    result = run_coding_subprocess(
+                        subprocess.run, argv, cwd=snapshot,
+                        env={**_clean_environment(),
+                             "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+0000",
+                             "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+0000"},
+                        capture_output=True, timeout=60, check=False,
+                    )
+                    if result.returncode != 0:
+                        return False, "main_snapshot_identity_failed"
+                if origin_url:
+                    remote = run_coding_subprocess(
+                        subprocess.run, ["git", "remote", "add", "origin", origin_url],
+                        cwd=snapshot, env=_clean_environment(),
+                        capture_output=True, timeout=15, check=False,
+                    )
+                    if remote.returncode != 0:
+                        return False, "main_snapshot_origin_failed"
+                if local_env.is_file():
+                    destination = snapshot / ".env"
+                    destination.write_bytes(local_env.read_bytes())
+                    destination.chmod(0o600)
+                baseline = run_permitted_command(
+                    list(branch.argv), snapshot, timeout_seconds=timeout_seconds,
+                    output_characters=0,
+                )
+                if baseline.timed_out or baseline.exit_status != 1:
+                    return False, "main_result_differs_or_unavailable"
+                baseline_signature = pytest_failure_signature(baseline.stdout, snapshot)
+                if baseline_signature is None:
+                    return False, "main_failure_unparsed"
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            temporary = cache.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"key": key, "signature": baseline_signature}),
+                                 encoding="utf-8")
+            temporary.replace(cache)
+        equivalent = not (Counter(branch_signature) - Counter(baseline_signature))
+        return (equivalent,
+                f"same_main_failure:main={sha}:evidence={key}" if equivalent
+                else f"failure_signature_changed:main={sha}:evidence={key}")
+    except (OSError, ValueError, tarfile.TarError, json.JSONDecodeError,
+            subprocess.TimeoutExpired, CodingError) as error:
+        return False, f"baseline_comparison_failed:{type(error).__name__}"
 
 
 @dataclass(frozen=True, slots=True)

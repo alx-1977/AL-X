@@ -15,6 +15,7 @@ passing them is what authorises a commit whether or not any test was among them.
 from __future__ import annotations
 
 import sys
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,8 +33,11 @@ from alx.contracts.coding_verification import (  # noqa: E402
     VerificationEvidence,
     content_violations,
     required_verification,
+    pytest_failure_signature,
 )
-from alx.providers.coding_process import command_permitted  # noqa: E402
+from alx.providers.coding_process import (  # noqa: E402
+    command_permitted, run_permitted_command, same_main_pytest_failure,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -608,6 +612,92 @@ class EvidenceAnswersWhatWasRequiredAndWhatHappened(unittest.TestCase):
         self.assertEqual(values["checks"][0]["name"], "diff_check")
         self.assertTrue(values["checks"][0]["passed"])
         self.assertEqual(values["checks"][0]["reason"], "because")
+
+
+class MainBaselineComparisonTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "Test")
+        (self.root / "test_sample.py").write_text(
+            "def test_existing():\n    assert 1 == 2\n", encoding="utf-8"
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "main")
+        self.git("switch", "-qc", "feature")
+        self.argv = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+
+    def git(self, *args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=self.root, text=True).strip()
+
+    def compare(self) -> tuple[bool, str]:
+        branch = run_permitted_command(self.argv, self.root, output_characters=0)
+        return same_main_pytest_failure(
+            branch, self.root, 30, (("pytest_full", tuple(self.argv)),)
+        )
+
+    def test_identical_failure_is_nonblocking_and_cached(self) -> None:
+        self.assertEqual(self.compare()[0], True)
+        cache = self.root / ".alx/runtime/verification-baselines"
+        self.assertEqual(len(list(cache.glob("*.json"))), 1)
+        self.assertEqual(self.compare()[0], True)
+        self.assertEqual(len(list(cache.glob("*.json"))), 1)
+
+    def test_cache_identity_changes_with_main_command_and_environment(self) -> None:
+        self.assertTrue(self.compare()[0])
+        cache = self.root / ".alx/runtime/verification-baselines"
+        self.git("switch", "-q", "main")
+        (self.root / "README.md").write_text("new commit\n", encoding="utf-8")
+        self.git("add", "README.md")
+        self.git("commit", "-qm", "move main")
+        self.git("switch", "-q", "feature")
+        self.assertTrue(self.compare()[0])
+        self.assertEqual(len(list(cache.glob("*.json"))), 2)
+        self.argv.append("-v")
+        self.assertTrue(self.compare()[0])
+        self.assertEqual(len(list(cache.glob("*.json"))), 3)
+
+    def test_additional_failure_blocks(self) -> None:
+        (self.root / "test_extra.py").write_text(
+            "def test_new():\n    assert False\n", encoding="utf-8"
+        )
+        self.assertFalse(self.compare()[0])
+
+    def test_branch_with_fewer_failures_keeps_matching_baseline_failure(self) -> None:
+        self.git("switch", "-q", "main")
+        (self.root / "test_extra.py").write_text(
+            "def test_extra():\n    assert False\n", encoding="utf-8"
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "another baseline failure")
+        self.git("switch", "-q", "feature")
+        self.assertTrue(self.compare()[0])
+
+    def test_changed_failure_message_blocks(self) -> None:
+        (self.root / "test_sample.py").write_text(
+            "def test_existing():\n    assert 1 == 3\n", encoding="utf-8"
+        )
+        self.assertFalse(self.compare()[0])
+
+    def test_main_passes_branch_fails(self) -> None:
+        self.git("switch", "-q", "main")
+        (self.root / "test_sample.py").write_text(
+            "def test_existing():\n    assert True\n", encoding="utf-8"
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "fix baseline")
+        self.git("switch", "-q", "feature")
+        self.assertFalse(self.compare()[0])
+
+    def test_missing_main_fails_closed(self) -> None:
+        self.git("branch", "-D", "main")
+        self.assertFalse(self.compare()[0])
+
+    def test_unparseable_failure_fails_closed(self) -> None:
+        self.assertIsNone(pytest_failure_signature("FAILED test_sample.py::x", self.root))
 
 
 if __name__ == "__main__":  # pragma: no cover
