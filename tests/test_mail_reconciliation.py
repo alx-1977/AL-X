@@ -379,6 +379,27 @@ class ScanReportsDisappearanceTest(unittest.TestCase):
             "done",
         )
 
+    def test_seen_row_above_cursor_settles_after_earlier_fetch_failure(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("Fetch later", "body")
+        self.imap.items[3] = message("Already read", "body")
+        self.imap.fetch_failures.add(2)
+        self.imap.seen_uids.add(3)
+        self.adapter.scan()
+        self.assertIsNone(next_arrival(self.state))
+        self.assertEqual(
+            self.state._connection.execute(
+                "SELECT state FROM mail_observations WHERE uid = 3"
+            ).fetchone()[0],
+            "done",
+        )
+        self.assertEqual(
+            self.state._connection.execute(
+                "SELECT last_uid FROM mail_cursor WHERE mailbox_id = 'INBOX'"
+            ).fetchone()[0],
+            1,
+        )
+
 
 
 

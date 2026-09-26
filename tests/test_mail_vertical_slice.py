@@ -149,6 +149,7 @@ class FakeImap:
     def __init__(self) -> None:
         self.items = {1: message("Old", "Old body")}
         self.seen_uids = set()
+        self.fetch_failures = set()
         self.commands = []
         self.store_status = "OK"
 
@@ -173,6 +174,8 @@ class FakeImap:
             return "OK", [b" ".join(str(uid).encode() for uid in sorted(identifiers))]
         if operation == "fetch":
             uid = int(values[0])
+            if uid in self.fetch_failures:
+                return "NO", []
             return "OK", [(b"metadata", self.items[uid]), b")"]
         if operation == "MOVE":
             return "OK", [b""]

@@ -604,7 +604,10 @@ class SQLiteMailObservationState:
             announced = 0
             for uid, state, vanished in rows:
                 number = int(uid)
-                if ceiling is not None and number > ceiling:
+                # A Seen flag is positive evidence even above a cursor held
+                # back by an earlier failed fetch. Absence above that cursor
+                # is still unknown and must not settle anything.
+                if ceiling is not None and number > ceiling and number not in seen:
                     continue
                 # Pending, absent or Seen, is settled and not counted.
                 # Overtaken between the read and the write: the later state
