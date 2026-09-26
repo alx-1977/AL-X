@@ -147,12 +147,12 @@ LOCAL_REVIEW_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "severity": {"type": "string"},
+                    "severity": {"type": ["string", "null"]},
                     "title": {"type": "string"},
                     "evidence": {"type": "string"},
                     "correction": {"type": "string"},
                 },
-                "required": ["title", "evidence", "correction"],
+                "required": ["severity", "title", "evidence", "correction"],
                 "additionalProperties": False,
             },
         },

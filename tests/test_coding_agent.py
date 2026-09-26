@@ -905,12 +905,11 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual((worktree / "app.py").read_text(encoding="utf-8"), _FIXED)
         self.assertNotIn("commit_sha", attempt.result.values)
 
-    def test_review_metric_is_optional_metadata_on_a_valid_finding(self) -> None:
+    def test_review_metric_deviations_preserve_a_valid_finding(self) -> None:
         worktree = _worktree(self.root, "review-metric")
-        self.assertNotIn(
-            "severity",
-            coding_agent_module.LOCAL_REVIEW_SCHEMA["properties"]["findings"]["items"]["required"],
-        )
+        schema = coding_agent_module.LOCAL_REVIEW_SCHEMA["properties"]["findings"]["items"]
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(schema["properties"]["severity"]["type"], ["string", "null"])
         for metric, expected in (("high", "high"), ("HI", "unknown"),
                                  (None, "unknown"), ({"unexpected": "shape"}, "unknown")):
             with self.subTest(metric=metric):
