@@ -243,7 +243,8 @@ class SubscriptionCodingSession:
             prompt_path.write_text(briefing, encoding="utf-8")
             command = self.command(prompt_path, worktree)
             try:
-                completed = self._runner(
+                from alx.providers.coding_process import run_coding_subprocess
+                completed = run_coding_subprocess(self._runner,
                     command,
                     capture_output=True,
                     text=True,

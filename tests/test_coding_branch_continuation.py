@@ -89,6 +89,7 @@ class Ownership(unittest.TestCase):
             ('check-attr', '-z', 'filter', '--'): 'paths',
             ('check-ignore', '-q', '--'): 'paths',
             ('ls-files', '-z', '--error-unmatch', '--'): 'paths',
+            ('ls-files', '--stage', '-z'): 'none',
             ('diff', '--cached', '--name-status', '-z'): 'none',
             ('add', '--'): 'paths', ('reset', '--quiet', '--'): 'paths',
             ('commit', '--quiet', '-m'): 'value', ('switch', '-c'): 'pair',

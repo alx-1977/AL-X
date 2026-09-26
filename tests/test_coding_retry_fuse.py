@@ -58,6 +58,26 @@ def state(*attempts):
 
 
 class CodingRetryFuseTests(unittest.TestCase):
+    def test_stage_infrastructure_and_cancellation_do_not_spend_implementation_retry(self):
+        failures = [
+            {"code": "review_failed", "phase": "local_review",
+             "review_classification": "infrastructure"},
+            {"code": "required_verification_failed", "phase": "test",
+             "failure_class": "test_infrastructure"},
+            {"code": "git_refused", "phase": "commit",
+             "failure_class": "commit_infrastructure"},
+            {"code": "coding_cancelled", "phase": "review"},
+        ]
+        attempts = tuple(
+            CapabilityAttempt(
+                CapabilityCall(f"stage-{index}", "run_coding_task", {"task": "work"}),
+                CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(f"stage-{index}", "run_coding_task",
+                                 CapabilityResultState.FAILED, failure=failure),
+            ) for index, failure in enumerate(failures)
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 0)
+
     def test_changed_arguments_do_not_change_goal_scoped_identity(self):
         self.assertEqual(CoreAgent._failed_coding_executions(state(attempt("first"), attempt("rewritten"))), 2)
 

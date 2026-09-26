@@ -17,6 +17,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from typing import Any
+from collections.abc import Callable
 
 from alx.contracts import AudioChunk, ResponseDelivery
 from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
@@ -51,6 +52,7 @@ LOGGER = logging.getLogger(__name__)
 # "audio.end" in the other direction; it names a frame format and never a
 # meaning, and nothing branches on what the frame carries.
 TYPED_FRAME = "person.text"
+CODING_CANCEL_FRAME = "coding.cancel"
 
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
     {
@@ -90,12 +92,14 @@ class LiveVoiceServer:
         port: int,
         sample_rate_hz: int,
         asset_root: Path,
+        cancel_coding: Callable[[str], bool] | None = None,
     ) -> None:
         self._session = session
         self._host = host
         self._port = port
         self._sample_rate_hz = sample_rate_hz
         self._asset_root = asset_root.resolve()
+        self._cancel_coding = cancel_coding
         # Set when a mid-exchange recovery happens, cleared by the next audio
         # frame. It proves the microphone iterator survived the recovery.
         self._await_audio_confirmation = False
@@ -404,6 +408,16 @@ class LiveVoiceServer:
         sequence = 0
         async for payload in connection:
             if isinstance(payload, str):
+                try:
+                    frame = json.loads(payload)
+                except (ValueError, TypeError):
+                    frame = None
+                if isinstance(frame, dict) and frame.get("type") == CODING_CANCEL_FRAME:
+                    job_id = frame.get("job_id")
+                    if (self._cancel_coding is not None and isinstance(job_id, str)
+                            and len(job_id) <= 128):
+                        await asyncio.to_thread(self._cancel_coding, job_id)
+                    continue
                 # The only non-audio frame the socket accepts. It carries what
                 # Friedl typed and nothing else: no command, no destination, no
                 # grammar. Where it goes is decided here, not by what it says.

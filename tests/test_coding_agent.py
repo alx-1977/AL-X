@@ -705,7 +705,7 @@ class NativeExecutionTests(unittest.TestCase):
                 for key, value in details.items():
                     self.assertEqual(failure[key], value)
                 self.assertEqual({key: failure[key] for key in expected}, expected)
-                persisted = json.dumps(dict(failure))
+                persisted = str(failure)
                 self.assertNotIn("must-not-survive", persisted)
                 self.assertNotIn("access_token", failure)
                 self.assertNotIn("stderr", failure)
@@ -758,7 +758,8 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(attempts[0]["attempt"], 1)
         self.assertEqual(attempts[0]["reason"], "review_schema_invalid")
         self.assertEqual(attempts[0]["error_message"], "findings is not a list")
-        self.assertIn("not-a-list", attempts[0]["raw_excerpt"])
+        self.assertIn('"findings": "<redacted:string:10>"', attempts[0]["raw_excerpt"])
+        self.assertNotIn("not-a-list", attempts[0]["raw_excerpt"])
         self.assertLessEqual(
             len(attempts[0]["raw_excerpt"]), MAX_REVIEW_RAW_EXCERPT_CHARACTERS
         )
@@ -835,8 +836,9 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertEqual(record["reason"], "review_schema_invalid")
             self.assertEqual(record["error_message"], "findings is not a list")
             self.assertLessEqual(len(record["raw_excerpt"]), MAX_REVIEW_RAW_EXCERPT_CHARACTERS)
-            self.assertEqual(len(record["raw_excerpt"]), MAX_REVIEW_RAW_EXCERPT_CHARACTERS)
+            self.assertLessEqual(len(record["raw_excerpt"]), MAX_REVIEW_RAW_EXCERPT_CHARACTERS)
             self.assertIn("findings", record["raw_excerpt"])
+            self.assertIn("<redacted:string:", record["raw_excerpt"])
             self.assertNotIn(huge, record["raw_excerpt"])
         self.assertEqual((worktree / "app.py").read_text(encoding="utf-8"), _FIXED)
         head = subprocess.run(

@@ -1090,7 +1090,7 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 15)
+        self.assertEqual(len(_WRITE_SHAPES), 16)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,

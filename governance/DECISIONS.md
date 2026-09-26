@@ -2102,3 +2102,25 @@ returned to Core; it does not terminate the Core turn or conversation. Core may
 reason again and choose another safe action or explain the blocker. All existing
 implementation, request-conflict, checkout-precondition, approval, and Git
 authority constraints remain unchanged.
+
+### Amendment — resume a preserved coding job
+
+- **Date:** 2026-09-26
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-26.** Friedl explicitly approved this
+  narrow amendment while directing repair of Coding Agent reliability.
+
+AL/X may resume the same failed or cancelled coding job on its preserved feature
+branch and existing diff or commits. The durable checkpoint must prove that the
+branch belongs to that job and goal, that the checkout remains attached and in
+a known safe state, and that repository state has not changed since the
+checkpoint. A mismatch refuses the resume without touching the repository.
+Only the failed stage and dependent later stages run again. Implementation is
+not rerun unless AL/X judges the preserved implementation invalid. Review and
+test infrastructure retries stay bounded within their own stages. A cancelled
+job leaves its branch, valid uncommitted work, and checkpoint for Core to
+inspect and may be resumed under the same proof. Cancellation stops the current
+coding subprocess without stopping AL/X or the server. Neither cancellation
+nor resumption resets, cleans, deletes, or switches away from preserved work.
+This grants no generic Coding Agent branch switching, reset, clean, or Git
+authority. D-033's clean-main rule continues to govern genuinely new jobs.

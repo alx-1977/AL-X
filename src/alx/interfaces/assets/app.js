@@ -8,6 +8,8 @@ const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
 const taskRows = document.querySelector("#task-rows");
+const codingCancel = document.querySelector("#coding-cancel");
+let activeCodingJobId = "";
 // Law 1: these name a system state and nothing more. First-person or
 // user-directed wording here reads as AL/X speaking when she has not reasoned,
 // so the gate whitelists exactly these labels.
@@ -93,6 +95,10 @@ function codingSeconds(value) {
 
 
 function showCodingStatus(message) {
+  activeCodingJobId = message.terminal || message.phase === "commit"
+    ? "" : String(message.job_id ?? "");
+  codingCancel.hidden = !activeCodingJobId;
+  if (message.transition === "CASE started" || message.terminal) codingCancel.disabled = false;
   const phase = String(message.phase ?? "").toUpperCase();
   const provider = String(message.provider ?? "");
   const model = String(message.model ?? "");
@@ -114,6 +120,12 @@ function showCodingStatus(message) {
     lastCodingTransition = key;
   }
 }
+
+codingCancel.addEventListener("click", () => {
+  if (!activeCodingJobId || !socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ type: "coding.cancel", job_id: activeCodingJobId }));
+  codingCancel.disabled = true;
+});
 
 function ttsElapsed() {
   if (ttsStartedAt === undefined) return "0.00 s";

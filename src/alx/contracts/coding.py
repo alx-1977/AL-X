@@ -70,6 +70,7 @@ MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS = 16_000
 # plus two retries, against the same diff. Material findings are not in this
 # bound: they stay advisory and do not retry the review.
 MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS = 3
+MAX_TEST_INFRASTRUCTURE_ATTEMPTS = 3
 MAX_REVIEW_RAW_EXCERPT_CHARACTERS = 2_000
 MAX_BRANCH_NAME_CHARACTERS = 200
 MAX_COMMIT_MESSAGE_CHARACTERS = 4_000
@@ -112,6 +113,7 @@ CODING_FAILURES = (
     "sandbox_unusable",
     "session_failed",
     "task_failed",
+    "coding_cancelled",
 )
 
 
@@ -322,6 +324,9 @@ class CodingRequest:
     repair_branch: str = ""
     commit_message: str = ""
     continuation: BranchContinuation | None = None
+    # Injected from the same goal's durable failed/cancelled attempt, never
+    # supplied as free-form capability input.
+    resume_checkpoint: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -618,16 +623,16 @@ class CodingOutcome:
     # the job can still commit, and Core still sees the infrastructure
     # classification. Material findings alone leave this empty.
     review_classification: str = ""
-    # The branch and uncommitted diff are still in the checkout. Set when
-    # review infrastructure retries are exhausted, which must not reset,
-    # clean, or delete that branch.
+    # The branch and uncommitted diff are still in the checkout after a
+    # failed or cancelled stage. No later failure may reset or delete them.
     diff_preserved: bool = False
     preserved_branch: str = ""
     review_attempts: tuple["ReviewInfrastructureAttempt", ...] = ()
+    checkpoint: str = ""
 
     def __post_init__(self) -> None:
-        if self.status not in ("succeeded", "failed", "blocked"):
-            raise ValueError("status must be succeeded, failed, or blocked")
+        if self.status not in ("succeeded", "failed", "blocked", "cancelled"):
+            raise ValueError("status must be succeeded, failed, blocked, or cancelled")
         _required(self.summary, "summary")
         _aware(self.finished_at, "finished_at")
         object.__setattr__(self, "files_changed", tuple(self.files_changed))
@@ -641,8 +646,8 @@ class CodingOutcome:
         object.__setattr__(self, "preserved_branch", str(self.preserved_branch or ""))
         if self.review_classification not in ("", "infrastructure"):
             raise ValueError("review_classification must be infrastructure or absent")
-        if self.diff_preserved and self.review_classification != "infrastructure":
-            raise ValueError("a preserved diff is an infrastructure review outcome")
+        if self.diff_preserved and not self.preserved_branch:
+            raise ValueError("a preserved diff needs its branch")
         if any(
             not isinstance(item, ReviewInfrastructureAttempt) for item in self.review_attempts
         ):
@@ -707,7 +712,7 @@ class CodingOutcome:
             # on when it asks for the repair: a branch and the SHA on it.
             values["branch"] = self.commit.branch
             values["commit_sha"] = self.commit.commit_sha
-        elif self.diff_preserved and self.preserved_branch:
+        elif self.preserved_branch:
             # No commit exists. The branch name is the checkout that still
             # holds the uncommitted diff, not a SHA Core can check out later.
             values["branch"] = self.preserved_branch
@@ -722,6 +727,8 @@ class CodingOutcome:
             values["review_attempts"] = [
                 item.as_values() for item in self.review_attempts
             ]
+        if self.checkpoint:
+            values["checkpoint"] = self.checkpoint
         return values
 
 

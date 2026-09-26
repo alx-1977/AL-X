@@ -36,6 +36,8 @@ prepared canonical checkout and a job-owned file list into a commit SHA.
 from __future__ import annotations
 
 import os
+import hashlib
+import stat
 import subprocess  # noqa: S404 - the one coding-job git-write site
 import fcntl
 from contextlib import contextmanager
@@ -58,6 +60,47 @@ from alx.contracts.coding import (
 
 
 GIT_TIMEOUT_SECONDS = 60
+
+
+def coding_checkpoint(root: Path) -> dict[str, str]:
+    """Hash complete checkout evidence without storing source or secret bytes.
+
+    The status listing includes untracked files. Index stage entries cover a
+    partially staged commit, while lstat and file bytes cover the visible diff.
+    A resume requires an exact match of all three facts.
+    """
+    state = read_workspace_state(root)
+    if state.detached or not state.branch or state.branch == "main":
+        raise CodingError("git_refused", reason_code="resume_checkout_unsafe")
+    digest = hashlib.sha256()
+    status = _run(root, ["git", "status", "--porcelain=v1", "-z", "-uall"], bounded=False)
+    index = _run(root, ["git", "ls-files", "--stage", "-z"], bounded=False)
+    if status.exit_status or index.exit_status:
+        raise CodingError("git_unavailable", reason_code="checkpoint_unreadable")
+    digest.update(status.stdout.encode("utf-8", "surrogateescape"))
+    digest.update(index.stdout.encode("utf-8", "surrogateescape"))
+    for name in state.inherited_dirty:
+        encoded = name.encode("utf-8", "surrogateescape")
+        digest.update(len(encoded).to_bytes(8, "big") + encoded)
+        target = root / name
+        if target.exists() or target.is_symlink():
+            digest.update(stat.S_IMODE(target.lstat().st_mode).to_bytes(4, "big"))
+        if target.is_symlink():
+            link = os.readlink(target).encode("utf-8", "surrogateescape")
+            digest.update(b"link\0" + len(link).to_bytes(8, "big") + link)
+        elif target.is_file():
+            digest.update(b"file\0")
+            content = hashlib.sha256()
+            with target.open("rb") as source:
+                for chunk in iter(lambda: source.read(64 * 1024), b""):
+                    content.update(chunk)
+            digest.update(content.digest())
+        elif target.exists():
+            digest.update(b"other\0")
+        else:
+            digest.update(b"missing\0")
+    return {"branch": state.branch, "head_sha": state.head_sha,
+            "state_digest": digest.hexdigest()}
 
 # D-029 fixes the suffix order; this bound fixes the maximum local work the
 # capability may spend looking for an unused name.  It counts the requested
@@ -87,6 +130,7 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("check-attr", "-z", "filter", "--"): "paths",
     ("check-ignore", "-q", "--"): "paths",
     ("ls-files", "-z", "--error-unmatch", "--"): "paths",
+    ("ls-files", "--stage", "-z"): "none",
     ("diff", "--cached", "--name-status", "-z"): "none",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
@@ -1109,6 +1153,28 @@ def commit_job_changes(
     )
 
 
+def verify_preserved_job_commit(
+    root: Path, branch: str, commit_sha: str,
+    expected_files: tuple[str, ...], deleted_files: tuple[str, ...],
+) -> CodingCommit:
+    """Resolve a post-commit readback failure without creating another commit.
+
+    Only a SHA that the original commit attempt reported may reach this helper.
+    The caller has already proved the unchanged checkout checkpoint. A mismatch
+    returns to Core; this path has no Git write.
+    """
+    state = read_workspace_state(root)
+    if (state.detached or state.branch != branch or state.head_sha != commit_sha
+            or not state.clean):
+        raise CodingError("git_refused", reason_code="preserved_commit_changed")
+    expected = tuple(dict.fromkeys((*expected_files, *deleted_files)))
+    committed = _verify_committed_tree(root, expected, deleted_files, state)
+    if set(committed) != set(expected):
+        raise CodingError("git_refused", reason_code="preserved_commit_incomplete",
+                          commit_sha=commit_sha)
+    return CodingCommit(branch, commit_sha, committed, True)
+
+
 def _unstage(worktree: Path, paths: tuple[str, ...]) -> None:
     """Take named paths back out of the index, leaving their content alone.
 
@@ -1221,6 +1287,7 @@ __all__ = [
     "assert_assigned_worktree",
     "branch_name_permitted",
     "canonical_repository_root",
+    "coding_checkpoint",
     "coding_job_lock",
     "commit_job_changes",
     "continue_feature_branch",
@@ -1229,5 +1296,6 @@ __all__ = [
     "prepare_feature_branch",
     "read_head_sha",
     "read_workspace_state",
+    "verify_preserved_job_commit",
     "worktree_branch",
 ]

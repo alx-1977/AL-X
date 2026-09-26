@@ -855,6 +855,8 @@ async def run(repository_root: Path) -> None:
         voice_settings.port,
         provider_settings.speech_to_text.sample_rate_hz,
         CODE_ROOT / "src/alx/interfaces/assets",
+        cancel_coding=(getattr(coding_runtime.agent, "cancel", None)
+                       if coding_runtime is not None else None),
     )
     # The due-cognition tick lives for the life of the process, beside the
     # transport rather than inside it. Voice is how she is heard, not what

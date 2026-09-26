@@ -541,6 +541,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
         process_references = []
         dynamic_references = []
         runner_calls = []
+        direct_runner_calls = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
                 owner = node.value.id
@@ -554,11 +555,19 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     process_references.append(node)
             if not isinstance(node, ast.Call):
                 continue
+            if (isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "self"
+                    and node.func.attr == "_runner"):
+                direct_runner_calls.append(node)
             if (
-                isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "self"
-                and node.func.attr == "_runner"
+                isinstance(node.func, ast.Name)
+                and node.func.id == "run_coding_subprocess"
+                and node.args
+                and isinstance(node.args[0], ast.Attribute)
+                and isinstance(node.args[0].value, ast.Name)
+                and node.args[0].value.id == "self"
+                and node.args[0].attr == "_runner"
             ):
                 runner_calls.append(node)
             if (
@@ -577,6 +586,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
         reference = process_references[0]
         self.assertEqual((reference.value.id, reference.attr), ("subprocess", "run"))
         self.assertEqual(dynamic_references, [])
+        self.assertEqual(direct_runner_calls, [])
 
         model_class = next(
             node for node in tree.body

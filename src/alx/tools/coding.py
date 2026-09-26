@@ -11,6 +11,7 @@ It does not merge, push, deploy, or request a review.
 from __future__ import annotations
 
 import logging
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -195,7 +196,11 @@ DEFINITION = CapabilityDefinition(
     "attempt's reason, error_message, and bounded raw_excerpt, including when "
     "a later attempt succeeds and the job commits. If those attempts are "
     "exhausted the job stays uncommitted with diff_preserved and the branch "
-    "name.",
+    "name. AL/X may set resume_job_id to the failed or cancelled call ID "
+    "from this active goal to retry only its recorded stage after the checkout "
+    "matches the durable branch, HEAD, and full state digest. The user can "
+    "stop an active job through the structured coding cancellation control; "
+    "cancellation preserves its branch and diff and returns a checkpoint.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -208,6 +213,7 @@ DEFINITION = CapabilityDefinition(
             "repair_branch": _STRING,
             "commit_message": _STRING,
             "continue_goal_branch": _BOOLEAN,
+            "resume_job_id": _STRING,
         },
         ("task", "repair_branch", "commit_message"),
         extra_properties=False,
@@ -251,6 +257,7 @@ DEFINITION = CapabilityDefinition(
             "review_attempts": StructuredSchema(
                 ValueKind.ARRAY, items=_REVIEW_ATTEMPT
             ),
+            "checkpoint": _STRING,
         },
         (
             "status",
@@ -271,6 +278,7 @@ DEFINITION = CapabilityDefinition(
     durable_input_fields=(
         "task", "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
+        "resume_job_id",
     ),
 )
 
@@ -278,6 +286,7 @@ DEFINITION = CapabilityDefinition(
 # sit late there and would invert this order. task_failed is the fallback
 # for undeclared issues such as no_files_changed, not an entry.
 _OUTCOME_ISSUE_CODES = (
+    "coding_cancelled",
     "sandbox_unusable",
     "session_failed",
     "coding_unavailable",
@@ -338,7 +347,39 @@ def build_coding_executors(
         if argument_failure is not None:
             return _failed(call_id, "arguments_unusable", **argument_failure)
 
-        if arguments.get("continue_goal_branch", False):
+        resume_id = arguments.get("resume_job_id")
+        if resume_id:
+            state = goal_state_source()
+            previous = next((item for item in (() if state is None else state.attempts)
+                             if item.call is not None and item.call.capability_id == RUN_CODING_TASK
+                             and item.call.call_id == resume_id and item.result is not None
+                             and item.result.state is CapabilityResultState.FAILED), None)
+            if previous is None:
+                return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                               implementation_reached=False)
+            raw_checkpoint = previous.result.durable_values.get("checkpoint")
+            try:
+                checkpoint = json.loads(raw_checkpoint)
+            except (TypeError, ValueError):
+                checkpoint = None
+            if (not isinstance(checkpoint, dict) or checkpoint.get("job_id") != resume_id
+                    or checkpoint.get("branch") != request.repair_branch
+                    or checkpoint.get("stage") not in {"planning", "execution", "review", "test", "commit"}
+                    or arguments.get("continue_goal_branch", False)):
+                return _failed(call_id, "git_refused", reason_code="resume_checkpoint_invalid",
+                               implementation_reached=False)
+            original = previous.call.arguments
+            for key in ("task", "context", "acceptance_criteria", "test_guidance",
+                        "blocked_paths", "repair_branch", "commit_message"):
+                if key in arguments and arguments.get(key) != original.get(key):
+                    return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
+                                   implementation_reached=False)
+            original_request, original_failure = parse_coding_arguments(original, call_id)
+            if original_failure is not None or original_request is None:
+                return _failed(call_id, "git_refused", reason_code="resume_original_request_invalid",
+                               implementation_reached=False)
+            request = replace(original_request, resume_checkpoint=checkpoint)
+        elif arguments.get("continue_goal_branch", False):
             continuation = goal_coding_branch(goal_state_source())
             if continuation is None or request.repair_branch != continuation.branch:
                 return _failed(
@@ -425,6 +466,11 @@ def parse_coding_arguments(
         return None, _argument_failure(
             "continue_goal_branch", "not_boolean", "continue_goal_branch must be a boolean"
         )
+    if "resume_job_id" in arguments and (
+        not isinstance(arguments["resume_job_id"], str)
+        or not job_id_permitted(arguments["resume_job_id"])
+    ):
+        return None, _argument_failure("resume_job_id", "unsafe", "resume_job_id is invalid")
     if not isinstance(job_id, str) or not job_id.strip():
         return None, _argument_failure(
             "job_id", "missing", "job_id was not assigned"
