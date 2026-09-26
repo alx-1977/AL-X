@@ -352,10 +352,14 @@ def build_coding_executors(
         resume_id = arguments.get("resume_job_id")
         if resume_id:
             state = goal_state_source()
-            previous = next((item for item in (() if state is None else state.attempts)
-                             if item.call is not None and item.call.capability_id == RUN_CODING_TASK
-                             and item.call.call_id == resume_id and item.result is not None
-                             and item.result.state is CapabilityResultState.FAILED), None)
+            recorded = {
+                item.call.call_id: item
+                for item in (() if state is None else state.attempts)
+                if item.call is not None and item.call.capability_id == RUN_CODING_TASK
+                and item.result is not None
+                and item.result.state is CapabilityResultState.FAILED
+            }
+            previous = recorded.get(resume_id)
             if previous is None:
                 return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
                                implementation_reached=False)
@@ -364,7 +368,29 @@ def build_coding_executors(
                 checkpoint = json.loads(raw_checkpoint)
             except (TypeError, ValueError):
                 checkpoint = None
-            original = previous.call.arguments
+            # A resumed attempt records only what Core supplied on that call.
+            # Walk its durable same-goal ancestry to recover the complete
+            # original request, while using the immediate attempt's checkpoint
+            # for the current stage and checkout proof.
+            origin = previous
+            seen: set[str] = set()
+            while True:
+                origin_id = origin.call.call_id
+                if origin_id in seen:
+                    return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                                   implementation_reached=False)
+                seen.add(origin_id)
+                parent_id = origin.call.arguments.get("resume_job_id")
+                if not parent_id:
+                    break
+                if not isinstance(parent_id, str) or not job_id_permitted(parent_id):
+                    return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                                   implementation_reached=False)
+                origin = recorded.get(parent_id)
+                if origin is None:
+                    return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
+                                   implementation_reached=False)
+            original = origin.call.arguments
             original_request, original_failure = parse_coding_arguments(original, call_id)
             if original_failure is not None or original_request is None:
                 return _failed(call_id, "git_refused", reason_code="resume_original_request_invalid",

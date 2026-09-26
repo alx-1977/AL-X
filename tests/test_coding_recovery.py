@@ -371,7 +371,10 @@ class CodingRecoveryTests(unittest.TestCase):
     def test_structured_browser_cancel_reaches_only_named_job(self):
         called = []
         server = LiveVoiceServer(None, "127.0.0.1", 0, 16000, self.root,
-                                 cancel_coding=lambda job_id: called.append(job_id) or job_id == "job-1")
+                                 cancel_coding=lambda job_id, conversation_id: (
+                                     called.append((job_id, conversation_id))
+                                     or job_id == "job-1" and conversation_id == "owner"
+                                 ))
 
         class Connection:
             def __init__(self):
@@ -387,12 +390,18 @@ class CodingRecoveryTests(unittest.TestCase):
                 self.sent.append(json.loads(payload))
 
         async def consume():
-            return [item async for item in server._audio(connection, "conversation")]
+            return [item async for item in server._audio(connection, "owner")]
 
         connection = Connection()
         self.assertEqual(asyncio.run(consume()), [])
-        self.assertEqual(called, ["job-1", "job-2"])
+        self.assertEqual(called, [("job-1", "owner"), ("job-2", "owner")])
         self.assertEqual(connection.sent, [
             {"type": "coding.cancel.ack", "job_id": "job-1", "accepted": True},
             {"type": "coding.cancel.ack", "job_id": "job-2", "accepted": False},
         ])
+
+        other = Connection()
+        async def consume_other():
+            return [item async for item in server._audio(other, "other")]
+        self.assertEqual(asyncio.run(consume_other()), [])
+        self.assertEqual(other.sent[0]["accepted"], False)

@@ -92,7 +92,7 @@ class LiveVoiceServer:
         port: int,
         sample_rate_hz: int,
         asset_root: Path,
-        cancel_coding: Callable[[str], bool] | None = None,
+        cancel_coding: Callable[[str, str], bool] | None = None,
     ) -> None:
         self._session = session
         self._host = host
@@ -417,7 +417,9 @@ class LiveVoiceServer:
                     accepted = False
                     if (self._cancel_coding is not None and isinstance(job_id, str)
                             and len(job_id) <= 128):
-                        accepted = await asyncio.to_thread(self._cancel_coding, job_id)
+                        accepted = await asyncio.to_thread(
+                            self._cancel_coding, job_id, stream_id
+                        )
                     await connection.send(json.dumps({
                         "type": "coding.cancel.ack",
                         "job_id": job_id if isinstance(job_id, str) and len(job_id) <= 128 else "",

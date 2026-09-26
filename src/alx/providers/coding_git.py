@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import re
 import stat
 import subprocess  # noqa: S404 - the one coding-job git-write site
 import fcntl
@@ -117,6 +118,7 @@ def coding_checkpoint(root: Path) -> dict[str, str]:
 # "value"  - exactly one further argument, checked by the caller that built it
 # "paths"  - a `--` separator followed by one or more worktree-relative paths,
 #            none of which may be spelled as a ref
+# "sha"    - exactly one full commit SHA, never a ref or revision expression
 # "pair"   - exactly two values: the feature branch and the already verified
 #            main commit used by `switch -c`.
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
@@ -126,10 +128,9 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("symbolic-ref", "--quiet", "--short", "HEAD"): "none",
     ("status", "--porcelain=v1", "-z", "-uall"): "none",
     ("diff", "--cached", "--name-only", "-z"): "none",
-    ("show", "--name-only", "--pretty=format:", "-z", "HEAD"): "none",
+    ("show", "--name-status", "--pretty=format:", "-z"): "sha",
     ("check-attr", "-z", "filter", "--"): "paths",
     ("check-ignore", "-q", "--"): "paths",
-    ("ls-files", "-z", "--error-unmatch", "--"): "paths",
     ("ls-files", "--stage", "-z"): "none",
     ("diff", "--cached", "--name-status", "-z"): "none",
     ("add", "--"): "paths",
@@ -175,6 +176,8 @@ def git_write_permitted(argv: list[str] | tuple[str, ...]) -> bool:
             return not tail
         if remainder == "value":
             return len(tail) == 1 and not tail[0].startswith("-")
+        if remainder == "sha":
+            return len(tail) == 1 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tail[0]) is not None
         if remainder == "paths":
             return bool(tail) and all(_pathspec_permitted(item) for item in tail)
         if remainder == "pair":
@@ -1096,8 +1099,8 @@ def _verify_committed_tree(
     returns to AL/X is the truth: a commit exists, it contains something this
     job did not authorise, and its SHA is here for her to act on.
     """
-    committed = _committed_paths(root)
-    undeleted = _still_tracked(root, authorised_deletions)
+    committed, deleted = _committed_change_set(root, after.head_sha)
+    undeleted = tuple(path for path in authorised_deletions if path not in deleted)
     if undeleted:
         raise CodingError(
             "unrelated_changes_staged",
@@ -1172,6 +1175,10 @@ def verify_preserved_job_commit(
     if set(committed) != set(expected):
         raise CodingError("git_refused", reason_code="preserved_commit_incomplete",
                           commit_sha=commit_sha)
+    current = read_workspace_state(root)
+    if (current.detached or current.branch != branch or current.head_sha != commit_sha
+            or not current.clean):
+        raise CodingError("git_refused", reason_code="preserved_commit_changed")
     return CodingCommit(branch, commit_sha, committed, True)
 
 
@@ -1228,39 +1235,27 @@ def _reconcile_after_commit(
     )
 
 
-def _still_tracked(worktree: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
-    """Which of these paths HEAD's tree still tracks, asked about by name.
-
-    Scoped to the paths in question rather than listing the repository: the
-    question is only ever "is this authorised deletion actually gone", and a
-    whole-repository listing would be a large read to answer it. Exit status 1
-    with `--error-unmatch` means none of them is tracked, which is the
-    expected answer after a successful deletion.
-    """
-    if not paths:
-        return ()
-    result = _run(
-        worktree, ["git", "ls-files", "-z", "--error-unmatch", "--", *paths],
-        bounded=False,
-    )
-    if result.exit_status not in (0, 1):
-        raise CodingError(
-            "git_unavailable",
-            reason_code="tracked_paths_unreadable",
-            exit_status=result.exit_status,
-        )
-    return _bounded_entries(result.stdout, "tracked_listing_too_large")
-
-
-def _committed_paths(worktree: Path) -> tuple[str, ...]:
-    """The paths HEAD's own commit touched, read back after it was created."""
+def _committed_change_set(worktree: Path, commit_sha: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Read changed paths and deletions from one pinned commit, never live HEAD."""
     listed = _require(
         worktree,
-        ["git", "show", "--name-only", "--pretty=format:", "-z", "HEAD"],
+        ["git", "show", "--name-status", "--pretty=format:", "-z", commit_sha],
         "commit_unreadable",
         bounded=False,
     )
-    return _bounded_entries(listed, "commit_too_large")
+    fields = _nul_paths(listed)
+    if len(fields) % 2 or len(fields) // 2 > MAX_INSPECTED_ENTRIES:
+        raise CodingError("git_refused", reason_code="commit_too_large",
+                          entry_count=len(fields) // 2)
+    paths: list[str] = []
+    deleted: set[str] = set()
+    for status, path in zip(fields[::2], fields[1::2]):
+        if status not in {"A", "M", "D", "T"} or not path:
+            raise CodingError("git_refused", reason_code="commit_change_unreadable")
+        paths.append(path)
+        if status == "D":
+            deleted.add(path)
+    return tuple(paths), frozenset(deleted)
 
 
 def _staged_paths(worktree: Path) -> tuple[str, ...]:
