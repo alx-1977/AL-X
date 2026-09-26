@@ -905,6 +905,57 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual((worktree / "app.py").read_text(encoding="utf-8"), _FIXED)
         self.assertNotIn("commit_sha", attempt.result.values)
 
+    def test_review_metric_is_optional_metadata_on_a_valid_finding(self) -> None:
+        worktree = _worktree(self.root, "review-metric")
+        self.assertNotIn(
+            "severity",
+            coding_agent_module.LOCAL_REVIEW_SCHEMA["properties"]["findings"]["items"]["required"],
+        )
+        for metric, expected in (("high", "high"), ("HI", "unknown"),
+                                 (None, "unknown"), ({"unexpected": "shape"}, "unknown")):
+            with self.subTest(metric=metric):
+                finding = {
+                    "title": "real concern", "evidence": "the changed path is incomplete",
+                    "correction": "cover the adjacent path",
+                }
+                if metric is not None:
+                    finding["severity"] = metric
+                reviewer = PlanningModel(reviews=[{"findings": [finding]}])
+                agent = coding_agent_module.CodingAgent(
+                    PlanningModel(), RecordingSession(), reviewer, repository=worktree,
+                )
+                parsed = agent._review(
+                    CodingRequest(task="fix add", job_id="job-1"),
+                    CodingWorkspace(str(worktree)), {}, ("app.py",), "candidate diff",
+                )
+                self.assertEqual(len(parsed), 1)
+                self.assertEqual(parsed[0].title, "real concern")
+                self.assertEqual(parsed[0].evidence, "the changed path is incomplete")
+                self.assertEqual(parsed[0].severity, expected)
+                self.assertTrue(parsed[0].material)
+
+    def test_unknown_review_metric_keeps_finding_in_job_result(self) -> None:
+        worktree = _worktree(self.root, "unknown-review-metric")
+        reviewer = PlanningModel(reviews=[{"findings": [{
+            "severity": "HI", "title": "adjacent path remains wrong",
+            "evidence": "the candidate does not cover the second path",
+            "correction": "cover the second path",
+        }]}])
+        session = RecordingSession(edits={"app.py": _FIXED})
+        attempt = self._run(
+            PlanningModel(), session, reviewer=reviewer, task="fix add",
+            worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(reviewer.requests), 1)
+        self.assertEqual(len(session.calls), 2)
+        self.assertNotIn("review_failed", attempt.result.values["unresolved_issues"])
+        self.assertEqual(attempt.result.values["review_findings"][0]["severity"], "unknown")
+        self.assertEqual(
+            attempt.result.values["review_findings"][0]["evidence"],
+            "the candidate does not cover the second path",
+        )
+
     def test_material_review_findings_stay_advisory_without_infrastructure_retry(self) -> None:
         """A material finding is not an infrastructure failure and is not retried."""
         worktree = _worktree(self.root, "material-advisory")

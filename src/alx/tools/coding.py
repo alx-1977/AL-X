@@ -197,7 +197,7 @@ DEFINITION = CapabilityDefinition(
     "attempt's reason, error_message, and bounded raw_excerpt, including when "
     "a later attempt succeeds and the job commits. If those attempts are "
     "exhausted the job stays uncommitted with diff_preserved and the branch "
-    "name. AL/X may set resume_job_id to the failed or cancelled call ID "
+    "name. AL/X may supply only resume_job_id for a failed or cancelled call "
     "from this active goal to retry only its recorded stage after the checkout "
     "matches the durable branch, HEAD, and full state digest. The user can "
     "stop an active job through the structured coding cancellation control; "
@@ -216,7 +216,7 @@ DEFINITION = CapabilityDefinition(
             "continue_goal_branch": _BOOLEAN,
             "resume_job_id": _STRING,
         },
-        ("task", "repair_branch", "commit_message"),
+        (),
         extra_properties=False,
     ),
     StructuredSchema(
@@ -344,12 +344,23 @@ def build_coding_executors(
 
     def run(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
-        # The job's identity is the broker's durable call ID, injected here.
-        request, argument_failure = parse_coding_arguments(arguments, call_id)
-        if argument_failure is not None:
-            return _failed(call_id, "arguments_unusable", **argument_failure)
-
+        if not isinstance(arguments, Mapping):
+            return _failed(call_id, "arguments_unusable", **_argument_failure(
+                None, "not_object", "arguments must be an object"
+            ))
         resume_id = arguments.get("resume_job_id")
+        if "resume_job_id" in arguments and (
+            not isinstance(resume_id, str) or not job_id_permitted(resume_id)
+        ):
+            return _failed(call_id, "arguments_unusable", **_argument_failure(
+                "resume_job_id", "unsafe", "resume_job_id is invalid"
+            ))
+        if not resume_id:
+            # New jobs retain their original required fields. A resume gets
+            # these fields from its durable same-goal ancestor instead.
+            request, argument_failure = parse_coding_arguments(arguments, call_id)
+            if argument_failure is not None:
+                return _failed(call_id, "arguments_unusable", **argument_failure)
         if resume_id:
             state = goal_state_source()
             recorded = {
@@ -395,6 +406,11 @@ def build_coding_executors(
             if original_failure is not None or original_request is None:
                 return _failed(call_id, "git_refused", reason_code="resume_original_request_invalid",
                                implementation_reached=False)
+            request, argument_failure = parse_coding_arguments(
+                {**original, **arguments}, call_id
+            )
+            if argument_failure is not None:
+                return _failed(call_id, "arguments_unusable", **argument_failure)
             requested_branch = original_request.repair_branch.strip()
             prepared_branches = {requested_branch} | {
                 f"{requested_branch}-{number}"

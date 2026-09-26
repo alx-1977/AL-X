@@ -488,19 +488,19 @@ class LocalReviewFinding:
     correction: str
 
     def __post_init__(self) -> None:
-        _required(self.severity, "severity")
         _required(self.title, "title")
-        if self.severity not in ("low", "medium", "high"):
-            raise ValueError("severity must be low, medium or high")
+        metric = self.severity.strip().lower() if isinstance(self.severity, str) else ""
+        object.__setattr__(
+            self, "severity", metric if metric in ("low", "medium", "high") else "unknown"
+        )
 
     @property
     def material(self) -> bool:
         """Whether this finding is one the reviewer considered substantive.
 
-        Materiality here is the reviewer's own severity label, not a judgement
-        this code makes about whether the finding matters to the job. Under
-        Law 3 that judgement is AL/X's, which is why a material finding is
-        reported to her rather than resolved here.
+        Known low findings remain advisory. An unknown label is treated as
+        potentially material so its text reaches AL/X instead of silently
+        making the review look clean. AL/X judges what matters under Law 3.
         """
         return self.severity in _MATERIAL_REVIEW_SEVERITIES
 
@@ -513,7 +513,7 @@ class LocalReviewFinding:
         }
 
 
-_MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high"})
+_MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high", "unknown"})
 
 
 @dataclass(frozen=True, slots=True)

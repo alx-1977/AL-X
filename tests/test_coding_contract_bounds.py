@@ -124,7 +124,7 @@ class InvalidValuesStillFailClosed(unittest.TestCase):
 
 class ExistingValidCallsAreUnchanged(unittest.TestCase):
     def test_the_input_schema_carries_no_path(self) -> None:
-        """D-031 removed one field; the rest of the contract is unchanged.
+        """D-031 removed the path; resume may supply only its durable job ID.
 
         `worktree` is gone rather than optional. An optional path field would
         still be a path a model could supply, which is the thing that made the
@@ -132,13 +132,17 @@ class ExistingValidCallsAreUnchanged(unittest.TestCase):
         """
         entry = catalogue_entry()
         schema = entry["input_schema"]
-        self.assertEqual(
-            sorted(schema["required"]),
-            ["commit_message", "repair_branch", "task"],
-        )
+        self.assertEqual(schema.get("required", []), [])
         self.assertIn("step_budget", schema["properties"])
         self.assertEqual(schema["properties"]["step_budget"]["kind"], "integer")
         self.assertNotIn("worktree", schema["properties"])
+
+    def test_a_new_call_still_requires_its_task(self) -> None:
+        result = build_coding_executors(
+            lambda request: None, lambda: "call-1"
+        )["run_coding_task"]({"repair_branch": "fix/new", "commit_message": "fix"})
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertEqual(result.failure["invalid_field"], "task")
 
     def test_a_call_without_a_step_budget_keeps_the_default(self) -> None:
         """Omitting it is valid and unchanged: the default still applies."""
