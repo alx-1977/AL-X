@@ -18,9 +18,9 @@ these tests keep proving it against the reader that replaced it.
 
 Whether a tracked identifier is still in the mailbox has one correct answer, so
 detection is deterministic (Law 2). What its disappearance means does not, so
-an observation Friedl has already heard about is returned to AL/X as evidence
-and she releases it herself (Laws 1 and 3). An observation never announced owes
-him nothing and is settled silently.
+an observation she is holding — current or presented — is returned to AL/X as
+evidence and she releases it herself (Laws 1 and 3). A pending observation,
+shown as waiting or not, owes no vanished report and is settled silently.
 """
 
 from __future__ import annotations
@@ -368,10 +368,11 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
     message — that it was gone, and that it had arrived — and she met the
     first with silence because she had never mentioned it.
 
-    The two facts are recorded independently on purpose, so a disappearance
-    found while nobody was connected still reaches her later. That leaves a
-    row satisfying both selectors at once, and only the vanished selector
-    checked. These tests hold the arrival selector to the same fact.
+    A pending message, including one already shown as waiting, is settled to
+    done when it leaves. That is neither a vanished report nor an arrival. A
+    presented message that leaves is reported vanished once and is still not
+    offered as an arrival. A row already marked vanished is withheld from the
+    arrival selector, so the two facts are never both offered.
     """
 
     def setUp(self) -> None:
@@ -391,13 +392,9 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         """The reported bug, end to end.
 
         Shown to the Core as waiting, then deleted from the mailbox before the
-        turn that would have raised it. She is told it is gone, and must never
-        afterwards be handed it as though it had just arrived.
-
-        Exposure is what makes the disappearance owed. A turn records it by
-        building its context; these tests call the same reader directly, which
-        is the step the removed single-slot reader used to perform as a side
-        effect of promotion.
+        turn that would have raised it. The pending row is settled with no
+        vanished report, and she must never afterwards be handed it as though
+        it had just arrived.
         """
         self.adapter.scan()
         self.imap.items[2] = message("Order received", "Thanks for your order")
@@ -410,17 +407,18 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         del self.imap.items[2]                       # Friedl deletes it
         self.adapter.scan()
 
-        vanished = self.state.pending_vanished()
-        self.assertEqual(len(vanished), 1)
-        self.state.record_vanished_delivery(vanished[0].event_id)
-
+        self.assertEqual(self.state.pending_vanished(), ())
         self.assertIsNone(
             next_arrival(self.state),
             "a message known to be gone was offered as a new arrival",
         )
+        state = self.state._connection.execute(
+            "SELECT state FROM mail_observations WHERE uid = 2"
+        ).fetchone()[0]
+        self.assertEqual(state, "done")
 
-    def test_the_disappearance_still_reaches_her(self) -> None:
-        """Excluded from arrivals, not erased: the vanished fact survives."""
+    def test_a_waiting_absence_is_settled_without_a_vanished_event(self) -> None:
+        """A still-pending message that leaves is a silent release."""
         self.adapter.scan()
         self.imap.items[2] = message("Order received", "Thanks")
         self.adapter.scan()
@@ -429,9 +427,11 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         self.adapter.scan()
 
         self.assertIsNone(next_arrival(self.state))
-        reported = self.state.pending_vanished()
-        self.assertEqual(len(reported), 1)
-        self.assertEqual(reported[0].kind, "mail.message_vanished")
+        self.assertEqual(self.state.pending_vanished(), ())
+        state = self.state._connection.execute(
+            "SELECT state FROM mail_observations WHERE uid = 2"
+        ).fetchone()[0]
+        self.assertEqual(state, "done")
 
     def test_a_vanished_pending_message_is_never_promoted(self) -> None:
         """It disappears before the transport ever picks it up."""
@@ -459,8 +459,8 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
 
         vanished = {item.data["uid"] for item in self.state.pending_vanished()}
         arrival = next_arrival(self.state)
-        if arrival is not None:
-            self.assertNotIn(arrival.data["uid"], vanished)
+        self.assertEqual(vanished, set())
+        self.assertIsNone(arrival)
 
     def test_an_ordinary_arrival_is_unaffected(self) -> None:
         """The narrowing must not withhold mail that is genuinely there."""
@@ -481,9 +481,7 @@ class VanishedIsNeverAnArrivalTest(unittest.TestCase):
         self.state.contextual_events()
         del self.imap.items[2]
         self.adapter.scan()
-        self.state.record_vanished_delivery(
-            self.state.pending_vanished()[0].event_id
-        )
+        self.assertEqual(self.state.pending_vanished(), ())
 
         self.imap.items[3] = message("Second", "still here")
         self.adapter.scan()

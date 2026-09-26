@@ -349,11 +349,16 @@ class SQLiteMailObservationState:
     matches nothing has been overtaken; it is re-read rather than forced,
     because the later state is the true one.
 
-        pending ──unclaimed_arrivals()──> … ──record_delivery()──> presented
-           │                                                          │
-           │                        ──── acknowledge() ──────────────>│
-           └──────────────── acknowledge() ─────────────────> done <──┘
-           └── reconcile(), never exposed ──────────────────> done
+        pending ──mark_claimed()──> current ──record_delivery()──> presented
+           │                          │                                  │
+           │                          └──────── acknowledge() ──> done <─┘
+           ├──────────── acknowledge() ────────────────────────> done
+           └── reconcile(), absent or Seen ───────────────────> done
+
+    Waiting exposure leaves a row pending. An absent or Seen pending row is
+    settled with no vanished report. A current or presented row that is absent
+    keeps its state and is reported once. A Seen flag on one that is still
+    present changes nothing.
 
     This store no longer decides which observation may be carried. A single
     `current` slot used to promote one row at a time and refuse to offer
@@ -443,13 +448,10 @@ class SQLiteMailObservationState:
                 (mailbox_id,),
             ).fetchone()
             if row is None or row[0] != uid_validity:
-                # A new mailbox generation: every stored identifier belongs to
-                # the old one and means nothing now.
+                # A new mailbox generation. Observations keep the generation
+                # they were stored under; replacing the cursor does not delete
+                # them. Nothing in the new generation has been observed yet.
                 with self._connection:
-                    self._connection.execute(
-                        "DELETE FROM mail_observations WHERE mailbox_id = ?",
-                        (mailbox_id,),
-                    )
                     self._connection.execute(
                         "INSERT OR REPLACE INTO mail_cursor"
                         "(mailbox_id, uid_validity, last_uid) VALUES (?, ?, ?)",
@@ -522,106 +524,118 @@ class SQLiteMailObservationState:
                     (highest, mailbox_id),
                 )
 
+    @staticmethod
+    def _presence(
+        present: tuple[int, ...] | tuple[tuple[int, bool], ...] | None,
+    ) -> tuple[set[int], set[int]] | None:
+        """Split one listing into unseen identifiers and Seen identifiers.
+
+        None is a failed listing and settles nothing. A bare identifier is
+        present and unseen, which is what a scan that has not read flags
+        reports. A pair records whether that identifier is Seen.
+        """
+        if present is None:
+            return None
+        unseen: set[int] = set()
+        seen: set[int] = set()
+        for item in present:
+            if isinstance(item, tuple):
+                uid, flag = item
+                (seen if flag else unseen).add(int(uid))
+            else:
+                unseen.add(int(item))
+        return unseen, seen
+
     def reconcile(
         self,
         mailbox_id: str,
         uid_validity: str,
-        present: tuple[int, ...],
+        present: tuple[int, ...] | tuple[tuple[int, bool], ...] | None,
     ) -> int:
-        """Settle observations whose message has left the mailbox.
+        """Settle one mailbox generation against one listing.
 
-        Whether a tracked identifier is still in the mailbox has one correct
-        answer, so Law 2 places the detection here. What its disappearance
-        means does not, so this decides nothing about it.
+        Whether a tracked identifier is still present has one correct answer,
+        so Law 2 places the detection here. What that means is state.
 
-        A `pending` observation the Core has never been shown was never put in
-        front of Friedl: nothing is owed, so it is settled silently.
+        `present` is None when the listing failed: write nothing and return 0.
+        A tuple of identifiers means those are present and unseen. A tuple of
+        pairs records which of them are Seen.
 
-        Anything the Core has seen -- a `current` or `presented` observation,
-        or a `pending` one already shown as waiting context -- is hers to
-        account for. Releasing it quietly would leave her unable to explain
-        something she may have raised, so it is queued as a fact for her to
-        reason about. She releases it herself; this does not.
+        Only rows of this mailbox and this generation are considered. The
+        cursor's last identifier is a ceiling only when that cursor row exists
+        and names this generation. A missing or different cursor generation
+        does not skip these rows and never touches another generation. Above
+        the ceiling, absence has not been scanned yet and means nothing.
 
-        The branch is decided by durable mechanical facts, `state` and
-        `context_exposed`, never by reading who sent the message or what it
-        says.
+        A pending row that is absent or Seen is settled to done, whether or
+        not it was shown as waiting. That release is not counted. A current
+        or presented row that is absent is queued once. Its state stays put
+        until she releases it, and repeating the scan or restarting does not
+        queue it again. A Seen flag on a current or presented row that is
+        still present changes nothing.
 
-        Only identifiers at or below the cursor are considered. A higher one has
-        not been scanned yet and its absence carries no meaning.
-
-        Detection is durable and separate from delivery. Scanning runs for the
-        life of the process, while the transport that carries a fact to AL/X
-        comes and goes, so a disappearance found with nobody connected is
-        recorded here and delivered later by `pending_vanished`. Returning it
-        only in memory would lose it exactly when no session was open.
+        The branch is state and presence. It does not read who sent anything
+        or what was written.
         """
+        parsed = self._presence(present)
+        if parsed is None:
+            return 0
+        unseen, seen = parsed
         with self._lock:
             row = self._connection.execute(
                 "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
                 (mailbox_id,),
             ).fetchone()
-            if row is None or row[0] != uid_validity:
-                return 0
-            last_uid = int(row[1])
-            live = set(present)
+            ceiling = (
+                int(row[1]) if row is not None and row[0] == uid_validity else None
+            )
             rows = self._connection.execute(
-                "SELECT uid, state, context_exposed FROM mail_observations "
+                "SELECT uid, state FROM mail_observations "
                 "WHERE mailbox_id = ? AND uid_validity = ? "
                 "AND state IN ('pending', 'current', 'presented') "
                 "AND COALESCE(reported_vanished, 0) = ? ORDER BY uid",
                 (mailbox_id, uid_validity, self._NOT_VANISHED),
             ).fetchall()
             announced = 0
-            for uid, state, exposed in rows:
-                if int(uid) > last_uid or int(uid) in live:
+            for uid, state in rows:
+                number = int(uid)
+                if ceiling is not None and number > ceiling:
                     continue
-                # A pending observation the Core has never been shown was
-                # never put in front of Friedl, so nothing is owed and it is
-                # settled. Once it has been shown as waiting, its
-                # disappearance is hers to account for exactly as an announced
-                # one is. Nothing here reads the subject, the sender or the
-                # body to decide which.
-                if state == "pending" and not exposed:
-                    if self._settle_silently(mailbox_id, uid_validity, int(uid)):
-                        continue
-                    # Overtaken between the read and the write: it has been
-                    # promoted or released since. The later state is the true
-                    # one, so it is left for the next scan rather than forced.
+                # Pending, absent or Seen, is settled and not counted.
+                # Overtaken between the read and the write: the later state
+                # stands, and the next scan sees it.
+                if state == "pending":
+                    if number in seen or number not in unseen:
+                        self._settle_silently(mailbox_id, uid_validity, number)
                     continue
-                if self._mark_vanished(mailbox_id, uid_validity, int(uid), state):
-                    announced += 1
+                # Current or presented and absent is reported once.
+                # Still present, Seen or not, is left as it is.
+                if number not in unseen and number not in seen:
+                    if self._mark_vanished(
+                        mailbox_id, uid_validity, number, state
+                    ):
+                        announced += 1
             return announced
 
     def mark_claimed(self, event_id: str) -> bool:
         """Record that an occasion has been raised for this observation.
 
-        A claimed occasion is owed an answer, so from here on the observation's
-        disappearance is hers to account for rather than something
-        reconciliation may settle quietly. This is the same durable fact
-        `context_exposed` already records when she is shown a waiting item, and
-        it is deliberately the same column: being given an occasion about a
-        message and being shown it are the same claim on her attention, and a
-        second flag would be a second answer to one question.
+        Claimed pending becomes current in the same update that records
+        exposure. Reconciliation reports a vanished fact for a current or
+        presented row that is absent, and settles a pending row without one.
+        Promoting here is what makes a later absence a vanished report.
+        A presented row is not rewritten.
 
-        Written when the occasion is claimed, before anything is spent on it,
-        because the window this closes is exactly the one between the claim and
-        the turn. A poll cycle that reconciles in that window used to settle the
-        observation silently: the turn then ran with no mail event in context at
-        all, reasoning about a synthetic occasion for a message it could not
-        see, and the disappearance was never reported.
+        Written when the occasion is claimed, before anything is spent on it.
+        A poll that reconciles in that window then finds a current row and
+        queues the disappearance instead of settling it.
 
-        Answers one question only: is there a live observation now carrying
-        this mark. True when the row is live and marked, whether this call set
-        the mark or an earlier one did -- being shown a waiting item marks it
-        too, and a claim after that is still a claim on a message that exists.
-        False means there is no live observation left to mark at all, which is
-        the caller's signal that the occasion is stale and must be refused.
-
-        The two are deliberately not collapsed. Writing the mark only when it
-        changes is idempotent and fine; reporting *that* as failure would refuse
-        every occasion for a message she had already been shown, which is most
-        of them.
+        The read-back is whether a live pending, current, or presented row
+        is carrying the mark. True when this call set it or an earlier one
+        did, including a row already shown as waiting. False when no such
+        exposed row remains, which is the caller's signal that the occasion
+        is stale and must be refused. Rowcount is not that answer: an
+        already-current row matches nothing and is still a live claim.
         """
         parts = event_id.split(":")
         if len(parts) >= 3 and parts[0] == "mail" and parts[2].isdigit():
@@ -630,10 +644,8 @@ class SQLiteMailObservationState:
             raise MailAccessError("observation_unavailable")
         with self._lock, self._connection:
             self._connection.execute(
-                "UPDATE mail_observations SET context_exposed = 1 "
-                "WHERE uid_validity = ? AND uid = ? "
-                "AND state IN ('pending', 'current', 'presented') "
-                "AND context_exposed = 0",
+                "UPDATE mail_observations SET state = 'current', context_exposed = 1 "
+                "WHERE uid_validity = ? AND uid = ? AND state = 'pending'",
                 (uid_validity, uid),
             )
             # Read back rather than trusting the update's rowcount, so an
@@ -650,13 +662,18 @@ class SQLiteMailObservationState:
     def _settle_silently(
         self, mailbox_id: str, uid_validity: str, uid: int
     ) -> bool:
-        """Complete an unexposed pending observation. False when overtaken."""
+        """Settle one pending observation to done. False when overtaken.
+
+        Absent or Seen, exposed or not. The stored record keeps the mailbox,
+        the generation and the uid. A current, presented or done row is not
+        matched.
+        """
         with self._connection:
             return bool(
                 self._connection.execute(
                     "UPDATE mail_observations SET state = 'done', event_json = ? "
                     "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ? "
-                    "AND state = 'pending' AND context_exposed = 0",
+                    "AND state = 'pending'",
                     (
                         json.dumps(
                             {
@@ -711,10 +728,9 @@ class SQLiteMailObservationState:
     def pending_vanished(self) -> tuple[BackgroundEvent, ...]:
         """Disappearances found but not yet carried to AL/X.
 
-        Every state reconciliation can queue one from is included. A `pending`
-        observation qualifies once it has been exposed as waiting context, and
-        omitting it here would strand the row: queued for ever and delivered
-        never.
+        Reconciliation queues these from a `current` or `presented` row that
+        has left the mailbox. A `pending` row is included when one is already
+        marked, so an older mark is not stranded undelivered.
         """
         with self._lock:
             rows = self._connection.execute(
@@ -837,19 +853,14 @@ class SQLiteMailObservationState:
         would let a burst of recent mail hide the older items that are actually
         next, and she would be judging a queue she is not going to be given.
 
-        Being shown one is recorded durably: from here on its disappearance is
-        hers to account for, not something reconciliation may settle quietly.
+        Being shown one is recorded durably, and the row stays pending.
+        Waiting exposure is not a vanished debt. An absent or Seen pending
+        row is settled without a report. Claimed pending becomes current,
+        and a later absence of that current row is what reconciliation reports.
 
-        The mark is written as the context is built, before the turn runs. A
-        turn that then fails leaves an observation marked exposed that she
-        never evaluated, and if it later disappears she is given one fact she
-        did not strictly need. That is the deliberate direction to err in: the
-        alternative, recording exposure only after a turn succeeds, loses the
-        mark when a turn that did show her the mail fails afterwards, and the
-        disappearance is then settled silently -- which is exactly the defect
-        this column exists to prevent. An unnecessary fact costs one reasoning
-        call and she decides what to do with it; a missing one leaves her
-        unable to account for something she may have raised.
+        The mark is written as the context is built, before the turn runs.
+        It records that she was shown the queue. It does not by itself change
+        what a later absence means.
         """
         with self._lock:
             rows = self._connection.execute(
@@ -861,8 +872,9 @@ class SQLiteMailObservationState:
             waiting = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-                "WHERE state = 'pending' ORDER BY uid LIMIT ?",
-                (self.WAITING_EVENT_LIMIT,),
+                "WHERE state = 'pending' AND COALESCE(reported_vanished, 0) = ? "
+                "ORDER BY uid LIMIT ?",
+                (self._NOT_VANISHED, self.WAITING_EVENT_LIMIT),
             ).fetchall()
             if waiting:
                 with self._connection:
@@ -898,10 +910,9 @@ class SQLiteMailObservationState:
         Friedl -- so it is reported rather than raised. It killed two live
         voice sessions on 2026-09-04 when raised.
 
-        An observation is carried straight from `pending` now that nothing
-        promotes it to `current` first. Both are accepted, because a row left
-        `current` by an earlier version of this runtime is still awaiting the
-        same delivery and must not be stranded by the change.
+        An observation is carried from `pending`, or from `current` after
+        `mark_claimed`. Both are accepted, so a claimed row is still awaiting
+        the same delivery and is not stranded by the promotion.
 
         A vanished report announces no mail, so it presents nothing and the
         observation keeps its own state until AL/X releases it. Its delivery is

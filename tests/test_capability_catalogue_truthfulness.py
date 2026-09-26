@@ -375,14 +375,13 @@ class VanishedMailIsNotCapabilityAbsence(unittest.TestCase):
         )
 
     def test_a_vanished_message_keeps_its_pending_observation(self) -> None:
-        """Deliberate semantics, unchanged: release is AL/X's, through the capability.
+        """Two waiting rows absent from the snapshot are settled, not vanished.
 
-        The live rows for 59093 and 59094 were state=pending with
-        reported_vanished=2, and that combination stays valid until she
-        acknowledges the observation. Nothing here expires it, and detecting
-        the disappearance does not release it. This test exists so a later
-        change to the catalogue cannot quietly buy its truthfulness by
-        discarding this state instead.
+        Shown as waiting, then missing from the listing, both become done.
+        The return is 0 and no vanished event is queued. A vanished report is
+        for a current or presented absence. This keeps a catalogue change from
+        treating a waiting absence as one, or from dropping the rows to buy a
+        quieter capability listing.
         """
         from alx.providers import SQLiteMailObservationState
 
@@ -405,16 +404,7 @@ class VanishedMailIsNotCapabilityAbsence(unittest.TestCase):
             )
             # Shown to her as waiting, then gone from INBOX.
             observations.contextual_events()
-            self.assertEqual(observations.reconcile("INBOX", "777", ()), 2)
-            events = observations.pending_vanished()
-            self.assertEqual(
-                [item.data["uid"] for item in events], ["59093", "59094"]
-            )
-            for event in events:
-                self.assertTrue(
-                    observations.record_vanished_delivery(event.event_id)
-                )
-            # Carried once, and not offered again.
+            self.assertEqual(observations.reconcile("INBOX", "777", ()), 0)
             self.assertEqual(observations.pending_vanished(), ())
             rows = {
                 int(uid): (state, vanished)
@@ -423,9 +413,7 @@ class VanishedMailIsNotCapabilityAbsence(unittest.TestCase):
                 )
             }
             for uid in uids:
-                # state=pending + reported_vanished=2, exactly as the live
-                # rows stood. Still held, because only she releases it.
-                self.assertEqual(rows[uid], ("pending", 2))
+                self.assertEqual(rows[uid], ("done", 0))
 
 
 if __name__ == "__main__":
