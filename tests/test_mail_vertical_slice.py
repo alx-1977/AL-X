@@ -148,6 +148,7 @@ def forwarded_message_with_attachment(subject: str) -> bytes:
 class FakeImap:
     def __init__(self) -> None:
         self.items = {1: message("Old", "Old body")}
+        self.seen_uids = set()
         self.commands = []
         self.store_status = "OK"
 
@@ -168,7 +169,8 @@ class FakeImap:
     def uid(self, operation, *values):
         self.commands.append(("UID", operation, *values))
         if operation == "search":
-            return "OK", [b" ".join(str(uid).encode() for uid in sorted(self.items))]
+            identifiers = self.seen_uids if values[-1] == "SEEN" else self.items
+            return "OK", [b" ".join(str(uid).encode() for uid in sorted(identifiers))]
         if operation == "fetch":
             uid = int(values[0])
             return "OK", [(b"metadata", self.items[uid]), b")"]

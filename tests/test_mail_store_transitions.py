@@ -229,12 +229,29 @@ class ExposedPendingAuthorityTest(Harness):
         self.discover(1, 2)
         self.assertEqual(self.state.new_identifiers("INBOX", "888", (4,)), ())
         self.assertEqual(set(self.rows()), {1, 2})
-        self.assertEqual(self.rows()[1][0], "pending")
+        self.assertEqual(self.rows()[1][0], "done")
+        self.assertEqual(self.state.unclaimed_arrivals(), ())
+        self.assertEqual(self.state.contextual_events(), ())
         cursor = self.state._connection.execute(
             "SELECT uid_validity, last_uid FROM mail_cursor WHERE mailbox_id = ?",
             ("INBOX",),
         ).fetchone()
         self.assertEqual(cursor, ("888", 4))
+
+    def test_a_new_generation_reports_old_claimed_mail_once(self) -> None:
+        self.discover(1, 2)
+        self.assertTrue(self.state.mark_claimed(f"mail:{VALIDITY}:1"))
+        self.state.new_identifiers("INBOX", "888", (1,))
+        self.assertEqual(self.rows()[1], ("current", 1, 1))
+        self.assertEqual(self.rows()[2][0], "done")
+        self.assertEqual(self.state.unclaimed_arrivals(), ())
+        self.assertEqual(self.state.contextual_events(), ())
+        self.assertEqual(
+            [event.data["uid"] for event in self.state.pending_vanished()],
+            ["1"],
+        )
+        self.state.new_identifiers("INBOX", "888", (1,))
+        self.assertEqual(len(self.state.pending_vanished()), 1)
 
     def test_a_different_cursor_generation_reconciles_only_this_one(self) -> None:
         self.discover(1)

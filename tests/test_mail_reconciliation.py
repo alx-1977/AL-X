@@ -356,6 +356,16 @@ class ScanReportsDisappearanceTest(unittest.TestCase):
         self.adapter.scan()
         self.assertEqual(self.state.pending_vanished(), ())
 
+    def test_scan_settles_a_pending_message_marked_seen_outside_alx(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("Order received", "body")
+        self.adapter.scan()
+        self.assertEqual(next_arrival(self.state).data["uid"], "2")
+        self.imap.seen_uids.add(2)
+        self.adapter.scan()
+        self.assertIsNone(next_arrival(self.state))
+        self.assertEqual(self.state.pending_vanished(), ())
+
 
 
 

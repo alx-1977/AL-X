@@ -449,8 +449,11 @@ class SQLiteMailObservationState:
             ).fetchone()
             if row is None or row[0] != uid_validity:
                 # A new mailbox generation. Observations keep the generation
-                # they were stored under; replacing the cursor does not delete
-                # them. Nothing in the new generation has been observed yet.
+                # they were stored under. Old identifiers cannot name mail in
+                # the new generation: settle pending rows and report claimed
+                # disappearances before replacing the cursor.
+                if row is not None:
+                    self.reconcile(mailbox_id, str(row[0]), ())
                 with self._connection:
                     self._connection.execute(
                         "INSERT OR REPLACE INTO mail_cursor"
@@ -767,6 +770,9 @@ class SQLiteMailObservationState:
                 "content_recorded_at, content_expires_at, mail_references "
                 "FROM mail_observations "
                 "WHERE state IN ('pending', 'current', 'presented') "
+                "AND EXISTS (SELECT 1 FROM mail_cursor c WHERE "
+                "c.mailbox_id = mail_observations.mailbox_id AND "
+                "c.uid_validity = mail_observations.uid_validity) "
                 "AND COALESCE(reported_vanished, 0) = ? ORDER BY uid",
                 (self._NOT_VANISHED,),
             ).fetchall()
@@ -866,13 +872,21 @@ class SQLiteMailObservationState:
             rows = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
-                "WHERE state IN ('current', 'presented') ORDER BY uid DESC LIMIT ?",
-                (self.CONTEXTUAL_EVENT_LIMIT,),
+                "WHERE state IN ('current', 'presented') "
+                "AND COALESCE(reported_vanished, 0) = ? "
+                "AND EXISTS (SELECT 1 FROM mail_cursor c WHERE "
+                "c.mailbox_id = mail_observations.mailbox_id AND "
+                "c.uid_validity = mail_observations.uid_validity) "
+                "ORDER BY uid DESC LIMIT ?",
+                (self._NOT_VANISHED, self.CONTEXTUAL_EVENT_LIMIT),
             ).fetchall()
             waiting = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
                 "WHERE state = 'pending' AND COALESCE(reported_vanished, 0) = ? "
+                "AND EXISTS (SELECT 1 FROM mail_cursor c WHERE "
+                "c.mailbox_id = mail_observations.mailbox_id AND "
+                "c.uid_validity = mail_observations.uid_validity) "
                 "ORDER BY uid LIMIT ?",
                 (self._NOT_VANISHED, self.WAITING_EVENT_LIMIT),
             ).fetchall()
@@ -1021,10 +1035,19 @@ class ICloudMailAdapter:
             present = tuple(
                 int(value) for value in (values[0] or b"").split() if value.isdigit()
             )
+            status, values = connection.uid("search", None, "SEEN")
+            if status != "OK":
+                raise MailAccessError("search_failed")
+            seen = {
+                int(value) for value in (values[0] or b"").split()
+                if value.isdigit()
+            }
             # Reconcile before narrowing: what is still in the mailbox is known
             # only from the full listing, and an observation Friedl handled
             # himself is settled from the same evidence that finds new mail.
-            self._observations.reconcile("INBOX", validity, present)
+            self._observations.reconcile(
+                "INBOX", validity, tuple((uid, uid in seen) for uid in present)
+            )
             identifiers = self._observations.new_identifiers(
                 "INBOX", validity, present
             )
