@@ -40,6 +40,7 @@ from alx.contracts.coding import (
     MAX_BRANCH_NAME_CHARACTERS,
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_STEP_BUDGET,
+    MAX_REPAIR_BRANCH_ATTEMPTS,
     MAX_TASK_CHARACTERS,
     BranchContinuation,
     CodingError,
@@ -276,7 +277,8 @@ DEFINITION = CapabilityDefinition(
     SideEffect.EFFECTFUL,
     CODING_FAILURES,
     durable_input_fields=(
-        "task", "blocked_paths", "repair_branch", "commit_message",
+        "task", "context", "acceptance_criteria", "test_guidance",
+        "step_budget", "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
         "resume_job_id",
     ),
@@ -362,23 +364,32 @@ def build_coding_executors(
                 checkpoint = json.loads(raw_checkpoint)
             except (TypeError, ValueError):
                 checkpoint = None
-            if (not isinstance(checkpoint, dict) or checkpoint.get("job_id") != resume_id
-                    or checkpoint.get("branch") != request.repair_branch
-                    or checkpoint.get("stage") not in {"planning", "execution", "review", "test", "commit"}
-                    or arguments.get("continue_goal_branch", False)):
-                return _failed(call_id, "git_refused", reason_code="resume_checkpoint_invalid",
-                               implementation_reached=False)
             original = previous.call.arguments
-            for key in ("task", "context", "acceptance_criteria", "test_guidance",
-                        "blocked_paths", "repair_branch", "commit_message"):
-                if key in arguments and arguments.get(key) != original.get(key):
-                    return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
-                                   implementation_reached=False)
             original_request, original_failure = parse_coding_arguments(original, call_id)
             if original_failure is not None or original_request is None:
                 return _failed(call_id, "git_refused", reason_code="resume_original_request_invalid",
                                implementation_reached=False)
-            request = replace(original_request, resume_checkpoint=checkpoint)
+            requested_branch = original_request.repair_branch.strip()
+            prepared_branches = {requested_branch} | {
+                f"{requested_branch}-{number}"
+                for number in range(2, MAX_REPAIR_BRANCH_ATTEMPTS + 1)
+            }
+            if (not isinstance(checkpoint, dict) or checkpoint.get("job_id") != resume_id
+                    or checkpoint.get("branch") not in prepared_branches
+                    or checkpoint.get("stage") not in {"planning", "execution", "review", "test", "commit"}
+                    or arguments.get("continue_goal_branch", False)):
+                return _failed(call_id, "git_refused", reason_code="resume_checkpoint_invalid",
+                               implementation_reached=False)
+            for field in ("task", "context", "acceptance_criteria", "test_guidance",
+                          "step_budget", "blocked_paths", "commit_message"):
+                if field in arguments and getattr(request, field) != getattr(original_request, field):
+                    return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
+                                   implementation_reached=False)
+            if request.repair_branch.strip() not in {requested_branch, checkpoint["branch"]}:
+                return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
+                               implementation_reached=False)
+            request = replace(original_request, repair_branch=checkpoint["branch"],
+                              resume_checkpoint=checkpoint)
         elif arguments.get("continue_goal_branch", False):
             continuation = goal_coding_branch(goal_state_source())
             if continuation is None or request.repair_branch != continuation.branch:

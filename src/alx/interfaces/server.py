@@ -414,9 +414,15 @@ class LiveVoiceServer:
                     frame = None
                 if isinstance(frame, dict) and frame.get("type") == CODING_CANCEL_FRAME:
                     job_id = frame.get("job_id")
+                    accepted = False
                     if (self._cancel_coding is not None and isinstance(job_id, str)
                             and len(job_id) <= 128):
-                        await asyncio.to_thread(self._cancel_coding, job_id)
+                        accepted = await asyncio.to_thread(self._cancel_coding, job_id)
+                    await connection.send(json.dumps({
+                        "type": "coding.cancel.ack",
+                        "job_id": job_id if isinstance(job_id, str) and len(job_id) <= 128 else "",
+                        "accepted": bool(accepted),
+                    }))
                     continue
                 # The only non-audio frame the socket accepts. It carries what
                 # Friedl typed and nothing else: no command, no destination, no

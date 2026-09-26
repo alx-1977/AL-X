@@ -10,6 +10,7 @@ const diagnosticClear = document.querySelector("#diagnostic-clear");
 const taskRows = document.querySelector("#task-rows");
 const codingCancel = document.querySelector("#coding-cancel");
 let activeCodingJobId = "";
+let codingCancelTimeout;
 // Law 1: these name a system state and nothing more. First-person or
 // user-directed wording here reads as AL/X speaking when she has not reasoned,
 // so the gate whitelists exactly these labels.
@@ -95,8 +96,13 @@ function codingSeconds(value) {
 
 
 function showCodingStatus(message) {
-  activeCodingJobId = message.terminal || message.phase === "commit"
+  const nextCodingJobId = message.terminal || message.phase === "commit"
     ? "" : String(message.job_id ?? "");
+  if (nextCodingJobId !== activeCodingJobId || message.terminal) {
+    clearTimeout(codingCancelTimeout);
+    codingCancel.disabled = false;
+  }
+  activeCodingJobId = nextCodingJobId;
   codingCancel.hidden = !activeCodingJobId;
   if (message.transition === "CASE started" || message.terminal) codingCancel.disabled = false;
   const phase = String(message.phase ?? "").toUpperCase();
@@ -123,8 +129,13 @@ function showCodingStatus(message) {
 
 codingCancel.addEventListener("click", () => {
   if (!activeCodingJobId || !socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({ type: "coding.cancel", job_id: activeCodingJobId }));
+  const requestedJobId = activeCodingJobId;
+  socket.send(JSON.stringify({ type: "coding.cancel", job_id: requestedJobId }));
   codingCancel.disabled = true;
+  clearTimeout(codingCancelTimeout);
+  codingCancelTimeout = setTimeout(() => {
+    if (activeCodingJobId === requestedJobId) codingCancel.disabled = false;
+  }, 5000);
 });
 
 function ttsElapsed() {
@@ -360,6 +371,13 @@ function playOneUtterance(blob) {
 }
 
 function handleControl(message) {
+  if (message.type === "coding.cancel.ack") {
+    if (message.job_id === activeCodingJobId && !message.accepted) {
+      clearTimeout(codingCancelTimeout);
+      codingCancel.disabled = false;
+    }
+    return;
+  }
   if (message.type === "session.ready") {
     diagnostic("Voice transport connected; session accepted", "ok");
     try {
@@ -529,6 +547,10 @@ begin.addEventListener("click", async () => {
   };
   socket.onclose = () => {
     sending = false;
+    clearTimeout(codingCancelTimeout);
+    activeCodingJobId = "";
+    codingCancel.hidden = true;
+    codingCancel.disabled = false;
     releaseMicrophone().catch(() => {});
     setPhase("disconnected");
     activation.hidden = false;

@@ -50,6 +50,7 @@ from alx.contracts.coding import (
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_COMMAND_OUTPUT_CHARACTERS,
     MAX_STAGED_FILES,
+    MAX_REPAIR_BRANCH_ATTEMPTS,
     branch_name_permitted,
     CodingCommit,
     CodingError,
@@ -106,7 +107,6 @@ def coding_checkpoint(root: Path) -> dict[str, str]:
 # capability may spend looking for an unused name.  It counts the requested
 # name as the first attempt, then -2 through -100.  Exhaustion is a refusal,
 # never a reason to widen the git authority or ask git to reuse a ref.
-MAX_REPAIR_BRANCH_ATTEMPTS = 100
 
 # Every argv the Coding Agent may run against the canonical checkout's git, as a fixed
 # prefix plus how the remainder is checked. A shape absent from this mapping

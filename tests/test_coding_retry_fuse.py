@@ -78,6 +78,19 @@ class CodingRetryFuseTests(unittest.TestCase):
         )
         self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 0)
 
+    def test_correction_failure_counts_after_an_earlier_review_transport_failure(self):
+        failure = {
+            "code": "session_failed", "phase": "local_review",
+            "review_classification": "infrastructure",
+        }
+        item = CapabilityAttempt(
+            CapabilityCall("correction", "run_coding_task", {"task": "work"}),
+            CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("correction", "run_coding_task",
+                             CapabilityResultState.FAILED, failure=failure),
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(state(item)), 1)
+
     def test_changed_arguments_do_not_change_goal_scoped_identity(self):
         self.assertEqual(CoreAgent._failed_coding_executions(state(attempt("first"), attempt("rewritten"))), 2)
 

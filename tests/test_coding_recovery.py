@@ -21,6 +21,7 @@ from alx.contracts.coding import (
     CodingCommandRecord, CodingError, CodingRequest, CodingSessionResult,
 )
 from alx.bootstrap.coding import build_coding_runtime
+from alx.core import CoreAgent
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.contracts import (
     CapabilityCall, CapabilityResultState, GoalState, Objective, SuccessCriterion,
@@ -152,6 +153,38 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertEqual(second.status, "succeeded")
         self.assertEqual(len(session.calls), 1)
 
+    def test_failed_correction_after_review_retry_spends_implementation_allowance(self):
+        class CorrectionFails(RecordingSession):
+            def run_session(self, request, briefing):
+                if self.calls:
+                    raise CodingError("session_failed", reason_code="correction_failed")
+                return super().run_session(request, briefing)
+
+        reviewer = PlanningModel(reviews=[
+            {"findings": "invalid schema"},
+            {"findings": [{"severity": "high", "title": "repair incomplete",
+                           "evidence": "adjacent path remains wrong",
+                           "correction": "finish the adjacent path"}]},
+        ])
+        outcome = self._agent(
+            session=CorrectionFails(edits={"app.py": _FIXED}), reviewer=reviewer,
+        ).run(self.request)
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("session_failed", outcome.unresolved_issues)
+        self.assertEqual(outcome.review_classification, "infrastructure")
+        failure = {"code": "session_failed", **outcome.diagnostics,
+                   "review_classification": outcome.review_classification}
+        from alx.contracts import CapabilityAttempt, CapabilityAttemptDisposition, CapabilityResult
+        attempt = CapabilityAttempt(
+            CapabilityCall("job-1", "run_coding_task", {"task": "fix add"}),
+            CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("job-1", "run_coding_task", CapabilityResultState.FAILED,
+                             failure=failure),
+        )
+        goal = GoalState("goal", Objective("turn:t", "repair"),
+                         (SuccessCriterion("c", "fixed"),), attempts=(attempt,))
+        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
+
     def test_commit_failure_after_passing_tests_resumes_commit_only(self):
         session = RecordingSession(edits={"app.py": _FIXED})
         transitions = []
@@ -213,12 +246,14 @@ class CodingRecoveryTests(unittest.TestCase):
 
     def test_review_schema_failure_is_secret_redacted_and_resumed_through_goal(self):
         secret = "sk-MUST-NOT-SURVIVE"
+        subprocess.run(["git", "branch", "fix/job-1"], cwd=self.root, check=True)
         current_goal = GoalState(
             "goal-a", Objective("turn:t", "repair"), (SuccessCriterion("c", "fixed"),),
         )
         current_call = ["job-1"]
         session = RecordingSession(edits={"app.py": _FIXED})
         reviewer = PlanningModel(reviews=[{"findings": secret, "api_key": secret}])
+        resumed_reviewer = PlanningModel()
 
         def dispatch(active_reviewer):
             runtime = build_coding_runtime(
@@ -228,15 +263,34 @@ class CodingRecoveryTests(unittest.TestCase):
             )
             broker = CapabilityBroker(CapabilityRegistry(runtime.definitions),
                                       SafetyGate(runtime.policies), runtime.executors)
-            return broker.dispatch(CapabilityCall(current_call[0], "run_coding_task", {
+            arguments = {
                 "task": "fix add", "repair_branch": "fix/job-1",
                 "commit_message": "fix add",
-                **({"resume_job_id": "job-1"} if current_call[0] == "job-2" else {}),
-            }), AuthorityContext("friedl", runtime.permissions, NOW))
+            }
+            if current_call[0] == "job-1":
+                arguments.update({
+                    "context": "the operation subtracts instead of adding",
+                    "acceptance_criteria": ["addition returns the expected sum"],
+                    "test_guidance": "run the app test",
+                    "step_budget": 7,
+                })
+            else:
+                arguments.update({"resume_job_id": "job-1",
+                                  "repair_branch": "fix/job-1-2"})
+            durable = {
+                key: arguments[key] for key in runtime.definitions[0].durable_input_fields
+                if key in arguments
+            }
+            return broker.dispatch(
+                CapabilityCall(current_call[0], "run_coding_task", arguments,
+                               durable_arguments=durable),
+                AuthorityContext("friedl", runtime.permissions, NOW),
+            )
 
         first = dispatch(reviewer)
         self.assertEqual(first.result.state, CapabilityResultState.FAILED)
         self.assertEqual(first.result.failure["review_classification"], "infrastructure")
+        self.assertEqual(first.result.values["branch"], "fix/job-1-2")
         self.assertNotIn(secret, str(first.result.values))
         self.assertNotIn(secret, str(first.result.durable_values))
         current_goal = replace(current_goal, attempts=(first,))
@@ -247,6 +301,9 @@ class CodingRecoveryTests(unittest.TestCase):
         reopened = SQLiteGoalStore(goal_path)
         self.addCleanup(reopened.close)
         current_goal = reopened.load("goal-a").state
+        self.assertEqual(current_goal.attempts[0].call.arguments["step_budget"], 7)
+        self.assertEqual(current_goal.attempts[0].call.arguments["context"],
+                         "the operation subtracts instead of adding")
         current_call[0] = "job-2"
         owned_goal = current_goal
         current_goal = GoalState(
@@ -257,11 +314,17 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertEqual(foreign.result.failure["reason_code"],
                          "resume_ownership_unproven")
         current_goal = owned_goal
-        second = dispatch(PlanningModel())
+        second = dispatch(resumed_reviewer)
         self.assertEqual(second.result.state, CapabilityResultState.SUCCEEDED,
                          second.result.failure)
         self.assertEqual(len(session.calls), 1)
         self.assertTrue(second.result.values["commit_sha"])
+        review_material = json.loads(resumed_reviewer.requests[0].messages[1].content)
+        self.assertEqual(review_material["root_cause_context"],
+                         "the operation subtracts instead of adding")
+        self.assertEqual(review_material["acceptance_criteria"],
+                         ["addition returns the expected sum"])
+        self.assertEqual(review_material["test_guidance"], "run the app test")
 
     def test_adapter_coding_error_cannot_spoof_schema_evidence(self):
         secret = "sk-MUST-NOT-SURVIVE"
@@ -308,16 +371,28 @@ class CodingRecoveryTests(unittest.TestCase):
     def test_structured_browser_cancel_reaches_only_named_job(self):
         called = []
         server = LiveVoiceServer(None, "127.0.0.1", 0, 16000, self.root,
-                                 cancel_coding=lambda job_id: called.append(job_id) or True)
+                                 cancel_coding=lambda job_id: called.append(job_id) or job_id == "job-1")
 
         class Connection:
+            def __init__(self):
+                self.sent = []
+
             def __aiter__(self):
                 async def frames():
                     yield json.dumps({"type": "coding.cancel", "job_id": "job-1"})
+                    yield json.dumps({"type": "coding.cancel", "job_id": "job-2"})
                 return frames()
 
-        async def consume():
-            return [item async for item in server._audio(Connection(), "conversation")]
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
 
+        async def consume():
+            return [item async for item in server._audio(connection, "conversation")]
+
+        connection = Connection()
         self.assertEqual(asyncio.run(consume()), [])
-        self.assertEqual(called, ["job-1"])
+        self.assertEqual(called, ["job-1", "job-2"])
+        self.assertEqual(connection.sent, [
+            {"type": "coding.cancel.ack", "job_id": "job-1", "accepted": True},
+            {"type": "coding.cancel.ack", "job_id": "job-2", "accepted": False},
+        ])
