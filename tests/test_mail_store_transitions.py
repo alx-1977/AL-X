@@ -285,6 +285,21 @@ class ExposedPendingAuthorityTest(Harness):
             ["1"],
         )
 
+    def test_reconciliation_settles_a_pending_row_with_an_old_vanished_mark(self) -> None:
+        self.discover(1, 2)
+        self.state._connection.execute(
+            "UPDATE mail_observations SET reported_vanished = 1 WHERE uid = 1"
+        )
+        self.state._connection.execute(
+            "UPDATE mail_observations SET reported_vanished = 2 WHERE uid = 2"
+        )
+        self.state._connection.commit()
+        self.state.reconcile("INBOX", VALIDITY, (1, 2))
+        self.assertEqual(self.rows()[1][0], "done")
+        self.assertEqual(self.rows()[2][0], "done")
+        self.assertEqual(self.state.unclaimed_arrivals(), ())
+        self.assertEqual(self.state.pending_vanished(), ())
+
     def test_one_reconcile_and_no_observation_delete(self) -> None:
         text = SOURCE.read_text()
         self.assertEqual(text.count("\n    def reconcile("), 1)

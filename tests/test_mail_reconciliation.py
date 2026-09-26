@@ -366,6 +366,19 @@ class ScanReportsDisappearanceTest(unittest.TestCase):
         self.assertIsNone(next_arrival(self.state))
         self.assertEqual(self.state.pending_vanished(), ())
 
+    def test_scan_does_not_offer_a_new_message_already_seen(self) -> None:
+        self.adapter.scan()
+        self.imap.items[2] = message("Already read", "body")
+        self.imap.seen_uids.add(2)
+        self.adapter.scan()
+        self.assertIsNone(next_arrival(self.state))
+        self.assertEqual(
+            self.state._connection.execute(
+                "SELECT state FROM mail_observations WHERE uid = 2"
+            ).fetchone()[0],
+            "done",
+        )
+
 
 
 

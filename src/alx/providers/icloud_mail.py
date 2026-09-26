@@ -593,14 +593,16 @@ class SQLiteMailObservationState:
                 int(row[1]) if row is not None and row[0] == uid_validity else None
             )
             rows = self._connection.execute(
-                "SELECT uid, state FROM mail_observations "
+                "SELECT uid, state, COALESCE(reported_vanished, 0) "
+                "FROM mail_observations "
                 "WHERE mailbox_id = ? AND uid_validity = ? "
                 "AND state IN ('pending', 'current', 'presented') "
-                "AND COALESCE(reported_vanished, 0) = ? ORDER BY uid",
+                "AND (state = 'pending' OR COALESCE(reported_vanished, 0) = ?) "
+                "ORDER BY uid",
                 (mailbox_id, uid_validity, self._NOT_VANISHED),
             ).fetchall()
             announced = 0
-            for uid, state in rows:
+            for uid, state, vanished in rows:
                 number = int(uid)
                 if ceiling is not None and number > ceiling:
                     continue
@@ -608,7 +610,7 @@ class SQLiteMailObservationState:
                 # Overtaken between the read and the write: the later state
                 # stands, and the next scan sees it.
                 if state == "pending":
-                    if number in seen or number not in unseen:
+                    if vanished or number in seen or number not in unseen:
                         self._settle_silently(mailbox_id, uid_validity, number)
                     continue
                 # Current or presented and absent is reported once.
@@ -1063,12 +1065,6 @@ class ICloudMailAdapter:
                 int(value) for value in (values[0] or b"").split()
                 if value.isdigit()
             }
-            # Reconcile before narrowing: what is still in the mailbox is known
-            # only from the full listing, and an observation Friedl handled
-            # himself is settled from the same evidence that finds new mail.
-            self._observations.reconcile(
-                "INBOX", validity, tuple((uid, uid in seen) for uid in present)
-            )
             identifiers = self._observations.new_identifiers(
                 "INBOX", validity, present
             )
@@ -1101,6 +1097,11 @@ class ICloudMailAdapter:
                 }))
             self._observations.discover(
                 "INBOX", validity, tuple(found), tuple(identifiers)
+            )
+            # Use the full listing after discovery so a newly inserted row
+            # that was already Seen is settled before it can be offered.
+            self._observations.reconcile(
+                "INBOX", validity, tuple((uid, uid in seen) for uid in present)
             )
         finally:
             self._close(connection)
