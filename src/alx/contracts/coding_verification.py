@@ -27,6 +27,7 @@ this module cannot drift from them.
 from __future__ import annotations
 
 import ast
+import re
 import tomllib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -205,12 +206,26 @@ def pytest_failure_signature(
     # Section headings and details stay verbatim. Only decorative line widths
     # differ when terminal settings change, which the environment key covers.
     headings = [index for index, line in enumerate(body)
-                if line.startswith("_") and line.endswith("_")]
+                if re.fullmatch(r"_+ .+? _+", line)]
     if len(headings) != len(short):
         return None
     signatures = []
     for position, start in enumerate(headings):
         end = headings[position + 1] if position + 1 < len(headings) else len(body)
+        heading = re.fullmatch(r"_+ (.+?) _+", body[start])
+        if heading is None:
+            return None
+        title = heading.group(1)
+        is_error = title.startswith("ERROR at ")
+        if is_error:
+            title = re.sub(r"^ERROR at (?:setup|teardown|call) of ", "", title)
+        status, _, node = short[position].partition(" ")
+        node = node.split(" - ", 1)[0]
+        parts = node.split("::")
+        identity = ".".join(parts[1:])
+        if (status == "ERROR") != is_error or not identity or \
+                title.replace("::", ".") != identity:
+            return None
         section = "\n".join(line.rstrip() for line in body[start:end] if line.strip())
         signatures.append((short[position], section))
     return tuple(signatures)

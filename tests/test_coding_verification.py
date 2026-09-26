@@ -15,10 +15,13 @@ passing them is what authorises a commit whether or not any test was among them.
 from __future__ import annotations
 
 import sys
+import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -38,6 +41,7 @@ from alx.contracts.coding_verification import (  # noqa: E402
 from alx.providers.coding_process import (  # noqa: E402
     command_permitted, run_permitted_command, same_main_pytest_failure,
 )
+from alx.providers import coding_process  # noqa: E402
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -616,6 +620,7 @@ class EvidenceAnswersWhatWasRequiredAndWhatHappened(unittest.TestCase):
 
 class MainBaselineComparisonTests(unittest.TestCase):
     def setUp(self) -> None:
+        coding_process._MAIN_FAILURE_CACHE.clear()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -640,25 +645,39 @@ class MainBaselineComparisonTests(unittest.TestCase):
         )
 
     def test_identical_failure_is_nonblocking_and_cached(self) -> None:
-        self.assertEqual(self.compare()[0], True)
-        cache = self.root / ".alx/runtime/verification-baselines"
-        self.assertEqual(len(list(cache.glob("*.json"))), 1)
-        self.assertEqual(self.compare()[0], True)
-        self.assertEqual(len(list(cache.glob("*.json"))), 1)
+        with patch.object(coding_process, "run_permitted_command",
+                          wraps=coding_process.run_permitted_command) as run:
+            self.assertTrue(self.compare()[0])
+            self.assertTrue(self.compare()[0])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(len(coding_process._MAIN_FAILURE_CACHE), 1)
+        self.assertFalse((self.root / ".alx/runtime/verification-baselines").exists())
 
     def test_cache_identity_changes_with_main_command_and_environment(self) -> None:
         self.assertTrue(self.compare()[0])
-        cache = self.root / ".alx/runtime/verification-baselines"
+        self.assertEqual(len(coding_process._MAIN_FAILURE_CACHE), 1)
         self.git("switch", "-q", "main")
         (self.root / "README.md").write_text("new commit\n", encoding="utf-8")
         self.git("add", "README.md")
         self.git("commit", "-qm", "move main")
         self.git("switch", "-q", "feature")
         self.assertTrue(self.compare()[0])
-        self.assertEqual(len(list(cache.glob("*.json"))), 2)
+        self.assertEqual(len(coding_process._MAIN_FAILURE_CACHE), 2)
         self.argv.append("-v")
         self.assertTrue(self.compare()[0])
-        self.assertEqual(len(list(cache.glob("*.json"))), 3)
+        self.assertEqual(len(coding_process._MAIN_FAILURE_CACHE), 3)
+
+    def test_a_branch_test_cannot_poison_the_baseline_cache_on_disk(self) -> None:
+        self.assertTrue(self.compare()[0])
+        key = next(iter(coding_process._MAIN_FAILURE_CACHE))
+        coding_process._MAIN_FAILURE_CACHE.clear()
+        (self.root / "test_sample.py").write_text(
+            "def test_existing():\n    assert 1 == 3\n", encoding="utf-8"
+        )
+        forged = self.root / ".alx/runtime/verification-baselines" / f"{key}.json"
+        forged.parent.mkdir(parents=True)
+        forged.write_text(json.dumps({"key": key, "signature": [["forged", "forged"]]}))
+        self.assertFalse(self.compare()[0])
 
     def test_additional_failure_blocks(self) -> None:
         (self.root / "test_extra.py").write_text(
@@ -696,8 +715,25 @@ class MainBaselineComparisonTests(unittest.TestCase):
         self.git("branch", "-D", "main")
         self.assertFalse(self.compare()[0])
 
+    def test_unreadable_path_entry_fails_closed(self) -> None:
+        branch = run_permitted_command(self.argv, self.root, output_characters=0)
+        not_a_directory = self.root / "path-entry"
+        not_a_directory.write_text("not a directory")
+        with patch.dict(os.environ, {"PATH": os.environ["PATH"] + os.pathsep +
+                         str(not_a_directory)}):
+            passed, reason = same_main_pytest_failure(
+                branch, self.root, 30, (("pytest_full", tuple(self.argv)),)
+            )
+        self.assertFalse(passed)
+        self.assertIn("baseline_comparison_failed", reason)
+
     def test_unparseable_failure_fails_closed(self) -> None:
         self.assertIsNone(pytest_failure_signature("FAILED test_sample.py::x", self.root))
+        mismatched = (
+            "=== FAILURES ===\n_ test_other _\nE assert False\n"
+            "=== short test summary info ===\nFAILED test_sample.py::test_existing\n"
+        )
+        self.assertIsNone(pytest_failure_signature(mismatched, self.root))
 
 
 if __name__ == "__main__":  # pragma: no cover

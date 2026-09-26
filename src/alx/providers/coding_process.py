@@ -44,6 +44,11 @@ _CURRENT: ContextVar["CodingCancellation | None"] = ContextVar(
     "alx_coding_cancellation", default=None
 )
 
+# The pytest child has its own process memory and cannot write this cache.
+# Nothing read from the checkout can assert what clean main did. A restart
+# discards the cache and recomputes the baseline on the next failing check.
+_MAIN_FAILURE_CACHE: dict[str, tuple[tuple[str, str], ...]] = {}
+
 
 class CodingCancellation:
     def __init__(self) -> None:
@@ -429,6 +434,9 @@ def same_main_pytest_failure(
                 candidates = tuple(Path(directory).iterdir())
             except FileNotFoundError:
                 continue
+            # Other OSError values deliberately reach the outer fail-closed
+            # handler: an unreadable PATH directory may contain an executable
+            # the tests use, so its toolchain identity cannot be established.
             for candidate in candidates:
                 try:
                     if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -443,16 +451,7 @@ def same_main_pytest_failure(
         key = hashlib.sha256(json.dumps(
             [sha, branch.argv, check_set, toolchain], sort_keys=True,
         ).encode()).hexdigest()
-        cache = checkout / ".alx" / "runtime" / "verification-baselines" / f"{key}.json"
-        baseline_signature: tuple[tuple[str, str], ...] | None = None
-        if cache.is_file():
-            stored = json.loads(cache.read_text(encoding="utf-8"))
-            raw_signature = stored.get("signature")
-            if stored.get("key") == key and isinstance(raw_signature, list) \
-                    and all(isinstance(item, list) and len(item) == 2 and
-                            all(isinstance(part, str) for part in item)
-                            for item in raw_signature):
-                baseline_signature = tuple(tuple(item) for item in raw_signature)
+        baseline_signature = _MAIN_FAILURE_CACHE.get(key)
         if baseline_signature is None:
             with tempfile.TemporaryDirectory(prefix="alx-main-verification-") as directory:
                 snapshot = Path(directory)
@@ -505,11 +504,7 @@ def same_main_pytest_failure(
                 baseline_signature = pytest_failure_signature(baseline.stdout, snapshot)
                 if baseline_signature is None:
                     return False, "main_failure_unparsed"
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            temporary = cache.with_suffix(".tmp")
-            temporary.write_text(json.dumps({"key": key, "signature": baseline_signature}),
-                                 encoding="utf-8")
-            temporary.replace(cache)
+            _MAIN_FAILURE_CACHE[key] = baseline_signature
         equivalent = not (Counter(branch_signature) - Counter(baseline_signature))
         return (equivalent,
                 f"same_main_failure:main={sha}:evidence={key}" if equivalent
