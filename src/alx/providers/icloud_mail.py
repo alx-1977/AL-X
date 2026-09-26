@@ -823,6 +823,7 @@ class SQLiteMailObservationState:
             "mail.message_vanished",
             datetime.now(UTC),
             data,
+            {"content_unavailable": "message_unavailable"},
             provenance=provenance_from_storage(*row[4:8]),
         )
 
@@ -877,18 +878,15 @@ class SQLiteMailObservationState:
         what a later absence means.
         """
         with self._lock:
-            # A claimed occasion may already be in flight when UIDVALIDITY
-            # changes. Keep its queued disappearance in that turn's context,
-            # while never presenting the old message as a live arrival.
+            # A claimed occasion may already be in flight when a message
+            # vanishes. Keep the disappearance in that turn's context, across
+            # UIDVALIDITY changes, without presenting it as a live arrival.
             vanished = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references "
                 "FROM mail_observations "
                 "WHERE state IN ('current', 'presented') "
                 "AND reported_vanished = ? "
-                "AND NOT EXISTS (SELECT 1 FROM mail_cursor c WHERE "
-                "c.mailbox_id = mail_observations.mailbox_id AND "
-                "c.uid_validity = mail_observations.uid_validity) "
                 "ORDER BY uid DESC LIMIT ?",
                 (self._VANISHED_UNDELIVERED, self.CONTEXTUAL_EVENT_LIMIT),
             ).fetchall()
@@ -896,11 +894,13 @@ class SQLiteMailObservationState:
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM mail_observations "
                 "WHERE state IN ('current', 'presented') "
+                "AND COALESCE(reported_vanished, 0) = ? "
                 "AND EXISTS (SELECT 1 FROM mail_cursor c WHERE "
                 "c.mailbox_id = mail_observations.mailbox_id AND "
                 "c.uid_validity = mail_observations.uid_validity) "
                 "ORDER BY uid DESC LIMIT ?",
-                (max(0, self.CONTEXTUAL_EVENT_LIMIT - len(vanished)),),
+                (self._NOT_VANISHED,
+                 max(0, self.CONTEXTUAL_EVENT_LIMIT - len(vanished))),
             ).fetchall()
             waiting = self._connection.execute(
                 "SELECT mailbox_id, uid_validity, uid, event_json, content_origins, "
