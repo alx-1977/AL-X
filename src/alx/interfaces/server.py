@@ -100,6 +100,8 @@ class LiveVoiceServer:
         self._sample_rate_hz = sample_rate_hz
         self._asset_root = asset_root.resolve()
         self._cancel_coding = cancel_coding
+        # Only the socket whose turn acquired Core may stop its active job.
+        self._active_turn_connection: ServerConnection | None = None
         # Set when a mid-exchange recovery happens, cleared by the next audio
         # frame. It proves the microphone iterator survived the recovery.
         self._await_audio_confirmation = False
@@ -303,6 +305,8 @@ class LiveVoiceServer:
                 self._audio(connection, conversation_id),
                 self._delivery_queue(conversation_id),
                 self._typed_queue(conversation_id),
+                turn_started=lambda: setattr(self, "_active_turn_connection", connection),
+                turn_finished=lambda: self._finish_turn(connection),
             ):
                 if event.kind is VoiceEventKind.AUDIO:
                     assert event.audio is not None
@@ -400,6 +404,10 @@ class LiveVoiceServer:
             )
         return False
 
+    def _finish_turn(self, connection: ServerConnection) -> None:
+        if self._active_turn_connection is connection:
+            self._active_turn_connection = None
+
     async def _audio(
         self,
         connection: ServerConnection,
@@ -415,7 +423,8 @@ class LiveVoiceServer:
                 if isinstance(frame, dict) and frame.get("type") == CODING_CANCEL_FRAME:
                     job_id = frame.get("job_id")
                     accepted = False
-                    if (self._cancel_coding is not None and isinstance(job_id, str)
+                    if (connection is self._active_turn_connection
+                            and self._cancel_coding is not None and isinstance(job_id, str)
                             and len(job_id) <= 128):
                         accepted = await asyncio.to_thread(
                             self._cancel_coding, job_id, stream_id

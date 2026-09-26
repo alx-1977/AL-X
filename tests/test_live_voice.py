@@ -332,14 +332,21 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             clock=lambda: NOW, identifier_factory=lambda: "turn-1",
             activity=activity,
         )
-        iterator = session.exchange("conversation-1", incoming_audio())
+        ownership = []
+        iterator = session.exchange(
+            "conversation-1", incoming_audio(),
+            turn_started=lambda: ownership.append("started"),
+            turn_finished=lambda: ownership.append("finished"),
+        )
         self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.THINKING)
         current = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
         self.assertIs(current.kind, VoiceEventKind.ACTIVITY)
         self.assertEqual(current.activity, "coding")
+        self.assertEqual(ownership, ["started"])
         release.set()
         events = [event async for event in iterator]
         self.assertIn(VoiceEventKind.LISTENING, [event.kind for event in events])
+        self.assertEqual(ownership, ["started", "finished"])
 
     async def test_stream_wires_the_real_core_task_into_coding_liveness(self) -> None:
         """`_stream` must attach the actual `core_task`, not a stand-in.

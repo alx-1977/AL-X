@@ -393,6 +393,7 @@ class CodingRecoveryTests(unittest.TestCase):
             return [item async for item in server._audio(connection, "owner")]
 
         connection = Connection()
+        server._active_turn_connection = connection
         self.assertEqual(asyncio.run(consume()), [])
         self.assertEqual(called, [("job-1", "owner"), ("job-2", "owner")])
         self.assertEqual(connection.sent, [
@@ -402,6 +403,7 @@ class CodingRecoveryTests(unittest.TestCase):
 
         other = Connection()
         async def consume_other():
-            return [item async for item in server._audio(other, "other")]
+            return [item async for item in server._audio(other, "owner")]
         self.assertEqual(asyncio.run(consume_other()), [])
+        self.assertEqual(called, [("job-1", "owner"), ("job-2", "owner")])
         self.assertEqual(other.sent[0]["accepted"], False)
