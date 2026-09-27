@@ -30,6 +30,7 @@ from alx.tools import (  # noqa: E402
     DELETE_XERO_DRAFT_BILL,
     DHL_DEFINITIONS,
     PROCESS_DHL_IMPORT,
+    UPDATE_XERO_CONTACT,
     XERO_DEFINITIONS,
 )
 from support import xero_settings  # noqa: E402
@@ -140,10 +141,16 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
             if item.side_effect is SideEffect.EFFECTFUL
         }
         # Capture posts an ordinary bill, process_dhl_import posts a DHL
-        # import, and delete discards a draft. Nothing else writes.
+        # import, and delete discards a draft. The D-034 contact rename writes
+        # a contact, never a bill. Nothing else writes.
         self.assertEqual(
             effectful,
-            {CAPTURE_SUPPLIER_INVOICE, PROCESS_DHL_IMPORT, DELETE_XERO_DRAFT_BILL},
+            {
+                CAPTURE_SUPPLIER_INVOICE,
+                PROCESS_DHL_IMPORT,
+                DELETE_XERO_DRAFT_BILL,
+                UPDATE_XERO_CONTACT,
+            },
         )
 
     def test_the_two_bill_paths_do_not_overlap(self) -> None:
@@ -213,7 +220,12 @@ class MutationTests(unittest.TestCase):
         } | {"execute_xero_bill"}
         self.assertNotEqual(
             effectful,
-            {CAPTURE_SUPPLIER_INVOICE, PROCESS_DHL_IMPORT, DELETE_XERO_DRAFT_BILL},
+            {
+                CAPTURE_SUPPLIER_INVOICE,
+                PROCESS_DHL_IMPORT,
+                DELETE_XERO_DRAFT_BILL,
+                UPDATE_XERO_CONTACT,
+            },
         )
 
 

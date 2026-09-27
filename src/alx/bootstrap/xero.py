@@ -22,6 +22,7 @@ from alx.tools import (
     LIST_XERO_TAX_RATES,
     READ_XERO_BILL,
     SEARCH_XERO_CONTACTS,
+    UPDATE_XERO_CONTACT,
     XERO_DEFINITIONS,
     build_xero_executors,
 )
@@ -30,6 +31,7 @@ from alx.tools import (
 XERO_READ_PERMISSION = "xero.read"
 XERO_BILL_WRITE_PERMISSION = "xero.bill.write"
 XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
+XERO_CONTACT_RENAME_PERMISSION = "xero.contact.rename"
 
 # Law 0: one production path per outcome. An ordinary supplier bill is posted
 # by capture_supplier_invoice and a DHL import by process_dhl_import. The steps
@@ -134,6 +136,10 @@ def build_xero_runtime(
         frozenset({XERO_BILL_DELETE_PERMISSION}),
         approval_required=not settings.unattended_bill_deletes,
     )
+    # D-034. Friedl granted standing authority to rename one existing contact
+    # by exact ContactID. It is its own permission because it writes a
+    # different record from a bill, and no setting makes it attended.
+    rename_policy = AuthorityPolicy(frozenset({XERO_CONTACT_RENAME_PERMISSION}))
     policies = {
         SEARCH_XERO_CONTACTS: read_policy,
         LIST_XERO_ACCOUNTS: read_policy,
@@ -141,6 +147,7 @@ def build_xero_runtime(
         FIND_XERO_BILL: read_policy,
         READ_XERO_BILL: read_policy,
         DELETE_XERO_DRAFT_BILL: delete_policy,
+        UPDATE_XERO_CONTACT: rename_policy,
     }
     definitions = tuple(
         definition
@@ -178,6 +185,7 @@ def build_xero_runtime(
                 XERO_READ_PERMISSION,
                 XERO_BILL_WRITE_PERMISSION,
                 XERO_BILL_DELETE_PERMISSION,
+                XERO_CONTACT_RENAME_PERMISSION,
             }
         ),
     )

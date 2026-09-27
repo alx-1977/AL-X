@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.xero import (  # noqa: E402
     XERO_BILL_DELETE_PERMISSION,
+    XERO_CONTACT_RENAME_PERMISSION,
     XERO_BILL_WRITE_PERMISSION,
     XERO_READ_PERMISSION,
     build_xero_runtime,
@@ -354,6 +355,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                     XERO_READ_PERMISSION,
                     XERO_BILL_WRITE_PERMISSION,
                     XERO_BILL_DELETE_PERMISSION,
+                    XERO_CONTACT_RENAME_PERMISSION,
                 }
             ),
         )
