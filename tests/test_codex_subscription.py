@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +21,28 @@ from alx.bootstrap.providers import build_runtime_providers  # noqa: E402
 from alx.config.settings import RuntimeSettings  # noqa: E402
 from alx.contracts import ModelMessage, ModelRequest, ModelRole  # noqa: E402
 from alx.providers import CodexSubscriptionReasoningModel, OpenAIReasoningModel  # noqa: E402
+from alx.contracts.coding import CodingError  # noqa: E402
+from alx.providers.coding_process import (  # noqa: E402
+    CodingCancellation,
+    _deliver_input,
+    bind_cancellation,
+    reset_cancellation,
+)
 from alx.providers.errors import ProviderError  # noqa: E402
+
+# Larger than any default pipe capacity (16 KiB on macOS, 64 KiB on Linux), so
+# the child must be reading before it all fits.
+_LARGE_INPUT = "x" * (256 * 1024)
+
+# Starts slowly, as `codex exec -` does, then reads stdin to EOF. read() only
+# returns at EOF, so an answer at all proves stdin was closed.
+_SLOW_READER = (
+    "import hashlib, sys, time\n"
+    "time.sleep(0.3)\n"
+    "data = sys.stdin.buffer.read()\n"
+    "sys.stderr.write('read done\\n')\n"
+    "print(len(data), hashlib.sha256(data).hexdigest())\n"
+)
 
 
 def _request() -> ModelRequest:
@@ -106,6 +132,127 @@ class CodexSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "stdout_characters": 8, "stderr_characters": 23,
         })
+
+
+class LargeInputReachesEndOfFileTests(unittest.TestCase):
+    """A coding job's real process loop delivers all of stdin, then EOF.
+
+    On 2026-09-27 a 22,138-character review prompt hung `codex exec -` in
+    read_to_end until the deadline: the polling loop's first communicate()
+    wrote only what fit the pipe, and later calls without input never sent
+    the rest or closed stdin. These tests use real child processes because
+    an injected runner skips that loop entirely.
+    """
+
+    def _run(self, cancellation: CodingCancellation, argv: list[str], **kwargs):
+        return cancellation.run(
+            subprocess.run, argv, capture_output=True, text=True, check=False, **kwargs
+        )
+
+    def test_a_slow_reader_receives_the_whole_input_and_eof(self) -> None:
+        started = time.monotonic()
+        completed = self._run(
+            CodingCancellation(), [sys.executable, "-c", _SLOW_READER],
+            input=_LARGE_INPUT, timeout=30,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(completed.returncode, 0)
+        expected = hashlib.sha256(_LARGE_INPUT.encode()).hexdigest()
+        self.assertEqual(completed.stdout.split(), [str(len(_LARGE_INPUT)), expected])
+        self.assertEqual(completed.stderr, "read done\n")
+        # Far inside the deadline: completion never waits for the timeout.
+        self.assertLess(elapsed, 10)
+
+    def test_cancellation_stays_responsive_while_input_is_undelivered(self) -> None:
+        cancellation = CodingCancellation()
+        never_reads = [sys.executable, "-c", "import time; time.sleep(60)"]
+        threading.Timer(0.3, cancellation.cancel).start()
+        started = time.monotonic()
+        with self.assertRaises(CodingError) as raised:
+            self._run(cancellation, never_reads, input=_LARGE_INPUT, timeout=60)
+        self.assertEqual(raised.exception.code, "coding_cancelled")
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_the_overall_deadline_still_applies(self) -> None:
+        never_reads = [sys.executable, "-c", "import time; time.sleep(60)"]
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self._run(CodingCancellation(), never_reads, input=_LARGE_INPUT, timeout=1)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_input_the_pipe_cannot_encode_fails_instead_of_arriving_short(self) -> None:
+        reader = [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"]
+        with self.assertRaises(UnicodeEncodeError):
+            # A lone surrogate has no encoding in any codec with strict errors.
+            self._run(CodingCancellation(), reader, input="\udcff", timeout=30)
+
+    def test_the_writer_stops_when_nobody_ever_reads(self) -> None:
+        # A descendant that left the process group can hold the read end open
+        # without reading. The writer must end when told, not block forever.
+        read_end, write_end = os.pipe()
+        stdin = os.fdopen(write_end, "wb")
+        stop = threading.Event()
+        writer = threading.Thread(
+            target=_deliver_input, args=(stdin, _LARGE_INPUT.encode(), stop)
+        )
+        try:
+            writer.start()
+            time.sleep(0.3)
+            self.assertTrue(writer.is_alive())
+            stop.set()
+            writer.join(5)
+            self.assertFalse(writer.is_alive())
+            self.assertTrue(stdin.closed)
+        finally:
+            os.close(read_end)
+
+    def test_a_large_review_prompt_completes_through_the_codex_adapter(self) -> None:
+        # A fake `codex` that behaves like `codex exec -`: slow start, read
+        # stdin to EOF, then emit the JSON event stream.
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "codex"
+            executable.write_text(
+                f"#!{sys.executable}\n"
+                "import json, sys, time\n"
+                "time.sleep(0.3)\n"
+                "received = len(sys.stdin.read())\n"
+                "answer = json.dumps({'findings': [], 'received': received})\n"
+                "for event in (\n"
+                "    {'type': 'thread.started', 'thread_id': 't'},\n"
+                "    {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': answer}},\n"
+                "    {'type': 'turn.completed', 'usage': {'input_tokens': 1}},\n"
+                "):\n"
+                "    print(json.dumps(event))\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            model = CodexSubscriptionReasoningModel(
+                "gpt-5.6-luna", 30, executable=str(executable),
+                environment={"PATH": os.environ.get("PATH", ""), "HOME": directory},
+                effort="high",
+            )
+            request = ModelRequest(
+                (
+                    ModelMessage(ModelRole.SYSTEM, "Return only the requested JSON."),
+                    ModelMessage(ModelRole.USER, _LARGE_INPUT),
+                ),
+                "alx_coding_local_review",
+                _request().output_schema,
+                kind="coding",
+            )
+            token = bind_cancellation(CodingCancellation())
+            started = time.monotonic()
+            try:
+                completion = model.complete(request)
+            finally:
+                reset_cancellation(token)
+            elapsed = time.monotonic() - started
+
+        prompt = CodexSubscriptionReasoningModel._prompt(request)
+        self.assertEqual(completion.output["received"], len(prompt))
+        self.assertEqual(completion.output["findings"], ())
+        self.assertLess(elapsed, 10)
 
 
 class CodexSubscriptionReviewerCompositionTests(unittest.TestCase):

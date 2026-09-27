@@ -13,12 +13,13 @@ import hashlib
 import io
 import json
 import platform
+import select
 import signal
 import tarfile
 import tempfile
 from importlib import metadata
 from contextvars import ContextVar
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any, Callable
 from collections.abc import Sequence
@@ -80,12 +81,33 @@ class CodingCancellation:
         kwargs.pop("check", None)
         kwargs["start_new_session"] = True
         process = subprocess.Popen(argv, **kwargs)
+        stop_input = Event()
         with self._lock:
             self._process = process
         try:
+            if supplied_input is not None:
+                # Deliver the whole input and close it here, not through the
+                # polling communicate() below. Its first 0.1 s call wrote only
+                # what fit the pipe before timing out, and later calls without
+                # input never resumed: a prompt larger than the pipe buffer was
+                # cut short and never reached EOF, so `codex exec -` waited
+                # until the deadline.
+                stdin, process.stdin = process.stdin, None
+                try:
+                    # Encoded here, as communicate() did, so a prompt the pipe
+                    # cannot carry fails this call instead of arriving short.
+                    payload = (
+                        supplied_input.encode(stdin.encoding, stdin.errors)
+                        if isinstance(supplied_input, str) else supplied_input
+                    )
+                except ValueError:
+                    stdin.close()
+                    raise
+                Thread(
+                    target=_deliver_input, args=(stdin, payload, stop_input), daemon=True
+                ).start()
             self.check()
             deadline = None if timeout is None else monotonic() + timeout
-            first = True
             while True:
                 remaining = None if deadline is None else max(0, deadline - monotonic())
                 if remaining == 0:
@@ -93,15 +115,14 @@ class CodingCancellation:
                     raise subprocess.TimeoutExpired(argv, timeout)
                 try:
                     stdout, stderr = process.communicate(
-                        input=supplied_input if first else None,
                         timeout=min(0.1, remaining) if remaining is not None else 0.1,
                     )
                     self.check()
                     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
                 except subprocess.TimeoutExpired:
-                    first = False
                     self.check()
         finally:
+            stop_input.set()
             with self._lock:
                 self._process = None
             if process.poll() is None:
@@ -114,6 +135,30 @@ class CodingCancellation:
                 for pipe in (process.stdout, process.stderr, process.stdin):
                     if pipe is not None:
                         pipe.close()
+
+
+def _deliver_input(stdin: Any, payload: bytes, stop: Event) -> None:
+    """Write a child's complete input, then close it so the child sees EOF.
+
+    Writes as communicate() does: at most PIPE_BUF bytes once the pipe is
+    writable, so no write blocks. `stop` ends it when the call returns, because
+    a descendant that left the process group can hold the read end without
+    reading, and this thread must not outlive the job waiting on it.
+    """
+    fd = stdin.fileno()
+    view = memoryview(payload)
+    try:
+        while view and not stop.is_set():
+            _, writable, _ = select.select([], [fd], [], 0.1)
+            if writable:
+                view = view[os.write(fd, view[:select.PIPE_BUF]):]
+    except OSError:
+        pass  # A broken pipe: the child exited or was stopped; its exit status says so.
+    finally:
+        try:
+            stdin.close()
+        except OSError:
+            pass
 
 
 def _stop(process: subprocess.Popen[Any]) -> None:
