@@ -122,7 +122,9 @@ function showCodingStatus(message) {
   const transition = String(message.transition ?? "");
   const key = `${message.job_id ?? ""}:${transition}`;
   if (transition && key !== lastCodingTransition) {
-    diagnostic(`${message.job_id ?? "CASE"} · ${transition}`, message.terminal || message.stalled ? "error" : "active", "CODING");
+    diagnostic(`${message.job_id ?? "CASE"} · ${transition}`,
+      message.stalled || (message.terminal && !["succeeded", "no_change_required"].includes(message.outcome))
+        ? "error" : "active", "CODING");
     lastCodingTransition = key;
   }
 }

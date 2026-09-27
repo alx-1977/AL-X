@@ -86,6 +86,18 @@ _BASELINE = StructuredSchema(
     extra_properties=False,
 )
 
+_NO_CHANGE_EVIDENCE = StructuredSchema(
+    ValueKind.OBJECT,
+    {
+        "branch": _STRING,
+        "head_sha": _STRING,
+        "checkout_clean": _BOOLEAN,
+        "session_completed": _BOOLEAN,
+    },
+    ("branch", "head_sha", "checkout_clean", "session_completed"),
+    extra_properties=False,
+)
+
 _COMMIT_RECORD = StructuredSchema(
     ValueKind.OBJECT,
     {
@@ -170,7 +182,14 @@ DEFINITION = CapabilityDefinition(
     # rather than written out, so the stated ceiling cannot drift from the one
     # the executor applies.
     "Execute one bounded software-engineering job in the configured canonical "
-    "checkout. By default it requires clean main, then "
+    "checkout. "
+    "For a tiny improvement you selected yourself, check current main with the "
+    "available repository evidence before dispatch when that cheaply establishes "
+    "whether the change is still needed. A completed session that changes no "
+    "files can return no_change_required with its report and clean-checkout "
+    "evidence for your judgement. It leaves a clean feature branch; position "
+    "the checkout on main through repository_operation before a new job. "
+    "By default the job requires clean main, then "
     "creates and switches to the requested new feature branch before the coding "
     "session may edit. With continue_goal_branch=true, it instead verifies the "
     "checked-out branch and HEAD belong to this active goal's successful coding "
@@ -247,6 +266,7 @@ DEFINITION = CapabilityDefinition(
             "diff_digest": _STRING,
             "finished_at": _STRING,
             "baseline": _BASELINE,
+            "no_change_evidence": _NO_CHANGE_EVIDENCE,
             "commit": _COMMIT_RECORD,
             "branch": _STRING,
             "commit_sha": _STRING,
@@ -452,7 +472,7 @@ def build_coding_executors(
             return _failed(call_id, "coding_unavailable")
 
         values = outcome.as_values()
-        if outcome.status != "succeeded":
+        if outcome.status not in {"succeeded", "no_change_required"}:
             issues = outcome.unresolved_issues
             code = next(
                 (item for item in _OUTCOME_ISSUE_CODES if item in issues),

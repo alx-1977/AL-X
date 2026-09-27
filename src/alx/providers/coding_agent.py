@@ -579,11 +579,12 @@ class CodingAgent:
                     self._active = None
             self._report_telemetry(
                 state,
-                "complete" if outcome is not None and outcome.status == "succeeded" else
+                "complete" if outcome is not None and outcome.status in {"succeeded", "no_change_required"} else
                 "cancelled" if outcome is not None and outcome.status == "cancelled" else "failed",
                 terminal=True,
                 outcome=outcome.status if outcome is not None else "failed",
-                transition="COMPLETE" if outcome is not None and outcome.status == "succeeded" else
+                transition="NO CHANGE REQUIRED" if outcome is not None and outcome.status == "no_change_required" else
+                "COMPLETE" if outcome is not None and outcome.status == "succeeded" else
                 "CANCELLED" if outcome is not None and outcome.status == "cancelled" else "FAILED",
             )
             self._report_activity(state, "reasoning")
@@ -757,6 +758,31 @@ class CodingAgent:
                 self._modified_preexisting(workspace, preexisting_fingerprints),
             )
             state.files = session_files
+            if session.completed and not session_files and not post_session_status and baseline is not None:
+                # No candidate exists for review, verification, or commit. Git
+                # proves only that the session left the checkout unchanged;
+                # Core judges whether the task was already satisfied from the
+                # session's account and the recorded main commit.
+                try:
+                    current = read_workspace_state(workspace.root)
+                except CodingError:
+                    current = None
+                if (current is not None and current.clean and
+                        current.branch == branch and
+                        current.head_sha == baseline.head_sha):
+                    return self._outcome(
+                        status="no_change_required",
+                        summary=session.report.strip() or "the coding session made no file changes",
+                        files=(), preexisting_dirty=preexisting_dirty,
+                        commands=commands, tests_run=False, tests_passed=None,
+                        git_status="", git_diff="", issues=(), review=False,
+                        plan_summary=plan_summary, baseline=baseline,
+                        diagnostics={
+                            "phase": "execution", "session_turns": session.turns,
+                            "session_completed": True, "checkout_clean": True,
+                            "branch": branch, "head_sha": current.head_sha,
+                        },
+                    )
         review_failure: str | None = None
         review_issues: tuple[str, ...] = ()
         reviewed_files = session_files
@@ -881,8 +907,8 @@ class CodingAgent:
             else:
                 issues.append("session_failed")
         elif not files:
-            # A session that reports success while changing nothing has not
-            # done the job. V1 treated an unchanged worktree the same way.
+            # A no-change outcome must prove an unchanged, clean checkout
+            # above. Unreadable or changed Git state remains a failed job.
             status = "failed"
             issues.append("no_files_changed")
         elif not verification.all_required_passed:
@@ -1771,7 +1797,7 @@ class CodingAgent:
         review_attempts: tuple[ReviewInfrastructureAttempt, ...] = (),
         checkpoint: str = "",
     ) -> CodingOutcome:
-        if status not in ("succeeded", "failed", "blocked", "cancelled"):
+        if status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled"):
             status = "failed"
         if failure_status:
             status = "failed"

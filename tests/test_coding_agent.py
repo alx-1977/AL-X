@@ -1426,17 +1426,62 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertNotIn("push", argv)
             self.assertTrue(command_permitted(list(argv), worktree))
 
-    def test_a_session_that_changes_nothing_is_not_a_success(self) -> None:
-        """Undeclared issues such as no_files_changed still surface as task_failed."""
+    def test_completed_no_change_is_neutral_without_review_or_tests(self) -> None:
         worktree = _worktree(self.root)
-        session = RecordingSession(edits={}, report="nothing needed")
+        session = RecordingSession(edits={}, report="app.py already exists")
+        reviewer = PlanningModel()
+        telemetry = []
         attempt = self._run(
-            PlanningModel(), session, task="fix add", worktree=str(worktree)
+            PlanningModel(), session, reviewer=reviewer,
+            telemetry_sink=telemetry.append,
+            task="Confirm app.py exists", worktree=str(worktree),
         )
-        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["code"], "task_failed")
-        self.assertIn("no_files_changed", attempt.result.values["unresolved_issues"])
-        self.assertNotIn("no_files_changed", DEFINITION.possible_failure_codes)
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(attempt.result.values["status"], "no_change_required")
+        self.assertEqual(attempt.result.values["summary"], "app.py already exists")
+        self.assertEqual(attempt.result.values["files_changed"], ())
+        self.assertEqual(attempt.result.values["commands"], ())
+        self.assertFalse(attempt.result.values["tests_run"])
+        self.assertEqual(reviewer.requests, [])
+        self.assertEqual(telemetry[-1].outcome, "no_change_required")
+        self.assertEqual(telemetry[-1].transition, "NO CHANGE REQUIRED")
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=worktree), b"",
+        )
+
+    def test_already_satisfied_on_main_leaves_a_second_job_available(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "app.py").write_text(_FIXED, encoding="utf-8")
+        _git(worktree, "add", "app.py")
+        _git(worktree, "commit", "-qm", "fix add on main")
+        main_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True,
+        ).strip()
+        first = self._run(
+            PlanningModel(), RecordingSession(report="add already works"),
+            task="Fix add", worktree=str(worktree),
+        )
+        self.assertEqual(first.result.values["status"], "no_change_required")
+        self.assertEqual(first.result.values["baseline"]["head_sha"], main_sha)
+        self.assertEqual(first.result.values["no_change_evidence"], {
+            "branch": "fix/call-1", "head_sha": main_sha,
+            "checkout_clean": True, "session_completed": True,
+        })
+        self.assertEqual(first.result.durable_values["no_change_evidence"]["head_sha"], main_sha)
+        self.assertEqual(CoreAgent._failed_coding_executions(GoalState(
+            "goal-a", Objective("turn:t", "improve app"),
+            (SuccessCriterion("c", "done"),), attempts=(first,),
+        )), 0)
+        # D-033 gives the switch back to main to AL/X, not the Coding Agent.
+        _git(worktree, "switch", "main")
+        second = self._run(
+            PlanningModel(), RecordingSession(edits={
+                "app.py": _FIXED + "\ndef subtract(a, b):\n    return a - b\n",
+            }),
+            task="Add subtraction", worktree=str(worktree),
+        )
+        self.assertEqual(second.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(second.result.values["status"], "succeeded")
 
     def test_a_session_failure_is_reported_not_swallowed(self) -> None:
         worktree = _worktree(self.root)

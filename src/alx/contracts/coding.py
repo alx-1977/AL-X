@@ -620,8 +620,8 @@ class CodingOutcome:
     checkpoint: str = ""
 
     def __post_init__(self) -> None:
-        if self.status not in ("succeeded", "failed", "blocked", "cancelled"):
-            raise ValueError("status must be succeeded, failed, blocked, or cancelled")
+        if self.status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled"):
+            raise ValueError("status must be succeeded, no_change_required, failed, blocked, or cancelled")
         _required(self.summary, "summary")
         _aware(self.finished_at, "finished_at")
         object.__setattr__(self, "files_changed", tuple(self.files_changed))
@@ -695,6 +695,13 @@ class CodingOutcome:
             )
         if self.baseline is not None:
             values["baseline"] = self.baseline.as_values()
+        if self.status == "no_change_required":
+            values["no_change_evidence"] = {
+                "branch": str((self.diagnostics or {}).get("branch", "")),
+                "head_sha": str((self.diagnostics or {}).get("head_sha", "")),
+                "checkout_clean": (self.diagnostics or {}).get("checkout_clean") is True,
+                "session_completed": (self.diagnostics or {}).get("session_completed") is True,
+            }
         if self.commit is not None:
             values["commit"] = self.commit.as_values()
             # Promoted to the top level because these two are what Core hands
