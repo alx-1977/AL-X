@@ -706,6 +706,16 @@ class RepositoryAuthority:
 
     # ---- the one entry point --------------------------------------------
 
+    def abort_rebase(self) -> None:
+        """Leave the checkout as it was before a rebase that did not finish.
+
+        `git reset --hard` does not clear an in-progress rebase.
+        """
+        completed = self._run(("git", "rebase", "--abort"))
+        if completed.returncode != 0:
+            detail = (completed.stderr or "rebase could not be aborted").strip()
+            raise RepositoryAuthorityError("operation_refused", detail[:400])
+
     def perform(self, request: RepositoryRequest) -> RepositoryOutcome:
         """Run one operation and report what it did."""
         operation = request.operation

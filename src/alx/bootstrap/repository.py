@@ -113,7 +113,25 @@ def build_repository_runtime(
                 if remote.values.get("sha") != reviewed_sha:
                     raise MergeError("head_changed", current_head=remote.values.get("sha"))
                 base = perform(Operation.RESOLVE, revision="origin/main")
-                perform(Operation.REBASE, onto=base.values["sha"])
+                rebase = repository_runtime.authority.perform(
+                    RepositoryRequest(Operation.REBASE, {"onto": base.values["sha"]})
+                )
+                if not rebase.succeeded:
+                    if rebase.failure_code == "conflict":
+                        try:
+                            repository_runtime.authority.abort_rebase()
+                        except RepositoryAuthorityError as error:
+                            raise MergeError(
+                                "merge_conflict", github_message=error.detail
+                            ) from None
+                        raise MergeError(
+                            "merge_conflict", github_message=rebase.refusal_reason
+                        )
+                    raise MergeError(
+                        "merge_refused",
+                        operation=Operation.REBASE.value,
+                        github_message=rebase.refusal_reason,
+                    )
                 current = repository_runtime.authority.read_checkout_status()
                 if not current.clean or current.branch != branch:
                     raise MergeError("merge_conflict")

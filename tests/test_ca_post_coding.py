@@ -339,6 +339,27 @@ class PostCodingTests(unittest.TestCase):
         self.assertEqual(sum('rebase' in op for op in self.operations), 1)
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('--git-dir', str(self.remote), 'rev-parse', 'fix/completed'))
 
+    def test_a_rebase_conflict_is_aborted_and_needs_judgement(self):
+        upstream = self.root / 'upstream'
+        self.git('clone', '-b', 'main', str(self.remote), str(upstream))
+        self.git('config', 'user.email', 'test@example.invalid', root=upstream)
+        self.git('config', 'user.name', 'Test', root=upstream)
+        (upstream / 'file.txt').write_text('main changed the same lines\n')
+        self.git('add', 'file.txt', root=upstream)
+        self.git('commit', '-m', 'main conflicts', root=upstream)
+        self.git('push', 'origin', 'main', root=upstream)
+        self.base = self.git('rev-parse', 'HEAD', root=upstream)
+        self.behind = 1
+        self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='The rebase conflicts.')])
+        failure = self.attempts[0].result.failure
+        self.assertEqual(failure['code'], 'merge_conflict', failure)
+        self.assertEqual(self.merge_count, 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+        self.assertEqual(self.git('branch', '--show-current'), 'fix/completed')
+        self.assertFalse((self.checkout / '.git' / 'rebase-merge').exists())
+        self.assertFalse((self.checkout / '.git' / 'rebase-apply').exists())
+        self.assertEqual((self.checkout / 'file.txt').read_text(), 'completed implementation\n')
+
     def test_review_timeout_returns_once_without_another_paid_request(self):
         self.review_pending = 10000
         self.tasks.poller._maximum_wait = 0.02
