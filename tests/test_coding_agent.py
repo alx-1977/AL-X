@@ -1267,10 +1267,10 @@ class NativeExecutionTests(unittest.TestCase):
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
             policy.commands,
         )
-        # An unmapped Python file is reported. It does not replace the
-        # mapped file's test with the repository suite, and that test does
-        # not count as coverage of the unmapped file.
-        mixed = required_verification(("app.py", "test_app.py"), worktree)
+        # A Python file with no neighbouring test is reported. It does not
+        # replace the mapped file's test with the repository suite, and that
+        # test does not count as coverage of the unmapped file.
+        mixed = required_verification(("orphan.py", "test_app.py"), worktree)
         self.assertNotIn(
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
             mixed.commands,
@@ -1279,10 +1279,9 @@ class NativeExecutionTests(unittest.TestCase):
             ("python", "-m", "pytest", "-q", "test_app.py"),
             mixed.commands,
         )
-        self.assertIn(
-            "unmapped_python",
-            [check.name for check in mixed.checks],
-        )
+        report = next(check for check in mixed.checks if check.name == "unmapped_python")
+        self.assertIn("orphan.py", report.findings)
+        self.assertNotIn("test_app.py", report.findings)
 
     def test_changed_pytest_module_can_verify_a_successful_job(self) -> None:
         """A newly changed regression test is run through AL/X's executor."""
