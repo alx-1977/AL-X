@@ -208,16 +208,18 @@ def _watch_review(
     head_sha: str,
     requested_at: datetime,
     reviewer: str,
-) -> None:
-    """Record a requested review so the watcher can report on it.
+) -> str:
+    """Wait for this requested review through the one task observer.
 
     Failing to record must not fail the request: the review has already been
     asked for, and losing visibility of it is worse reported than raised.
     """
+    if not head_sha:
+        return "head_unconfirmed"
     if task_runtime is None:
-        return
+        return "observer_unavailable"
     try:
-        task_runtime.poller.record(
+        return task_runtime.poller.wait(
             ExternalTask(
                 # Two same-second requests are still distinct occasions. A
                 # timestamp identifier collided and silently inherited the
@@ -237,6 +239,7 @@ def _watch_review(
         LOGGER.warning(
             "A requested review could not be watched: %s", type(error).__name__
         )
+        return "observer_unavailable"
 
 
 # The tree this process imported: `scripts/alx` extracts committed main here,
@@ -503,13 +506,8 @@ async def run(repository_root: Path) -> None:
 
     # Requesting an external review is effectful and may spend review credits,
     # so its policy requires an approval grounded in Friedl's own turn.
-    # The watcher is composed later, beside the transport, so the review path
-    # reaches it through a holder rather than being reordered around it.
-    task_holder: list[Any] = [None]
-    # The review runtime names its own reviewer, and the callback below needs
-    # that name before the runtime exists. Held like the task runtime, for the
-    # same reason: the callback is built first and reads it when it runs.
-    review_runtime_holder: list[Any] = [None]
+    # Compose the sole waiter before publishing the capabilities. The callback
+    # runs only after composition; neither a holder nor a second observer is needed.
     review_runtime = build_review_runtime(
         review_configuration.is_usable,
         review_configuration.repository,
@@ -517,7 +515,7 @@ async def run(repository_root: Path) -> None:
         lambda: current_call_id[0],
         reviewer=review_configuration.reviewer,
         started=lambda number, sha, requested_at: _watch_review(
-            task_holder[0],
+            task_runtime,
             current_conversation_id[0],
             number,
             sha,
@@ -530,32 +528,42 @@ async def run(repository_root: Path) -> None:
             # provider's own name, and the poller finds an observer by the
             # task's service: recording the raw value meant a lookup that
             # matched nothing, and a review nobody ever polled.
-            _reviewer_name(review_runtime_holder[0]),
+            _reviewer_name(review_runtime),
         ),
     )
-    review_runtime_holder[0] = review_runtime
+    task_runtime = build_task_runtime(
+        storage_root,
+        review_configuration.repository,
+        review_configuration.token,
+        # The frontend dispatches on `code`; a diagnostic without one renders
+        # as "Server diagnostic · unknown", which is what the watcher's lines
+        # became. The code names the event and the payload carries only
+        # identifiers, a state and a duration, as D-012 requires.
+        lambda conversation_id, values: diagnostics.publish(
+            conversation_id, {"code": "task.status", **values}
+        ),
+        # Completion is recorded durably by the watcher. Turning it into a
+        # Core turn is the completed-work source's job, through the same
+        # runner, ledger and lock as every other occasion. Writing an
+        # opportunity here instead left a ledger row nothing consumed, so the
+        # Core was never woken.
+        lambda task: None,
+        # The reviewer being watched, reused rather than rebuilt. Without it
+        # the watcher is never composed, and a review AL/X successfully
+        # requests is recorded nowhere, polled by nothing, and never handed
+        # back to her: the request succeeds and the result never arrives.
+        review_provider=review_runtime.provider if review_runtime else None,
+    )
+
+    if task_runtime is None:
+        # Do not spend review credits when completion cannot be watched.
+        review_runtime = None
     if review_runtime is not None:
         for definition in review_runtime.definitions:
             registry.register(definition)
         policies.update(review_runtime.policies)
         executors.update(review_runtime.executors)
         permissions.update(review_runtime.permissions)
-
-    # Friedl delegated routine merge authorisation to AL/X. She reads an
-    # external review of the current head and decides; this executes that
-    # decision against the exact revision she judged.
-    merge_runtime = build_repository_runtime(
-        merge_configuration.is_usable,
-        merge_configuration.repository,
-        merge_configuration.token,
-        lambda: current_call_id[0],
-    )
-    if merge_runtime is not None:
-        for definition in merge_runtime.definitions:
-            registry.register(definition)
-        policies.update(merge_runtime.policies)
-        executors.update(merge_runtime.executors)
-        permissions.update(merge_runtime.permissions)
 
     # AL/X's repository authority. Hers, never the Coding Agent's: a job
     # commits on the feature branch prepared in the canonical checkout and
@@ -582,6 +590,23 @@ async def run(repository_root: Path) -> None:
         policies.update(repository_runtime.policies)
         executors.update(repository_runtime.executors)
         permissions.update(repository_runtime.permissions)
+
+    # Friedl delegated routine merge authorisation to AL/X. She reads an
+    # external review of the current head and decides; this executes that
+    # decision against the exact revision she judged.
+    merge_runtime = build_repository_runtime(
+        merge_configuration.is_usable,
+        merge_configuration.repository,
+        merge_configuration.token,
+        lambda: current_call_id[0],
+        repository_runtime=repository_runtime,
+    )
+    if merge_runtime is not None:
+        for definition in merge_runtime.definitions:
+            registry.register(definition)
+        policies.update(merge_runtime.policies)
+        executors.update(merge_runtime.executors)
+        permissions.update(merge_runtime.permissions)
 
     # D-028 authorises one bounded coding job in the configured checkout. It is
     # a separate authority from sandbox.execute: the sandbox cannot touch a
@@ -864,40 +889,6 @@ async def run(repository_root: Path) -> None:
             if coding_runtime is not None else None
         ),
     )
-    # The due-cognition tick lives for the life of the process, beside the
-    # transport rather than inside it. Voice is how she is heard, not what
-    # decides whether she exists.
-    # Work handed to an external service does not stop when a browser closes,
-    # so what watches it lives here beside the transport, as the mail scan and
-    # the due-cognition tick do. It only looks: it cannot request a review,
-    # retry one, spend anything, or merge. When a result appears it raises one
-    # opportunity, and AL/X reads the review herself.
-    task_runtime = build_task_runtime(
-        storage_root,
-        review_configuration.repository,
-        review_configuration.token,
-        # The frontend dispatches on `code`; a diagnostic without one renders
-        # as "Server diagnostic · unknown", which is what the watcher's lines
-        # became. The code names the event and the payload carries only
-        # identifiers, a state and a duration, as D-012 requires.
-        lambda conversation_id, values: diagnostics.publish(
-            conversation_id, {"code": "task.status", **values}
-        ),
-        # Completion is recorded durably by the watcher. Turning it into a
-        # Core turn is the completed-work source's job, through the same
-        # runner, ledger and lock as every other occasion. Writing an
-        # opportunity here instead left a ledger row nothing consumed, so the
-        # Core was never woken.
-        lambda task: None,
-        # The reviewer being watched, reused rather than rebuilt. Without it
-        # the watcher is never composed, and a review AL/X successfully
-        # requests is recorded nowhere, polled by nothing, and never handed
-        # back to her: the request succeeds and the result never arrives.
-        review_provider=review_runtime.provider if review_runtime else None,
-    )
-
-    task_holder[0] = task_runtime
-
     # Every kind of occasion reaches the Core through one producer, one
     # runner and one tick. A finished external task joins the matured requests
     # here rather than bringing a second tick, which would be a competing

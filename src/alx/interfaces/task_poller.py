@@ -6,8 +6,8 @@ scan and the due-cognition tick do.
 
 This decides nothing. It asks an observer what it can see, records the state,
 writes a terminal line, and sleeps. When a result appears it stops watching and
-raises one cognition opportunity, so the Core evaluates the result through the
-one ingress that already exists. It never requests a review, retries, spends,
+returns to an attached dispatch, or raises one cognition opportunity after a
+restart. Both deliver evidence to the existing Core. It never requests a review, retries, spends,
 fixes or merges: it imports nothing that could, and a test asserts that.
 
 Terminal lines carry identifiers, states and durations only, which is what
@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from threading import Condition
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -54,6 +55,8 @@ class TaskPoller:
         announce: Callable[[str, dict], None],
         completed: Callable[[ExternalTask], None],
         fatal_exceptions: tuple[type[Exception], ...] = (),
+        clock=None,
+        maximum_wait_seconds: float = 900.0,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -67,6 +70,45 @@ class TaskPoller:
         # result: what the result says is read by her from the source.
         self._completed = completed
         self._fatal_exceptions = fatal_exceptions
+        self._lock = Condition()
+        self._waiting: set[str] = set()
+        self._settled: dict[str, ExternalTask] = {}
+        if maximum_wait_seconds <= 0:
+            raise ValueError("maximum wait must be positive")
+        self._maximum_wait = maximum_wait_seconds
+        self._now = clock or (lambda: datetime.now(UTC))
+
+    def wait(self, task: ExternalTask) -> str:
+        """Join the existing observer path; never return an in-progress result.
+
+        While a dispatch is attached, its terminal evidence returns to that
+        dispatch rather than also scheduling an autonomous Core turn. A crash
+        leaves the durable outstanding task for the normal background tick.
+        """
+        with self._lock:
+            self._waiting.add(task.task_id)
+        try:
+            with self._lock:
+                self.record(task)
+                # Only run()/tick() observes the provider. This dispatch joins
+                # that waiter; it does not start another polling loop.
+                arrived = self._lock.wait_for(
+                    lambda: task.task_id in self._settled,
+                    timeout=self._maximum_wait,
+                )
+                if not arrived:
+                    now = self._now()
+                    self._finish(replace(task, state=TaskState.FAILED,
+                                         last_checked_at=now, completed_at=now))
+                settled = self._settled.pop(task.task_id)
+                if settled.state is TaskState.COMPLETED:
+                    return "completed"
+                if not arrived or settled.elapsed_seconds(settled.completed_at) >= self._maximum_wait:
+                    return "timed_out"
+                return "failed"
+        finally:
+            with self._lock:
+                self._waiting.discard(task.task_id)
 
     async def run(self) -> None:
         """Tick for the life of the process."""
@@ -91,7 +133,11 @@ class TaskPoller:
         self._announce(task.conversation_id, self._payload(task, task.requested_at))
 
     def tick(self) -> None:
-        """One look at every outstanding task."""
+        """One look at every outstanding task, serialized with attached waits."""
+        with self._lock:
+            self._tick()
+
+    def _tick(self) -> None:
         failures: list[Exception] = []
         for task in self._store.outstanding():
             try:
@@ -108,18 +154,16 @@ class TaskPoller:
 
     def _check(self, task: ExternalTask) -> None:
         observer = self._observers.get(task.service)
-        now = datetime.now(UTC)
-        if observer is None:
-            unavailable = replace(
-                task,
-                state=TaskState.OBSERVER_UNAVAILABLE,
-                last_checked_at=now,
-            )
+        now = self._now()
+        if observer is None and task.task_id not in self._waiting:
+            unavailable = replace(task, state=TaskState.OBSERVER_UNAVAILABLE, last_checked_at=now)
             self._store.record(unavailable)
-            self._announce(
-                task.conversation_id,
-                self._payload(unavailable, now),
-            )
+            self._announce(task.conversation_id, self._payload(unavailable, now))
+            return
+        if task.elapsed_seconds(now) >= self._maximum_wait or observer is None:
+            settled = replace(task, state=TaskState.FAILED,
+                              last_checked_at=now, completed_at=now)
+            self._finish(settled)
             return
 
         # Only the review observer distinguishes a verdict nobody has read from
@@ -166,17 +210,7 @@ class TaskPoller:
                 last_checked_at=observation.observed_at,
                 completed_at=observation.observed_at,
             )
-            # Announce and wake first, and only then record the outcome. A
-            # callback that fails after the write would leave a task settled
-            # in the store and never reported, so the result would be lost
-            # rather than retried on the next tick.
-            self._announce(
-                task.conversation_id,
-                self._payload(settled, observation.observed_at),
-            )
-            # The Core evaluates the result. This does not read it.
-            self._completed(settled)
-            self._store.record(settled)
+            self._finish(settled)
             return
 
         waiting = replace(
@@ -189,6 +223,16 @@ class TaskPoller:
             task.conversation_id,
             self._payload(waiting, observation.observed_at),
         )
+
+    def _finish(self, task: ExternalTask) -> None:
+        attached = task.task_id in self._waiting
+        self._announce(task.conversation_id, self._payload(task, task.completed_at))
+        if not attached:
+            self._completed(task)
+        self._store.record(task, handed_over=attached)
+        if attached:
+            self._settled[task.task_id] = task
+            self._lock.notify_all()
 
     @staticmethod
     def _payload(task: ExternalTask, at: datetime) -> dict[str, object]:

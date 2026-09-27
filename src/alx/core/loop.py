@@ -230,6 +230,9 @@ class CoreAgent:
         memory_conflicts: tuple[Mapping[str, Any], ...] = ()
         # Calls refused before approval this turn, each reported to her once.
         refused_calls: tuple[Mapping[str, Any], ...] = ()
+        # A settled mechanical blocker is explained once. Pending external work
+        # never reaches this boundary: its executor waits without reasoning.
+        mechanical_blocker: str | None = None
         # One-shot notice that a call-less decision would have ended the turn
         # while remaining work was still immediately executable. Shown on the
         # next reasoning step, then cleared.
@@ -314,6 +317,12 @@ class CoreAgent:
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
+            if mechanical_blocker is not None and (
+                decision.call is not None or decision.memory_query is not None
+            ):
+                if snapshot is not None:
+                    snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
+                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
             continuation_notices = ()
             if decision.goal_id is not None:
                 selection_error = self._goal_selection_error(
@@ -694,6 +703,14 @@ class CoreAgent:
                 memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                if mechanical_blocker is not None:
+                    if snapshot is not None:
+                        snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
+                    return CoreOutcome(
+                        CoreState.RESPONDED if decision.response is not None else CoreState.CHECKPOINTED,
+                        snapshot, response=decision.response, reason=mechanical_blocker,
+                        response_provenance=decision_provenance,
+                    )
                 if decision.selects_only:
                     # Selection with proposals is still an intermediate step.
                     # Its writes have used the canonical persistence path above;
@@ -895,6 +912,11 @@ class CoreAgent:
                 # boundary, so a corrected call may still use the same turn.
                 approved_dispatches.add(decision.call.capability_id)
             snapshot = self._finalize_dispatch(snapshot, attempt, now)
+            if (decision.call.capability_id in {
+                "request_external_review", "read_external_review", "merge_pull_request"
+            } and attempt.result is not None
+                    and (attempt.result.failure or {}).get("requires_judgement")):
+                mechanical_blocker = str(attempt.result.failure["code"])
             continuation_notice_issued = False
         if (
             snapshot is not None

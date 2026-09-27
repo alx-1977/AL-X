@@ -426,7 +426,10 @@ ARGUMENTS: dict[Operation, dict[str, tuple[str, bool]]] = {
         "mode": ("soft, mixed or hard; mixed by default", False),
     },
     Operation.PUSH: {"branch": ("the branch to publish", True)},
-    Operation.FORCE_PUSH: {"branch": ("the branch to replace on the remote", True)},
+    Operation.FORCE_PUSH: {
+        "branch": ("the branch to replace on the remote", True),
+        "expected_head": ("exact remote head to lease; otherwise the fetched tracking head", False),
+    },
     Operation.ADD_WORKTREE: {
         "branch": ("the branch to create for it", True),
         "path": ("where the worktree goes", True),

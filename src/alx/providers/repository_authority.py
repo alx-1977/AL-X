@@ -429,6 +429,13 @@ class RepositoryAuthority:
                 # nothing to lease against, and the operation is refused rather
                 # than performed as an unguarded force.
                 tracking = self._sha_of(f"refs/remotes/{ORIGIN}/{branch}")
+                expected = arguments.get("expected_head")
+                if expected is not None:
+                    if not valid_sha(expected):
+                        raise RepositoryAuthorityError("arguments_unusable", "expected_head must be a full commit id")
+                    # An intervening fetch must not silently widen a lease
+                    # authorised for the reviewed head to somebody else's work.
+                    tracking = expected
                 if not tracking:
                     raise RepositoryAuthorityError(
                         "arguments_unusable",
@@ -698,6 +705,16 @@ class RepositoryAuthority:
         )
 
     # ---- the one entry point --------------------------------------------
+
+    def abort_rebase(self) -> None:
+        """Leave the checkout as it was before a rebase that did not finish.
+
+        `git reset --hard` does not clear an in-progress rebase.
+        """
+        completed = self._run(("git", "rebase", "--abort"))
+        if completed.returncode != 0:
+            detail = (completed.stderr or "rebase could not be aborted").strip()
+            raise RepositoryAuthorityError("operation_refused", detail[:400])
 
     def perform(self, request: RepositoryRequest) -> RepositoryOutcome:
         """Run one operation and report what it did."""

@@ -636,7 +636,8 @@ class PolicyDerivationTests(unittest.TestCase):
                 raise AssertionError("no provider contact in this test")
 
         runtime = build_review_runtime(
-            True, "owner/repo", "token", lambda: "call-1", provider=Provider()
+            True, "owner/repo", "token", lambda: "call-1", provider=Provider(),
+            started=lambda *args: "completed",
         )
         derived = frozenset(
             capability_id
