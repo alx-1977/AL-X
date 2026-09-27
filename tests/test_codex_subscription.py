@@ -24,13 +24,15 @@ from alx.providers import CodexSubscriptionReasoningModel, OpenAIReasoningModel 
 from alx.contracts.coding import CodingError  # noqa: E402
 from alx.providers.coding_process import (  # noqa: E402
     CodingCancellation,
+    _deliver_input,
     bind_cancellation,
     reset_cancellation,
 )
 from alx.providers.errors import ProviderError  # noqa: E402
 
-# Larger than any pipe buffer, so the child must be reading before it all fits.
-_LARGE_INPUT = "x" * (64 * 1024)
+# Larger than any default pipe capacity (16 KiB on macOS, 64 KiB on Linux), so
+# the child must be reading before it all fits.
+_LARGE_INPUT = "x" * (256 * 1024)
 
 # Starts slowly, as `codex exec -` does, then reads stdin to EOF. read() only
 # returns at EOF, so an answer at all proves stdin was closed.
@@ -178,6 +180,32 @@ class LargeInputReachesEndOfFileTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             self._run(CodingCancellation(), never_reads, input=_LARGE_INPUT, timeout=1)
         self.assertLess(time.monotonic() - started, 10)
+
+    def test_input_the_pipe_cannot_encode_fails_instead_of_arriving_short(self) -> None:
+        reader = [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"]
+        with self.assertRaises(UnicodeEncodeError):
+            # A lone surrogate has no encoding in any codec with strict errors.
+            self._run(CodingCancellation(), reader, input="\udcff", timeout=30)
+
+    def test_the_writer_stops_when_nobody_ever_reads(self) -> None:
+        # A descendant that left the process group can hold the read end open
+        # without reading. The writer must end when told, not block forever.
+        read_end, write_end = os.pipe()
+        stdin = os.fdopen(write_end, "wb")
+        stop = threading.Event()
+        writer = threading.Thread(
+            target=_deliver_input, args=(stdin, _LARGE_INPUT.encode(), stop)
+        )
+        try:
+            writer.start()
+            time.sleep(0.3)
+            self.assertTrue(writer.is_alive())
+            stop.set()
+            writer.join(5)
+            self.assertFalse(writer.is_alive())
+            self.assertTrue(stdin.closed)
+        finally:
+            os.close(read_end)
 
     def test_a_large_review_prompt_completes_through_the_codex_adapter(self) -> None:
         # A fake `codex` that behaves like `codex exec -`: slow start, read
