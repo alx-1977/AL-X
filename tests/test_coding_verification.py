@@ -653,6 +653,25 @@ class MainBaselineComparisonTests(unittest.TestCase):
         self.assertEqual(len(coding_process._MAIN_FAILURE_CACHE), 1)
         self.assertFalse((self.root / ".alx/runtime/verification-baselines").exists())
 
+    def test_parametrized_id_with_summary_delimiter_is_nonblocking(self) -> None:
+        self.git("switch", "-q", "main")
+        (self.root / "test_sample.py").write_text(
+            "import pytest\n"
+            "@pytest.mark.parametrize('value', [0], ids=['left - right'])\n"
+            "def test_existing(value):\n"
+            "    assert value == 1\n", encoding="utf-8"
+        )
+        self.git("add", "test_sample.py")
+        self.git("commit", "-qm", "parametrized baseline failure")
+        self.git("switch", "-q", "feature")
+        (self.root / "test_sample.py").write_text(
+            "import pytest\n"
+            "@pytest.mark.parametrize('value', [0], ids=['left - right'])\n"
+            "def test_existing(value):\n"
+            "    assert value == 1\n", encoding="utf-8"
+        )
+        self.assertTrue(self.compare()[0])
+
     def test_cache_identity_changes_with_main_command_and_environment(self) -> None:
         self.assertTrue(self.compare()[0])
         self.assertEqual(len(coding_process._MAIN_FAILURE_CACHE), 1)

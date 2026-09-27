@@ -220,9 +220,24 @@ def pytest_failure_signature(
         if is_error:
             title = re.sub(r"^ERROR at (?:setup|teardown|call) of ", "", title)
         status, _, node = short[position].partition(" ")
-        node = node.split(" - ", 1)[0]
+        path, separator, node = node.partition("::")
+        if not path or not separator:
+            return None
+        depth = 0
+        for offset, character in enumerate(node):
+            if character == "[":
+                depth += 1
+            elif character == "]":
+                depth -= 1
+                if depth < 0:
+                    return None
+            elif depth == 0 and node.startswith(" - ", offset):
+                node = node[:offset]
+                break
+        if depth != 0:
+            return None
         parts = node.split("::")
-        identity = ".".join(parts[1:])
+        identity = ".".join(parts)
         if (status == "ERROR") != is_error or not identity or \
                 title.replace("::", ".") != identity:
             return None
