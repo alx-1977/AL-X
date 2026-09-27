@@ -1269,12 +1269,21 @@ class NativeExecutionTests(unittest.TestCase):
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
             policy.commands,
         )
-        # Adding an unmapped Python file escalates the whole set, rather than
-        # letting the mapped file's test speak for the unmapped one.
+        # An unmapped Python file is reported. It does not replace the
+        # mapped file's test with the repository suite, and that test does
+        # not count as coverage of the unmapped file.
         mixed = required_verification(("app.py", "test_app.py"), worktree)
-        self.assertIn(
+        self.assertNotIn(
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
             mixed.commands,
+        )
+        self.assertIn(
+            ("python", "-m", "pytest", "-q", "test_app.py"),
+            mixed.commands,
+        )
+        self.assertIn(
+            "unmapped_python",
+            [check.name for check in mixed.checks],
         )
 
     def test_changed_pytest_module_can_verify_a_successful_job(self) -> None:

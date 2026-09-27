@@ -33,24 +33,12 @@ DEFAULT_COMMAND_SECONDS = 60
 # meant for git inspection.
 #
 # This comment used to say the full suite takes about 90 seconds. Measured on
-# 2026-09-21 it takes about 190, so the claim was not merely stale but
-# inverted: the bound below cannot complete the suite at all. That is not
-# fixed by raising the number. Most jobs have no business running the whole
-# suite, and `coding_verification` now decides from the job's changed files
-# which checks it actually owes. The full suite remains the escalation for a
-# Python change with no safe targeted mapping, and whether its bound should
-# rise for that case is a separate question from this one.
+# 2026-09-21 it takes about 190. Most jobs have no business running the whole
+# suite. `coding_verification` decides the checks from the changed files:
+# targeted tests where a mapping exists, and a report where it does not.
+# The full suite is not that report.
 DEFAULT_VERIFICATION_COMMAND_SECONDS = 180
-# The full suite gets its own bound, because it is the one check the shared
-# bound cannot accommodate: at ~190 seconds measured it exceeds 180, so every
-# unmapped Python change selected a check that was guaranteed to time out and
-# could never be committed. Raised in review on PR #54.
-#
-# This is not the documentation-job fix. That was not a timeout problem and was
-# not solved with one: the policy simply no longer selects the suite for a
-# change that has no reason to run it. This makes the deliberately narrow
-# fallback that remains actually able to finish, with real headroom over the
-# measurement rather than a margin that erodes as the suite grows.
+# Kept for an explicit broader run. A missing test mapping does not select it.
 FULL_SUITE_COMMAND_SECONDS = 600
 MAX_COMMAND_SECONDS = 600
 MAX_FILE_CHARACTERS = 256_000

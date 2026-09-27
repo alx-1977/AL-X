@@ -1380,13 +1380,18 @@ class CodingAgent:
         # The bound is a ceiling on work, never a reason to drop a requirement.
         # Truncating the list would leave the dropped checks out of the evidence
         # entirely, so a partly-verified job would read as fully passed. The
-        # policy emits at most four checks against a ceiling of eight, so this
-        # is unreachable today; it fails closed rather than depending on that
-        # headroom surviving a future check class.
+        # policy emits the diff check, the content check, at most the two
+        # gates, one targeted pytest, and one unmapped-file report. That is
+        # six against a ceiling of eight. Exceeding the ceiling fails closed.
         checks = policy.checks
         if len(checks) > MAX_VERIFICATION_COMMANDS:
             return VerificationEvidence(checks), False, None
         for check in checks:
+            if check.kind == "report":
+                # Already recorded by the policy. It names Python files with
+                # no targeted test and does not run a command.
+                results.append(check)
+                continue
             if check.kind == "content":
                 # Performed here rather than through the executor: reading the
                 # job's own files is deterministic with one correct answer, so

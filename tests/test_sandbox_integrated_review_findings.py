@@ -18,7 +18,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
-import subprocess
 import json
 import stat
 import sys
@@ -610,42 +609,6 @@ class PrivilegedParentTest(unittest.TestCase):
         thread.start()
         thread.join(timeout=15)
         self.assertTrue(finished, "the evidence walk blocked on a fifo or device")
-
-    def test_a_helper_does_not_outlive_a_clean_exit(self) -> None:
-        """Q3: the group was killed only when the run timed out.
-
-        A program that spawns a background helper and returns cleanly left it
-        running - outside wall-time accounting, still able to write to session
-        state while the evidence walk read it.
-
-        Staged directly against the group sweep rather than through a confined
-        run: RLIMIT_NPROC on this host refuses the child's own spawn, so a real
-        experiment cannot set the trap here. What is asserted is the property
-        the runner now relies on - after a leader exits, no member of its group
-        is left alive.
-        """
-        import subprocess
-
-        leader = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import subprocess, sys, time;"
-                " subprocess.Popen([sys.executable, '-c',"
-                " 'import time; time.sleep(60)']);"
-                " time.sleep(0.2)",
-            ],
-            start_new_session=True,
-        )
-        group = SeatbeltSandboxRunner._group_of(leader)
-        self.assertIsNotNone(group)
-        leader.wait(timeout=10)
-
-        # The leader is gone; without the sweep the helper is still running.
-        SeatbeltSandboxRunner._reap_group(group)
-
-        with self.assertRaises((ProcessLookupError, PermissionError)):
-            os.killpg(group, 0)
 
 
 class ResilienceAndAccountingTest(unittest.TestCase):

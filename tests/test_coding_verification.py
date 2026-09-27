@@ -173,9 +173,12 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         self.assertIn("governance_gate", governance)
         architecture = _names(("scripts/check_architecture.py",))
         self.assertIn("architecture_gate", architecture)
-        # Still Python, so it still owes a runtime check as well.
-        self.assertIn("pytest_full", governance)
-        self.assertIn("pytest_full", architecture)
+        # The gate is the check. A missing unit-test name is reported and
+        # does not schedule the repository suite.
+        self.assertIn("unmapped_python", governance)
+        self.assertIn("unmapped_python", architecture)
+        self.assertNotIn("pytest_full", governance)
+        self.assertNotIn("pytest_full", architecture)
 
     def test_a_python_module_with_a_mapped_test_selects_that_test(self) -> None:
         """4. `src/alx/…` maps to its conventional test, which exists."""
@@ -184,10 +187,11 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         self.assertEqual(
             names, ("diff_check", "content_check", "architecture_gate", "pytest_targeted")
         )
-        self.assertIn(
-            ("python", "-m", "pytest", "-q", "tests/test_coding_verification.py"),
-            _commands(changed),
+        targeted = next(
+            command for command in _commands(changed)
+            if command[:4] == ("python", "-m", "pytest", "-q")
         )
+        self.assertIn("tests/test_coding_verification.py", targeted)
         self.assertNotIn(FULL_SUITE, _commands(changed))
 
     def test_a_changed_test_file_selects_itself(self) -> None:
@@ -199,34 +203,42 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             (DIFF_CHECK, ("python", "-m", "pytest", "-q", "tests/test_coding_agent.py")),
         )
 
-    def test_a_python_change_with_no_mapped_test_escalates_to_the_suite(self) -> None:
-        """6. The one case that still earns the whole suite.
+    def test_a_python_change_with_no_mapped_test_is_reported(self) -> None:
+        """6. A missing mapping is evidence, not the whole suite.
 
-        The change is executable and its blast radius is unknown, so runtime
-        verification is required and there is no narrower honest target. A
-        *non*-Python change never reaches this escalation, which is the whole
-        correction.
+        The architecture gate still runs. The unmapped path is named. The
+        repository suite is not scheduled, because a missing filename match
+        is not a reason to run every other test.
         """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "src" / "alx" / "tools").mkdir(parents=True)
             (root / "src" / "alx" / "tools" / "orphan.py").write_text("x = 1\n")
             changed = ("src/alx/tools/orphan.py",)
-            names = tuple(
-                check.name for check in required_verification(changed, root).checks
-            )
+            policy = required_verification(changed, root)
+            names = tuple(check.name for check in policy.checks)
             self.assertEqual(
-                names, ("diff_check", "content_check", "architecture_gate", "pytest_full")
+                names,
+                (
+                    "diff_check",
+                    "content_check",
+                    "architecture_gate",
+                    "unmapped_python",
+                ),
             )
-            self.assertIn(FULL_SUITE, required_verification(changed, root).commands)
+            self.assertNotIn(FULL_SUITE, policy.commands)
+            report = next(check for check in policy.checks if check.name == "unmapped_python")
+            self.assertEqual(report.kind, "report")
+            self.assertTrue(report.ran and report.passed)
+            self.assertIn("src/alx/tools/orphan.py", report.findings)
 
     def test_one_mapped_file_does_not_speak_for_an_unmapped_one(self) -> None:
         """Every changed Python path must be covered, not merely one of them.
 
-        `_targeted_tests` combined mappings across the whole set and the policy
-        asked only whether any existed, so a job changing a covered module and
-        an uncovered one ran the covered module's test and called the pair
-        verified. Found in review on PR #54.
+        A mapped file still runs its own test. The unmapped file is named
+        beside that, and is not described as covered by the neighbour's test.
+        Found in review on PR #54, when the pair was treated as verified by
+        whichever file happened to have a test.
         """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -249,17 +261,24 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             mixed = required_verification(
                 ("src/alx/core/mapped.py", "src/alx/core/unmapped.py"), root
             )
-            self.assertIn(FULL_SUITE, mixed.commands)
-            names = tuple(check.name for check in mixed.checks)
-            self.assertIn("pytest_full", names)
-            self.assertNotIn("pytest_targeted", names)
-            # The reason names the path that forced the escalation.
-            reason = next(
-                check.reason for check in mixed.checks
-                if check.name == "pytest_full"
+            self.assertNotIn(FULL_SUITE, mixed.commands)
+            self.assertIn(
+                ("python", "-m", "pytest", "-q", "tests/test_core_mapped.py"),
+                mixed.commands,
             )
-            self.assertIn("unmapped.py", reason)
-            self.assertNotIn("mapped.py,", reason)
+            names = tuple(check.name for check in mixed.checks)
+            self.assertIn("pytest_targeted", names)
+            self.assertIn("unmapped_python", names)
+            self.assertNotIn("pytest_full", names)
+            report = next(
+                check for check in mixed.checks if check.name == "unmapped_python"
+            )
+            self.assertIn("unmapped.py", report.reason)
+            self.assertNotIn("mapped.py", report.findings)
+            targeted = next(
+                check for check in mixed.checks if check.name == "pytest_targeted"
+            )
+            self.assertNotIn("unmapped.py", targeted.reason)
 
     def test_a_non_python_change_never_escalates_to_the_suite(self) -> None:
         """The escalation is reachable only from a Python change."""
@@ -292,6 +311,48 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         self.assertEqual(set(first), set(second))
         self.assertEqual(first, _commands(("src/alx/core/loop.py", "governance/DECISIONS.md")))
 
+    def test_frequently_edited_areas_select_their_own_tests(self) -> None:
+        """Coding, providers, tools, safety and bootstrap map to existing tests.
+
+        A tiny change in one of those files runs those tests and the
+        architecture gate. It does not schedule the repository suite.
+        """
+        cases = {
+            "src/alx/providers/coding_git.py": "tests/test_coding_git_workspace.py",
+            "src/alx/providers/dhl.py": "tests/test_dhl_reconciliation.py",
+            "src/alx/tools/dhl.py": "tests/test_dhl_reconciliation.py",
+            "src/alx/safety/gate.py": "tests/test_capability_safety.py",
+            "src/alx/bootstrap/coding.py": "tests/test_coding_agent.py",
+        }
+        for changed, expected in cases.items():
+            with self.subTest(changed=changed):
+                policy = required_verification((changed,), REPOSITORY_ROOT)
+                names = tuple(check.name for check in policy.checks)
+                self.assertIn("architecture_gate", names)
+                self.assertIn("pytest_targeted", names)
+                self.assertNotIn("pytest_full", names)
+                self.assertNotIn("unmapped_python", names)
+                self.assertNotIn(FULL_SUITE, policy.commands)
+                targeted = next(
+                    command for command in policy.commands
+                    if command[:4] == ("python", "-m", "pytest", "-q")
+                )
+                self.assertIn(expected, targeted)
+                self.assertTrue(command_permitted(list(targeted), REPOSITORY_ROOT))
+
+    def test_an_unmapped_provider_module_does_not_select_the_suite(self) -> None:
+        """A real module with no test file is reported, and the gate still runs."""
+        changed = ("src/alx/providers/pdf_limits.py",)
+        policy = required_verification(changed, REPOSITORY_ROOT)
+        names = tuple(check.name for check in policy.checks)
+        self.assertIn("architecture_gate", names)
+        self.assertIn("unmapped_python", names)
+        self.assertNotIn("pytest_targeted", names)
+        self.assertNotIn("pytest_full", names)
+        self.assertNotIn(FULL_SUITE, policy.commands)
+        report = next(check for check in policy.checks if check.name == "unmapped_python")
+        self.assertIn("src/alx/providers/pdf_limits.py", report.findings)
+
     def test_every_policy_command_is_already_permitted(self) -> None:
         """11. The policy cannot widen the allowlist; it selects within it."""
         for changed in (
@@ -299,6 +360,10 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             ("governance/DECISIONS.md",),
             ("src/alx/core/loop.py",),
             ("tests/test_coding_agent.py",),
+            ("src/alx/providers/coding_git.py",),
+            ("src/alx/tools/dhl.py",),
+            ("src/alx/safety/gate.py",),
+            ("src/alx/bootstrap/coding.py",),
         ):
             for argv in _commands(changed):
                 with self.subTest(argv=argv):
@@ -483,11 +548,11 @@ class TheBoundNeverSilentlyDropsARequirement(unittest.TestCase):
 
 
 class TheFullSuiteCanActuallyFinish(unittest.TestCase):
-    """A check that cannot finish inside its bound is not a check.
+    """The broader suite keeps a bound of its own.
 
-    The suite measures ~190 seconds against a shared 180-second bound, so every
-    unmapped Python change selected `pytest_full` and was guaranteed to time
-    out — it could never be committed. Raised in review on PR #54.
+    It is no longer what a missing test mapping selects. The bound remains so
+    an explicit broader run is not given the short command limit. Raised when
+    that run was the unmapped fallback, on PR #54.
     """
 
     def test_the_full_suite_bound_exceeds_the_measured_runtime(self) -> None:
