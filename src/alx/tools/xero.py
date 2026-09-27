@@ -36,6 +36,7 @@ READ_XERO_BILL = "read_xero_bill"
 CAPTURE_SUPPLIER_INVOICE = "capture_supplier_invoice"
 DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
 UPDATE_XERO_CONTACT = "update_xero_contact"
+CREATE_XERO_CONTACT = "create_xero_contact"
 
 # Xero's documented maximum length for a contact name.
 _CONTACT_NAME_LIMIT = 255
@@ -283,6 +284,23 @@ UPDATE_CONTACT_DEFINITION = CapabilityDefinition(
     _FAILURES + ("contact_name_conflict", "read_back_mismatch"),
 )
 
+CREATE_CONTACT_DEFINITION = CapabilityDefinition(
+    CREATE_XERO_CONTACT,
+    "Create one new Xero contact carrying only the exact name given, and read it back; refuse a name any existing contact, active or archived, already holds.",
+    _object({"name": _STRING}, ("name",)),
+    _object(
+        {
+            "contact_id": _STRING,
+            "name": _STRING,
+            "status": _STRING,
+            "created": _BOOLEAN,
+        },
+        ("contact_id", "name", "status", "created"),
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES + ("contact_name_conflict", "read_back_mismatch"),
+)
+
 DEFINITIONS = (
     SEARCH_CONTACTS_DEFINITION,
     LIST_ACCOUNTS_DEFINITION,
@@ -292,6 +310,7 @@ DEFINITIONS = (
     CAPTURE_INVOICE_DEFINITION,
     DELETE_DRAFT_DEFINITION,
     UPDATE_CONTACT_DEFINITION,
+    CREATE_CONTACT_DEFINITION,
 )
 
 
@@ -300,6 +319,23 @@ def _required(arguments: StructuredData, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(name)
     return value.strip()
+
+
+def _name_taken(
+    account: XeroAccountingAccount, name: str, except_contact_id: str | None = None
+) -> bool:
+    """Whether a contact other than the one excepted already holds `name`.
+
+    Two contacts sharing a name is ambiguous identity, and a later exact-name
+    supplier match would refuse both. Xero allows an archived namesake;
+    D-034 and D-035 do not.
+    """
+    wanted = name.casefold()
+    return any(
+        str(item.get("ContactID") or "") != except_contact_id
+        and str(item.get("Name") or "").strip().casefold() == wanted
+        for item in account.search_contacts(name, include_archived=True)
+    )
 
 
 def _decimal(value: Any, name: str) -> Decimal:
@@ -1250,16 +1286,8 @@ def build_xero_executors(
                 raise XeroAccessError("contact_not_found")
             previous = str(current.get("Name") or "")
             if previous != name:
-                # Two contacts sharing a name is ambiguous identity, and a
-                # later exact-name supplier match would refuse both. Xero
-                # allows an archived namesake; D-034 does not.
-                wanted = name.casefold()
-                for item in account.search_contacts(name, include_archived=True):
-                    if (
-                        str(item.get("ContactID") or "") != contact_id
-                        and str(item.get("Name") or "").strip().casefold() == wanted
-                    ):
-                        raise XeroAccessError("contact_name_conflict")
+                if _name_taken(account, name, contact_id):
+                    raise XeroAccessError("contact_name_conflict")
                 written = account.rename_contact(contact_id, name)
                 if str(written.get("ContactID") or "") != contact_id:
                     raise XeroAccessError("read_back_mismatch")
@@ -1276,6 +1304,37 @@ def build_xero_executors(
 
         return invoke(UPDATE_XERO_CONTACT, operation)
 
+    def create_contact(arguments: StructuredData) -> CapabilityResult:
+        """D-035: create one supplier contact, exactly as AL/X decided.
+
+        Whether a new contact is right, and that no existing one is the same
+        supplier under another name, is AL/X's judgement from the evidence.
+        This only refuses a name some contact already holds, sends the name
+        alone, and reads the result back. A repeated call after an unseen
+        success finds the name taken and creates nothing.
+        """
+
+        def operation() -> Mapping[str, Any]:
+            name = _required(arguments, "name")
+            if len(name) > _CONTACT_NAME_LIMIT or not name.isprintable():
+                raise ValueError("name")
+            if _name_taken(account, name):
+                raise XeroAccessError("contact_name_conflict")
+            contact_id = str(account.create_contact(name).get("ContactID") or "")
+            if not contact_id:
+                raise XeroAccessError("read_back_mismatch")
+            current = account.read_contact(contact_id)
+            if current is None or str(current.get("Name") or "") != name:
+                raise XeroAccessError("read_back_mismatch")
+            return {
+                "contact_id": contact_id,
+                "name": name,
+                "status": str(current.get("ContactStatus") or ""),
+                "created": True,
+            }
+
+        return invoke(CREATE_XERO_CONTACT, operation)
+
     return {
         SEARCH_XERO_CONTACTS: search_contacts,
         LIST_XERO_ACCOUNTS: list_accounts,
@@ -1285,4 +1344,5 @@ def build_xero_executors(
         CAPTURE_SUPPLIER_INVOICE: capture_invoice,
         DELETE_XERO_DRAFT_BILL: delete_draft,
         UPDATE_XERO_CONTACT: update_contact,
+        CREATE_XERO_CONTACT: create_contact,
     }

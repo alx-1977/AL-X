@@ -2138,3 +2138,17 @@ authority. D-033's clean-main rule continues to govern genuinely new jobs.
 - **Scope.** The requested OAuth scope `accounting.contacts.read` becomes `accounting.contacts`, which the current connection already holds. The granted payment and bank-transaction scopes are not changed by this decision.
 - **Boundary.** This amends the "no contact mutation" boundary of D-016, D-017, D-018, D-020 and D-021 for the rename above only. No other contact mutation, payment, bank reconciliation, sales document, journal or payroll action is authorised. No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 - **Review condition.** Revisit if a contact is renamed that Friedl did not intend, if any field other than Name changes, or if a rename breaks supplier resolution elsewhere, such as the DHL contact matched by `ALX_XERO_DHL_SUPPLIER_NAME`.
+
+## D-035 — Xero supplier contact creation
+
+- **Date:** 2026-09-27
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-27.** A real invoice from CodeRabbit Inc could not be captured because no matching Xero contact exists, and AL/X could only ask Friedl to create the supplier contact by hand. D-034 permits renaming an existing contact and forbids creation, so Friedl approved this separate decision. D-034 is unchanged.
+- **Authority.** AL/X may create one new Xero contact when invoice-processing evidence establishes that: (1) no suitable existing Xero contact exists for the supplier; (2) the supplier identity is sufficiently clear from the invoice and available records; (3) creation will not duplicate or ambiguously overlap an existing contact. Standing authority applies; Friedl does not need to approve each supplier-contact creation individually.
+- **Permitted.** Create one new contact; require the exact supplier name; perform duplicate and ambiguity checks before creation; read back the new contact after creation and verify the returned ContactID and Name; use that ContactID for the existing invoice-capture workflow.
+- **Not permitted.** Create a contact if identity is ambiguous; create a duplicate contact; merge contacts; archive or delete contacts; add or alter banking details; add or alter payment details; add tax settings; add addresses, phone numbers, email addresses or other contact fields unless separately approved later; create a contact under a guessed or substituted name.
+- **What AL/X decides.** AL/X remains responsible for deciding that creation is appropriate from the invoice and Xero evidence. The deterministic capability, `create_xero_contact`, performs only the exact approved mutation.
+- **Deterministic sequence under Law 2.** `create_xero_contact` validates the name, refuses a name any existing contact holds (active or archived, compared case-insensitively), creates the contact with `PUT /Contacts` carrying only `Name`, and reads it back by the returned ContactID to verify the ContactID and Name. It carries its own permission, `xero.contact.create`; D-034's rename permission does not grant it, and it does not grant rename.
+- **Scope.** The existing `accounting.contacts` OAuth scope covers creation. No scope changes.
+- **Boundary.** No other contact mutation, payment, bank reconciliation, sales document, journal or payroll action is authorised. No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+- **Review condition.** Revisit if a contact is created that Friedl did not intend, if a duplicate or near-duplicate supplier contact appears, or if any field other than Name is set on creation.

@@ -31,6 +31,7 @@ from alx.tools import (  # noqa: E402
     DHL_DEFINITIONS,
     PROCESS_DHL_IMPORT,
     UPDATE_XERO_CONTACT,
+    CREATE_XERO_CONTACT,
     XERO_DEFINITIONS,
 )
 from support import xero_settings  # noqa: E402
@@ -141,8 +142,9 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
             if item.side_effect is SideEffect.EFFECTFUL
         }
         # Capture posts an ordinary bill, process_dhl_import posts a DHL
-        # import, and delete discards a draft. The D-034 contact rename writes
-        # a contact, never a bill. Nothing else writes.
+        # import, and delete discards a draft. The D-034 contact rename and
+        # D-035 contact creation write a contact, never a bill. Nothing else
+        # writes.
         self.assertEqual(
             effectful,
             {
@@ -150,6 +152,7 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
                 PROCESS_DHL_IMPORT,
                 DELETE_XERO_DRAFT_BILL,
                 UPDATE_XERO_CONTACT,
+                CREATE_XERO_CONTACT,
             },
         )
 
@@ -225,6 +228,7 @@ class MutationTests(unittest.TestCase):
                 PROCESS_DHL_IMPORT,
                 DELETE_XERO_DRAFT_BILL,
                 UPDATE_XERO_CONTACT,
+                CREATE_XERO_CONTACT,
             },
         )
 

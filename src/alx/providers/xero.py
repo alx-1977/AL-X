@@ -34,7 +34,8 @@ _DISCARDED_STATUSES = frozenset({"DELETED", "VOIDED"})
 
 # External protocol identifiers. D-016 deliberately excludes payments, bank
 # transactions, journals, reports, payroll, and sales work. Contact writes are
-# requested only for D-034's rename of one existing contact.
+# requested only for D-034's rename of one existing contact and D-035's
+# creation of one supplier contact.
 XERO_SCOPES = (
     "openid",
     "profile",
@@ -515,6 +516,20 @@ class XeroAccountingAdapter:
             "POST",
             f"/Contacts/{quote(contact_id, safe='')}",
             json_body={"Contacts": [{"ContactID": contact_id, "Name": name}]},
+        )
+        items = self._items(body, "Contacts")
+        if not items:
+            _raise_clean("response_invalid")
+        return items[0]
+
+    def create_contact(self, name: str) -> Mapping[str, Any]:
+        """D-035. Create one contact carrying only its name.
+
+        PUT only creates. POST /Contacts is Xero's update-or-create and could
+        land on an existing contact instead.
+        """
+        body = self._request(
+            "PUT", "/Contacts", json_body={"Contacts": [{"Name": name}]}
         )
         items = self._items(body, "Contacts")
         if not items:
