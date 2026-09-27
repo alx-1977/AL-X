@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 import hashlib
+import json
 import logging
 from uuid import uuid4
 
@@ -1896,6 +1897,10 @@ class CoreAgent:
             return False
         values = result.durable_values
         baseline = values.get("baseline")
+        try:
+            checkpoint = json.loads(values.get("checkpoint"))
+        except (TypeError, ValueError):
+            return False
         return (
             result.failure.get("code") == "task_failed"
             and result.failure.get("phase") == "test"
@@ -1908,6 +1913,14 @@ class CoreAgent:
             and isinstance(baseline.get("head_sha"), str)
             and len(baseline["head_sha"]) in (40, 64)
             and baseline.get("inherited_dirty") == ()
+            and isinstance(checkpoint, dict)
+            and checkpoint.get("branch") == baseline.get("branch")
+            and checkpoint.get("head_sha") == baseline.get("head_sha")
+            and checkpoint.get("stage") == "test"
+            and checkpoint.get("files") == []
+            and checkpoint.get("preexisting_dirty") == []
+            and isinstance(checkpoint.get("state_digest"), str)
+            and len(checkpoint["state_digest"]) == 64
             and values.get("all_required_verification_passed") is True
         )
 

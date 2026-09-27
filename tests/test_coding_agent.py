@@ -1483,6 +1483,15 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(second.result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(second.result.values["status"], "succeeded")
 
+    def test_no_change_report_keeps_the_existing_summary_bound(self) -> None:
+        worktree = _worktree(self.root)
+        attempt = self._run(
+            PlanningModel(), RecordingSession(report="x" * 9_000),
+            task="Confirm app.py exists", worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.values["status"], "no_change_required")
+        self.assertEqual(len(attempt.result.values["summary"]), 8_000)
+
     def test_a_session_failure_is_reported_not_swallowed(self) -> None:
         worktree = _worktree(self.root)
         session = RecordingSession(

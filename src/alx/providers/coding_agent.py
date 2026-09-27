@@ -772,7 +772,7 @@ class CodingAgent:
                         current.head_sha == baseline.head_sha):
                     return self._outcome(
                         status="no_change_required",
-                        summary=session.report.strip() or "the coding session made no file changes",
+                        summary=(session.report.strip() or "the coding session made no file changes")[:8_000],
                         files=(), preexisting_dirty=preexisting_dirty,
                         commands=commands, tests_run=False, tests_passed=None,
                         git_status="", git_diff="", issues=(), review=False,
