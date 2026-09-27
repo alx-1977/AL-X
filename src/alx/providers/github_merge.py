@@ -91,7 +91,7 @@ class GitHubMergeProvider:
         self._max_polls = max_polls
         self._interval = interval_seconds
 
-    def _get(self, path: str, *, missing=None):
+    def _get(self, path: str, *, missing=None, accept_404_message: str | None = None):
         try:
             response = httpx.get(
                 f"{self._api_root}/repos/{self._repository}{path}",
@@ -102,6 +102,20 @@ class GitHubMergeProvider:
         except httpx.HTTPError:
             raise MergeError("merge_unavailable") from None
         if response.status_code == 404 and missing is not None:
+            # An unprotected branch says so. Any other 404, including a token
+            # that cannot read protection, is an unknown state, not "no checks".
+            if accept_404_message is not None:
+                message = ""
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                if isinstance(body, dict):
+                    message = str(body.get("message") or "")
+                if message.casefold() != accept_404_message.casefold():
+                    raise MergeError(
+                        "merge_unavailable", http_status=404, github_message=message
+                    )
             return missing
         if response.status_code != 200:
             code = "merge_refused" if response.status_code in (401, 403) and not _throttled(response) else "merge_unavailable"
@@ -134,7 +148,11 @@ class GitHubMergeProvider:
             if pull["head"].get("repo", {}).get("full_name", "").lower() != self._repository.lower():
                 raise MergeError("branch_behind", github_message="Source repository does not match canonical checkout")
             return "behind", pull
-        required = self._get("/branches/main/protection/required_status_checks", missing={})
+        required = self._get(
+            "/branches/main/protection/required_status_checks",
+            missing={},
+            accept_404_message="Branch not protected",
+        )
         if not isinstance(required, dict):
             raise MergeError("merge_unavailable")
         checks = required.get("checks") or [

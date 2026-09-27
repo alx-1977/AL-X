@@ -278,6 +278,54 @@ class MergeProviderTest(unittest.TestCase):
         self.addCleanup(setattr, github_merge.httpx, "get", original_get)
         return github_merge.GitHubMergeProvider("owner/repo", "token"), sent
 
+    def test_only_an_unprotected_branch_has_no_required_checks(self) -> None:
+        """A 404 that does not say the branch is unprotected is not readiness."""
+        from types import SimpleNamespace
+        from alx.providers import github_merge
+
+        def install(message: str):
+            def get(url, **kwargs):
+                if "/protection/" in url:
+                    return SimpleNamespace(
+                        status_code=404, headers={},
+                        json=lambda: {"message": message},
+                    )
+                if "/compare/" in url:
+                    payload = {"behind_by": 0}
+                else:
+                    payload = {
+                        "head": {"sha": HEAD},
+                        "base": {"ref": "main", "sha": "b" * 40},
+                        "state": "open", "mergeable": True,
+                    }
+                return SimpleNamespace(status_code=200, headers={}, json=lambda: payload)
+
+            github_merge.httpx.get = get
+
+        original = github_merge.httpx.get
+        self.addCleanup(setattr, github_merge.httpx, "get", original)
+        provider = github_merge.GitHubMergeProvider("owner/repo", "token")
+        provider._sleep = lambda seconds: None
+        install("Not Found")
+        with self.assertRaises(MergeError) as caught:
+            provider.merge(MergeRequest(pull_request_number=21, head_sha=HEAD))
+        self.assertEqual(caught.exception.code, "merge_unavailable")
+        install("Branch not protected")
+        sent: dict = {}
+
+        def put(url, json, headers, timeout):  # noqa: A002
+            sent["url"] = url
+            return SimpleNamespace(
+                status_code=200, headers={},
+                json=lambda: {"merged": True, "sha": "c" * 40},
+            )
+
+        original_put = github_merge.httpx.put
+        github_merge.httpx.put = put
+        self.addCleanup(setattr, github_merge.httpx, "put", original_put)
+        provider.merge(MergeRequest(pull_request_number=21, head_sha=HEAD))
+        self.assertIn("/pulls/21/merge", sent["url"])
+
     def test_the_reviewed_head_is_sent_as_sha(self) -> None:
         """This is what makes GitHub refuse a head that moved."""
         provider, sent = self._provider(200, {"merged": True, "sha": "c" * 40})
