@@ -48,7 +48,9 @@ class XeroAccessError(Exception):
 
 
 class XeroAccountingAccount(Protocol):
-    def search_contacts(self, search_term: str) -> tuple[Mapping[str, Any], ...]: ...
+    def search_contacts(
+        self, search_term: str, include_archived: bool = False
+    ) -> tuple[Mapping[str, Any], ...]: ...
 
     def read_contact(self, contact_id: str) -> Mapping[str, Any] | None: ...
 

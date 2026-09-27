@@ -485,9 +485,13 @@ class XeroAccountingAdapter:
         values = body.get(key, ()) if isinstance(body, Mapping) else ()
         return tuple(item for item in values if isinstance(item, Mapping))
 
-    def search_contacts(self, search_term: str) -> tuple[Mapping[str, Any], ...]:
-        body = self._request("GET", f"/Contacts?SearchTerm={quote(search_term)}")
-        return self._items(body, "Contacts")
+    def search_contacts(
+        self, search_term: str, include_archived: bool = False
+    ) -> tuple[Mapping[str, Any], ...]:
+        path = f"/Contacts?SearchTerm={quote(search_term)}"
+        if include_archived:
+            path += "&includeArchived=true"
+        return self._items(self._request("GET", path), "Contacts")
 
     def read_contact(self, contact_id: str) -> Mapping[str, Any] | None:
         body = self._request(

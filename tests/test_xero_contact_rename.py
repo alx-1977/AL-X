@@ -93,7 +93,7 @@ class ContactXero(FakeXero):
     def contacts(self, _value) -> None:
         pass
 
-    def search_contacts(self, term):
+    def search_contacts(self, term, include_archived=False):
         wanted = term.casefold()
         return tuple(
             dict(item)
@@ -101,6 +101,8 @@ class ContactXero(FakeXero):
             # Xero's SearchTerm is a contains-match, so the invoice's legal
             # name does not find the contact while it is still IzwiTech.
             if wanted in item["Name"].casefold()
+            # Xero leaves archived contacts out unless asked for them.
+            and (include_archived or item["ContactStatus"] != "ARCHIVED")
         )
 
     def read_contact(self, contact_id):
@@ -182,6 +184,31 @@ class UpdateContactTests(unittest.TestCase):
         self.assertEqual(result.failure["code"], "contact_name_conflict")
         self.assertEqual(self.xero.renames, [])
 
+    def test_an_archived_namesake_is_refused(self) -> None:
+        """Xero would allow it; D-034 treats it as ambiguous identity."""
+        self.xero.records[OTHER_ID] = {
+            **izwi(),
+            "ContactID": OTHER_ID,
+            "Name": LEGAL_NAME,
+            "ContactStatus": "ARCHIVED",
+        }
+        result = self.update({"contact_id": IZWI_ID, "name": LEGAL_NAME})
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "contact_name_conflict")
+        self.assertEqual(self.xero.renames, [])
+        self.assertEqual(self.xero.records[IZWI_ID]["Name"], "IzwiTech")
+
+    def test_an_archived_contact_with_another_name_does_not_block(self) -> None:
+        self.xero.records[OTHER_ID] = {
+            **izwi(),
+            "ContactID": OTHER_ID,
+            "Name": "Izwi Technology Group (Pty) Ltd - old",
+            "ContactStatus": "ARCHIVED",
+        }
+        result = self.update({"contact_id": IZWI_ID, "name": LEGAL_NAME})
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(self.xero.renames, [(IZWI_ID, LEGAL_NAME)])
+
     def test_a_name_already_in_place_writes_nothing(self) -> None:
         """A retry after an unseen success must not write again."""
         self.xero.records[IZWI_ID]["Name"] = LEGAL_NAME
@@ -241,6 +268,16 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(
             kwargs["json"], {"Contacts": [{"ContactID": IZWI_ID, "Name": LEGAL_NAME}]}
         )
+
+    def test_only_the_conflict_search_asks_for_archived_contacts(self) -> None:
+        response = self.response({"Contacts": []})
+        with patch("httpx.request", return_value=response) as request:
+            self.adapter.search_contacts(LEGAL_NAME)
+            ordinary = request.call_args.args[1]
+            self.adapter.search_contacts(LEGAL_NAME, include_archived=True)
+            conflict = request.call_args.args[1]
+        self.assertNotIn("includeArchived", ordinary)
+        self.assertEqual(conflict, f"{ordinary}&includeArchived=true")
 
     def test_an_unknown_contact_reads_as_absent(self) -> None:
         with patch("httpx.request", return_value=self.response({}, 404)):

@@ -1251,9 +1251,10 @@ def build_xero_executors(
             previous = str(current.get("Name") or "")
             if previous != name:
                 # Two contacts sharing a name is ambiguous identity, and a
-                # later exact-name supplier match would refuse both.
+                # later exact-name supplier match would refuse both. Xero
+                # allows an archived namesake; D-034 does not.
                 wanted = name.casefold()
-                for item in account.search_contacts(name):
+                for item in account.search_contacts(name, include_archived=True):
                     if (
                         str(item.get("ContactID") or "") != contact_id
                         and str(item.get("Name") or "").strip().casefold() == wanted
