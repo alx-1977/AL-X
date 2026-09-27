@@ -214,6 +214,8 @@ class PostCodingTests(unittest.TestCase):
             return Response({'behind_by': self.behind})
         if path == '/branches/main/protection/required_status_checks':
             return Response({'checks': [{'context': 'law-gates', 'app_id': 1}]})
+        if path == '/rules/branches/main':
+            return Response([])
         if '/check-runs?' in path:
             self.check_reads += 1
             return Response({'total_count': 1, 'check_runs': [

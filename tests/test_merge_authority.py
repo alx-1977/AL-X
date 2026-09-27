@@ -269,6 +269,8 @@ class MergeProviderTest(unittest.TestCase):
                 payload = {"behind_by": 0}
             elif "/protection/" in url:
                 payload = {}
+            elif "/rules/branches/" in url:
+                payload = []
             else:
                 payload = {"head": {"sha": OTHER if status == 409 and sent else HEAD}, "base": {"ref": "main", "sha": OTHER},
                            "state": "open", "mergeable": True}
@@ -290,6 +292,8 @@ class MergeProviderTest(unittest.TestCase):
                         status_code=404, headers={},
                         json=lambda: {"message": message},
                     )
+                if "/rules/branches/" in url:
+                    return SimpleNamespace(status_code=200, headers={}, json=lambda: [])
                 if "/compare/" in url:
                     payload = {"behind_by": 0}
                 else:
@@ -324,6 +328,73 @@ class MergeProviderTest(unittest.TestCase):
         github_merge.httpx.put = put
         self.addCleanup(setattr, github_merge.httpx, "put", original_put)
         provider.merge(MergeRequest(pull_request_number=21, head_sha=HEAD))
+        self.assertIn("/pulls/21/merge", sent["url"])
+
+    def test_a_ruleset_check_is_waited_for_without_legacy_protection(self) -> None:
+        """Rulesets require checks even when classic protection is absent."""
+        from types import SimpleNamespace
+        from alx.providers import github_merge
+
+        reads = {"checks": 0}
+        sent: dict = {}
+
+        def get(url, **kwargs):
+            if "/protection/" in url:
+                return SimpleNamespace(
+                    status_code=404, headers={},
+                    json=lambda: {"message": "Branch not protected"},
+                )
+            if "/rules/branches/" in url:
+                return SimpleNamespace(status_code=200, headers={}, json=lambda: [{
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [
+                        {"context": "law-gates", "integration_id": 1},
+                    ]},
+                }])
+            if "/check-runs" in url:
+                reads["checks"] += 1
+                done = reads["checks"] > 1
+                return SimpleNamespace(status_code=200, headers={}, json=lambda: {
+                    "total_count": 1,
+                    "check_runs": [{
+                        "id": 1, "name": "law-gates", "app": {"id": 1},
+                        "status": "completed" if done else "in_progress",
+                        "conclusion": "success" if done else None,
+                    }],
+                })
+            if "/status?" in url:
+                return SimpleNamespace(
+                    status_code=200, headers={}, json=lambda: {"total_count": 0, "statuses": []},
+                )
+            if "/compare/" in url:
+                payload = {"behind_by": 0}
+            else:
+                payload = {
+                    "head": {"sha": HEAD},
+                    "base": {"ref": "main", "sha": "b" * 40},
+                    "state": "open", "mergeable": True,
+                }
+            return SimpleNamespace(status_code=200, headers={}, json=lambda: payload)
+
+        def put(url, json, headers, timeout):  # noqa: A002
+            sent["url"] = url
+            return SimpleNamespace(
+                status_code=200, headers={},
+                json=lambda: {"merged": True, "sha": "c" * 40},
+            )
+
+        original_get = github_merge.httpx.get
+        original_put = github_merge.httpx.put
+        github_merge.httpx.get = get
+        github_merge.httpx.put = put
+        self.addCleanup(setattr, github_merge.httpx, "get", original_get)
+        self.addCleanup(setattr, github_merge.httpx, "put", original_put)
+        provider = github_merge.GitHubMergeProvider(
+            "owner/repo", "token", max_polls=3, interval_seconds=0.01,
+        )
+        provider._sleep = lambda seconds: None
+        provider.merge(MergeRequest(pull_request_number=21, head_sha=HEAD))
+        self.assertGreater(reads["checks"], 1)
         self.assertIn("/pulls/21/merge", sent["url"])
 
     def test_the_reviewed_head_is_sent_as_sha(self) -> None:

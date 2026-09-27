@@ -126,6 +126,42 @@ class GitHubMergeProvider:
         except ValueError:
             raise MergeError("merge_unavailable") from None
 
+    def _required_checks(self) -> list[dict]:
+        """Legacy branch protection and active rulesets, as one check list.
+
+        "Branch not protected" means there is no legacy protection. A ruleset
+        can still require checks, so that response is not an empty set.
+        """
+        legacy = self._get(
+            "/branches/main/protection/required_status_checks",
+            missing={},
+            accept_404_message="Branch not protected",
+        )
+        if not isinstance(legacy, dict):
+            raise MergeError("merge_unavailable")
+        checks = list(legacy.get("checks") or [
+            {"context": name, "app_id": None}
+            for name in legacy.get("contexts", [])
+        ])
+        rules = self._get("/rules/branches/main")
+        if not isinstance(rules, list):
+            raise MergeError("merge_unavailable")
+        seen = {(item.get("context"), item.get("app_id")) for item in checks}
+        for rule in rules:
+            if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+                continue
+            parameters = rule.get("parameters") or {}
+            for item in parameters.get("required_status_checks") or []:
+                if not isinstance(item, dict) or not item.get("context"):
+                    continue
+                app_id = item.get("integration_id")
+                key = (item["context"], app_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                checks.append({"context": item["context"], "app_id": app_id})
+        return checks
+
     def _readiness(self, request: MergeRequest):
         pull = self._get(f"/pulls/{request.pull_request_number}")
         if not isinstance(pull, dict) or not isinstance(pull.get("head"), dict):
@@ -148,16 +184,7 @@ class GitHubMergeProvider:
             if pull["head"].get("repo", {}).get("full_name", "").lower() != self._repository.lower():
                 raise MergeError("branch_behind", github_message="Source repository does not match canonical checkout")
             return "behind", pull
-        required = self._get(
-            "/branches/main/protection/required_status_checks",
-            missing={},
-            accept_404_message="Branch not protected",
-        )
-        if not isinstance(required, dict):
-            raise MergeError("merge_unavailable")
-        checks = required.get("checks") or [
-            {"context": name, "app_id": None} for name in required.get("contexts", [])
-        ]
+        checks = self._required_checks()
         if checks:
             runs = self._get(f"/commits/{request.head_sha}/check-runs?per_page=100")
             statuses = self._get(f"/commits/{request.head_sha}/status?per_page=100")
