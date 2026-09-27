@@ -486,7 +486,7 @@ class MailboxQuotingTests(unittest.TestCase):
             Observations(), 15, connection_factory=lambda *_, **__: connection,
         )
         trash = adapter.move_to_trash(MailReference("INBOX", "1", "2"))
-        self.assertEqual(trash, "Deleted Messages")
+        self.assertEqual(trash.mailbox_id, "Deleted Messages")
         moves = [item for item in connection.commands
                  if item[0] == "UID" and item[1] == "MOVE"]
         self.assertTrue(moves)

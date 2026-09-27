@@ -27,6 +27,20 @@ class MailReference:
 
 
 @dataclass(frozen=True, slots=True)
+class MailMoveResult:
+    """Destination identity exists only after a verified server read-back."""
+
+    mailbox_id: str
+    destination_reference: MailReference | None = None
+
+    def __post_init__(self) -> None:
+        _required(self.mailbox_id, "mailbox_id")
+        if (self.destination_reference is not None
+                and self.destination_reference.mailbox_id != self.mailbox_id):
+            raise ValueError("destination reference names another mailbox")
+
+
+@dataclass(frozen=True, slots=True)
 class MailParticipants:
     """Addresses observed on a message, reported as facts.
 
@@ -257,11 +271,10 @@ class MailAccount(Protocol):
 
     def mark_seen(self, reference: MailReference) -> None: ...
 
-    def file_message(self, reference: MailReference, mailbox: str) -> str: ...
+    def file_message(self, reference: MailReference, mailbox: str) -> MailMoveResult: ...
 
-    def move_to_trash(self, reference: MailReference) -> str: ...
+    def move_to_trash(self, reference: MailReference) -> MailMoveResult: ...
 
 
 class MailObservationControl(Protocol):
     def acknowledge(self, reference: MailReference) -> None: ...
-

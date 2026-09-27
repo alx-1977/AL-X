@@ -29,6 +29,7 @@ from alx.contracts import (  # noqa: E402
     GoalProposal,
     GoalState,
     MailContent,
+    MailMoveResult,
     MailReference,
     Objective,
     RetentionPolicy,
@@ -204,7 +205,7 @@ class FakeAccount:
 
     def move_to_trash(self, reference):
         self.trashed.append(reference)
-        return "Deleted Messages"
+        return MailMoveResult("Deleted Messages", MailReference("Deleted Messages", "888", "7"))
 
 
 class Queued:
@@ -579,7 +580,7 @@ class MailProviderTests(unittest.TestCase):
         first = next_arrival(self.state)
         self.adapter.record_delivery(first.event_id)
         trash = self.adapter.move_to_trash(MailReference("INBOX", "777", "2"))
-        self.assertEqual(trash, "Deleted Messages")
+        self.assertEqual(trash.mailbox_id, "Deleted Messages")
         self.assertEqual(next_arrival(self.state).data["subject"], "Second")
 
     def test_read_uses_peek_and_trash_is_discovered_then_moved(self) -> None:
@@ -590,7 +591,7 @@ class MailProviderTests(unittest.TestCase):
         content = self.adapter.read(reference)
         destination = self.adapter.move_to_trash(reference)
         self.assertEqual(content.body, "The quote is R2,000")
-        self.assertEqual(destination, "Deleted Messages")
+        self.assertEqual(destination.mailbox_id, "Deleted Messages")
         rendered = repr(self.imap.commands)
         self.assertIn("BODY.PEEK[]", rendered)
         # The Trash mailbox name contains a space, so it must reach IMAP quoted.
