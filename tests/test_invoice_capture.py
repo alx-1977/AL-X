@@ -1048,9 +1048,15 @@ class NoFallbackTests(unittest.TestCase):
             for item in XERO_DEFINITIONS
             if item.side_effect is SideEffect.EFFECTFUL
         }
-        # Capture commits a bill; delete discards one. Nothing else writes.
+        # Capture commits a bill; delete discards one. The D-034 contact
+        # rename writes a contact, never a bill. Nothing else writes.
         self.assertEqual(
-            effectful, {CAPTURE_SUPPLIER_INVOICE, "delete_xero_draft_bill"}
+            effectful,
+            {
+                CAPTURE_SUPPLIER_INVOICE,
+                "delete_xero_draft_bill",
+                "update_xero_contact",
+            },
         )
 
     def test_capture_arms_the_reasoning_ceiling_immediately(self) -> None:

@@ -32,15 +32,16 @@ ACCOUNTING_URL = "https://api.xero.com/api.xro/2.0"
 # invoice number.
 _DISCARDED_STATUSES = frozenset({"DELETED", "VOIDED"})
 
-# External protocol identifiers. D-016 deliberately excludes contact writes,
-# payments, bank transactions, journals, reports, payroll, and sales work.
+# External protocol identifiers. D-016 deliberately excludes payments, bank
+# transactions, journals, reports, payroll, and sales work. Contact writes are
+# requested only for D-034's rename of one existing contact.
 XERO_SCOPES = (
     "openid",
     "profile",
     "email",
     "offline_access",
     "accounting.invoices",
-    "accounting.contacts.read",
+    "accounting.contacts",
     "accounting.settings.read",
     "accounting.attachments",
 )
@@ -487,6 +488,34 @@ class XeroAccountingAdapter:
     def search_contacts(self, search_term: str) -> tuple[Mapping[str, Any], ...]:
         body = self._request("GET", f"/Contacts?SearchTerm={quote(search_term)}")
         return self._items(body, "Contacts")
+
+    def read_contact(self, contact_id: str) -> Mapping[str, Any] | None:
+        body = self._request(
+            "GET", f"/Contacts/{quote(contact_id, safe='')}", allow_not_found=True
+        )
+        items = self._items(body, "Contacts") if body is not None else ()
+        return (
+            items[0]
+            if items and str(items[0].get("ContactID") or "") == contact_id
+            else None
+        )
+
+    def rename_contact(self, contact_id: str, name: str) -> Mapping[str, Any]:
+        """D-034. Send only the identity and the new name.
+
+        Xero leaves fields absent from an update unchanged, so nothing else on
+        the contact is restated. The ContactID in the path and the body makes
+        this an update of that contact; a POST without one would create.
+        """
+        body = self._request(
+            "POST",
+            f"/Contacts/{quote(contact_id, safe='')}",
+            json_body={"Contacts": [{"ContactID": contact_id, "Name": name}]},
+        )
+        items = self._items(body, "Contacts")
+        if not items:
+            _raise_clean("response_invalid")
+        return items[0]
 
     def list_accounts(self) -> tuple[Mapping[str, Any], ...]:
         return self._items(self._request("GET", "/Accounts"), "Accounts")

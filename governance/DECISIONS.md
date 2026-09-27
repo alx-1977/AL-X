@@ -2124,3 +2124,17 @@ coding subprocess without stopping AL/X or the server. Neither cancellation
 nor resumption resets, cleans, deletes, or switches away from preserved work.
 This grants no generic Coding Agent branch switching, reset, clean, or Git
 authority. D-033's clean-main rule continues to govern genuinely new jobs.
+
+## D-034 — Xero existing-contact rename
+
+- **Date:** 2026-09-27
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-27.** An Izwi supplier invoice could not be captured because the existing Xero contact is named `IzwiTech` while the invoice names `Izwi Technology Group (Pty) Ltd`, and AL/X could only ask Friedl to rename the contact by hand. Friedl approved closing that capability gap.
+- **Authority.** AL/X may rename one existing Xero contact identified by its exact Xero ContactID. Standing authority applies; Friedl does not need to approve each rename individually.
+- **Permitted.** Change the Name of one existing contact; verify the contact exists before mutation; update by exact ContactID; read the contact back afterward and verify the resulting ContactID and Name.
+- **Not permitted.** Create a contact; archive or delete a contact; merge contacts; change banking, payment, tax, address, phone, email, account or any other contact field; infer or substitute a different ContactID; silently continue if Xero reports a duplicate-name conflict or ambiguous identity.
+- **What AL/X decides.** AL/X remains responsible for deciding that the rename is appropriate from the evidence available in the workflow. The deterministic capability, `update_xero_contact`, performs only the exact approved mutation.
+- **Deterministic sequence under Law 2.** `update_xero_contact` reads the contact by ContactID, refuses one that does not exist, refuses a name another contact already holds, sends only the ContactID and the new Name, and reads the contact back. A name already in place writes nothing. It carries its own permission, `xero.contact.rename`.
+- **Scope.** The requested OAuth scope `accounting.contacts.read` becomes `accounting.contacts`, which the current connection already holds. The granted payment and bank-transaction scopes are not changed by this decision.
+- **Boundary.** This amends the "no contact mutation" boundary of D-016, D-017, D-018, D-020 and D-021 for the rename above only. No other contact mutation, payment, bank reconciliation, sales document, journal or payroll action is authorised. No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+- **Review condition.** Revisit if a contact is renamed that Friedl did not intend, if any field other than Name changes, or if a rename breaks supplier resolution elsewhere, such as the DHL contact matched by `ALX_XERO_DHL_SUPPLIER_NAME`.
