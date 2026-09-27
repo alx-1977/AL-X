@@ -639,9 +639,11 @@ def _tier_settings(
 
 
 AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
-# The exact provider, model and effort EX-001 approves for autonomous turns.
-# Not a default: the only value configuration may take.
-AUTONOMOUS_APPROVED_IDENTITY = ("openai", "gpt-5.6-luna", "max")
+# The exact provider and model EX-001, as amended on 2026-09-27, approves for
+# autonomous turns: the conversational Core itself, on Friedl's Claude
+# subscription. Not a default: the only value configuration may take. The
+# subscription CLI takes no effort setting, so none is part of the identity.
+AUTONOMOUS_APPROVED_IDENTITY = ("claude_subscription", "claude-opus-5-5")
 # The input ceiling the autonomous reservation is computed against. Enforced on
 # the constructed request before dispatch: a bound nothing checks makes the
 # worst case a guess rather than a ceiling.
@@ -661,60 +663,43 @@ def autonomous_reasoning_settings(
 ) -> "ReasoningSettings | None":
     """The Core that answers an autonomous turn, or None when unconfigured.
 
-    Recorded under D-024a as a time-boxed experiment. Absent configuration
-    disables the second reasoner entirely rather than falling back to the
-    conversational Core, because a silent fallback would make the experiment
-    invisible: an autonomous turn would still run, on a model nobody chose.
+    Absent configuration disables autonomous cognition entirely rather than
+    falling back to the conversational Core, because a silent fallback would
+    make it invisible: an autonomous turn would still run, and nobody would
+    have switched it on.
     """
     provider = environment.get("ALX_AUTONOMOUS_PROVIDER", "").strip().lower()
     model = environment.get("ALX_AUTONOMOUS_MODEL", "").strip()
     if not provider or not model:
         return None
-    effort = environment.get("ALX_AUTONOMOUS_EFFORT", "max").strip().lower()
     # EX-001 authorises one exact arrangement, so configuration may install one
     # exact arrangement. Anything else would put an unapproved reasoning
     # authority into production under cover of an exception that does not
     # describe it, and a typo would do it silently. Widening this set requires
     # widening the exception first, which is Friedl's decision and not a
     # configuration change.
-    if (provider, model, effort) != AUTONOMOUS_APPROVED_IDENTITY:
+    if (provider, model) != AUTONOMOUS_APPROVED_IDENTITY:
         approved = "/".join(AUTONOMOUS_APPROVED_IDENTITY)
         raise ConfigurationError(
             f"autonomous cognition is approved under EX-001 for {approved} "
-            f"only; refusing {provider}/{model}/{effort}"
+            f"only; refusing {provider}/{model}"
         )
-    key_name = {
-        "openai": "OPENAI_API_KEY",
-        "xai": "XAI_API_KEY",
-        "kimi": "KIMI_API_KEY",
-    }.get(provider, "ALX_AUTONOMOUS_API_KEY")
-    base_name = {
-        "openai": "OPENAI_BASE_URL",
-        "xai": "XAI_BASE_URL",
-        "kimi": "KIMI_BASE_URL",
-    }.get(provider, "ALX_AUTONOMOUS_BASE_URL")
-    base_fallback = {
-        "openai": "https://api.openai.com",
-        "xai": "https://api.x.ai",
-        "kimi": "https://api.moonshot.ai",
-    }.get(provider, "")
+    # The subscription authenticates through the Claude Code installation:
+    # no key, no base URL, no effort. It waits as long as the conversational
+    # Core does unless told otherwise, because it is the same Core.
     return ReasoningSettings(
         provider=provider,
         model=model,
-        api_key=_configured(
-            environment, "ALX_AUTONOMOUS_API_KEY", key_name, ""
-        ),
-        base_url=_configured(
-            environment, "ALX_AUTONOMOUS_BASE_URL", base_name, base_fallback
-        ).rstrip("/"),
+        api_key="",
+        base_url="",
         timeout_seconds=_positive_integer(
-            environment, "ALX_AUTONOMOUS_TIMEOUT_SECONDS", 120
+            environment,
+            "ALX_AUTONOMOUS_TIMEOUT_SECONDS",
+            _positive_integer(environment, "ALX_REASONING_TIMEOUT_SECONDS", 120),
         ),
-        streaming=_boolean(environment, "ALX_AUTONOMOUS_STREAMING", False),
-        service_tier=environment.get(
-            "ALX_AUTONOMOUS_SERVICE_TIER", "default"
-        ).strip().lower(),
-        effort=effort,
+        streaming=False,
+        service_tier="default",
+        effort="none",
     )
 
 
@@ -1130,17 +1115,31 @@ class RuntimeSettings:
             "xai": "https://api.x.ai",
             "kimi": "https://api.moonshot.ai",
         }.get(reasoning_provider)
+        reasoning = _core_reasoning_settings(
+            environment,
+            reasoning_provider,
+            provider_key_name,
+            provider_base_name,
+            provider_base_fallback,
+        )
+        autonomous = autonomous_reasoning_settings(environment)
+        # The approval is for the conversational Core answering autonomous
+        # turns too. If conversation moved to another model, the approved
+        # autonomous identity would no longer be that Core, and running it
+        # anyway would be a second mind nobody chose.
+        if autonomous is not None and (autonomous.provider, autonomous.model) != (
+            reasoning.provider, reasoning.model
+        ):
+            raise ConfigurationError(
+                "autonomous cognition must use the conversational Core; "
+                f"refusing {autonomous.provider}/{autonomous.model} beside "
+                f"{reasoning.provider}/{reasoning.model}"
+            )
         return cls(
-            reasoning=_core_reasoning_settings(
-                environment,
-                reasoning_provider,
-                provider_key_name,
-                provider_base_name,
-                provider_base_fallback,
-            ),
+            reasoning=reasoning,
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),
-            autonomous=autonomous_reasoning_settings(environment),
+            autonomous=autonomous,
             coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),

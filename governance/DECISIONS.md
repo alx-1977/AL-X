@@ -408,6 +408,17 @@ The daily fuse is unchanged at $0.5405. It remains a fuse rather than a quota or
 
 **Until that decision is recorded, the Luna/Sol split remains explicitly experimental and may not silently become permanent architecture.** The concluding decision is Friedl's, and is one of: Luna remains; move autonomous cognition to Terra; move to Sol; or return to one universal Core model.
 
+**Amendment — 2026-09-27: autonomous turns run on the conversational subscription Core.**
+
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-27**, by written instruction during the PR #77 continuation fix; exact wording for his confirmation at review.
+
+The conversational Core now runs on Friedl's Claude subscription (`claude_subscription` / `claude-opus-5-5`), and every metered key is deliberately disabled. Luna could not run, so autonomous cognition was off and AL/X's durable revisits never woke her. Autonomous turns now use that same subscription Core; EX-001 is amended to match and its table above no longer describes production.
+
+The Luna evaluation is suspended, not concluded: no evidence is recorded for it, and choosing the permanent topology remains the separate decision named above. Until then the two reasoner instances are the same provider and model, differing only in the autonomous input bound and the per-occasion spend ledger.
+
+The subscription bills nothing per token, so its recorded rate is zero and the daily USD fuse no longer limits autonomous turns. The ceiling still applies, unchanged, to any metered model. The remaining D-024 bounds stand: requests are hers, a 60-second minimum horizon, one Core turn at a time, a bounded step budget per turn, and the master switch. The subscription's usage limits are shared with conversation, so autonomous turns spend the same allowance Friedl talks to her on.
+
 ## D-025 — Public web read authority (Web Access V1)
 
 - **Date:** 2026-09-04

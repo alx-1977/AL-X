@@ -44,6 +44,9 @@ RESOLVE_UNDELIVERED_RESPONSE = "resolve_undelivered_response"
 # a long list is trimmed by count rather than by anyone deciding which of her
 # thoughts is worth seeing.
 OPEN_THOUGHT_LIMIT = 20
+# The same kind of bound for her pending revisits: a count, soonest first, so
+# nothing decides which of her requests she is shown.
+PENDING_REVISIT_LIMIT = 20
 
 # A self-requested occasion may not be immediate. This is the mechanical
 # anti-tight-loop bound from D-024: it stops a turn spawning a turn without

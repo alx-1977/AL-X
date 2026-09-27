@@ -38,7 +38,7 @@ from alx.bootstrap.autonomous import (
 )
 from alx.bootstrap.continuity import build_continuity_runtime
 from alx.contracts.notebook import OPEN_NOTEBOOK_THREAD_LIMIT
-from alx.tools import OPEN_THOUGHT_LIMIT
+from alx.tools import OPEN_THOUGHT_LIMIT, PENDING_REVISIT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
 from alx.bootstrap.xero import (
@@ -843,6 +843,12 @@ async def run(repository_root: Path) -> None:
         open_thoughts=lambda: continuity_runtime.store.open_thoughts(
             OPEN_THOUGHT_LIMIT
         ),
+        # Her pending revisits, bounded the same way, for every turn. So she
+        # can see what she already asked to come back to, and withdraw what
+        # another revisit or finished work has made unnecessary.
+        pending_revisits=lambda: continuity_runtime.store.pending()[
+            :PENDING_REVISIT_LIMIT
+        ],
         # Her open enquiries, from the one notebook store. Context only: a
         # thread never creates an occasion, and nothing here schedules a
         # return to one. Continuity of interest; opportunity stays hers to
