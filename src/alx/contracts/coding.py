@@ -489,9 +489,9 @@ class LocalReviewFinding:
 
     def __post_init__(self) -> None:
         _required(self.title, "title")
-        metric = self.severity.strip().lower() if isinstance(self.severity, str) else ""
+        label = self.severity.strip().lower() if isinstance(self.severity, str) else ""
         object.__setattr__(
-            self, "severity", metric if metric in ("low", "medium", "high") else "unknown"
+            self, "severity", label if label in ("low", "medium", "high") else "unknown"
         )
 
     @property

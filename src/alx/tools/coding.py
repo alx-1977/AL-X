@@ -139,8 +139,9 @@ _VERIFICATION_CHECK = StructuredSchema(
         # What a failed content check found, so Core is told why rather than
         # having to infer it from a bare false.
         "findings": _STRING_ARRAY,
+        "baseline": _STRING,
     },
-    ("name", "argv", "reason", "ran", "passed", "kind", "findings"),
+    ("name", "argv", "reason", "ran", "passed", "kind", "findings", "baseline"),
     extra_properties=False,
 )
 
