@@ -52,6 +52,9 @@ DEFINITION = CapabilityDefinition(
     "Ask the configured external reviewer to review one pull request. "
     "Requests a review of whatever revision the pull request currently points "
     "at, waits boundedly for publication, and reports that revision and wait_state. "
+    "If the reviewer is already reviewing, or has reviewed, that exact revision, "
+    "nothing new is requested (requested is false) and the wait attaches to that "
+    "review. "
     "Read the completed review to judge it; never request another review to poll.",
     StructuredSchema(
         ValueKind.OBJECT,

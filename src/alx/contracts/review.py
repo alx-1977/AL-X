@@ -78,6 +78,10 @@ class ReviewOutcome:
     reaches the work, so a head that moved in between means the revision it
     examined is not established. Empty says that plainly; naming the commit
     that happened to be current a moment earlier would be a false record.
+
+    `requested` is false when no trigger was posted because the reviewer's own
+    status already showed a round running or completed on `head_sha`. The
+    outcome then names that round's revision, and the wait attaches to it.
     """
 
     pull_request_number: int

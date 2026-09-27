@@ -46,7 +46,7 @@ from alx.tools.review_content import (
     READ_EXTERNAL_REVIEW,
     build_review_content_executors,
 )
-from tests.review_transcript import HEAD, PUBLISHED_AT, REVIEWER_LOGIN
+from tests.review_transcript import HEAD, PUBLISHED_AT, REVIEWER_LOGIN, statuses_route
 
 REVIEWER = "coderabbit"
 SUMMARY = f"Formal review body. Reviewed up to {HEAD}."
@@ -137,6 +137,9 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         def request(method, url, **keywords):
             if method != "GET":
                 raise AssertionError("the handoff reads; it must not write")
+            listed = statuses_route(url)
+            if listed is not None:
+                return Response(listed)
             base = url.split("?")[0]
             first = "page=1" in url
             if base.endswith("/issues/21/comments"):

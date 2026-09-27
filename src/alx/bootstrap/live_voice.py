@@ -368,9 +368,9 @@ async def run(repository_root: Path) -> None:
     opportunity_ledger = SQLiteOpportunityLedger(
         storage_root / "cognition-opportunities.sqlite3"
     )
-    # D-024: AL/X may ask for another cognition opportunity later. Phase 4
-    # creates and withdraws those requests durably; nothing honours them until
-    # the opportunity source exists, so this is inert on its own.
+    # D-024: AL/X may ask for another cognition opportunity later. Requests
+    # are created and withdrawn durably here; the occasion sources composed
+    # below honour them only while an autonomous Core is configured.
     continuity_runtime = build_continuity_runtime(
         storage_root,
         voice_settings.goal_retention_days,
@@ -383,6 +383,10 @@ async def run(repository_root: Path) -> None:
         # So she can close an undelivered occasion once she has decided what
         # to do about it. Only she may: nothing expires it.
         occasions=opportunity_ledger,
+        # The same condition that enables every occasion source below. When
+        # it is false her requests are still kept, and each receipt says no
+        # occasion will arise from it in this runtime.
+        autonomous_available=providers.autonomous is not None,
     )
     for definition in continuity_runtime.definitions:
         registry.register(definition)
@@ -390,10 +394,11 @@ async def run(repository_root: Path) -> None:
     executors.update(continuity_runtime.executors)
     permissions.update(continuity_runtime.permissions)
 
-    # D-024 Phases 2 and 5, composed but inert. The ledgers and the source are
-    # constructed here, once, so the paid path is real rather than something
-    # that only exists in tests. Nothing polls the source and nothing calls
-    # run_due(): activation is Phase 8 and is Friedl's to switch on.
+    # D-024 Phases 2 and 5. The ledgers and the source are constructed here,
+    # once, so the paid path is real rather than something that only exists
+    # in tests. The due-cognition tick below polls every source; each one
+    # produces nothing unless an autonomous Core is configured, which is
+    # Friedl's to switch on (EX-001 names the only permitted configuration).
     #
     # The source is enabled only when an autonomous Core is actually
     # configured. Without one an autonomous turn would be refused at the

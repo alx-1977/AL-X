@@ -69,7 +69,10 @@ REQUEST_DEFINITION = CapabilityDefinition(
     REQUEST_FUTURE_COGNITION,
     "Ask for another cognition opportunity no earlier than a given time, "
     "carrying a private note to your future self. The note is stored and "
-    "returned to you unread; nothing interprets it.",
+    "returned to you unread; nothing interprets it. autonomous_cognition says "
+    "whether this runtime can give you that opportunity: when it is "
+    "unavailable the request is kept, but no occasion arises until autonomous "
+    "cognition is enabled, so nothing will happen at that time by itself.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -87,6 +90,7 @@ REQUEST_DEFINITION = CapabilityDefinition(
             "request_id": _STRING,
             "not_before": _STRING,
             "status": _STRING,
+            "autonomous_cognition": _STRING,
         },
         ("request_id", "not_before", "status"),
         extra_properties=False,
@@ -234,6 +238,10 @@ def build_continuity_executors(
     clock: Callable[[], datetime] | None = None,
     conversation_id_source: Callable[[], str] | None = None,
     occasions: Any = None,
+    # Whether a matured request can become a Core turn in this runtime. A
+    # fact about composition, reported so AL/X never tells anyone she will
+    # look again at a time nothing will wake her.
+    autonomous_available: bool = False,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Bind both primitives to the one durable continuity store."""
     now_of = clock or (lambda: datetime.now(UTC))
@@ -277,6 +285,9 @@ def build_continuity_executors(
                 "request_id": stored.request_id,
                 "not_before": stored.not_before.isoformat(),
                 "status": stored.status.value,
+                "autonomous_cognition": (
+                    "available" if autonomous_available else "unavailable"
+                ),
             },
             # The receipt names the request; it does not repeat her note back
             # into goal state, where it would become durable prose nobody asked

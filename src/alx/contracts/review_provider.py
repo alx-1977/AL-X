@@ -68,6 +68,14 @@ class ReviewProviderProfile:
     trigger: str
     # The exact GitHub logins this reviewer publishes under.
     allowed_logins: frozenset[str]
+    # The commit-status context this reviewer publishes on the revision it is
+    # reviewing, when that is verified. It is the reviewer's own structured
+    # statement of where a review round stands — pending while it works,
+    # terminal once it has finished — and it is the only one: a summary
+    # comment is posted as a placeholder the moment a round starts and edited
+    # in place afterwards, so its existence says a review began, not that one
+    # finished. Empty where no status has been verified for this reviewer.
+    status_context: str = ""
 
     def authored_by_reviewer(self, login: object) -> bool:
         """Whether this GitHub account is the configured reviewer.
@@ -94,6 +102,11 @@ PROFILES: dict[ReviewProvider, ReviewProviderProfile] = {
         # Verified against this repository: every review CodeRabbit has
         # published here came from this account (id 136622811).
         allowed_logins=frozenset({"coderabbitai[bot]"}),
+        # Verified on PR #77: `pending` "Review in progress" when a round
+        # starts, `success` "Review completed" once its findings are
+        # published, each on the exact commit reviewed and created by the
+        # account above.
+        status_context="CodeRabbit",
     ),
     # Greptile's documented trigger. It has published no review here yet, so
     # both accounts it is known to publish under are listed rather than one

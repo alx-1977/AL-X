@@ -13,7 +13,11 @@ A new pull request is reviewed without being asked. The trigger exists for the
 other case: a corrective commit moved the head, the previous review is evidence
 about a revision that no longer exists, and a fresh look is needed. So a request
 is a comment, and the outcome records the revision the pull request pointed at
-when it was left.
+when it was left. Where the reviewer's status shows it already reviewing or
+done reviewing that revision, no comment is left and the wait joins that round.
+
+A review round ends when the reviewer's commit status on the revision says so.
+Until then nothing it has published about the revision is reported as a review.
 
 ## Reading
 
@@ -53,6 +57,8 @@ import httpx
 
 from alx.contracts.review import ReviewError, ReviewOutcome, ReviewRequest
 from alx.contracts.review_content import (
+    REVIEW_FAILED,
+    REVIEW_IN_PROGRESS,
     ReviewComment,
     ReviewContent,
     ReviewContentRequest,
@@ -81,6 +87,12 @@ MAX_PAGES = 10
 # Why a read found nothing. A fact about the search — this reviewer has not
 # published about this revision — never an opinion about the code.
 NO_REVIEW_FOR_REVISION = "no_review_for_revision"
+
+# Commit-status states that end a review round. `pending` is the round still
+# running; anything GitHub adds later is not known to be an end, so it is read
+# as still running rather than as finished.
+_COMPLETED_STATE = "success"
+_FAILED_STATES = frozenset({"failure", "error"})
 
 
 def _moment(value: object) -> datetime | None:
@@ -177,10 +189,56 @@ class GitHubReviewProvider:
         sha = head.get("sha") if isinstance(head, dict) else None
         return sha if isinstance(sha, str) and _SHA.fullmatch(sha) else ""
 
+    def _round(self, head_sha: str) -> str | None:
+        """Where this reviewer's latest review round of this revision stands.
+
+        Read from the commit status the reviewer publishes on the exact commit
+        it is reviewing, by its own account. That binds the round to the head
+        by GitHub's data rather than by prose, and says whether the round has
+        ended, which nothing else it publishes does: its summary comment is
+        posted as a placeholder when the round starts. Taking that placeholder
+        for a review completed the wait on PR #77 three minutes before the
+        finding it was waiting for existed.
+
+        Returns the latest state, or None when this reviewer has published no
+        status on this revision.
+        """
+        statuses = [
+            item
+            for item in self._pages(
+                f"/repos/{self._repository}/commits/{head_sha}/statuses"
+            )
+            if isinstance(item, dict)
+            and item.get("context") == self._profile.status_context
+            and isinstance(item.get("creator"), dict)
+            and self._profile.authored_by_reviewer(item["creator"].get("login"))
+            and isinstance(item.get("state"), str)
+        ]
+        if not statuses:
+            return None
+        # GitHub lists a commit's statuses newest first, and `max` keeps the
+        # first of equals, so a same-second transition resolves to the newer.
+        latest = max(
+            statuses,
+            key=lambda item: _moment(item.get("created_at"))
+            or datetime.min.replace(tzinfo=UTC),
+        )
+        return latest["state"]
+
     # ---- requesting -----------------------------------------------------
 
     def request(self, review: ReviewRequest) -> ReviewOutcome:
-        """Ask the configured reviewer to look at this pull request again."""
+        """Ask the configured reviewer to look at this pull request again.
+
+        Unless it is already looking. A reviewer that reviews a pull request
+        unasked has usually started on the current head before anyone asks,
+        and a trigger then is a second request for work already underway: on
+        PR #77 it was posted ten seconds after the automatic round began, and
+        answered "Already reviewed the last commit." Where the reviewer's own
+        status shows a round running or completed on this exact head, nothing
+        is posted and the outcome says so; the caller's wait attaches to that
+        round. A failed round, or none, still gets the trigger.
+        """
         number = review.pull_request_number
         # Stamped before the trigger goes out, never after. The observer
         # refuses a review published at or before this moment, because such a
@@ -193,6 +251,19 @@ class GitHubReviewProvider:
         requested_at = self._now()
         try:
             head = self._head(number)
+            if head and self._profile.status_context:
+                state = self._round(head)
+                if state is not None and state not in _FAILED_STATES:
+                    # The round is bound to this head by the reviewer's own
+                    # status, so the head is established without a trigger
+                    # having gone out for it to move under.
+                    return ReviewOutcome(
+                        pull_request_number=number,
+                        head_sha=head,
+                        requested=False,
+                        reviewer=self._profile.reviewer,
+                        requested_at=requested_at,
+                    )
             self._call(
                 "POST",
                 f"/repos/{self._repository}/issues/{number}/comments",
@@ -314,6 +385,15 @@ class GitHubReviewProvider:
         number = request.pull_request_number
         head_sha = request.head_sha
         try:
+            # The round's state first, then its content. The reviewer
+            # publishes its findings before it marks the round ended, so
+            # content read after an ended round includes them; read the other
+            # way round, a round ending between the two reads would pair a
+            # completed status with content fetched before the findings
+            # existed.
+            state = (
+                self._round(head_sha) if self._profile.status_context else _COMPLETED_STATE
+            )
             issue_comments = self._pages(
                 f"/repos/{self._repository}/issues/{number}/comments"
             )
@@ -325,6 +405,27 @@ class GitHubReviewProvider:
             # declares one code for that, and inventing a second here would be
             # a distinction nothing downstream can act on.
             raise ReviewReadError("review_unavailable") from error
+
+        # Nothing is a review of this revision until the reviewer says its
+        # round on this revision has ended. Before that, whatever it has
+        # published here is a placeholder or a partial account, and reporting
+        # it as available settles a wait on evidence the real review will
+        # contradict.
+        if state != _COMPLETED_STATE:
+            return ReviewContent(
+                pull_request_number=number,
+                head_sha=head_sha,
+                reviewer=self._profile.reviewer,
+                available=False,
+                retrieved_at=self._now(),
+                unavailable_reason=(
+                    NO_REVIEW_FOR_REVISION
+                    if state is None
+                    else REVIEW_FAILED
+                    if state in _FAILED_STATES
+                    else REVIEW_IN_PROGRESS
+                ),
+            )
 
         # The review object submitted against this exact revision, where there
         # is one. It is what binds the inline findings below: comments belong

@@ -47,6 +47,12 @@ from alx.contracts.task import TaskState  # noqa: E402
 from alx.providers.github_review import GitHubReviewProvider  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.tools.review import REQUEST_EXTERNAL_REVIEW  # noqa: E402
+from tests.review_transcript import (  # noqa: E402
+    ended_round,
+    running_round,
+    status,
+    statuses_route,
+)
 
 
 HEAD = "a" * 40
@@ -369,9 +375,15 @@ class ConfiguredProviderTest(unittest.TestCase):
         after: str | None = None,
         post_headers: dict | None = None,
         provider: ReviewProvider = ReviewProvider.CODERABBIT,
+        statuses: dict[str, list] | None = None,
     ):
-        """`after` is the head on the second read, when it differs."""
-        calls: dict = {"get": [], "post": []}
+        """`after` is the head on the second read, when it differs.
+
+        `statuses` is what the reviewer has published per revision. Absent,
+        it has published nothing on any: no round is running, so a request
+        is exactly what is needed.
+        """
+        calls: dict = {"get": [], "post": [], "statuses": []}
 
         class Response:
             def __init__(self, status, body, response_headers=None):
@@ -386,6 +398,10 @@ class ConfiguredProviderTest(unittest.TestCase):
             if method == "POST":
                 calls["post"].append((url, keywords.get("json")))
                 return Response(post_status, {}, post_headers)
+            listed = statuses_route(url, statuses or {})
+            if listed is not None:
+                calls["statuses"].append(url)
+                return Response(200, listed)
             calls["get"].append(url)
             current = head if not calls["post"] else (after if after else head)
             return Response(200, {"head": {"sha": current}})
@@ -534,9 +550,17 @@ class RequestBoundaryTests(unittest.TestCase):
             def json(self):
                 return self._body
 
+        posted: list = []
+
         def request(method, url, **keywords):
             if method == "POST":
+                posted.append(url)
                 return Response({})
+            # No round on this head until the trigger goes out; the one it
+            # starts has ended by the time the observer looks.
+            listed = statuses_route(url, {HEAD: ended_round()} if posted else {})
+            if listed is not None:
+                return Response(listed)
             base = url.split("?")[0]
             first = "page=1" in url
             if base.endswith("/reviews"):

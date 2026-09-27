@@ -79,6 +79,23 @@ def _review(
     }
 
 
+def _status(state: str = "success", when: str = "2026-09-06T20:11:30Z",
+            login: str = REVIEWER_LOGIN, context: str = "CodeRabbit") -> dict:
+    """One commit status, as GitHub lists it for a revision.
+
+    `success` is how CodeRabbit marks a review round ended; `pending` is the
+    round still running. Every fake reviewer here publishes one, because the
+    real one does on every revision it reviews.
+    """
+    return {
+        "context": context,
+        "state": state,
+        "description": "Review completed" if state == "success" else "Review in progress",
+        "creator": {"login": login},
+        "created_at": when,
+    }
+
+
 def summary_of(body: str, sha: str) -> str:
     """The full summary text `_review` publishes for this content."""
     return f"{body}\n\nReviewed up to {sha}."
@@ -97,8 +114,13 @@ class FakeGitHub:
         reviews: list,
         comments: dict[int, list] | None = None,
         issue_comments: list | None = None,
+        statuses: dict[str, list] | None = None,
     ) -> None:
         self._reviews = reviews
+        # Commit statuses by revision. Absent, every revision's round has
+        # ended, which is the state every read test before the terminal
+        # signal existed was describing.
+        self.statuses = statuses
         # The issue thread, where reviewers publish their summary prose.
         self.issue_comments = list(issue_comments or [])
         # Inline comments, flattened: the provider reads a pull request's
@@ -114,6 +136,13 @@ class FakeGitHub:
             raise AssertionError(f"the reader must not {method}")
         base = url.split("?")[0]
         first = "page=1" in url
+        if base.endswith("/statuses"):
+            sha = base.split("/")[-2]
+            listed = (
+                [_status()] if self.statuses is None
+                else self.statuses.get(sha, [])
+            )
+            return _Response(listed if first else [])
         if base.endswith("/reviews"):
             return _Response(self._reviews if first else [])
         if "/issues/" in base and base.endswith("/comments"):
@@ -188,6 +217,9 @@ class FindingsWithoutEmailTests(ProviderTestCase):
             self.assertIn("/repos/owner/repo/", url)
             self.assertTrue(
                 "/pulls/21" in url or "/issues/21/comments" in url
+                # The reviewer's status on the exact revision asked about,
+                # and on no other.
+                or f"/commits/{HEAD}/statuses" in url
             )
 
     def test_a_clean_review_is_retrieved_the_same_way(self) -> None:
@@ -945,6 +977,8 @@ class PaginationFailsClosedTests(unittest.TestCase):
         def request(method, url, **keywords):
             base = url.split("?")[0]
             page = int(url.rsplit("&page=", 1)[1])
+            if base.endswith("/statuses"):
+                return Response([_status()] if page == 1 else [])
             if base.endswith("/reviews"):
                 return Response([_review(HEAD, "Summary.")] if page == 1 else [])
             if "/issues/" in base:

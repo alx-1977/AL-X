@@ -32,6 +32,12 @@ REVIEW_ID = 5001
 STALE_REVIEW_ID = 5000
 PUBLISHED_AT = "2026-09-07T06:15:00Z"
 STALE_PUBLISHED_AT = "2026-09-07T05:00:00Z"
+# The reviewer's own round markers on a revision, as PR #77 recorded them: a
+# `pending` status when the round starts, the findings, then `success` seconds
+# after the findings are published.
+ROUND_STARTED_AT = "2026-09-07T06:12:00Z"
+ROUND_ENDED_AT = "2026-09-07T06:15:07Z"
+STATUS_CONTEXT = "CodeRabbit"
 
 SUMMARY_BODY = (
     "**Actionable comments posted: 1**\n\n"
@@ -49,6 +55,49 @@ STALE_INLINE_BODY = "The earlier revision left this cursor unclosed."
 
 def _user(login: str) -> dict:
     return {"login": login, "type": "Bot" if login.endswith("[bot]") else "User"}
+
+
+def status(state: str = "success", created_at: str = ROUND_ENDED_AT,
+           login: str = REVIEWER_LOGIN, context: str = STATUS_CONTEXT) -> dict:
+    """One commit status, as GitHub lists it for a revision."""
+    return {
+        "context": context,
+        "state": state,
+        "description": {
+            "pending": "Review in progress",
+            "success": "Review completed",
+        }.get(state, "Review failed"),
+        "creator": _user(login),
+        "created_at": created_at,
+    }
+
+
+def ended_round() -> list[dict]:
+    """A revision whose review round has finished, newest first like GitHub."""
+    return [status("success", ROUND_ENDED_AT), status("pending", ROUND_STARTED_AT)]
+
+
+def running_round() -> list[dict]:
+    """A revision the reviewer has started on and not finished."""
+    return [status("pending", ROUND_STARTED_AT)]
+
+
+def statuses_route(url: str, by_revision: dict[str, list[dict]] | None = None):
+    """The statuses listed for the revision a statuses URL names, or None.
+
+    Every fake GitHub in the tests answers this through here. Absent a
+    mapping, every revision's round has ended, which is what a reviewer that
+    has published its review of a revision has also done.
+    """
+    parsed = urlparse(url)
+    parts = parsed.path.rstrip("/").split("/")
+    if len(parts) < 3 or parts[-1] != "statuses" or parts[-3] != "commits":
+        return None
+    if int(parse_qs(parsed.query).get("page", ["1"])[0]) != 1:
+        return []
+    if by_revision is None:
+        return ended_round()
+    return list(by_revision.get(parts[-2], []))
 
 
 def issue_comments() -> list[dict]:
@@ -164,6 +213,7 @@ def transport(
     comments: list[dict] | None = None,
     inline: list[dict] | None = None,
     submitted: list[dict] | None = None,
+    statuses: dict[str, list[dict]] | None = None,
 ):
     """A stand-in for GitHub that answers the production path's real calls.
 
@@ -199,6 +249,9 @@ def transport(
             return Response(lines if page == 1 else [])
         if method == "GET" and path.endswith(f"/pulls/{number}/reviews"):
             return Response(rounds if page == 1 else [])
+        listed = statuses_route(url, statuses) if method == "GET" else None
+        if listed is not None:
+            return Response(listed)
         raise AssertionError(f"unexpected call: {method} {url}")
 
     request.posted = posted  # type: ignore[attr-defined]
@@ -219,9 +272,13 @@ __all__ = [
     "STALE_SUMMARY_BODY",
     "SUMMARY_BODY",
     "SUMMARY_COMMENT_ID",
+    "ended_round",
     "inline_comments",
     "issue_comments",
     "reviews",
     "pull_request",
+    "running_round",
+    "status",
+    "statuses_route",
     "transport",
 ]

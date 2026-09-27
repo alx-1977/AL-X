@@ -200,6 +200,17 @@ class PostCodingTests(unittest.TestCase):
                              'base': {'sha': self.base, 'ref': 'main'}, 'state': 'open',
                              'merged': self.merged, 'merge_commit_sha': self.merge_sha,
                              'mergeable': True, 'mergeable_state': 'clean'})
+        if path.startswith(f'/commits/{self.head}/statuses'):
+            # The reviewer's own round marker: nothing until the trigger goes
+            # out, pending while its comment still says it is in progress
+            # (the next comment read is still inside `review_pending`), then
+            # completed.
+            if not self.request_count or 'page=1' not in path:
+                return Response([])
+            state = 'pending' if self.review_reads < self.review_pending else 'success'
+            return Response([{'context': 'CodeRabbit', 'state': state,
+                              'creator': {'login': 'coderabbitai[bot]'},
+                              'created_at': self.now.isoformat()}])
         if path.startswith('/issues/72/comments'):
             self.review_reads += 1
             if self.review_reads <= self.review_pending:
