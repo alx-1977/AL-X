@@ -1,15 +1,12 @@
 """The Claude subscription reasoner: fails closed, and never bills.
 
-Reasoning calls fake the process boundary. A local help-only probe checks the
-installed CLI contract without making a model call or consuming tokens.
+Reasoning calls fake the process boundary. The argv those calls build is what
+this file locks. Installed-CLI help wording lives under evaluation/toolchain.
 """
 
 from __future__ import annotations
 
 import json
-import re
-import shutil
-import tempfile
 import subprocess
 import sys
 import unittest
@@ -217,50 +214,6 @@ class NoClaudeCapabilitiesTest(unittest.TestCase):
                          {"mcpServers": {}})
         self.assertNotIn("--allowed-tools", command)
         self.assertNotIn("--disallowed-tools", command)
-
-    def test_installed_cli_help_documents_isolation_contract(self) -> None:
-        executable = shutil.which("claude")
-        if executable is None:
-            self.skipTest("unverified on this CLI: claude is not installed")
-        model = ClaudeSubscriptionReasoningModel("opus", 60)
-        with tempfile.TemporaryDirectory(prefix="alx-claude-help-") as cwd:
-            result = subprocess.run(
-                [executable, "--help"], cwd=cwd, env=model.child_environment(),
-                capture_output=True, text=True, timeout=15, check=True,
-            )
-        def option(flag: str) -> tuple[str, set[str]]:
-            lines = result.stdout.splitlines()
-            start = next(
-                (index for index, line in enumerate(lines)
-                 if re.search(rf"(?:^|\s){re.escape(flag)}(?:\s|$)", line)),
-                None,
-            )
-            self.assertIsNotNone(start, f"installed Claude CLI lacks {flag}")
-            block = [lines[start]]
-            for line in lines[start + 1:]:
-                if re.match(r"^  (?:-\w, )?--[a-z]", line):
-                    break
-                block.append(line)
-            description = " ".join(" ".join(block).split()).lower()
-            return description, set(re.findall(r"[a-z]+", description))
-
-        tools, tool_words = option("--tools")
-        self.assertIn('""', tools)
-        self.assertTrue({"disable", "all", "tools"} <= tool_words)
-        _strict_mcp, strict_mcp_words = option("--strict-mcp-config")
-        self.assertTrue(
-            {"only", "mcp", "servers", "ignoring", "other", "configurations"}
-            <= strict_mcp_words
-        )
-        _mcp, mcp_words = option("--mcp-config")
-        self.assertTrue({"load", "mcp", "servers", "json", "strings"} <= mcp_words)
-        _sources, source_words = option("--setting-sources")
-        self.assertTrue({"user", "project", "local"} <= source_words)
-        _persistence, persistence_words = option("--no-session-persistence")
-        self.assertTrue(
-            {"disable", "persistence", "saved", "resumed", "print"}
-            <= persistence_words
-        )
 
     def test_private_empty_cwd_is_unique_and_cleaned_on_every_exit(self) -> None:
         directories = []

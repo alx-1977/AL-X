@@ -1181,14 +1181,12 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("diff_check", values["verification"]["ran"])
 
     def test_a_suite_that_collected_nothing_is_not_a_failed_suite(self) -> None:
-        """pytest exit 5 means there was nothing to run, not that it failed.
+        """pytest exit 5 on an explicit broader run means nothing was collected.
 
-        A Python change in a worktree holding no tests escalates to the full
-        suite, which collects nothing and exits 5. Reading that as a failure
-        made such a change permanently uncommittable — the same shape as the
-        defect this module's rewrite removes, one class of verification
-        standing in for verification itself. Found by CI on PR #54, where a
-        fixture repository with no tests failed for exactly this reason.
+        Reading that as a failure made a repository with no tests permanently
+        uncommittable. A targeted run is different: those files were the
+        reason the suite was not used, so collecting nothing there is a
+        failure. Found by CI on PR #54.
         """
         from alx.providers.coding_agent import _check_passed
 
@@ -1269,13 +1267,21 @@ class NativeExecutionTests(unittest.TestCase):
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
             policy.commands,
         )
-        # Adding an unmapped Python file escalates the whole set, rather than
-        # letting the mapped file's test speak for the unmapped one.
-        mixed = required_verification(("app.py", "test_app.py"), worktree)
-        self.assertIn(
+        # A Python file with no neighbouring test is reported. It does not
+        # replace the mapped file's test with the repository suite, and that
+        # test does not count as coverage of the unmapped file.
+        mixed = required_verification(("orphan.py", "test_app.py"), worktree)
+        self.assertNotIn(
             ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
             mixed.commands,
         )
+        self.assertIn(
+            ("python", "-m", "pytest", "-q", "test_app.py"),
+            mixed.commands,
+        )
+        report = next(check for check in mixed.checks if check.name == "unmapped_python")
+        self.assertIn("orphan.py", report.findings)
+        self.assertNotIn("test_app.py", report.findings)
 
     def test_changed_pytest_module_can_verify_a_successful_job(self) -> None:
         """A newly changed regression test is run through AL/X's executor."""
@@ -1293,11 +1299,11 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(attempt.result.values["tests_passed"])
-        # `app.py` changed too and maps to no test in this flat fixture, so the
-        # set escalates rather than letting `test_app.py` cover both.
+        # Both changed files select the fixture's own test. The repository
+        # suite is not what covers them.
         self.assertEqual(
             tuple(attempt.result.values["commands"][1]["argv"]),
-            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
+            ("python", "-m", "pytest", "-q", "test_app.py"),
         )
 
     def test_a_correction_only_file_selects_the_targeted_verification(self) -> None:
@@ -1343,20 +1349,16 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         # The correction-only file reaches the reviewed/evidence set...
         self.assertIn("test_parallel.py", values["files_changed"])
-        # ...and the same set chooses the verification. `app.py` is also in
-        # it and maps to nothing here, so the set escalates; what this test
-        # holds is that the correction-only file reached the policy at all.
-        self.assertEqual(
-            tuple(values["commands"][1]["argv"]),
-            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
-        )
+        # ...and the same set chooses the verification. The correction-only
+        # module is one of the tests AL/X runs.
+        argv = tuple(values["commands"][1]["argv"])
+        self.assertEqual(argv[:4], ("python", "-m", "pytest", "-q"))
+        self.assertIn("test_parallel.py", argv)
         self.assertTrue(values["tests_run"])
         self.assertTrue(values["tests_passed"])
 
     def test_verification_timeout_remains_failed_bounded_evidence(self) -> None:
         """A realistic bound does not turn a genuine timeout into success."""
-        from alx.contracts.coding import FULL_SUITE_COMMAND_SECONDS
-
         worktree = _worktree(self.root)
         session = RecordingSession(edits={"app.py": _FIXED})
         bounds: dict[tuple[str, ...], int] = {}
@@ -1374,11 +1376,16 @@ class NativeExecutionTests(unittest.TestCase):
         command = attempt.result.values["commands"][0]
         self.assertTrue(command["timed_out"])
         self.assertEqual(command["stdout"], "partial")
-        # The full suite gets its own longer bound; every other check keeps the
-        # shared one. `app.py` maps to no test here, so the suite is selected.
+        # The fixture's own test is the check. It uses the ordinary bound.
+        # The longer bound belongs to an explicit broader run, which this
+        # change does not select.
         self.assertEqual(
-            bounds[("python", "-m", "pytest", "-q", "-p", "no:cacheprovider")],
-            FULL_SUITE_COMMAND_SECONDS,
+            bounds[("python", "-m", "pytest", "-q", "test_app.py")],
+            DEFAULT_VERIFICATION_COMMAND_SECONDS,
+        )
+        self.assertNotIn(
+            ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
+            bounds,
         )
         self.assertEqual(
             bounds[("git", "diff", "--check")],

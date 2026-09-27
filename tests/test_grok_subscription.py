@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -304,35 +303,6 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(attempt.result.values["status"], "failed")
         self.assertTrue(runner.calls)
         self.assertEqual(runner.calls[0]["command"][0], "grok")
-
-    def test_installed_cli_help_documents_the_headless_contract(self) -> None:
-        import os
-
-        if os.environ.get("ALX_GROK_CLI_HELP_PROBE", "").strip().lower() not in {
-            "1", "true", "yes",
-        }:
-            self.skipTest("set ALX_GROK_CLI_HELP_PROBE=1 to probe the installed CLI")
-        executable = shutil.which("grok")
-        if executable is None:
-            self.skipTest("unverified on this CLI: grok is not installed")
-        model = GrokSubscriptionReasoningModel("grok-4.6", 30)
-        with tempfile.TemporaryDirectory(prefix="alx-grok-help-") as cwd:
-            result = subprocess.run(
-                [executable, "--help"],
-                cwd=cwd,
-                env=model.child_environment(),
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=True,
-            )
-        help_text = result.stdout.lower()
-        self.assertIn("--single", help_text)
-        self.assertIn("--json-schema", help_text)
-        self.assertIn("--prompt-file", help_text)
-        self.assertIn("--tools", help_text)
-        self.assertIn("--disallowed-tools", help_text)
-        self.assertNotIn("XAI_API_KEY", result.stdout)
 
     def test_live_cli_envelope_uses_camelcase_structured_output(self) -> None:
         """Observed grok 1.0.24 `--output-format json --json-schema` envelope."""

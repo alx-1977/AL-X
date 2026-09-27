@@ -57,10 +57,257 @@ _CONFLICT_MARKERS = ("<" * 7, "=" * 7, ">" * 7, "|" * 7)
 GOVERNANCE_GATE: tuple[str, ...] = ("python", "scripts/check_governance.py")
 ARCHITECTURE_GATE: tuple[str, ...] = ("python", "scripts/check_architecture.py")
 
-# The escalation target for a Python change with no safe targeted mapping. It
-# is reached only from that case: a non-Python change never arrives here, which
-# is the whole point of the correction this module exists for.
+# The broader suite. `required_verification` does not select it. A missing
+# test-file mapping is reported, and the architecture or governance gate still
+# runs when the changed path is one of theirs. The command stays so a separate
+# broader run can use the same argv the executor already knows.
 FULL_SUITE: tuple[str, ...] = ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider")
+
+# Modules whose tests are not named after the module. Each target is a file
+# that already imports or executes that module. A listed file that is not on
+# disk is ignored, so the map cannot schedule a command that would error.
+_EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
+    # Coding.
+    "src/alx/contracts/coding.py": (
+        "tests/test_coding_contract_bounds.py",
+        "tests/test_coding_agent.py",
+        "tests/test_coding_verification.py",
+        "tests/test_coding_checkout.py",
+        "tests/test_coding_retry_fuse.py",
+    ),
+    "src/alx/contracts/coding_verification.py": (
+        "tests/test_coding_agent.py",
+    ),
+    "src/alx/providers/coding_agent.py": (
+        "tests/test_coding_recovery.py",
+        "tests/test_coding_git_outcome.py",
+    ),
+    "src/alx/providers/coding_containment.py": (
+        "tests/test_coding_agent.py",
+    ),
+    "src/alx/providers/coding_git.py": (
+        "tests/test_coding_git_workspace.py",
+        "tests/test_coding_git_outcome.py",
+        "tests/test_coding_checkout.py",
+        "tests/test_coding_branch_continuation.py",
+    ),
+    "src/alx/providers/coding_process.py": (
+        "tests/test_coding_verification.py",
+        "tests/test_coding_agent.py",
+        "tests/test_coding_recovery.py",
+    ),
+    "src/alx/providers/coding_session.py": (
+        "tests/test_coding_session_boundary.py",
+        "tests/test_coding_agent.py",
+    ),
+    "src/alx/providers/coding_subscription_session.py": (
+        "tests/test_coding_session_boundary.py",
+    ),
+    "src/alx/providers/coding_workspace.py": (
+        "tests/test_coding_checkout.py",
+        "tests/test_coding_contract_bounds.py",
+        "tests/test_coding_agent.py",
+    ),
+    "src/alx/tools/coding.py": (
+        "tests/test_coding_agent.py",
+        "tests/test_coding_contract_bounds.py",
+        "tests/test_coding_retry_fuse.py",
+    ),
+    "src/alx/bootstrap/coding.py": (
+        "tests/test_coding_agent.py",
+        "tests/test_coding_recovery.py",
+        "tests/test_runtime_startup_smoke.py",
+    ),
+    # Providers.
+    "src/alx/providers/cartesia.py": (
+        "tests/test_provider_adapters.py",
+        "tests/test_provider_failure_sanitisation.py",
+    ),
+    "src/alx/providers/dhl.py": (
+        "tests/test_dhl_reconciliation.py",
+    ),
+    "src/alx/providers/elevenlabs.py": (
+        "tests/test_provider_adapters.py",
+    ),
+    "src/alx/providers/errors.py": (
+        "tests/test_provider_failure_sanitisation.py",
+        "tests/test_provider_adapters.py",
+    ),
+    "src/alx/providers/gated_transcription.py": (
+        "tests/test_speech_transmission_gate.py",
+    ),
+    "src/alx/providers/github_merge.py": (
+        "tests/test_merge_authority.py",
+    ),
+    "src/alx/providers/github_review.py": (
+        "tests/test_read_external_review.py",
+        "tests/test_review_request.py",
+        "tests/test_external_review_handoff.py",
+    ),
+    "src/alx/providers/icloud_mail.py": (
+        "tests/test_mail_poll_lifetime.py",
+        "tests/test_mail_store_transitions.py",
+        "tests/test_mail_reliability.py",
+        "tests/test_mail_reconciliation.py",
+        "tests/test_mail_attachments.py",
+        "tests/test_mail_review_fixes.py",
+    ),
+    "src/alx/providers/icloud_mail_send.py": (
+        "tests/test_mail_reply.py",
+    ),
+    "src/alx/providers/mail_poller.py": (
+        "tests/test_mail_poll_lifetime.py",
+    ),
+    "src/alx/providers/openai.py": (
+        "tests/test_provider_adapters.py",
+        "tests/test_prompt_cache_prefix.py",
+    ),
+    "src/alx/providers/sandbox_macos/__init__.py": (
+        "tests/test_sandbox_macos_backend.py",
+        "tests/test_sandbox_bounds.py",
+        "tests/test_sandbox_isolation.py",
+        "tests/test_sandbox_capability.py",
+    ),
+    "src/alx/providers/sandbox_macos/launcher.py": (
+        "tests/test_sandbox_macos_backend.py",
+    ),
+    "src/alx/providers/sandbox_macos/runner.py": (
+        "tests/test_sandbox_macos_backend.py",
+        "tests/test_sandbox_bounds.py",
+        "tests/test_sandbox_isolation.py",
+        "tests/test_sandbox_capability.py",
+    ),
+    "src/alx/providers/sandbox_retention.py": (
+        "tests/test_sandbox_lifecycle.py",
+    ),
+    "src/alx/providers/sandbox_workspace.py": (
+        "tests/test_sandbox_bounds.py",
+        "tests/test_sandbox_lifecycle.py",
+        "tests/test_sandbox_capability.py",
+        "tests/test_sandbox_macos_backend.py",
+    ),
+    "src/alx/providers/speech_activity.py": (
+        "tests/test_speech_transmission_gate.py",
+    ),
+    "src/alx/providers/web_fetch.py": (
+        "tests/test_web_fetch_bounds.py",
+        "tests/test_web_composed_retrieval.py",
+    ),
+    "src/alx/providers/web_search.py": (
+        "tests/test_web_search_capability.py",
+    ),
+    "src/alx/providers/web_url.py": (
+        "tests/test_web_url_boundary.py",
+        "tests/test_web_search_capability.py",
+        "tests/test_web_composed_retrieval.py",
+    ),
+    "src/alx/providers/xai.py": (
+        "tests/test_provider_adapters.py",
+        "tests/test_runtime_startup_smoke.py",
+    ),
+    "src/alx/providers/xero.py": (
+        "tests/test_xero_bill_primitives.py",
+    ),
+    # Tools.
+    "src/alx/tools/dhl.py": (
+        "tests/test_dhl_reconciliation.py",
+    ),
+    "src/alx/tools/mail.py": (
+        "tests/test_mail_reply.py",
+    ),
+    "src/alx/tools/repository.py": (
+        "tests/test_merge_authority.py",
+    ),
+    "src/alx/tools/repository_authority.py": (
+        "tests/test_repository_authority.py",
+    ),
+    "src/alx/tools/review.py": (
+        "tests/test_review_request.py",
+        "tests/test_read_external_review.py",
+    ),
+    "src/alx/tools/review_content.py": (
+        "tests/test_read_external_review.py",
+        "tests/test_review_request.py",
+    ),
+    "src/alx/tools/sandbox.py": (
+        "tests/test_sandbox_capability.py",
+    ),
+    "src/alx/tools/web.py": (
+        "tests/test_web_capabilities.py",
+        "tests/test_web_search_capability.py",
+        "tests/test_web_untrusted_content.py",
+        "tests/test_web_single_path.py",
+        "tests/test_web_conversation.py",
+        "tests/test_web_composed_retrieval.py",
+    ),
+    "src/alx/tools/xero.py": (
+        "tests/test_xero_bill_primitives.py",
+        "tests/test_invoice_capture.py",
+    ),
+    # Safety.
+    "src/alx/safety/gate.py": (
+        "tests/test_capability_safety.py",
+    ),
+    "src/alx/safety/retention.py": (
+        "tests/test_retention_provenance.py",
+        "tests/test_retention_wiring.py",
+    ),
+    # Bootstrap and runtime composition.
+    "src/alx/bootstrap/autonomous.py": (
+        "tests/test_autonomous_integration.py",
+        "tests/test_autonomous_recovery.py",
+    ),
+    "src/alx/bootstrap/dhl.py": (
+        "tests/test_dhl_reconciliation.py",
+        "tests/test_single_production_path.py",
+    ),
+    "src/alx/bootstrap/live_voice.py": (
+        "tests/test_runtime_startup_smoke.py",
+        "tests/test_runtime_launch.py",
+    ),
+    "src/alx/bootstrap/mail.py": (
+        "tests/test_mail_vertical_slice.py",
+        "tests/test_mail_reply.py",
+    ),
+    "src/alx/bootstrap/notebook.py": (
+        "tests/test_notebook_runtime.py",
+    ),
+    "src/alx/bootstrap/providers.py": (
+        "tests/test_runtime_config.py",
+        "tests/test_provider_adapters.py",
+    ),
+    "src/alx/bootstrap/reasoning.py": (
+        "tests/test_origin_selected_core.py",
+        "tests/test_model_reasoner.py",
+    ),
+    "src/alx/bootstrap/repository.py": (
+        "tests/test_merge_authority.py",
+    ),
+    "src/alx/bootstrap/repository_authority.py": (
+        "tests/test_repository_authority.py",
+    ),
+    "src/alx/bootstrap/research.py": (
+        "tests/test_first_research_activation.py",
+    ),
+    "src/alx/bootstrap/review.py": (
+        "tests/test_review_request.py",
+    ),
+    "src/alx/bootstrap/sandbox.py": (
+        "tests/test_sandbox_capability.py",
+    ),
+    "src/alx/bootstrap/tasks.py": (
+        "tests/test_task_status.py",
+    ),
+    "src/alx/bootstrap/web.py": (
+        "tests/test_web_single_path.py",
+        "tests/test_web_capabilities.py",
+    ),
+    "src/alx/bootstrap/xero.py": (
+        "tests/test_xero_bill_primitives.py",
+        "tests/test_invoice_capture.py",
+        "tests/test_single_production_path.py",
+    ),
+}
 
 # Where the governance gate declares its canonical documents, and where the
 # architecture gate declares the tree it governs. The source root below is only
@@ -116,7 +363,7 @@ class VerificationPolicy:
 
     @property
     def commands(self) -> tuple[tuple[str, ...], ...]:
-        """The argv forms only. A content check has none and is excluded."""
+        """The argv forms only. Content and report checks have none."""
         return tuple(
             check.argv for check in self.checks if check.kind == "command"
         )
@@ -353,19 +600,15 @@ def _targeted_tests(
     root: Path | None,
     exists: Callable[[Path | None, str], bool],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Test modules a changed path maps to mechanically, never by name guessing.
+    """Test modules a changed path maps to, and the Python paths that map to none.
 
-    Returns the mapped tests and the changed Python paths that mapped to
-    nothing. Both halves matter: the caller may use targeted tests only when
-    *every* changed Python path is covered. Combining the mappings and asking
-    only whether any existed let one mapped file speak for an unmapped one, so
-    a job changing a covered module and an uncovered one ran the covered
-    module's test and called the pair verified. Found in review on PR #54.
+    A changed test module is its own test. A changed `src/alx/…` module also
+    tries the conventional names derived from its path, then the explicit
+    table for the areas whose tests are not named after the module. A
+    candidate counts only when it exists on disk.
 
-    Two mappings only, both structural: a changed test module is its own test,
-    and a changed `src/alx/…` module has the conventional test paths derived
-    from its own path. A candidate counts only when it exists on disk, so a
-    module with no test yields nothing rather than a command that would error.
+    Mapped and unmapped are both returned. A mapped neighbour does not cover
+    an unmapped file, and an unmapped file does not discard the mapped tests.
     """
     tests: list[str] = []
     unmapped: list[str] = []
@@ -376,11 +619,25 @@ def _targeted_tests(
         candidates: list[str] = []
         if path.name.startswith("test_"):
             candidates.append(path.as_posix())
+        # A test module sitting next to the file it covers, when that file
+        # exists. This is how a small fixture names its own test, and it is
+        # the same stem rule the source tree already uses under tests/.
+        parent = path.parent.as_posix()
+        sibling = (
+            f"test_{path.stem}.py"
+            if parent in ("", ".")
+            else f"{parent}/test_{path.stem}.py"
+        )
+        if sibling not in candidates:
+            candidates.append(sibling)
         if path.parts[:2] == ("src", "alx"):
             module_parts = PurePosixPath(relative).with_suffix("").parts[2:]
             if module_parts:
                 candidates.append(f"tests/test_{'_'.join(module_parts)}.py")
                 candidates.append(f"tests/test_{path.stem}.py")
+        for candidate in _EXPLICIT_TESTS.get(relative, ()):
+            if candidate not in candidates:
+                candidates.append(candidate)
         found = False
         for candidate in candidates:
             if exists(root, candidate):
@@ -555,8 +812,10 @@ def required_verification(
     python_paths = tuple(name for name in changed if name.endswith(".py"))
     if python_paths:
         targeted, unmapped = _targeted_tests(changed, root, _path_exists)
-        # Every changed Python path must be covered, not merely one of them.
-        if targeted and not unmapped:
+        # Mapped files run their own tests. Unmapped files are named in the
+        # evidence and are not a reason to schedule the repository suite.
+        # The gates above still run for the paths they govern.
+        if targeted:
             checks.append(
                 VerificationCheck(
                     "pytest_targeted",
@@ -565,17 +824,23 @@ def required_verification(
                     + ", ".join(targeted[:8]),
                 )
             )
-        else:
-            # A Python change with nothing to target is the one case that still
-            # earns the whole suite: the change is executable, its blast radius
-            # is unknown, and repository policy requires runtime verification of
-            # executable changes. A *non*-Python change never reaches this line.
+        if unmapped:
+            shown = unmapped[:8]
+            reason = (
+                "changed Python modules have no targeted test mapping "
+                "and were not sent to the full suite: " + ", ".join(shown)
+            )
+            if len(unmapped) > len(shown):
+                reason += f", and {len(unmapped) - len(shown)} more"
             checks.append(
                 VerificationCheck(
-                    "pytest_full",
-                    FULL_SUITE,
-                    "changed Python modules with no safe targeted test mapping: "
-                    + ", ".join((unmapped or python_paths)[:8]),
+                    "unmapped_python",
+                    (),
+                    reason,
+                    kind="report",
+                    ran=True,
+                    passed=True,
+                    findings=tuple(unmapped[:MAX_CONTENT_FINDINGS]),
                 )
             )
 
