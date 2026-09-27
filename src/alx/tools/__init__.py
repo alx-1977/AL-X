@@ -25,6 +25,7 @@ from alx.tools.xero import (
     READ_XERO_BILL,
     SEARCH_XERO_CONTACTS,
     UPDATE_XERO_CONTACT,
+    CREATE_XERO_CONTACT,
     build_xero_executors,
 )
 from alx.tools.continuity import (
@@ -157,6 +158,7 @@ __all__ = [
     "READ_XERO_BILL",
     "SEARCH_XERO_CONTACTS",
     "UPDATE_XERO_CONTACT",
+    "CREATE_XERO_CONTACT",
     "build_xero_executors",
     "DHL_DEFINITIONS",
     "build_dhl_executors",

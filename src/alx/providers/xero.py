@@ -19,7 +19,7 @@ from urllib.parse import quote, urlencode
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
-from alx.contracts import XeroAccessError
+from alx.contracts import CONTACT_CREATION_UNCONFIRMED, XeroAccessError
 
 
 AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
@@ -34,7 +34,8 @@ _DISCARDED_STATUSES = frozenset({"DELETED", "VOIDED"})
 
 # External protocol identifiers. D-016 deliberately excludes payments, bank
 # transactions, journals, reports, payroll, and sales work. Contact writes are
-# requested only for D-034's rename of one existing contact.
+# requested only for D-034's rename of one existing contact and D-035's
+# creation of one supplier contact.
 XERO_SCOPES = (
     "openid",
     "profile",
@@ -425,7 +426,15 @@ class XeroAccountingAdapter:
         media_type: str = "application/json",
         allow_not_found: bool = False,
         binary: bool = False,
+        unconfirmed_code: str = "",
     ) -> Any:
+        """Send one Accounting API request and return its decoded body.
+
+        `unconfirmed_code` marks a write whose outcome can be unknown. Once
+        the request has left, a lost connection, a server error or an
+        unreadable body does not show that Xero refused it, so those raise
+        this code instead of one that reads as a definite failure.
+        """
         connection = self._oauth.connection()
         failure = ""
         response = None
@@ -447,17 +456,19 @@ class XeroAccountingAdapter:
                 timeout=self._timeout_seconds,
             )
         except Exception:
-            failure = "connection_failed"
+            failure = unconfirmed_code or "connection_failed"
         if failure:
             _raise_clean(failure)
         if response is None:
-            _raise_clean("response_missing")
+            _raise_clean(unconfirmed_code or "response_missing")
         if allow_not_found and response.status_code == 404:
             return None
         if response.status_code in (401, 403):
             _raise_clean("permission_denied")
         if response.status_code == 429:
             _raise_clean("rate_limited")
+        if unconfirmed_code and response.status_code >= 500:
+            _raise_clean(unconfirmed_code)
         if response.status_code >= 400:
             _raise_clean("request_rejected")
         if binary:
@@ -475,7 +486,7 @@ class XeroAccountingAdapter:
         try:
             body = response.json()
         except Exception:
-            failure = "response_invalid"
+            failure = unconfirmed_code or "response_invalid"
         if failure:
             _raise_clean(failure)
         return body
@@ -519,6 +530,25 @@ class XeroAccountingAdapter:
         items = self._items(body, "Contacts")
         if not items:
             _raise_clean("response_invalid")
+        return items[0]
+
+    def create_contact(self, name: str) -> Mapping[str, Any]:
+        """D-035. Create one contact carrying only its name.
+
+        PUT only creates. POST /Contacts is Xero's update-or-create and could
+        land on an existing contact instead. A refusal Xero states (401, 403,
+        429 or another 4xx) is definite; anything after sending that is not a
+        refusal may have created the contact.
+        """
+        body = self._request(
+            "PUT",
+            "/Contacts",
+            json_body={"Contacts": [{"Name": name}]},
+            unconfirmed_code=CONTACT_CREATION_UNCONFIRMED,
+        )
+        items = self._items(body, "Contacts")
+        if not items:
+            _raise_clean(CONTACT_CREATION_UNCONFIRMED)
         return items[0]
 
     def list_accounts(self) -> tuple[Mapping[str, Any], ...]:

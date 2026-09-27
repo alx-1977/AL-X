@@ -23,6 +23,7 @@ from alx.tools import (
     READ_XERO_BILL,
     SEARCH_XERO_CONTACTS,
     UPDATE_XERO_CONTACT,
+    CREATE_XERO_CONTACT,
     XERO_DEFINITIONS,
     build_xero_executors,
 )
@@ -32,6 +33,7 @@ XERO_READ_PERMISSION = "xero.read"
 XERO_BILL_WRITE_PERMISSION = "xero.bill.write"
 XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
 XERO_CONTACT_RENAME_PERMISSION = "xero.contact.rename"
+XERO_CONTACT_CREATE_PERMISSION = "xero.contact.create"
 
 # Law 0: one production path per outcome. An ordinary supplier bill is posted
 # by capture_supplier_invoice and a DHL import by process_dhl_import. The steps
@@ -140,6 +142,9 @@ def build_xero_runtime(
     # by exact ContactID. It is its own permission because it writes a
     # different record from a bill, and no setting makes it attended.
     rename_policy = AuthorityPolicy(frozenset({XERO_CONTACT_RENAME_PERMISSION}))
+    # D-035. Standing authority to create one supplier contact. Creating is a
+    # different act from renaming, so neither permission carries the other.
+    create_policy = AuthorityPolicy(frozenset({XERO_CONTACT_CREATE_PERMISSION}))
     policies = {
         SEARCH_XERO_CONTACTS: read_policy,
         LIST_XERO_ACCOUNTS: read_policy,
@@ -148,6 +153,7 @@ def build_xero_runtime(
         READ_XERO_BILL: read_policy,
         DELETE_XERO_DRAFT_BILL: delete_policy,
         UPDATE_XERO_CONTACT: rename_policy,
+        CREATE_XERO_CONTACT: create_policy,
     }
     definitions = tuple(
         definition
@@ -186,6 +192,7 @@ def build_xero_runtime(
                 XERO_BILL_WRITE_PERMISSION,
                 XERO_BILL_DELETE_PERMISSION,
                 XERO_CONTACT_RENAME_PERMISSION,
+                XERO_CONTACT_CREATE_PERMISSION,
             }
         ),
     )

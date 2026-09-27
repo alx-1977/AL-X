@@ -189,6 +189,14 @@ entry = "tools/xero.py::build_xero_executors.<locals>.update_contact"
 forbidden = []
 
 [[outcomes]]
+id = "xero.supplier_contact_is_created"
+description = "One new Xero supplier contact is created by exact name."
+# D-035. Nothing was superseded: before it, Friedl created supplier contacts
+# in Xero by hand.
+entry = "tools/xero.py::build_xero_executors.<locals>.create_contact"
+forbidden = []
+
+[[outcomes]]
 id = "dhl.import_is_posted"
 description = "A DHL import is reconciled and posted as its own bill."
 # D-021. A separate outcome from an ordinary bill, and deliberately so: a DHL

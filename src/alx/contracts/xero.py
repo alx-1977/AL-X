@@ -37,6 +37,10 @@ def xero_date(value: str) -> str | None:
     return None
 
 
+# A contact create was sent and may have succeeded, but nothing proves it.
+CONTACT_CREATION_UNCONFIRMED = "contact_creation_unconfirmed"
+
+
 class XeroAccessError(Exception):
     """A sanitised Xero failure carrying no request, token, or document."""
 
@@ -55,6 +59,8 @@ class XeroAccountingAccount(Protocol):
     def read_contact(self, contact_id: str) -> Mapping[str, Any] | None: ...
 
     def rename_contact(self, contact_id: str, name: str) -> Mapping[str, Any]: ...
+
+    def create_contact(self, name: str) -> Mapping[str, Any]: ...
 
     def list_accounts(self) -> tuple[Mapping[str, Any], ...]: ...
 

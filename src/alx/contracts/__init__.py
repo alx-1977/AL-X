@@ -198,7 +198,12 @@ from alx.contracts.mail import (
     OutboundReply,
     ReplyOutcome,
 )
-from alx.contracts.xero import xero_date, XeroAccessError, XeroAccountingAccount
+from alx.contracts.xero import (
+    CONTACT_CREATION_UNCONFIRMED,
+    xero_date,
+    XeroAccessError,
+    XeroAccountingAccount,
+)
 from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
@@ -316,6 +321,6 @@ __all__ = [
     "MailSearchCriteria", "MailSearchResult",
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
     "xero_date",
-    "XeroAccessError", "XeroAccountingAccount",
+    "XeroAccessError", "XeroAccountingAccount", "CONTACT_CREATION_UNCONFIRMED",
     "DhlDocumentError", "DhlImportAnalyzer",
 ]
