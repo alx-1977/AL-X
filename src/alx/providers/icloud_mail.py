@@ -28,6 +28,7 @@ from alx.contracts import (
     MailAccessError,
     MailAttachment,
     MailContent,
+    MailMoveResult,
     MailParticipants,
     MailReference,
     MailSearchCriteria,
@@ -1316,7 +1317,71 @@ class ICloudMailAdapter:
         finally:
             self._close(connection)
 
-    def file_message(self, reference: MailReference, mailbox: str) -> str:
+    @staticmethod
+    def _copyuid(values, source_uid: str, *, response_code: bool = False) -> tuple[str, str] | None:
+        """Map this one source UID from an RFC 4315 COPYUID response."""
+        if not re.fullmatch(r"[0-9]{1,10}", source_uid) or not 0 < int(source_uid) <= 0xFFFFFFFF:
+            return None
+        for value in values or ():
+            if not isinstance(value, bytes):
+                continue
+            payload = value.strip()
+            if response_code:
+                match = (
+                    re.fullmatch(rb"(?:COPYUID\s+)?([0-9]+)\s+([0-9]+)\s+([0-9]+)", payload, re.I)
+                    or re.fullmatch(rb"\[COPYUID\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\]", payload, re.I)
+                )
+            else:
+                match = re.search(rb"\[COPYUID\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\]", payload, re.I)
+            if not match:
+                continue
+            validity, source, destination = (part.decode("ascii") for part in match.groups())
+            if (all(len(part) <= 10 and 0 < int(part) <= 0xFFFFFFFF
+                    for part in (validity, source, destination))
+                    and int(source) == int(source_uid)):
+                return validity, destination
+        return None
+
+    def _move_selected(self, connection, reference: MailReference, mailbox: str) -> MailMoveResult:
+        # A command whose response is lost may already have moved the item.
+        try:
+            status, move_data = connection.uid("MOVE", reference.uid, self._quoted(mailbox))
+        except Exception:
+            return MailMoveResult(mailbox)
+        if status != "OK":
+            raise MailAccessError("move_failed")
+
+        try:
+            _code, response_data = connection.response("COPYUID")
+            mapping = self._copyuid(response_data, reference.uid, response_code=True)
+        except Exception:
+            mapping = None
+        if mapping is None:
+            mapping = self._copyuid(move_data, reference.uid)
+
+        destination_reference = None
+        if mapping is not None:
+            validity, uid = mapping
+            try:
+                selected, _ = connection.select(self._quoted(mailbox), readonly=True)
+                if selected == "OK" and _uid_validity(connection) == validity:
+                    found, values = connection.uid("search", None, "UID", uid)
+                    if found == "OK" and values and values[0] and values[0].split() == [uid.encode("ascii")]:
+                        destination_reference = MailReference(mailbox, validity, uid)
+            except Exception:
+                # The accepted move stands; failed confirmation is partial.
+                pass
+
+        try:
+            self._observations.acknowledge(reference)
+        except MailAccessError as error:
+            if error.code != "observation_unavailable":
+                LOGGER.warning("Mail attention cleanup unavailable after UID MOVE: %s", error.code)
+        except Exception:
+            LOGGER.warning("Mail attention cleanup unavailable after UID MOVE")
+        return MailMoveResult(mailbox, destination_reference)
+
+    def file_message(self, reference: MailReference, mailbox: str) -> MailMoveResult:
         """Move one message to a named mailbox, releasing mail attention.
 
         Filing a processed invoice is not deletion: the message stays in the
@@ -1333,15 +1398,11 @@ class ICloudMailAdapter:
                 raise MailAccessError("mailbox_unavailable")
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
-            status, _ = connection.uid("MOVE", reference.uid, self._quoted(mailbox))
-            if status != "OK":
-                raise MailAccessError("move_failed")
-            self._observations.acknowledge(reference)
-            return mailbox
+            return self._move_selected(connection, reference, mailbox)
         finally:
             self._close(connection)
 
-    def move_to_trash(self, reference: MailReference) -> str:
+    def move_to_trash(self, reference: MailReference) -> MailMoveResult:
         connection = self._open()
         try:
             status, _ = connection.select(self._quoted(reference.mailbox_id), readonly=False)
@@ -1353,11 +1414,7 @@ class ICloudMailAdapter:
             if status != "OK":
                 raise MailAccessError("trash_unavailable")
             trash = self._trash_mailbox(values)
-            status, _ = connection.uid("MOVE", reference.uid, self._quoted(trash))
-            if status != "OK":
-                raise MailAccessError("move_failed")
-            self._observations.acknowledge(reference)
-            return trash
+            return self._move_selected(connection, reference, trash)
         finally:
             self._close(connection)
 

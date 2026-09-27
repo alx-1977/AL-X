@@ -842,7 +842,8 @@ class ProcessedFilingTests(unittest.TestCase):
 
             def file_message(self, reference, mailbox):
                 self.filed.append((reference.uid, mailbox))
-                return mailbox
+                from alx.contracts import MailMoveResult, MailReference
+                return MailMoveResult(mailbox, MailReference(mailbox, "888", "7"))
 
         mail = Mail()
         unconfigured = build_mail_executors(
@@ -863,7 +864,8 @@ class ProcessedFilingTests(unittest.TestCase):
 
             def file_message(self, reference, mailbox):
                 self.filed.append((reference.uid, mailbox))
-                return mailbox
+                from alx.contracts import MailMoveResult, MailReference
+                return MailMoveResult(mailbox, MailReference(mailbox, "888", "7"))
 
         mail = Mail()
         configured = build_mail_executors(

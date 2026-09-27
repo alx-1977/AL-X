@@ -16,6 +16,7 @@ from alx.contracts import (
     MailAccount,
     MailAttachment,
     MailContent,
+    MailMoveResult,
     MailObservationControl,
     MailReference,
     MailSearchCriteria,
@@ -52,6 +53,7 @@ _FAILURES = (
     "observation_unavailable",
     "trash_unavailable",
     "move_failed",
+    "mail_move_unconfirmed",
     "flag_update_failed",
     "recipients_refused",
     "send_rejected",
@@ -242,11 +244,12 @@ MARK_SEEN_DEFINITION = CapabilityDefinition(
 
 FILE_DEFINITION = CapabilityDefinition(
     FILE_PROCESSED_MAIL_MESSAGE,
-    "Move one identified mail item to the configured processed mailbox once its invoice is in Xero; the destination is configured, not chosen.",
+    "Move one identified mail item to the configured processed mailbox once its invoice is in Xero; the destination is configured, not chosen. Returns partial mail_move_unconfirmed when the move may have happened but destination confirmation is unavailable.",
     _input(),
     StructuredSchema(
         ValueKind.OBJECT,
-        {"reference": _REFERENCE, "mailbox_id": _STRING, "filed": StructuredSchema(ValueKind.BOOLEAN)},
+        {"reference": _REFERENCE, "mailbox_id": _STRING, "filed": StructuredSchema(ValueKind.BOOLEAN),
+         "destination_reference": _REFERENCE},
         ("reference", "mailbox_id", "filed"),
         extra_properties=False,
     ),
@@ -256,11 +259,12 @@ FILE_DEFINITION = CapabilityDefinition(
 
 TRASH_DEFINITION = CapabilityDefinition(
     MOVE_MAIL_MESSAGE_TO_TRASH,
-    "Move one identified mail item to the account's recoverable Trash mailbox.",
+    "Move one identified mail item to the account's recoverable Trash mailbox. Returns partial mail_move_unconfirmed when the move may have happened but destination confirmation is unavailable.",
     _input(),
     StructuredSchema(
         ValueKind.OBJECT,
-        {"reference": _REFERENCE, "trash_mailbox_id": _STRING, "moved": StructuredSchema(ValueKind.BOOLEAN)},
+        {"reference": _REFERENCE, "trash_mailbox_id": _STRING, "moved": StructuredSchema(ValueKind.BOOLEAN),
+         "destination_reference": _REFERENCE},
         ("reference", "trash_mailbox_id", "moved"),
         extra_properties=False,
     ),
@@ -440,6 +444,25 @@ def build_mail_executors(
             failure={"code": code},
         )
 
+    def move_result(
+        capability_id: str, reference: MailReference, outcome: MailMoveResult,
+        destination_key: str, confirmed_key: str,
+    ) -> CapabilityResult:
+        confirmed = outcome.destination_reference is not None
+        values: dict[str, Any] = {
+            "reference": _reference_values(reference),
+            destination_key: outcome.mailbox_id,
+            confirmed_key: confirmed,
+        }
+        if confirmed:
+            values["destination_reference"] = _reference_values(outcome.destination_reference)
+        return CapabilityResult(
+            call_id_source(), capability_id,
+            CapabilityResultState.SUCCEEDED if confirmed else CapabilityResultState.PARTIAL,
+            values,
+            failure=None if confirmed else {"code": "mail_move_unconfirmed"},
+        )
+
     def read(arguments: StructuredData) -> CapabilityResult:
         try:
             reference = _reference(arguments)
@@ -579,39 +602,25 @@ def build_mail_executors(
             return failed(FILE_PROCESSED_MAIL_MESSAGE, "mailbox_unavailable")
         try:
             reference = _reference(arguments)
-            destination = account.file_message(reference, processed_mailbox)
+            outcome = account.file_message(reference, processed_mailbox)
         except ValueError:
             return failed(FILE_PROCESSED_MAIL_MESSAGE, "arguments_unusable")
         except MailAccessError as error:
             return failed(FILE_PROCESSED_MAIL_MESSAGE, error.code)
-        return CapabilityResult(
-            call_id_source(),
-            FILE_PROCESSED_MAIL_MESSAGE,
-            CapabilityResultState.SUCCEEDED,
-            {
-                "reference": _reference_values(reference),
-                "mailbox_id": destination,
-                "filed": True,
-            },
+        return move_result(
+            FILE_PROCESSED_MAIL_MESSAGE, reference, outcome, "mailbox_id", "filed",
         )
 
     def move_to_trash(arguments: StructuredData) -> CapabilityResult:
         try:
             reference = _reference(arguments)
-            destination = account.move_to_trash(reference)
+            outcome = account.move_to_trash(reference)
         except ValueError:
             return failed(MOVE_MAIL_MESSAGE_TO_TRASH, "arguments_unusable")
         except MailAccessError as error:
             return failed(MOVE_MAIL_MESSAGE_TO_TRASH, error.code)
-        return CapabilityResult(
-            call_id_source(),
-            MOVE_MAIL_MESSAGE_TO_TRASH,
-            CapabilityResultState.SUCCEEDED,
-            {
-                "reference": _reference_values(reference),
-                "trash_mailbox_id": destination,
-                "moved": True,
-            },
+        return move_result(
+            MOVE_MAIL_MESSAGE_TO_TRASH, reference, outcome, "trash_mailbox_id", "moved",
         )
 
     def mark_seen(arguments: StructuredData) -> CapabilityResult:
