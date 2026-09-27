@@ -624,6 +624,7 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
     means available. Both facts are now carried by the message itself.
     """
     shared = _shared_failure_codes(capabilities)
+    code_sets = _failure_code_sets(capabilities, shared)
     return json.dumps(
         {
             "catalogue_semantics": (
@@ -639,7 +640,7 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
                     "id": item.capability_id,
                     "purpose": item.purpose,
                     "side_effect": item.side_effect.value,
-                    "failure_codes": _failure_codes(item, shared),
+                    **_failure_code_payload(item, shared, code_sets),
                     "input_schema": _capability_schema_payload(item.input_schema),
                     "result_fields": _result_fields(item.output_schema),
                 }
@@ -648,6 +649,12 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
             # Most capabilities repeat the same failure codes, so they are
             # stated once and each capability lists only what it adds.
             "shared_failure_codes": sorted(shared),
+            # A provider's capabilities repeat that provider's codes in full.
+            # Each such set is stated once; a capability names the set it
+            # carries and lists only the codes it adds beyond it.
+            "failure_code_sets": {
+                name: sorted(codes) for codes, name in code_sets.items()
+            },
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -664,6 +671,44 @@ def _shared_failure_codes(capabilities: Sequence[Any]) -> frozenset[str]:
 
 def _failure_codes(item: Any, shared: frozenset[str]) -> list[str]:
     return sorted(frozenset(item.possible_failure_codes) - shared)
+
+
+def _failure_code_sets(
+    capabilities: Sequence[Any], shared: frozenset[str]
+) -> dict[frozenset[str], str]:
+    """Name each failure set that several capabilities carry in full.
+
+    A candidate is one capability's own codes that another capability also
+    carries entirely. Only the smallest candidates are named, so a capability
+    that adds a few codes refers to the set it extends instead of repeating a
+    near-copy of it.
+    """
+    own = [frozenset(_failure_codes(item, shared)) for item in capabilities]
+    candidates = {
+        codes for codes in own if codes and sum(codes <= other for other in own) > 1
+    }
+    smallest = sorted(
+        (codes for codes in candidates if not any(other < codes for other in candidates)),
+        key=sorted,
+    )
+    return {codes: f"set_{index}" for index, codes in enumerate(smallest, 1)}
+
+
+def _failure_code_payload(
+    item: Any, shared: frozenset[str], code_sets: Mapping[frozenset[str], str]
+) -> dict[str, Any]:
+    """The named set this capability carries, if any, and the codes it adds."""
+    own = frozenset(_failure_codes(item, shared))
+    carried = sorted(
+        (codes for codes in code_sets if codes <= own),
+        key=lambda codes: (-len(codes), code_sets[codes]),
+    )
+    if not carried:
+        return {"failure_codes": sorted(own)}
+    return {
+        "failure_code_set": code_sets[carried[0]],
+        "failure_codes": sorted(own - carried[0]),
+    }
 
 
 def _context_payload(context: ReasoningContext) -> str:

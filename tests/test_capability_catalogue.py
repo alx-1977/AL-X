@@ -22,6 +22,7 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.core.model_reasoner import (  # noqa: E402
     _capability_schema_payload,
+    _catalogue_payload,
     _failure_codes,
     _result_fields,
     _shared_failure_codes,
@@ -138,6 +139,60 @@ class FailureCodeTests(unittest.TestCase):
 
     def test_a_single_capability_shares_nothing(self) -> None:
         self.assertEqual(_shared_failure_codes(XERO_DEFINITIONS[:1]), frozenset())
+
+
+class FailureCodeSetTests(unittest.TestCase):
+    """A provider's repeated codes are stated once, and none is lost."""
+
+    def setUp(self) -> None:
+        from alx.tools import (
+            CONTINUITY_DEFINITIONS, NOTEBOOK_DEFINITIONS, RESEARCH_DEFINITION,
+        )
+        from alx.tools.mail import DEFINITIONS as MAIL
+
+        self.definitions = (
+            tuple(NOTEBOOK_DEFINITIONS) + (RESEARCH_DEFINITION,)
+            + tuple(CONTINUITY_DEFINITIONS) + tuple(MAIL)
+            + tuple(XERO_DEFINITIONS) + tuple(DHL_DEFINITIONS)
+        )
+        self.payload = json.loads(_catalogue_payload(self.definitions))
+
+    def test_every_capability_reconstructs_its_exact_failure_codes(self) -> None:
+        declared = {item.capability_id: item for item in self.definitions}
+        sets = self.payload["failure_code_sets"]
+        self.assertEqual(len(self.payload["capabilities"]), len(self.definitions))
+        for entry in self.payload["capabilities"]:
+            with self.subTest(capability_id=entry["id"]):
+                rebuilt = (
+                    set(self.payload["shared_failure_codes"])
+                    | set(sets.get(entry.get("failure_code_set"), ()))
+                    | set(entry["failure_codes"])
+                )
+                self.assertEqual(
+                    rebuilt, set(declared[entry["id"]].possible_failure_codes)
+                )
+
+    def test_every_named_set_exists_and_is_used_more_than_once(self) -> None:
+        sets = self.payload["failure_code_sets"]
+        used = [
+            entry["failure_code_set"]
+            for entry in self.payload["capabilities"]
+            if "failure_code_set" in entry
+        ]
+        self.assertTrue(set(used) <= set(sets))
+        for name in sets:
+            with self.subTest(set=name):
+                self.assertGreater(used.count(name), 1)
+
+    def test_xeros_codes_are_stated_once_not_per_capability(self) -> None:
+        xero = {item.capability_id for item in XERO_DEFINITIONS}
+        entries = [e for e in self.payload["capabilities"] if e["id"] in xero]
+        self.assertEqual({e.get("failure_code_set") for e in entries} - {None}, {
+            entries[0]["failure_code_set"]
+        })
+        for entry in entries:
+            with self.subTest(capability_id=entry["id"]):
+                self.assertNotIn("connection_failed", entry["failure_codes"])
 
 
 class CatalogueSizeTests(unittest.TestCase):

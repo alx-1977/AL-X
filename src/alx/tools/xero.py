@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from alx.contracts import (
+    CONTACT_CREATION_UNCONFIRMED,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -268,7 +269,7 @@ DELETE_DRAFT_DEFINITION = CapabilityDefinition(
 
 UPDATE_CONTACT_DEFINITION = CapabilityDefinition(
     UPDATE_XERO_CONTACT,
-    "Rename one existing Xero contact identified by its exact ContactID, changing nothing else on it, and read it back; refuse an unknown contact or a name another contact already holds.",
+    "Rename one existing Xero contact, by exact ContactID, to the exact name given, changing nothing else, and read it back. Refuses an unknown contact or a name another contact, archived included, holds.",
     _object({"contact_id": _STRING, "name": _STRING}, ("contact_id", "name")),
     _object(
         {
@@ -286,7 +287,7 @@ UPDATE_CONTACT_DEFINITION = CapabilityDefinition(
 
 CREATE_CONTACT_DEFINITION = CapabilityDefinition(
     CREATE_XERO_CONTACT,
-    "Create one new Xero contact carrying only the exact name given, and read it back; refuse a name any existing contact, active or archived, already holds.",
+    "Create one Xero contact with only the exact name given, and read it back. Refuses a name any contact, archived included, holds. Returns partial with contact_creation_unconfirmed when the create was sent but could not be confirmed: search before acting again.",
     _object({"name": _STRING}, ("name",)),
     _object(
         {
@@ -298,7 +299,7 @@ CREATE_CONTACT_DEFINITION = CapabilityDefinition(
         ("contact_id", "name", "status", "created"),
     ),
     SideEffect.EFFECTFUL,
-    _FAILURES + ("contact_name_conflict", "read_back_mismatch"),
+    _FAILURES + ("contact_name_conflict", CONTACT_CREATION_UNCONFIRMED),
 )
 
 DEFINITIONS = (
@@ -1312,28 +1313,56 @@ def build_xero_executors(
         This only refuses a name some contact already holds, sends the name
         alone, and reads the result back. A repeated call after an unseen
         success finds the name taken and creates nothing.
-        """
 
-        def operation() -> Mapping[str, Any]:
+        Once the create has been sent, nothing is reported as a definite
+        failure unless Xero stated a refusal. A lost or unreadable response,
+        or a read-back that fails or disagrees, may follow a real creation,
+        so it returns partial and unconfirmed, with the ContactID when Xero
+        gave one, and nothing is sent again.
+        """
+        try:
             name = _required(arguments, "name")
             if len(name) > _CONTACT_NAME_LIMIT or not name.isprintable():
                 raise ValueError("name")
             if _name_taken(account, name):
                 raise XeroAccessError("contact_name_conflict")
-            contact_id = str(account.create_contact(name).get("ContactID") or "")
-            if not contact_id:
-                raise XeroAccessError("read_back_mismatch")
+            written = account.create_contact(name)
+        except ValueError:
+            return failed(CREATE_XERO_CONTACT, "arguments_unusable")
+        except XeroAccessError as error:
+            if error.code == CONTACT_CREATION_UNCONFIRMED:
+                return unconfirmed(name, "")
+            return failed(CREATE_XERO_CONTACT, error.code)
+        contact_id = str(written.get("ContactID") or "")
+        if not contact_id:
+            return unconfirmed(name, "")
+        try:
             current = account.read_contact(contact_id)
-            if current is None or str(current.get("Name") or "") != name:
-                raise XeroAccessError("read_back_mismatch")
-            return {
+        except XeroAccessError:
+            current = None
+        if current is None or str(current.get("Name") or "") != name:
+            return unconfirmed(name, contact_id)
+        return CapabilityResult(
+            call_id_source(),
+            CREATE_XERO_CONTACT,
+            CapabilityResultState.SUCCEEDED,
+            {
                 "contact_id": contact_id,
                 "name": name,
                 "status": str(current.get("ContactStatus") or ""),
                 "created": True,
-            }
+            },
+        )
 
-        return invoke(CREATE_XERO_CONTACT, operation)
+    def unconfirmed(name: str, contact_id: str) -> CapabilityResult:
+        """A create that may have happened. `created` is false: unconfirmed."""
+        return CapabilityResult(
+            call_id_source(),
+            CREATE_XERO_CONTACT,
+            CapabilityResultState.PARTIAL,
+            {"contact_id": contact_id, "name": name, "status": "", "created": False},
+            failure={"code": CONTACT_CREATION_UNCONFIRMED},
+        )
 
     return {
         SEARCH_XERO_CONTACTS: search_contacts,

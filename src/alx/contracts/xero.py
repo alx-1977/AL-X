@@ -37,6 +37,10 @@ def xero_date(value: str) -> str | None:
     return None
 
 
+# A contact create was sent and may have succeeded, but nothing proves it.
+CONTACT_CREATION_UNCONFIRMED = "contact_creation_unconfirmed"
+
+
 class XeroAccessError(Exception):
     """A sanitised Xero failure carrying no request, token, or document."""
 

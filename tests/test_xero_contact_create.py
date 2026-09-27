@@ -35,6 +35,7 @@ from alx.contracts import (  # noqa: E402
     ConversationTurn,
     GoalState,
     Objective,
+    CONTACT_CREATION_UNCONFIRMED,
     SideEffect,
     SuccessCriterion,
     XeroAccessError,
@@ -167,20 +168,96 @@ class CreateContactTests(unittest.TestCase):
                 self.assertEqual(result.failure["code"], "arguments_unusable")
         self.assertEqual(self.xero.creates, [])
 
-    def test_a_read_back_that_disagrees_is_not_success(self) -> None:
+    def assert_unconfirmed(self, result, contact_id: str) -> None:
+        """May have been created: never a definite failure, never success."""
+        self.assertEqual(result.state, CapabilityResultState.PARTIAL)
+        self.assertEqual(result.failure["code"], CONTACT_CREATION_UNCONFIRMED)
+        self.assertEqual(
+            result.values,
+            {"contact_id": contact_id, "name": SUPPLIER, "status": "", "created": False},
+        )
+
+    def test_a_refusal_before_the_create_stays_definite(self) -> None:
+        for code in ("permission_denied", "connection_failed", "rate_limited"):
+            with self.subTest(code=code):
+                def refused(_term, include_archived=False, code=code):
+                    raise XeroAccessError(code)
+
+                self.xero.search_contacts = refused
+                result = self.create({"name": SUPPLIER})
+                self.assertEqual(result.state, CapabilityResultState.FAILED)
+                self.assertEqual(result.failure["code"], code)
+        self.assertEqual(self.xero.creates, [])
+
+    def test_an_unconfirmed_create_response_is_not_a_failure(self) -> None:
+        self.xero.fail_create = CONTACT_CREATION_UNCONFIRMED
+        self.assert_unconfirmed(self.create({"name": SUPPLIER}), "")
+
+    def test_a_response_without_a_contact_id_is_unconfirmed(self) -> None:
+        """No ContactID came back, so none is invented."""
+        self.xero.create_contact = lambda name: {"Name": name}
+        self.assert_unconfirmed(self.create({"name": SUPPLIER}), "")
+
+    def test_a_read_back_that_cannot_run_is_unconfirmed(self) -> None:
+        for code in ("connection_failed", "permission_denied", "response_invalid"):
+            with self.subTest(code=code):
+                self.xero = CreatingXero(izwi())
+
+                def unreadable(_contact_id, code=code):
+                    raise XeroAccessError(code)
+
+                self.xero.read_contact = unreadable
+                create = build_xero_executors(self.xero, FakeMail(), lambda: "c")[
+                    CREATE_XERO_CONTACT
+                ]
+                self.assert_unconfirmed(create({"name": SUPPLIER}), NEW_ID)
+
+    def test_a_read_back_that_disagrees_is_unconfirmed(self) -> None:
         original = self.xero.read_contact
         self.xero.read_contact = lambda contact_id: (
             {**original(contact_id), "Name": "Something Else"}
             if contact_id == NEW_ID
             else original(contact_id)
         )
-        result = self.create({"name": SUPPLIER})
-        self.assertEqual(result.failure["code"], "read_back_mismatch")
+        self.assert_unconfirmed(self.create({"name": SUPPLIER}), NEW_ID)
 
-    def test_a_response_without_a_contact_id_is_not_success(self) -> None:
-        self.xero.create_contact = lambda name: {"Name": name}
-        result = self.create({"name": SUPPLIER})
-        self.assertEqual(result.failure["code"], "read_back_mismatch")
+    def test_a_missing_read_back_is_unconfirmed(self) -> None:
+        self.xero.read_contact = lambda _contact_id: None
+        self.assert_unconfirmed(self.create({"name": SUPPLIER}), NEW_ID)
+
+    def test_nothing_is_sent_again_after_an_unconfirmed_create(self) -> None:
+        self.xero.read_contact = lambda _contact_id: None
+        self.create({"name": SUPPLIER})
+        self.assertEqual(self.xero.creates, [SUPPLIER])
+        # AL/X's own later call still meets the conflict search first.
+        del self.xero.read_contact
+        retry = self.create({"name": SUPPLIER})
+        self.assertEqual(retry.failure["code"], "contact_name_conflict")
+        self.assertEqual(self.xero.creates, [SUPPLIER])
+
+    def test_the_broker_accepts_the_unconfirmed_result(self) -> None:
+        registry = CapabilityRegistry()
+        for definition in XERO_DEFINITIONS:
+            registry.register(definition)
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_xero_runtime(
+                xero_settings(), Path(directory), FakeMail(), lambda: "call-1"
+            )
+        self.xero.read_contact = lambda _contact_id: None
+        broker = CapabilityBroker(
+            registry,
+            SafetyGate(runtime.policies),
+            build_xero_executors(self.xero, FakeMail(), lambda: "call-1"),
+        )
+        attempt = broker.dispatch(
+            CapabilityCall("call-1", CREATE_XERO_CONTACT, {"name": SUPPLIER}),
+            AuthorityContext(
+                "friedl", runtime.permissions, datetime(2026, 9, 27, tzinfo=UTC)
+            ),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.PARTIAL)
+        self.assertEqual(attempt.result.failure["code"], CONTACT_CREATION_UNCONFIRMED)
+        self.assertEqual(attempt.result.values["contact_id"], NEW_ID)
 
 
 class AdapterTests(unittest.TestCase):
@@ -207,13 +284,45 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(args, ("PUT", f"{ACCOUNTING_URL}/Contacts"))
         self.assertEqual(kwargs["json"], {"Contacts": [{"Name": SUPPLIER}]})
 
-    def test_provider_refusals_surface_as_codes(self) -> None:
-        for status, code in ((403, "permission_denied"), (400, "request_rejected")):
+    def test_a_stated_refusal_is_definite(self) -> None:
+        for status, code in (
+            (401, "permission_denied"),
+            (403, "permission_denied"),
+            (429, "rate_limited"),
+            (400, "request_rejected"),
+        ):
             with self.subTest(status=status):
                 with patch("httpx.request", return_value=self.response({}, status)):
                     with self.assertRaises(XeroAccessError) as raised:
                         self.adapter.create_contact(SUPPLIER)
                 self.assertEqual(raised.exception.code, code)
+
+    def test_an_outcome_xero_did_not_state_is_unconfirmed(self) -> None:
+        unreadable = self.response(None)
+        unreadable.json.side_effect = ValueError("not json")
+        for label, patched in (
+            ("server error", {"return_value": self.response({}, 500)}),
+            ("empty body", {"return_value": self.response({})}),
+            ("no contacts", {"return_value": self.response({"Contacts": []})}),
+            ("unreadable body", {"return_value": unreadable}),
+            ("lost connection", {"side_effect": TimeoutError()}),
+        ):
+            with self.subTest(label):
+                with patch("httpx.request", **patched):
+                    with self.assertRaises(XeroAccessError) as raised:
+                        self.adapter.create_contact(SUPPLIER)
+                self.assertEqual(raised.exception.code, CONTACT_CREATION_UNCONFIRMED)
+
+    def test_other_requests_keep_their_existing_codes(self) -> None:
+        """Only the create opts in; a read that errors still reads as before."""
+        with patch("httpx.request", return_value=self.response({}, 500)):
+            with self.assertRaises(XeroAccessError) as raised:
+                self.adapter.read_contact(NEW_ID)
+        self.assertEqual(raised.exception.code, "request_rejected")
+        with patch("httpx.request", side_effect=TimeoutError()):
+            with self.assertRaises(XeroAccessError) as raised:
+                self.adapter.search_contacts(SUPPLIER)
+        self.assertEqual(raised.exception.code, "connection_failed")
 
 
 class AuthorityTests(unittest.TestCase):
