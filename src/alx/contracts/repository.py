@@ -54,16 +54,22 @@ MERGE_FAILURES = (
     # Branch protection, an unmergeable state, or a conflict. Reported as the
     # fact it is; nothing here retries or works around it.
     "merge_refused",
+    "checks_failed", "checks_timed_out", "branch_behind", "review_required",
+    "merge_conflict", "local_sync_failed",
 )
 
 
 class MergeError(Exception):
     """A merge could not be performed, with a declared machine-readable code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, http_status: int | None = None,
+                 github_message: str = "", **details: object) -> None:
         if code not in MERGE_FAILURES:
             raise ValueError("merge failures must be declared")
         self.code = code
+        self.http_status = http_status
+        self.github_message = github_message[:300]
+        self.details = details
         super().__init__(code)
 
 
@@ -109,6 +115,8 @@ class MergeOutcome:
     head_sha: str
     merged: bool
     merge_commit_sha: str = ""
+    local_main_sha: str = ""
+    checkout_branch: str = ""
 
     def __post_init__(self) -> None:
         if not valid_sha(self.head_sha):
@@ -124,6 +132,8 @@ class MergeOutcome:
             "head_sha": self.head_sha,
             "merged": self.merged,
             "merge_commit_sha": self.merge_commit_sha,
+            "local_main_sha": self.local_main_sha,
+            "checkout_branch": self.checkout_branch,
         }
 
 

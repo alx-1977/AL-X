@@ -261,6 +261,21 @@ class MergeProviderTest(unittest.TestCase):
         original = github_merge.httpx.put
         github_merge.httpx.put = put
         self.addCleanup(setattr, github_merge.httpx, "put", original)
+        # Endpoint tests use a ready GitHub snapshot; full waiting and real
+        # repository transitions are exercised in test_ca_post_coding.
+        def get(url, **kwargs):
+            from types import SimpleNamespace
+            if "/compare/" in url:
+                payload = {"behind_by": 0}
+            elif "/protection/" in url:
+                payload = {}
+            else:
+                payload = {"head": {"sha": OTHER if status == 409 and sent else HEAD}, "base": {"ref": "main", "sha": OTHER},
+                           "state": "open", "mergeable": True}
+            return SimpleNamespace(status_code=200, headers={}, json=lambda: payload)
+        original_get = github_merge.httpx.get
+        github_merge.httpx.get = get
+        self.addCleanup(setattr, github_merge.httpx, "get", original_get)
         return github_merge.GitHubMergeProvider("owner/repo", "token"), sent
 
     def test_the_reviewed_head_is_sent_as_sha(self) -> None:

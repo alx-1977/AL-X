@@ -17,8 +17,8 @@ revision, because Friedl asks for a pull request to be reviewed rather than for
 a particular commit; which commit that is now is read when the request is made
 and reported back with the outcome.
 
-Nothing here reads a review, waits for one, judges findings, or decides whether
-anything may merge.
+The existing task runtime waits boundedly for publication. Nothing here reads
+a review, judges findings, or decides whether anything may merge.
 """
 
 from __future__ import annotations
@@ -51,8 +51,8 @@ DEFINITION = CapabilityDefinition(
     REQUEST_EXTERNAL_REVIEW,
     "Ask the configured external reviewer to review one pull request. "
     "Requests a review of whatever revision the pull request currently points "
-    "at, and reports that revision; it does not wait for the review, read it, "
-    "or judge what it finds.",
+    "at, waits boundedly for publication, and reports that revision and wait_state. "
+    "Read the completed review to judge it; never request another review to poll.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"pull_request_number": _INTEGER},
@@ -67,6 +67,7 @@ DEFINITION = CapabilityDefinition(
             "requested": _BOOLEAN,
             "reviewer": _STRING,
             "requested_at": _STRING,
+            "wait_state": _STRING,
         },
         ("pull_request_number", "head_sha", "requested", "reviewer"),
         extra_properties=False,
@@ -104,6 +105,14 @@ def build_review_executors(
             )
             return _failed(call_id, "review_unavailable")
 
+        if outcome.wait_state and outcome.wait_state != "completed":
+            return CapabilityResult(
+                call_id, REQUEST_EXTERNAL_REVIEW, CapabilityResultState.FAILED,
+                outcome.as_values(),
+                failure={"code": "review_unavailable", "reason": outcome.wait_state,
+                         "requires_judgement": True, "requested": outcome.requested,
+                         "head_sha": outcome.head_sha},
+            )
         return CapabilityResult(
             call_id,
             REQUEST_EXTERNAL_REVIEW,

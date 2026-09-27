@@ -109,7 +109,7 @@ class WatchWindowTest(unittest.TestCase):
             "token",
             lambda: "call-1",
             provider=SlowProvider(),
-            started=lambda number, sha, requested_at: watched.append(requested_at),
+            started=lambda number, sha, requested_at: (watched.append(requested_at) or "completed"),
         )
         runtime.executors[REQUEST_EXTERNAL_REVIEW]({"pull_request_number": 21})
 
@@ -123,7 +123,8 @@ class WatchWindowTest(unittest.TestCase):
 class ReviewRequestTest(unittest.TestCase):
     def _runtime(self, provider):
         return build_review_runtime(
-            True, "owner/repo", "token", lambda: "call-1", provider=provider
+            True, "owner/repo", "token", lambda: "call-1", provider=provider,
+            started=lambda *args: "completed",
         )
 
     def _broker(self, runtime):

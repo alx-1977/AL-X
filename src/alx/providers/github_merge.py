@@ -10,13 +10,17 @@ made about one revision cannot merge a different one, however much later it is
 executed. That is the whole stale-head protection, and it lives on GitHub's
 side precisely so nothing here has to track branch state.
 
-Branch protection still applies. A refusal from it is reported as the fact it
-is; nothing here retries, escalates or works around it.
+Branch protection still applies. Known pending checks are observed boundedly;
+unknown refusals return once. A safe rebase requires a new review decision.
+After the exact authorised head merges, the existing repository authority
+synchronizes the canonical checkout. No review is requested by this provider.
 """
 
 from __future__ import annotations
 
 import re
+import time
+from dataclasses import replace
 
 import httpx
 
@@ -25,6 +29,7 @@ from alx.contracts.repository import (
     MergeError,
     MergeOutcome,
     MergeRequest,
+    valid_sha,
 )
 
 
@@ -52,10 +57,20 @@ def _throttled(response: "httpx.Response") -> bool:
     )
 
 
+def _refusal_message(response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    return str(body.get("message", ""))[:300] if isinstance(body, dict) else ""
+
+
 class GitHubMergeProvider:
     """Merges one pull request at one exact head, or reports why it could not."""
 
-    def __init__(self, repository: str, token: str, api_root: str = API_ROOT) -> None:
+    def __init__(self, repository: str, token: str, api_root: str = API_ROOT,
+                 *, synchronize=None, bring_current=None, sleep=time.sleep,
+                 max_polls: int = 30, interval_seconds: float = 30) -> None:
         # Exactly one owner and one name, each non-empty and free of path
         # characters. A value like "owner/" or "owner/repo/extra" passed the
         # old check, registered the capability, and then built a wrong endpoint
@@ -68,8 +83,132 @@ class GitHubMergeProvider:
         self._repository = repository
         self._token = token
         self._api_root = api_root.rstrip("/")
+        if max_polls < 1 or interval_seconds <= 0:
+            raise ValueError("merge waiting must be bounded")
+        self._synchronize = synchronize
+        self._bring_current = bring_current
+        self._sleep = sleep
+        self._max_polls = max_polls
+        self._interval = interval_seconds
+
+    def _get(self, path: str, *, missing=None):
+        try:
+            response = httpx.get(
+                f"{self._api_root}/repos/{self._repository}{path}",
+                headers={"Authorization": f"Bearer {self._token}",
+                         "Accept": "application/vnd.github+json"},
+                timeout=TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            raise MergeError("merge_unavailable") from None
+        if response.status_code == 404 and missing is not None:
+            return missing
+        if response.status_code != 200:
+            code = "merge_refused" if response.status_code in (401, 403) and not _throttled(response) else "merge_unavailable"
+            raise MergeError(code, http_status=response.status_code,
+                             github_message=_refusal_message(response))
+        try:
+            return response.json()
+        except ValueError:
+            raise MergeError("merge_unavailable") from None
+
+    def _readiness(self, request: MergeRequest):
+        pull = self._get(f"/pulls/{request.pull_request_number}")
+        if not isinstance(pull, dict) or not isinstance(pull.get("head"), dict):
+            raise MergeError("merge_unavailable")
+        if pull["head"].get("sha") != request.head_sha:
+            raise MergeError("head_changed", current_head=pull["head"].get("sha"))
+        if pull.get("merged"):
+            return "merged", pull
+        if pull.get("state") != "open" or pull.get("draft"):
+            raise MergeError("merge_refused", github_message="Pull request is closed or draft")
+        if pull.get("mergeable") is False:
+            raise MergeError("merge_conflict")
+        base = pull.get("base", {})
+        if base.get("ref") != "main" or not valid_sha(base.get("sha")):
+            raise MergeError("merge_refused", github_message="Expected canonical main as the base")
+        comparison = self._get(f"/compare/{base['sha']}...{request.head_sha}")
+        if not isinstance(comparison, dict) or not isinstance(comparison.get("behind_by"), int):
+            raise MergeError("merge_unavailable")
+        if comparison["behind_by"] > 0:
+            if pull["head"].get("repo", {}).get("full_name", "").lower() != self._repository.lower():
+                raise MergeError("branch_behind", github_message="Source repository does not match canonical checkout")
+            return "behind", pull
+        required = self._get("/branches/main/protection/required_status_checks", missing={})
+        if not isinstance(required, dict):
+            raise MergeError("merge_unavailable")
+        checks = required.get("checks") or [
+            {"context": name, "app_id": None} for name in required.get("contexts", [])
+        ]
+        if checks:
+            runs = self._get(f"/commits/{request.head_sha}/check-runs?per_page=100")
+            statuses = self._get(f"/commits/{request.head_sha}/status?per_page=100")
+            if not isinstance(runs, dict) or not isinstance(statuses, dict):
+                raise MergeError("merge_unavailable")
+            if runs.get("total_count", 0) > 100 or statuses.get("total_count", 0) > 100:
+                raise MergeError("merge_unavailable", github_message="Check result exceeds bounded snapshot")
+            pending = []
+            failed = []
+            for check in checks:
+                name, app = check["context"], check.get("app_id")
+                matching = [r for r in runs.get("check_runs", [])
+                            if r.get("name") == name and (app in (None, -1) or r.get("app", {}).get("id") == app)]
+                matching.sort(key=lambda r: r.get("id", 0), reverse=True)
+                legacy = [r for r in statuses.get("statuses", []) if r.get("context") == name]
+                legacy.sort(key=lambda r: r.get("id", 0), reverse=True)
+                if matching:
+                    run = matching[0]
+                    if run.get("status") != "completed":
+                        pending.append(name)
+                    elif run.get("conclusion") not in ("success", "neutral", "skipped"):
+                        failed.append(name)
+                elif legacy and app in (None, -1):
+                    if legacy[0].get("state") in ("failure", "error"):
+                        failed.append(name)
+                    elif legacy[0].get("state") != "success":
+                        pending.append(name)
+                else:
+                    pending.append(name)
+            if failed:
+                raise MergeError("checks_failed", checks=tuple(failed))
+            if pending:
+                return "pending", pull
+        if pull.get("mergeable") is None or pull.get("mergeable_state") == "unknown":
+            return "pending", pull
+        return "ready", pull
 
     def merge(self, request: MergeRequest) -> MergeOutcome:
+        for index in range(self._max_polls):
+            state, pull = self._readiness(request)
+            if state != "pending":
+                break
+            if index + 1 == self._max_polls:
+                raise MergeError("checks_timed_out")
+            self._sleep(self._interval)
+        if state == "behind":
+            if self._bring_current is None:
+                raise MergeError("branch_behind")
+            # Rebase changes the reviewed revision. Never merge or buy another
+            # review under the old authorisation, even if its tree is identical.
+            head = self._bring_current(request.head_sha, pull["head"].get("ref", ""))
+            raise MergeError("review_required", previous_head=request.head_sha,
+                             current_head=head, new_review_approval_required=True)
+        if state == "merged":
+            outcome = MergeOutcome(request.pull_request_number, request.head_sha,
+                                   True, pull.get("merge_commit_sha", ""))
+        else:
+            outcome = self._merge(request)
+        if self._synchronize is not None:
+            try:
+                sha = self._synchronize(outcome.merge_commit_sha, request.head_sha)
+            except MergeError as error:
+                raise MergeError("local_sync_failed", merged=True,
+                                 merge_commit_sha=outcome.merge_commit_sha,
+                                 blocker=error.code, **error.details) from None
+            outcome = replace(outcome, local_main_sha=sha, checkout_branch="main")
+        return outcome
+
+    def _merge(self, request: MergeRequest) -> MergeOutcome:
         url = (
             f"{self._api_root}/repos/{self._repository}"
             f"/pulls/{request.pull_request_number}/merge"
@@ -102,10 +241,17 @@ class GitHubMergeProvider:
             raise MergeError("merge_unavailable") from None
 
         if response.status_code == 409:
-            # GitHub's answer when the head no longer matches `sha`, and also
-            # when the branch cannot be merged. Both mean the same thing here:
-            # what AL/X judged is not what is on the branch now.
-            raise MergeError("head_changed") from None
+            # A conflict and a changed revision are different facts. Re-read
+            # once; do not infer either from the HTTP status alone.
+            current = self._get(f"/pulls/{request.pull_request_number}")
+            if isinstance(current, dict) and current.get("head", {}).get("sha") != request.head_sha:
+                code = "head_changed"
+            elif isinstance(current, dict) and current.get("mergeable") is False:
+                code = "merge_conflict"
+            else:
+                code = "merge_refused"
+            raise MergeError(code, http_status=409,
+                             github_message=_refusal_message(response)) from None
         if response.status_code in (403, 429) and _throttled(response):
             # GitHub uses 403 for throttling as well as for refusal. Reporting
             # a rate limit as a refusal would tell AL/X the merge was rejected
@@ -114,7 +260,8 @@ class GitHubMergeProvider:
             raise MergeError("merge_unavailable") from None
         if response.status_code in (403, 405, 422):
             # Branch protection, an unmergeable state, or a rejected request.
-            raise MergeError("merge_refused") from None
+            raise MergeError("merge_refused", http_status=response.status_code,
+                             github_message=_refusal_message(response)) from None
         if response.status_code != 200:
             raise MergeError("merge_unavailable") from None
 
@@ -123,7 +270,8 @@ class GitHubMergeProvider:
         except ValueError:
             raise MergeError("merge_unavailable") from None
         if not isinstance(body, dict) or body.get("merged") is not True:
-            raise MergeError("merge_refused") from None
+            raise MergeError("merge_refused", http_status=response.status_code,
+                             github_message=_refusal_message(response)) from None
         commit = body.get("sha")
         if not isinstance(commit, str):
             raise MergeError("merge_unavailable") from None

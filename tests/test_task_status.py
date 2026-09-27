@@ -687,7 +687,9 @@ class ReviewCleanupRegressions(PollerHarness):
             "updated_at": "2026-09-24T17:44:16Z",
         }])
         self.store = SQLiteTaskStore(Path(self.directory.name) / "tasks.sqlite3")
-        self._poller(observer).tick()
+        poller = self._poller(observer)
+        poller._now = lambda: asked + timedelta(minutes=3)
+        poller.tick()
         self.assertEqual(self.store.outstanding(), ())
         self.assertEqual(self.lines[-1][1]["state"], "completed")
         self.assertEqual(self.woken[-1].task_id, "second")
@@ -907,8 +909,9 @@ class WatchIdentityTests(unittest.TestCase):
         captured: list[ExternalTask] = []
 
         class Poller:
-            def record(self, task):
+            def wait(self, task):
                 captured.append(task)
+                return "completed"
 
         class Runtime:
             poller = Poller()
@@ -920,20 +923,22 @@ class WatchIdentityTests(unittest.TestCase):
         self.assertNotEqual(captured[0].task_id, captured[1].task_id)
         self.assertEqual(captured[0].subject_reference, subject_reference(21, HEAD))
 
-    def test_unknown_head_keeps_the_review_reference_unpinned(self) -> None:
+    def test_unknown_head_returns_for_judgement_without_polling(self) -> None:
         from alx.bootstrap.live_voice import _watch_review
 
         captured: list[ExternalTask] = []
 
         class Poller:
-            def record(self, task):
+            def wait(self, task):
                 captured.append(task)
+                return "completed"
 
         class Runtime:
             poller = Poller()
 
-        _watch_review(Runtime(), "conversation-1", 21, "", datetime.now(UTC), REVIEWER)
-        self.assertEqual(captured[0].subject_reference, subject_reference(21))
+        result = _watch_review(Runtime(), "conversation-1", 21, "", datetime.now(UTC), REVIEWER)
+        self.assertEqual(result, "head_unconfirmed")
+        self.assertEqual(captured, [])
 
 
 class OneProducerForEveryOccasionTest(unittest.TestCase):
@@ -1380,6 +1385,7 @@ class ProductionWatcherWiringTests(unittest.TestCase):
             "a-token",
             lambda: "call-1",
             reviewer=REVIEWER,
+            started=lambda *args: "completed",
         )
         self.assertIsNotNone(runtime)
         return runtime
@@ -1484,6 +1490,7 @@ class ProductionWatcherWiringTests(unittest.TestCase):
                     "a-token",
                     lambda: "call-1",
                     reviewer=configured,
+                    started=lambda *args: "completed",
                 )
                 self.assertIsNotNone(runtime)
                 self.assertEqual(_reviewer_name(runtime), canonical)
@@ -1500,6 +1507,7 @@ class ProductionWatcherWiringTests(unittest.TestCase):
                 review_runtime = build_review_runtime(
                     True, "alx-1977/AL-X", "a-token", lambda: "call-1",
                     reviewer=configured,
+                    started=lambda *args: "completed",
                 )
                 service = _reviewer_name(review_runtime)
                 runtime = self.build(review_runtime.provider)

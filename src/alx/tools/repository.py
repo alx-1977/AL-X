@@ -49,8 +49,9 @@ DEFINITION = CapabilityDefinition(
     MERGE_PULL_REQUEST,
     "Merge one pull request at one exact reviewed revision. Requires the head "
     "commit that was reviewed, and the merge does not happen if the branch has "
-    "moved since. Decides nothing about whether the change is ready: that "
-    "judgement is made before this is called.",
+    "moved since. Waits boundedly for required checks, then merges and syncs "
+    "the canonical checkout to main. A safe rebase stops for new review approval. "
+    "Review judgement is made before this is called.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -69,6 +70,8 @@ DEFINITION = CapabilityDefinition(
             "head_sha": _STRING,
             "merged": _BOOLEAN,
             "merge_commit_sha": _STRING,
+            "local_main_sha": _STRING,
+            "checkout_branch": _STRING,
         },
         ("pull_request_number", "head_sha", "merged"),
         extra_properties=False,
@@ -104,7 +107,8 @@ def build_repository_executors(
         try:
             outcome = merge(request)
         except MergeError as error:
-            return _failed(call_id, error.code)
+            return _failed(call_id, error.code, http_status=error.http_status,
+                           github_message=error.github_message, **error.details)
         except Exception as error:  # noqa: BLE001 - unclassified is still a fact
             # The type, never the message. An undeclared failure leaves an
             # operator with nothing to go on if only a fixed sentence is
@@ -127,10 +131,10 @@ def build_repository_executors(
     return {MERGE_PULL_REQUEST: merge_pull_request}
 
 
-def _failed(call_id: str, code: str) -> CapabilityResult:
+def _failed(call_id: str, code: str, **details) -> CapabilityResult:
     return CapabilityResult(
         call_id,
         MERGE_PULL_REQUEST,
         CapabilityResultState.FAILED,
-        failure={"code": code},
+        failure={"code": code, **details, "requires_judgement": code != "arguments_unusable"},
     )

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -72,12 +72,14 @@ def build_review_runtime(
     # Reads what a reviewer published. Injected like the requesting provider,
     # so another reviewer can replace it without changing the capability.
     content_provider: Any = None,
-    # Called when a review has been requested, so something can watch for the
-    # result. Optional: without it the request still works and simply is not
-    # watched, which is honest rather than broken.
-    started: Callable[[int, str, datetime], None] | None = None,
+    # The sole bounded task waiter. Without it the capability is withheld;
+    # an immediate-return request would restore Core-driven polling.
+    started: Callable[[int, str, datetime], str] | None = None,
 ) -> ReviewRuntime | None:
     """Compose review requesting, or leave it unregistered."""
+    if started is None:
+        LOGGER.info("No deterministic review waiter: review requesting unavailable")
+        return None
     if not enabled:
         LOGGER.info("External review requesting is not enabled: no capability")
         return None
@@ -117,12 +119,12 @@ def build_review_runtime(
         # injected provider without that fact falls back to the pre-call time.
         local_requested_at = datetime.now(UTC)
         outcome = selected.request(review)
-        if started is not None:
-            started(
-                outcome.pull_request_number,
-                outcome.head_sha,
-                outcome.requested_at or local_requested_at,
-            )
+        wait_state = started(
+            outcome.pull_request_number,
+            outcome.head_sha,
+            outcome.requested_at or local_requested_at,
+        )
+        outcome = replace(outcome, wait_state=wait_state or "observer_unavailable")
         return outcome
 
     LOGGER.info(

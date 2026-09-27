@@ -429,6 +429,13 @@ class RepositoryAuthority:
                 # nothing to lease against, and the operation is refused rather
                 # than performed as an unguarded force.
                 tracking = self._sha_of(f"refs/remotes/{ORIGIN}/{branch}")
+                expected = arguments.get("expected_head")
+                if expected is not None:
+                    if not valid_sha(expected):
+                        raise RepositoryAuthorityError("arguments_unusable", "expected_head must be a full commit id")
+                    # An intervening fetch must not silently widen a lease
+                    # authorised for the reviewed head to somebody else's work.
+                    tracking = expected
                 if not tracking:
                     raise RepositoryAuthorityError(
                         "arguments_unusable",

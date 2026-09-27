@@ -46,6 +46,8 @@ class RepositoryAuthorityRuntime:
     # The canonical checkout this authority recovers and switches back to
     # main. Coding composes only against this root, never a fallback.
     root: Path
+    authority: Any
+    repository_identity: str
 
 
 def build_repository_authority_runtime(
@@ -151,6 +153,8 @@ def build_repository_authority_runtime(
         executors=build_repository_operation_executors(selected, call_id_source),
         permissions=frozenset({REPOSITORY_PERMISSION}),
         root=system.root,
+        authority=selected,
+        repository_identity=system.repository,
     )
 
 

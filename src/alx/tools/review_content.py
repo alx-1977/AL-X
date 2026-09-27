@@ -121,6 +121,11 @@ def build_review_content_executors(
             content = read_review(request)
             if not isinstance(content, ReviewContent):
                 raise TypeError("provider returned malformed review content")
+            if not content.available:
+                # A read is retrieval, never a second polling mechanism. The
+                # requested review was already awaited by the task runtime.
+                return _failed(call_id, "review_unavailable",
+                               reason=content.unavailable_reason or "not_published")
             values = content.as_values()
             provenance = RetentionPolicy().non_mail(
                 ContentOrigin.EXTERNAL,
@@ -166,10 +171,10 @@ def build_review_content_executors(
     return {READ_EXTERNAL_REVIEW: read_external_review}
 
 
-def _failed(call_id: str, code: str) -> CapabilityResult:
+def _failed(call_id: str, code: str, **details) -> CapabilityResult:
     return CapabilityResult(
         call_id,
         READ_EXTERNAL_REVIEW,
         CapabilityResultState.FAILED,
-        failure={"code": code},
+        failure={"code": code, **details, "requires_judgement": code != "arguments_unusable"},
     )

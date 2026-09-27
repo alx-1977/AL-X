@@ -95,7 +95,7 @@ class SQLiteTaskStore:
         except sqlite3.Error as error:
             raise TaskStoreCorrupt(str(error)) from error
 
-    def record(self, task: ExternalTask) -> None:
+    def record(self, task: ExternalTask, *, handed_over: bool = False) -> None:
         """Write one task, replacing any earlier state for the same id."""
         with self._lock:
             database = self._connect()
@@ -104,8 +104,8 @@ class SQLiteTaskStore:
                     """
                     INSERT INTO external_tasks (task_id, kind, service,
                         subject_reference, state, requested_at, last_checked_at,
-                        completed_at, conversation_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        completed_at, conversation_id, handed_over)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(task_id) DO UPDATE SET
                         kind = excluded.kind,
                         service = excluded.service,
@@ -115,7 +115,7 @@ class SQLiteTaskStore:
                         last_checked_at = excluded.last_checked_at,
                         completed_at = excluded.completed_at,
                         conversation_id = excluded.conversation_id,
-                        handed_over = 0
+                        handed_over = excluded.handed_over
                     """,
                     (
                         task.task_id,
@@ -129,6 +129,7 @@ class SQLiteTaskStore:
                         None if task.completed_at is None
                         else task.completed_at.isoformat(),
                         task.conversation_id,
+                        int(handed_over),
                     ),
                 )
             except sqlite3.Error as error:

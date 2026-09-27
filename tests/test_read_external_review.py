@@ -454,12 +454,10 @@ class ExternalEvidenceTests(unittest.TestCase):
                 unavailable_reason=NO_REVIEW_FOR_REVISION,
             )
         )
-        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
-        self.assertFalse(result.values["available"])
-        self.assertEqual(
-            result.values["unavailable_reason"], NO_REVIEW_FOR_REVISION
-        )
-        self.assertEqual(result.values["summary"], "")
+        self.assertIs(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "review_unavailable")
+        self.assertEqual(result.failure["reason"], NO_REVIEW_FOR_REVISION)
+        self.assertTrue(result.failure["requires_judgement"])
 
     def test_unusable_arguments_fail_before_any_read(self) -> None:
         reads: list = []
@@ -530,6 +528,7 @@ class AuthorityTests(unittest.TestCase):
             lambda: "call-1",
             provider=Requester(),
             content_provider=Reader(),
+            started=lambda *args: "completed",
         )
 
     def test_reading_needs_no_approval_from_friedl(self) -> None:

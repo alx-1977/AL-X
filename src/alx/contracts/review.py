@@ -85,6 +85,7 @@ class ReviewOutcome:
     requested: bool
     reviewer: str
     requested_at: datetime | None = None
+    wait_state: str = ""
 
     def __post_init__(self) -> None:
         if self.head_sha and not valid_sha(self.head_sha):
@@ -104,6 +105,8 @@ class ReviewOutcome:
             "requested": self.requested,
             "reviewer": self.reviewer,
         }
+        if self.wait_state:
+            values["wait_state"] = self.wait_state
         if self.requested_at is not None:
             values["requested_at"] = self.requested_at.isoformat()
         return values
