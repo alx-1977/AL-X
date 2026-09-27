@@ -619,6 +619,17 @@ def _targeted_tests(
         candidates: list[str] = []
         if path.name.startswith("test_"):
             candidates.append(path.as_posix())
+        # A test module sitting next to the file it covers, when that file
+        # exists. This is how a small fixture names its own test, and it is
+        # the same stem rule the source tree already uses under tests/.
+        parent = path.parent.as_posix()
+        sibling = (
+            f"test_{path.stem}.py"
+            if parent in ("", ".")
+            else f"{parent}/test_{path.stem}.py"
+        )
+        if sibling not in candidates:
+            candidates.append(sibling)
         if path.parts[:2] == ("src", "alx"):
             module_parts = PurePosixPath(relative).with_suffix("").parts[2:]
             if module_parts:
