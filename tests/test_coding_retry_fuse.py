@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -58,6 +60,56 @@ def state(*attempts):
 
 
 class CodingRetryFuseTests(unittest.TestCase):
+    def test_completed_unchanged_historical_job_does_not_spend_retry(self):
+        checkpoint = {
+            "branch": "fix/old-noop", "head_sha": "a" * 40,
+            "stage": "test", "files": [], "preexisting_dirty": [],
+            "state_digest": "b" * 64,
+        }
+        evidence = {
+            "status": "failed", "file_count": 0,
+            "diff_digest": hashlib.sha256(b"").hexdigest(),
+            "baseline": {"branch": "fix/old-noop", "head_sha": "a" * 40,
+                         "inherited_dirty": [], "clean": True},
+            "checkpoint": json.dumps(checkpoint),
+            "all_required_verification_passed": True,
+        }
+        old_noop = CapabilityAttempt(
+            CapabilityCall("old-noop", "run_coding_task", {"task": "already done"}),
+            CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(
+                "old-noop", "run_coding_task", CapabilityResultState.FAILED,
+                evidence, {"code": "task_failed", "phase": "test",
+                           "session_completed": True},
+            ),
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(state(old_noop)), 0)
+        self.assertEqual(CoreAgent._request_conflict_coding_executions(state(old_noop)), 0)
+        self.assertEqual(CoreAgent._planning_coding_failures(state(old_noop)), 0)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(
+            state(attempt("earlier-failure"), old_noop)
+        ))
+        for changed in (
+            {"diff_digest": "changed"},
+            {"file_count": 1},
+            {"baseline": {"clean": False}},
+            {"checkpoint": json.dumps({**checkpoint, "head_sha": "c" * 40})},
+            {"checkpoint": ""},
+            {"all_required_verification_passed": False},
+        ):
+            with self.subTest(changed=changed):
+                result = CapabilityResult(
+                    "failed", "run_coding_task", CapabilityResultState.FAILED,
+                    {**evidence, **changed},
+                    {"code": "task_failed", "phase": "test",
+                     "session_completed": True},
+                )
+                failed = CapabilityAttempt(
+                    CapabilityCall("failed", "run_coding_task", {"task": "work"}),
+                    CapabilityAttemptDisposition.EXECUTED, True, result,
+                )
+                self.assertEqual(CoreAgent._failed_coding_executions(state(failed)), 1)
+
     def test_stage_infrastructure_and_cancellation_do_not_spend_implementation_retry(self):
         failures = [
             {"code": "review_failed", "phase": "local_review",

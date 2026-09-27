@@ -7,6 +7,8 @@ from typing import Any
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+import hashlib
+import json
 import logging
 from uuid import uuid4
 
@@ -1888,6 +1890,41 @@ class CoreAgent:
         )
 
     @staticmethod
+    def _completed_unchanged_coding_result(item: CapabilityAttempt) -> bool:
+        """Recognise durable no-op evidence recorded before the neutral status existed."""
+        result = item.result
+        if result is None or result.failure is None:
+            return False
+        values = result.durable_values
+        baseline = values.get("baseline")
+        try:
+            checkpoint = json.loads(values.get("checkpoint"))
+        except (TypeError, ValueError):
+            return False
+        return (
+            result.failure.get("code") == "task_failed"
+            and result.failure.get("phase") == "test"
+            and result.failure.get("session_completed") is True
+            and values.get("status") == "failed"
+            and values.get("file_count") == 0
+            and values.get("diff_digest") == hashlib.sha256(b"").hexdigest()
+            and isinstance(baseline, Mapping)
+            and baseline.get("clean") is True
+            and isinstance(baseline.get("head_sha"), str)
+            and len(baseline["head_sha"]) in (40, 64)
+            and baseline.get("inherited_dirty") == ()
+            and isinstance(checkpoint, dict)
+            and checkpoint.get("branch") == baseline.get("branch")
+            and checkpoint.get("head_sha") == baseline.get("head_sha")
+            and checkpoint.get("stage") == "test"
+            and checkpoint.get("files") == []
+            and checkpoint.get("preexisting_dirty") == []
+            and isinstance(checkpoint.get("state_digest"), str)
+            and len(checkpoint["state_digest"]) == 64
+            and values.get("all_required_verification_passed") is True
+        )
+
+    @staticmethod
     def _coding_execution_failures(state: GoalState) -> list[Mapping[str, Any]]:
         """Failures of durable Coding Agent runs that reached implementation."""
         return [
@@ -1909,6 +1946,7 @@ class CoreAgent:
             and (item.result.failure or {}).get("failure_class") not in {
                 "test_infrastructure", "commit_infrastructure"
             }
+            and not CoreAgent._completed_unchanged_coding_result(item)
             # A checkout refused before the feature branch existed: nothing
             # was implemented, so nothing of the allowance was spent.
             and (item.result.failure or {}).get("implementation_reached") is not False
