@@ -69,6 +69,11 @@ class PostCodingTests(unittest.TestCase):
         self.checkout.mkdir()
         self.remote = self.root / 'remote.git'
         self.git('init', '--bare', str(self.remote))
+        # The simulated squash uses commit-tree on this bare remote. A runner
+        # with no global identity refuses that commit; the checkout config
+        # does not apply to it.
+        self.git('--git-dir', str(self.remote), 'config', 'user.email', 'test@example.invalid')
+        self.git('--git-dir', str(self.remote), 'config', 'user.name', 'Test')
         self.git('init', '-b', 'main')
         self.git('config', 'user.email', 'test@example.invalid')
         self.git('config', 'user.name', 'Test')
