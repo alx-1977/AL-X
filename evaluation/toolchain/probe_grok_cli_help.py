@@ -8,6 +8,7 @@ reads the installed binary's help text.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -39,12 +40,24 @@ class GrokCliHelpProbe(unittest.TestCase):
                 timeout=15,
                 check=True,
             )
-        help_text = result.stdout.lower()
-        self.assertIn("--single", help_text)
-        self.assertIn("--json-schema", help_text)
-        self.assertIn("--prompt-file", help_text)
-        self.assertIn("--tools", help_text)
-        self.assertIn("--disallowed-tools", help_text)
+        def declares_option(flag: str) -> None:
+            """An option line, not a mention inside prose or a longer name."""
+            pattern = re.compile(
+                rf"^\s*(?:-\w,\s*)?{re.escape(flag)}(?![\w-])"
+            )
+            self.assertTrue(
+                any(pattern.search(line) for line in result.stdout.splitlines()),
+                f"installed Grok CLI does not declare {flag}",
+            )
+
+        for flag in (
+            "--single",
+            "--json-schema",
+            "--prompt-file",
+            "--tools",
+            "--disallowed-tools",
+        ):
+            declares_option(flag)
         self.assertNotIn("XAI_API_KEY", result.stdout)
 
 

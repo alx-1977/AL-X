@@ -91,10 +91,13 @@ class SeatbeltProcessTimingProbe(unittest.TestCase):
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline and not child_note.exists():
             time.sleep(0.05)
-        if child_note.exists():
-            self._wait_for_process_to_end(
-                int(child_note.read_text(encoding="utf-8"))
+        if not child_note.exists():
+            self.skipTest(
+                "experiment did not record its pid; reap not observed"
             )
+        self._wait_for_process_to_end(
+            int(child_note.read_text(encoding="utf-8"))
+        )
 
     def test_the_launcher_reaps_descendants_when_the_runtime_dies(self) -> None:
         if not self.runner.available():
