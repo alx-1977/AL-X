@@ -281,7 +281,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             self.assertNotIn("unmapped.py", targeted.reason)
 
     def test_a_non_python_change_never_escalates_to_the_suite(self) -> None:
-        """The escalation is reachable only from a Python change."""
+        """A non-Python change never schedules the repository suite and requires no tests."""
         for changed in (
             ("TODO.md",),
             ("README.md",),
