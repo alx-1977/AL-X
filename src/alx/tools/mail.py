@@ -458,8 +458,8 @@ def build_mail_executors(
         `failure` is None. When it is absent the result is PARTIAL with
         `mail_move_unconfirmed`.
 
-        Local acknowledgement is not an input to this result. The account move
-        releases attention on its own and, in the iCloud path, still returns
+        Local acknowledgement is not an input to this result. In the iCloud
+        path, the account move releases attention on its own and still returns
         this outcome when that cleanup fails. Once the server-side move is
         confirmed, a failure of the local acknowledgement must not downgrade,
         reverse, or re-report the move as failed or unconfirmed. A confirmed
