@@ -448,6 +448,24 @@ def build_mail_executors(
         capability_id: str, reference: MailReference, outcome: MailMoveResult,
         destination_key: str, confirmed_key: str,
     ) -> CapabilityResult:
+        """Turn one mail-move outcome into a capability result.
+
+        IMAP server-side move confirmation and local attention-state cleanup
+        are separate concerns. This helper does not acknowledge the message or
+        release the current notification. Confirmation is only whether
+        `outcome.destination_reference` is present. When it is present the move
+        is confirmed: the result is SUCCEEDED, the confirmed flag is true, and
+        `failure` is None. When it is absent the result is PARTIAL with
+        `mail_move_unconfirmed`.
+
+        Local acknowledgement is not an input to this result. The account move
+        releases attention on its own and, in the iCloud path, still returns
+        this outcome when that cleanup fails. Once the server-side move is
+        confirmed, a failure of the local acknowledgement must not downgrade,
+        reverse, or re-report the move as failed or unconfirmed. A confirmed
+        outcome stays SUCCEEDED here; this function has no path that rewrites
+        it from attention-state cleanup.
+        """
         confirmed = outcome.destination_reference is not None
         values: dict[str, Any] = {
             "reference": _reference_values(reference),
