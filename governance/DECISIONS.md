@@ -419,6 +419,15 @@ The Luna evaluation is suspended, not concluded: no evidence is recorded for it,
 
 The subscription bills nothing per token, so its recorded rate is zero and the daily USD fuse no longer limits autonomous turns. The ceiling still applies, unchanged, to any metered model. The remaining D-024 bounds stand: requests are hers, a 60-second minimum horizon, one Core turn at a time, a bounded step budget per turn, and the master switch. The subscription's usage limits are shared with conversation, so autonomous turns spend the same allowance Friedl talks to her on.
 
+**Amendment — 2026-09-28: the autonomous input bound follows the Core's context window.**
+
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-28**, by written instruction after the first live activation; exact wording for his confirmation at review.
+
+The 96,000-token input bound recorded under Economics above was sized for Luna. Carried unchanged onto the subscription Core, it refused every autonomous occasion: real requests measured 102,899 to 113,387 on the conservative byte count, and no autonomous turn happened.
+
+Autonomous input remains bounded. For `claude_subscription` / `claude-opus-5-5` the bound is that Core's context window less a 128,000-token reserve equal to the model/transport maximum output allowance. The recorded context window is 1,000,000 tokens and the recorded maximum output allowance is 128,000 tokens, so the autonomous input ceiling is 872,000 tokens. Both values were reported by Claude Code CLI 2.1.281 for the exact production invocation on 2026-09-28. The limits are recorded once, for the conversational Core's model, and the bound is derived from them rather than held as a separate number; if the transport later reports different limits, the authoritative record is corrected rather than guessed. Oversized requests are still refused before dispatch and never truncated; the occasion is held durably, is not re-offered on every tick, and becomes eligible again when the bound changes or after a fixed retry interval. The 96,000 figure is historical and no longer production policy. No provider authority changes.
+
 ## D-025 — Public web read authority (Web Access V1)
 
 - **Date:** 2026-09-04

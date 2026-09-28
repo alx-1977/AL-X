@@ -19,6 +19,27 @@ class AutonomousReasoningDisabled(Exception):
     """An autonomous turn was refused because that reasoning path is off."""
 
 
+class AutonomousRequestUnbounded(Exception):
+    """The constructed request exceeds the autonomous input ceiling.
+
+    Raised before any provider call and before any reservation, because a
+    reservation computed from a bound the request does not respect is not a
+    ceiling, it is a guess. Nothing is truncated to make it fit: cutting the
+    Laws, her identity, the catalogue, the conversation, her goals or her own
+    thoughts would change who is reasoning in order to save money, which is
+    the one trade this design may never make. The turn simply does not happen,
+    and that becomes evidence.
+    """
+
+    def __init__(self, measured: int, ceiling: int) -> None:
+        self.measured = measured
+        self.ceiling = ceiling
+        super().__init__(
+            f"autonomous request needs {measured} input tokens, above the "
+            f"{ceiling} ceiling; refusing rather than truncating"
+        )
+
+
 class Cognition(str, Enum):
     """How much reasoning capability one bounded question is worth."""
 

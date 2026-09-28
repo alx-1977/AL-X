@@ -27,8 +27,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from alx.contracts import CognitionOpportunity, ResponseDelivery
+from alx.core.loop import INPUT_BOUND_EXCEEDED
 
 LOGGER = logging.getLogger(__name__)
+
+# How a held occasion is marked in the opportunity ledger, followed by the
+# input ceiling it was held against.
+DEFERRED_INPUT_BOUND = "deferred_input_bound"
+# How long an occasion held for its size waits before it is tried again at an
+# unchanged bound. A conversation or goal list can shrink, so the hold is not
+# permanent; an hour costs one local rebuild per held occasion per hour, where
+# releasing it at once rebuilt every one of them every thirty seconds.
+INPUT_BOUND_RETRY_SECONDS = 3600.0
 
 
 class AutonomousCognitionRunner:
@@ -46,6 +56,9 @@ class AutonomousCognitionRunner:
         clock: Callable[[], datetime] | None = None,
         spend_observer: Any = None,
         commissioning_limit: int | None = None,
+        # Where an occasion too large for the input bound is held. None holds
+        # nothing, and such an occasion is released like any other refusal.
+        holds: "InputBoundHolds | None" = None,
     ) -> None:
         # Deliberately no budget, provider, model or token bounds. Those belong
         # to the reasoning boundary, which is the only place the exact request
@@ -73,6 +86,7 @@ class AutonomousCognitionRunner:
         # where the contracts reject it, so the failure would surface as a
         # broken turn rather than as the wrong time.
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._holds = holds
 
     def run_one(self, opportunity: CognitionOpportunity) -> bool:
         """Run one occasion the producer has already found.
@@ -134,6 +148,7 @@ class AutonomousCognitionRunner:
         # or reserves against it, and dispatches the same object. Reserving
         # here would be paying against an estimate of a request not yet built.
         outcome_state = "error"
+        outcome_reason = None
         # Bind cost reporting to this occasion for the duration of the turn, so
         # what the reasoning boundary spends lands on the right ledger row.
         spend = _OccasionSpend()
@@ -152,6 +167,7 @@ class AutonomousCognitionRunner:
                 self._clock() + timedelta(days=self._retention_days),
             )
             outcome_state = outcome.state.value
+            outcome_reason = getattr(outcome, "reason", None)
             # She decided to speak. Whether anyone could hear is a fact about
             # the occasion, recorded and nothing more: the words are not kept,
             # so nothing can replay them, and no rule here decides whether it
@@ -217,7 +233,24 @@ class AutonomousCognitionRunner:
         # The request is closed only once the turn actually happened, so a
         # refused or crashed occasion is not silently marked as taken.
         try:
-            if outcome_state == "error":
+            if (
+                outcome_state == "error"
+                and outcome_reason == INPUT_BOUND_EXCEEDED
+                and not spend.dispatched
+                and self._holds is not None
+            ):
+                # The request would not fit, so no turn happened and nothing
+                # was reserved. Released, the next tick would rebuild the same
+                # request and refuse it again, every thirty seconds, for ever.
+                # Held instead: the claim is kept so no source offers it, its
+                # request or task stays open, and it is released when the
+                # bound changes or the retry interval passes.
+                self._holds.hold(opportunity.opportunity_id)
+                LOGGER.info(
+                    "Held %s: its request exceeds the autonomous input bound",
+                    opportunity.opportunity_id,
+                )
+            elif outcome_state == "error":
                 # The turn did not happen, so the occasion is given back rather
                 # than kept. Its request stays pending and will mature again;
                 # holding the claim would leave her waiting on a cognition that
@@ -242,6 +275,42 @@ class AutonomousCognitionRunner:
                 error,
             )
         return True
+
+
+class InputBoundHolds:
+    """Occasions held because their request exceeds the input bound.
+
+    A hold keeps the occasion's claim in the opportunity ledger, marked with
+    the ceiling it was held against, so no source offers it and nothing about
+    its request or task is closed. `reopen` lifts a hold made against a
+    different ceiling, or one older than the retry interval, and the source
+    then offers the occasion again. Mechanical throughout: nothing here reads
+    an occasion or judges it worth thinking about.
+    """
+
+    def __init__(
+        self,
+        ledger: Any,
+        input_ceiling: int,
+        clock: Callable[[], datetime] | None = None,
+        retry_seconds: float = INPUT_BOUND_RETRY_SECONDS,
+    ) -> None:
+        if retry_seconds <= 0:
+            raise ValueError("retry_seconds must be positive")
+        self._ledger = ledger
+        self._marker = f"{DEFERRED_INPUT_BOUND}:{input_ceiling}"
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._retry_seconds = retry_seconds
+
+    def hold(self, opportunity_id: str) -> None:
+        self._ledger.defer(opportunity_id, self._marker, self._clock())
+
+    def reopen(self) -> tuple[str, ...]:
+        return self._ledger.reopen_deferred(
+            DEFERRED_INPUT_BOUND,
+            self._marker,
+            self._clock() - timedelta(seconds=self._retry_seconds),
+        )
 
 
 class LedgerSpendAuthority:

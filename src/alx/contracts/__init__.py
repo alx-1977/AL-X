@@ -2,6 +2,7 @@
 
 from alx.contracts.cognition import (
     AutonomousReasoningDisabled,
+    AutonomousRequestUnbounded,
     Cognition,
     CognitionOrigin,
 )

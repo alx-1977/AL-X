@@ -37,6 +37,10 @@ class DueCognitionSource:
         runner: Any,
         core_turn_lock: asyncio.Lock,
         interval_seconds: float,
+        # Lifts holds on occasions that were too large for the input bound,
+        # so a changed bound or a lapsed hold is offered again. One ledger
+        # update; it starts no Core turn.
+        reopen: Any = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -48,6 +52,7 @@ class DueCognitionSource:
         # other, which is worse than having none.
         self._core_turn_lock = core_turn_lock
         self._interval_seconds = interval_seconds
+        self._reopen = reopen
 
     async def run(self) -> None:
         """Tick for the life of the process."""
@@ -69,6 +74,10 @@ class DueCognitionSource:
         tuple when the master switch is off or no `not_before` has matured, and
         this never reaches the runner.
         """
+        # Occasions held because they did not fit are released first when
+        # their hold has lapsed, so they are offered in this same tick.
+        if self._reopen is not None:
+            await asyncio.to_thread(self._reopen)
         run = 0
         # Offered once each per tick. An occasion the runner declines without
         # holding a claim is due again at once, and must wait for the next

@@ -504,9 +504,11 @@ class ShutdownOrderingTests(unittest.TestCase):
                     and call.func.attr == "to_thread"
                 ):
                     # The tick's due-scan reads outside the lock and starts no
-                    # Core turn; everything else must go through the barrier.
+                    # Core turn, and so does lifting input-bound holds: one
+                    # ledger update. Everything else must go through the
+                    # barrier.
                     rendered = ast.dump(call)
-                    if "due_opportunities" in rendered:
+                    if "due_opportunities" in rendered or "_reopen" in rendered:
                         continue
                     offenders.append(f"{path.name}:{node.lineno}")
         self.assertEqual(offenders, [])
