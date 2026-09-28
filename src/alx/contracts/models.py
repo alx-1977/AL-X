@@ -106,6 +106,42 @@ class ReasoningModel(Protocol):
 PROTOCOL_INPUT_TOKEN_ALLOWANCE = 512
 
 
+# The context window, in tokens, of each Core model as the runtime reaches it.
+# The one record of how much a Core request may hold: a bound on Core input is
+# derived from here and nowhere else, so the Core that answers Friedl and the
+# instance that answers an unprompted turn cannot come to disagree about the
+# model they share.
+#
+# A fact about the model and the transport together, recorded deliberately and
+# never inferred from a model's name: an unlisted model has no window here, and
+# anything that needs one refuses rather than guesses.
+CORE_CONTEXT_WINDOW_TOKENS: dict[tuple[str, str], int] = {
+    # Claude Opus 5.5 is documented with a 1,000,000-token window. The
+    # subscription reaches it through the Claude Code CLI as `--model
+    # claude-opus-5-5`, without the `[1m]` opt-in to the long window, so the
+    # standard 200,000-token window is recorded: the smaller of the two, and
+    # the one this transport is not known to exceed.
+    ("claude_subscription", "claude-opus-5-5"): 200_000,
+}
+
+
+def core_input_ceiling(provider: str, model: str, output_reserve: int) -> int | None:
+    """The most input a Core request to this model may carry, or None.
+
+    The model's context window less a reserve kept free for what the model
+    writes back: a request that filled the window would leave no room for its
+    own answer. Compared against `input_token_upper_bound`, which counts every
+    encoded byte and so over-states tokens, which keeps the check on the safe
+    side. None for a model with no recorded window.
+    """
+    if output_reserve <= 0:
+        raise ValueError("output_reserve must be positive")
+    window = CORE_CONTEXT_WINDOW_TOKENS.get((provider.strip().lower(), model.strip()))
+    if window is None or window <= output_reserve:
+        return None
+    return window - output_reserve
+
+
 def input_token_upper_bound(request: "ModelRequest") -> int:
     """Conservatively bound the complete request, including schema and framing."""
     import json

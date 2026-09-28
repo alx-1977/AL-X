@@ -419,6 +419,15 @@ The Luna evaluation is suspended, not concluded: no evidence is recorded for it,
 
 The subscription bills nothing per token, so its recorded rate is zero and the daily USD fuse no longer limits autonomous turns. The ceiling still applies, unchanged, to any metered model. The remaining D-024 bounds stand: requests are hers, a 60-second minimum horizon, one Core turn at a time, a bounded step budget per turn, and the master switch. The subscription's usage limits are shared with conversation, so autonomous turns spend the same allowance Friedl talks to her on.
 
+**Amendment — 2026-09-28: the autonomous input bound follows the Core's context window.**
+
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-28**, by written instruction after the first live activation; exact wording for his confirmation at review.
+
+The 96,000-token input bound recorded under Economics above was sized for Luna. Carried unchanged onto the subscription Core, it refused every autonomous occasion: real requests measured 102,899 to 113,387 on the conservative byte count, and no autonomous turn happened.
+
+Autonomous input remains bounded. For `claude_subscription` / `claude-opus-5-5` the bound is that Core's recorded context window, 200,000 tokens, less a 32,000-token reserve kept free for its output: 168,000. It is derived from the one recorded window for the conversational Core's model, not held as a separate number. Oversized requests are still refused before dispatch and never truncated; the occasion is held durably, is not re-offered on every tick, and becomes eligible again when the bound changes or after a fixed retry interval. The 96,000 figure is historical and no longer production policy. No provider authority changes.
+
 ## D-025 — Public web read authority (Web Access V1)
 
 - **Date:** 2026-09-04

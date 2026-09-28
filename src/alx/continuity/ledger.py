@@ -114,6 +114,49 @@ class SQLiteOpportunityLedger:
         ).fetchone()
         return row is not None
 
+    def defer(self, opportunity_id: str, marker: str, deferred_at: datetime) -> None:
+        """Hold an occasion that could not be carried, without closing it.
+
+        The claim is kept, so no source offers the occasion again while it is
+        held, and its request or task stays open: nothing is marked honoured
+        and nothing is lost. `marker` records why and against what bound, so
+        the hold can be lifted when that bound changes.
+        """
+        with self._connection:
+            self._connection.execute(
+                "UPDATE cognition_opportunities SET outcome = ?, recorded_at = ? "
+                "WHERE opportunity_id = ?",
+                (marker, deferred_at.isoformat(), opportunity_id),
+            )
+
+    def reopen_deferred(
+        self, kind: str, current_marker: str, held_since_or_before: datetime
+    ) -> tuple[str, ...]:
+        """Release held occasions whose reason may no longer hold.
+
+        A hold of this `kind` is lifted when its marker differs from the
+        current one — the bound it was held against has changed — or when it
+        has been held since `held_since_or_before` or earlier, so a context
+        that has since shrunk is tried again. Released occasions are offered
+        by their source like any other. Returns what was released.
+        """
+        with self._connection:
+            rows = self._connection.execute(
+                "SELECT opportunity_id FROM cognition_opportunities "
+                "WHERE outcome LIKE ? AND (outcome != ? OR recorded_at <= ?)",
+                (
+                    f"{kind}:%",
+                    current_marker,
+                    held_since_or_before.isoformat(),
+                ),
+            ).fetchall()
+            released = tuple(row["opportunity_id"] for row in rows)
+            self._connection.executemany(
+                "DELETE FROM cognition_opportunities WHERE opportunity_id = ?",
+                [(item,) for item in released],
+            )
+        return released
+
     def record_reserved(
         self, opportunity_id: str, provider: str, model: str, reserved_usd: float
     ) -> None:

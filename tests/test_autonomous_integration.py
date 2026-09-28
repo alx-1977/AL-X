@@ -22,11 +22,14 @@ from alx.bootstrap.autonomous import AutonomousCognitionRunner  # noqa: E402
 from alx.bootstrap.reasoning import (  # noqa: E402
     AutonomousReasonerUnavailable,
     OriginSelectedReasoner,
+    autonomous_input_ceiling,
     build_model_reasoner,
 )
-from alx.config import (  # noqa: E402
-    AUTONOMOUS_MAX_INPUT_TOKENS,
-    AUTONOMOUS_MAX_OUTPUT_TOKENS,
+from alx.config import AUTONOMOUS_MAX_OUTPUT_TOKENS  # noqa: E402
+
+# The input ceiling production derives for the one approved autonomous Core.
+AUTONOMOUS_MAX_INPUT_TOKENS = autonomous_input_ceiling(
+    "claude_subscription", "claude-opus-5-5"
 )
 from alx.continuity import (  # noqa: E402
     FutureCognitionSource,
@@ -35,7 +38,7 @@ from alx.continuity import (  # noqa: E402
 )
 from alx.contracts import CognitionOrigin, ReasoningContext  # noqa: E402
 from alx.contracts.continuity import FutureCognitionRequest  # noqa: E402
-from alx.core.model_reasoner import AutonomousRequestUnbounded  # noqa: E402
+from alx.contracts import AutonomousRequestUnbounded  # noqa: E402
 from alx.observability import ConfiguredPricingWorstCase  # noqa: E402
 from alx.observability.autonomous_budget import SQLiteAutonomousLedger  # noqa: E402
 
@@ -367,9 +370,11 @@ class ViableInputCeilingTests(unittest.TestCase):
         headroom = AUTONOMOUS_MAX_INPUT_TOKENS - self._production_bound()
         self.assertGreater(headroom, 20_000)
 
-    def test_the_ceiling_is_the_corrected_figure(self) -> None:
-        self.assertEqual(AUTONOMOUS_MAX_INPUT_TOKENS, 96_000)
+    def test_the_ceiling_is_derived_from_the_core_window(self) -> None:
+        """The Core's window less the output reserve; not the Luna figure."""
         self.assertEqual(AUTONOMOUS_MAX_OUTPUT_TOKENS, 32_000)
+        self.assertEqual(AUTONOMOUS_MAX_INPUT_TOKENS, 200_000 - 32_000)
+        self.assertNotEqual(AUTONOMOUS_MAX_INPUT_TOKENS, 96_000)
 
 
 class SameRequestObjectTests(unittest.TestCase):

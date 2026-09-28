@@ -638,24 +638,19 @@ def _tier_settings(
     )
 
 
+# The output the autonomous Core may write, and the reserve its input ceiling
+# keeps free for that answer.
 AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
 # The exact provider and model EX-001, as amended on 2026-09-27, approves for
 # autonomous turns: the conversational Core itself, on Friedl's Claude
 # subscription. Not a default: the only value configuration may take. The
 # subscription CLI takes no effort setting, so none is part of the identity.
 AUTONOMOUS_APPROVED_IDENTITY = ("claude_subscription", "claude-opus-5-5")
-# The input ceiling the autonomous reservation is computed against. Enforced on
-# the constructed request before dispatch: a bound nothing checks makes the
-# worst case a guess rather than a ceiling.
-#
-# 96,000 rather than 32,000, corrected in D-024a on 2026-09-03. A real Core
-# request measures roughly 59.6k input units with the full capability catalogue
-# and an empty conversation, so 32,000 guaranteed refusal and 64,000 left no
-# room for the conversation, goals and thoughts that make a turn worth having.
-# The alternative was a thinner prompt for the autonomous Core, which D-024a
-# forbids: both origins must reason in the same identity and capability
-# environment, or the experiment compares two different minds.
-AUTONOMOUS_MAX_INPUT_TOKENS = 96_000
+# The autonomous input ceiling is not a constant here. It is derived, in
+# bootstrap, from the conversational Core's recorded context window less
+# AUTONOMOUS_MAX_OUTPUT_TOKENS, because the autonomous instance is that same
+# Core. The 96,000 figure D-024a recorded belonged to the retired Luna
+# arrangement and is history, not configuration.
 
 
 def autonomous_reasoning_settings(

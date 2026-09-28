@@ -2,7 +2,6 @@
 
 from alx.config.settings import (
     WebSearchSettings,
-    AUTONOMOUS_MAX_INPUT_TOKENS,
     AUTONOMOUS_MAX_OUTPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
     autonomous_commissioning_limit,
@@ -39,7 +38,6 @@ __all__ = [
     "RepositoryRuntimeSettings",
     "repository_runtime_settings",
     "WebSearchSettings",
-    "AUTONOMOUS_MAX_INPUT_TOKENS",
     "AUTONOMOUS_MAX_OUTPUT_TOKENS",
     "autonomous_cognition_daily_budget_usd",
     "autonomous_commissioning_limit",

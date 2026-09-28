@@ -267,3 +267,29 @@ usage limits, which conversation shares.
 **Unchanged:** everything in "Explicitly prohibited by this exception", the
 origin-only selection, the absence of any fallback, and the expiry condition.
 The Luna evaluation is suspended rather than concluded; see D-024a.
+
+### Amendment — 2026-09-28: the autonomous input bound follows the Core's context window
+
+- **Approved by Friedl:** 2026-09-28, by written instruction to the
+  implementing model after the first live activation refused every autonomous
+  occasion; exact wording for his confirmation at review.
+- **Why:** the 96,000-token input bound in the 2026-09-27 amendment above was
+  carried over from the Luna arrangement, whose pricing it was sized for. Real
+  autonomous requests to the subscription Core measured 102,899 to 113,387 on
+  the conservative byte count, so every occasion was refused before dispatch
+  and no autonomous turn could happen.
+
+Autonomous turns keep a bounded input. For `claude_subscription` /
+`claude-opus-5-5` the bound is that Core's recorded context window, 200,000
+tokens, less a reserve of 32,000 tokens kept free for its output: 168,000. The
+window is recorded once, for the model the conversational Core uses, and the
+autonomous bound is derived from it, so the two cannot drift apart.
+
+A request over the bound is still refused before dispatch, and nothing is
+truncated to make it fit. The refused occasion is held, not lost: its request
+or task stays open, it is not offered again on every tick, and it becomes
+eligible again when the bound changes or after a fixed retry interval.
+
+The 96,000-token figure is historical: it belonged to the Luna arrangement and
+is no longer production policy. This amendment grants no provider authority
+beyond the 2026-09-27 amendment.

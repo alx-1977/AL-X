@@ -28,10 +28,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from alx.bootstrap.live_voice import load_environment  # noqa: E402
 from alx.bootstrap.reasoning import build_model_reasoner  # noqa: E402
-from alx.config import (  # noqa: E402
-    AUTONOMOUS_MAX_INPUT_TOKENS,
-    AUTONOMOUS_MAX_OUTPUT_TOKENS,
-)
+from alx.config import AUTONOMOUS_MAX_OUTPUT_TOKENS  # noqa: E402
+
+# The input ceiling of the retired Luna arrangement this calibration was
+# written for (D-024a, 2026-09-03). Historical: production now derives the
+# autonomous ceiling from the conversational Core's context window.
+AUTONOMOUS_MAX_INPUT_TOKENS = 96_000
 from alx.contracts import CognitionOrigin, ReasoningContext  # noqa: E402
 from alx.contracts.continuity import CarriedThought  # noqa: E402
 from alx.contracts.models import input_token_upper_bound  # noqa: E402

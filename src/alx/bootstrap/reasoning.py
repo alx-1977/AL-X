@@ -4,8 +4,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from alx.config import AUTONOMOUS_MAX_OUTPUT_TOKENS, ConfigurationError
 from alx.contracts import AutonomousReasoningDisabled, CognitionOrigin, ReasoningModel
+from alx.contracts.models import core_input_ceiling
 from alx.core import ModelReasoner
+
+
+def autonomous_input_ceiling(provider: str, model: str) -> int:
+    """The input bound for an autonomous turn on this Core.
+
+    Derived from the Core's recorded context window less the output reserve,
+    so it moves with the model rather than being a second number that can
+    drift from it. Called with the conversational Core's identity, which
+    settings require the autonomous one to equal. A model with no recorded
+    window cannot be bounded honestly, so autonomy refuses to start on it.
+    """
+    ceiling = core_input_ceiling(provider, model, AUTONOMOUS_MAX_OUTPUT_TOKENS)
+    if ceiling is None:
+        raise ConfigurationError(
+            f"no context window is recorded for {provider}/{model}; "
+            "autonomous cognition cannot bound its input"
+        )
+    return ceiling
 
 
 def build_model_reasoner(

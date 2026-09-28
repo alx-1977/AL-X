@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled,
+    AutonomousRequestUnbounded,
     CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityDispatch, CapabilityResult,
     ConversationOrigin,
@@ -28,6 +29,9 @@ from alx.contracts import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# Why an autonomous turn did not happen when its request would not fit.
+INPUT_BOUND_EXCEEDED = "input_bound_exceeded"
 
 _RUN_CODING_TASK = "run_coding_task"
 _MAX_FAILED_CODING_EXECUTIONS = 2
@@ -320,6 +324,15 @@ class CoreAgent:
                     CoreState.FINISHED_SILENTLY,
                     snapshot,
                     reason="autonomous_reasoning_disabled",
+                )
+            except AutonomousRequestUnbounded as error:
+                # Not a failed turn and not a finished one: the occasion is
+                # known and valid, and cannot be carried at this bound. Named,
+                # so the runner can hold it durably instead of offering the
+                # same oversized request again on every tick.
+                LOGGER.info("Autonomous request over its input bound: %s", error)
+                return CoreOutcome(
+                    CoreState.ERROR, snapshot, reason=INPUT_BOUND_EXCEEDED
                 )
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)

@@ -33,6 +33,7 @@ from alx.providers.review_status import subject_reference
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
+    InputBoundHolds,
     LedgerSpendAuthority,
     OccasionSpendRelay,
 )
@@ -40,7 +41,11 @@ from alx.bootstrap.continuity import build_continuity_runtime
 from alx.contracts.notebook import OPEN_NOTEBOOK_THREAD_LIMIT
 from alx.tools import OPEN_THOUGHT_LIMIT, PENDING_REVISIT_LIMIT
 from alx.bootstrap.notebook import build_notebook_runtime
-from alx.bootstrap.reasoning import OriginSelectedReasoner, build_model_reasoner
+from alx.bootstrap.reasoning import (
+    OriginSelectedReasoner,
+    autonomous_input_ceiling,
+    build_model_reasoner,
+)
 from alx.bootstrap.xero import (
     BILL_EXECUTION_CAPABILITIES,
     BILL_TASK_CAPABILITIES,
@@ -53,7 +58,6 @@ from alx.config import (
     merge_settings,
     repository_runtime_settings,
     review_settings,
-    AUTONOMOUS_MAX_INPUT_TOKENS,
     autonomous_cognition_daily_budget_usd,
     autonomous_commissioning_limit,
     autonomous_due_check_seconds,
@@ -306,6 +310,16 @@ async def run(repository_root: Path) -> None:
         usage.record(task_id, values)
 
     providers = build_runtime_providers(provider_settings, telemetry)
+    # The most input an autonomous turn may carry, derived once from the
+    # conversational Core's recorded context window, because the autonomous
+    # instance is that same Core. Refuses to start on a model with no window.
+    autonomous_ceiling = (
+        None if providers.autonomous is None
+        else autonomous_input_ceiling(
+            provider_settings.reasoning.provider,
+            provider_settings.reasoning.model,
+        )
+    )
     goal_store = SQLiteGoalStore(storage_root / "goals.sqlite3")
     conversation_store = SQLiteConversationStore(storage_root / "conversations.sqlite3")
     migrate_legacy_conversations(goal_store, conversation_store)
@@ -796,7 +810,7 @@ async def run(repository_root: Path) -> None:
             providers.autonomous,
             CODE_ROOT,
             AUTONOMOUS_MAX_OUTPUT_TOKENS,
-            AUTONOMOUS_MAX_INPUT_TOKENS,
+            autonomous_ceiling,
             # The bounds and the budget arrive together; ModelReasoner refuses
             # a partial combination, so a bounded autonomous reasoner that
             # could dispatch without withdrawing anything cannot be built.
@@ -967,6 +981,13 @@ async def run(repository_root: Path) -> None:
         else CombinedOccasionSource(*occasion_sources)
     )
 
+    # Occasions too large for the autonomous input bound are held durably and
+    # released when the bound changes or the retry interval passes, rather
+    # than rebuilt and refused on every tick.
+    autonomous_holds = (
+        None if autonomous_ceiling is None
+        else InputBoundHolds(opportunity_ledger, autonomous_ceiling)
+    )
     autonomous_runner = AutonomousCognitionRunner(
         occasion_source,
         opportunity_ledger,
@@ -976,12 +997,14 @@ async def run(repository_root: Path) -> None:
         response_transport=server,
         spend_observer=occasion_spend,
         commissioning_limit=autonomous_commissioning_limit(environment),
+        holds=autonomous_holds,
     )
     due_cognition = DueCognitionSource(
         occasion_source,
         autonomous_runner,
         core_turn_lock,
         autonomous_due_check_seconds(environment),
+        reopen=None if autonomous_holds is None else autonomous_holds.reopen,
     )
     # Watching the mailbox is not a property of whether Friedl has a browser
     # open, so the scan lives here beside the transport rather than inside a
