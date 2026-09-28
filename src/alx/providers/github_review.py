@@ -104,6 +104,10 @@ _FAILED_STATES = frozenset({"failure", "error"})
 # spent.
 AUTOMATIC_REVIEW_GRACE_SECONDS = 60.0
 AUTOMATIC_REVIEW_RECHECK_SECONDS = 10.0
+# How many times one request follows the head to a newer commit before it
+# stops trying to join a round. Each follow needs a push inside one request,
+# so only a branch being pushed continuously reaches it.
+MAX_HEAD_CHANGES = 3
 
 
 def _moment(value: object) -> datetime | None:
@@ -316,10 +320,26 @@ class GitHubReviewProvider:
         grace at once: nothing automatic is coming, and asking again is right.
         """
         deadline = time.monotonic() + AUTOMATIC_REVIEW_GRACE_SECONDS
+        changes = 0
         while head:
             found = self._round(head)
             if found is not None and found.state not in _FAILED_STATES:
-                return _Head(head, found.state)
+                # Confirmed before it is joined, as a trigger is confirmed
+                # after it is posted. A push between reading the head and
+                # reading its status would otherwise join the old head's round
+                # and ask nothing for the commit now under review. If the head
+                # moved, the old head's round decides nothing: the question is
+                # asked again of the new head, at once.
+                current = self._head(number)
+                if current == head:
+                    return _Head(head, found.state)
+                changes += 1
+                if changes > MAX_HEAD_CHANGES:
+                    # Still moving. No round can be tied to a head, so none is
+                    # joined; the trigger path confirms the head it reports.
+                    return _Head(current, "")
+                head = current
+                continue
             if found is not None or time.monotonic() >= deadline:
                 break
             time.sleep(AUTOMATIC_REVIEW_RECHECK_SECONDS)

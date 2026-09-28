@@ -832,6 +832,102 @@ class StatusBeforeContentTests(Harness):
         self.assertEqual(self.content_reads(), [])
 
 
+class HeadConfirmedBeforeJoiningTests(Harness):
+    """PR #78 finding 5: a push between the head and status reads.
+
+    The request must not join the old head's round and stay silent about the
+    commit now under review. It confirms the head before joining, and asks
+    the whole question again of a head that moved.
+    """
+
+    def request(self):
+        return self.provider.request(ReviewRequest(pull_request_number=NUMBER))
+
+    def push_around_status_read(self, when: str, heads=(NEXT_HEAD,)) -> None:
+        """Push each of `heads`, one per status read, `before` or `after` it."""
+        pending = list(heads)
+
+        def hooked(method, url, **keywords):
+            is_status = "/statuses" in url
+            if is_status and when == "before" and pending:
+                self.github.commit_pushed(pending.pop(0))
+            response = self.github.request(method, url, **keywords)
+            if is_status and when == "after" and pending:
+                self.github.commit_pushed(pending.pop(0))
+            # A push reinstalls the transport; keep this hook in front of it.
+            github_review.httpx.request = hooked
+            return response
+
+        github_review.httpx.request = hooked
+
+    def test_an_unchanged_head_joins_its_round(self) -> None:
+        self.github.statuses[HEAD] = running_round()
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [])
+        self.assertFalse(outcome.requested)
+        self.assertEqual(outcome.head_sha, HEAD)
+        self.assertEqual(outcome.attached_round, "pending")
+
+    def test_a_push_before_the_status_read_does_not_join_the_old_head(self) -> None:
+        self.github.statuses[HEAD] = running_round()
+        self.push_around_status_read("before")
+        outcome = self.request()
+        # The new head has no round, so it follows the grace to one trigger.
+        self.assertEqual(self.github.posted, [{"body": "@coderabbitai review"}])
+        self.assertTrue(outcome.requested)
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+        self.assertEqual(sum(self.grace.sleeps), 60.0)
+
+    def test_a_push_after_the_status_read_does_not_join_the_old_head(self) -> None:
+        self.github.statuses[HEAD] = running_round()
+        self.push_around_status_read("after")
+        outcome = self.request()
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+
+    def test_the_new_head_s_automatic_round_is_joined(self) -> None:
+        self.github.statuses[HEAD] = running_round()
+        self.github.statuses[NEXT_HEAD] = running_round()
+        self.push_around_status_read("after")
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [])
+        self.assertFalse(outcome.requested)
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+        # Followed at once: the move is not a grace recheck.
+        self.assertEqual(self.grace.sleeps, [])
+
+    def test_the_old_head_s_finished_review_does_not_suppress_the_new_one(self) -> None:
+        self.github.statuses[HEAD] = ended_round()
+        self.push_around_status_read("after")
+        outcome = self.request()
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertTrue(outcome.requested)
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+
+    def test_a_head_that_keeps_moving_ends_with_at_most_one_trigger(self) -> None:
+        heads = ["e" * 40, "f" * 40, "1" * 40, "2" * 40, "3" * 40]
+        self.github.statuses[HEAD] = running_round()
+        for head in heads:
+            self.github.statuses[head] = running_round()
+        self.push_around_status_read("after", heads=heads)
+        outcome = self.request()
+        # Bounded: it stops following after MAX_HEAD_CHANGES moves, joins
+        # nothing, and asks once. The head it names is confirmed or empty.
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertTrue(outcome.requested)
+        self.assertIn(outcome.head_sha, ("", self.github.head))
+
+    def test_repeated_requests_across_a_push_trigger_once(self) -> None:
+        self.github.statuses[HEAD] = running_round()
+        self.push_around_status_read("before")
+        self.request()
+        github_review.httpx.request = self.github.request
+        self.github.statuses[NEXT_HEAD] = running_round()
+        self.request()
+        self.request()
+        self.assertEqual(len(self.github.posted), 1)
+
+
 class UnserviceableContinuationTests(unittest.TestCase):
     """Defect 2, where autonomy is off: say so, and keep the work."""
 
