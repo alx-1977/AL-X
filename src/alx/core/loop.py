@@ -150,8 +150,8 @@ class CoreAgent:
         self._store = store
         self._reasoner = reasoner
         # Mechanical record of a refused goal proposal, for diagnosis. The
-        # references and the rejection code only: enough to see what was cited
-        # and why it failed, and nothing about how she reasoned. On
+        # cited references, mutation and response dependence: enough to diagnose
+        # why it failed without recording hidden reasoning. On
         # 2026-09-04 a live rejection could not be diagnosed because the
         # proposal was never recorded anywhere.
         self._record_goal_rejection = record_goal_rejection or (lambda _record: None)
@@ -478,7 +478,7 @@ class CoreAgent:
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
                 self._record_rejection(
-                    conversation, decision.goal_proposal, proposal_error, now,
+                    conversation, decision, proposal_error, now,
                 )
                 # A proposal's evidence is independently reducible from its
                 # requested mutation.  For example, a real completed attempt
@@ -509,7 +509,7 @@ class CoreAgent:
                 # Subject is the mutation kind rather than the capability: the
                 # fault is which mutation was offered, and a later call for the
                 # same capability is a different refusal.
-                if self._already_refused(
+                if decision.response is None and self._already_refused(
                     refused_calls, proposal_error, decision.goal_proposal.kind.value
                 ):
                     return CoreOutcome(
@@ -736,18 +736,23 @@ class CoreAgent:
                     # Its writes have used the canonical persistence path above;
                     # continue within this turn's existing budget and attempts.
                     continue
-                snapshot, deferred = self._defer_or_park_premature_end(
-                    snapshot,
-                    approved_dispatches,
-                    continuation_notice_issued,
-                    step_index,
-                    step_budget,
-                    decision_provenance,
-                )
-                if deferred is not None:
-                    continuation_notice_issued = True
-                    continuation_notices = deferred
-                    continue
+                # A rejected optional mutation must not let old outstanding
+                # work suppress an independent answer. Dependent responses and
+                # silence have already failed above; selection-only decisions
+                # have continued, and memory checks still run before this point.
+                if proposal_error is None:
+                    snapshot, deferred = self._defer_or_park_premature_end(
+                        snapshot,
+                        approved_dispatches,
+                        continuation_notice_issued,
+                        step_index,
+                        step_budget,
+                        decision_provenance,
+                    )
+                    if deferred is not None:
+                        continuation_notice_issued = True
+                        continuation_notices = deferred
+                        continue
                 if decision.finish_silently:
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,
@@ -1660,14 +1665,14 @@ class CoreAgent:
             return snapshot, False
 
     def _record_rejection(self, conversation: ConversationSnapshot,
-                          proposal: GoalProposal | None, reason: str,
+                          decision: AgentDecision, reason: str,
                           now: datetime) -> None:
-        """Mechanical facts about a refused proposal. No reasoning, no prose.
+        """Record the refused mutation and its proposed response dependence.
 
-        Deliberately excludes the objective summary, criteria text and the
-        response: those carry her wording, and this record exists only to show
-        which durable references were cited and which rule refused them.
+        Retain the Core-authored response for diagnosis, not as delivered speech.
+        Objective and criteria prose and hidden reasoning remain excluded.
         """
+        proposal = decision.goal_proposal
         if proposal is None:
             return
         references: list[str] = []
@@ -1690,6 +1695,8 @@ class CoreAgent:
                 "history_evidence_references": history_references,
                 "evidence_ids": [item.evidence_id for item in proposal.new_evidence],
                 "mutation_kind": proposal.kind.value,
+                "proposed_response": decision.response,
+                "response_requires_goal_commit": decision.response_requires_goal_commit,
                 "recorded_at": now.isoformat(),
             })
         except Exception:

@@ -316,8 +316,8 @@ class RejectedProposalObservabilityTest(unittest.TestCase):
         self.assertEqual(record["conversation_id"], "c1")
         self.assertEqual(record["recorded_at"], NOW.isoformat())
 
-    def test_no_reasoning_or_prose_is_persisted(self) -> None:
-        """Mechanical metadata only: no objective text, no model payload."""
+    def test_response_dependence_is_recorded_without_objective_or_hidden_reasoning(self) -> None:
+        """The refused answer is diagnostic evidence, not delivered speech."""
         records: list = []
         reasoner = Queued(
             AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID),
@@ -329,7 +329,25 @@ class RejectedProposalObservabilityTest(unittest.TestCase):
         ).process(conversation(), RETENTION, 2)
         serialised = repr(records[0])
         self.assertNotIn("Delete the message from Quinton", serialised)
-        self.assertNotIn("Working on it", serialised)
+        self.assertEqual(records[0]["proposed_response"], "Working on it.")
+        self.assertFalse(records[0]["response_requires_goal_commit"])
+        self.assertEqual(records[0]["mutation_kind"], "create")
+
+    def test_dependent_rejected_response_is_retained_as_diagnostics_only(self) -> None:
+        records: list = []
+        reasoner = Queued(AgentDecision(
+            goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Claimed completion.",
+            response_requires_goal_commit=True,
+        ))
+        outcome = CoreAgent(
+            self.store, reasoner, lambda call, state: None, (TRASH,),
+            clock=lambda: NOW, record_goal_rejection=records.append,
+        ).process(conversation(), RETENTION, 2)
+        self.assertIsNone(outcome.response)
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertEqual(records[0]["proposed_response"], "Claimed completion.")
+        self.assertTrue(records[0]["response_requires_goal_commit"])
+        self.assertEqual(records[0]["reason"], "evidence_source_unknown")
 
     def test_an_accepted_proposal_records_nothing(self) -> None:
         records: list = []
