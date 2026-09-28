@@ -131,6 +131,11 @@ class ReviewContent:
     # Why nothing was found, when nothing was. A fact about the search, never
     # an opinion about the code.
     unavailable_reason: str = ""
+    # When the reviewer published the round state that made this unavailable.
+    # A retry after a failed round is read against it: a failure published
+    # before the retry was asked for is the previous round's, not its answer.
+    # Not part of `as_values`; it is a fact for the watcher, not review text.
+    round_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not valid_sha(self.head_sha):

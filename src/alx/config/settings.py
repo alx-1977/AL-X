@@ -668,6 +668,15 @@ def autonomous_reasoning_settings(
     make it invisible: an autonomous turn would still run, and nobody would
     have switched it on.
     """
+    # The retired Luna arrangement was selected by effort; the subscription
+    # takes none. A leftover value looks active and changes nothing, which
+    # would leave Friedl believing something about this runtime that is not
+    # true, so it is refused, as a stray reasoning key is.
+    if environment.get("ALX_AUTONOMOUS_EFFORT", "").strip():
+        raise ConfigurationError(
+            "ALX_AUTONOMOUS_EFFORT must not be set: the subscription Core "
+            "takes no effort setting"
+        )
     provider = environment.get("ALX_AUTONOMOUS_PROVIDER", "").strip().lower()
     model = environment.get("ALX_AUTONOMOUS_MODEL", "").strip()
     if not provider or not model:

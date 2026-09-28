@@ -429,15 +429,29 @@ class ApprovedIdentityOnlyTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError):
                     self._settings(ALX_AUTONOMOUS_MODEL=model)
 
-    def test_an_effort_setting_changes_nothing_built(self) -> None:
-        """The subscription takes no effort, so none can select another Core."""
-        for effort in ("low", "medium", "max"):
+    def test_an_effort_setting_is_refused(self) -> None:
+        """The subscription takes no effort; a leftover one must not look live."""
+        from alx.config.settings import ConfigurationError
+
+        for effort in ("low", "medium", "max", "none"):
             with self.subTest(effort=effort):
-                settings = self._settings(ALX_AUTONOMOUS_EFFORT=effort)
-                self.assertEqual(
-                    (settings.provider, settings.model, settings.effort),
-                    ("claude_subscription", "claude-opus-5-5", "none"),
-                )
+                with self.assertRaises(ConfigurationError) as caught:
+                    self._settings(ALX_AUTONOMOUS_EFFORT=effort)
+                self.assertIn("ALX_AUTONOMOUS_EFFORT", str(caught.exception))
+
+    def test_a_leftover_effort_is_refused_even_with_autonomy_off(self) -> None:
+        """Dead configuration is refused whether or not autonomy is on."""
+        from alx.config.settings import (
+            ConfigurationError,
+            autonomous_reasoning_settings,
+        )
+
+        with self.assertRaises(ConfigurationError):
+            autonomous_reasoning_settings({"ALX_AUTONOMOUS_EFFORT": "max"})
+
+    def test_a_blank_effort_is_no_setting(self) -> None:
+        settings = self._settings(ALX_AUTONOMOUS_EFFORT="  ")
+        self.assertEqual(settings.effort, "none")
 
     def test_an_unconfigured_runtime_is_still_simply_absent(self) -> None:
         """Refusing a wrong arrangement must not break having none."""

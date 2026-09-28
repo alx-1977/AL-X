@@ -57,6 +57,7 @@ from alx.contracts.review_content import (  # noqa: E402
     REVIEW_FAILED,
     REVIEW_IN_PROGRESS,
     ReviewContentRequest,
+    ReviewReadError,
 )
 from alx.contracts.review_provider import ReviewProvider, profile_for  # noqa: E402
 from alx.contracts.task import ExternalTask, TaskState  # noqa: E402
@@ -368,8 +369,9 @@ class PlaceholderNeverSettlesTests(Harness):
         self.assertEqual(content.unavailable_reason, REVIEW_FAILED)
         self.assertIs(self.observe(), TaskState.FAILED)
 
-        self.record_task()
-        self.poller().tick()
+        # Watched from before the round failed, so the failure is its answer.
+        self.record_task(requested_at=REQUESTED_AT)
+        self.poller(now=WATCHED_AT).tick()
         self.assertEqual(self.store.outstanding(), ())
         self.assertIs(self.woken[-1].state, TaskState.FAILED)
 
@@ -605,6 +607,229 @@ class AutomaticReviewGraceTests(Harness):
         self.assertEqual(seen.count("POST"), 1)
         self.assertEqual(seen[-2], "POST")
         self.assertTrue(all(method == "GET" for method in seen[:-2]))
+
+
+def _at(moment: datetime) -> str:
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+class RetryAfterFailedRoundTests(Harness):
+    """PR #78 finding 1: the old failure must not answer the retry."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.github.statuses[HEAD] = [status("failure", ROUND_ENDED_AT)]
+        self.outcome = self.provider.request(ReviewRequest(pull_request_number=NUMBER))
+        self.asked = self.outcome.requested_at
+        self.record_task(requested_at=self.asked)
+
+    def tick(self, after_seconds: float) -> None:
+        self.poller(now=self.asked + timedelta(seconds=after_seconds)).tick()
+
+    def new_round(self, *states_and_offsets) -> None:
+        self.github.statuses[HEAD] = [
+            status(state, _at(self.asked + timedelta(seconds=offset)))
+            for state, offset in reversed(states_and_offsets)
+        ] + [status("failure", ROUND_ENDED_AT)]
+
+    def test_the_retry_is_asked_for_once(self) -> None:
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertTrue(self.outcome.requested)
+
+    def test_the_old_failure_does_not_fail_the_new_task(self) -> None:
+        self.tick(5)
+        self.assertEqual(len(self.store.outstanding()), 1)
+        self.assertEqual(self.woken, [])
+
+    def test_the_new_round_s_pending_keeps_it_waiting(self) -> None:
+        self.tick(5)
+        self.new_round(("pending", 20))
+        self.tick(30)
+        self.assertIs(self.store.outstanding()[0].state, TaskState.WAITING_FOR_RESULT)
+
+    def test_the_new_round_s_success_completes_it(self) -> None:
+        self.tick(5)
+        self.new_round(("pending", 20), ("success", 200))
+        self.github.reviews[:] = [{
+            "id": REVIEW_ID, "user": _user(), "body": SUMMARY_BODY,
+            "state": "COMMENTED", "commit_id": HEAD,
+            "submitted_at": _at(self.asked + timedelta(seconds=190)),
+        }]
+        self.tick(230)
+        self.assertEqual(self.store.outstanding(), ())
+        self.assertIs(self.woken[-1].state, TaskState.COMPLETED)
+
+    def test_a_genuine_new_failure_still_fails_it(self) -> None:
+        self.tick(5)
+        self.new_round(("pending", 20), ("error", 200))
+        self.tick(230)
+        self.assertEqual(self.store.outstanding(), ())
+        self.assertIs(self.woken[-1].state, TaskState.FAILED)
+
+    def test_the_new_failure_is_reported_even_without_a_pending_first(self) -> None:
+        self.new_round(("failure", 60))
+        self.tick(90)
+        self.assertIs(self.woken[-1].state, TaskState.FAILED)
+
+
+class ConsumedReviewTests(Harness):
+    """PR #78 finding 2: a finished review already delivered is not re-waited."""
+
+    def runtime(self, delivered):
+        self.waits: list[tuple] = []
+
+        def started(number, head_sha, requested_at):
+            self.waits.append((number, head_sha))
+            return "completed"
+
+        return build_review_runtime(
+            True, "owner/repo", "token", lambda: "call-1",
+            started=started, delivered=delivered,
+        )
+
+    def request(self, delivered):
+        return self.runtime(delivered).executors["request_external_review"](
+            {"pull_request_number": NUMBER}
+        )
+
+    def record_consumed(self) -> None:
+        self.store.record(ExternalTask(
+            task_id="review:42:earlier", kind="external_review", service=REVIEWER,
+            subject_reference=subject_reference(NUMBER, HEAD),
+            state=TaskState.COMPLETED,
+            requested_at=datetime(2026, 9, 7, 6, 12, 10, tzinfo=UTC),
+            completed_at=datetime(2026, 9, 7, 6, 16, tzinfo=UTC),
+            conversation_id="conversation-1",
+        ))
+
+    def from_store(self, number, sha, requested_at):
+        # The composition's own question, asked of a real store.
+        return self.store.verdict_already_consumed(
+            REVIEWER, subject_reference(number, sha), requested_at.isoformat()
+        )
+
+    def test_an_unconsumed_finished_review_is_joined_and_read(self) -> None:
+        self.github.review_finishes_with_a_finding()
+        result = self.request(self.from_store)
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(self.waits, [(NUMBER, HEAD)])
+        self.assertTrue(self.read().available)
+
+    def test_a_consumed_finished_review_is_reported_at_once(self) -> None:
+        self.github.review_finishes_with_a_finding()
+        self.record_consumed()
+        result = self.request(self.from_store)
+        self.assertIs(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["reason"], "already_reviewed")
+        self.assertFalse(result.failure["requested"])
+        self.assertEqual(result.failure["head_sha"], HEAD)
+        # No wait started, so no 900 s timeout; no grace, no trigger.
+        self.assertEqual(self.waits, [])
+        self.assertEqual(self.grace.sleeps, [])
+        self.assertEqual(self.github.posted, [])
+        # No second task was recorded to consume the verdict again.
+        self.assertEqual(
+            [task.task_id for task in self.store.completed_unhandled()]
+            + [task.task_id for task in self.store.outstanding()],
+            ["review:42:earlier"],
+        )
+
+    def test_a_running_round_is_still_joined_after_an_earlier_verdict(self) -> None:
+        """Only a finished round is final; a new round on the head still comes."""
+        self.record_consumed()
+        self.github.statuses[HEAD] = running_round()
+        asked: list = []
+        result = self.request(lambda *args: asked.append(args) or True)
+        self.assertEqual(asked, [])
+        self.assertEqual(self.waits, [(NUMBER, HEAD)])
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+
+    def test_a_triggered_request_never_asks(self) -> None:
+        asked: list = []
+        self.request(lambda *args: asked.append(args) or True)
+        self.assertEqual(asked, [])
+        self.assertEqual(len(self.github.posted), 1)
+
+    def test_unreadable_history_falls_back_to_waiting(self) -> None:
+        self.github.review_finishes_with_a_finding()
+
+        def broken(*args):
+            raise RuntimeError("store unavailable")
+
+        result = self.request(broken)
+        self.assertEqual(self.waits, [(NUMBER, HEAD)])
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+
+    def test_composition_asks_the_task_store(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "alx" / "bootstrap" / "live_voice.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("task_runtime.store.verdict_already_consumed(", source)
+
+
+class StatusBeforeContentTests(Harness):
+    """PR #78 finding 3: a known round state is returned before any fetch."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.urls: list[str] = []
+        self.fail_content = False
+        original = self.github.request
+
+        def recording(method, url, **keywords):
+            self.urls.append(url)
+            if self.fail_content and "/statuses" not in url:
+                raise github_review.httpx.ConnectError("down")
+            return original(method, url, **keywords)
+
+        github_review.httpx.request = recording
+
+    def content_reads(self) -> list[str]:
+        return [url for url in self.urls if "/statuses" not in url]
+
+    def test_pending_fetches_no_content(self) -> None:
+        self.github.automatic_review_starts()
+        self.assertEqual(self.read().unavailable_reason, REVIEW_IN_PROGRESS)
+        self.assertEqual(self.content_reads(), [])
+
+    def test_failed_fetches_no_content(self) -> None:
+        self.github.statuses[HEAD] = [status("error", ROUND_ENDED_AT)]
+        content = self.read()
+        self.assertEqual(content.unavailable_reason, REVIEW_FAILED)
+        self.assertEqual(content.round_at, datetime.fromisoformat(ROUND_ENDED_AT))
+        self.assertEqual(self.content_reads(), [])
+
+    def test_no_round_fetches_no_content(self) -> None:
+        self.assertEqual(self.read().unavailable_reason, NO_REVIEW_FOR_REVISION)
+        self.assertEqual(self.content_reads(), [])
+
+    def test_a_known_state_survives_a_content_outage(self) -> None:
+        self.github.automatic_review_starts()
+        self.fail_content = True
+        self.assertIs(self.observe(), TaskState.WAITING_FOR_RESULT)
+
+    def test_success_fetches_the_content(self) -> None:
+        self.github.review_finishes_with_a_finding()
+        self.assertTrue(self.read().available)
+        self.assertEqual(len(self.content_reads()), 3)
+
+    def test_a_content_failure_after_success_is_surfaced(self) -> None:
+        self.github.review_finishes_with_a_finding()
+        self.fail_content = True
+        with self.assertRaises(ReviewReadError):
+            self.read()
+        self.assertIs(self.observe(), TaskState.STATUS_UNKNOWN)
+
+    def test_only_the_reviewer_s_own_status_on_this_head_counts(self) -> None:
+        self.github.statuses[OLD_HEAD] = ended_round()
+        self.github.statuses[HEAD] = [
+            status("success", ROUND_ENDED_AT, login=OTHER_LOGIN),
+            status("success", ROUND_ENDED_AT, context="law-gates"),
+            *running_round(),
+        ]
+        self.assertEqual(self.read().unavailable_reason, REVIEW_IN_PROGRESS)
+        self.assertEqual(self.content_reads(), [])
 
 
 class UnserviceableContinuationTests(unittest.TestCase):

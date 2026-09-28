@@ -535,6 +535,17 @@ async def run(repository_root: Path) -> None:
             # matched nothing, and a review nobody ever polled.
             _reviewer_name(review_runtime),
         ),
+        # Whether an earlier task already took the verdict of this exact
+        # head. Asked only when the request joined a finished round, which is
+        # the one case where no further review of that head is coming.
+        delivered=lambda number, sha, requested_at: (
+            task_runtime is not None
+            and task_runtime.store.verdict_already_consumed(
+                _reviewer_name(review_runtime),
+                subject_reference(number, sha),
+                requested_at.isoformat(),
+            )
+        ),
     )
     task_runtime = build_task_runtime(
         storage_root,

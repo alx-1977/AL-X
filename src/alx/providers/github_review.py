@@ -200,7 +200,7 @@ class GitHubReviewProvider:
         sha = head.get("sha") if isinstance(head, dict) else None
         return sha if isinstance(sha, str) and _SHA.fullmatch(sha) else ""
 
-    def _round(self, head_sha: str) -> str | None:
+    def _round(self, head_sha: str) -> "_Round | None":
         """Where this reviewer's latest review round of this revision stands.
 
         Read from the commit status the reviewer publishes on the exact commit
@@ -211,8 +211,10 @@ class GitHubReviewProvider:
         for a review completed the wait on PR #77 three minutes before the
         finding it was waiting for existed.
 
-        Returns the latest state, or None when this reviewer has published no
-        status on this revision.
+        Returns the latest state and when it was published, or None when
+        this reviewer has published no status on this revision. The time is
+        what tells a round that ended before a request from one that answers
+        it.
         """
         statuses = [
             item
@@ -234,7 +236,7 @@ class GitHubReviewProvider:
             key=lambda item: _moment(item.get("created_at"))
             or datetime.min.replace(tzinfo=UTC),
         )
-        return latest["state"]
+        return _Round(latest["state"], _moment(latest.get("created_at")))
 
     # ---- requesting -----------------------------------------------------
 
@@ -268,7 +270,7 @@ class GitHubReviewProvider:
             if self._profile.status_context:
                 awaited = self._await_automatic_round(number, head)
                 head = awaited.sha
-                if awaited.attached:
+                if awaited.state:
                     # The round is bound to this head by the reviewer's own
                     # status, so the head is established without a trigger
                     # having gone out for it to move under.
@@ -278,6 +280,7 @@ class GitHubReviewProvider:
                         requested=False,
                         reviewer=self._profile.reviewer,
                         requested_at=requested_at,
+                        attached_round=awaited.state,
                     )
             self._call(
                 "POST",
@@ -314,14 +317,14 @@ class GitHubReviewProvider:
         """
         deadline = time.monotonic() + AUTOMATIC_REVIEW_GRACE_SECONDS
         while head:
-            state = self._round(head)
-            if state is not None and state not in _FAILED_STATES:
-                return _Head(head, True)
-            if state is not None or time.monotonic() >= deadline:
+            found = self._round(head)
+            if found is not None and found.state not in _FAILED_STATES:
+                return _Head(head, found.state)
+            if found is not None or time.monotonic() >= deadline:
                 break
             time.sleep(AUTOMATIC_REVIEW_RECHECK_SECONDS)
             head = self._head(number)
-        return _Head(head, False)
+        return _Head(head, "")
 
     # ---- reading --------------------------------------------------------
 
@@ -428,9 +431,38 @@ class GitHubReviewProvider:
             # way round, a round ending between the two reads would pair a
             # completed status with content fetched before the findings
             # existed.
-            state = (
-                self._round(head_sha) if self._profile.status_context else _COMPLETED_STATE
+            found = (
+                self._round(head_sha) if self._profile.status_context
+                else _Round(_COMPLETED_STATE, None)
             )
+        except (_Refused, _Unavailable) as error:
+            raise ReviewReadError("review_unavailable") from error
+
+        # Nothing is a review of this revision until the reviewer says its
+        # round on this revision has ended. Before that, whatever it has
+        # published here is a placeholder or a partial account, and reporting
+        # it as available settles a wait on evidence the real review will
+        # contradict. Returned before any content is fetched: a known state
+        # must not become an unknown one because a read it never needed
+        # failed.
+        if found is None or found.state != _COMPLETED_STATE:
+            return ReviewContent(
+                pull_request_number=number,
+                head_sha=head_sha,
+                reviewer=self._profile.reviewer,
+                available=False,
+                retrieved_at=self._now(),
+                unavailable_reason=(
+                    NO_REVIEW_FOR_REVISION
+                    if found is None
+                    else REVIEW_FAILED
+                    if found.state in _FAILED_STATES
+                    else REVIEW_IN_PROGRESS
+                ),
+                round_at=None if found is None else found.at,
+            )
+
+        try:
             issue_comments = self._pages(
                 f"/repos/{self._repository}/issues/{number}/comments"
             )
@@ -442,27 +474,6 @@ class GitHubReviewProvider:
             # declares one code for that, and inventing a second here would be
             # a distinction nothing downstream can act on.
             raise ReviewReadError("review_unavailable") from error
-
-        # Nothing is a review of this revision until the reviewer says its
-        # round on this revision has ended. Before that, whatever it has
-        # published here is a placeholder or a partial account, and reporting
-        # it as available settles a wait on evidence the real review will
-        # contradict.
-        if state != _COMPLETED_STATE:
-            return ReviewContent(
-                pull_request_number=number,
-                head_sha=head_sha,
-                reviewer=self._profile.reviewer,
-                available=False,
-                retrieved_at=self._now(),
-                unavailable_reason=(
-                    NO_REVIEW_FOR_REVISION
-                    if state is None
-                    else REVIEW_FAILED
-                    if state in _FAILED_STATES
-                    else REVIEW_IN_PROGRESS
-                ),
-            )
 
         # The review object submitted against this exact revision, where there
         # is one. It is what binds the inline findings below: comments belong
@@ -560,11 +571,19 @@ class GitHubReviewProvider:
         )
 
 
+class _Round(NamedTuple):
+    """The reviewer's latest status on one revision, and when it said so."""
+
+    state: str
+    at: datetime | None
+
+
 class _Head(NamedTuple):
-    """A head SHA, and whether an automatic round is already on it."""
+    """A head SHA, and the state of the round already on it, if one is."""
 
     sha: str
-    attached: bool
+    # Empty when no round was joined and a trigger is needed.
+    state: str
 
 
 class _Unavailable(Exception):

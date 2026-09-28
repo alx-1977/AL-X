@@ -206,17 +206,17 @@ class PostCodingTests(unittest.TestCase):
                              'mergeable': True, 'mergeable_state': 'clean'})
         if path.startswith(f'/commits/{self.head}/statuses'):
             # The reviewer's own round marker: nothing until the trigger goes
-            # out, pending while its comment still says it is in progress
-            # (the next comment read is still inside `review_pending`), then
-            # completed.
+            # out, pending for the first `review_pending` looks at it, then
+            # completed. The round advances as the waiter polls its status,
+            # because the reader fetches no content until the round ends.
             if not self.request_count or 'page=1' not in path:
                 return Response([])
-            state = 'pending' if self.review_reads < self.review_pending else 'success'
+            self.review_reads += 1
+            state = 'pending' if self.review_reads <= self.review_pending else 'success'
             return Response([{'context': 'CodeRabbit', 'state': state,
                               'creator': {'login': 'coderabbitai[bot]'},
                               'created_at': self.now.isoformat()}])
         if path.startswith('/issues/72/comments'):
-            self.review_reads += 1
             if self.review_reads <= self.review_pending:
                 return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
                                   'body': 'Review in progress', 'created_at': self.now.isoformat()}])

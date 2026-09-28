@@ -90,6 +90,10 @@ class ReviewOutcome:
     reviewer: str
     requested_at: datetime | None = None
     wait_state: str = ""
+    # The state of the reviewer's own round that was joined instead of
+    # triggering one: `pending` while it runs, `success` once finished. Empty
+    # when a trigger was posted. Not part of `as_values`.
+    attached_round: str = ""
 
     def __post_init__(self) -> None:
         if self.head_sha and not valid_sha(self.head_sha):

@@ -122,6 +122,20 @@ class ReviewStatusObserver:
             # round yet, or one still in progress with only a placeholder to
             # show — is still coming, and the task keeps waiting.
             if content.unavailable_reason == REVIEW_FAILED:
+                # A failure published at or before this request is the round
+                # that prompted it: a retry is asked for because the last
+                # round failed, and until the reviewer marks the new round the
+                # old failure is still its latest status. It answers nothing
+                # asked here, so the task waits for the new round. A failure
+                # published after the request is this round's, and ends it.
+                if (
+                    since is not None
+                    and content.round_at is not None
+                    and content.round_at <= since
+                ):
+                    return self._unresolved(
+                        number, now, TaskState.WAITING_FOR_RESULT
+                    )
                 return TaskObservation(TaskState.FAILED, now)
             return self._unresolved(number, now, TaskState.WAITING_FOR_RESULT)
         # Available means the reader bound this verdict to the exact revision
