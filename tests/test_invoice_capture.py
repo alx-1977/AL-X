@@ -890,6 +890,218 @@ class ProcessedFilingTests(unittest.TestCase):
         )
 
 
+class CurrencyResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self.xero = FakeXero()
+
+    def capture(self, invoice, **inputs):
+        executor = build_xero_executors(
+            self.xero, FakeMail(), lambda: "currency-call", lambda *_: invoice
+        )[CAPTURE_SUPPLIER_INVOICE]
+        return executor(arguments(**inputs))
+
+    def assert_unresolved(self, result, reason):
+        from alx.tools.xero import CAPTURE_INVOICE_DEFINITION
+        self.assertEqual(result.state, CapabilityResultState.PARTIAL)
+        diagnostic = {
+            "code": "invoice_fields_unresolved", "stage": "invoice_fields",
+            "field": "currency", "reason": reason,
+            "expected": "ISO currency code (three ASCII letters)",
+        }
+        if reason == "currency_conflict":
+            diagnostic.update(extracted_currency="USD", supplied_currency="ZAR")
+        self.assertEqual(result.failure, diagnostic)
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["invoice"], {})
+        self.assertEqual(result.values["steps"], ("read_source_document", "extracted_invoice"))
+        self.assertTrue(CAPTURE_INVOICE_DEFINITION.output_schema.accepts(result.values))
+        self.assertEqual(self.xero.created, 0)
+        self.assertEqual(self.xero.bills, {})
+
+    def test_missing_currency_preserves_read_evidence_without_writing(self):
+        from alx.specialists import checked_invoice
+        invoice = checked_invoice(extracted(currency=""))
+        self.assertFalse(invoice["verified"])
+        self.assert_unresolved(self.capture(invoice), "required_nonblank")
+
+    def test_even_a_legacy_verified_extraction_cannot_post_without_currency(self):
+        self.assert_unresolved(self.capture(extracted(currency="")), "required_nonblank")
+
+    def test_explicit_currency_resolves_only_the_missing_field(self):
+        from alx.specialists import checked_invoice
+        result = self.capture(checked_invoice(extracted(currency="")), currency=" zar ")
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(result.values["bill"]["currency"], "ZAR")
+        self.assertEqual(result.values["invoice"]["currency"], "ZAR")
+
+    def test_agreement_succeeds_after_mechanical_normalization(self):
+        result = self.capture(extracted(currency=" zar "), currency="ZAR")
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(result.values["bill"]["currency"], "ZAR")
+
+    def test_conflict_returns_to_core_without_writing(self):
+        self.assert_unresolved(self.capture(extracted(currency="USD"), currency="ZAR"), "currency_conflict")
+
+    def test_invalid_explicit_currency_has_bounded_diagnostics(self):
+        for value, reason in [("", "required_nonblank"), ("  ", "required_nonblank"),
+                              (None, "type_invalid"), (5, "type_invalid"),
+                              ("ZAR-secret-provider-body", "format_invalid"),
+                              ("US", "format_invalid"), ("123", "format_invalid"),
+                              ("€UR", "format_invalid"), ("uſd", "format_invalid")]:
+            with self.subTest(value=value):
+                result = self.capture(extracted(), currency=value)
+                self.assertEqual(result.state, CapabilityResultState.FAILED)
+                self.assertEqual(result.failure, {
+                    "code": "invoice_validation_failed", "stage": "capture_input",
+                    "field": "currency", "reason": reason,
+                    "expected": "ISO currency code (three ASCII letters)",
+                })
+                self.assertEqual(self.xero.created, 0)
+                self.assertNotIn("secret-provider-body", str(result))
+
+    def test_invalid_extracted_currency_is_unresolved_even_with_explicit_value(self):
+        self.assert_unresolved(self.capture(extracted(currency="R"), currency="ZAR"), "format_invalid")
+
+    def test_currency_resolution_cannot_clear_arithmetic_or_identity_problems(self):
+        from alx.specialists import checked_invoice
+        for changes in ({"total": "999"}, {"supplier_name": ""}, {"invoice_number": ""}):
+            with self.subTest(changes=changes):
+                result = self.capture(checked_invoice(extracted(currency="", **changes)), currency="ZAR")
+                self.assertFalse(result.values["completed"])
+                self.assertEqual(result.values["returned_for"], "extraction_unverified")
+                self.assertEqual(self.xero.created, 0)
+
+    def test_coderabbit_style_usd_invoice_keeps_existing_success(self):
+        invoice = extracted(supplier_name="CodeRabbit Inc", invoice_number="CR268291")
+        self.xero.contacts = ({"Name": "CodeRabbit Inc", "ContactID": "c-1"},)
+        result = self.capture(invoice)
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(result.values["bill"]["currency"], "USD")
+        self.assertEqual(self.xero.created, 1)
+
+    def test_invoice_660_shape_resolves_and_retry_is_duplicate_safe(self):
+        from alx.specialists import checked_invoice
+        class ShuttleXero(FakeXero):
+            def create_draft_bill(self, bill):
+                stored = super().create_draft_bill(bill)
+                stored.update(Total="620.00", AmountDue="620.00")
+                return stored
+        self.xero = ShuttleXero()
+        self.xero.contacts = ({"Name": "Cape Shuttle's and Tours", "ContactID": "c-1"},)
+        invoice = checked_invoice(extracted(
+            supplier_name="Cape Shuttle's and Tours", invoice_number="660",
+            invoice_date="2026-09-25", due_date="", currency="",
+            subtotal="620.00", tax_amount="", total="620.00",
+        ))
+        first = self.capture(invoice, currency="ZAR", authorise=False)
+        self.assertTrue(first.values["completed"])
+        second = self.capture(invoice, currency="ZAR", authorise=True)
+        self.assertTrue(second.values["completed"])
+        self.assertIn("resumed_existing_draft", second.values["steps"])
+        third = self.capture(invoice, currency="ZAR")
+        self.assertEqual(third.values["returned_for"], "duplicate_bill")
+        self.assertEqual(self.xero.created, 1)
+
+    def test_schema_and_broker_support_optional_currency(self):
+        from alx.tools.xero import CAPTURE_INVOICE_DEFINITION
+        from alx.contracts import ValueKind
+        schema = CAPTURE_INVOICE_DEFINITION.input_schema
+        self.assertEqual(schema.properties["currency"].kind, ValueKind.STRING)
+        self.assertNotIn("currency", schema.required)
+        self.assertTrue(schema.accepts(arguments()))
+        self.assertTrue(schema.accepts(arguments(currency="ZAR")))
+        self.assertFalse(schema.accepts(arguments(currency=None)))
+        self.assertFalse(schema.accepts(arguments(currency=5)))
+        self.assertFalse(schema.accepts(arguments(overrides={"currency": "ZAR"})))
+
+    def test_live_broker_rejects_invalid_currency_and_preserves_diagnostics(self):
+        from datetime import UTC, datetime
+        from alx.capabilities import CapabilityBroker, CapabilityRegistry
+        from alx.contracts import CapabilityCall
+        from alx.safety import SafetyGate, AuthorityPolicy, AuthorityContext
+        from alx.tools.xero import CAPTURE_INVOICE_DEFINITION
+        calls = []
+        executors = build_xero_executors(
+            self.xero, FakeMail(), lambda: "currency-call",
+            lambda *args: calls.append(args) or extracted(),
+        )
+        broker = CapabilityBroker(
+            CapabilityRegistry((CAPTURE_INVOICE_DEFINITION,)),
+            SafetyGate({CAPTURE_SUPPLIER_INVOICE: AuthorityPolicy()}), executors,
+        )
+        authority = AuthorityContext("friedl", frozenset(), datetime.now(UTC))
+        for currency in ("", "ZAR body", None, 123):
+            with self.subTest(currency=currency):
+                attempt = broker.dispatch(
+                    CapabilityCall("currency-call", CAPTURE_SUPPLIER_INVOICE,
+                                   arguments(currency=currency)), authority,
+                )
+                if isinstance(currency, str):
+                    self.assertTrue(attempt.implementation_invoked)
+                    self.assertEqual(attempt.result.failure["code"], "invoice_validation_failed")
+                    self.assertEqual(attempt.result.failure["field"], "currency")
+                else:
+                    self.assertFalse(attempt.implementation_invoked)
+                    self.assertEqual(attempt.reason_code, "input_invalid")
+                self.assertEqual(calls, [])
+                self.assertEqual(self.xero.created, 0)
+
+    def test_partial_invoice_evidence_survives_restart_and_is_citable(self):
+        from datetime import UTC, datetime, timedelta
+        from alx.capabilities import CapabilityBroker, CapabilityRegistry
+        from alx.contracts import CapabilityCall, GoalState, Objective, SuccessCriterion
+        from alx.core.loop import CoreAgent
+        from alx.core.model_reasoner import _attempt_is_citable, _attempt_payload
+        from alx.goals import SQLiteGoalStore
+        from alx.safety import SafetyGate, AuthorityPolicy, AuthorityContext
+        from alx.tools.xero import CAPTURE_INVOICE_DEFINITION
+        now = datetime.now(UTC)
+        executors = build_xero_executors(
+            self.xero, FakeMail(), lambda: "currency-call", lambda *_: extracted(currency="")
+        )
+        broker = CapabilityBroker(
+            CapabilityRegistry((CAPTURE_INVOICE_DEFINITION,)),
+            SafetyGate({CAPTURE_SUPPLIER_INVOICE: AuthorityPolicy()}), executors,
+        )
+        attempt = broker.dispatch(
+            CapabilityCall("currency-call", CAPTURE_SUPPLIER_INVOICE, arguments()),
+            AuthorityContext("friedl", frozenset(), now),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.PARTIAL)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "goals.sqlite3"
+            store = SQLiteGoalStore(path)
+            store.create(GoalState("currency-goal", Objective("turn:test", "Capture invoice"),
+                                   success_criteria=(SuccessCriterion("bill", "Bill captured"),), attempts=(attempt,)), "conversation", now + timedelta(days=1))
+            restored = SQLiteGoalStore(path).load("currency-goal").state.attempts[0]
+        self.assertEqual(restored.result, attempt.result)
+        self.assertTrue(_attempt_is_citable(restored))
+        self.assertTrue(CoreAgent._attempt_is_citable_evidence_source(restored))
+        projected = _attempt_payload(restored)
+        self.assertEqual(projected["failure"]["field"], "currency")
+        self.assertEqual(projected["result_values"]["steps"], ["read_source_document", "extracted_invoice"])
+        result = self.capture(extracted(currency=""), currency="ZAR")
+        self.assertTrue(result.values["completed"])
+
+    def test_known_internal_payload_failure_is_bounded_and_not_arguments_unusable(self):
+        result = self.capture(extracted(), context_line="   ")
+        self.assertEqual(result.failure, {
+            "code": "invoice_validation_failed", "stage": "bill_payload",
+            "field": "reference", "reason": "value_invalid", "expected": "nonblank string",
+        })
+        self.assertEqual(self.xero.created, 0)
+
+    def test_unknown_exception_text_does_not_escape(self):
+        def broken(*_):
+            raise ValueError("secret invoice body and provider payload")
+        executor = build_xero_executors(
+            self.xero, FakeMail(), lambda: "currency-call", broken
+        )[CAPTURE_SUPPLIER_INVOICE]
+        result = executor(arguments())
+        self.assertEqual(result.failure["field"], "unknown")
+        self.assertNotIn("secret", str(result))
+
+
 class ReturnsToCoreTests(unittest.TestCase):
     """Only genuine ambiguity reaches AL/X, and it reaches her with the facts."""
 

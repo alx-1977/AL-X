@@ -241,6 +241,15 @@ class ExtractionTests(unittest.TestCase):
         self.assertTrue(any("does not equal total" in item for item in result["problems"]))
         self.assertEqual(result["total"], "180.00", "the figures must not be altered")
 
+    def test_missing_currency_is_unverified_without_inference(self) -> None:
+        for currency in ("", "   ", None):
+            with self.subTest(currency=currency):
+                result = checked_invoice(answer(currency=currency))
+                self.assertFalse(result["verified"])
+                self.assertEqual(result["currency"], "")
+                self.assertEqual(result["problems"], ("currency missing",))
+                self.assertEqual(result["total"], "180.00")
+
     def test_missing_identity_is_reported(self) -> None:
         result = checked_invoice(answer(invoice_number="", supplier_name=""))
         self.assertFalse(result["verified"])

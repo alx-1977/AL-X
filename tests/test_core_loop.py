@@ -1822,6 +1822,7 @@ class AttemptEvidenceCitationTests(unittest.TestCase):
             "        return result.state in {\n"
             "            CapabilityResultState.SUCCEEDED,\n"
             "            CapabilityResultState.FAILED,\n"
+            "            CapabilityResultState.PARTIAL,\n"
             "        }",
             "        return result.state is CapabilityResultState.SUCCEEDED",
         )

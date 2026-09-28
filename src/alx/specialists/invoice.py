@@ -129,7 +129,7 @@ def _money(values: Mapping[str, Any], name: str) -> Decimal | None:
 
 
 def checked_invoice(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Verify the extracted figures arithmetically before anyone relies on them.
+    """Check identity, currency presence and arithmetic before relying on fields.
 
     A model reading a document can misread a number that still looks plausible.
     Nothing here repairs a value: an inconsistency is reported so AL/X can
@@ -140,6 +140,8 @@ def checked_invoice(values: Mapping[str, Any]) -> dict[str, Any]:
     subtotal = _money(values, "subtotal")
     tax = _money(values, "tax_amount")
 
+    if not _text(values, "currency"):
+        problems.append("currency missing")
     if not _text(values, "invoice_number"):
         problems.append("invoice number missing")
     if not _text(values, "supplier_name"):
