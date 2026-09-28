@@ -1517,8 +1517,9 @@ class CoreAgent:
         """Whether this attempt may be named as attempt:<call-id> evidence.
 
         A terminal attempt with a result is a real source, including FAILED
-        jobs that ran. PENDING and never-executed attempts are not. Citing a
-        failed result records that it happened; it does not prove success.
+        jobs and PARTIAL invoice reads that ran. Partial evidence is not
+        posting success. PENDING and never-executed attempts are not. Citing
+        a failed result records that it happened; it does not prove success.
         """
         if item.call is None:
             return False
@@ -1532,6 +1533,7 @@ class CoreAgent:
         return result.state in {
             CapabilityResultState.SUCCEEDED,
             CapabilityResultState.FAILED,
+            CapabilityResultState.PARTIAL,
         }
 
     @staticmethod

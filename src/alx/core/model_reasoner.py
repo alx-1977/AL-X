@@ -577,8 +577,9 @@ def _attempt_is_citable(item: Any) -> bool:
 
     Deliberately the same rule the runtime's grounding check applies: a
     terminal attempt whose implementation was invoked and which carries a
-    result, succeeded or failed. Pending and never-invoked attempts describe
-    an intention rather than something that happened.
+    result, succeeded, failed or partial. Partial invoice reads are evidence
+    of gathered facts, never proof of posting. Pending and never-invoked
+    attempts describe an intention rather than something that happened.
     """
     if item.call is None:
         return False
@@ -592,6 +593,7 @@ def _attempt_is_citable(item: Any) -> bool:
     return result.state in {
         CapabilityResultState.SUCCEEDED,
         CapabilityResultState.FAILED,
+        CapabilityResultState.PARTIAL,
     }
 
 

@@ -26,7 +26,7 @@ from alx.contracts import (
     XeroAccountingAccount,
     xero_date,
 )
-from alx.specialists import is_supplier_bill, prior_coding, resolve_supplier
+from alx.specialists import checked_invoice, is_supplier_bill, prior_coding, resolve_supplier
 
 
 SEARCH_XERO_CONTACTS = "search_xero_contacts"
@@ -209,7 +209,7 @@ _SOURCE_DOCUMENT = _object(
 
 CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
     CAPTURE_SUPPLIER_INVOICE,
-    "Read one identified mail attachment as a supplier invoice, resolve its supplier and accounting treatment from this organisation's own records, and commit the bill when every one of those is unambiguous; otherwise return what is unresolved without acting.",
+    "Read one identified mail attachment as a supplier invoice, resolve its supplier and accounting treatment from this organisation's own records, and commit the bill when every one of those is unambiguous; otherwise return what is unresolved without acting. Optional currency is an explicit ISO-style three-letter code resolved by AL/X; it may fill a missing extracted currency but cannot override a conflicting one.",
     _object(
         {
             "mailbox_id": _STRING,
@@ -218,6 +218,7 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
             "attachment_id": _STRING,
             "expected_sha256": _STRING,
             "context_line": _STRING,
+            "currency": _STRING,
             "authorise": _BOOLEAN,
         },
         (
@@ -244,6 +245,8 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
     SideEffect.EFFECTFUL,
     _FAILURES
     + (
+        "invoice_fields_unresolved",
+        "invoice_validation_failed",
         "document_has_no_text",
         "not_an_invoice",
         "extraction_unverified",
@@ -320,6 +323,64 @@ def _required(arguments: StructuredData, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(name)
     return value.strip()
+
+
+class _InvoiceCurrencyInvalid(ValueError):
+    """Only bounded currency diagnostics may cross the result boundary."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__("currency")
+
+
+def _invoice_currency(value: Any) -> str:
+    if not isinstance(value, str):
+        raise _InvoiceCurrencyInvalid("type_invalid")
+    raw = value.strip()
+    code = raw.upper()
+    if not code:
+        raise _InvoiceCurrencyInvalid("required_nonblank")
+    if not raw.isascii() or len(code) != 3 or any(letter not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" for letter in code):
+        raise _InvoiceCurrencyInvalid("format_invalid")
+    return code
+
+
+def _invoice_validation_detail(error: ValueError, stage: str) -> dict[str, str]:
+    # Never forward exception prose: even a provider ValueError can contain
+    # document contents. Only our declared field names are reportable.
+    constraints = {
+        "currency": "ISO currency code (three ASCII letters)",
+        "contact_id": "nonblank string",
+        "invoice_number": "nonblank string",
+        "date": "ISO date",
+        "due_date": "ISO date",
+        "reference": "nonblank string",
+        "expected_total": "positive decimal matching line total",
+        "line_items": "nonempty valid bill lines",
+        "line_amount_types": "Exclusive, Inclusive or NoTax",
+        "source_documents": "nonempty structured document references",
+        "authorise": "boolean",
+        "context_line": "string",
+        "mailbox_id": "nonblank string",
+        "uid_validity": "nonblank string",
+        "uid": "nonblank string",
+        "attachment_id": "nonblank string",
+        "expected_sha256": "64 hexadecimal characters",
+        "description": "nonblank string",
+        "account_code": "nonblank string",
+        "tax_type": "nonblank string",
+        "quantity": "positive decimal",
+        "unit_amount": "finite decimal",
+        "tax_amount": "nonnegative decimal",
+    }
+    candidate = error.args[0] if error.args else None
+    field = candidate if isinstance(candidate, str) and candidate in constraints else "unknown"
+    return {
+        "stage": stage,
+        "field": field,
+        "reason": error.reason if isinstance(error, _InvoiceCurrencyInvalid) else "value_invalid",
+        "expected": constraints.get(field, "valid structured invoice values"),
+    }
 
 
 def _name_taken(
@@ -660,7 +721,7 @@ def _draft_payload(
             "InvoiceNumber": invoice_number,
             "Date": issue_date,
             "DueDate": due_date,
-            "CurrencyCode": _required(arguments, "currency"),
+            "CurrencyCode": _invoice_currency(arguments.get("currency")),
             "Reference": _required(arguments, "reference"),
             "LineAmountTypes": line_amount_types,
             "LineItems": lines,
@@ -1066,8 +1127,13 @@ def build_xero_executors(
                     "steps": tuple(steps),
                 },
             )
-        except ValueError:
-            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+        except ValueError as error:
+            return CapabilityResult(
+                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.FAILED,
+                {"steps": tuple(steps)},
+                failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "bill_payload")},
+            )
         except MailAccessError as error:
             return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
         except XeroAccessError as error:
@@ -1108,9 +1174,36 @@ def build_xero_executors(
                 },
             )
 
+        def currency_unresolved(reason: str, *, extracted: str = "", supplied: str = "") -> CapabilityResult:
+            return CapabilityResult(
+                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.PARTIAL,
+                {
+                    "completed": False,
+                    "returned_for": "invoice_fields_unresolved",
+                    "detail": "",
+                    "invoice": {},
+                    "bill": _bill_values(None),
+                    "attached": (),
+                    "steps": tuple(steps),
+                },
+                failure={
+                    "code": "invoice_fields_unresolved",
+                    "stage": "invoice_fields",
+                    "field": "currency",
+                    "reason": reason,
+                    "expected": "ISO currency code (three ASCII letters)",
+                    **({"extracted_currency": extracted, "supplied_currency": supplied}
+                       if reason == "currency_conflict" else {}),
+                },
+            )
+
         if extractor is None:
             return failed(CAPTURE_SUPPLIER_INVOICE, "specialist_unconfigured")
         try:
+            explicit_currency = (
+                _invoice_currency(arguments["currency"]) if "currency" in arguments else None
+            )
             reference = MailReference(
                 _required(arguments, "mailbox_id"),
                 _required(arguments, "uid_validity"),
@@ -1157,6 +1250,24 @@ def build_xero_executors(
             steps.append("extracted_invoice")
             if not is_supplier_bill(invoice["document_type"]):
                 return failed(CAPTURE_SUPPLIER_INVOICE, "not_an_invoice")
+            invoice = dict(invoice)
+            extracted_currency = invoice.get("currency", "")
+            if not isinstance(extracted_currency, str):
+                return currency_unresolved("type_invalid")
+            if extracted_currency.strip():
+                try:
+                    extracted_currency = _invoice_currency(extracted_currency)
+                except _InvoiceCurrencyInvalid as error:
+                    return currency_unresolved(error.reason)
+                if explicit_currency is not None and explicit_currency != extracted_currency:
+                    return currency_unresolved("currency_conflict", extracted=extracted_currency, supplied=explicit_currency)
+            elif explicit_currency is None:
+                return currency_unresolved("required_nonblank")
+            invoice["currency"] = explicit_currency or extracted_currency
+            # A resolved currency repairs only that known missing-field check.
+            # Other extraction problems must never be cleared by an override.
+            if not invoice["verified"] and tuple(invoice["problems"]) == ("currency missing",):
+                invoice = checked_invoice(invoice)
             if not invoice["verified"]:
                 return returned(
                     "extraction_unverified",
@@ -1182,8 +1293,13 @@ def build_xero_executors(
             steps.append("looked_up_prior_coding")
             if not coding["resolved"]:
                 return returned("coding_unresolved", coding["reason"], invoice)
-        except ValueError:
-            return failed(CAPTURE_SUPPLIER_INVOICE, "arguments_unusable")
+        except ValueError as error:
+            return CapabilityResult(
+                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.FAILED,
+                {"steps": tuple(steps)},
+                failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "capture_input")},
+            )
         except MailAccessError as error:
             return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
         except SpecialistError as error:
@@ -1227,6 +1343,7 @@ def build_xero_executors(
                 call_id_source(),
                 CAPTURE_SUPPLIER_INVOICE,
                 CapabilityResultState.FAILED,
+                {"steps": (*steps, *outcome.values.get("steps", ()))},
                 failure=dict(outcome.failure or {"code": "request_rejected"}),
             )
         return CapabilityResult(
