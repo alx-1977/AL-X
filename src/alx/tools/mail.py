@@ -489,8 +489,9 @@ def build_mail_executors(
             return failed(READ_MAIL_MESSAGE, "arguments_unusable")
         except MailAccessError as error:
             return failed(READ_MAIL_MESSAGE, error.code)
-        # Addresses and identifiers are references, not message content, so they
-        # remain durable. The body stays transient.
+        # durable_values records the reference, subject, sender, received_at,
+        # participants, threading identifiers, and has_attachments. The body is
+        # copied only into the result values, so it is not durable.
         durable: dict[str, Any] = {
             "reference": _reference_values(content.reference),
             "subject": content.subject,
