@@ -155,6 +155,9 @@ class CoreAgent:
         # 2026-09-04 a live rejection could not be diagnosed because the
         # proposal was never recorded anywhere.
         self._record_goal_rejection = record_goal_rejection or (lambda _record: None)
+        # One transient, provenance-bound capture for inspecting the failed
+        # decision. Payload text never reaches the persistent diagnostic sink.
+        self._last_goal_rejection: tuple[dict[str, Any], ContentProvenance] | None = None
         self._dispatch = dispatch
         self._capabilities = tuple(capabilities)
         self._memory_store = memory_store
@@ -478,7 +481,7 @@ class CoreAgent:
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
                 self._record_rejection(
-                    conversation, decision, proposal_error, now,
+                    conversation, decision, proposal_error, now, decision_provenance,
                 )
                 # A proposal's evidence is independently reducible from its
                 # requested mutation.  For example, a real completed attempt
@@ -1664,12 +1667,25 @@ class CoreAgent:
         except Exception:
             return snapshot, False
 
+    @property
+    def last_goal_rejection(self) -> Mapping[str, Any] | None:
+        """Inspect the last refused response in memory, respecting source expiry.
+
+        This is debug state, never a reasoning input or delivered response.
+        Restart discards it; persistent logs contain only content-free metadata.
+        """
+        if self._last_goal_rejection is None:
+            return None
+        record, provenance = self._last_goal_rejection
+        if provenance.is_expired(self._clock()):
+            record.pop("proposed_response", None)
+        return dict(record)
+
     def _record_rejection(self, conversation: ConversationSnapshot,
                           decision: AgentDecision, reason: str,
-                          now: datetime) -> None:
-        """Record the refused mutation and its proposed response dependence.
+                          now: datetime, provenance: ContentProvenance) -> None:
+        """Capture the answer transiently; persist only rejection metadata.
 
-        Retain the Core-authored response for diagnosis, not as delivered speech.
         Objective and criteria prose and hidden reasoning remain excluded.
         """
         proposal = decision.goal_proposal
@@ -1687,18 +1703,26 @@ class CoreAgent:
             )
             for reference in record.evidence_refs
         ]
+        record = {
+            "conversation_id": conversation.conversation_id,
+            "reason": reason,
+            "source_references": references,
+            "history_evidence_references": history_references,
+            "evidence_ids": [item.evidence_id for item in proposal.new_evidence],
+            "mutation_kind": proposal.kind.value,
+            "proposed_response_present": decision.response is not None,
+            "response_requires_goal_commit": decision.response_requires_goal_commit,
+            "recorded_at": now.isoformat(),
+            "response_content_expires_at": (
+                None if provenance.content_expires_at is None
+                else provenance.content_expires_at.isoformat()
+            ),
+        }
+        self._last_goal_rejection = (
+            {**record, "proposed_response": decision.response}, provenance,
+        )
         try:
-            self._record_goal_rejection({
-                "conversation_id": conversation.conversation_id,
-                "reason": reason,
-                "source_references": references,
-                "history_evidence_references": history_references,
-                "evidence_ids": [item.evidence_id for item in proposal.new_evidence],
-                "mutation_kind": proposal.kind.value,
-                "proposed_response": decision.response,
-                "response_requires_goal_commit": decision.response_requires_goal_commit,
-                "recorded_at": now.isoformat(),
-            })
+            self._record_goal_rejection(record)
         except Exception:
             # Diagnosis must never break the turn it is diagnosing.
             LOGGER.warning("Goal rejection record could not be written")

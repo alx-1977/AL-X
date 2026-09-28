@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from alx.contracts import (  # noqa: E402
     AgentDecision, BackgroundEvent, CapabilityCall, CapabilityDefinition,
     ConversationOrigin, ConversationSnapshot, ConversationTurn, Evidence,
     GoalMutationKind, GoalProposal, MailAccessError, MailReference,
-    SideEffect, StructuredSchema, SuccessCriterion, ValueKind,
+    SideEffect, StructuredSchema, SuccessCriterion, ValueKind, RetentionPolicy,
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
@@ -316,38 +317,64 @@ class RejectedProposalObservabilityTest(unittest.TestCase):
         self.assertEqual(record["conversation_id"], "c1")
         self.assertEqual(record["recorded_at"], NOW.isoformat())
 
-    def test_response_dependence_is_recorded_without_objective_or_hidden_reasoning(self) -> None:
-        """The refused answer is diagnostic evidence, not delivered speech."""
+    def test_response_capture_is_transient_and_not_in_the_log_record(self) -> None:
         records: list = []
-        reasoner = Queued(
-            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID),
-                          response="Working on it."),
-        )
-        CoreAgent(
+        reasoner = Queued(AgentDecision(
+            goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Working on it.",
+        ))
+        core = CoreAgent(
             self.store, reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW, record_goal_rejection=records.append,
-        ).process(conversation(), RETENTION, 2)
+        )
+        core.process(conversation(), RETENTION, 2)
         serialised = repr(records[0])
         self.assertNotIn("Delete the message from Quinton", serialised)
-        self.assertEqual(records[0]["proposed_response"], "Working on it.")
+        self.assertNotIn("Working on it", serialised)
+        self.assertEqual(core.last_goal_rejection["proposed_response"], "Working on it.")
+        self.assertTrue(records[0]["proposed_response_present"])
         self.assertFalse(records[0]["response_requires_goal_commit"])
         self.assertEqual(records[0]["mutation_kind"], "create")
 
-    def test_dependent_rejected_response_is_retained_as_diagnostics_only(self) -> None:
+    def test_dependent_rejected_response_is_captured_without_delivery_or_logging(self) -> None:
         records: list = []
         reasoner = Queued(AgentDecision(
             goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Claimed completion.",
             response_requires_goal_commit=True,
         ))
-        outcome = CoreAgent(
+        core = CoreAgent(
             self.store, reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW, record_goal_rejection=records.append,
-        ).process(conversation(), RETENTION, 2)
+        )
+        outcome = core.process(conversation(), RETENTION, 2)
         self.assertIsNone(outcome.response)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(records[0]["proposed_response"], "Claimed completion.")
+        self.assertEqual(core.last_goal_rejection["proposed_response"], "Claimed completion.")
+        self.assertNotIn("proposed_response", records[0])
         self.assertTrue(records[0]["response_requires_goal_commit"])
         self.assertEqual(records[0]["reason"], "evidence_source_unknown")
+
+    def test_mail_derived_rejected_response_capture_expires(self) -> None:
+        records: list = []
+        current = [NOW]
+        context = conversation()
+        provenance = RetentionPolicy().direct_mail(NOW, (MailReference("INBOX", "777", "3"),))
+        context = replace(context, events=(replace(context.events[0], provenance=provenance),))
+        core = CoreAgent(
+            self.store, Queued(AgentDecision(
+                goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Private mail fact.",
+                response_requires_goal_commit=True,
+            )), lambda call, state: None, (TRASH,),
+            clock=lambda: current[0], record_goal_rejection=records.append,
+        )
+        core.process(context, RETENTION, 2)
+        self.assertEqual(core.last_goal_rejection["proposed_response"], "Private mail fact.")
+        self.assertNotIn("Private mail fact", repr(records))
+        self.assertEqual(records[0]["response_content_expires_at"], RETENTION.isoformat())
+        current[0] = RETENTION
+        self.assertNotIn("proposed_response", core.last_goal_rejection)
+        self.assertNotIn("Private mail fact", repr(core._last_goal_rejection))
+        self.assertTrue(core.last_goal_rejection["response_requires_goal_commit"])
+        self.assertEqual(core.last_goal_rejection["source_references"], [MAIL_EVENT_ID])
 
     def test_an_accepted_proposal_records_nothing(self) -> None:
         records: list = []
