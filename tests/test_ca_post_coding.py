@@ -37,6 +37,7 @@ from alx.providers.github_merge import GitHubMergeProvider
 from alx.providers.github_review import GitHubReviewProvider
 from alx.providers.repository_authority import RepositoryAuthority
 from alx.safety import AuthorityContext, SafetyGate
+from tests.review_transcript import install_grace_clock
 
 
 class Response:
@@ -62,6 +63,9 @@ class PostCodingTests(unittest.TestCase):
                               check=True, capture_output=True, text=True).stdout.strip()
 
     def setUp(self):
+        # No automatic round is modelled on this pull request, so a request
+        # waits out the grace before triggering; instantly, here.
+        install_grace_clock(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

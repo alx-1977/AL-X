@@ -49,6 +49,7 @@ from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.tools.review import REQUEST_EXTERNAL_REVIEW  # noqa: E402
 from tests.review_transcript import (  # noqa: E402
     ended_round,
+    install_grace_clock,
     running_round,
     status,
     statuses_route,
@@ -384,6 +385,7 @@ class ConfiguredProviderTest(unittest.TestCase):
         is exactly what is needed.
         """
         calls: dict = {"get": [], "post": [], "statuses": []}
+        self.grace = install_grace_clock(self)
 
         class Response:
             def __init__(self, status, body, response_headers=None):
@@ -461,14 +463,16 @@ class ConfiguredProviderTest(unittest.TestCase):
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertTrue(outcome.requested)
         self.assertEqual(outcome.head_sha, "")
-        self.assertEqual(len(calls["get"]), 2)
+        # Before and after the trigger, plus one re-read per grace recheck.
+        self.assertEqual(len(calls["get"]), 2 + len(self.grace.sleeps))
         self.assertEqual(len(calls["post"]), 1)
 
     def test_a_stable_head_is_reported_after_confirmation(self) -> None:
         provider, calls = self._provider(head=HEAD)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(outcome.head_sha, HEAD)
-        self.assertEqual(len(calls["get"]), 2)
+        # Before and after the trigger, plus one re-read per grace recheck.
+        self.assertEqual(len(calls["get"]), 2 + len(self.grace.sleeps))
 
     def test_a_rejected_comment_is_reported_as_a_refusal(self) -> None:
         provider, _ = self._provider(head=HEAD, post_status=403)
@@ -550,6 +554,7 @@ class RequestBoundaryTests(unittest.TestCase):
             def json(self):
                 return self._body
 
+        install_grace_clock(self)
         posted: list = []
 
         def request(method, url, **keywords):

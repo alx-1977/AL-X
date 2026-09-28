@@ -96,6 +96,7 @@ from tests.review_transcript import (  # noqa: E402
     SUMMARY_BODY,
     SUMMARY_COMMENT_ID,
     ended_round,
+    install_grace_clock,
     running_round,
     status,
     transport,
@@ -208,6 +209,7 @@ class Harness(unittest.TestCase):
         original = github_review.httpx.request
         self.addCleanup(setattr, github_review.httpx, "request", original)
         self.github = PullRequest77()
+        self.grace = install_grace_clock(self)
         self.provider = GitHubReviewProvider(
             "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
         )
@@ -467,6 +469,142 @@ class NoRedundantTriggerTests(Harness):
         self.assertFalse(result.values["requested"])
         self.assertEqual(result.values["head_sha"], HEAD)
         self.assertEqual(result.values["wait_state"], "completed")
+
+
+class AutomaticReviewGraceTests(Harness):
+    """The race after PR #77: asked before the reviewer has marked the head.
+
+    CodeRabbit marks a new head `pending` seconds after it appears. A request
+    in that window must wait a bounded grace for the mark, mechanically and
+    inside the one call, and trigger only if none comes.
+    """
+
+    def request(self):
+        return self.provider.request(ReviewRequest(pull_request_number=NUMBER))
+
+    def publish_after(self, sleeps: int, head: str, statuses) -> None:
+        def on_sleep(count):
+            if count == sleeps:
+                self.github.statuses[head] = statuses
+        self.grace = install_grace_clock(self, on_sleep)
+
+    def test_a_new_pr_marked_pending_during_the_grace_is_joined(self) -> None:
+        self.publish_after(1, HEAD, running_round())
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [])
+        self.assertFalse(outcome.requested)
+        self.assertEqual(outcome.head_sha, HEAD)
+        self.assertEqual(self.grace.sleeps, [10.0])
+
+    def test_a_new_head_marked_pending_during_the_grace_is_joined(self) -> None:
+        self.github.statuses[HEAD] = ended_round()
+        self.github.commit_pushed(NEXT_HEAD)
+        self.publish_after(2, NEXT_HEAD, running_round())
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [])
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+
+    def test_a_round_that_finishes_during_the_grace_is_joined(self) -> None:
+        self.publish_after(3, HEAD, ended_round())
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [])
+        self.assertFalse(outcome.requested)
+
+    def test_no_automatic_review_by_the_end_of_the_grace_gets_one_trigger(self) -> None:
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [{"body": "@coderabbitai review"}])
+        self.assertTrue(outcome.requested)
+        self.assertEqual(outcome.head_sha, HEAD)
+        # Bounded: sixty seconds, rechecked every ten, then exactly one ask.
+        self.assertEqual(sum(self.grace.sleeps), 60.0)
+        self.assertEqual(set(self.grace.sleeps), {10.0})
+
+    def test_the_old_head_s_review_does_not_stand_in_for_the_new_one(self) -> None:
+        self.github.statuses[HEAD] = ended_round()
+        self.github.commit_pushed(NEXT_HEAD)
+        outcome = self.request()
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+
+    def test_a_push_during_the_grace_is_followed_to_the_new_head(self) -> None:
+        def on_sleep(count):
+            if count == 1:
+                self.github.commit_pushed(NEXT_HEAD)
+            if count == 2:
+                self.github.statuses[NEXT_HEAD] = running_round()
+        self.grace = install_grace_clock(self, on_sleep)
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [])
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+
+    def test_a_failed_round_is_asked_again_without_waiting(self) -> None:
+        self.github.statuses[HEAD] = [status("failure", ROUND_ENDED_AT)]
+        self.request()
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertEqual(self.grace.sleeps, [])
+
+    def test_the_pr_77_sequence_posts_no_trigger(self) -> None:
+        """Opened, asked at once, marked `pending` seconds later: no trigger.
+
+        On PR #77 AL/X asked ten seconds after the automatic round began; here
+        she asks before it begins, the harder case, and the capability still
+        attaches its one wait to the automatic round.
+        """
+        self.publish_after(1, HEAD, running_round())
+        waits: list[tuple] = []
+
+        def started(number, head_sha, requested_at):
+            waits.append((number, head_sha))
+            return "completed"
+
+        runtime = build_review_runtime(
+            True, "owner/repo", "token", lambda: "call-1", started=started
+        )
+        result = runtime.executors["request_external_review"](
+            {"pull_request_number": NUMBER}
+        )
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(self.github.posted, [])
+        self.assertFalse(result.values["requested"])
+        self.assertEqual(waits, [(NUMBER, HEAD)])
+
+    def test_repeated_requests_never_trigger_twice_for_one_head(self) -> None:
+        self.request()
+        self.github.statuses[HEAD] = running_round()
+        self.request()
+        self.request()
+        self.assertEqual(len(self.github.posted), 1)
+
+    def test_the_grace_is_mechanical(self) -> None:
+        """No Core, no scheduler: GitHub reads and a sleep inside one call."""
+        import ast
+
+        tree = ast.parse((
+            Path(__file__).resolve().parents[1]
+            / "src" / "alx" / "providers" / "github_review.py"
+        ).read_text(encoding="utf-8"))
+        imported = {
+            node.module for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        self.assertFalse(any(
+            name.startswith(("alx.core", "alx.continuity", "alx.interfaces",
+                             "alx.bootstrap", "asyncio"))
+            for name in imported
+        ))
+        seen: list[str] = []
+        original = self.github.request
+
+        def recording(method, url, **keywords):
+            seen.append(method)
+            return original(method, url, **keywords)
+
+        github_review.httpx.request = recording
+        self.request()
+        # Every call during the grace was a read; the one write is the trigger.
+        self.assertEqual(seen.count("POST"), 1)
+        self.assertEqual(seen[-2], "POST")
+        self.assertTrue(all(method == "GET" for method in seen[:-2]))
 
 
 class UnserviceableContinuationTests(unittest.TestCase):

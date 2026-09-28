@@ -100,6 +100,40 @@ def statuses_route(url: str, by_revision: dict[str, list[dict]] | None = None):
     return list(by_revision.get(parts[-2], []))
 
 
+class GraceClock:
+    """Stands in for `time` in the review provider.
+
+    Sleeping advances the clock at once and is recorded, so the automatic-
+    review grace runs its whole course instantly. `on_sleep(n)` runs after
+    the n-th sleep, which is how a test publishes a status mid-grace.
+    """
+
+    def __init__(self, on_sleep=None) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+        self._on_sleep = on_sleep
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+        if self._on_sleep is not None:
+            self._on_sleep(len(self.sleeps))
+
+
+def install_grace_clock(test, on_sleep=None) -> GraceClock:
+    """Put a GraceClock in the provider for the length of one test."""
+    from alx.providers import github_review
+
+    clock = GraceClock(on_sleep)
+    original = github_review.time
+    github_review.time = clock
+    test.addCleanup(setattr, github_review, "time", original)
+    return clock
+
+
 def issue_comments() -> list[dict]:
     """The summary thread: two reviewer summaries and one from a person."""
     return [
@@ -272,7 +306,9 @@ __all__ = [
     "STALE_SUMMARY_BODY",
     "SUMMARY_BODY",
     "SUMMARY_COMMENT_ID",
+    "GraceClock",
     "ended_round",
+    "install_grace_clock",
     "inline_comments",
     "issue_comments",
     "reviews",

@@ -50,8 +50,9 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -93,6 +94,16 @@ NO_REVIEW_FOR_REVISION = "no_review_for_revision"
 # as still running rather than as finished.
 _COMPLETED_STATE = "success"
 _FAILED_STATES = frozenset({"failure", "error"})
+
+# How long a request waits for the reviewer's own automatic round to show on
+# the current head before asking for one. CodeRabbit marked a freshly opened
+# pull request `pending` 7-9 seconds after it opened on seven of PR #70-#77;
+# PR #77's trigger went out 10 seconds after it did. Sixty seconds covers that
+# several times over and is a small part of the wait that follows. Rechecked
+# mechanically inside this one call: nothing is scheduled and no Core turn is
+# spent.
+AUTOMATIC_REVIEW_GRACE_SECONDS = 60.0
+AUTOMATIC_REVIEW_RECHECK_SECONDS = 10.0
 
 
 def _moment(value: object) -> datetime | None:
@@ -237,7 +248,10 @@ class GitHubReviewProvider:
         answered "Already reviewed the last commit." Where the reviewer's own
         status shows a round running or completed on this exact head, nothing
         is posted and the outcome says so; the caller's wait attaches to that
-        round. A failed round, or none, still gets the trigger.
+        round. Where there is no status yet, it is looked for again for a
+        short bounded grace, because a head only just opened or pushed is
+        usually marked seconds after AL/X asks. A failed round, or none by the
+        end of the grace, still gets the trigger.
         """
         number = review.pull_request_number
         # Stamped before the trigger goes out, never after. The observer
@@ -251,9 +265,10 @@ class GitHubReviewProvider:
         requested_at = self._now()
         try:
             head = self._head(number)
-            if head and self._profile.status_context:
-                state = self._round(head)
-                if state is not None and state not in _FAILED_STATES:
+            if self._profile.status_context:
+                awaited = self._await_automatic_round(number, head)
+                head = awaited.sha
+                if awaited.attached:
                     # The round is bound to this head by the reviewer's own
                     # status, so the head is established without a trigger
                     # having gone out for it to move under.
@@ -285,6 +300,28 @@ class GitHubReviewProvider:
             reviewer=self._profile.reviewer,
             requested_at=requested_at,
         )
+
+    def _await_automatic_round(self, number: int, head: str) -> "_Head":
+        """The current head, and whether its automatic round has begun.
+
+        A pull request just opened, or a head just pushed, has usually not yet
+        been marked by the reviewer when AL/X asks: the status follows seconds
+        later. So an absent status is looked at again, on a fixed cadence, for
+        a bounded grace period before a trigger is judged necessary. The head
+        is re-read each time, so a push during the grace is followed to the
+        revision the reviewer will actually take up. A failed round ends the
+        grace at once: nothing automatic is coming, and asking again is right.
+        """
+        deadline = time.monotonic() + AUTOMATIC_REVIEW_GRACE_SECONDS
+        while head:
+            state = self._round(head)
+            if state is not None and state not in _FAILED_STATES:
+                return _Head(head, True)
+            if state is not None or time.monotonic() >= deadline:
+                break
+            time.sleep(AUTOMATIC_REVIEW_RECHECK_SECONDS)
+            head = self._head(number)
+        return _Head(head, False)
 
     # ---- reading --------------------------------------------------------
 
@@ -521,6 +558,13 @@ class GitHubReviewProvider:
             submitted_at=self._when(latest),
             retrieved_at=self._now(),
         )
+
+
+class _Head(NamedTuple):
+    """A head SHA, and whether an automatic round is already on it."""
+
+    sha: str
+    attached: bool
 
 
 class _Unavailable(Exception):
