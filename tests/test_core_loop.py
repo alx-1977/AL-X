@@ -512,37 +512,64 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.store.load("goal-1").state, goal())
         self.assertEqual(len(reasoner.contexts), 1)
 
-    def test_invalid_optional_proposal_does_not_end_executable_work(self) -> None:
-        self.store.create(
-            goal(outstanding_work=(WorkItem("work-1", "continue investigation"),)),
-            "conversation-1", RETENTION,
-        )
-        invalid = GoalProposal(
-            GoalMutationKind.REQUEST_COMPLETION,
-            new_evidence=(Evidence(
-                "evidence-1", "unsupported", supports=("criterion-1",),
-                source_references=("turn:not-real",),
-            ),),
+    def test_rejected_optional_completion_returns_answer_despite_stale_work(self) -> None:
+        initial = goal(outstanding_work=(WorkItem("work-1", "verify prior work"),))
+        self.store.create(initial, "conversation-1", RETENTION)
+        proposal = GoalProposal(
+            GoalMutationKind.REQUEST_COMPLETION, outstanding_work=(),
         )
         reasoner = Queued(
-            AgentDecision(response="Premature response.", goal_proposal=invalid),
-            AgentDecision(
-                response="Investigation continued.",
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.UPDATE, outstanding_work=(),
-                ),
-            ),
+            AgentDecision(response="The check is finished; the old work is unresolved.",
+                          goal_proposal=proposal),
+            AssertionError("redundant completion attempt"),
             selects="goal-1",
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.response, "Investigation continued.")
+        self.assertEqual(outcome.response, "The check is finished; the old work is unresolved.")
+        self.assertEqual(outcome.reason, "goal_proposal_rejected")
+        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(self.store.load("goal-1").state, initial)
+
+    def test_independent_answer_survives_a_repeated_mutation_refusal(self) -> None:
+        initial = goal()
+        self.store.create(initial, "conversation-1", RETENTION)
+        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
+        reasoner = Queued(
+            AgentDecision(goal_id="goal-1", goal_proposal=proposal),
+            AgentDecision(response="There is not enough evidence to finish that work.",
+                          goal_proposal=proposal),
+            AssertionError("rejected optional response was retried"),
+            selects="goal-1",
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(len(reasoner.contexts), 2)
-        self.assertEqual(self.store.load("goal-1").state.outstanding_work, ())
+        self.assertEqual(outcome.reason, "goal_proposal_rejected")
+        self.assertEqual(self.store.load("goal-1").state, initial)
+
+    def test_inbox_absence_does_not_automatically_prove_a_destination(self) -> None:
+        for destination in ("Trash", "Processed"):
+            with self.subTest(destination=destination):
+                attempt = CapabilityAttempt(
+                    CapabilityCall("lookup", "inspect", {}),
+                    CapabilityAttemptDisposition.EXECUTED, True,
+                    CapabilityResult("lookup", "inspect", CapabilityResultState.SUCCEEDED,
+                                     {"messages": [], "truncated": False}),
+                )
+                absence = Evidence("absence", "mailbox_observation", supports=(),
+                                   source_references=("attempt:lookup",))
+                initial = goal(
+                    success_criteria=(SuccessCriterion("criterion-1", f"Message in {destination}"),),
+                    attempts=(attempt,), evidence=(absence,),
+                )
+                with self.assertRaisesRegex(ValueError, "completion_lacks_sourced_evidence"):
+                    CoreAgent._derive_goal_status(initial, GoalMutationKind.REQUEST_COMPLETION)
 
     def test_materially_dependent_rejection_fails_without_blanket_retry(self) -> None:
-        self.store.create(goal(), "conversation-1", RETENTION)
-        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
+        initial = goal(outstanding_work=(WorkItem("work-1", "verify prior work"),))
+        self.store.create(initial, "conversation-1", RETENTION)
+        proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION, outstanding_work=())
         reasoner = Queued(
             AgentDecision(response="The goal is complete.", goal_proposal=proposal,
                           response_requires_goal_commit=True),
@@ -550,6 +577,9 @@ class CoreTests(unittest.TestCase):
             selects="goal-1",
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertIsNone(outcome.response)
+        self.assertEqual(self.store.load("goal-1").state, initial)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(len(reasoner.contexts), 1)
 
@@ -725,7 +755,8 @@ class CoreTests(unittest.TestCase):
         proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
         reasoner = Queued(
             AgentDecision(call=call, goal_proposal=proposal),
-            AgentDecision(response="Complete.", goal_proposal=proposal),
+            AgentDecision(call=CapabilityCall("call-2", "inspect", {}),
+                          goal_proposal=proposal),
             selects="goal-1",
         )
         attempt = CapabilityAttempt(
@@ -1085,7 +1116,7 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(outcome.reason, "goal_proposal_rejected")
         self.assertEqual(
-            self.store.load("goal-1").state.status, GoalStatus.AWAITING_INPUT
+            self.store.load("goal-1").state.status, GoalStatus.ACTIVE
         )
 
     def test_tool_result_reenters_same_core_before_response(self) -> None:
