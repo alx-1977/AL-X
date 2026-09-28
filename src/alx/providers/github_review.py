@@ -323,15 +323,20 @@ class GitHubReviewProvider:
         changes = 0
         while head:
             found = self._round(head)
-            if found is not None and found.state not in _FAILED_STATES:
-                # Confirmed before it is joined, as a trigger is confirmed
-                # after it is posted. A push between reading the head and
-                # reading its status would otherwise join the old head's round
-                # and ask nothing for the commit now under review. If the head
-                # moved, the old head's round decides nothing: the question is
-                # asked again of the new head, at once.
+            if found is not None:
+                # Confirmed before it decides anything, as a trigger is
+                # confirmed after it is posted. A push between reading the head
+                # and reading its status would otherwise let the old head's
+                # round decide for the commit now under review: joining a
+                # round that says nothing about it, or retrying a failure that
+                # was never its own while its own round is already running.
+                # If the head moved, the old head's state decides nothing and
+                # the question is asked again of the new head, at once.
                 current = self._head(number)
                 if current == head:
+                    if found.state in _FAILED_STATES:
+                        # This head's own round failed: ask again.
+                        return _Head(head, "")
                     return _Head(head, found.state)
                 changes += 1
                 if changes > MAX_HEAD_CHANGES:
@@ -340,7 +345,7 @@ class GitHubReviewProvider:
                     return _Head(current, "")
                 head = current
                 continue
-            if found is not None or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 break
             time.sleep(AUTOMATIC_REVIEW_RECHECK_SECONDS)
             head = self._head(number)

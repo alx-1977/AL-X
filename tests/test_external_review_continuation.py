@@ -928,6 +928,76 @@ class HeadConfirmedBeforeJoiningTests(Harness):
         self.assertEqual(len(self.github.posted), 1)
 
 
+class FailedRoundHeadConfirmedTests(Harness):
+    """PR #78 finding 6: the failed-round branch confirms the head too.
+
+    A failure on the head that was read must not trigger a retry once the
+    pull request has moved to a head whose own round is already running.
+    """
+
+    request = HeadConfirmedBeforeJoiningTests.request
+    push_around_status_read = HeadConfirmedBeforeJoiningTests.push_around_status_read
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.github.statuses[HEAD] = [status("failure", ROUND_ENDED_AT)]
+
+    def test_an_unchanged_failed_head_is_retried_at_once(self) -> None:
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [{"body": "@coderabbitai review"}])
+        self.assertTrue(outcome.requested)
+        self.assertEqual(outcome.head_sha, HEAD)
+        self.assertEqual(self.grace.sleeps, [])
+
+    def test_a_push_to_a_pending_head_joins_it_without_a_trigger(self) -> None:
+        self.github.statuses[NEXT_HEAD] = running_round()
+        for when in ("before", "after"):
+            with self.subTest(when=when):
+                self.setUp()
+                self.github.statuses[NEXT_HEAD] = running_round()
+                self.push_around_status_read(when)
+                outcome = self.request()
+                self.assertEqual(self.github.posted, [])
+                self.assertFalse(outcome.requested)
+                self.assertEqual(outcome.head_sha, NEXT_HEAD)
+                self.assertEqual(outcome.attached_round, "pending")
+
+    def test_a_push_to_a_finished_head_joins_it_without_a_trigger(self) -> None:
+        self.github.statuses[NEXT_HEAD] = ended_round()
+        self.push_around_status_read("after")
+        outcome = self.request()
+        self.assertEqual(self.github.posted, [])
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+        self.assertEqual(outcome.attached_round, "success")
+
+    def test_a_push_to_an_unreviewed_head_follows_its_grace(self) -> None:
+        self.push_around_status_read("after")
+        outcome = self.request()
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertEqual(outcome.head_sha, NEXT_HEAD)
+        self.assertEqual(sum(self.grace.sleeps), 60.0)
+
+    def test_the_stale_failed_head_is_never_returned_after_a_move(self) -> None:
+        for statuses in (running_round(), ended_round(), None):
+            with self.subTest(statuses=statuses):
+                self.setUp()
+                if statuses is not None:
+                    self.github.statuses[NEXT_HEAD] = statuses
+                self.push_around_status_read("after")
+                self.assertNotEqual(self.request().head_sha, HEAD)
+                self.assertLessEqual(len(self.github.posted), 1)
+
+    def test_a_failing_head_that_keeps_moving_stays_bounded(self) -> None:
+        heads = ["e" * 40, "f" * 40, "1" * 40, "2" * 40, "3" * 40]
+        for head in heads:
+            self.github.statuses[head] = [status("failure", ROUND_ENDED_AT)]
+        self.push_around_status_read("after", heads=heads)
+        outcome = self.request()
+        self.assertEqual(len(self.github.posted), 1)
+        self.assertNotEqual(outcome.head_sha, HEAD)
+        self.assertIn(outcome.head_sha, ("", self.github.head))
+
+
 class UnserviceableContinuationTests(unittest.TestCase):
     """Defect 2, where autonomy is off: say so, and keep the work."""
 
