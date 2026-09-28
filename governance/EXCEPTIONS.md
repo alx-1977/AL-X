@@ -280,10 +280,15 @@ The Luna evaluation is suspended rather than concluded; see D-024a.
   and no autonomous turn could happen.
 
 Autonomous turns keep a bounded input. For `claude_subscription` /
-`claude-opus-5-5` the bound is that Core's recorded context window, 200,000
-tokens, less a reserve of 32,000 tokens kept free for its output: 168,000. The
-window is recorded once, for the model the conversational Core uses, and the
-autonomous bound is derived from it, so the two cannot drift apart.
+`claude-opus-5-5` the bound is that Core's context window less a
+128,000-token reserve equal to the model/transport maximum output allowance.
+The recorded context window is 1,000,000 tokens and the recorded maximum
+output allowance is 128,000 tokens, so the autonomous input ceiling is 872,000
+tokens. Both values were reported by Claude Code CLI 2.1.281 for the exact
+production invocation on 2026-09-28. The limits are recorded once, for the
+model the conversational Core uses, and the autonomous bound is derived from
+them, so the two cannot drift apart. If the transport later reports different
+limits, the authoritative record is corrected rather than guessed.
 
 A request over the bound is still refused before dispatch, and nothing is
 truncated to make it fit. The refused occasion is held, not lost: its request

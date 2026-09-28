@@ -60,7 +60,8 @@ from alx.contracts.continuity import (  # noqa: E402
     FutureCognitionStatus,
 )
 from alx.contracts.models import (  # noqa: E402
-    CORE_CONTEXT_WINDOW_TOKENS,
+    CORE_MODEL_LIMITS,
+    CoreModelLimits,
     core_input_ceiling,
     input_token_upper_bound,
 )
@@ -123,24 +124,39 @@ def _reasoner_measuring(target: int):
 
 
 class DerivedCeilingTests(unittest.TestCase):
-    def test_the_ceiling_is_the_core_window_less_the_output_reserve(self) -> None:
-        window = CORE_CONTEXT_WINDOW_TOKENS[SUBSCRIPTION]
-        self.assertEqual(CEILING + AUTONOMOUS_MAX_OUTPUT_TOKENS, window)
-        self.assertEqual(CEILING, 168_000)
+    def test_the_recorded_limits_are_the_transport_s_reported_ones(self) -> None:
+        """Claude Code CLI 2.1.281, exact production invocation, 2026-09-28."""
+        self.assertEqual(
+            CORE_MODEL_LIMITS[SUBSCRIPTION],
+            CoreModelLimits(context_window=1_000_000, max_output=128_000),
+        )
 
-    def test_a_reserve_remains_for_the_answer(self) -> None:
-        self.assertGreater(AUTONOMOUS_MAX_OUTPUT_TOKENS, 0)
-        self.assertLess(CEILING, CORE_CONTEXT_WINDOW_TOKENS[SUBSCRIPTION])
-        with self.assertRaises(ValueError):
-            core_input_ceiling(*SUBSCRIPTION, 0)
-        self.assertIsNone(core_input_ceiling(*SUBSCRIPTION, 200_000))
+    def test_the_ceiling_is_the_window_less_the_maximum_output(self) -> None:
+        limits = CORE_MODEL_LIMITS[SUBSCRIPTION]
+        self.assertEqual(CEILING, limits.context_window - limits.max_output)
+        self.assertEqual(CEILING, 872_000)
 
-    def test_the_approved_autonomous_core_has_a_recorded_window(self) -> None:
+    def test_the_reserve_is_the_model_s_output_allowance_not_the_budget(self) -> None:
+        """The whole answer the transport permits fits beside a full request."""
+        limits = CORE_MODEL_LIMITS[SUBSCRIPTION]
+        self.assertEqual(limits.context_window - CEILING, 128_000)
+        self.assertNotEqual(limits.context_window - CEILING, AUTONOMOUS_MAX_OUTPUT_TOKENS)
+
+    def test_limits_leaving_no_room_bound_nothing(self) -> None:
+        import alx.contracts.models as models
+
+        original = dict(models.CORE_MODEL_LIMITS)
+        self.addCleanup(models.CORE_MODEL_LIMITS.update, original)
+        models.CORE_MODEL_LIMITS[("p", "m")] = CoreModelLimits(128_000, 128_000)
+        self.addCleanup(models.CORE_MODEL_LIMITS.pop, ("p", "m"), None)
+        self.assertIsNone(core_input_ceiling("p", "m"))
+
+    def test_the_approved_autonomous_core_has_recorded_limits(self) -> None:
         """Autonomy cannot be switched on for a Core it cannot bound."""
-        self.assertIn(SUBSCRIPTION, CORE_CONTEXT_WINDOW_TOKENS)
+        self.assertIn(SUBSCRIPTION, CORE_MODEL_LIMITS)
 
-    def test_a_model_with_no_recorded_window_refuses_autonomy(self) -> None:
-        self.assertIsNone(core_input_ceiling("claude_subscription", "unknown", 32_000))
+    def test_a_model_with_no_recorded_limits_refuses_autonomy(self) -> None:
+        self.assertIsNone(core_input_ceiling("claude_subscription", "unknown"))
         with self.assertRaises(ConfigurationError):
             autonomous_input_ceiling("claude_subscription", "unknown")
 
@@ -182,7 +198,7 @@ class RealisticRequestsFitTests(unittest.TestCase):
                 )
 
     def test_the_live_range_leaves_real_headroom(self) -> None:
-        self.assertGreater(CEILING - LIVE_LARGEST, 50_000)
+        self.assertGreater(CEILING - LIVE_LARGEST, 700_000)
 
     def test_a_genuinely_oversized_request_is_refused_untruncated(self) -> None:
         reasoner, model, authority = _reasoner_measuring(CEILING + 1)

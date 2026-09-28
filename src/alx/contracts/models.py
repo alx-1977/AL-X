@@ -106,40 +106,50 @@ class ReasoningModel(Protocol):
 PROTOCOL_INPUT_TOKEN_ALLOWANCE = 512
 
 
-# The context window, in tokens, of each Core model as the runtime reaches it.
-# The one record of how much a Core request may hold: a bound on Core input is
-# derived from here and nowhere else, so the Core that answers Friedl and the
-# instance that answers an unprompted turn cannot come to disagree about the
-# model they share.
+@dataclass(frozen=True, slots=True)
+class CoreModelLimits:
+    """What one Core model accepts and may write back, in tokens."""
+
+    context_window: int
+    max_output: int
+
+
+# The limits of each Core model as the runtime reaches it. The one record of
+# how much a Core request may hold: a bound on Core input is derived from here
+# and nowhere else, so the Core that answers Friedl and the instance that
+# answers an unprompted turn cannot come to disagree about the model they
+# share.
 #
-# A fact about the model and the transport together, recorded deliberately and
-# never inferred from a model's name: an unlisted model has no window here, and
-# anything that needs one refuses rather than guesses.
-CORE_CONTEXT_WINDOW_TOKENS: dict[tuple[str, str], int] = {
-    # Claude Opus 5.5 is documented with a 1,000,000-token window. The
-    # subscription reaches it through the Claude Code CLI as `--model
-    # claude-opus-5-5`, without the `[1m]` opt-in to the long window, so the
-    # standard 200,000-token window is recorded: the smaller of the two, and
-    # the one this transport is not known to exceed.
-    ("claude_subscription", "claude-opus-5-5"): 200_000,
+# A fact about the model and the transport together, recorded from what the
+# transport reports and never inferred from a model's name or an older model:
+# an unlisted model has no limits here, and anything that needs them refuses
+# rather than guesses. If the transport later reports different limits, this
+# record is corrected.
+CORE_MODEL_LIMITS: dict[tuple[str, str], CoreModelLimits] = {
+    # Reported by Claude Code CLI 2.1.281 for the exact production invocation
+    # (`--model claude-opus-5-5`, the Core's own flags), observed 2026-09-28:
+    # modelUsage["claude-opus-5-5"].contextWindow = 1000000 and
+    # .maxOutputTokens = 128000, with no `[1m]` opt-in. The same figures are
+    # documented for the model.
+    ("claude_subscription", "claude-opus-5-5"): CoreModelLimits(
+        context_window=1_000_000, max_output=128_000
+    ),
 }
 
 
-def core_input_ceiling(provider: str, model: str, output_reserve: int) -> int | None:
+def core_input_ceiling(provider: str, model: str) -> int | None:
     """The most input a Core request to this model may carry, or None.
 
-    The model's context window less a reserve kept free for what the model
-    writes back: a request that filled the window would leave no room for its
-    own answer. Compared against `input_token_upper_bound`, which counts every
+    The model's context window less its maximum output allowance, so a request
+    at the ceiling still leaves room for the longest answer the transport
+    permits. Compared against `input_token_upper_bound`, which counts every
     encoded byte and so over-states tokens, which keeps the check on the safe
-    side. None for a model with no recorded window.
+    side. None for a model with no recorded limits.
     """
-    if output_reserve <= 0:
-        raise ValueError("output_reserve must be positive")
-    window = CORE_CONTEXT_WINDOW_TOKENS.get((provider.strip().lower(), model.strip()))
-    if window is None or window <= output_reserve:
+    limits = CORE_MODEL_LIMITS.get((provider.strip().lower(), model.strip()))
+    if limits is None or limits.context_window <= limits.max_output:
         return None
-    return window - output_reserve
+    return limits.context_window - limits.max_output
 
 
 def input_token_upper_bound(request: "ModelRequest") -> int:

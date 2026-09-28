@@ -638,8 +638,7 @@ def _tier_settings(
     )
 
 
-# The output the autonomous Core may write, and the reserve its input ceiling
-# keeps free for that answer.
+# The output the autonomous Core is asked to stay within.
 AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
 # The exact provider and model EX-001, as amended on 2026-09-27, approves for
 # autonomous turns: the conversational Core itself, on Friedl's Claude
@@ -647,9 +646,8 @@ AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
 # subscription CLI takes no effort setting, so none is part of the identity.
 AUTONOMOUS_APPROVED_IDENTITY = ("claude_subscription", "claude-opus-5-5")
 # The autonomous input ceiling is not a constant here. It is derived, in
-# bootstrap, from the conversational Core's recorded context window less
-# AUTONOMOUS_MAX_OUTPUT_TOKENS, because the autonomous instance is that same
-# Core. The 96,000 figure D-024a recorded belonged to the retired Luna
+# bootstrap, from the conversational Core's recorded context window less its
+# recorded maximum output, because the autonomous instance is that same Core. The 96,000 figure D-024a recorded belonged to the retired Luna
 # arrangement and is history, not configuration.
 
 

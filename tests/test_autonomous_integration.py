@@ -31,6 +31,8 @@ from alx.config import AUTONOMOUS_MAX_OUTPUT_TOKENS  # noqa: E402
 AUTONOMOUS_MAX_INPUT_TOKENS = autonomous_input_ceiling(
     "claude_subscription", "claude-opus-5-5"
 )
+# Laws and identity each this long make a request over that ceiling.
+OVERSIZED = AUTONOMOUS_MAX_INPUT_TOKENS // 2 + 1
 from alx.continuity import (  # noqa: E402
     FutureCognitionSource,
     SQLiteContinuityStore,
@@ -260,7 +262,7 @@ class InputBoundTests(unittest.TestCase):
         from alx.core.model_reasoner import ModelReasoner
 
         model = self.NeverCalled()
-        reasoner = _bounded_reasoner(model, "L" * 200_000, "I" * 200_000)
+        reasoner = _bounded_reasoner(model, "L" * OVERSIZED, "I" * OVERSIZED)
         with self.assertRaises(AutonomousRequestUnbounded):
             reasoner.decide(
                 ReasoningContext(None, (), (), conversation_id="c1")
@@ -291,7 +293,7 @@ class InputBoundTests(unittest.TestCase):
         """Refusing is the approved behaviour; shortening her mind is not."""
         from alx.core.model_reasoner import ModelReasoner
 
-        laws = "L" * 200_000
+        laws = "L" * (2 * OVERSIZED)
         model = self.NeverCalled()
         reasoner = _bounded_reasoner(model, laws, "identity")
         with self.assertRaises(AutonomousRequestUnbounded) as caught:
@@ -371,9 +373,9 @@ class ViableInputCeilingTests(unittest.TestCase):
         self.assertGreater(headroom, 20_000)
 
     def test_the_ceiling_is_derived_from_the_core_window(self) -> None:
-        """The Core's window less the output reserve; not the Luna figure."""
+        """The Core's window less its maximum output; not the Luna figure."""
         self.assertEqual(AUTONOMOUS_MAX_OUTPUT_TOKENS, 32_000)
-        self.assertEqual(AUTONOMOUS_MAX_INPUT_TOKENS, 200_000 - 32_000)
+        self.assertEqual(AUTONOMOUS_MAX_INPUT_TOKENS, 1_000_000 - 128_000)
         self.assertNotEqual(AUTONOMOUS_MAX_INPUT_TOKENS, 96_000)
 
 
@@ -474,7 +476,7 @@ class SameRequestObjectTests(unittest.TestCase):
 
         authority = RecordingAuthority()
         reasoner = _bounded_reasoner(
-            NeverCalled(), "L" * 400_000, "I" * 400_000, authority
+            NeverCalled(), "L" * OVERSIZED, "I" * OVERSIZED, authority
         )
         with self.assertRaises(Exception) as caught:
             reasoner.decide(ReasoningContext(None, (), (), conversation_id="c1"))
@@ -614,7 +616,7 @@ class RequestObjectIdentityTests(unittest.TestCase):
 
     def test_an_oversized_real_request_reserves_nothing(self) -> None:
         """Measured from the real build_request output, not an estimate."""
-        events, checked, dispatched = self._trace("L" * 400_000, "I" * 400_000)
+        events, checked, dispatched = self._trace("L" * OVERSIZED, "I" * OVERSIZED)
         self.assertEqual([name for name, _ in events], ["measure"])
         self.assertIsNone(dispatched)
         self.assertEqual(len(checked), 1)
