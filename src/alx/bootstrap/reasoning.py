@@ -53,9 +53,10 @@ class OriginSelectedReasoner:
 
     Authorised by EX-001 as a narrowly scoped, time-boxed exception to Laws 0
     and 1, and recorded under D-024a as an experiment rather than architecture.
-    It exists to learn whether the Luna/max configuration produces better
-    autonomous cognition than the conversational Sol/medium configuration, or
-    worse, or indistinguishable. Nothing is assumed about the answer.
+    It was built to learn whether Luna/max answered autonomous turns better
+    than the conversational Core. Since the 2026-09-27 amendment both are the
+    same subscription Core; the autonomous instance differs only in carrying
+    the input bound and the per-occasion ledger that recovery relies on.
 
     The selection below is the whole mechanism: one expression over
     `CognitionOrigin.is_autonomous`. There is deliberately no table, registry,

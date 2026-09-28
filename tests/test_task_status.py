@@ -45,6 +45,7 @@ from alx.providers.review_status import (  # noqa: E402
 from tests.review_transcript import (  # noqa: E402
     PUBLISHED_AT,
     REVIEWER_LOGIN,
+    statuses_route,
 )
 
 
@@ -499,7 +500,7 @@ class ReviewObserverTests(unittest.TestCase):
     """
 
     def _observer(self, reviews, comments, provider=ReviewProvider.CODERABBIT,
-                  pull_state="open", merged=False):
+                  pull_state="open", merged=False, statuses=None):
         normalised = []
         for index, review in enumerate(reviews, 1):
             item = dict(review)
@@ -520,6 +521,9 @@ class ReviewObserverTests(unittest.TestCase):
         def request(method, url, **keywords):
             if method != "GET":
                 raise AssertionError("the observer must not write")
+            listed = statuses_route(url, statuses)
+            if listed is not None:
+                return Response(listed)
             base = url.split("?")[0]
             first = "page=1" in url
             if base.endswith("/reviews"):
@@ -820,6 +824,9 @@ class ReviewFindingRegressions(unittest.TestCase):
         def request(method, url, **keywords):
             if method != "GET":
                 raise AssertionError("the observer must not write")
+            listed = statuses_route(url)
+            if listed is not None:
+                return Response(listed)
             base = url.split("?")[0]
             if not base.endswith("/issues/21/comments"):
                 return Response([])
@@ -1576,6 +1583,9 @@ class ConsumedVerdictTests(unittest.TestCase):
         def request(method, url, **keywords):
             if method != "GET":
                 raise AssertionError("the observer must not write")
+            listed = statuses_route(url)
+            if listed is not None:
+                return Response(listed)
             base = url.split("?")[0]
             first = "page=1" in url
             if base.endswith("/reviews"):

@@ -166,6 +166,11 @@ undelivered_responses names autonomous occasions where you decided to say someth
 and no one was there to hear it. The words are not kept, deliberately: decide afresh
 whether anything still matters, say it if so, and resolve the occasion either way
 through the capability. Nothing resolves or expires it for you.
+pending_revisits lists later occasions you asked for with request_future_cognition
+and have not yet had, soonest first, each with the note you left yourself. Each
+will wake you once at or after its not_before. If one no longer serves a purpose,
+because the work is done or another revisit covers it, withdraw it through the
+capability; nothing withdraws or expires it for you.
 carried_thoughts holds things you decided were worth keeping on your mind, in your
 own words. They are not tasks and nothing acts on them by itself. You may revisit
 one, let one go, or bring one into conversation when it genuinely fits; when you
@@ -736,6 +741,17 @@ def _context_payload(context: ReasoningContext) -> str:
                 "formed_at": item.formed_at.isoformat(),
             }
             for item in context.carried_thoughts
+        ],
+        # Her own pending revisits, soonest first, notes verbatim. Nothing
+        # ranks or filters them; she decides which still matter.
+        "pending_revisits": [
+            {
+                "request_id": item.request_id,
+                "not_before": item.not_before.isoformat(),
+                "note": item.note,
+                "references": list(item.references),
+            }
+            for item in context.pending_revisits
         ],
         # Identity and framing of her open enquiries, verbatim and unranked,
         # with a count of entries but none of their content. Enough to know

@@ -74,6 +74,14 @@ USD_PER_MILLION: dict[tuple[str, str], ModelPrice] = {
     # cache writes bill separately at 1.25x the uncached input rate. This is a
     # rate verified for this model, not one derived from Sol's.
     ("openai", "gpt-5.6-luna"): ModelPrice(0.20, 0.02, 1.20, 0.25),
+    # Friedl's flat-rate Claude subscription, recorded by Friedl on 2026-09-27
+    # when autonomous turns moved onto the conversational Core (EX-001 as
+    # amended). A call bills nothing per token: the rate card is the monthly
+    # plan, not usage. Recorded rather than left unpriced, because autonomous
+    # turns still reserve before dispatch — that reservation is what marks a
+    # turn as dispatched, and recovery relies on the mark never to replay one.
+    # The USD fuse therefore bounds nothing here; D-024a says what does.
+    ("claude_subscription", "claude-opus-5-5"): ModelPrice(0.0, 0.0, 0.0, None),
 }
 
 # Exact provider identities that Friedl approved to inherit an existing price.

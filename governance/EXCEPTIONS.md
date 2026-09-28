@@ -29,23 +29,23 @@ in `governance/DECISIONS.md`.
 ### Register metadata
 
 - **Law:** Law 0 (one outcome, one production path) and Law 1 (AL/X decides meaning).
-- **Scope:** `OriginSelectedReasoner` in `src/alx/bootstrap/reasoning.py` and its single composition site in `src/alx/bootstrap/live_voice.py`; `PERSON_TURN` → OpenAI `gpt-5.6-sol` / `medium`, and `EXTERNAL_EVENT`, `WORK_COMPLETED`, `SELF_REQUESTED` → OpenAI `gpt-5.6-luna` / `max`. Nothing else.
+- **Scope:** `OriginSelectedReasoner` in `src/alx/bootstrap/reasoning.py` and its single composition site in `src/alx/bootstrap/live_voice.py`; as amended on 2026-09-27, every origin → the conversational Core, `claude_subscription` / `claude-opus-5-5`, with autonomous origins through a second, bounded instance of it. Nothing else. The 2026-09-03 scope (`PERSON_TURN` → OpenAI `gpt-5.6-sol` / `medium`; autonomous origins → OpenAI `gpt-5.6-luna` / `max`) is recorded below and no longer authorised.
 - **Necessity:** the evidence for choosing a permanent Core topology for autonomous turns does not exist, and cannot be produced without running both configurations under one identity. See "Why this is necessary" below.
 - **Alternatives:** Sol for all turns; Luna for all turns; delaying the experiment. All considered and set out below.
 - **Risks and safeguards:** inconsistent judgement between configurations, drift into semantic routing, an unconcluded experiment becoming architecture, and procedural drift; guarded by an origin-only architecture gate, one CoreAgent/broker/gate, no fallback, off-by-default operation and a hard spend fuse. Set out in full below.
 - **Approved by Friedl:** yes, explicitly, for this exact wording and scope.
-- **Approval date:** 2026-09-03.
+- **Approval date:** 2026-09-03; amended 2026-09-27.
 - **Expiry or review condition:** conclusion of the D-024a Luna experiment, requiring an explicit Friedl-approved decision recording the permanent Core topology. Not renewable by silence.
 
 | Field | Value |
 | --- | --- |
 | **Exception ID** | **EX-001** |
 | **Status** | **APPROVED** |
-| **Approval date** | **2026-09-03** |
+| **Approval date** | **2026-09-03**; amended **2026-09-27** |
 | **Approved by** | Friedl |
 | **Laws affected** | **Law 0** (one outcome, one production path) and **Law 1** (AL/X decides meaning) |
 | **Affected code** | `OriginSelectedReasoner` in `src/alx/bootstrap/reasoning.py`, and its single composition site in `src/alx/bootstrap/live_voice.py` |
-| **Affected behaviour** | `PERSON_TURN` → OpenAI `gpt-5.6-sol` / `medium`; `EXTERNAL_EVENT`, `WORK_COMPLETED`, `SELF_REQUESTED` → OpenAI `gpt-5.6-luna` / `max` |
+| **Affected behaviour** | As amended 2026-09-27: every origin → `claude_subscription` / `claude-opus-5-5`, the conversational Core; autonomous origins through its bounded instance. See "Amendment — 2026-09-27". |
 | **Mandatory review / expiry** | Conclusion of the D-024a Luna experiment. Not renewable by silence. |
 | **Related decision** | D-024a in `governance/DECISIONS.md` |
 
@@ -226,3 +226,44 @@ precedent for any future dual-Core or routing proposal.
 
 The exception does not renew by silence, by continued operation, by the
 experiment producing good results, or by the passage of time.
+
+### Amendment — 2026-09-27: autonomous turns on the conversational subscription Core
+
+- **Approved by Friedl:** yes, 2026-09-27, by written instruction to the
+  implementing model during the PR #77 continuation fix: autonomous cognition
+  is to use the existing subscription-backed Core used for normal cognition,
+  not the OpenAI Luna/API-key path, and EX-001 / D-024a are to be updated
+  narrowly to authorise it. The exact wording below is for his confirmation at
+  review.
+- **Why:** the live runtime moved the conversational Core to Friedl's Claude
+  subscription and deliberately disabled every metered key, OpenAI's included.
+  The only autonomous arrangement this exception approved therefore could not
+  run, so no autonomous occasion could reach a Core, and AL/X promised
+  revisits nothing would wake her for.
+
+**Approved behaviour, replacing the 2026-09-03 table:**
+
+| Origin | Provider / model | Instance |
+| --- | --- | --- |
+| `PERSON_TURN` | `claude_subscription` / `claude-opus-5-5` | the conversational reasoner |
+| `EXTERNAL_EVENT`, `WORK_COMPLETED`, `SELF_REQUESTED` | `claude_subscription` / `claude-opus-5-5` | a second instance of the same Core, carrying the autonomous input bound and the per-occasion spend ledger |
+
+Configuration may install only this arrangement, and only while the
+conversational Core is that same provider and model; any other value, including
+the retired Luna arrangement, is refused at start-up. The subscription takes no
+effort setting.
+
+**What still differs between the two instances,** and why they remain two: the
+autonomous instance enforces the 96,000-token input bound and reserves against
+the autonomous ledger before every dispatch. That reservation is what marks an
+occasion as dispatched, and restart recovery relies on the mark never to replay
+a turn. The subscription bills nothing per token, so the rate recorded for it is
+zero and the daily USD fuse no longer bounds how many autonomous turns occur.
+What bounds them is unchanged from D-024: her own requests, the 60-second
+minimum horizon, one Core turn at a time, the per-turn step budget, the master
+switch (absent `ALX_AUTONOMOUS_*` configuration), and the subscription's own
+usage limits, which conversation shares.
+
+**Unchanged:** everything in "Explicitly prohibited by this exception", the
+origin-only selection, the absence of any fallback, and the expiry condition.
+The Luna evaluation is suspended rather than concluded; see D-024a.

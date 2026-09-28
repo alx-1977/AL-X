@@ -5,7 +5,9 @@ This is that watcher, and it reports completion on one condition only: that the
 review can actually be read for the exact revision it was requested about. A
 reviewer that has commented on the pull request but not on this head has not
 finished the work that was asked for, and saying otherwise would hand AL/X a
-completion for evidence she cannot use.
+completion for evidence she cannot use. Nor has one that has only started: the
+reader reports a round as readable once the reviewer's own status says it
+ended, so a placeholder posted when the round began settles nothing.
 
 It reuses the same provider that reads reviews, so the account matching, the
 head binding and the notion of "available" are one implementation rather than
@@ -34,7 +36,11 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from alx.contracts.review_content import ReviewContentRequest, ReviewReadError
+from alx.contracts.review_content import (
+    REVIEW_FAILED,
+    ReviewContentRequest,
+    ReviewReadError,
+)
 from alx.contracts.task import TaskObservation, TaskState
 
 # `pull/<number>` or `pull/<number>@<sha>`, as `subject_reference` writes it.
@@ -111,6 +117,26 @@ class ReviewStatusObserver:
             # transport merely unavailable, so nothing is claimed either way.
             return self._unresolved(number, now, TaskState.STATUS_UNKNOWN)
         if not content.available:
+            # A round the reviewer itself reports as failed will publish
+            # nothing more for this request. Anything else unavailable — no
+            # round yet, or one still in progress with only a placeholder to
+            # show — is still coming, and the task keeps waiting.
+            if content.unavailable_reason == REVIEW_FAILED:
+                # A failure published at or before this request is the round
+                # that prompted it: a retry is asked for because the last
+                # round failed, and until the reviewer marks the new round the
+                # old failure is still its latest status. It answers nothing
+                # asked here, so the task waits for the new round. A failure
+                # published after the request is this round's, and ends it.
+                if (
+                    since is not None
+                    and content.round_at is not None
+                    and content.round_at <= since
+                ):
+                    return self._unresolved(
+                        number, now, TaskState.WAITING_FOR_RESULT
+                    )
+                return TaskObservation(TaskState.FAILED, now)
             return self._unresolved(number, now, TaskState.WAITING_FOR_RESULT)
         # Available means the reader bound this verdict to the exact revision
         # asked about: the reviewer's prose names the forty-character sha, or

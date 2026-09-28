@@ -139,6 +139,7 @@ class CoreAgent:
                  turn_bound_capabilities: frozenset[str] = frozenset(),
                  approval_free_capabilities: frozenset[str] = frozenset(),
                  open_thoughts: Callable[[], tuple] | None = None,
+                 pending_revisits: Callable[[], tuple] | None = None,
                  open_notebook_threads: Callable[[], tuple] | None = None,
                  undelivered_responses: Callable[[], tuple] | None = None,
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None) -> None:
@@ -181,6 +182,11 @@ class CoreAgent:
         # Core asks for them; it never reaches the store itself, and the same
         # call is made for every turn whatever its origin.
         self._open_thoughts = open_thoughts or (lambda: ())
+        # The later occasions she has asked for and not yet had, from the same
+        # continuity store and the same for every turn. Without them a revisit
+        # she made in one conversation was invisible from every other, and the
+        # only way to learn it was obsolete was to be woken by it.
+        self._pending_revisits = pending_revisits or (lambda: ())
         # Her open enquiries, from the one notebook store, bounded and
         # content-free. Supplied identically on every turn: a context
         # assembled differently when nobody is watching would be a second
@@ -300,6 +306,7 @@ class CoreAgent:
                     unfinished_goals=summaries,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
+                    pending_revisits=self._pending_revisits(),
                     open_notebook_threads=self._open_notebook_threads(),
                     undelivered_responses=self._undelivered_responses(),
                     memory_conflicts=memory_conflicts,

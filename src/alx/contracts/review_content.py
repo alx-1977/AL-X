@@ -38,6 +38,14 @@ REVIEW_READ_FAILURES = (
 )
 
 
+# Why a revision's review is not yet readable, when the reviewer has said so
+# itself through its commit status. Facts about the review round, never an
+# opinion about the code: the first means it is still working, the second that
+# it stopped without finishing.
+REVIEW_IN_PROGRESS = "review_in_progress"
+REVIEW_FAILED = "review_failed"
+
+
 class ReviewReadError(Exception):
     """A review could not be read, with a declared machine-readable code."""
 
@@ -123,6 +131,11 @@ class ReviewContent:
     # Why nothing was found, when nothing was. A fact about the search, never
     # an opinion about the code.
     unavailable_reason: str = ""
+    # When the reviewer published the round state that made this unavailable.
+    # A retry after a failed round is read against it: a failure published
+    # before the retry was asked for is the previous round's, not its answer.
+    # Not part of `as_values`; it is a fact for the watcher, not review text.
+    round_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not valid_sha(self.head_sha):
@@ -155,6 +168,8 @@ class ReviewContent:
 
 
 __all__ = [
+    "REVIEW_FAILED",
+    "REVIEW_IN_PROGRESS",
     "REVIEW_READ_FAILURES",
     "ReviewComment",
     "ReviewContent",

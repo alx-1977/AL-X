@@ -69,11 +69,26 @@ class DueCognitionSource:
         tuple when the master switch is off or no `not_before` has matured, and
         this never reaches the runner.
         """
-        opportunities = await asyncio.to_thread(self._source.due_opportunities)
-        if not opportunities:
-            return 0
         run = 0
-        for opportunity in opportunities:
+        # Offered once each per tick. An occasion the runner declines without
+        # holding a claim is due again at once, and must wait for the next
+        # tick rather than spin this one.
+        offered: set[str] = set()
+        while True:
+            # Asked again before every turn, never once for the whole tick. A
+            # turn can change what is due: AL/X may withdraw a revisit she now
+            # sees is superseded, or close work another occasion covered. A
+            # list taken before the first turn would still run those, which is
+            # a Core turn for a request she had already withdrawn.
+            opportunities = await asyncio.to_thread(self._source.due_opportunities)
+            opportunity = next(
+                (item for item in opportunities
+                 if item.opportunity_id not in offered),
+                None,
+            )
+            if opportunity is None:
+                return run
+            offered.add(opportunity.opportunity_id)
             # Held across the whole turn, exactly as the voice path holds it.
             async with self._core_turn_lock:
                 # Shielded because cancelling the await would unwind this
@@ -86,4 +101,3 @@ class DueCognitionSource:
                 # writing. Shared with every other kind of turn.
                 if await run_core_worker(self._runner.run_one, opportunity):
                     run += 1
-        return run

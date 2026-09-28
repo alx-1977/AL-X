@@ -370,16 +370,16 @@ class ApprovedIdentityOnlyTests(unittest.TestCase):
     An exception authorising one exact arrangement is worth little if
     configuration can install a different reasoning authority under it. A typo
     would do it silently, in production, with the exception appearing to cover
-    it.
+    it. As amended on 2026-09-27 the one arrangement is the conversational
+    subscription Core answering autonomous turns too.
     """
 
     def _settings(self, **overrides):
         from alx.config.settings import autonomous_reasoning_settings
 
         environment = {
-            "ALX_AUTONOMOUS_PROVIDER": "openai",
-            "ALX_AUTONOMOUS_MODEL": "gpt-5.6-luna",
-            "OPENAI_API_KEY": "key",
+            "ALX_AUTONOMOUS_PROVIDER": "claude_subscription",
+            "ALX_AUTONOMOUS_MODEL": "claude-opus-5-5",
         }
         environment.update(overrides)
         return autonomous_reasoning_settings(environment)
@@ -387,35 +387,71 @@ class ApprovedIdentityOnlyTests(unittest.TestCase):
     def test_the_approved_arrangement_is_accepted(self) -> None:
         settings = self._settings()
         self.assertEqual(
-            (settings.provider, settings.model, settings.effort),
-            ("openai", "gpt-5.6-luna", "max"),
+            (settings.provider, settings.model),
+            ("claude_subscription", "claude-opus-5-5"),
         )
+        # The subscription authenticates itself; nothing here holds a key.
+        self.assertEqual(settings.api_key, "")
 
-    def test_another_provider_is_refused(self) -> None:
+    def test_the_retired_luna_arrangement_is_refused(self) -> None:
         from alx.config.settings import ConfigurationError
 
         with self.assertRaises(ConfigurationError):
             self._settings(
-                ALX_AUTONOMOUS_PROVIDER="xai",
-                ALX_AUTONOMOUS_MODEL="grok-4.5",
-                XAI_API_KEY="key",
+                ALX_AUTONOMOUS_PROVIDER="openai",
+                ALX_AUTONOMOUS_MODEL="gpt-5.6-luna",
+                ALX_AUTONOMOUS_EFFORT="max",
+                OPENAI_API_KEY="key",
             )
+
+    def test_another_provider_is_refused(self) -> None:
+        from alx.config.settings import ConfigurationError
+
+        for provider, model in (
+            ("xai", "grok-4.5"),
+            ("codex_subscription", "claude-opus-5-5"),
+            ("openai", "claude-opus-5-5"),
+        ):
+            with self.subTest(provider=provider):
+                with self.assertRaises(ConfigurationError):
+                    self._settings(
+                        ALX_AUTONOMOUS_PROVIDER=provider,
+                        ALX_AUTONOMOUS_MODEL=model,
+                        XAI_API_KEY="key",
+                        OPENAI_API_KEY="key",
+                    )
 
     def test_another_model_is_refused(self) -> None:
         from alx.config.settings import ConfigurationError
 
-        for model in ("gpt-5.4-nano", "gpt-5.6-sol", "gpt-5.6-luna-preview"):
+        for model in ("claude-sonnet-5", "claude-opus-5-5-preview", "gpt-5.6-luna"):
             with self.subTest(model=model):
                 with self.assertRaises(ConfigurationError):
                     self._settings(ALX_AUTONOMOUS_MODEL=model)
 
-    def test_another_effort_is_refused(self) -> None:
+    def test_an_effort_setting_is_refused(self) -> None:
+        """The subscription takes no effort; a leftover one must not look live."""
         from alx.config.settings import ConfigurationError
 
-        for effort in ("low", "medium", "high", "none"):
+        for effort in ("low", "medium", "max", "none"):
             with self.subTest(effort=effort):
-                with self.assertRaises(ConfigurationError):
+                with self.assertRaises(ConfigurationError) as caught:
                     self._settings(ALX_AUTONOMOUS_EFFORT=effort)
+                self.assertIn("ALX_AUTONOMOUS_EFFORT", str(caught.exception))
+
+    def test_a_leftover_effort_is_refused_even_with_autonomy_off(self) -> None:
+        """Dead configuration is refused whether or not autonomy is on."""
+        from alx.config.settings import (
+            ConfigurationError,
+            autonomous_reasoning_settings,
+        )
+
+        with self.assertRaises(ConfigurationError):
+            autonomous_reasoning_settings({"ALX_AUTONOMOUS_EFFORT": "max"})
+
+    def test_a_blank_effort_is_no_setting(self) -> None:
+        settings = self._settings(ALX_AUTONOMOUS_EFFORT="  ")
+        self.assertEqual(settings.effort, "none")
 
     def test_an_unconfigured_runtime_is_still_simply_absent(self) -> None:
         """Refusing a wrong arrangement must not break having none."""
@@ -423,16 +459,33 @@ class ApprovedIdentityOnlyTests(unittest.TestCase):
 
         self.assertIsNone(autonomous_reasoning_settings({}))
 
+    def test_it_must_be_the_conversational_core(self) -> None:
+        """Approved as the same Core; a different conversational one refuses."""
+        from alx.config.settings import ConfigurationError, RuntimeSettings
+
+        environment = {
+            "ALX_REASONING_PROVIDER": "openai",
+            "ALX_REASONING_MODEL": "gpt-5.6-sol",
+            "OPENAI_API_KEY": "key",
+            "ALX_STT_PROVIDER": "cartesia",
+            "ALX_STT_MODEL": "ink",
+            "ALX_TTS_PROVIDER": "none",
+            "ALX_AUTONOMOUS_PROVIDER": "claude_subscription",
+            "ALX_AUTONOMOUS_MODEL": "claude-opus-5-5",
+        }
+        with self.assertRaises(ConfigurationError) as caught:
+            RuntimeSettings.from_environment(environment)
+        self.assertIn("conversational Core", str(caught.exception))
+
     def test_the_approved_identity_matches_the_exception(self) -> None:
         from alx.config.settings import AUTONOMOUS_APPROVED_IDENTITY
 
         register = (
             Path(__file__).resolve().parents[1] / "governance" / "EXCEPTIONS.md"
         ).read_text(encoding="utf-8")
-        provider, model, effort = AUTONOMOUS_APPROVED_IDENTITY
-        self.assertIn(model, register)
-        self.assertIn(f"`{effort}`", register)
-        self.assertEqual(provider, "openai")
+        provider, model = AUTONOMOUS_APPROVED_IDENTITY
+        self.assertIn(f"`{provider}`", register)
+        self.assertIn(f"`{model}`", register)
 
 
 if __name__ == "__main__":

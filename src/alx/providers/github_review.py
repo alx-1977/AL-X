@@ -13,7 +13,11 @@ A new pull request is reviewed without being asked. The trigger exists for the
 other case: a corrective commit moved the head, the previous review is evidence
 about a revision that no longer exists, and a fresh look is needed. So a request
 is a comment, and the outcome records the revision the pull request pointed at
-when it was left.
+when it was left. Where the reviewer's status shows it already reviewing or
+done reviewing that revision, no comment is left and the wait joins that round.
+
+A review round ends when the reviewer's commit status on the revision says so.
+Until then nothing it has published about the revision is reported as a review.
 
 ## Reading
 
@@ -46,13 +50,16 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
 from alx.contracts.review import ReviewError, ReviewOutcome, ReviewRequest
 from alx.contracts.review_content import (
+    REVIEW_FAILED,
+    REVIEW_IN_PROGRESS,
     ReviewComment,
     ReviewContent,
     ReviewContentRequest,
@@ -81,6 +88,26 @@ MAX_PAGES = 10
 # Why a read found nothing. A fact about the search — this reviewer has not
 # published about this revision — never an opinion about the code.
 NO_REVIEW_FOR_REVISION = "no_review_for_revision"
+
+# Commit-status states that end a review round. `pending` is the round still
+# running; anything GitHub adds later is not known to be an end, so it is read
+# as still running rather than as finished.
+_COMPLETED_STATE = "success"
+_FAILED_STATES = frozenset({"failure", "error"})
+
+# How long a request waits for the reviewer's own automatic round to show on
+# the current head before asking for one. CodeRabbit marked a freshly opened
+# pull request `pending` 7-9 seconds after it opened on seven of PR #70-#77;
+# PR #77's trigger went out 10 seconds after it did. Sixty seconds covers that
+# several times over and is a small part of the wait that follows. Rechecked
+# mechanically inside this one call: nothing is scheduled and no Core turn is
+# spent.
+AUTOMATIC_REVIEW_GRACE_SECONDS = 60.0
+AUTOMATIC_REVIEW_RECHECK_SECONDS = 10.0
+# How many times one request follows the head to a newer commit before it
+# stops trying to join a round. Each follow needs a push inside one request,
+# so only a branch being pushed continuously reaches it.
+MAX_HEAD_CHANGES = 3
 
 
 def _moment(value: object) -> datetime | None:
@@ -177,10 +204,61 @@ class GitHubReviewProvider:
         sha = head.get("sha") if isinstance(head, dict) else None
         return sha if isinstance(sha, str) and _SHA.fullmatch(sha) else ""
 
+    def _round(self, head_sha: str) -> "_Round | None":
+        """Where this reviewer's latest review round of this revision stands.
+
+        Read from the commit status the reviewer publishes on the exact commit
+        it is reviewing, by its own account. That binds the round to the head
+        by GitHub's data rather than by prose, and says whether the round has
+        ended, which nothing else it publishes does: its summary comment is
+        posted as a placeholder when the round starts. Taking that placeholder
+        for a review completed the wait on PR #77 three minutes before the
+        finding it was waiting for existed.
+
+        Returns the latest state and when it was published, or None when
+        this reviewer has published no status on this revision. The time is
+        what tells a round that ended before a request from one that answers
+        it.
+        """
+        statuses = [
+            item
+            for item in self._pages(
+                f"/repos/{self._repository}/commits/{head_sha}/statuses"
+            )
+            if isinstance(item, dict)
+            and item.get("context") == self._profile.status_context
+            and isinstance(item.get("creator"), dict)
+            and self._profile.authored_by_reviewer(item["creator"].get("login"))
+            and isinstance(item.get("state"), str)
+        ]
+        if not statuses:
+            return None
+        # GitHub lists a commit's statuses newest first, and `max` keeps the
+        # first of equals, so a same-second transition resolves to the newer.
+        latest = max(
+            statuses,
+            key=lambda item: _moment(item.get("created_at"))
+            or datetime.min.replace(tzinfo=UTC),
+        )
+        return _Round(latest["state"], _moment(latest.get("created_at")))
+
     # ---- requesting -----------------------------------------------------
 
     def request(self, review: ReviewRequest) -> ReviewOutcome:
-        """Ask the configured reviewer to look at this pull request again."""
+        """Ask the configured reviewer to look at this pull request again.
+
+        Unless it is already looking. A reviewer that reviews a pull request
+        unasked has usually started on the current head before anyone asks,
+        and a trigger then is a second request for work already underway: on
+        PR #77 it was posted ten seconds after the automatic round began, and
+        answered "Already reviewed the last commit." Where the reviewer's own
+        status shows a round running or completed on this exact head, nothing
+        is posted and the outcome says so; the caller's wait attaches to that
+        round. Where there is no status yet, it is looked for again for a
+        short bounded grace, because a head only just opened or pushed is
+        usually marked seconds after AL/X asks. A failed round, or none by the
+        end of the grace, still gets the trigger.
+        """
         number = review.pull_request_number
         # Stamped before the trigger goes out, never after. The observer
         # refuses a review published at or before this moment, because such a
@@ -193,6 +271,21 @@ class GitHubReviewProvider:
         requested_at = self._now()
         try:
             head = self._head(number)
+            if self._profile.status_context:
+                awaited = self._await_automatic_round(number, head)
+                head = awaited.sha
+                if awaited.state:
+                    # The round is bound to this head by the reviewer's own
+                    # status, so the head is established without a trigger
+                    # having gone out for it to move under.
+                    return ReviewOutcome(
+                        pull_request_number=number,
+                        head_sha=head,
+                        requested=False,
+                        reviewer=self._profile.reviewer,
+                        requested_at=requested_at,
+                        attached_round=awaited.state,
+                    )
             self._call(
                 "POST",
                 f"/repos/{self._repository}/issues/{number}/comments",
@@ -214,6 +307,49 @@ class GitHubReviewProvider:
             reviewer=self._profile.reviewer,
             requested_at=requested_at,
         )
+
+    def _await_automatic_round(self, number: int, head: str) -> "_Head":
+        """The current head, and whether its automatic round has begun.
+
+        A pull request just opened, or a head just pushed, has usually not yet
+        been marked by the reviewer when AL/X asks: the status follows seconds
+        later. So an absent status is looked at again, on a fixed cadence, for
+        a bounded grace period before a trigger is judged necessary. The head
+        is re-read each time, so a push during the grace is followed to the
+        revision the reviewer will actually take up. A failed round ends the
+        grace at once: nothing automatic is coming, and asking again is right.
+        """
+        deadline = time.monotonic() + AUTOMATIC_REVIEW_GRACE_SECONDS
+        changes = 0
+        while head:
+            found = self._round(head)
+            if found is not None:
+                # Confirmed before it decides anything, as a trigger is
+                # confirmed after it is posted. A push between reading the head
+                # and reading its status would otherwise let the old head's
+                # round decide for the commit now under review: joining a
+                # round that says nothing about it, or retrying a failure that
+                # was never its own while its own round is already running.
+                # If the head moved, the old head's state decides nothing and
+                # the question is asked again of the new head, at once.
+                current = self._head(number)
+                if current == head:
+                    if found.state in _FAILED_STATES:
+                        # This head's own round failed: ask again.
+                        return _Head(head, "")
+                    return _Head(head, found.state)
+                changes += 1
+                if changes > MAX_HEAD_CHANGES:
+                    # Still moving. No round can be tied to a head, so none is
+                    # joined; the trigger path confirms the head it reports.
+                    return _Head(current, "")
+                head = current
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(AUTOMATIC_REVIEW_RECHECK_SECONDS)
+            head = self._head(number)
+        return _Head(head, "")
 
     # ---- reading --------------------------------------------------------
 
@@ -313,6 +449,44 @@ class GitHubReviewProvider:
         """Return what the reviewer published about this exact revision."""
         number = request.pull_request_number
         head_sha = request.head_sha
+        try:
+            # The round's state first, then its content. The reviewer
+            # publishes its findings before it marks the round ended, so
+            # content read after an ended round includes them; read the other
+            # way round, a round ending between the two reads would pair a
+            # completed status with content fetched before the findings
+            # existed.
+            found = (
+                self._round(head_sha) if self._profile.status_context
+                else _Round(_COMPLETED_STATE, None)
+            )
+        except (_Refused, _Unavailable) as error:
+            raise ReviewReadError("review_unavailable") from error
+
+        # Nothing is a review of this revision until the reviewer says its
+        # round on this revision has ended. Before that, whatever it has
+        # published here is a placeholder or a partial account, and reporting
+        # it as available settles a wait on evidence the real review will
+        # contradict. Returned before any content is fetched: a known state
+        # must not become an unknown one because a read it never needed
+        # failed.
+        if found is None or found.state != _COMPLETED_STATE:
+            return ReviewContent(
+                pull_request_number=number,
+                head_sha=head_sha,
+                reviewer=self._profile.reviewer,
+                available=False,
+                retrieved_at=self._now(),
+                unavailable_reason=(
+                    NO_REVIEW_FOR_REVISION
+                    if found is None
+                    else REVIEW_FAILED
+                    if found.state in _FAILED_STATES
+                    else REVIEW_IN_PROGRESS
+                ),
+                round_at=None if found is None else found.at,
+            )
+
         try:
             issue_comments = self._pages(
                 f"/repos/{self._repository}/issues/{number}/comments"
@@ -420,6 +594,21 @@ class GitHubReviewProvider:
             submitted_at=self._when(latest),
             retrieved_at=self._now(),
         )
+
+
+class _Round(NamedTuple):
+    """The reviewer's latest status on one revision, and when it said so."""
+
+    state: str
+    at: datetime | None
+
+
+class _Head(NamedTuple):
+    """A head SHA, and the state of the round already on it, if one is."""
+
+    sha: str
+    # Empty when no round was joined and a trigger is needed.
+    state: str
 
 
 class _Unavailable(Exception):

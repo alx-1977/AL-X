@@ -48,6 +48,12 @@ REVIEW_REQUEST_PERMISSION = "review.request"
 # something that already exists, and nothing else.
 REVIEW_READ_PERMISSION = "review.read"
 
+# The joined round's state when the reviewer had already finished it.
+COMPLETED_ROUND = "success"
+# Why a request returned without waiting: the head's review was finished and
+# already delivered, and no new one will come for an unchanged head.
+ALREADY_REVIEWED = "already_reviewed"
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewRuntime:
@@ -75,6 +81,10 @@ def build_review_runtime(
     # The sole bounded task waiter. Without it the capability is withheld;
     # an immediate-return request would restore Core-driven polling.
     started: Callable[[int, str, datetime], str] | None = None,
+    # Whether an earlier task already consumed the verdict of this pull
+    # request at this head. Supplied by the composition that holds the task
+    # store; absent, a joined finished round is always waited on.
+    delivered: Callable[[int, str, datetime], bool] | None = None,
 ) -> ReviewRuntime | None:
     """Compose review requesting, or leave it unregistered."""
     if started is None:
@@ -119,10 +129,32 @@ def build_review_runtime(
         # injected provider without that fact falls back to the pre-call time.
         local_requested_at = datetime.now(UTC)
         outcome = selected.request(review)
+        requested_at = outcome.requested_at or local_requested_at
+        # Joined a round that had already finished, and whose verdict an
+        # earlier task already took. The reviewer does not review an unchanged
+        # head again, so nothing further will arrive for a wait to observe;
+        # waiting would only run out the clock. Say so now instead, and leave
+        # the existing review to be read.
+        if (
+            delivered is not None
+            and outcome.attached_round == COMPLETED_ROUND
+            and outcome.head_sha
+        ):
+            try:
+                consumed = delivered(
+                    outcome.pull_request_number, outcome.head_sha, requested_at
+                )
+            except Exception as error:  # noqa: BLE001 - fall back to waiting
+                LOGGER.warning(
+                    "Review history unreadable: %s", type(error).__name__
+                )
+                consumed = False
+            if consumed:
+                return replace(outcome, wait_state=ALREADY_REVIEWED)
         wait_state = started(
             outcome.pull_request_number,
             outcome.head_sha,
-            outcome.requested_at or local_requested_at,
+            requested_at,
         )
         outcome = replace(outcome, wait_state=wait_state or "observer_unavailable")
         return outcome

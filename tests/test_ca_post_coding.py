@@ -37,6 +37,7 @@ from alx.providers.github_merge import GitHubMergeProvider
 from alx.providers.github_review import GitHubReviewProvider
 from alx.providers.repository_authority import RepositoryAuthority
 from alx.safety import AuthorityContext, SafetyGate
+from tests.review_transcript import install_grace_clock
 
 
 class Response:
@@ -62,6 +63,9 @@ class PostCodingTests(unittest.TestCase):
                               check=True, capture_output=True, text=True).stdout.strip()
 
     def setUp(self):
+        # No automatic round is modelled on this pull request, so a request
+        # waits out the grace before triggering; instantly, here.
+        install_grace_clock(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -200,8 +204,19 @@ class PostCodingTests(unittest.TestCase):
                              'base': {'sha': self.base, 'ref': 'main'}, 'state': 'open',
                              'merged': self.merged, 'merge_commit_sha': self.merge_sha,
                              'mergeable': True, 'mergeable_state': 'clean'})
-        if path.startswith('/issues/72/comments'):
+        if path.startswith(f'/commits/{self.head}/statuses'):
+            # The reviewer's own round marker: nothing until the trigger goes
+            # out, pending for the first `review_pending` looks at it, then
+            # completed. The round advances as the waiter polls its status,
+            # because the reader fetches no content until the round ends.
+            if not self.request_count or 'page=1' not in path:
+                return Response([])
             self.review_reads += 1
+            state = 'pending' if self.review_reads <= self.review_pending else 'success'
+            return Response([{'context': 'CodeRabbit', 'state': state,
+                              'creator': {'login': 'coderabbitai[bot]'},
+                              'created_at': self.now.isoformat()}])
+        if path.startswith('/issues/72/comments'):
             if self.review_reads <= self.review_pending:
                 return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
                                   'body': 'Review in progress', 'created_at': self.now.isoformat()}])

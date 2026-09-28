@@ -8,7 +8,7 @@ from typing import Any, Mapping, Protocol
 
 from alx.contracts.capabilities import CapabilityDefinition
 from alx.contracts.cognition import CognitionOrigin
-from alx.contracts.continuity import CarriedThought
+from alx.contracts.continuity import CarriedThought, FutureCognitionRequest
 from alx.contracts.records import (
     ApprovalProposal,
     BackgroundEvent,
@@ -205,6 +205,10 @@ class ReasoningContext:
     # differently for an unprompted turn would be a second builder deciding
     # what she is like when nobody is watching.
     carried_thoughts: tuple[CarriedThought, ...] = ()
+    # Later occasions she has asked for and not yet had, soonest first and
+    # bounded by count. The same list on every turn, so she can see what she
+    # has already asked to come back to, and withdraw what is no longer needed.
+    pending_revisits: tuple[FutureCognitionRequest, ...] = ()
     # Enquiries she has open in her notebook, most recently opened first and
     # bounded by count. Identity and framing only -- no entry content -- so she
     # is aware of her own unfinished interests without the notebook becoming
@@ -240,6 +244,7 @@ class ReasoningContext:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
+        object.__setattr__(self, "pending_revisits", tuple(self.pending_revisits))
         object.__setattr__(self, "memory_conflicts", tuple(self.memory_conflicts))
         object.__setattr__(self, "refused_calls", tuple(self.refused_calls))
         object.__setattr__(

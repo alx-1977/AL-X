@@ -139,6 +139,10 @@ class StartupSmokeTest(unittest.TestCase):
 
             from alx.continuity.due_source import DueCognitionSource
             from alx.interfaces.server import LiveVoiceServer
+            from alx.bootstrap import providers as runtime_providers
+            from alx.providers.claude_subscription import (
+                ClaudeSubscriptionReasoningModel,
+            )
             from alx.providers.openai import OpenAIReasoningModel
             from alx.providers.xai import XAIReasoningModel
 
@@ -148,6 +152,9 @@ class StartupSmokeTest(unittest.TestCase):
                 (DueCognitionSource, "run", tick_forever),
                 (OpenAIReasoningModel, "complete", refuse_provider_call),
                 (XAIReasoningModel, "complete", refuse_provider_call),
+                (ClaudeSubscriptionReasoningModel, "complete", refuse_provider_call),
+                # The CLI's presence is checked at composition; nothing runs it.
+                (runtime_providers, "subscription_cli_present", lambda: True),
             ]
             originals = [
                 (target, name, getattr(target, name)) for target, name, _ in patches
@@ -201,9 +208,12 @@ class StartupSmokeTest(unittest.TestCase):
 
     def _commissioning(self) -> dict[str, str]:
         return {
-            "ALX_AUTONOMOUS_PROVIDER": "openai",
-            "ALX_AUTONOMOUS_MODEL": "gpt-5.6-luna",
-            "ALX_AUTONOMOUS_EFFORT": "max",
+            # EX-001 as amended 2026-09-27: autonomous turns are answered by
+            # the conversational subscription Core, so both name it.
+            "ALX_REASONING_PROVIDER": "claude_subscription",
+            "ALX_REASONING_MODEL": "claude-opus-5-5",
+            "ALX_AUTONOMOUS_PROVIDER": "claude_subscription",
+            "ALX_AUTONOMOUS_MODEL": "claude-opus-5-5",
             "AUTONOMOUS_COGNITION_DAILY_BUDGET_USD": "0.0816",
             "ALX_AUTONOMOUS_COMMISSIONING_DISPATCHES": "1",
         }

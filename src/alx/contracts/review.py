@@ -78,6 +78,10 @@ class ReviewOutcome:
     reaches the work, so a head that moved in between means the revision it
     examined is not established. Empty says that plainly; naming the commit
     that happened to be current a moment earlier would be a false record.
+
+    `requested` is false when no trigger was posted because the reviewer's own
+    status already showed a round running or completed on `head_sha`. The
+    outcome then names that round's revision, and the wait attaches to it.
     """
 
     pull_request_number: int
@@ -86,6 +90,10 @@ class ReviewOutcome:
     reviewer: str
     requested_at: datetime | None = None
     wait_state: str = ""
+    # The state of the reviewer's own round that was joined instead of
+    # triggering one: `pending` while it runs, `success` once finished. Empty
+    # when a trigger was posted. Not part of `as_values`.
+    attached_round: str = ""
 
     def __post_init__(self) -> None:
         if self.head_sha and not valid_sha(self.head_sha):

@@ -47,6 +47,13 @@ from alx.contracts.task import TaskState  # noqa: E402
 from alx.providers.github_review import GitHubReviewProvider  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.tools.review import REQUEST_EXTERNAL_REVIEW  # noqa: E402
+from tests.review_transcript import (  # noqa: E402
+    ended_round,
+    install_grace_clock,
+    running_round,
+    status,
+    statuses_route,
+)
 
 
 HEAD = "a" * 40
@@ -369,9 +376,16 @@ class ConfiguredProviderTest(unittest.TestCase):
         after: str | None = None,
         post_headers: dict | None = None,
         provider: ReviewProvider = ReviewProvider.CODERABBIT,
+        statuses: dict[str, list] | None = None,
     ):
-        """`after` is the head on the second read, when it differs."""
-        calls: dict = {"get": [], "post": []}
+        """`after` is the head on the second read, when it differs.
+
+        `statuses` is what the reviewer has published per revision. Absent,
+        it has published nothing on any: no round is running, so a request
+        is exactly what is needed.
+        """
+        calls: dict = {"get": [], "post": [], "statuses": []}
+        self.grace = install_grace_clock(self)
 
         class Response:
             def __init__(self, status, body, response_headers=None):
@@ -386,6 +400,10 @@ class ConfiguredProviderTest(unittest.TestCase):
             if method == "POST":
                 calls["post"].append((url, keywords.get("json")))
                 return Response(post_status, {}, post_headers)
+            listed = statuses_route(url, statuses or {})
+            if listed is not None:
+                calls["statuses"].append(url)
+                return Response(200, listed)
             calls["get"].append(url)
             current = head if not calls["post"] else (after if after else head)
             return Response(200, {"head": {"sha": current}})
@@ -445,14 +463,16 @@ class ConfiguredProviderTest(unittest.TestCase):
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertTrue(outcome.requested)
         self.assertEqual(outcome.head_sha, "")
-        self.assertEqual(len(calls["get"]), 2)
+        # Before and after the trigger, plus one re-read per grace recheck.
+        self.assertEqual(len(calls["get"]), 2 + len(self.grace.sleeps))
         self.assertEqual(len(calls["post"]), 1)
 
     def test_a_stable_head_is_reported_after_confirmation(self) -> None:
         provider, calls = self._provider(head=HEAD)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(outcome.head_sha, HEAD)
-        self.assertEqual(len(calls["get"]), 2)
+        # Before and after the trigger, plus one re-read per grace recheck.
+        self.assertEqual(len(calls["get"]), 2 + len(self.grace.sleeps))
 
     def test_a_rejected_comment_is_reported_as_a_refusal(self) -> None:
         provider, _ = self._provider(head=HEAD, post_status=403)
@@ -534,9 +554,18 @@ class RequestBoundaryTests(unittest.TestCase):
             def json(self):
                 return self._body
 
+        install_grace_clock(self)
+        posted: list = []
+
         def request(method, url, **keywords):
             if method == "POST":
+                posted.append(url)
                 return Response({})
+            # No round on this head until the trigger goes out; the one it
+            # starts has ended by the time the observer looks.
+            listed = statuses_route(url, {HEAD: ended_round()} if posted else {})
+            if listed is not None:
+                return Response(listed)
             base = url.split("?")[0]
             first = "page=1" in url
             if base.endswith("/reviews"):

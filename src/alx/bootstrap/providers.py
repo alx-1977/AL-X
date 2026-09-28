@@ -276,12 +276,17 @@ def build_runtime_providers(
             f"reasoning provider adapter is not installed: {settings.reasoning.provider}"
         )
     specialist = _build_reasoning_model(settings.specialist, telemetry_sink)
-    # D-024a: the experimental autonomous Core, when one is configured. It is
-    # built by the same function, from the same settings shape, so it differs
-    # from the conversational Core only in provider, model and effort.
+    # D-024a as amended 2026-09-27: the autonomous Core, when switched on, is
+    # the conversational subscription Core built again the same way. Settings
+    # admit no other provider or model, and refuse one that differs from the
+    # conversational Core, so this constructs nothing else.
     autonomous = (
         None if settings.autonomous is None
-        else _build_reasoning_model(settings.autonomous, telemetry_sink)
+        else ClaudeSubscriptionReasoningModel(
+            settings.autonomous.model,
+            settings.autonomous.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+        )
     )
     coding = _build_coding_model(settings, telemetry_sink)
     coding_reviewer = _build_coding_reviewer_model(settings, telemetry_sink)
