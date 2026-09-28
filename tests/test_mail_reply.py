@@ -1063,8 +1063,8 @@ class AttentionAndTidyingGuidanceTests(unittest.TestCase):
 
     def test_she_may_weigh_how_much_attention_an_event_deserves(self) -> None:
         source = self._instructions()
-        self.assertIn("Judge whether an event is worth his attention", source)
-        self.assertIn("never a rule about a sender or a subject", source)
+        self.assertIn("it is your semantic decision", source)
+        self.assertIn("never from a\nstanding rule about a sender, a subject or a kind of message", source)
 
     def test_nothing_classifies_mail_by_sender_or_subject(self) -> None:
         """Law 1: a filter on wording would be keyword routing."""

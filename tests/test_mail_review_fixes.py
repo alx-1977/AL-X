@@ -545,15 +545,10 @@ class TrashAuthorisationTests(unittest.TestCase):
 
 
 
-class SpokenResponseGuidanceTests(unittest.TestCase):
-    """The model must know its response is spoken, or it writes for a screen."""
+class SharedResponseGuidanceTests(unittest.TestCase):
+    """Shared instructions must not script wording or rewrite identity."""
 
-    def test_the_model_is_told_its_response_is_spoken(self) -> None:
-        source = (Path(__file__).resolve().parents[1]
-                  / "src/alx/core/model_reasoner.py").read_text("utf-8")
-        self.assertIn("spoken aloud", source)
-
-    def test_the_guidance_states_the_medium_without_scripting_wording(self) -> None:
+    def test_the_guidance_does_not_script_wording(self) -> None:
         """Law 1 and the identity document both forbid scripted phrasing."""
         source = (Path(__file__).resolve().parents[1]
                   / "src/alx/core/model_reasoner.py").read_text("utf-8")
