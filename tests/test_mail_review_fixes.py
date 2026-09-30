@@ -571,11 +571,12 @@ class SessionResilienceTests(unittest.TestCase):
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
 
         self.assertIn("speech_transcription_error", RECOVERABLE_TRANSPORT_REASONS)
-        # A refused action or an invalid Core decision is not a transport fault
-        # and must not silently resume as though nothing happened.
-        for reason in ("repeated_rejected_call",
-                       "goal_proposal_invalid", "voice_transport_error"):
+        # A refused action or a broken transport is not a recoverable turn and
+        # must not silently resume as though nothing happened. A refused goal
+        # mutation is different: it is a checkpoint, and the exchange goes on.
+        for reason in ("repeated_rejected_call", "voice_transport_error"):
             self.assertNotIn(reason, RECOVERABLE_TRANSPORT_REASONS)
+        self.assertIn("goal_proposal_invalid", RECOVERABLE_TRANSPORT_REASONS)
         # A dispatch blocked by goal eligibility is different: the Core stopped
         # after one decision, nothing acted and nothing was recorded, so the
         # error phase is shown and listening continues for the turn that
@@ -594,13 +595,12 @@ class SessionResilienceTests(unittest.TestCase):
 
         self.assertIn("reasoner_error", RECOVERABLE_TRANSPORT_REASONS)
 
-    def test_an_invalid_core_decision_still_ends_the_session(self) -> None:
+    def test_a_decision_acted_on_still_ends_the_session(self) -> None:
         """Recovering a blank response must not excuse a decision AL/X acted on."""
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
 
         for reason in (
             "repeated_rejected_call",
-            "goal_proposal_invalid",
             "voice_transport_error",
         ):
             with self.subTest(reason=reason):
@@ -688,6 +688,7 @@ class SessionResilienceTests(unittest.TestCase):
             frozenset({
                 "budget_exhausted", "budget_exceeded", "reasoner_error",
                 "active_goal_required", "memory_persistence_error",
+                "goal_proposal_invalid",
                 "goal_selection_no_progress", "goal_selection_revisited", "goal_selection_redundant",
             }),
         )

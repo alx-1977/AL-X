@@ -243,7 +243,7 @@ class BlockedDispatchTest(unittest.TestCase):
         # told the evidence source was unknown and offered the same proposal
         # unchanged. The property under test is the same -- the turn stops
         # rather than buying further paid calls from an unchanged state.
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(len(self.reasoner.contexts), 2)
         self.assertEqual(self.dispatched, [])
@@ -345,8 +345,9 @@ class RejectedProposalObservabilityTest(unittest.TestCase):
             self.store, reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW, record_goal_rejection=records.append,
         )
-        outcome = core.process(conversation(), RETENTION, 2)
+        outcome = core.process(conversation(), RETENTION, 1)
         self.assertIsNone(outcome.response)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(core.last_goal_rejection["proposed_response"], "Claimed completion.")
         self.assertNotIn("proposed_response", records[0])

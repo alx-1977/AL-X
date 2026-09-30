@@ -523,8 +523,17 @@ class CoreAgent:
                         candidate, previous, conversation, retention_until,
                         decision_provenance,
                     )
-                if decision.response_requires_goal_commit or decision.finish_silently:
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="goal_proposal_invalid")
+                # A refused mutation is never fatal. An answer that depends on
+                # the commit (or a silence chosen on the strength of it) claims
+                # a state that does not exist, so it is suppressed, but the
+                # conversation, the unfinished goal and the Core all remain
+                # operational. The refusal goes back to her as evidence below
+                # and she reasons again from the truthful state. The same
+                # refusal twice checkpoints instead: nothing about the state
+                # changed, so a further step would only buy the same mutation.
+                commit_dependent = (
+                    decision.response_requires_goal_commit or decision.finish_silently
+                )
                 # The reason reaches the Core, exactly as an approval or memory
                 # rejection already does. It used to go only to the log and the
                 # rejection record, so a proposal refused here was invisible to
@@ -537,17 +546,25 @@ class CoreAgent:
                 # Subject is the mutation kind rather than the capability: the
                 # fault is which mutation was offered, and a later call for the
                 # same capability is a different refusal.
-                if decision.response is None and self._already_refused(
-                    refused_calls, proposal_error, decision.goal_proposal.kind.value
-                ):
+                if (
+                    (commit_dependent or decision.response is None)
+                    and self._already_refused(
+                        refused_calls, proposal_error, decision.goal_proposal.kind.value
+                    )
+                ) or (commit_dependent and step_index + 1 >= step_budget):
+                    # Also when no step remains to reason again in: the turn
+                    # ends on the refusal itself rather than a budget reason
+                    # that would hide it.
                     return CoreOutcome(
-                        CoreState.ERROR, snapshot, reason="goal_proposal_invalid",
+                        CoreState.CHECKPOINTED, snapshot, reason="goal_proposal_invalid",
                     )
                 refused_calls = (*refused_calls, {
                     "reason": proposal_error,
                     "subject": decision.goal_proposal.kind.value,
                     "mutation_kind": decision.goal_proposal.kind.value,
                 })
+                if commit_dependent:
+                    continue
             # The goal a call would run under: the reduced proposal when it was
             # accepted, or the evidence-only state when its requested mutation
             # was refused.
