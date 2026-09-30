@@ -491,6 +491,20 @@ class VoiceSession:
                 )
             yield VoiceEvent(VoiceEventKind.LISTENING)
             return
+        if outcome.state.value == "checkpointed":
+            # A checkpoint has preserved the durable workflow and deliberately
+            # stopped this turn. The transport reports that mechanical fact,
+            # but cannot compose an answer in AL/X's voice or turn it into a
+            # fatal session error.
+            yield VoiceEvent(
+                VoiceEventKind.DIAGNOSTIC,
+                diagnostic={
+                    "code": "core.checkpointed",
+                    "reason": outcome.reason or "checkpointed",
+                },
+            )
+            yield VoiceEvent(VoiceEventKind.LISTENING)
+            return
         if outcome.response is None:
             yield VoiceEvent(
                 VoiceEventKind.ERROR,

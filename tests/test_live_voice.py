@@ -803,16 +803,19 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(synthesizer.responses, [])
 
-    async def test_missing_response_is_still_an_error_not_silence(self) -> None:
+    async def test_checkpointed_review_wait_keeps_listening_without_retry(self) -> None:
+        checkpoint = outcome(
+            GoalStatus.AWAITING_INPUT,
+            response=None,
+            reason="review_unavailable",
+            core_state=CoreState.CHECKPOINTED,
+        )
+        preserved_state = checkpoint.snapshot.state
+        gateway = FakeGateway((checkpoint,))
         session = VoiceSession(
-            FakeGateway((outcome(
-                GoalStatus.ACTIVE,
-                response=None,
-                reason="active_goal_required",
-                core_state=CoreState.CHECKPOINTED,
-            ),)),
+            gateway,
             FakeTranscriber((transcription(
-                "one", TranscriptionState.FINAL, "Do the required action"
+                "one", TranscriptionState.FINAL, "Continue when review is ready"
             ),)),
             FakeSynthesizer(),
             "friedl", 8, 3650,
@@ -826,9 +829,69 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(
             [event.kind for event in events],
+            [VoiceEventKind.THINKING, VoiceEventKind.DIAGNOSTIC, VoiceEventKind.LISTENING],
+        )
+        self.assertEqual(
+            events[1].diagnostic,
+            {"code": "core.checkpointed", "reason": "review_unavailable"},
+        )
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertIs(checkpoint.snapshot.state, preserved_state)
+
+    async def test_other_checkpoint_reasons_use_the_same_voice_boundary(self) -> None:
+        for reason in ("budget_exhausted", "goal_selection_revisited"):
+            with self.subTest(reason=reason):
+                gateway = FakeGateway((outcome(
+                    GoalStatus.ACTIVE,
+                    response=None,
+                    reason=reason,
+                    core_state=CoreState.CHECKPOINTED,
+                ),))
+                session = VoiceSession(
+                    gateway,
+                    FakeTranscriber((transcription(
+                        "one", TranscriptionState.FINAL, "Continue later"
+                    ),)),
+                    FakeSynthesizer(), "friedl", 8, 3650,
+                    clock=lambda: NOW, identifier_factory=lambda: "turn-1",
+                )
+                events = [
+                    event async for event in session.exchange(
+                        "conversation-1", incoming_audio()
+                    )
+                ]
+                self.assertEqual(
+                    [event.kind for event in events],
+                    [VoiceEventKind.THINKING, VoiceEventKind.DIAGNOSTIC,
+                     VoiceEventKind.LISTENING],
+                )
+                self.assertEqual(events[1].diagnostic["reason"], reason)
+                self.assertEqual(len(gateway.calls), 1)
+
+    async def test_empty_error_outcome_remains_an_error(self) -> None:
+        session = VoiceSession(
+            FakeGateway((outcome(
+                GoalStatus.ACTIVE,
+                response=None,
+                reason="repeated_rejected_call",
+                core_state=CoreState.ERROR,
+            ),)),
+            FakeTranscriber((transcription(
+                "one", TranscriptionState.FINAL, "Do the required action"
+            ),)),
+            FakeSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: "turn-1",
+        )
+        events = [
+            event async for event in session.exchange(
+                "conversation-1", incoming_audio()
+            )
+        ]
+        self.assertEqual(
+            [event.kind for event in events],
             [VoiceEventKind.THINKING, VoiceEventKind.ERROR, VoiceEventKind.LISTENING],
         )
-        self.assertEqual(events[1].reason, "active_goal_required")
+        self.assertEqual(events[1].reason, "repeated_rejected_call")
 
 
 class BootstrapVoiceTests(unittest.TestCase):

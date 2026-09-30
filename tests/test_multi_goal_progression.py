@@ -262,7 +262,10 @@ class MultiGoalProgressionTests(Fixture):
                         async for frame in audio:
                             consumed.append(frame)
                             if frame == 1:
-                                yield VoiceEvent(VoiceEventKind.ERROR, reason=reason)
+                                yield VoiceEvent(
+                                    VoiceEventKind.DIAGNOSTIC,
+                                    diagnostic={"code": "core.checkpointed", "reason": reason},
+                                )
                             yield VoiceEvent(VoiceEventKind.LISTENING)
                 class Connection:
                     async def send(self, payload):

@@ -567,21 +567,19 @@ class SharedResponseGuidanceTests(unittest.TestCase):
 class SessionResilienceTests(unittest.TestCase):
     """One dropped speech transport must not end the conversation."""
 
-    def test_only_transport_failures_are_treated_as_recoverable(self) -> None:
+    def test_only_genuine_error_reasons_are_enumerated_for_recovery(self) -> None:
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
 
         self.assertIn("speech_transcription_error", RECOVERABLE_TRANSPORT_REASONS)
-        # A refused action or a broken transport is not a recoverable turn and
-        # must not silently resume as though nothing happened. A refused goal
-        # mutation is different: it is a checkpoint, and the exchange goes on.
-        for reason in ("repeated_rejected_call", "voice_transport_error"):
+        # Checkpoint recovery follows CoreState before events reach the server;
+        # no checkpoint reason belongs to this error-only set.
+        for reason in (
+            "budget_exhausted", "budget_exceeded", "goal_proposal_invalid",
+            "goal_selection_no_progress", "goal_selection_revisited",
+            "goal_selection_redundant", "review_unavailable",
+            "repeated_rejected_call", "voice_transport_error",
+        ):
             self.assertNotIn(reason, RECOVERABLE_TRANSPORT_REASONS)
-        self.assertIn("goal_proposal_invalid", RECOVERABLE_TRANSPORT_REASONS)
-        # A dispatch blocked by goal eligibility is different: the Core stopped
-        # after one decision, nothing acted and nothing was recorded, so the
-        # error phase is shown and listening continues for the turn that
-        # resolves it. Ending the session would cut Friedl off for asking.
-        self.assertIn("active_goal_required", RECOVERABLE_TRANSPORT_REASONS)
 
     def test_a_blank_reasoning_response_does_not_end_the_conversation(self) -> None:
         """Live failure: the model answered blank after 154 seconds.
@@ -686,10 +684,7 @@ class SessionResilienceTests(unittest.TestCase):
         self.assertEqual(
             MID_EXCHANGE_RECOVERABLE_REASONS,
             frozenset({
-                "budget_exhausted", "budget_exceeded", "reasoner_error",
-                "active_goal_required", "memory_persistence_error",
-                "goal_proposal_invalid",
-                "goal_selection_no_progress", "goal_selection_revisited", "goal_selection_redundant",
+                "reasoner_error", "memory_persistence_error",
             }),
         )
         # Every mid-exchange reason must also be recoverable at all.
@@ -771,15 +766,11 @@ class SessionResilienceTests(unittest.TestCase):
         self.assertNotIn("Please say", source)
         self.assertNotIn("Sorry", source)
 
-    def test_a_step_budget_checkpoint_keeps_the_conversation_open(self) -> None:
-        """Reaching the step budget is durable progress, not a failure.
-
-        The Core persists the goal and can continue it, so a long multi-step
-        task must not hang up the voice transport mid-goal.
-        """
+    def test_checkpoint_reasons_are_not_server_recovery_policy(self) -> None:
+        """The state boundary, rather than an expanding reason list, recovers."""
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
 
-        self.assertIn("budget_exhausted", RECOVERABLE_TRANSPORT_REASONS)
+        self.assertNotIn("budget_exhausted", RECOVERABLE_TRANSPORT_REASONS)
 
     def test_the_handler_resumes_rather_than_returning_once(self) -> None:
         import ast
