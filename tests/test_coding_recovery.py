@@ -24,7 +24,8 @@ from alx.bootstrap.coding import build_coding_runtime
 from alx.core import CoreAgent
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.contracts import (
-    CapabilityCall, CapabilityResultState, GoalState, Objective, SuccessCriterion,
+    CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall,
+    CapabilityResult, CapabilityResultState, GoalState, Objective, SuccessCriterion,
 )
 from alx.safety import AuthorityContext, SafetyGate
 from tests.test_coding_agent import NOW
@@ -33,6 +34,7 @@ from alx.goals import SQLiteGoalStore
 from alx.providers.coding_agent import CodingAgent
 from alx.providers.coding_process import run_coding_subprocess
 from alx.providers import coding_agent as coding_agent_module
+from alx.tools.coding import build_coding_executors
 
 
 def _wait_in_child(started: threading.Event) -> None:
@@ -84,6 +86,81 @@ class CodingRecoveryTests(unittest.TestCase):
             reviewer or PlanningModel(), repository=self.root,
             telemetry_sink=telemetry,
         )
+
+    def test_interrupted_execution_resumes_from_exact_checkout_through_verified_commit(self):
+        class InterruptedAfterEdit(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                (Path(request.worktree) / "app.py").write_text(_FIXED, encoding="utf-8")
+                raise CodingError("session_interrupted", reason_code="session_stalled")
+
+        first = self._agent(session=InterruptedAfterEdit()).run(self.request)
+        self.assertEqual(first.status, "interrupted")
+        self.assertTrue(first.diff_preserved)
+        self.assertIsNone(first.commit)
+        self.assertEqual(json.loads(first.checkpoint)["stage"], "execution")
+        original = CapabilityAttempt(
+            CapabilityCall("job-1", "run_coding_task", {
+                "task": "fix add", "repair_branch": "fix/job-1",
+                "commit_message": "fix add",
+            }),
+            CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(
+                "job-1", "run_coding_task", CapabilityResultState.PARTIAL,
+                first.as_values(), durable_values=first.durable_values(),
+            ),
+        )
+        goal = GoalState("goal", Objective("turn:t", "repair"),
+                         (SuccessCriterion("c", "fixed"),), attempts=(original,))
+        durable_path = self.root.parent / "interrupted-goal.sqlite3"
+        stored = SQLiteGoalStore(durable_path)
+        stored.create(goal, "conversation", NOW + timedelta(days=1))
+        stored.close()
+        reopened = SQLiteGoalStore(durable_path)
+        self.addCleanup(reopened.close)
+        goal = reopened.load("goal").state
+        resumed_session = RecordingSession(edits={"app.py": _FIXED})
+        agent = self._agent(session=resumed_session)
+        result = build_coding_executors(
+            agent.run, lambda: "job-2", lambda: goal,
+        )["run_coding_task"]({"resume_job_id": "job-1"})
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["commit_sha"])
+        self.assertTrue(result.values["all_required_verification_passed"])
+        self.assertEqual(len(resumed_session.calls), 1)
+
+    def test_interrupted_review_correction_resumes_execution_before_review_and_commit(self):
+        class CorrectionInterrupted(RecordingSession):
+            def run_session(self, request, briefing):
+                if self.calls:
+                    self.calls.append((request, briefing))
+                    (Path(request.worktree) / "app.py").write_text(
+                        _FIXED + "# partial correction\n", encoding="utf-8"
+                    )
+                    raise CodingError("session_interrupted", reason_code="session_emergency_ceiling")
+                return super().run_session(request, briefing)
+
+        findings = {"findings": [{
+            "severity": "high", "title": "finish correction",
+            "evidence": "partial result", "correction": "finish the change",
+        }]}
+        first = self._agent(
+            session=CorrectionInterrupted(edits={"app.py": _FIXED}),
+            reviewer=PlanningModel(reviews=[findings]),
+        ).run(self.request)
+        self.assertEqual(first.status, "interrupted")
+        checkpoint = json.loads(first.checkpoint)
+        self.assertEqual(checkpoint["stage"], "execution")
+        self.assertTrue(checkpoint["review_findings"])
+        self.assertIsNone(first.commit)
+        resumed_session = RecordingSession(edits={"app.py": _FIXED})
+        second = self._agent(session=resumed_session).run(replace(
+            self.request, job_id="job-2", resume_checkpoint=checkpoint,
+        ))
+        self.assertEqual(second.status, "succeeded")
+        self.assertIsNotNone(second.commit)
+        self.assertIn("finish correction", resumed_session.calls[0][1])
+        self.assertTrue(second.verification.all_required_passed)
 
     def _cancel_at(self, agent: CodingAgent, started: threading.Event):
         result = []

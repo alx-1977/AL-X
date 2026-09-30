@@ -580,12 +580,14 @@ class CodingAgent:
             self._report_telemetry(
                 state,
                 "complete" if outcome is not None and outcome.status in {"succeeded", "no_change_required"} else
-                "cancelled" if outcome is not None and outcome.status == "cancelled" else "failed",
+                "cancelled" if outcome is not None and outcome.status == "cancelled" else
+                "interrupted" if outcome is not None and outcome.status == "interrupted" else "failed",
                 terminal=True,
                 outcome=outcome.status if outcome is not None else "failed",
                 transition="NO CHANGE REQUIRED" if outcome is not None and outcome.status == "no_change_required" else
                 "COMPLETE" if outcome is not None and outcome.status == "succeeded" else
-                "CANCELLED" if outcome is not None and outcome.status == "cancelled" else "FAILED",
+                "CANCELLED" if outcome is not None and outcome.status == "cancelled" else
+                "INTERRUPTED" if outcome is not None and outcome.status == "interrupted" else "FAILED",
             )
             self._report_activity(state, "reasoning")
 
@@ -725,8 +727,17 @@ class CodingAgent:
             self._report_activity(state, "coding")
             self._report_telemetry(state, "execution", in_flight=True, transition="EXECUTION started")
             try:
+                execution_briefing = build_briefing(request, plan)
+                if resume is not None and resume["stage"] == "execution":
+                    pending_findings = resume.get("review_findings", ())
+                    if isinstance(pending_findings, list) and pending_findings:
+                        execution_briefing += "\n\n# Local reviewer findings to correct\n" + "\n".join(
+                            f"- [{item.get('severity', '')}] {item.get('title', '')}: "
+                            f"{item.get('evidence', '')} Correction: {item.get('correction', '')}"
+                            for item in pending_findings if isinstance(item, Mapping)
+                        )
                 session = self._session.run_session(
-                    request, build_briefing(request, plan)
+                    request, execution_briefing
                 )
             except CodingError as error:
                 if error.code == "coding_cancelled":
@@ -736,13 +747,22 @@ class CodingAgent:
                     state.files, git_status, preexisting_dirty,
                     self._modified_preexisting(workspace, preexisting_fingerprints),
                 )
+                interrupted = error.code == "session_interrupted" or (
+                    error.code == "session_failed"
+                    and error.details.get("reason_code") == "session_timeout"
+                )
                 return self._outcome(
-                    status="failed", summary="the coding session could not be started or completed",
+                    status="interrupted" if interrupted else "failed",
+                    summary="coding session interrupted" if interrupted else
+                    "the coding session could not be started or completed",
                     files=state.files, preexisting_dirty=preexisting_dirty, commands=commands,
                     tests_run=False, tests_passed=None, git_status=git_status,
                     git_diff=git_diff, issues=(error.code,), review=False,
-                    failure_status=True, plan_summary=plan_summary,
-                    diagnostics={"phase": "execution", **error.details}, baseline=baseline,
+                    failure_status=not interrupted, plan_summary=plan_summary,
+                    diagnostics={"phase": "execution", **error.details,
+                                 "reason_code": "session_emergency_ceiling"
+                                 if error.details.get("reason_code") == "session_timeout"
+                                 else error.details.get("reason_code", "")}, baseline=baseline,
                     checkpoint=self._checkpoint(state),
                     diff_preserved=bool(state.files),
                     preserved_branch=branch if state.files else "",
@@ -802,13 +822,35 @@ class CodingAgent:
             resume is not None and resume["stage"] in {"test", "commit"}
         ):
             state.stage = "review"
-            (
-                review_failure, review_issues, reviewed_files,
-                review_diagnostics, review_findings,
-            ) = self._local_review_loop(
-                request, workspace, plan, session_files, preexisting_dirty,
-                preexisting_fingerprints, state,
-            )
+            try:
+                (
+                    review_failure, review_issues, reviewed_files,
+                    review_diagnostics, review_findings,
+                ) = self._local_review_loop(
+                    request, workspace, plan, session_files, preexisting_dirty,
+                    preexisting_fingerprints, state,
+                )
+            except CodingError as error:
+                if error.code != "session_interrupted":
+                    raise
+                git_status, git_diff = self._git_evidence(workspace)
+                state.files = self._files_changed(
+                    state.files, git_status, preexisting_dirty,
+                    self._modified_preexisting(workspace, preexisting_fingerprints),
+                )
+                return self._outcome(
+                    status="interrupted", summary="coding correction interrupted",
+                    files=state.files, preexisting_dirty=preexisting_dirty,
+                    commands=commands, tests_run=False, tests_passed=None,
+                    git_status=git_status, git_diff=git_diff,
+                    issues=(error.code,), review=False,
+                    review_findings=state.review_findings,
+                    plan_summary=plan_summary,
+                    diagnostics={"phase": "execution", **error.details},
+                    baseline=baseline, checkpoint=self._checkpoint(state),
+                    diff_preserved=bool(state.files),
+                    preserved_branch=branch if state.files else "",
+                )
             state.files = reviewed_files
             state.review_findings = review_findings
         # Failed attempts stay on the result when a later attempt produced an
@@ -1238,10 +1280,14 @@ class CodingAgent:
             )
             self._report_activity(state, "coding")
             self._report_telemetry(state, "correction", in_flight=True, transition="CORRECTION cycle", correction_cycle=cycle + 1)
+            state.stage = "execution"
+            state.review_findings = findings
             try:
                 correction = self._session.run_session(request, briefing)
             except CodingError as error:
                 if error.code == "coding_cancelled":
+                    raise
+                if error.code == "session_interrupted":
                     raise
                 # The session broke. That is infrastructure, not an opinion.
                 return (
@@ -1255,6 +1301,7 @@ class CodingAgent:
                     carried, findings,
                 )
             self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
+            state.stage = "review"
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
             # whole-worktree one would never match, so a correction that
             # changed nothing would read as progress.
@@ -1797,7 +1844,7 @@ class CodingAgent:
         review_attempts: tuple[ReviewInfrastructureAttempt, ...] = (),
         checkpoint: str = "",
     ) -> CodingOutcome:
-        if status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled"):
+        if status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled", "interrupted"):
             status = "failed"
         if failure_status:
             status = "failed"

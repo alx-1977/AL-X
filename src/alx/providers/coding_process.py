@@ -25,7 +25,7 @@ from typing import Any, Callable
 from collections.abc import Sequence
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess  # noqa: S404 - the one coding-job process site
 import sys
 
@@ -38,6 +38,7 @@ from alx.contracts.coding import (
     CodingError,
     path_matches_blocked,
 )
+from alx.providers.coding_containment import CREDENTIAL_DENY_GLOBS
 from alx.contracts.coding_verification import pytest_failure_signature
 
 
@@ -66,6 +67,10 @@ class CodingCancellation:
 
     def run(self, runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
         self.check()
+        inactivity_timeout = kwargs.pop("inactivity_timeout", None)
+        activity_root = kwargs.pop("activity_root", None)
+        activity_blocked_paths = tuple(kwargs.pop("activity_blocked_paths", ()))
+        activity_path = Path(activity_root) if activity_root is not None else None
         if runner is not subprocess.run:
             result = runner(argv, **kwargs)
             self.check()
@@ -107,20 +112,65 @@ class CodingCancellation:
                     target=_deliver_input, args=(stdin, payload, stop_input), daemon=True
                 ).start()
             self.check()
-            deadline = None if timeout is None else monotonic() + timeout
+            started = monotonic()
+            deadline = None if timeout is None else started + timeout
+            last_activity = started
+            observed_output = (0, 0)
+            observed_files = (
+                _activity_snapshot(activity_path, activity_blocked_paths)
+                if activity_path is not None else None
+            )
+            next_file_check = started
             while True:
-                remaining = None if deadline is None else max(0, deadline - monotonic())
-                if remaining == 0:
+                now = monotonic()
+                if process.poll() is not None:
+                    try:
+                        stdout, stderr = process.communicate(timeout=0)
+                    except subprocess.TimeoutExpired:
+                        # A detached descendant may still hold a pipe. The
+                        # normal emergency/stall bounds still apply.
+                        pass
+                    else:
+                        self.check()
+                        return subprocess.CompletedProcess(
+                            argv, process.returncode, stdout, stderr
+                        )
+                if deadline is not None and now >= deadline:
                     _stop(process)
+                    if inactivity_timeout is not None:
+                        raise CodingError("session_interrupted", reason_code="session_emergency_ceiling")
                     raise subprocess.TimeoutExpired(argv, timeout)
+                if observed_files is not None and now >= next_file_check:
+                    current_files = _activity_snapshot(activity_path, activity_blocked_paths)
+                    if current_files != observed_files:
+                        last_activity = now
+                        observed_files = current_files
+                    scan_interval = min(1.0, inactivity_timeout / 4) if inactivity_timeout else 1.0
+                    next_file_check = now + scan_interval
+                if inactivity_timeout is not None and now - last_activity >= inactivity_timeout:
+                    _stop(process)
+                    raise CodingError("session_interrupted", reason_code="session_stalled")
+                remaining = None if deadline is None else max(0, deadline - now)
+                idle_remaining = (
+                    None if inactivity_timeout is None
+                    else max(0, inactivity_timeout - (now - last_activity))
+                )
+                poll = min(
+                    0.1,
+                    *(value for value in (remaining, idle_remaining) if value is not None),
+                )
                 try:
                     stdout, stderr = process.communicate(
-                        timeout=min(0.1, remaining) if remaining is not None else 0.1,
+                        timeout=poll,
                     )
                     self.check()
                     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as pending:
                     self.check()
+                    output = (len(pending.stdout or b""), len(pending.stderr or b""))
+                    if output != observed_output:
+                        observed_output = output
+                        last_activity = monotonic()
         finally:
             stop_input.set()
             with self._lock:
@@ -186,7 +236,40 @@ def check_cancelled() -> None:
 
 def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
     current = _CURRENT.get()
-    return runner(argv, **kwargs) if current is None else current.run(runner, argv, **kwargs)
+    if current is None and "inactivity_timeout" not in kwargs:
+        return runner(argv, **kwargs)
+    return (current or CodingCancellation()).run(runner, argv, **kwargs)
+
+
+def _activity_snapshot(
+    root: Path, blocked_paths: tuple[str, ...]
+) -> tuple[tuple[str, int, int], ...]:
+    """Observe checkout metadata only; never read source bytes or Git internals."""
+    entries: list[tuple[str, int, int]] = []
+    for directory, subdirs, files in os.walk(root, followlinks=False):
+        # Git's own writes and AL/X runtime logs are not coding progress.
+        subdirs[:] = [
+            name for name in subdirs
+            if name not in {".git", ".alx"}
+            and not path_matches_blocked(
+                str((Path(directory) / name).relative_to(root)), blocked_paths
+            )
+        ]
+        for name in (*subdirs, *files):
+            path = Path(directory) / name
+            relative = str(path.relative_to(root))
+            candidate = PurePosixPath(relative)
+            if path_matches_blocked(relative, blocked_paths) or any(
+                candidate.match(pattern) or candidate.match(pattern.removeprefix("**/"))
+                for pattern in CREDENTIAL_DENY_GLOBS
+            ):
+                continue
+            try:
+                info = path.lstat()
+            except OSError:
+                continue  # A concurrent rename is activity on the next snapshot.
+            entries.append((relative, info.st_mtime_ns, info.st_size))
+    return tuple(sorted(entries))
 
 
 def bind_cancellation(cancellation: CodingCancellation):

@@ -60,6 +60,67 @@ def state(*attempts):
 
 
 class CodingRetryFuseTests(unittest.TestCase):
+    def test_interruption_and_historical_timeout_do_not_spend_failure_allowance(self):
+        old = CapabilityAttempt(
+            CapabilityCall("old", "run_coding_task", {"task": "work"}),
+            CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(
+                "old", "run_coding_task", CapabilityResultState.FAILED,
+                {"status": "failed", "checkpoint": json.dumps({
+                    "stage": "execution", "state_digest": "a" * 64,
+                })},
+                {"code": "session_failed", "reason_code": "session_timeout"},
+            ),
+        )
+        current = CapabilityAttempt(
+            CapabilityCall("current", "run_coding_task", {"resume_job_id": "old"}),
+            CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(
+                "current", "run_coding_task", CapabilityResultState.PARTIAL,
+                {"status": "interrupted", "checkpoint": json.dumps({
+                    "stage": "execution", "state_digest": "b" * 64,
+                })},
+            ),
+        )
+        goal = state(old, current)
+        self.assertEqual(CoreAgent._failed_coding_executions(goal), 0)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(goal))
+        self.assertIsNone(CoreAgent._coding_interruption_exhaustion_reason(
+            goal, CapabilityCall("next", "run_coding_task", {"resume_job_id": "current"})
+        ))
+        self.assertEqual(CoreAgent._failed_coding_executions(state(
+            old, current, attempt("implementation-error")
+        )), 1)
+
+    def test_interruption_chain_stops_on_no_progress_and_at_its_own_bound(self):
+        def interrupted(number, parent, digest):
+            return CapabilityAttempt(
+                CapabilityCall(str(number), "run_coding_task",
+                               {"resume_job_id": str(parent)} if parent else {"task": "work"}),
+                CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    str(number), "run_coding_task", CapabilityResultState.PARTIAL,
+                    {"status": "interrupted", "checkpoint": json.dumps({
+                        "stage": "execution", "state_digest": digest,
+                    })},
+                ),
+            )
+        first = interrupted(1, None, "a")
+        unchanged = interrupted(2, 1, "a")
+        next_call = CapabilityCall("3", "run_coding_task", {"resume_job_id": "2"})
+        self.assertEqual(
+            CoreAgent._coding_interruption_exhaustion_reason(state(first, unchanged), next_call),
+            "coding_interruption_no_progress",
+        )
+        chain = tuple(interrupted(index, index - 1 if index > 1 else None, str(index))
+                      for index in range(1, 5))
+        self.assertEqual(
+            CoreAgent._coding_interruption_exhaustion_reason(
+                state(*chain), CapabilityCall("5", "run_coding_task", {"resume_job_id": "4"})
+            ), "coding_interruption_exhausted",
+        )
+        self.assertEqual(CoreAgent._failed_coding_executions(state(*chain)), 0)
+
     def test_completed_unchanged_historical_job_does_not_spend_retry(self):
         checkpoint = {
             "branch": "fix/old-noop", "head_sha": "a" * 40,

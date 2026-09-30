@@ -101,6 +101,7 @@ CODING_FAILURES = (
     "required_verification_failed",
     "sandbox_unusable",
     "session_failed",
+    "session_interrupted",
     "task_failed",
     "coding_cancelled",
 )
@@ -612,16 +613,16 @@ class CodingOutcome:
     # the job can still commit, and Core still sees the infrastructure
     # classification. Material findings alone leave this empty.
     review_classification: str = ""
-    # The branch and uncommitted diff are still in the checkout after a
-    # failed or cancelled stage. No later failure may reset or delete them.
+    # The branch and uncommitted diff remain after a failed, cancelled, or
+    # interrupted stage. No later outcome may reset or delete them.
     diff_preserved: bool = False
     preserved_branch: str = ""
     review_attempts: tuple["ReviewInfrastructureAttempt", ...] = ()
     checkpoint: str = ""
 
     def __post_init__(self) -> None:
-        if self.status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled"):
-            raise ValueError("status must be succeeded, no_change_required, failed, blocked, or cancelled")
+        if self.status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled", "interrupted"):
+            raise ValueError("invalid coding outcome status")
         _required(self.summary, "summary")
         _aware(self.finished_at, "finished_at")
         object.__setattr__(self, "files_changed", tuple(self.files_changed))
@@ -702,6 +703,8 @@ class CodingOutcome:
                 "checkout_clean": (self.diagnostics or {}).get("checkout_clean") is True,
                 "session_completed": (self.diagnostics or {}).get("session_completed") is True,
             }
+        if self.status == "interrupted":
+            values["interruption_reason"] = str((self.diagnostics or {}).get("reason_code", ""))
         if self.commit is not None:
             values["commit"] = self.commit.as_values()
             # Promoted to the top level because these two are what Core hands
