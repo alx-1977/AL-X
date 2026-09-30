@@ -688,6 +688,7 @@ class SessionResilienceTests(unittest.TestCase):
             frozenset({
                 "budget_exhausted", "budget_exceeded", "reasoner_error",
                 "active_goal_required", "memory_persistence_error",
+                "goal_selection_no_progress", "goal_selection_revisited", "goal_selection_redundant",
             }),
         )
         # Every mid-exchange reason must also be recoverable at all.

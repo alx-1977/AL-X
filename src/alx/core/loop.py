@@ -271,10 +271,11 @@ class CoreAgent:
         conflict_silent = False
         transient_attempts: tuple[CapabilityAttempt, ...] = ()
         memory_query_ids: set[str] = set()
-        # How many times this turn has moved to a different goal. Reading one
-        # goal before acting is legitimate; walking the conversation's goals
-        # one at a time buys a reasoning call per goal, so it is not.
-        selections = 0
+        # Baselines for every goal entered this turn. A new selection needs
+        # persisted progress on the departing goal; departed goals cannot be
+        # revisited. The existing step budget bounds even productive traversal.
+        selected_goals: dict[str, GoalState | None] = {}
+        prior_goal_provenance: tuple[ContentProvenance, ...] = ()
         for step_index in range(step_budget):
             try:
                 now = self._clock()
@@ -282,13 +283,16 @@ class CoreAgent:
                     raise ValueError("Core clock must be timezone-aware")
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="clock_error")
+            if snapshot is not None:
+                # A goal created during this turn is itself durable progress.
+                selected_goals.setdefault(snapshot.state.goal_id, None)
             summaries = self._selectable_goals(conversation_id, snapshot)
             decision_provenance = self._derived_provenance(
                 now,
                 conversation,
                 snapshot,
                 retrieved_memories,
-                transient_attempts,
+                transient_attempts, prior_goal_provenance,
             )
             try:
                 self._budget_check(conversation_id)
@@ -347,12 +351,20 @@ class CoreAgent:
                     snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
                 return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
             continuation_notices = ()
+            deferred_selection: str | None = None
             if decision.goal_id is not None:
                 selection_error = self._goal_selection_error(
-                    decision, snapshot, summaries, selections
+                    decision, snapshot, summaries, selected_goals
                 )
                 if selection_error is not None:
-                    LOGGER.info("Goal selection rejected: %s", selection_error)
+                    LOGGER.info(
+                        "Goal selection rejected: %s current=%s requested=%s "
+                        "selected=%s response_present=%s response_requires_goal_commit=%s",
+                        selection_error,
+                        None if snapshot is None else snapshot.state.goal_id,
+                        decision.goal_id, tuple(selected_goals),
+                        decision.response is not None, decision.response_requires_goal_commit,
+                    )
                     # Selecting a goal this conversation does not offer is a
                     # correctable slip, not the end of the conversation. It
                     # read nothing, changed nothing and dispatched nothing, so
@@ -378,8 +390,20 @@ class CoreAgent:
                     # Told once and selected an unavailable goal again, or an
                     # error correction cannot help: reasoning further against
                     # an unchanged list is the runaway this stops.
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason=selection_error)
-                if snapshot is None or snapshot.state.goal_id != decision.goal_id:
+                    if selection_error == "goal_selection_unknown":
+                        return CoreOutcome(CoreState.ERROR, snapshot, reason=selection_error)
+                    if decision.response is None or decision.response_requires_goal_commit:
+                        return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=selection_error)
+                    # The refused selection authorises no mutation or action.
+                    # An independent answer still uses canonical memory checks
+                    # and delivery, without stale-work continuation buying a retry.
+                    deferred_selection = selection_error
+                    decision = replace(decision, goal_id=None, goal_proposal=None)
+                if decision.goal_id is not None and (
+                    snapshot is None or snapshot.state.goal_id != decision.goal_id
+                ):
+                    if snapshot is not None and snapshot.provenance is not None:
+                        prior_goal_provenance = (*prior_goal_provenance, snapshot.provenance)
                     snapshot = self._store.load(decision.goal_id)
                     # A goal may be resumed from any conversation, but only one
                     # that was actually offered this turn. The check used to be
@@ -395,13 +419,13 @@ class CoreAgent:
                         return CoreOutcome(
                             CoreState.ERROR, None, reason="goal_selection_unknown"
                         )
-                    selections += 1
+                    selected_goals[decision.goal_id] = snapshot.state
                     # The selected goal is now a reasoning input, so the
                     # provenance of everything this step persists must include
                     # it. It was computed before the goal was known.
                     decision_provenance = self._derived_provenance(
                         now, conversation, snapshot, retrieved_memories,
-                        transient_attempts,
+                        transient_attempts, prior_goal_provenance,
                     )
                 if decision.selects_only:
                     # Reading a goal before acting is a step, not a mutation.
@@ -735,6 +759,12 @@ class CoreAgent:
                         response_provenance=decision_provenance,
                     )
                 if decision.selects_only:
+                    if (proposal_error is None and decision.goal_proposal is not None
+                            and previous is not None
+                            and snapshot is not None and snapshot.state == previous.state):
+                        return CoreOutcome(
+                            CoreState.CHECKPOINTED, snapshot, reason="goal_selection_no_progress",
+                        )
                     # Selection with proposals is still an intermediate step.
                     # Its writes have used the canonical persistence path above;
                     # continue within this turn's existing budget and attempts.
@@ -743,7 +773,10 @@ class CoreAgent:
                 # work suppress an independent answer. Dependent responses and
                 # silence have already failed above; selection-only decisions
                 # have continued, and memory checks still run before this point.
-                if proposal_error is None:
+                if deferred_selection is not None:
+                    if snapshot is not None:
+                        snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
+                elif proposal_error is None:
                     snapshot, deferred = self._defer_or_park_premature_end(
                         snapshot,
                         approved_dispatches,
@@ -766,7 +799,7 @@ class CoreAgent:
                     CoreState.RESPONDED,
                     snapshot,
                     response=decision.response,
-                    reason="goal_proposal_rejected" if proposal_error else None,
+                    reason="goal_proposal_rejected" if proposal_error else deferred_selection,
                     response_provenance=decision_provenance,
                 )
 
@@ -962,7 +995,7 @@ class CoreAgent:
                     snapshot,
                     self._derived_provenance(
                         now, conversation, snapshot, retrieved_memories,
-                        transient_attempts,
+                        transient_attempts, prior_goal_provenance,
                     ),
                 )
             except Exception:
@@ -1196,26 +1229,25 @@ class CoreAgent:
         kept = summaries[: UNFINISHED_GOAL_CANDIDATES - 1]
         return (*kept, selected)
 
-    # One goal is read per turn. A second move to a different goal is refused
-    # rather than paid for: selecting A, then B, then C bought a reasoning
-    # call per goal and reached the step budget without acting.
-    _MAX_GOAL_SELECTIONS = 1
-
-    @classmethod
-    def _goal_selection_error(cls, decision: AgentDecision, snapshot: GoalSnapshot | None,
+    @staticmethod
+    def _goal_selection_error(decision: AgentDecision, snapshot: GoalSnapshot | None,
                               summaries: tuple[GoalSummary, ...],
-                              selections: int) -> str | None:
-        """Check a selection the Core made; never make one for it."""
+                              selected_goals: Mapping[str, GoalState | None]) -> str | None:
+        """Bound AL/X's choices by durable progress, never by user wording."""
         assert decision.goal_id is not None
+        current = None if snapshot is None else snapshot.state
+        already_selected = current is not None and current.goal_id == decision.goal_id
+        # Detect revisits even when completion removed the goal from summaries.
+        if not already_selected and decision.goal_id in selected_goals:
+            return "goal_selection_revisited"
         if not any(item.goal_id == decision.goal_id for item in summaries):
             return "goal_selection_unknown"
-        already_selected = (
-            snapshot is not None and snapshot.state.goal_id == decision.goal_id
-        )
-        if decision.selects_only and already_selected:
-            return "goal_selection_redundant"
-        if not already_selected and selections >= cls._MAX_GOAL_SELECTIONS:
-            return "goal_selection_exhausted"
+        if already_selected:
+            if decision.selects_only and decision.goal_proposal is None:
+                return "goal_selection_redundant"
+            return None
+        if current is not None and current == selected_goals.get(current.goal_id):
+            return "goal_selection_no_progress"
         return None
 
     def _definition(self, capability_id: str) -> CapabilityDefinition | None:
@@ -1788,6 +1820,7 @@ class CoreAgent:
         snapshot: GoalSnapshot | None,
         memories: tuple[MemorySnapshot, ...],
         transient_attempts: tuple[CapabilityAttempt, ...],
+        prior_goal_provenance: tuple[ContentProvenance, ...] = (),
     ) -> ContentProvenance:
         """Mechanically union every durable and transient reasoning input."""
         inputs: list[ContentProvenance] = [
@@ -1796,6 +1829,7 @@ class CoreAgent:
                 *(turn.provenance for turn in conversation.turns),
                 *(event.provenance for event in conversation.events),
                 None if snapshot is None else snapshot.provenance,
+                *prior_goal_provenance,
                 *(memory.current.provenance for memory in memories),
                 *(
                     None if attempt.result is None else attempt.result.provenance
