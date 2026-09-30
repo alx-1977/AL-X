@@ -439,7 +439,7 @@ class CoreTests(unittest.TestCase):
             AgentDecision(finish_silently=True, goal_proposal=proposal),
             selects="goal-1",
         )).process(conversation(), RETENTION, 1)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
 
     def test_history_record_cannot_cite_an_unoffered_evidence_identifier(self) -> None:
@@ -456,7 +456,8 @@ class CoreTests(unittest.TestCase):
                           response_requires_goal_commit=True),
             selects="goal-1",
         )).process(conversation(), RETENTION, 1)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertIsNone(outcome.response)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
 
     def test_history_record_accepts_an_existing_offered_evidence_identifier(self) -> None:
@@ -566,22 +567,30 @@ class CoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "completion_lacks_sourced_evidence"):
                     CoreAgent._derive_goal_status(initial, GoalMutationKind.REQUEST_COMPLETION)
 
-    def test_materially_dependent_rejection_fails_without_blanket_retry(self) -> None:
+    def test_materially_dependent_rejection_suppresses_the_answer_and_reasons_again(self) -> None:
         initial = goal(outstanding_work=(WorkItem("work-1", "verify prior work"),))
         self.store.create(initial, "conversation-1", RETENTION)
         proposal = GoalProposal(GoalMutationKind.REQUEST_COMPLETION, outstanding_work=())
         reasoner = Queued(
             AgentDecision(response="The goal is complete.", goal_proposal=proposal,
                           response_requires_goal_commit=True),
-            AssertionError("blanket retry occurred"),
+            AgentDecision(response="Not yet, one item is outstanding."),
+            AgentDecision(response="Not yet, one item is outstanding."),
             selects="goal-1",
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertIsNone(outcome.response)
-        self.assertEqual(self.store.load("goal-1").state, initial)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(len(reasoner.contexts), 1)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        # The claimed completion is suppressed; the further step is her own
+        # reasoning from the refusal, not a replay of the same mutation.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Not yet, one item is outstanding.")
+        # The rejected mutation cleared nothing. Parking the unfinished goal
+        # after the later valid answer is the existing end-of-turn rule.
+        stored = self.store.load("goal-1").state
+        self.assertEqual(stored.outstanding_work, initial.outstanding_work)
+        self.assertIsNot(stored.status, GoalStatus.COMPLETED)
+        self.assertEqual(
+            reasoner.contexts[1].refused_calls[0]["mutation_kind"], "request_completion",
+        )
 
     def test_rejected_memory_cannot_partially_commit_goal_proposal(self) -> None:
         self.store.create(goal(), "conversation-1", RETENTION)
@@ -648,7 +657,7 @@ class CoreTests(unittest.TestCase):
             response_requires_goal_commit=True,
         ), selects="goal-1")).process(conversation(), RETENTION, 1)
 
-        self.assertEqual(rejected.state, CoreState.ERROR)
+        self.assertEqual(rejected.state, CoreState.CHECKPOINTED)
         self.assertEqual(rejected.reason, "goal_proposal_invalid")
         self.assertEqual(rejected.snapshot.state.evidence, (recorded,))
         self.assertEqual(self.store.load("goal-1").state.evidence, (recorded,))
@@ -768,7 +777,7 @@ class CoreTests(unittest.TestCase):
             conversation(), RETENTION, 3,
         )
 
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(len(reasoner.contexts), 2)
 
@@ -791,12 +800,17 @@ class CoreTests(unittest.TestCase):
             AgentDecision(call=call),
             AgentDecision(response="Recorded.", goal_proposal=claim,
                           response_requires_goal_commit=True),
+            AgentDecision(response="The write failed."),
             selects="goal-1",
         )
         outcome = self.agent(reasoner, lambda proposed, state: failed).process(
             conversation(), RETENTION, 5,
         )
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertNotEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.response, "The write failed.")
+        self.assertEqual(
+            reasoner.contexts[2].refused_calls[0]["mutation_kind"], "request_completion",
+        )
         stored = self.store.load("goal-1").state
         self.assertEqual(stored.status, GoalStatus.ACTIVE)
         self.assertEqual(stored.evidence, claim.new_evidence)
@@ -975,12 +989,17 @@ class CoreTests(unittest.TestCase):
             AgentDecision(call=call),
             AgentDecision(response="Recorded.", goal_proposal=claim,
                           response_requires_goal_commit=True),
+            AgentDecision(response="Only part of it was recorded."),
             selects="goal-1",
         )
         outcome = self.agent(reasoner, lambda proposed, state: partial).process(
             conversation(), RETENTION, 5,
         )
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertNotEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.response, "Only part of it was recorded.")
+        self.assertEqual(
+            reasoner.contexts[2].refused_calls[0]["mutation_kind"], "request_completion",
+        )
         self.assertEqual(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
 
     def test_a_successful_action_still_completes_the_goal(self) -> None:
@@ -1171,7 +1190,7 @@ class CoreTests(unittest.TestCase):
         outcome = self.agent(
             reasoner, lambda proposed, state: attempt
         ).process(conversation(), RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         recovered = self.store.load("goal-1").state
         self.assertEqual(recovered.status, GoalStatus.ACTIVE)

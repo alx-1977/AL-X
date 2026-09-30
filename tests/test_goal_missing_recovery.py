@@ -223,7 +223,7 @@ class TheLiveComplaintTrace(Harness):
             ),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(self.dispatched, [])
 
@@ -278,18 +278,24 @@ class OrdinaryGoalBehaviourIsUnchanged(Harness):
         self.assertEqual(outcome.response, "The part arrives Thursday.")
         self.assertEqual(self.dispatched, [])
 
-    def test_a_response_depending_on_the_rejected_commit_still_errors(self) -> None:
-        """Unchanged: that branch returns before the refusal is recorded."""
+    def test_a_response_depending_on_the_rejected_commit_is_suppressed(self) -> None:
+        """The refusal reaches the Core and the claimed answer does not."""
         reasoner = Queued(
             AgentDecision(
                 response="Recorded.",
                 response_requires_goal_commit=True,
                 goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
             ),
+            AgentDecision(response="Nothing was recorded."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertNotEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.response, "Nothing was recorded.")
+        entry = next(
+            item for item in reasoner.contexts[1].refused_calls
+            if item["reason"] == "goal_missing"
+        )
+        self.assertEqual(entry["mutation_kind"], "update")
 
 
 class TheProtocolExplainsTheReason(unittest.TestCase):
