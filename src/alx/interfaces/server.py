@@ -54,6 +54,8 @@ LOGGER = logging.getLogger(__name__)
 TYPED_FRAME = "person.text"
 CODING_CANCEL_FRAME = "coding.cancel"
 
+# Selection checkpoints preserve durable work and emit their reason visibly.
+# They end work for this turn, not the microphone's conversation lifetime.
 RECOVERABLE_TRANSPORT_REASONS = frozenset(
     {
         "speech_transcription_error",
@@ -62,6 +64,7 @@ RECOVERABLE_TRANSPORT_REASONS = frozenset(
         "reasoner_error",
         "active_goal_required",
         "memory_persistence_error",
+        "goal_selection_no_progress", "goal_selection_revisited", "goal_selection_redundant",
     }
 )
 
@@ -80,6 +83,7 @@ MID_EXCHANGE_RECOVERABLE_REASONS = frozenset(
     {
         "budget_exhausted", "budget_exceeded", "reasoner_error",
         "active_goal_required", "memory_persistence_error",
+        "goal_selection_no_progress", "goal_selection_revisited", "goal_selection_redundant",
     }
 )
 

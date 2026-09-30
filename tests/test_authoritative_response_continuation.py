@@ -111,7 +111,7 @@ class SelectionContinuationTests(Fixture):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         reasoner = Queued(self.selection(), self.selection())
         result = self.core(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(result.state, CoreState.ERROR)
+        self.assertEqual(result.state, CoreState.CHECKPOINTED)
         self.assertEqual(result.reason, "goal_selection_redundant")
         self.assertEqual(len(reasoner.contexts), 2)
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)

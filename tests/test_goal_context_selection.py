@@ -552,7 +552,7 @@ class SelectionCannotBuyReasoningTests(Fixture):
                 active_goal(f"goal-{index}"), "conversation-1", RETENTION,
             )
 
-    def test_walking_the_conversation_goals_is_refused_after_the_first(self) -> None:
+    def test_walking_goals_without_progress_is_checkpointed(self) -> None:
         self.create_goals(4)
         reasoner = Queued(
             AgentDecision(goal_id="goal-0"),
@@ -560,18 +560,16 @@ class SelectionCannotBuyReasoningTests(Fixture):
             AssertionError("a third selection bought another reasoning call"),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.reason, "goal_selection_exhausted")
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.reason, "goal_selection_no_progress")
         self.assertEqual(len(reasoner.contexts), 2)
 
     def test_the_step_budget_is_never_reached_by_selection_alone(self) -> None:
         """Many goals, many steps, two decisions.
 
-        Selecting one goal after another must stop at the selection limit
+        Selecting one goal after another without durable progress must stop
         rather than spending the turn. The goals are kept within the candidate
-        cap so that the limit being tested is the selection one: past the cap a
-        goal is simply not offered, which is a different refusal covered
-        separately.
+        cap so that candidacy does not mask the no-progress guard.
         """
         self.create_goals(UNFINISHED_GOAL_CANDIDATES)
         reasoner = Queued(
@@ -581,7 +579,7 @@ class SelectionCannotBuyReasoningTests(Fixture):
             ]
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.reason, "goal_selection_exhausted")
+        self.assertEqual(outcome.reason, "goal_selection_no_progress")
         self.assertLessEqual(len(reasoner.contexts), 2)
 
     def test_a_goal_beyond_the_candidate_cap_is_not_selectable(self) -> None:
