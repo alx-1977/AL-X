@@ -259,6 +259,62 @@ class MoveResultTests(unittest.TestCase):
                         self.assertNotIn("destination_reference", result.values)
                         self.assert_one_move()
 
+    def test_present_source_discards_valid_copyuid_for_both_capabilities(self):
+        responses = {
+            "rejected": ("NO", False, CapabilityResultState.FAILED, "move_failed"),
+            "accepted": ("OK", False, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+            "lost": ("OK", True, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+        }
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name, (status, lost, state, code) in responses.items():
+                with self.subTest(capability=capability, response=name):
+                    self._reset()
+                    self.connection.copyuid = b"888 42 7"
+                    self.connection.move_data = [b"[COPYUID 888 42 7] Move completed"]
+                    self.connection.move_status = status
+                    self.connection.source_search = "OK", [b"42"]
+                    if lost:
+                        self.connection.move_error = OSError("reset")
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, state)
+                    self.assertEqual(result.failure["code"], code)
+                    self.assertNotIn("destination_reference", result.values)
+                    if name == "accepted":
+                        self.assertIn(
+                            ("UID", "search", None, "UID", "7"),
+                            self.connection.commands,
+                        )
+                    self.assert_one_move()
+
+    def test_present_source_discards_preexisting_message_id_for_both_capabilities(self):
+        responses = {
+            "rejected": ("NO", False, CapabilityResultState.FAILED, "move_failed"),
+            "accepted": ("OK", False, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+            "lost": ("OK", True, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+        }
+        quoted = f'"{MESSAGE_ID}"'
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name, (status, lost, state, code) in responses.items():
+                with self.subTest(capability=capability, response=name):
+                    self._reset()
+                    self.connection.copyuid = None
+                    self.connection.message_bytes = MESSAGE_BYTES
+                    self.connection.source_search = "OK", [b"42"]
+                    self.connection.header_search = "OK", [b"7"]
+                    self.connection.move_status = status
+                    if lost:
+                        self.connection.move_error = OSError("reset")
+                    result = self.run_move(capability)
+                    self.assertNotEqual(result.state, CapabilityResultState.SUCCEEDED)
+                    self.assertEqual(result.state, state)
+                    self.assertEqual(result.failure["code"], code)
+                    self.assertNotIn("destination_reference", result.values)
+                    self.assertIn(
+                        ("UID", "search", None, "HEADER", "Message-ID", quoted),
+                        self.connection.commands,
+                    )
+                    self.assert_one_move()
+
     def test_local_acknowledge_error_does_not_downgrade_confirmed_move(self):
         for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
             with self.subTest(capability=capability):

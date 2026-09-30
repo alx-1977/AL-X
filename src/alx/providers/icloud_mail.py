@@ -352,6 +352,11 @@ def _listed_uids(values) -> tuple[str, ...]:
 
 
 def _same_uid(left: str, right: str) -> bool:
+    """Whether two UID tokens name the same message.
+
+    Decimal tokens compare as integers, so leading zeros do not make them
+    different. Any other pair matches only when the two strings are equal.
+    """
     if left.isdigit() and right.isdigit():
         return int(left) == int(right)
     return left == right
@@ -1460,6 +1465,16 @@ class ICloudMailAdapter:
             LOGGER.warning("Mail attention cleanup unavailable after UID MOVE")
 
     def _move_selected(self, connection, reference: MailReference, mailbox: str) -> MailMoveResult:
+        """UID MOVE of the already selected message.
+
+        COPYUID and a unique destination Message-ID can name where the message
+        landed. A source UID that the post-move check still finds discards both
+        before the outcome is chosen, so the returned result carries no
+        destination reference. With the source present, a rejected MOVE raises
+        move_failed, an empty destination search raises move_failed, and an
+        accepted or lost MOVE in every other search state returns no destination
+        reference. The caller reports that return as partial mail_move_unconfirmed.
+        """
         # Read the identifier first. The MOVE response can be lost after the
         # message has already moved, and this connection then checks for itself.
         message_id = self._selected_message_id(connection, reference)
@@ -1482,6 +1497,11 @@ class ICloudMailAdapter:
         # when that search cannot name exactly one UID.
         if destination_state == "found":
             destination = matched
+        # Last assignment when the source UID remains. Clearing earlier would
+        # let the Message-ID match write a destination back. The search state
+        # itself is kept, so an empty destination search still fails below.
+        if source_state == "present":
+            destination = None
 
         self._release_attention(reference)
         # Still in the source and absent from the destination: it did not move.
