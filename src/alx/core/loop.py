@@ -271,10 +271,11 @@ class CoreAgent:
         conflict_silent = False
         transient_attempts: tuple[CapabilityAttempt, ...] = ()
         memory_query_ids: set[str] = set()
-        # Baselines for every goal entered this turn. A new selection needs
-        # persisted progress on the departing goal; departed goals cannot be
-        # revisited. The existing step budget bounds even productive traversal.
-        selected_goals: dict[str, GoalState | None] = {}
+        # Loading a goal's full state is one useful inspection this turn.
+        # A later choice may inspect a different offered goal, but never one
+        # already inspected. Candidate projection and the existing step budget
+        # bound traversal without requiring an unrelated durable mutation.
+        selected_goals: set[str] = set()
         prior_goal_provenance: tuple[ContentProvenance, ...] = ()
         for step_index in range(step_budget):
             try:
@@ -284,8 +285,8 @@ class CoreAgent:
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="clock_error")
             if snapshot is not None:
-                # A goal created during this turn is itself durable progress.
-                selected_goals.setdefault(snapshot.state.goal_id, None)
+                # A newly created goal is already known in full this turn.
+                selected_goals.add(snapshot.state.goal_id)
             summaries = self._selectable_goals(conversation_id, snapshot)
             decision_provenance = self._derived_provenance(
                 now,
@@ -419,7 +420,7 @@ class CoreAgent:
                         return CoreOutcome(
                             CoreState.ERROR, None, reason="goal_selection_unknown"
                         )
-                    selected_goals[decision.goal_id] = snapshot.state
+                    selected_goals.add(decision.goal_id)
                     # The selected goal is now a reasoning input, so the
                     # provenance of everything this step persists must include
                     # it. It was computed before the goal was known.
@@ -1232,8 +1233,8 @@ class CoreAgent:
     @staticmethod
     def _goal_selection_error(decision: AgentDecision, snapshot: GoalSnapshot | None,
                               summaries: tuple[GoalSummary, ...],
-                              selected_goals: Mapping[str, GoalState | None]) -> str | None:
-        """Bound AL/X's choices by durable progress, never by user wording."""
+                              selected_goals: set[str]) -> str | None:
+        """Permit each offered goal's full-state inspection once per turn."""
         assert decision.goal_id is not None
         current = None if snapshot is None else snapshot.state
         already_selected = current is not None and current.goal_id == decision.goal_id
@@ -1246,8 +1247,6 @@ class CoreAgent:
             if decision.selects_only and decision.goal_proposal is None:
                 return "goal_selection_redundant"
             return None
-        if current is not None and current == selected_goals.get(current.goal_id):
-            return "goal_selection_no_progress"
         return None
 
     def _definition(self, capability_id: str) -> CapabilityDefinition | None:

@@ -544,7 +544,7 @@ class SelectionUsesTheCanonicalPathTests(Fixture):
 
 
 class SelectionCannotBuyReasoningTests(Fixture):
-    """Review finding: distinct goals each purchased another reasoning call."""
+    """Distinct full-state reads are bounded by candidates and the step budget."""
 
     def create_goals(self, count: int) -> None:
         for index in range(count):
@@ -552,25 +552,21 @@ class SelectionCannotBuyReasoningTests(Fixture):
                 active_goal(f"goal-{index}"), "conversation-1", RETENTION,
             )
 
-    def test_walking_goals_without_progress_is_checkpointed(self) -> None:
+    def test_inspecting_distinct_goals_needs_no_unrelated_goal_write(self) -> None:
         self.create_goals(4)
         reasoner = Queued(
             AgentDecision(goal_id="goal-0"),
             AgentDecision(goal_id="goal-1"),
-            AssertionError("a third selection bought another reasoning call"),
+            AgentDecision(goal_id="goal-2"),
+            AgentDecision(response="Inspected."),
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
-        self.assertEqual(outcome.reason, "goal_selection_no_progress")
-        self.assertEqual(len(reasoner.contexts), 2)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
+        self.assertEqual(outcome.response, "Inspected.")
+        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual([self.store.load(f"goal-{i}").revision for i in range(3)], [1, 1, 1])
 
-    def test_the_step_budget_is_never_reached_by_selection_alone(self) -> None:
-        """Many goals, many steps, two decisions.
-
-        Selecting one goal after another without durable progress must stop
-        rather than spending the turn. The goals are kept within the candidate
-        cap so that candidacy does not mask the no-progress guard.
-        """
+    def test_inspection_alone_still_spends_the_existing_step_budget(self) -> None:
+        """Distinct inspections stop at the unchanged global step budget."""
         self.create_goals(UNFINISHED_GOAL_CANDIDATES)
         reasoner = Queued(
             *[
@@ -578,9 +574,10 @@ class SelectionCannotBuyReasoningTests(Fixture):
                 for index in range(UNFINISHED_GOAL_CANDIDATES)
             ]
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.reason, "goal_selection_no_progress")
-        self.assertLessEqual(len(reasoner.contexts), 2)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.reason, "budget_exhausted")
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertTrue(all(self.store.load(f"goal-{i}").revision == 1 for i in range(3)))
 
     def test_a_goal_beyond_the_candidate_cap_is_not_selectable(self) -> None:
         """The cap bounds awareness, and what is not offered cannot be taken."""
@@ -591,7 +588,7 @@ class SelectionCannotBuyReasoningTests(Fixture):
         self.assertEqual(len(offered), UNFINISHED_GOAL_CANDIDATES)
 
     def test_acting_on_the_one_selected_goal_is_unaffected(self) -> None:
-        """The cap limits moving between goals, never working within one."""
+        """The bounds on selection never impede work within one goal."""
         self.store.create(active_goal(), "conversation-1", RETENTION)
         self.store.create(active_goal("goal-other"), "conversation-1", RETENTION)
         call = CapabilityCall("call-1", "study_question", {"question_id": "q-1"})
