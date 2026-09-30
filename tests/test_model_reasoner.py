@@ -172,6 +172,33 @@ class ModelReasonerTests(unittest.TestCase):
         supplied = json.loads(model.requests[0].messages[-1].content)
         self.assertEqual(supplied["continuation_notices"], [notice])
 
+    def test_terminal_checkpoint_schema_only_permits_a_grounded_response(self) -> None:
+        model = FakeModel(base_output(response="The review is still in progress."))
+        context = replace(self.context(), response_only_reason="review_unavailable")
+        decision = ModelReasoner(model, "laws", "identity").decide(context)
+        self.assertEqual(decision.response, "The review is still in progress.")
+        request = model.requests[0]
+        payload = json.loads(request.messages[-1].content)
+        self.assertEqual(payload["terminal_checkpoint_reason"], "review_unavailable")
+        properties = request.output_schema["properties"]
+        self.assertEqual(properties["action"]["properties"]["type"]["const"], "respond")
+        self.assertEqual(properties["goal_id"], {"type": "null"})
+        self.assertEqual(properties["goal_update"], {"type": "null"})
+        self.assertEqual(properties["memory_proposals"]["maxItems"], 0)
+
+    def test_terminal_checkpoint_parser_rejects_work_even_if_provider_ignores_schema(self):
+        context = replace(self.context(), response_only_reason="review_unavailable")
+        for output in (
+            base_output(disposition="call_capability", call_id="c2",
+                        capability_id="search_records", arguments_json="{}"),
+            base_output(response="Done", goal_update=goal_update()),
+            base_output(response="Done", goal_id="goal-1"),
+            base_output(response="Done", response_requires_goal_commit=True),
+        ):
+            with self.subTest(output=output):
+                with self.assertRaisesRegex(DecisionValidationError, "response only"):
+                    ModelReasoner(FakeModel(output), "laws", "identity").decide(context)
+
     def test_silent_completion_is_a_general_core_decision(self) -> None:
         model = FakeModel(base_output(disposition="finish_silently"))
         decision = ModelReasoner(model, "Approved Laws", "Approved identity").decide(

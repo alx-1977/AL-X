@@ -303,7 +303,7 @@ class CoreAgent:
                     CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
                 )
             try:
-                decision = self._reasoner.decide(ReasoningContext(
+                reasoning_context = ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,
                     turns=project_turns_for_reasoning(
                         conversation.turns,
@@ -325,7 +325,8 @@ class CoreAgent:
                     refused_calls=refused_calls,
                     continuation_notices=continuation_notices,
                     refused_goal_selections=refused_goal_selections,
-                ))
+                )
+                decision = self._reasoner.decide(reasoning_context)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
                 return CoreOutcome(
@@ -996,6 +997,11 @@ class CoreAgent:
             } and attempt.result is not None
                     and (attempt.result.failure or {}).get("requires_judgement")):
                 mechanical_blocker = str(attempt.result.failure["code"])
+                if origin is CognitionOrigin.PERSON_TURN:
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, snapshot, reasoning_context,
+                        transient_attempts, mechanical_blocker, decision_provenance,
+                    )
             continuation_notice_issued = False
         if (
             snapshot is not None
@@ -1032,6 +1038,56 @@ class CoreAgent:
                 memory_state="unresolved_identity_conflict",
             )
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
+
+    def _respond_to_terminal_blocker(
+        self,
+        conversation_id: str,
+        snapshot: GoalSnapshot,
+        context: ReasoningContext,
+        transient_attempts: tuple[CapabilityAttempt, ...],
+        reason: str,
+        provenance: ContentProvenance,
+    ) -> CoreOutcome:
+        """Park the workflow and allow one response-only decision for a person."""
+        snapshot = self._park_unfinished_goal(snapshot, provenance)
+        terminal_context = replace(
+            context,
+            active_goal=snapshot.state,
+            unfinished_goals=self._selectable_goals(conversation_id, snapshot),
+            transient_attempts=transient_attempts,
+            response_only_reason=reason,
+        )
+        try:
+            self._budget_check(conversation_id)
+        except Exception as error:
+            LOGGER.warning("Terminal checkpoint response stopped by execution budget: %s", error)
+            return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
+        try:
+            decision = self._reasoner.decide(terminal_context)
+        except Exception as error:
+            LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
+            return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
+        # A test double or a nonconforming provider can bypass the structured
+        # schema. The already selected goal ID is only referential metadata;
+        # any different ID would navigate to another goal. Reject that and all
+        # work before any mutation, memory write or call.
+        if (
+            decision.response is None
+            or decision.call is not None
+            or decision.memory_query is not None
+            or decision.goal_id not in (None, snapshot.state.goal_id)
+            or decision.goal_proposal is not None
+            or decision.memory_proposals
+            or decision.approval_proposal is not None
+            or decision.response_requires_goal_commit
+            or decision.finish_silently
+        ):
+            LOGGER.info("Terminal checkpoint response rejected: not response only")
+            return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
+        return CoreOutcome(
+            CoreState.RESPONDED, snapshot, response=decision.response,
+            reason=reason, response_provenance=provenance,
+        )
 
     def _close_interrupted_dispatch(self, snapshot: GoalSnapshot) -> GoalSnapshot:
         """Resolve an interrupted dispatch as an unknown outcome, once."""
