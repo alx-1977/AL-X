@@ -773,7 +773,10 @@ class CoreAgent:
                 # work suppress an independent answer. Dependent responses and
                 # silence have already failed above; selection-only decisions
                 # have continued, and memory checks still run before this point.
-                if proposal_error is None and deferred_selection is None:
+                if deferred_selection is not None:
+                    if snapshot is not None:
+                        snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
+                elif proposal_error is None:
                     snapshot, deferred = self._defer_or_park_premature_end(
                         snapshot,
                         approved_dispatches,

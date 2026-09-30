@@ -112,9 +112,24 @@ class MultiGoalProgressionTests(Fixture):
         self.assertEqual(result.response, "The remaining work is still open.")
         self.assertEqual(result.reason, "goal_selection_no_progress")
         self.assertEqual(self.store.load("b").revision, 1)
+        self.assertEqual(self.store.load("a").state.status, GoalStatus.AWAITING_INPUT)
+        self.assertEqual(result.snapshot.state.status, GoalStatus.AWAITING_INPUT)
         # A fresh turn may resume that durable work; the guard is not goal state.
         following = self.agent(Queued(cancel("b"), AgentDecision(response="Closed.")))
         self.assertEqual(following.process(conversation(), RETENTION, 2).response, "Closed.")
+
+    def test_deferred_answer_parks_a_blocked_departing_goal(self):
+        self.store.create(replace(active_goal("a"), blockers=(WorkItem("blocked", "Needs evidence"),)),
+                          "conversation-1", RETENTION)
+        self.create("b")
+        result = self.agent(Queued(AgentDecision(goal_id="a"), AgentDecision(
+            goal_id="b", response="The evidence is still missing.",
+        ))).process(conversation(), RETENTION, 2)
+        self.assertEqual(result.response, "The evidence is still missing.")
+        self.assertEqual(result.reason, "goal_selection_no_progress")
+        self.assertEqual(result.snapshot.state.status, GoalStatus.BLOCKED)
+        self.assertEqual(self.store.load("a").state.status, GoalStatus.BLOCKED)
+        self.assertEqual(self.store.load("b").revision, 1)
 
     def test_commit_dependent_answer_does_not_survive_refused_selection(self):
         self.create("a", "b")
