@@ -14,7 +14,7 @@ from alx.contracts import (  # noqa: E402
     AgentDecision, ApprovalProposal, ApprovalScope,
     CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityResult,
-    CapabilityResultState, ConversationOrigin, ConversationSnapshot,
+    CapabilityResultState, CognitionOrigin, ConversationOrigin, ConversationSnapshot,
     ConversationTurn, DecisionValidationError, Evidence, GoalMutationKind,
     GoalProposal, GoalState, GoalStatus, Objective, SideEffect,
     MemoryKind, MemoryProposal, StructuredSchema, SuccessCriterion, ValueKind,
@@ -1895,6 +1895,118 @@ class AttemptEvidenceCitationTests(unittest.TestCase):
         finally:
             CoreAgent._attempt_is_citable_evidence_source = original
         self.assertIsNone(self._error((self._failed(),), "attempt:call-1"))
+
+
+class TerminalCheckpointResponseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
+        self.addCleanup(self.store.close)
+        self.addCleanup(self.directory.cleanup)
+        self.store.create(
+            goal(outstanding_work=(WorkItem("read-review", "Read the pending review"),)),
+            "conversation-1", RETENTION,
+        )
+        self.call = CapabilityCall("review-1", "read_external_review", {})
+        self.attempt = CapabilityAttempt(
+            self.call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(
+                "review-1", "read_external_review", CapabilityResultState.FAILED,
+                failure={"code": "review_unavailable", "reason": "review_in_progress",
+                         "requires_judgement": True},
+            ),
+        )
+        self.dispatched = []
+
+    def _process(self, final_decision, *, origin=CognitionOrigin.PERSON_TURN,
+                 step_budget=1, message="What happened with the review?"):
+        reasoner = Queued(
+            AgentDecision(call=self.call, goal_id="goal-1"), final_decision,
+        )
+
+        def dispatch(call, state):
+            self.dispatched.append(call)
+            return self.attempt
+
+        agent = CoreAgent(
+            self.store, reasoner, dispatch,
+            (CapabilityDefinition("read_external_review", "Read a review", SCHEMA,
+                                  SCHEMA, SideEffect.NONE),),
+            clock=lambda: NOW,
+        )
+        question = ConversationTurn(
+            "conversation-1", "turn-1", ConversationOrigin.TYPED,
+            message, NOW, "friedl",
+        )
+        outcome = agent.process(conversation(question), RETENTION, step_budget,
+                                origin=origin)
+        return outcome, reasoner
+
+    def test_person_status_question_gets_grounded_answer_and_durable_checkpoint(self):
+        answer = "The review is still in progress; the merge is waiting on it."
+        outcome, reasoner = self._process(AgentDecision(response=answer))
+        self.assertIs(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, answer)
+        self.assertEqual(outcome.reason, "review_unavailable")
+        self.assertEqual(self.dispatched, [self.call])
+        self.assertEqual(len(reasoner.contexts), 2)
+        final_context = reasoner.contexts[-1]
+        self.assertEqual(final_context.response_only_reason, "review_unavailable")
+        self.assertEqual(final_context.turns[-1].content, "What happened with the review?")
+        self.assertEqual(final_context.active_goal.attempts, (self.attempt,))
+        stored = self.store.load("goal-1").state
+        self.assertEqual(stored.status, GoalStatus.AWAITING_INPUT)
+        self.assertEqual(stored.outstanding_work[0].item_id, "read-review")
+        self.assertEqual(stored.attempts, (self.attempt,))
+
+    def test_final_pass_refuses_another_capability_without_retry(self):
+        outcome, reasoner = self._process(AgentDecision(
+            call=CapabilityCall("review-2", "read_external_review", {}),
+        ))
+        self.assertIs(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.reason, "review_unavailable")
+        self.assertEqual(self.dispatched, [self.call])
+        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(self.store.load("goal-1").state.attempts, (self.attempt,))
+
+    def test_final_pass_refuses_goal_mutation(self):
+        outcome, _ = self._process(AgentDecision(
+            response="The review is pending.",
+            goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION),
+        ))
+        self.assertIs(outcome.state, CoreState.CHECKPOINTED)
+        stored = self.store.load("goal-1").state
+        self.assertEqual(stored.status, GoalStatus.AWAITING_INPUT)
+        self.assertEqual(stored.outstanding_work[0].item_id, "read-review")
+        self.assertEqual(stored.attempts, (self.attempt,))
+
+    def test_final_pass_cannot_navigate_to_another_goal(self):
+        outcome, _ = self._process(AgentDecision(
+            response="The review is pending.", goal_id="other-goal",
+        ))
+        self.assertIs(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.reason, "review_unavailable")
+        self.assertEqual(self.dispatched, [self.call])
+
+    def test_final_pass_reasoner_error_retains_fatal_classification(self):
+        outcome, reasoner = self._process(DecisionValidationError("bad model output"))
+        self.assertIs(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.reason, "reasoner_error")
+        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(self.dispatched, [self.call])
+        self.assertEqual(self.store.load("goal-1").state.attempts, (self.attempt,))
+
+    def test_autonomous_checkpoint_can_remain_silent(self):
+        outcome, reasoner = self._process(
+            AgentDecision(finish_silently=True),
+            origin=CognitionOrigin.EXTERNAL_EVENT, step_budget=2,
+        )
+        self.assertIs(outcome.state, CoreState.CHECKPOINTED)
+        self.assertIsNone(outcome.response)
+        self.assertEqual(outcome.reason, "review_unavailable")
+        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertIsNone(reasoner.contexts[-1].response_only_reason)
+        self.assertEqual(self.dispatched, [self.call])
 
 
 if __name__ == "__main__":

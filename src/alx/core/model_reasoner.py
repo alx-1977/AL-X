@@ -906,6 +906,7 @@ def _context_payload(context: ReasoningContext) -> str:
         "refused_goal_selections": [
             dict(item) for item in context.refused_goal_selections
         ],
+        "terminal_checkpoint_reason": context.response_only_reason,
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
@@ -1212,6 +1213,21 @@ def decision_schema() -> dict[str, Any]:
     }
 
 
+def response_only_schema() -> dict[str, Any]:
+    """Constrain a terminal checkpoint decision to words, with no state writes."""
+    schema = decision_schema()
+    properties = schema["properties"]
+    respond = properties["action"]["anyOf"][0]
+    respond["properties"]["response_requires_goal_commit"] = {
+        "type": "boolean", "const": False,
+    }
+    properties["action"] = respond
+    properties["goal_id"] = {"type": "null"}
+    properties["goal_update"] = {"type": "null"}
+    properties["memory_proposals"] = {"type": "array", "maxItems": 0, "items": {"type": "object"}}
+    return schema
+
+
 class ModelReasoner:
     """The sole model-backed implementation of the Core reasoning port."""
 
@@ -1331,7 +1347,7 @@ class ModelReasoner:
                     ModelMessage(ModelRole.USER, _context_payload(context)),
                 ),
                 "alx_core_decision",
-                decision_schema(),
+                response_only_schema() if context.response_only_reason else decision_schema(),
                 context.conversation_id,
                 CACHE_KEY,
                 self._max_output_tokens,
@@ -1347,6 +1363,14 @@ class ModelReasoner:
         else:
             completion = self._spend_for(request)
         output = completion.output
+        if context.response_only_reason is not None and (
+            output["action"]["type"] != "respond"
+            or output["goal_id"] is not None
+            or output["goal_update"] is not None
+            or output["memory_proposals"]
+            or output["action"].get("response_requires_goal_commit") is not False
+        ):
+            raise ValueError("terminal checkpoint decision must be response only")
         action = output["action"]
         disposition = action["type"]
         goal_id = output["goal_id"]

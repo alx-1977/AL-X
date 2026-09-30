@@ -239,6 +239,10 @@ class ReasoningContext:
     # without one; selecting an unavailable goal again ends the turn rather
     # than buying another reasoning step against an unchanged list.
     refused_goal_selections: tuple[Mapping[str, Any], ...] = ()
+    # A terminal capability blocker has ended workflow work for this person
+    # turn. The same reasoner may compose one answer from the state it already
+    # has, but cannot select another action or change durable state.
+    response_only_reason: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
