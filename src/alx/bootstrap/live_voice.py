@@ -22,6 +22,7 @@ from alx.bootstrap.mail import (
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
 from alx.bootstrap.coding import build_coding_runtime
+from alx.bootstrap.pull_request_checks import build_pull_request_checks_runtime
 from alx.bootstrap.repository import build_repository_runtime
 from alx.bootstrap.repository_authority import build_repository_authority_runtime
 from alx.bootstrap.review import build_review_runtime
@@ -637,6 +638,22 @@ async def run(repository_root: Path) -> None:
         policies.update(merge_runtime.policies)
         executors.update(merge_runtime.executors)
         permissions.update(merge_runtime.permissions)
+
+    # Reading check results is not merging and not requesting a review.
+    # Those stay behind their own switches. This read is available whenever
+    # the repository and token they already use are configured, and holding
+    # it grants neither permission.
+    checks_runtime = build_pull_request_checks_runtime(
+        merge_configuration.repository,
+        merge_configuration.token,
+        lambda: current_call_id[0],
+    )
+    if checks_runtime is not None:
+        for definition in checks_runtime.definitions:
+            registry.register(definition)
+        policies.update(checks_runtime.policies)
+        executors.update(checks_runtime.executors)
+        permissions.update(checks_runtime.permissions)
 
     # D-028 authorises one bounded coding job in the configured checkout. It is
     # a separate authority from sandbox.execute: the sandbox cannot touch a
