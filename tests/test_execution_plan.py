@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -18,6 +19,7 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.continuity.plan_source import PlanContinuationSource  # noqa: E402
+from alx.conversation import ConversationGateway, SQLiteConversationStore  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 
 NOW = datetime(2026, 10, 1, tzinfo=UTC)
@@ -184,6 +186,22 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(reasoner.contexts[1].transient_attempts[0].result.values["state"],
                          "done")
 
+    def test_review_findings_wake_core_even_when_wait_condition_matches(self):
+        workflow = plan(step("review", completion=(
+            PlanCondition("values.findings", ()),), waiting=(
+            PlanCondition("state", "succeeded"),)), step("merge"))
+        self.outputs["review"] = {"findings": ["repair required"]}
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+                            AgentDecision(response="I will assess the finding.",
+                                          goal_id="goal"))
+        self.agent(reasoner, review_requires_judgment=True).process(
+            conversation(), RETENTION, 3,
+        )
+        self.assertEqual(self.calls, ["review"])
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(reasoner.contexts[1].transient_attempts[0].result.values["findings"],
+                         ("repair required",))
+
     def test_pending_external_review_is_mechanical_until_published(self):
         workflow = plan(step("review", completion=(
             PlanCondition("values.available", True),), waiting=(
@@ -227,7 +245,10 @@ class ExecutionPlanTests(unittest.TestCase):
         workflow = plan(step("coding"))
         reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
                             AgentDecision(response="Done.", goal_id="goal"))
-        self.agent(reasoner).process(conversation(), RETENTION, 3)
+        agent = self.agent(reasoner)
+        outcome = agent.process(conversation(), RETENTION, 3)
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
+        agent.acknowledge_plan_response(outcome.snapshot)
 
         class Ledger:
             def exists(self, _identifier):
@@ -236,6 +257,67 @@ class ExecutionPlanTests(unittest.TestCase):
         source = PlanContinuationSource(self.store, Ledger(), enabled=True)
         self.assertEqual(source.due_opportunities(), ())
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+
+    def test_intermediate_core_decision_does_not_consume_plan_continuation(self):
+        workflow = plan(step("coding"))
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+                            AgentDecision(goal_id="goal"),
+                            AgentDecision(response="Done.", goal_id="goal"))
+        agent = self.agent(reasoner)
+        outcome = agent.process(conversation(), RETENTION, 2)
+        self.assertEqual(outcome.reason, "goal_selection_redundant")
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
+
+        class Ledger:
+            def exists(self, _identifier):
+                return False
+
+        source = PlanContinuationSource(self.store, Ledger(), enabled=True)
+        self.assertEqual(len(source.due_opportunities()), 1)
+        outcome = agent.process(conversation(), RETENTION, 1,
+                                resume_plan_goal_id="goal")
+        self.assertEqual(outcome.response, "Done.")
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
+        agent.acknowledge_plan_response(outcome.snapshot)
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+
+    def test_gateway_handles_plan_only_after_response_is_stored(self):
+        workflow = replace(plan(step("coding")), cursor=1, status="completed")
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=workflow),
+                           snapshot.retention_until, snapshot.revision)
+        conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(conversations.close)
+        gateway = ConversationGateway(
+            self.agent(Reasoner(AgentDecision(response="Done.", goal_id="goal"))),
+            conversations,
+        )
+        gateway.receive_conversation_turn(conversation().turns[0], 1, RETENTION)
+        self.assertEqual(conversations.load("thread").turns[-1].content, "Done.")
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+
+    def test_failed_response_persistence_keeps_plan_continuation(self):
+        workflow = replace(plan(step("coding")), cursor=1, status="completed")
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=workflow),
+                           snapshot.retention_until, snapshot.revision)
+        conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(conversations.close)
+        gateway = ConversationGateway(
+            self.agent(Reasoner(AgentDecision(response="Done.", goal_id="goal"))),
+            conversations,
+        )
+        original_append = conversations.append
+
+        def append(turn, retention_until, expected_revision):
+            if turn.origin is ConversationOrigin.ALX_RESPONSE:
+                raise RuntimeError("response store unavailable")
+            return original_append(turn, retention_until, expected_revision)
+
+        with patch.object(conversations, "append", side_effect=append):
+            with self.assertRaisesRegex(RuntimeError, "response store unavailable"):
+                gateway.receive_conversation_turn(conversation().turns[0], 1, RETENTION)
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
 
     def test_changed_evidence_offers_one_core_occasion(self):
         workflow = plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
@@ -304,6 +386,7 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Checks passed.")
         self.assertEqual(reasoner.calls, 2)
+        agent.acknowledge_plan_response(outcome.snapshot)
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
 
     def test_array_conditions_keep_mixed_ci_pending_without_reasoning(self):

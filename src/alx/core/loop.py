@@ -409,14 +409,6 @@ class CoreAgent:
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
-            if snapshot is not None and snapshot.state.execution_plan is not None:
-                plan = snapshot.state.execution_plan
-                if plan.status in {"needs_core", "completed"}:
-                    self._plan_transient_attempts.pop(snapshot.state.goal_id, None)
-                    snapshot = self._plan_checkpoint(
-                        snapshot, replace(plan, status="handled"),
-                        "core_reentered",
-                    )
             if mechanical_blocker is not None and (
                 decision.call is not None or decision.memory_query is not None
                 or decision.execution_plan is not None
@@ -930,6 +922,7 @@ class CoreAgent:
                         continuation_notices = deferred
                         continue
                 if decision.finish_silently:
+                    snapshot = self._handle_resolved_plan(snapshot)
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,
                         snapshot,
@@ -1968,6 +1961,24 @@ class CoreAgent:
             snapshot.retention_until, snapshot.revision, snapshot.provenance,
         )
 
+    def _handle_resolved_plan(self, snapshot: GoalSnapshot | None) -> GoalSnapshot | None:
+        if snapshot is None or snapshot.state.execution_plan is None:
+            return snapshot
+        plan = snapshot.state.execution_plan
+        if plan.status not in {"needs_core", "completed"}:
+            return snapshot
+        self._plan_transient_attempts.pop(snapshot.state.goal_id, None)
+        return self._plan_checkpoint(snapshot, replace(plan, status="handled"),
+                                     "core_responded")
+
+    def acknowledge_plan_response(self, snapshot: GoalSnapshot | None) -> None:
+        """Close a cognitive continuation only after its response is stored."""
+        if snapshot is None or snapshot.state.execution_plan is None:
+            return
+        current = self._store.load(snapshot.state.goal_id)
+        if current.revision == snapshot.revision:
+            self._handle_resolved_plan(current)
+
     def _advance_execution_plan(
         self, snapshot: GoalSnapshot, conversation: ConversationSnapshot
     ) -> tuple[GoalSnapshot, str]:
@@ -2050,14 +2061,24 @@ class CoreAgent:
                 "values": {} if result is None else result.values,
                 "failure": {} if result is None or result.failure is None else result.failure,
             }
+            definition = self._definition(call.capability_id)
+            if (definition is not None and definition.requires_core_judgment
+                    and result is not None
+                    and (result.state is CapabilityResultState.SUCCEEDED
+                         or (result.failure or {}).get("requires_judgement"))):
+                self._remember_plan_attempt(snapshot.state.goal_id, attempt)
+                plan = replace(plan, status="needs_core", next_due_at=None,
+                               core_reentry_reason="planned_evidence_requires_judgement")
+                snapshot = self._plan_checkpoint(
+                    snapshot, plan, "planned_evidence_requires_judgement",
+                )
+                return snapshot, "wake"
             if (result is not None
                     and result.state is CapabilityResultState.SUCCEEDED
                     and self._plan_conditions_match(document, step.completion_conditions)):
                 plan = replace(plan, cursor=plan.cursor + 1, status="ready",
                                next_due_at=None, core_reentry_reason=None)
-                definition = self._definition(call.capability_id)
-                if (step.wake_core_on_completion
-                        or (definition is not None and definition.requires_core_judgment)):
+                if step.wake_core_on_completion:
                     self._remember_plan_attempt(snapshot.state.goal_id, attempt)
                     plan = replace(plan, status="needs_core",
                                    core_reentry_reason="planned_evidence_requires_judgement")

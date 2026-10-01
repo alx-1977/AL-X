@@ -111,6 +111,7 @@ class ConversationGateway:
                 retention_until,
                 self._conversation_store.load(turn.conversation_id).revision,
             )
+            self._core.acknowledge_plan_response(outcome.snapshot)
         return outcome
 
     def receive_cognition_opportunity(
@@ -172,4 +173,5 @@ class ConversationGateway:
                 retention_until,
                 self._conversation_store.load(conversation_id).revision,
             )
+            self._core.acknowledge_plan_response(outcome.snapshot)
         return outcome
