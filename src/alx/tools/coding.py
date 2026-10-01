@@ -191,9 +191,11 @@ DEFINITION = CapabilityDefinition(
     "the checkout on main through repository_operation before a new job. "
     "By default the job requires clean main, then "
     "creates and switches to the requested new feature branch before the coding "
-    "session may edit. With continue_goal_branch=true, it instead verifies the "
-    "checked-out branch and HEAD belong to this active goal's successful coding "
-    "commits and the checkout is clean; repair_branch must match that branch. "
+    "session may edit. With continue_goal_branch=true, it instead verifies a "
+    "clean checkout of repair_branch whose HEAD is a durable successfully "
+    "verified Coding Agent commit recorded for this active goal on that same "
+    "branch, including when a later verified commit for the goal exists on "
+    "another branch. "
     "AL/X must position the checkout first. Only one implementation job may hold "
     "the checkout at a "
     "time. No repository path is accepted. repair_branch and commit_message are "
@@ -335,9 +337,11 @@ _OUTCOME_ISSUE_CODES = (
 )
 
 
-def goal_coding_branch(state: GoalState | None) -> BranchContinuation | None:
-    """Derive ownership solely from this goal's durable successful CA commits."""
-    commits: list[tuple[str, str]] = []
+def goal_coding_branch(
+    state: GoalState | None, repair_branch: str
+) -> BranchContinuation | None:
+    """Durable successful Coding Agent commits recorded for this goal on one branch."""
+    heads: list[str] = []
     for attempt in (() if state is None else state.attempts):
         result = attempt.result
         if (
@@ -357,13 +361,14 @@ def goal_coding_branch(state: GoalState | None) -> BranchContinuation | None:
             validated = BranchContinuation(branch, frozenset({sha}))
         except (TypeError, ValueError):
             return None
-        commits.append((validated.branch, sha))
-    if not commits:
+        if validated.branch == repair_branch:
+            heads.append(sha)
+    if not heads:
         return None
-    branch = commits[-1][0]
-    return BranchContinuation(
-        branch, frozenset(sha for name, sha in commits if name == branch)
-    )
+    try:
+        return BranchContinuation(repair_branch, frozenset(heads))
+    except (TypeError, ValueError):
+        return None
 
 
 def build_coding_executors(
@@ -490,8 +495,10 @@ def build_coding_executors(
                               corrective_action=request.corrective_action,
                               corrected_failure=corrected_failure)
         elif arguments.get("continue_goal_branch", False):
-            continuation = goal_coding_branch(goal_state_source())
-            if continuation is None or request.repair_branch != continuation.branch:
+            continuation = goal_coding_branch(
+                goal_state_source(), request.repair_branch
+            )
+            if continuation is None:
                 return _failed(
                     call_id, "git_refused",
                     reason_code="continuation_ownership_unproven",

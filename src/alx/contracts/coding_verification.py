@@ -112,6 +112,7 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
         "tests/test_coding_agent.py",
         "tests/test_coding_contract_bounds.py",
         "tests/test_coding_retry_fuse.py",
+        "tests/test_coding_branch_continuation.py",
     ),
     "src/alx/bootstrap/coding.py": (
         "tests/test_coding_agent.py",
