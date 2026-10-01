@@ -280,6 +280,7 @@ DEFINITION = CapabilityDefinition(
                 ValueKind.ARRAY, items=_REVIEW_ATTEMPT
             ),
             "checkpoint": _STRING,
+            "interruption_reason": _STRING,
         },
         (
             "status",
@@ -389,7 +390,11 @@ def build_coding_executors(
                 for item in (() if state is None else state.attempts)
                 if item.call is not None and item.call.capability_id == RUN_CODING_TASK
                 and item.result is not None
-                and item.result.state is CapabilityResultState.FAILED
+                and (
+                    item.result.state is CapabilityResultState.FAILED
+                    or (item.result.state is CapabilityResultState.PARTIAL
+                        and item.result.durable_values.get("status") == "interrupted")
+                )
             }
             previous = recorded.get(resume_id)
             if previous is None:
@@ -472,6 +477,14 @@ def build_coding_executors(
             return _failed(call_id, "coding_unavailable")
 
         values = outcome.as_values()
+        if outcome.status == "interrupted":
+            return CapabilityResult(
+                call_id, RUN_CODING_TASK, CapabilityResultState.PARTIAL,
+                values, durable_values=outcome.durable_values(),
+                provenance=RetentionPolicy().non_mail(
+                    ContentOrigin.EXTERNAL, outcome.finished_at
+                ),
+            )
         if outcome.status not in {"succeeded", "no_change_required"}:
             issues = outcome.unresolved_issues
             code = next(

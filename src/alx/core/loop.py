@@ -35,6 +35,7 @@ INPUT_BOUND_EXCEEDED = "input_bound_exceeded"
 
 _RUN_CODING_TASK = "run_coding_task"
 _MAX_FAILED_CODING_EXECUTIONS = 2
+_MAX_INTERRUPTED_CODING_EXECUTIONS_PER_JOB = 4
 _MAX_PLANNING_CODING_FAILURES = 2
 # A job that implemented but whose required verification only the request's
 # own constraints blocked. Recoverable by a changed plan, so it does not spend
@@ -862,7 +863,8 @@ class CoreAgent:
                 continuation_notice_issued = False
                 continue
             coding_exhaustion = (
-                self._coding_exhaustion_reason(snapshot.state)
+                (self._coding_exhaustion_reason(snapshot.state)
+                 or self._coding_interruption_exhaustion_reason(snapshot.state, decision.call))
                 if decision.call.capability_id == _RUN_CODING_TASK
                 else None
             )
@@ -2120,6 +2122,12 @@ class CoreAgent:
             and (item.result.failure or {}).get("code") != "planning_failed"
             and (item.result.failure or {}).get("phase") != "planning"
             and (item.result.failure or {}).get("code") != "coding_cancelled"
+            # Historical fixed-wall-clock timeouts are interruptions too. A
+            # pre-watchdog checkpoint can still be resumed on its exact tree.
+            and not (
+                (item.result.failure or {}).get("code") == "session_failed"
+                and (item.result.failure or {}).get("reason_code") == "session_timeout"
+            )
             and not (
                 (item.result.failure or {}).get("code") == "review_failed"
                 and (item.result.failure or {}).get("review_classification") == "infrastructure"
@@ -2140,6 +2148,60 @@ class CoreAgent:
             1 for failure in cls._coding_execution_failures(state)
             if failure.get("failure_class") != "request_conflict"
         )
+
+    @staticmethod
+    def _coding_interruption_exhaustion_reason(
+        state: GoalState, call: CapabilityCall
+    ) -> str | None:
+        """Bound one resumed job without spending the implementation fuse."""
+        resume_id = call.arguments.get("resume_job_id")
+        if not isinstance(resume_id, str):
+            return None
+        attempts = {
+            item.call.call_id: item for item in state.attempts
+            if item.call is not None and item.call.capability_id == _RUN_CODING_TASK
+            and item.result is not None
+        }
+        visited: set[str] = set()
+        interrupted = 0
+        child_checkpoint: Mapping[str, Any] | None = None
+        child_interrupted = False
+        while resume_id in attempts and resume_id not in visited:
+            visited.add(resume_id)
+            attempt = attempts[resume_id]
+            result = attempt.result
+            if result is None:
+                break
+            values = result.durable_values
+            legacy_timeout = (
+                result.state is CapabilityResultState.FAILED
+                and (result.failure or {}).get("code") == "session_failed"
+                and (result.failure or {}).get("reason_code") == "session_timeout"
+            )
+            is_interrupted = values.get("status") == "interrupted" or legacy_timeout
+            if is_interrupted:
+                interrupted += 1
+            try:
+                checkpoint = json.loads(values.get("checkpoint", ""))
+            except (TypeError, ValueError):
+                checkpoint = None
+            if (
+                child_interrupted and is_interrupted
+                and child_checkpoint is not None and isinstance(checkpoint, dict)
+                and child_checkpoint.get("stage") == checkpoint.get("stage")
+                and child_checkpoint.get("head_sha") == checkpoint.get("head_sha")
+                and child_checkpoint.get("state_digest") == checkpoint.get("state_digest")
+            ):
+                return "coding_interruption_no_progress"
+            child_checkpoint = checkpoint if isinstance(checkpoint, dict) else None
+            child_interrupted = is_interrupted
+            parent = attempt.call.arguments.get("resume_job_id")
+            if not isinstance(parent, str):
+                break
+            resume_id = parent
+        if interrupted >= _MAX_INTERRUPTED_CODING_EXECUTIONS_PER_JOB:
+            return "coding_interruption_exhausted"
+        return None
 
     @classmethod
     def _request_conflict_coding_executions(cls, state: GoalState) -> int:

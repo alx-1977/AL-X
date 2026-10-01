@@ -148,7 +148,8 @@ def _build_coding_session(
     # call, and a native session working a real defect needs far longer.
     return GrokCodingSession(
         coding.reasoning.model,
-        coding.session_timeout_seconds,
+        coding.session_emergency_seconds,
+        stall_seconds=coding.session_stall_seconds,
         effort=coding.reasoning.effort,
     )
 

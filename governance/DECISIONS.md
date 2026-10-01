@@ -2145,6 +2145,30 @@ nor resumption resets, cleans, deletes, or switches away from preserved work.
 This grants no generic Coding Agent branch switching, reset, clean, or Git
 authority. D-033's clean-main rule continues to govern genuinely new jobs.
 
+### Amendment — activity-bounded coding sessions and resumable interruption
+
+- **Date:** 2026-09-30
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-09-30.** Friedl explicitly approved this
+  amendment during review of PR #90 after directing the coding-session
+  watchdog and its interruption behavior.
+
+The one `run_coding_task` path observes coding-session output and checkout
+changes. Ten minutes without observed activity interrupts the child; a
+two-hour ceiling interrupts it regardless of activity. Both intervals are
+configurable. Interruption is durable partial evidence with an exact-checkout
+checkpoint, not implementation success or failure. AL/X may resume that same
+job under the existing branch, goal, and checkout proof. Historical
+`session_timeout` attempts with usable checkpoints have the same allowance
+treatment. A repeated unchanged checkpoint or a bounded chain of interrupted
+executions stops further continuation without resetting the genuine-failure
+allowance. A real implementation error still consumes that allowance.
+
+No interruption can proceed to review, verification, or commit as a completed
+candidate. The existing completion, review, verification, and commit route and
+authority remain unchanged. Neither the Coding Agent nor the watchdog may
+switch branches, reset a checkout, approve a review, or merge.
+
 ## D-034 — Xero existing-contact rename
 
 - **Date:** 2026-09-27

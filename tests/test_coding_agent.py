@@ -1808,7 +1808,7 @@ class SessionLaunchTests(unittest.TestCase):
 
 
 class SessionTimeoutTests(unittest.TestCase):
-    """The session's bound is its own, and exceeding it fails closed."""
+    """The session watchdog is separate from planning's call deadline."""
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -1818,7 +1818,8 @@ class SessionTimeoutTests(unittest.TestCase):
     def test_planning_and_session_timeouts_are_independent(self) -> None:
         """A planning call answers in seconds; a session needs far longer."""
         from alx.config.settings import (
-            DEFAULT_CODING_SESSION_TIMEOUT_SECONDS,
+            DEFAULT_CODING_SESSION_STALL_SECONDS,
+            DEFAULT_CODING_SESSION_EMERGENCY_SECONDS,
             _coding_settings,
         )
 
@@ -1831,11 +1832,12 @@ class SessionTimeoutTests(unittest.TestCase):
         )
         self.assertEqual(settings.reasoning.timeout_seconds, 120)
         self.assertEqual(
-            settings.session_timeout_seconds,
-            DEFAULT_CODING_SESSION_TIMEOUT_SECONDS,
+            settings.session_stall_seconds,
+            DEFAULT_CODING_SESSION_STALL_SECONDS,
         )
+        self.assertEqual(settings.session_emergency_seconds, DEFAULT_CODING_SESSION_EMERGENCY_SECONDS)
         self.assertGreater(
-            settings.session_timeout_seconds, settings.reasoning.timeout_seconds
+            settings.session_stall_seconds, settings.reasoning.timeout_seconds
         )
 
     def test_each_timeout_is_configured_by_its_own_variable(self) -> None:
@@ -1849,11 +1851,13 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
                 "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
-                "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1800",
+                "ALX_CODING_SESSION_STALL_SECONDS": "300",
+                "ALX_CODING_SESSION_EMERGENCY_SECONDS": "1800",
             }
         )
         self.assertEqual(settings.reasoning.timeout_seconds, 45)
-        self.assertEqual(settings.session_timeout_seconds, 1800)
+        self.assertEqual(settings.session_stall_seconds, 300)
+        self.assertEqual(settings.session_emergency_seconds, 1800)
         # Changing one must not move the other.
         planning_only = _coding_settings(
             {
@@ -1864,7 +1868,17 @@ class SessionTimeoutTests(unittest.TestCase):
             }
         )
         self.assertEqual(planning_only.reasoning.timeout_seconds, 45)
-        self.assertEqual(planning_only.session_timeout_seconds, 1200)
+        self.assertEqual(planning_only.session_stall_seconds, 600)
+        self.assertEqual(planning_only.session_emergency_seconds, 7200)
+        obsolete = _coding_settings({
+            "ALX_CODING_ENABLED": "true",
+            "ALX_CODING_PROVIDER": "grok_subscription",
+            "ALX_CODING_MODEL": "grok-4.6",
+            "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
+            "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
+            "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1200",
+        })
+        self.assertEqual(obsolete.session_emergency_seconds, 7200)
 
     def test_the_native_session_is_built_with_the_session_timeout(self) -> None:
         """The regression that killed a working session after two minutes."""
@@ -1883,18 +1897,19 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
                 "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
-                "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1500",
+                "ALX_CODING_SESSION_STALL_SECONDS": "300",
+                "ALX_CODING_SESSION_EMERGENCY_SECONDS": "1500",
             }
         )
         session = _build_coding_session(_Settings(settings))
         self.assertIsNotNone(session)
         self.assertEqual(session._timeout_seconds, 1500)
+        self.assertEqual(session._stall_seconds, 300)
         self.assertNotEqual(
-            session._timeout_seconds, settings.reasoning.timeout_seconds
+            session._stall_seconds, settings.reasoning.timeout_seconds
         )
 
-    def test_a_timed_out_session_fails_closed_with_bounded_evidence(self) -> None:
-        """The failure is named, and what was already gathered survives it."""
+    def test_emergency_ceiling_is_a_named_interruption(self) -> None:
         def expire(*_args, **kwargs):
             raise subprocess.TimeoutExpired(
                 cmd="grok", timeout=kwargs.get("timeout", 1200)
@@ -1905,9 +1920,9 @@ class SessionTimeoutTests(unittest.TestCase):
             session.run_session(
                 CodingRequest(task="t", job_id="job-1", worktree=str(self.root)), "briefing"
             )
-        self.assertEqual(raised.exception.code, "session_failed")
+        self.assertEqual(raised.exception.code, "session_interrupted")
         self.assertEqual(
-            raised.exception.details["reason_code"], "session_timeout"
+            raised.exception.details["reason_code"], "session_emergency_ceiling"
         )
 
     def test_a_timeout_preserves_plan_and_dirty_state_evidence(self) -> None:
@@ -1935,10 +1950,10 @@ class SessionTimeoutTests(unittest.TestCase):
                 "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
             ),
         )
-        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(attempt.result.failure["code"], "session_failed")
+        self.assertEqual(attempt.result.state, CapabilityResultState.PARTIAL)
+        self.assertIsNone(attempt.result.failure)
         self.assertEqual(
-            attempt.result.failure["reason_code"], "session_timeout"
+            attempt.result.durable_values["interruption_reason"], "session_emergency_ceiling"
         )
         values = attempt.result.values
         self.assertTrue(values["plan_summary"])
