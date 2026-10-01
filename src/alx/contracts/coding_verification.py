@@ -493,6 +493,31 @@ def pytest_failure_signature(
     return tuple(signatures)
 
 
+MAX_FAILED_TEST_FINDINGS = 20
+MAX_FAILED_TEST_CHARACTERS = 300
+
+
+def pytest_failed_tests(output: str) -> tuple[str, ...]:
+    """The node identifiers pytest's short summary names as failed or errored.
+
+    Identifiers only: the assertion text after ` - ` can quote source and
+    values, and durable evidence stays content-free. Bounded, because this is
+    durable state; the first identifiers are enough to tell one failure from
+    another.
+    """
+    failed: list[str] = []
+    for line in output.splitlines():
+        status, _, rest = line.partition(" ")
+        if status not in {"FAILED", "ERROR"} or not rest.strip():
+            continue
+        node = rest.split(" - ", 1)[0].strip()
+        if node and node not in failed:
+            failed.append(node[:MAX_FAILED_TEST_CHARACTERS])
+        if len(failed) == MAX_FAILED_TEST_FINDINGS:
+            break
+    return tuple(failed)
+
+
 def _governed_documents(root: Path | None) -> frozenset[str]:
     """The canonical documents, read from the governance gate's own list.
 

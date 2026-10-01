@@ -1,4 +1,9 @@
-"""The Coding Agent failed-run fuse is durable, goal-scoped, and pre-dispatch."""
+"""The Coding Agent failed-run fuse is durable, episode-scoped, and pre-dispatch.
+
+Failures count within the open failure episode of a durable goal: since the
+last succeeded job or dispatched correction. tests/test_coding_failure_episodes.py
+covers the episode boundaries and the correction bound.
+"""
 
 from __future__ import annotations
 
@@ -779,7 +784,7 @@ class TheVerificationChangeDoesNotTouchTheRetryAccounting(unittest.TestCase):
 
     The verification model changed underneath it: a job can now fail because a
     law gate failed rather than because pytest did. The fuse is indifferent to
-    the reason — it counts failed coding executions on a goal — and this holds
+    the reason — it counts failed coding executions in the open episode — and this holds
     that indifference explicitly, so a later change to the limits or to what
     counts as a failure has to break a test that says so.
     """
