@@ -269,9 +269,12 @@ class VoiceStaysConnected(unittest.TestCase):
         events = asyncio.run(collect())
         self.assertEqual(
             [event.kind for event in events],
-            [VoiceEventKind.ERROR, VoiceEventKind.LISTENING],
+            [VoiceEventKind.DIAGNOSTIC, VoiceEventKind.LISTENING],
         )
-        self.assertEqual(events[0].reason, "goal_proposal_invalid")
+        self.assertEqual(
+            events[0].diagnostic,
+            {"code": "core.checkpointed", "reason": "goal_proposal_invalid"},
+        )
 
     def test_the_server_recovers_inside_the_exchange_and_keeps_hearing(self) -> None:
         consumed: list[str] = []
@@ -283,7 +286,13 @@ class VoiceStaysConnected(unittest.TestCase):
                 exchanges.append(1)
                 iterator = audio.__aiter__()
                 consumed.append(await iterator.__anext__())
-                yield VoiceEvent(VoiceEventKind.ERROR, reason="goal_proposal_invalid")
+                yield VoiceEvent(
+                    VoiceEventKind.DIAGNOSTIC,
+                    diagnostic={
+                        "code": "core.checkpointed",
+                        "reason": "goal_proposal_invalid",
+                    },
+                )
                 yield VoiceEvent(VoiceEventKind.LISTENING)
                 consumed.append(await iterator.__anext__())
                 yield VoiceEvent(VoiceEventKind.LISTENING)
@@ -311,7 +320,7 @@ class VoiceStaysConnected(unittest.TestCase):
         self.assertFalse(resume)
         frames = [json.loads(item) for item in sent]
         self.assertTrue(any(
-            item.get("code") == "voice.recovered_in_exchange"
+            item.get("code") == "core.checkpointed"
             and item.get("reason") == "goal_proposal_invalid"
             for item in frames
         ))

@@ -131,6 +131,7 @@ class SubscriptionCodingSession:
         timeout_seconds: int,
         *,
         executable: str,
+        stall_seconds: int | float | None = None,
         max_turns: int = 60,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
@@ -138,6 +139,13 @@ class SubscriptionCodingSession:
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if stall_seconds is None:
+            # Direct adapter users with a short emergency bound (including
+            # containment tests) retain a valid watchdog without production
+            # configuration. Production passes its explicit 600-second bound.
+            stall_seconds = min(600, timeout_seconds / 2)
+        if stall_seconds <= 0 or stall_seconds >= timeout_seconds:
+            raise ValueError("stall_seconds must be positive and below the emergency ceiling")
         if max_turns <= 1:
             # One turn is what broke the previous execution model: an agent
             # that cannot take a second turn cannot act on what it just read.
@@ -146,6 +154,7 @@ class SubscriptionCodingSession:
             raise ValueError("model must not be blank")
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._stall_seconds = stall_seconds
         self._executable = executable
         self._max_turns = max_turns
         self._runner = runner or subprocess.run
@@ -249,6 +258,9 @@ class SubscriptionCodingSession:
                     capture_output=True,
                     text=True,
                     timeout=self._timeout_seconds,
+                    inactivity_timeout=self._stall_seconds,
+                    activity_root=worktree,
+                    activity_blocked_paths=request.blocked_paths,
                     env=self.child_environment(home),
                     cwd=str(worktree),
                     stdin=subprocess.DEVNULL,
@@ -257,7 +269,7 @@ class SubscriptionCodingSession:
                 )
             except subprocess.TimeoutExpired as error:
                 raise CodingError(
-                    "session_failed", reason_code="session_timeout"
+                    "session_interrupted", reason_code="session_emergency_ceiling"
                 ) from error
             except FileNotFoundError as error:
                 raise CodingError(

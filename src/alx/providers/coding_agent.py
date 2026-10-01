@@ -67,6 +67,7 @@ from alx.contracts.coding_verification import (
     VerificationCheck,
     VerificationEvidence,
     content_violations,
+    pytest_failed_tests,
     required_verification,
 )
 from alx.providers.coding_process import (
@@ -220,6 +221,22 @@ def _check_passed(record: CodingCommandRecord, check_name: str = "") -> bool:
         and is_test_command(record.argv)
         and record.exit_status == _PYTEST_NOTHING_COLLECTED
     )
+
+
+# Per failed check, enough of a pytest report to show each failure body and
+# its short summary, which is what a corrective session must act on.
+MAX_CORRECTIVE_OUTPUT_CHARACTERS = 12_000
+
+
+def _failure_excerpt(record: CodingCommandRecord, root: Path) -> str:
+    """The end of one failed check's output, where pytest puts its verdicts."""
+    output = "\n".join(part for part in (record.stdout, record.stderr) if part.strip())
+    if record.timed_out:
+        output = f"{output}\n[the command timed out]".strip()
+    output = output.replace(str(root), "<checkout>")
+    if len(output) > MAX_CORRECTIVE_OUTPUT_CHARACTERS:
+        output = "[earlier output omitted]\n" + output[-MAX_CORRECTIVE_OUTPUT_CHARACTERS:]
+    return output
 
 
 def _strings(value: object) -> tuple[str, ...]:
@@ -388,6 +405,49 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def corrective_briefing(
+    corrective_action: str,
+    corrected_failure: Mapping[str, Any] | None,
+    recorded: Mapping[str, Any] | None,
+    observed: VerificationEvidence,
+    outputs: Mapping[str, str],
+) -> str:
+    """The failure a corrective session must repair, and AL/X's diagnosis.
+
+    `recorded` is the failed job's durable verification. `observed` and
+    `outputs` come from rerunning the required checks on the exact checkout
+    just before this session, so the session sees the failure as it stands,
+    not only as it was summarised.
+    """
+    lines = ["", "# Correction of a recorded failure",
+             "This task already has a preserved implementation in this checkout.",
+             "A previous run of it failed. Repair that failure; do not start over."]
+    failure = {key: value for key, value in (corrected_failure or {}).items()
+               if key in {"code", "phase", "reason_code", "failure_class"} and value}
+    if failure:
+        lines += ["", "## Recorded failure"]
+        lines += [f"- {key}: {value}" for key, value in failure.items()]
+    if isinstance(recorded, Mapping):
+        failed = [item for item in recorded.get("checks", ())
+                  if isinstance(item, Mapping) and not item.get("passed")]
+        if failed:
+            lines += ["", "## Checks that failed in the recorded run"]
+            for item in failed:
+                lines.append(f"- {item.get('name', '')}: {item.get('reason', '')}")
+                lines += [f"  - {finding}" for finding in _strings(item.get("findings"))]
+    lines += ["", "## Required checks rerun on this checkout now"]
+    for check in observed.checks:
+        verdict = "passed" if check.ran and check.passed else (
+            "failed" if check.ran else "did not run")
+        lines.append(f"- {check.name}: {verdict}")
+        lines += [f"  - {finding}" for finding in check.findings]
+    for name, output in outputs.items():
+        lines += ["", f"### Output of {name}", "```", output, "```"]
+    lines += ["", "## AL/X's diagnosis and corrective action", corrective_action.strip(),
+              "", "AL/X reruns every required check after you finish."]
+    return "\n".join(lines)
+
+
 class _JobState:
     """Everything one `run` owns, so two overlapping runs own nothing jointly.
 
@@ -400,7 +460,8 @@ class _JobState:
     __slots__ = ("job_id", "branch", "telemetry", "activity", "cancellation",
                  "stage", "plan", "files", "session_report", "review_findings",
                  "verification", "request", "preexisting_dirty", "commands",
-                 "commit_candidate_sha", "deleted_files")
+                 "commit_candidate_sha", "deleted_files", "corrective_action",
+                 "corrected_failure")
 
     def __init__(self, job_id: str) -> None:
         self.job_id = job_id or "coding-job"
@@ -419,6 +480,8 @@ class _JobState:
         self.commands: list[CodingCommandRecord] = []
         self.commit_candidate_sha = ""
         self.deleted_files: tuple[str, ...] = ()
+        self.corrective_action = ""
+        self.corrected_failure: Mapping[str, Any] | None = None
 
 
 class CodingAgent:
@@ -580,12 +643,14 @@ class CodingAgent:
             self._report_telemetry(
                 state,
                 "complete" if outcome is not None and outcome.status in {"succeeded", "no_change_required"} else
-                "cancelled" if outcome is not None and outcome.status == "cancelled" else "failed",
+                "cancelled" if outcome is not None and outcome.status == "cancelled" else
+                "interrupted" if outcome is not None and outcome.status == "interrupted" else "failed",
                 terminal=True,
                 outcome=outcome.status if outcome is not None else "failed",
                 transition="NO CHANGE REQUIRED" if outcome is not None and outcome.status == "no_change_required" else
                 "COMPLETE" if outcome is not None and outcome.status == "succeeded" else
-                "CANCELLED" if outcome is not None and outcome.status == "cancelled" else "FAILED",
+                "CANCELLED" if outcome is not None and outcome.status == "cancelled" else
+                "INTERRUPTED" if outcome is not None and outcome.status == "interrupted" else "FAILED",
             )
             self._report_activity(state, "reasoning")
 
@@ -623,8 +688,23 @@ class CodingAgent:
             worktree=str(self._repository),
         )
         state.request = request
+        resume_stage = None
         if resume is not None:
-            state.stage = str(resume["stage"])
+            resume_stage = str(resume["stage"])
+            # A correction reopens the session on the preserved
+            # implementation. Resuming an interrupted correction keeps the
+            # diagnosis it was given; the failure is reproduced again below.
+            state.corrective_action = request.corrective_action
+            state.corrected_failure = request.corrected_failure
+            carried = resume.get("corrective_action")
+            if (not state.corrective_action and resume_stage == "execution"
+                    and isinstance(carried, str) and carried.strip()):
+                state.corrective_action = carried
+                failure = resume.get("corrected_failure")
+                state.corrected_failure = failure if isinstance(failure, Mapping) else None
+            if state.corrective_action:
+                resume_stage = "execution"
+            state.stage = resume_stage
             state.plan = resume.get("plan") if isinstance(resume.get("plan"), Mapping) else None
             state.files = tuple(str(item) for item in resume.get("files", ()))
             state.session_report = "resumed preserved implementation"
@@ -668,7 +748,7 @@ class CodingAgent:
         # The session starts only after the visible checkout is on the feature
         # branch. It has no Git authority and cannot change that branch.
 
-        if resume is not None and resume["stage"] != "planning":
+        if resume is not None and resume_stage != "planning":
             plan = resume.get("plan")
             if not isinstance(plan, Mapping) or not isinstance(plan.get("problem_understanding"), str):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_plan_invalid"))
@@ -717,7 +797,7 @@ class CodingAgent:
                 baseline=baseline,
             )
 
-        if resume is not None and resume["stage"] in {"review", "test", "commit"}:
+        if resume_stage in {"review", "test", "commit"}:
             session = CodingSessionResult(True, state.session_report)
             session_files = state.files
         else:
@@ -725,8 +805,31 @@ class CodingAgent:
             self._report_activity(state, "coding")
             self._report_telemetry(state, "execution", in_flight=True, transition="EXECUTION started")
             try:
+                execution_briefing = build_briefing(request, plan)
+                if resume_stage == "execution":
+                    pending_findings = resume.get("review_findings", ())
+                    if isinstance(pending_findings, list) and pending_findings:
+                        execution_briefing += "\n\n# Local reviewer findings to correct\n" + "\n".join(
+                            f"- [{item.get('severity', '')}] {item.get('title', '')}: "
+                            f"{item.get('evidence', '')} Correction: {item.get('correction', '')}"
+                            for item in pending_findings if isinstance(item, Mapping)
+                        )
+                if state.corrective_action:
+                    # Reproduce the recorded failure on the exact checkout so
+                    # the session repairs what fails now, then brief it. The
+                    # output stays in this briefing and is never checkpointed.
+                    outputs: dict[str, str] = {}
+                    observed, _, _ = self._verify(
+                        request, workspace, state.files, commands, outputs
+                    )
+                    recorded = resume.get("verification")
+                    execution_briefing += corrective_briefing(
+                        state.corrective_action, state.corrected_failure,
+                        recorded if isinstance(recorded, Mapping) else None,
+                        observed, outputs,
+                    )
                 session = self._session.run_session(
-                    request, build_briefing(request, plan)
+                    request, execution_briefing
                 )
             except CodingError as error:
                 if error.code == "coding_cancelled":
@@ -736,13 +839,22 @@ class CodingAgent:
                     state.files, git_status, preexisting_dirty,
                     self._modified_preexisting(workspace, preexisting_fingerprints),
                 )
+                interrupted = error.code == "session_interrupted" or (
+                    error.code == "session_failed"
+                    and error.details.get("reason_code") == "session_timeout"
+                )
                 return self._outcome(
-                    status="failed", summary="the coding session could not be started or completed",
+                    status="interrupted" if interrupted else "failed",
+                    summary="coding session interrupted" if interrupted else
+                    "the coding session could not be started or completed",
                     files=state.files, preexisting_dirty=preexisting_dirty, commands=commands,
                     tests_run=False, tests_passed=None, git_status=git_status,
                     git_diff=git_diff, issues=(error.code,), review=False,
-                    failure_status=True, plan_summary=plan_summary,
-                    diagnostics={"phase": "execution", **error.details}, baseline=baseline,
+                    failure_status=not interrupted, plan_summary=plan_summary,
+                    diagnostics={"phase": "execution", **error.details,
+                                 "reason_code": "session_emergency_ceiling"
+                                 if error.details.get("reason_code") == "session_timeout"
+                                 else error.details.get("reason_code", "")}, baseline=baseline,
                     checkpoint=self._checkpoint(state),
                     diff_preserved=bool(state.files),
                     preserved_branch=branch if state.files else "",
@@ -788,7 +900,7 @@ class CodingAgent:
         reviewed_files = session_files
         review_diagnostics: dict[str, object] = {}
         review_findings: tuple[LocalReviewFinding, ...] = ()
-        if resume is not None and resume["stage"] in {"test", "commit"}:
+        if resume_stage in {"test", "commit"}:
             try:
                 review_findings = tuple(
                     LocalReviewFinding(**item) for item in resume.get("review_findings", ())
@@ -799,16 +911,38 @@ class CodingAgent:
         # There is no candidate to review when the native session reports a
         # failed execution. Preserve that failure for AL/X's normal outcome.
         if session.completed and session_files and not (
-            resume is not None and resume["stage"] in {"test", "commit"}
+            resume_stage in {"test", "commit"}
         ):
             state.stage = "review"
-            (
-                review_failure, review_issues, reviewed_files,
-                review_diagnostics, review_findings,
-            ) = self._local_review_loop(
-                request, workspace, plan, session_files, preexisting_dirty,
-                preexisting_fingerprints, state,
-            )
+            try:
+                (
+                    review_failure, review_issues, reviewed_files,
+                    review_diagnostics, review_findings,
+                ) = self._local_review_loop(
+                    request, workspace, plan, session_files, preexisting_dirty,
+                    preexisting_fingerprints, state,
+                )
+            except CodingError as error:
+                if error.code != "session_interrupted":
+                    raise
+                git_status, git_diff = self._git_evidence(workspace)
+                state.files = self._files_changed(
+                    state.files, git_status, preexisting_dirty,
+                    self._modified_preexisting(workspace, preexisting_fingerprints),
+                )
+                return self._outcome(
+                    status="interrupted", summary="coding correction interrupted",
+                    files=state.files, preexisting_dirty=preexisting_dirty,
+                    commands=commands, tests_run=False, tests_passed=None,
+                    git_status=git_status, git_diff=git_diff,
+                    issues=(error.code,), review=False,
+                    review_findings=state.review_findings,
+                    plan_summary=plan_summary,
+                    diagnostics={"phase": "execution", **error.details},
+                    baseline=baseline, checkpoint=self._checkpoint(state),
+                    diff_preserved=bool(state.files),
+                    preserved_branch=branch if state.files else "",
+                )
             state.files = reviewed_files
             state.review_findings = review_findings
         # Failed attempts stay on the result when a later attempt produced an
@@ -854,7 +988,7 @@ class CodingAgent:
         # allowlist already permits it. The scope is `reviewed_files`, the job's
         # final file set: a reviewer correction can touch a file the initial
         # session never did, and that file must select tests like any other.
-        if resume is not None and resume["stage"] == "commit":
+        if resume_stage == "commit":
             raw_verification = resume.get("verification")
             if not isinstance(raw_verification, Mapping) or not isinstance(raw_verification.get("checks"), list):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_invalid"))
@@ -999,7 +1133,7 @@ class CodingAgent:
         elif wanted_commit:
             state.stage = "commit"
             check_cancelled()
-            if (resume is not None and resume["stage"] == "commit"
+            if (resume_stage == "commit"
                     and not state.commit_candidate_sha and not git_status):
                 raise _before_implementation(CodingError(
                     "git_refused", reason_code="preserved_commit_requires_alx_review"
@@ -1238,10 +1372,14 @@ class CodingAgent:
             )
             self._report_activity(state, "coding")
             self._report_telemetry(state, "correction", in_flight=True, transition="CORRECTION cycle", correction_cycle=cycle + 1)
+            state.stage = "execution"
+            state.review_findings = findings
             try:
                 correction = self._session.run_session(request, briefing)
             except CodingError as error:
                 if error.code == "coding_cancelled":
+                    raise
+                if error.code == "session_interrupted":
                     raise
                 # The session broke. That is infrastructure, not an opinion.
                 return (
@@ -1255,6 +1393,7 @@ class CodingAgent:
                     carried, findings,
                 )
             self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
+            state.stage = "review"
             # Scoped exactly as `before` was. Comparing a narrowed diff with a
             # whole-worktree one would never match, so a correction that
             # changed nothing would read as progress.
@@ -1378,8 +1517,15 @@ class CodingAgent:
         workspace: CodingWorkspace,
         changed_files: tuple[str, ...],
         commands: list[CodingCommandRecord],
+        failure_output: dict[str, str] | None = None,
     ) -> tuple[VerificationEvidence, bool, bool | None]:
         """Run every check this job's final file set requires, and record each.
+
+        `failure_output`, when given, receives the bounded output of each
+        failed command check by name. It is for a corrective session's
+        briefing only and never enters durable evidence, which stays
+        content-free: a failed pytest check records only the identifiers of
+        the tests that failed.
 
         The policy is derived from `changed_files` — the set after the local
         reviewer's corrections landed — and from nothing else. Task wording and
@@ -1478,7 +1624,15 @@ class CodingAgent:
                     else DEFAULT_VERIFICATION_COMMAND_SECONDS,
                     tuple((item.name, item.argv) for item in checks),
                 )
-            results.append(replace(check, ran=True, passed=passed, baseline=baseline))
+            findings: tuple[str, ...] = ()
+            if not passed:
+                if check.name.startswith("pytest"):
+                    findings = pytest_failed_tests(record.stdout)
+                if failure_output is not None:
+                    failure_output[check.name] = _failure_excerpt(record, worktree)
+            results.append(replace(
+                check, ran=True, passed=passed, baseline=baseline, findings=findings
+            ))
             if is_test_command(record.argv):
                 tests_run = True
                 if not passed:
@@ -1721,6 +1875,11 @@ class CodingAgent:
             "commit_candidate_sha": state.commit_candidate_sha,
             "deleted_files": list(state.deleted_files),
             "preexisting_dirty": list(state.preexisting_dirty),
+            # Present only on a corrective job, so an interrupted correction
+            # resumes with the diagnosis it was given.
+            **({"corrective_action": state.corrective_action,
+                "corrected_failure": dict(state.corrected_failure or {})}
+               if state.corrective_action else {}),
         }, ensure_ascii=True, sort_keys=True)
 
     def _cancelled_outcome(self, state: _JobState) -> CodingOutcome:
@@ -1797,7 +1956,7 @@ class CodingAgent:
         review_attempts: tuple[ReviewInfrastructureAttempt, ...] = (),
         checkpoint: str = "",
     ) -> CodingOutcome:
-        if status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled"):
+        if status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled", "interrupted"):
             status = "failed"
         if failure_status:
             status = "failed"

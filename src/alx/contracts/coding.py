@@ -101,6 +101,7 @@ CODING_FAILURES = (
     "required_verification_failed",
     "sandbox_unusable",
     "session_failed",
+    "session_interrupted",
     "task_failed",
     "coding_cancelled",
 )
@@ -316,6 +317,11 @@ class CodingRequest:
     # Injected from the same goal's durable failed/cancelled attempt, never
     # supplied as free-form capability input.
     resume_checkpoint: dict[str, object] | None = None
+    # AL/X's diagnosis of a recorded failure and the repair she chose for it.
+    # Only a resume of a failed job may carry it; the failure it answers is
+    # injected beside it from that job's durable record, never supplied.
+    corrective_action: str = ""
+    corrected_failure: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -326,6 +332,8 @@ class CodingRequest:
             raise ValueError("context exceeds the permitted size")
         if len(self.test_guidance) > MAX_CONTEXT_CHARACTERS:
             raise ValueError("test_guidance exceeds the permitted size")
+        if len(self.corrective_action) > MAX_CONTEXT_CHARACTERS:
+            raise ValueError("corrective_action exceeds the permitted size")
         criteria = tuple(self.acceptance_criteria)
         object.__setattr__(self, "acceptance_criteria", criteria)
         if len(criteria) > MAX_CRITERIA:
@@ -612,16 +620,16 @@ class CodingOutcome:
     # the job can still commit, and Core still sees the infrastructure
     # classification. Material findings alone leave this empty.
     review_classification: str = ""
-    # The branch and uncommitted diff are still in the checkout after a
-    # failed or cancelled stage. No later failure may reset or delete them.
+    # The branch and uncommitted diff remain after a failed, cancelled, or
+    # interrupted stage. No later outcome may reset or delete them.
     diff_preserved: bool = False
     preserved_branch: str = ""
     review_attempts: tuple["ReviewInfrastructureAttempt", ...] = ()
     checkpoint: str = ""
 
     def __post_init__(self) -> None:
-        if self.status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled"):
-            raise ValueError("status must be succeeded, no_change_required, failed, blocked, or cancelled")
+        if self.status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled", "interrupted"):
+            raise ValueError("invalid coding outcome status")
         _required(self.summary, "summary")
         _aware(self.finished_at, "finished_at")
         object.__setattr__(self, "files_changed", tuple(self.files_changed))
@@ -702,6 +710,8 @@ class CodingOutcome:
                 "checkout_clean": (self.diagnostics or {}).get("checkout_clean") is True,
                 "session_completed": (self.diagnostics or {}).get("session_completed") is True,
             }
+        if self.status == "interrupted":
+            values["interruption_reason"] = str((self.diagnostics or {}).get("reason_code", ""))
         if self.commit is not None:
             values["commit"] = self.commit.as_values()
             # Promoted to the top level because these two are what Core hands

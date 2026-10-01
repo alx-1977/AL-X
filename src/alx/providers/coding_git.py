@@ -595,7 +595,7 @@ def continue_feature_branch(
             current_branch=current,
         )
     if read_head_sha(root) not in permitted_heads:
-        raise CodingError("git_refused", reason_code="continuation_head_not_owned")
+        raise CodingError("git_refused", reason_code="continuation_ownership_unproven")
     if _dirty_paths(root):
         raise CodingError("git_refused", reason_code="canonical_checkout_dirty")
     return branch

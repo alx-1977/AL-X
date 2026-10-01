@@ -191,9 +191,11 @@ DEFINITION = CapabilityDefinition(
     "the checkout on main through repository_operation before a new job. "
     "By default the job requires clean main, then "
     "creates and switches to the requested new feature branch before the coding "
-    "session may edit. With continue_goal_branch=true, it instead verifies the "
-    "checked-out branch and HEAD belong to this active goal's successful coding "
-    "commits and the checkout is clean; repair_branch must match that branch. "
+    "session may edit. With continue_goal_branch=true, it instead verifies a "
+    "clean checkout of repair_branch whose HEAD is a durable successfully "
+    "verified Coding Agent commit recorded for this active goal on that same "
+    "branch, including when a later verified commit for the goal exists on "
+    "another branch. "
     "AL/X must position the checkout first. Only one implementation job may hold "
     "the checkout at a "
     "time. No repository path is accepted. repair_branch and commit_message are "
@@ -219,7 +221,15 @@ DEFINITION = CapabilityDefinition(
     "exhausted the job stays uncommitted with diff_preserved and the branch "
     "name. AL/X may supply only resume_job_id for a failed or cancelled call "
     "from this active goal to retry only its recorded stage after the checkout "
-    "matches the durable branch, HEAD, and full state digest. The user can "
+    "matches the durable branch, HEAD, and full state digest. With a resume of "
+    "a failed job whose recorded stage is execution, review, or test, "
+    "AL/X may add corrective_action: her diagnosis of that recorded failure and "
+    "the specific repair she chose. The job then reruns its required checks on "
+    "the exact checkout, hands the coding session the recorded failure, the "
+    "reproduced check output, and her corrective_action, and continues through "
+    "review, verification, and commit unchanged. Repeating an attempt without "
+    "a new diagnosis is bounded per failure episode, and each recorded failure "
+    "admits a bounded number of distinct corrections. The user can "
     "stop an active job through the structured coding cancellation control; "
     "cancellation preserves its branch and diff and returns a checkpoint.",
     StructuredSchema(
@@ -235,6 +245,7 @@ DEFINITION = CapabilityDefinition(
             "commit_message": _STRING,
             "continue_goal_branch": _BOOLEAN,
             "resume_job_id": _STRING,
+            "corrective_action": _STRING,
         },
         (),
         extra_properties=False,
@@ -280,6 +291,7 @@ DEFINITION = CapabilityDefinition(
                 ValueKind.ARRAY, items=_REVIEW_ATTEMPT
             ),
             "checkpoint": _STRING,
+            "interruption_reason": _STRING,
         },
         (
             "status",
@@ -301,7 +313,7 @@ DEFINITION = CapabilityDefinition(
         "task", "context", "acceptance_criteria", "test_guidance",
         "step_budget", "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
-        "resume_job_id",
+        "resume_job_id", "corrective_action",
     ),
 )
 
@@ -325,9 +337,11 @@ _OUTCOME_ISSUE_CODES = (
 )
 
 
-def goal_coding_branch(state: GoalState | None) -> BranchContinuation | None:
-    """Derive ownership solely from this goal's durable successful CA commits."""
-    commits: list[tuple[str, str]] = []
+def goal_coding_branch(
+    state: GoalState | None, repair_branch: str
+) -> BranchContinuation | None:
+    """Durable successful Coding Agent commits recorded for this goal on one branch."""
+    heads: list[str] = []
     for attempt in (() if state is None else state.attempts):
         result = attempt.result
         if (
@@ -347,13 +361,14 @@ def goal_coding_branch(state: GoalState | None) -> BranchContinuation | None:
             validated = BranchContinuation(branch, frozenset({sha}))
         except (TypeError, ValueError):
             return None
-        commits.append((validated.branch, sha))
-    if not commits:
+        if validated.branch == repair_branch:
+            heads.append(sha)
+    if not heads:
         return None
-    branch = commits[-1][0]
-    return BranchContinuation(
-        branch, frozenset(sha for name, sha in commits if name == branch)
-    )
+    try:
+        return BranchContinuation(repair_branch, frozenset(heads))
+    except (TypeError, ValueError):
+        return None
 
 
 def build_coding_executors(
@@ -389,7 +404,11 @@ def build_coding_executors(
                 for item in (() if state is None else state.attempts)
                 if item.call is not None and item.call.capability_id == RUN_CODING_TASK
                 and item.result is not None
-                and item.result.state is CapabilityResultState.FAILED
+                and (
+                    item.result.state is CapabilityResultState.FAILED
+                    or (item.result.state is CapabilityResultState.PARTIAL
+                        and item.result.durable_values.get("status") == "interrupted")
+                )
             }
             previous = recorded.get(resume_id)
             if previous is None:
@@ -451,11 +470,35 @@ def build_coding_executors(
             if request.repair_branch.strip() not in {requested_branch, checkpoint["branch"]}:
                 return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
                                implementation_reached=False)
+            corrected_failure = None
+            if request.corrective_action:
+                # A correction answers recorded failure evidence. An interruption
+                # or a cancellation recorded none, and a commit-stage candidate
+                # has already passed the session it would reopen.
+                failure = previous.result.failure or {}
+                if (previous.result.state is not CapabilityResultState.FAILED
+                        or failure.get("code") == "coding_cancelled"):
+                    return _failed(call_id, "arguments_unusable",
+                                   reason_code="corrective_action_without_failure",
+                                   implementation_reached=False)
+                if (checkpoint["stage"] not in {"execution", "review", "test"}
+                        or checkpoint.get("commit_candidate_sha")):
+                    return _failed(call_id, "arguments_unusable",
+                                   reason_code="corrective_action_stage_unsupported",
+                                   implementation_reached=False)
+                corrected_failure = {
+                    key: value for key, value in failure.items()
+                    if isinstance(value, (str, int, bool)) or value is None
+                }
             request = replace(original_request, repair_branch=checkpoint["branch"],
-                              resume_checkpoint=checkpoint)
+                              resume_checkpoint=checkpoint,
+                              corrective_action=request.corrective_action,
+                              corrected_failure=corrected_failure)
         elif arguments.get("continue_goal_branch", False):
-            continuation = goal_coding_branch(goal_state_source())
-            if continuation is None or request.repair_branch != continuation.branch:
+            continuation = goal_coding_branch(
+                goal_state_source(), request.repair_branch
+            )
+            if continuation is None:
                 return _failed(
                     call_id, "git_refused",
                     reason_code="continuation_ownership_unproven",
@@ -472,6 +515,14 @@ def build_coding_executors(
             return _failed(call_id, "coding_unavailable")
 
         values = outcome.as_values()
+        if outcome.status == "interrupted":
+            return CapabilityResult(
+                call_id, RUN_CODING_TASK, CapabilityResultState.PARTIAL,
+                values, durable_values=outcome.durable_values(),
+                provenance=RetentionPolicy().non_mail(
+                    ContentOrigin.EXTERNAL, outcome.finished_at
+                ),
+            )
         if outcome.status not in {"succeeded", "no_change_required"}:
             issues = outcome.unresolved_issues
             code = next(
@@ -579,6 +630,21 @@ def parse_coding_arguments(
     blocked, error = _optional_blocked_paths(arguments)
     if error is not None:
         return None, error
+    corrective_action, error = _optional_string(
+        arguments, "corrective_action", MAX_CONTEXT_CHARACTERS
+    )
+    if error is not None:
+        return None, error
+    if "corrective_action" in arguments and not corrective_action.strip():
+        return None, _argument_failure(
+            "corrective_action", "blank", "corrective_action must be a non-blank string"
+        )
+    if corrective_action and "resume_job_id" not in arguments:
+        return None, _argument_failure(
+            "corrective_action",
+            "requires_resume",
+            "corrective_action answers a recorded failure and requires resume_job_id",
+        )
     branch, error = _optional_string(
         arguments, "repair_branch", MAX_BRANCH_NAME_CHARACTERS
     )
@@ -612,6 +678,7 @@ def parse_coding_arguments(
             blocked_paths=blocked,
             repair_branch=branch,
             commit_message=message,
+            corrective_action=corrective_action,
         ),
         None,
     )

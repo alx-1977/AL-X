@@ -21,6 +21,7 @@ from alx.providers.llamaparse import LlamaParseInvoiceExtractor
 from alx.providers.sandbox_runner import SandboxRunner
 from alx.providers.sandbox_workspace import SandboxWorkspace
 from alx.providers.sandbox_retention import SandboxRetention
+from alx.providers.github_checks import GitHubPullRequestChecks
 from alx.providers.github_merge import GitHubMergeProvider
 from alx.providers.github_pull_request import GitHubPullRequests
 from alx.providers.github_review import GitHubReviewProvider
@@ -37,6 +38,7 @@ __all__ = [
     "subject_reference",
     "GitHubReviewProvider",
     "GitHubPullRequests",
+    "GitHubPullRequestChecks",
     "GitHubMergeProvider",
     "BraveWebSearchProvider",
     "HttpWebFetchProvider",

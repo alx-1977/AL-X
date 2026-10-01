@@ -697,13 +697,10 @@ class BlockedDispatchTests(Fixture):
         self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(len(reasoner.contexts), 2)
 
-    def test_the_transport_keeps_listening_after_a_blocked_dispatch(self) -> None:
-        from alx.interfaces.server import (
-            MID_EXCHANGE_RECOVERABLE_REASONS, RECOVERABLE_TRANSPORT_REASONS,
-        )
+    def test_a_blocked_dispatch_checkpoint_does_not_need_reason_recovery(self) -> None:
+        from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
 
-        self.assertIn("active_goal_required", RECOVERABLE_TRANSPORT_REASONS)
-        self.assertIn("active_goal_required", MID_EXCHANGE_RECOVERABLE_REASONS)
+        self.assertNotIn("active_goal_required", RECOVERABLE_TRANSPORT_REASONS)
 
 
 class MemoryFaultDoesNotEndTheConversationTests(Fixture):

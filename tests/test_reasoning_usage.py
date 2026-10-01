@@ -509,10 +509,10 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "budget_exceeded")
         self.assertEqual(calls, [])
 
-    def test_the_transport_keeps_listening_after_a_budget_stop(self) -> None:
+    def test_a_budget_checkpoint_does_not_need_reason_recovery(self) -> None:
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
 
-        self.assertIn("budget_exceeded", RECOVERABLE_TRANSPORT_REASONS)
+        self.assertNotIn("budget_exceeded", RECOVERABLE_TRANSPORT_REASONS)
 
 
 class CoreTelemetryPersistenceTests(unittest.TestCase):

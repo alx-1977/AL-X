@@ -112,6 +112,7 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
         "tests/test_coding_agent.py",
         "tests/test_coding_contract_bounds.py",
         "tests/test_coding_retry_fuse.py",
+        "tests/test_coding_branch_continuation.py",
     ),
     "src/alx/bootstrap/coding.py": (
         "tests/test_coding_agent.py",
@@ -135,6 +136,9 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
     ),
     "src/alx/providers/gated_transcription.py": (
         "tests/test_speech_transmission_gate.py",
+    ),
+    "src/alx/providers/github_checks.py": (
+        "tests/test_pull_request_checks.py",
     ),
     "src/alx/providers/github_merge.py": (
         "tests/test_merge_authority.py",
@@ -225,6 +229,9 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
         "tests/test_review_request.py",
         "tests/test_read_external_review.py",
     ),
+    "src/alx/tools/pull_request_checks.py": (
+        "tests/test_pull_request_checks.py",
+    ),
     "src/alx/tools/review_content.py": (
         "tests/test_read_external_review.py",
         "tests/test_review_request.py",
@@ -279,6 +286,9 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
     "src/alx/bootstrap/reasoning.py": (
         "tests/test_origin_selected_core.py",
         "tests/test_model_reasoner.py",
+    ),
+    "src/alx/bootstrap/pull_request_checks.py": (
+        "tests/test_pull_request_checks.py",
     ),
     "src/alx/bootstrap/repository.py": (
         "tests/test_merge_authority.py",
@@ -491,6 +501,31 @@ def pytest_failure_signature(
         section = "\n".join(line.rstrip() for line in body[start:end] if line.strip())
         signatures.append((short[position], section))
     return tuple(signatures)
+
+
+MAX_FAILED_TEST_FINDINGS = 20
+MAX_FAILED_TEST_CHARACTERS = 300
+
+
+def pytest_failed_tests(output: str) -> tuple[str, ...]:
+    """The node identifiers pytest's short summary names as failed or errored.
+
+    Identifiers only: the assertion text after ` - ` can quote source and
+    values, and durable evidence stays content-free. Bounded, because this is
+    durable state; the first identifiers are enough to tell one failure from
+    another.
+    """
+    failed: list[str] = []
+    for line in output.splitlines():
+        status, _, rest = line.partition(" ")
+        if status not in {"FAILED", "ERROR"} or not rest.strip():
+            continue
+        node = rest.split(" - ", 1)[0].strip()
+        if node and node not in failed:
+            failed.append(node[:MAX_FAILED_TEST_CHARACTERS])
+        if len(failed) == MAX_FAILED_TEST_FINDINGS:
+            break
+    return tuple(failed)
 
 
 def _governed_documents(root: Path | None) -> frozenset[str]:

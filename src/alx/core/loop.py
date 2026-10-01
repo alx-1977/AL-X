@@ -34,12 +34,27 @@ LOGGER = logging.getLogger(__name__)
 INPUT_BOUND_EXCEEDED = "input_bound_exceeded"
 
 _RUN_CODING_TASK = "run_coding_task"
+# Repeated failures within one open failure episode. An episode closes when a
+# coding job succeeds or when AL/X dispatches a correction of a recorded
+# failure; it is not a goal-wide allowance.
 _MAX_FAILED_CODING_EXECUTIONS = 2
+# Corrections dispatched against failures with the same failure signature.
+# Distinct diagnoses of an unchanged failure are bounded too.
+_MAX_CORRECTIONS_PER_FAILURE = 2
+_CORRECTIVE_ACTION = "corrective_action"
+_MAX_INTERRUPTED_CODING_EXECUTIONS_PER_JOB = 4
 _MAX_PLANNING_CODING_FAILURES = 2
 # A job that implemented but whose required verification only the request's
 # own constraints blocked. Recoverable by a changed plan, so it does not spend
 # the implementation allowance, but it has its own bound so it cannot loop.
 _MAX_REQUEST_CONFLICT_CODING_EXECUTIONS = 2
+
+
+_CODING_CORRECTION_REFUSALS = frozenset({
+    "coding_correction_unanchored",
+    "coding_correction_repeated",
+    "coding_correction_exhausted",
+})
 
 
 class CoreState(str, Enum):
@@ -303,7 +318,7 @@ class CoreAgent:
                     CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
                 )
             try:
-                decision = self._reasoner.decide(ReasoningContext(
+                reasoning_context = ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,
                     turns=project_turns_for_reasoning(
                         conversation.turns,
@@ -325,7 +340,8 @@ class CoreAgent:
                     refused_calls=refused_calls,
                     continuation_notices=continuation_notices,
                     refused_goal_selections=refused_goal_selections,
-                ))
+                )
+                decision = self._reasoner.decide(reasoning_context)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
                 return CoreOutcome(
@@ -861,7 +877,8 @@ class CoreAgent:
                 continuation_notice_issued = False
                 continue
             coding_exhaustion = (
-                self._coding_exhaustion_reason(snapshot.state)
+                (self._coding_exhaustion_reason(snapshot.state, decision.call)
+                 or self._coding_interruption_exhaustion_reason(snapshot.state, decision.call))
                 if decision.call.capability_id == _RUN_CODING_TASK
                 else None
             )
@@ -869,9 +886,10 @@ class CoreAgent:
                 # A bounded Coding Agent path is already closed. Treat even a
                 # repeated call identifier as the same capability refusal so
                 # it cannot escalate into a Core-level call-id failure.
-                if not self._coding_retry_already_exhausted(
+                already_exhausted = self._coding_retry_already_exhausted(
                     snapshot.state, coding_exhaustion
-                ):
+                )
+                if not already_exhausted:
                     refusal = CapabilityAttempt(
                         decision.call,
                         CapabilityAttemptDisposition.REJECTED,
@@ -893,6 +911,14 @@ class CoreAgent:
                     "reason": coding_exhaustion,
                     "subject": coding_exhaustion,
                 })
+                if already_exhausted and origin is CognitionOrigin.PERSON_TURN:
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, coding_exhaustion, decision_provenance,
+                        refused_calls,
+                    )
+                if already_exhausted:
+                    mechanical_blocker = coding_exhaustion
                 continue
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 if self._already_refused(
@@ -941,10 +967,22 @@ class CoreAgent:
                     snapshot,
                     reason="approval_capability_already_dispatched",
                 )
-            if self._repeats_rejected_call(snapshot.state, decision.call, now):
+            refusal = self._binding_rejected_call(snapshot.state, decision.call, now)
+            if refusal is not None:
+                refused_calls = (*refused_calls, {
+                    "call_id": decision.call.call_id,
+                    "capability_id": decision.call.capability_id,
+                    "reason": "repeated_rejected_call",
+                    "subject": refusal.reason_code,
+                })
+                if origin is CognitionOrigin.PERSON_TURN:
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, "repeated_rejected_call",
+                        decision_provenance, refused_calls,
+                    )
                 return CoreOutcome(
-                    CoreState.ERROR,
-                    snapshot,
+                    CoreState.CHECKPOINTED, snapshot,
                     reason="repeated_rejected_call",
                 )
             authority_state = snapshot.state
@@ -996,6 +1034,11 @@ class CoreAgent:
             } and attempt.result is not None
                     and (attempt.result.failure or {}).get("requires_judgement")):
                 mechanical_blocker = str(attempt.result.failure["code"])
+                if origin is CognitionOrigin.PERSON_TURN:
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, mechanical_blocker, decision_provenance,
+                    )
             continuation_notice_issued = False
         if (
             snapshot is not None
@@ -1032,6 +1075,60 @@ class CoreAgent:
                 memory_state="unresolved_identity_conflict",
             )
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
+
+    def _respond_to_terminal_blocker(
+        self,
+        conversation_id: str,
+        conversation: ConversationSnapshot,
+        snapshot: GoalSnapshot,
+        context: ReasoningContext,
+        transient_attempts: tuple[CapabilityAttempt, ...],
+        reason: str,
+        provenance: ContentProvenance,
+        refused_calls: tuple[Mapping[str, Any], ...] = (),
+    ) -> CoreOutcome:
+        """Park the workflow and allow one response-only decision for a person."""
+        snapshot = self._park_unfinished_goal(snapshot, provenance)
+        terminal_context = replace(
+            context,
+            active_goal=snapshot.state,
+            turns=project_turns_for_reasoning(conversation.turns, snapshot.state),
+            unfinished_goals=self._selectable_goals(conversation_id, snapshot),
+            transient_attempts=transient_attempts,
+            response_only_reason=reason,
+            refused_calls=refused_calls or context.refused_calls,
+        )
+        try:
+            self._budget_check(conversation_id)
+        except Exception as error:
+            LOGGER.warning("Terminal checkpoint response stopped by execution budget: %s", error)
+            return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
+        try:
+            decision = self._reasoner.decide(terminal_context)
+        except Exception as error:
+            LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
+            return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
+        # A test double or a nonconforming provider can bypass the structured
+        # schema. The already selected goal ID is only referential metadata;
+        # any different ID would navigate to another goal. Reject that and all
+        # work before any mutation, memory write or call.
+        if (
+            decision.response is None
+            or decision.call is not None
+            or decision.memory_query is not None
+            or decision.goal_id not in (None, snapshot.state.goal_id)
+            or decision.goal_proposal is not None
+            or decision.memory_proposals
+            or decision.approval_proposal is not None
+            or decision.response_requires_goal_commit
+            or decision.finish_silently
+        ):
+            LOGGER.info("Terminal checkpoint response rejected: not response only")
+            return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
+        return CoreOutcome(
+            CoreState.RESPONDED, snapshot, response=decision.response,
+            reason=reason, response_provenance=provenance,
+        )
 
     def _close_interrupted_dispatch(self, snapshot: GoalSnapshot) -> GoalSnapshot:
         """Resolve an interrupted dispatch as an unknown outcome, once."""
@@ -1969,23 +2066,25 @@ class CoreAgent:
     def _repeats_rejected_call(
         cls, state: GoalState, call: CapabilityCall, at: datetime
     ) -> bool:
+        return cls._binding_rejected_call(state, call, at) is not None
+
+    @classmethod
+    def _binding_rejected_call(
+        cls, state: GoalState, call: CapabilityCall, at: datetime
+    ) -> CapabilityAttempt | None:
         """Stop deterministic safety/input rejections from becoming model loops.
 
         The identity of a repeat is the capability and its arguments. A fresh
         call or approval identifier does not by itself make a refused action
         different, so retrying with new identifiers alone is still a loop.
 
-        One case is not a loop. A call rejected as `approval_invalid` names an
-        approval that did not authorise it; the action was never attempted and
-        nothing about it is settled. If the Core then obtains a real approval
-        that permits this exact call now, the authority state has changed, and
-        the retry is the correction this guard is meant to elicit rather than
-        punish. Refusing it cost a person their session on 2026-09-10 after
-        the Core had already recovered correctly.
+        A refusal whose mechanical predicate has since changed is not a loop.
+        Approval refusals require a newly valid approval. Coding fuse refusals
+        are re-evaluated against the current durable attempts, including the
+        historical timeout classification. All other refusals remain binding.
 
         The approval still has to be real: `permits` re-checks lifecycle,
-        identifier, expiry and scope against this call, so an absent, stale,
-        consumed or mismatched approval leaves the retry a repeat.
+        identifier, expiry and scope against this call.
         """
         repeats = [
             item
@@ -1994,25 +2093,41 @@ class CoreAgent:
             and item.disposition is CapabilityAttemptDisposition.REJECTED
             and item.call.capability_id == call.capability_id
             and item.call.arguments == call.arguments
+            and not (
+                call.capability_id == _RUN_CODING_TASK
+                and item.reason_code in {
+                    "coding_retry_exhausted", "coding_planning_exhausted",
+                    "coding_interruption_no_progress", "coding_interruption_exhausted",
+                    *_CODING_CORRECTION_REFUSALS,
+                }
+                and item.reason_code not in {
+                    cls._coding_exhaustion_reason(state, call),
+                    cls._coding_interruption_exhaustion_reason(state, call),
+                }
+            )
         ]
         if not repeats:
-            return False
-        if any(
-            item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS
-            for item in repeats
-        ):
+            return None
+        binding = next(
+            (item for item in reversed(repeats)
+             if item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS),
+            None,
+        )
+        if binding is not None:
             # A refusal this call cannot repair stands, whatever else happened.
-            return True
+            return binding
         if call.approval_id is None:
-            return True
+            return repeats[-1]
         if any(item.call.approval_id == call.approval_id for item in repeats):
             # The same approval identifier that was already refused.
-            return True
-        return not any(
+            return repeats[-1]
+        if any(
             approval.approval_id == call.approval_id
             and approval.permits(call, at)
             for approval in state.approvals
-        )
+        ):
+            return None
+        return repeats[-1]
 
     @staticmethod
     def _completed_unchanged_coding_result(item: CapabilityAttempt) -> bool:
@@ -2050,40 +2165,230 @@ class CoreAgent:
         )
 
     @staticmethod
-    def _coding_execution_failures(state: GoalState) -> list[Mapping[str, Any]]:
-        """Failures of durable Coding Agent runs that reached implementation."""
-        return [
-            item.result.failure or {}
-            for item in state.attempts
-            if item.call is not None
+    def _is_coding_execution_failure(item: CapabilityAttempt) -> bool:
+        """A durable Coding Agent run that failed after reaching implementation."""
+        failure = (item.result.failure or {}) if item.result is not None else {}
+        return (
+            item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
             and item.implementation_invoked is True
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
-            and (item.result.failure or {}).get("code") != "arguments_unusable"
-            and (item.result.failure or {}).get("code") != "planning_failed"
-            and (item.result.failure or {}).get("phase") != "planning"
-            and (item.result.failure or {}).get("code") != "coding_cancelled"
+            and failure.get("code") != "arguments_unusable"
+            and failure.get("code") != "planning_failed"
+            and failure.get("phase") != "planning"
+            and failure.get("code") != "coding_cancelled"
+            # Historical fixed-wall-clock timeouts are interruptions too. A
+            # pre-watchdog checkpoint can still be resumed on its exact tree.
             and not (
-                (item.result.failure or {}).get("code") == "review_failed"
-                and (item.result.failure or {}).get("review_classification") == "infrastructure"
+                failure.get("code") == "session_failed"
+                and failure.get("reason_code") == "session_timeout"
             )
-            and (item.result.failure or {}).get("failure_class") not in {
+            and not (
+                failure.get("code") == "review_failed"
+                and failure.get("review_classification") == "infrastructure"
+            )
+            and failure.get("failure_class") not in {
                 "test_infrastructure", "commit_infrastructure"
             }
             and not CoreAgent._completed_unchanged_coding_result(item)
             # A checkout refused before the feature branch existed: nothing
             # was implemented, so nothing of the allowance was spent.
-            and (item.result.failure or {}).get("implementation_reached") is not False
+            and failure.get("implementation_reached") is not False
+        )
+
+    @staticmethod
+    def _coding_execution_failures(state: GoalState) -> list[Mapping[str, Any]]:
+        """Failures of durable Coding Agent runs that reached implementation."""
+        return [
+            item.result.failure or {}
+            for item in state.attempts
+            if CoreAgent._is_coding_execution_failure(item)
         ]
+
+    @staticmethod
+    def _corrective_action(call: CapabilityCall) -> str:
+        """The diagnosis a call carries; blank or absent means a plain retry."""
+        value = call.arguments.get(_CORRECTIVE_ACTION)
+        return " ".join(value.split()) if isinstance(value, str) else ""
+
+    @staticmethod
+    def _is_corrective_coding_dispatch(item: CapabilityAttempt) -> bool:
+        """A correction AL/X dispatched that reached the preserved implementation."""
+        failure = (item.result.failure or {}) if item.result is not None else {}
+        return (
+            item.call is not None
+            and item.call.capability_id == _RUN_CODING_TASK
+            and CoreAgent._corrective_action(item.call)
+            and item.implementation_invoked is True
+            and item.result is not None
+            and failure.get("code") != "arguments_unusable"
+            and failure.get("implementation_reached") is not False
+        )
+
+    @classmethod
+    def _open_coding_failure_episode(
+        cls, state: GoalState
+    ) -> list[CapabilityAttempt]:
+        """Implementation failures since the last success or dispatched correction.
+
+        Retrying without a new diagnosis is a repeat against the same open
+        episode, however the call is worded and whatever noise its run
+        produced. A succeeded job resolves the episode. A correction AL/X
+        dispatched against a recorded failure closes it; that correction's
+        own failure, if any, opens the next one. Interruptions, refusals,
+        planning failures and request conflicts neither open nor close one.
+        """
+        episode: list[CapabilityAttempt] = []
+        for item in state.attempts:
+            if item.call is None or item.call.capability_id != _RUN_CODING_TASK:
+                continue
+            if (
+                item.implementation_invoked is True
+                and item.result is not None
+                and item.result.state is CapabilityResultState.SUCCEEDED
+            ) or cls._is_corrective_coding_dispatch(item):
+                episode = []
+            if (
+                cls._is_coding_execution_failure(item)
+                and (item.result.failure or {}).get("failure_class") != "request_conflict"
+            ):
+                episode.append(item)
+        return episode
 
     @classmethod
     def _failed_coding_executions(cls, state: GoalState) -> int:
-        """Count genuine implementation failures: D-028's allowance."""
-        return sum(
-            1 for failure in cls._coding_execution_failures(state)
-            if failure.get("failure_class") != "request_conflict"
+        """Genuine implementation failures in the open failure episode."""
+        return len(cls._open_coding_failure_episode(state))
+
+    @staticmethod
+    def _coding_failure_signature(item: CapabilityAttempt) -> str:
+        """What failed, independent of wording and of the tree it failed on.
+
+        The failure code, phase, class and stage, each failed required check,
+        and the test identifiers it recorded. A correction that changes the
+        tree but leaves the same checks failing has not changed the failure.
+        """
+        result = item.result
+        failure = (result.failure or {}) if result is not None else {}
+        values = result.durable_values if result is not None else {}
+        failed_checks: list[list[object]] = []
+        verification = values.get("verification")
+        if isinstance(verification, Mapping):
+            for check in verification.get("checks") or ():
+                if isinstance(check, Mapping) and not check.get("passed"):
+                    failed_checks.append([
+                        str(check.get("name", "")),
+                        sorted(str(finding) for finding in check.get("findings") or ()),
+                    ])
+        try:
+            checkpoint = json.loads(values.get("checkpoint"))
+        except (TypeError, ValueError):
+            checkpoint = None
+        return json.dumps({
+            "code": failure.get("code"),
+            "phase": failure.get("phase"),
+            "reason_code": failure.get("reason_code"),
+            "failure_class": failure.get("failure_class"),
+            "stage": checkpoint.get("stage") if isinstance(checkpoint, dict) else None,
+            "failed_checks": sorted(failed_checks),
+        }, sort_keys=True, default=str)
+
+    @classmethod
+    def _coding_correction_refusal(
+        cls, state: GoalState, call: CapabilityCall
+    ) -> str | None:
+        """Whether a correction answers new failure evidence within its bound.
+
+        It must name a failure in the open episode, so each correction answers
+        evidence recorded since the last one. At most two corrections may
+        answer the same failure signature, and the same diagnosis may not be
+        dispatched twice against it. Whether a diagnosis is right, or differs
+        enough in substance, is AL/X's judgement and not decided here.
+        """
+        episode = cls._open_coding_failure_episode(state)
+        target = next(
+            (item for item in reversed(episode)
+             if item.call is not None
+             and item.call.call_id == call.arguments.get("resume_job_id")),
+            None,
         )
+        if target is None:
+            return "coding_correction_unanchored"
+        signature = cls._coding_failure_signature(target)
+        attempted = {
+            item.call.call_id: item for item in state.attempts
+            if item.call is not None and item.call.capability_id == _RUN_CODING_TASK
+        }
+        previous = [
+            item for item in state.attempts
+            if cls._is_corrective_coding_dispatch(item)
+            and (anchor := attempted.get(item.call.arguments.get("resume_job_id"))) is not None
+            and cls._coding_failure_signature(anchor) == signature
+        ]
+        diagnosis = cls._corrective_action(call).casefold()
+        if any(
+            cls._corrective_action(item.call).casefold() == diagnosis
+            for item in previous
+        ):
+            return "coding_correction_repeated"
+        if len(previous) >= _MAX_CORRECTIONS_PER_FAILURE:
+            return "coding_correction_exhausted"
+        return None
+
+    @staticmethod
+    def _coding_interruption_exhaustion_reason(
+        state: GoalState, call: CapabilityCall
+    ) -> str | None:
+        """Bound one resumed job without spending the implementation fuse."""
+        resume_id = call.arguments.get("resume_job_id")
+        if not isinstance(resume_id, str):
+            return None
+        attempts = {
+            item.call.call_id: item for item in state.attempts
+            if item.call is not None and item.call.capability_id == _RUN_CODING_TASK
+            and item.result is not None
+        }
+        visited: set[str] = set()
+        interrupted = 0
+        child_checkpoint: Mapping[str, Any] | None = None
+        child_interrupted = False
+        while resume_id in attempts and resume_id not in visited:
+            visited.add(resume_id)
+            attempt = attempts[resume_id]
+            result = attempt.result
+            if result is None:
+                break
+            values = result.durable_values
+            legacy_timeout = (
+                result.state is CapabilityResultState.FAILED
+                and (result.failure or {}).get("code") == "session_failed"
+                and (result.failure or {}).get("reason_code") == "session_timeout"
+            )
+            is_interrupted = values.get("status") == "interrupted" or legacy_timeout
+            if is_interrupted:
+                interrupted += 1
+            try:
+                checkpoint = json.loads(values.get("checkpoint", ""))
+            except (TypeError, ValueError):
+                checkpoint = None
+            if (
+                child_interrupted and is_interrupted
+                and child_checkpoint is not None and isinstance(checkpoint, dict)
+                and child_checkpoint.get("stage") == checkpoint.get("stage")
+                and child_checkpoint.get("head_sha") == checkpoint.get("head_sha")
+                and child_checkpoint.get("state_digest") == checkpoint.get("state_digest")
+            ):
+                return "coding_interruption_no_progress"
+            child_checkpoint = checkpoint if isinstance(checkpoint, dict) else None
+            child_interrupted = is_interrupted
+            parent = attempt.call.arguments.get("resume_job_id")
+            if not isinstance(parent, str):
+                break
+            resume_id = parent
+        if interrupted >= _MAX_INTERRUPTED_CODING_EXECUTIONS_PER_JOB:
+            return "coding_interruption_exhausted"
+        return None
 
     @classmethod
     def _request_conflict_coding_executions(cls, state: GoalState) -> int:
@@ -2108,8 +2413,14 @@ class CoreAgent:
         )
 
     @classmethod
-    def _coding_exhaustion_reason(cls, state: GoalState) -> str | None:
-        if cls._failed_coding_executions(state) >= _MAX_FAILED_CODING_EXECUTIONS:
+    def _coding_exhaustion_reason(
+        cls, state: GoalState, call: CapabilityCall | None = None
+    ) -> str | None:
+        if call is not None and cls._corrective_action(call):
+            refusal = cls._coding_correction_refusal(state, call)
+            if refusal is not None:
+                return refusal
+        elif cls._failed_coding_executions(state) >= _MAX_FAILED_CODING_EXECUTIONS:
             return "coding_retry_exhausted"
         if cls._planning_coding_failures(state) >= _MAX_PLANNING_CODING_FAILURES:
             return "coding_planning_exhausted"
@@ -2124,12 +2435,23 @@ class CoreAgent:
     def _coding_retry_already_exhausted(
         state: GoalState, reason_code: str
     ) -> bool:
-        """Whether this durable goal already recorded the fixed refusal."""
+        """Whether the refusal is already recorded against the current evidence.
+
+        Only refusals after the latest coding run count. An older refusal is
+        evidence about an episode that has since changed, not this one.
+        """
+        latest = max(
+            (index for index, item in enumerate(state.attempts)
+             if item.call is not None
+             and item.call.capability_id == _RUN_CODING_TASK
+             and item.disposition is not CapabilityAttemptDisposition.REJECTED),
+            default=-1,
+        )
         return any(
             item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
             and item.reason_code == reason_code
-            for item in state.attempts
+            for item in state.attempts[latest + 1:]
         )
 
     @staticmethod
