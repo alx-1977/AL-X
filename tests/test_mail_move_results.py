@@ -121,6 +121,22 @@ class MoveResultTests(unittest.TestCase):
                 "VALUES ('INBOX', '777', 42, '{}', 'done')"
             )
 
+    def hold_attention(self) -> None:
+        with self.observations._connection:
+            self.observations._connection.execute(
+                "INSERT INTO mail_observations "
+                "(mailbox_id, uid_validity, uid, event_json, state) "
+                "VALUES ('INBOX', '777', 42, '{}', 'pending')"
+            )
+
+    def attention_state(self) -> str:
+        row = self.observations._connection.execute(
+            "SELECT state FROM mail_observations "
+            "WHERE mailbox_id = 'INBOX' AND uid_validity = '777' AND uid = 42"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        return row[0]
+
     def assert_one_move(self):
         self.assertEqual(
             len([item for item in self.connection.commands if item[:2] == ("UID", "MOVE")]),
@@ -188,6 +204,53 @@ class MoveResultTests(unittest.TestCase):
                 self.assertEqual(result.state, CapabilityResultState.FAILED)
                 self.assertEqual(result.failure["code"], "move_failed")
                 self.assert_one_move()
+
+    def test_failed_move_keeps_attention_for_both_capabilities(self):
+        """move_failed leaves the source in the INBOX, so attention stays."""
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name in ("source_still_present", "rejected_without_destination"):
+                with self.subTest(capability=capability, case=name):
+                    self._reset()
+                    self.hold_attention()
+                    if name == "source_still_present":
+                        # Empty destination search, source UID still present.
+                        self.connection.copyuid = None
+                        self.connection.message_bytes = MESSAGE_BYTES
+                        self.connection.source_search = "OK", [b"42"]
+                        self.connection.header_search = "OK", [b""]
+                    else:
+                        # Rejected MOVE and nothing names a destination.
+                        self.connection.move_status = "NO"
+                        self.connection.copyuid = None
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, CapabilityResultState.FAILED)
+                    self.assertEqual(result.failure["code"], "move_failed")
+                    self.assertEqual(self.attention_state(), "pending")
+                    self.assert_one_move()
+
+    def test_successful_or_unconfirmed_move_releases_attention_for_both_capabilities(self):
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name, prepare, state, code in (
+                ("succeeded", lambda: None, CapabilityResultState.SUCCEEDED, None),
+                (
+                    "unconfirmed",
+                    lambda: setattr(self.connection, "copyuid", None),
+                    CapabilityResultState.PARTIAL,
+                    "mail_move_unconfirmed",
+                ),
+            ):
+                with self.subTest(capability=capability, case=name):
+                    self._reset()
+                    self.hold_attention()
+                    prepare()
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, state)
+                    if code is None:
+                        self.assertIsNone(result.failure)
+                    else:
+                        self.assertEqual(result.failure["code"], code)
+                    self.assertEqual(self.attention_state(), "done")
+                    self.assert_one_move()
 
     def _unavailable_observation(self) -> None:
         self.observations.acknowledge = lambda _reference: (_ for _ in ()).throw(

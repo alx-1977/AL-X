@@ -1503,13 +1503,13 @@ class ICloudMailAdapter:
         if source_state == "present":
             destination = None
 
-        self._release_attention(reference)
         # Still in the source and absent from the destination: it did not move.
         # A rejected command whose check cannot show a destination is the same.
         if source_state == "present" and destination_state == "missing":
             raise MailAccessError("move_failed")
         if destination is None and status not in (None, "OK"):
             raise MailAccessError("move_failed")
+        self._release_attention(reference)
         return MailMoveResult(mailbox, destination)
 
     def file_message(self, reference: MailReference, mailbox: str) -> MailMoveResult:
