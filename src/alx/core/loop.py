@@ -899,7 +899,7 @@ class CoreAgent:
                 })
                 if already_exhausted and origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
-                        conversation_id, snapshot, reasoning_context,
+                        conversation_id, conversation, snapshot, reasoning_context,
                         transient_attempts, coding_exhaustion, decision_provenance,
                         refused_calls,
                     )
@@ -963,7 +963,7 @@ class CoreAgent:
                 })
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
-                        conversation_id, snapshot, reasoning_context,
+                        conversation_id, conversation, snapshot, reasoning_context,
                         transient_attempts, "repeated_rejected_call",
                         decision_provenance, refused_calls,
                     )
@@ -1022,7 +1022,7 @@ class CoreAgent:
                 mechanical_blocker = str(attempt.result.failure["code"])
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
-                        conversation_id, snapshot, reasoning_context,
+                        conversation_id, conversation, snapshot, reasoning_context,
                         transient_attempts, mechanical_blocker, decision_provenance,
                     )
             continuation_notice_issued = False
@@ -1065,6 +1065,7 @@ class CoreAgent:
     def _respond_to_terminal_blocker(
         self,
         conversation_id: str,
+        conversation: ConversationSnapshot,
         snapshot: GoalSnapshot,
         context: ReasoningContext,
         transient_attempts: tuple[CapabilityAttempt, ...],
@@ -1077,6 +1078,7 @@ class CoreAgent:
         terminal_context = replace(
             context,
             active_goal=snapshot.state,
+            turns=project_turns_for_reasoning(conversation.turns, snapshot.state),
             unfinished_goals=self._selectable_goals(conversation_id, snapshot),
             transient_attempts=transient_attempts,
             response_only_reason=reason,

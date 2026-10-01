@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -190,6 +191,35 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(reasoner.contexts), 2)
         self.assertEqual(self.store.load("goal-a").state.attempts, state.attempts)
+
+    def test_first_step_selection_reprojects_goal_referenced_old_turn(self):
+        old = ConversationTurn(
+            "conversation", "old-request", ConversationOrigin.TYPED,
+            "Preserve the work from my original request", NOW, "friedl",
+        )
+        fillers = tuple(
+            ConversationTurn(
+                "conversation", f"filler-{index}", ConversationOrigin.TYPED,
+                "Other conversation", NOW, "friedl",
+            ) for index in range(12)
+        )
+        self.conversation = ConversationSnapshot(
+            "conversation", (old, *fillers, self.conversation.turns[0]),
+            14, RETENTION,
+        )
+        state = replace(
+            goal(refused("input_invalid")),
+            objective=Objective("turn:old-request", "Continue the preserved job"),
+        )
+        reasoner = Reasoner(
+            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME),
+                          goal_id="goal-a"),
+            AgentDecision(response="The prior input remains invalid.", goal_id="goal-a"),
+        )
+        outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))
+        self.assertIs(outcome.state, CoreState.RESPONDED)
+        self.assertNotIn(old, reasoner.contexts[0].turns)
+        self.assertIn(old, reasoner.contexts[1].turns)
 
 
 if __name__ == "__main__":
