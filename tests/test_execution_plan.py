@@ -473,6 +473,81 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "review_pending")
         self.assertEqual(self.calls, ["request_external_review"])
 
+    def test_planned_review_blocker_applies_after_ordinary_goal_selection(self):
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        workflow = plan(step("request_external_review"), step("merge"))
+        self.agent(Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"))).process(
+            conversation(), RETENTION, 1, origin=CognitionOrigin.EXTERNAL_EVENT,
+        )
+        reasoner = Reasoner(
+            AgentDecision(goal_id="goal"),
+            AgentDecision(call=CapabilityCall("merge-after-selection", "merge", {}),
+                          goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(
+            conversation(), RETENTION, 2, origin=CognitionOrigin.EXTERNAL_EVENT,
+        )
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertEqual(self.calls, ["request_external_review"])
+
+    def test_review_blocker_survives_crash_before_plan_checkpoint(self):
+        workflow = plan(step("request_external_review"), step("merge"))
+        call = workflow.steps[0].call
+        failed = CapabilityResult(
+            call.call_id, call.capability_id, CapabilityResultState.FAILED, {},
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        attempt = CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED,
+                                    True, failed)
+        snapshot = self.store.load("goal")
+        self.store.replace(
+            replace(snapshot.state, execution_plan=workflow, attempts=(attempt,)),
+            snapshot.retention_until, snapshot.revision,
+        )
+        reasoner = Reasoner(AgentDecision(
+            call=CapabilityCall("merge-after-crash", "merge", {}), goal_id="goal",
+        ))
+        outcome = self.agent(reasoner).process(
+            conversation(), RETENTION, 1, origin=CognitionOrigin.EXTERNAL_EVENT,
+            resume_plan_goal_id="goal",
+        )
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.load("goal").state.execution_plan.core_reentry_reason,
+                         "plan_call_id_reused")
+
+    def test_reinstalled_model_plan_id_gets_new_continuation_identity(self):
+        class Ledger:
+            def __init__(self):
+                self.seen = set()
+
+            def exists(self, identifier):
+                return identifier in self.seen
+
+            def record_created(self, opportunity):
+                self.seen.add(opportunity.opportunity_id)
+                return True
+
+        ledger = Ledger()
+        source = PlanContinuationSource(self.store, ledger, enabled=True)
+        reasoner = Reasoner(
+            AgentDecision(execution_plan=plan(step("coding")), goal_id="goal"),
+            AgentDecision(execution_plan=plan(step("other")), goal_id="goal"),
+        )
+        agent = self.agent(reasoner)
+        agent.process(conversation(), RETENTION, 1)
+        first = source.due_opportunities()
+        self.assertEqual(len(first), 1)
+        self.assertTrue(source.claim(first[0]))
+        agent.process(conversation(), RETENTION, 1)
+        second = source.due_opportunities()
+        self.assertEqual(len(second), 1)
+        self.assertNotEqual(second[0].opportunity_id, first[0].opportunity_id)
+        self.assertEqual(self.calls, ["coding", "other"])
+
     def test_waiting_cannot_repeat_a_consequential_capability(self):
         workflow = plan(step("merge", completion=(PlanCondition("values.state", "done"),),
                              waiting=(PlanCondition("values.state", "pending"),)))

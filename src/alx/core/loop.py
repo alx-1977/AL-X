@@ -485,6 +485,7 @@ class CoreAgent:
                                         core_reentry_reason="new_person_turn"),
                                 "new_person_turn",
                             )
+                    mechanical_blocker = self._plan_mechanical_blocker(snapshot)
                     # A goal may be resumed from any conversation, but only one
                     # that was actually offered this turn. The check used to be
                     # that the goal belonged to this conversation, which made
@@ -854,7 +855,11 @@ class CoreAgent:
                     if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
                         refused_calls = (*refused_calls, {"reason": "plan_requires_active_goal"},)
                         continue
-                    plan = decision.execution_plan
+                    # Each installation needs a distinct durable identity:
+                    # the model may reuse its plan_id when it revises a plan,
+                    # but an earlier cognition opportunity may be claimed.
+                    plan = replace(decision.execution_plan,
+                                   plan_id=f"{decision.execution_plan.plan_id}:{uuid4()}")
                     latest_person = next(
                         (item.turn_id for item in reversed(conversation.turns)
                          if item.person_id is not None), None,
@@ -1937,11 +1942,14 @@ class CoreAgent:
         if snapshot is None or snapshot.state.execution_plan is None:
             return None
         plan = snapshot.state.execution_plan
-        if (plan.status != "needs_core" or plan.core_reentry_reason not in {
-                "planned_result_unexpected", "planned_evidence_requires_judgement"
-        } or not snapshot.state.attempts):
+        if (plan.status != "needs_core" or plan.cursor >= len(plan.steps)
+                or not snapshot.state.attempts):
             return None
-        return self._mechanical_blocker_from_attempt(snapshot.state.attempts[-1])
+        attempt = snapshot.state.attempts[-1]
+        if (attempt.call is None
+                or attempt.call.capability_id != plan.steps[plan.cursor].call.capability_id):
+            return None
+        return self._mechanical_blocker_from_attempt(attempt)
 
     def _remember_plan_attempt(self, goal_id: str, attempt: CapabilityAttempt) -> None:
         provenance = None if attempt.result is None else attempt.result.provenance
