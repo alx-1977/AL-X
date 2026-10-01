@@ -304,10 +304,10 @@ class GitHubPullRequestChecks:
             location = _location(getattr(response, "headers", None))
             if location is None:
                 raise CheckReadError("log_unavailable")
-            target = urljoin(url, location)
-            parsed = urlparse(target)
-            if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+            parsed = urlparse(location)
+            if parsed.scheme != "https" or not parsed.netloc:
                 raise CheckReadError("log_unavailable")
+            target = urljoin(url, location)
             # No Authorization. The credential stays on api.github.com.
             response = self._get(target, {"User-Agent": USER_AGENT})
             status = getattr(response, "status_code", None)

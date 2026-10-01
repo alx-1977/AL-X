@@ -1053,6 +1053,36 @@ class GitHubReadTests(ProviderCase):
         self.assertNotIn("authorization", {key.lower() for key in blob_calls[0]["headers"]})
         self.assertNotIn(TOKEN, " ".join(blob_calls[0]["headers"].values()))
 
+    def test_an_http_log_redirect_is_not_requested(self) -> None:
+        self.github.runs = [
+            _actions("lint", "success", job_id=9, title="lint", summary="clean"),
+            _actions("law-gates", "failure", job_id=42, title="no", summary="no"),
+        ]
+        self.github.jobs["42"] = {
+            "steps": [
+                {"name": "Checkout", "conclusion": "success"},
+                {"name": "Law gates", "conclusion": "failure"},
+            ]
+        }
+        insecure = "http://blob.example/logs/42?sig=signed"
+        self.github.log_location = insecure
+        content = self.read()
+        self.assertEqual(
+            [item.name for item in content.check_runs], ["lint", "law-gates"]
+        )
+        failed = content.check_runs[1]
+        self.assertEqual(
+            failed.steps,
+            (("Checkout", "success"), ("Law gates", "failure")),
+        )
+        self.assertEqual(failed.log_tail, "")
+        self.assertEqual(failed.characters_omitted, 0)
+        self.assertEqual(failed.log_failure, "log_unavailable")
+        self.assertIsNone(content.check_runs[0].log_tail)
+        self.assertNotIn(insecure, self.urls())
+        self.assertTrue(all(not url.startswith("http://") for url in self.urls()))
+        self.assert_get_only()
+
     def test_a_job_that_cannot_be_read_does_not_invent_one(self) -> None:
         self.github.runs = [
             _actions("law-gates", "failure", job_id=42, title="no", summary="no")
