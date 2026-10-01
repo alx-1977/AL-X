@@ -237,7 +237,8 @@ class CoreAgent:
             if plan is None or plan.status not in {"ready", "waiting"}:
                 continue
             if plan.status == "waiting" and plan.next_due_at is not None:
-                if self._clock() < plan.next_due_at:
+                if (self._clock() < plan.next_due_at
+                        and self._uncheckpointed_plan_attempt(snapshot) is None):
                     continue
             if summary.has_pending_dispatch:
                 self._close_interrupted_dispatch(snapshot)
@@ -478,9 +479,14 @@ class CoreAgent:
                                         core_reentry_reason="new_person_turn"),
                                 "new_person_turn",
                             )
-                    mechanical_blocker = self._plan_mechanical_blocker(snapshot)
+                    selected_plan_blocker = self._plan_mechanical_blocker(snapshot)
+                    mechanical_blocker = selected_plan_blocker or mechanical_blocker
+                    selected_plan_attempt = self._active_plan_attempt(snapshot.state.goal_id)
+                    transient_attempts = (
+                        () if selected_plan_attempt is None else (selected_plan_attempt,)
+                    )
                     current_plan = snapshot.state.execution_plan
-                    if (mechanical_blocker is not None and current_plan is not None
+                    if (selected_plan_blocker is not None and current_plan is not None
                             and current_plan.status in {"ready", "waiting"}):
                         snapshot = self._plan_checkpoint(
                             snapshot,
@@ -1963,6 +1969,24 @@ class CoreAgent:
             return None
         return self._mechanical_blocker_from_attempt(attempt)
 
+    @staticmethod
+    def _uncheckpointed_plan_attempt(
+        snapshot: GoalSnapshot,
+    ) -> CapabilityAttempt | None:
+        plan = snapshot.state.execution_plan
+        if (plan is None or plan.status not in {"ready", "waiting"}
+                or plan.cursor >= len(plan.steps) or not snapshot.state.attempts):
+            return None
+        attempt = snapshot.state.attempts[-1]
+        if (attempt.call is None
+                or attempt.disposition is CapabilityAttemptDisposition.PENDING
+                or attempt.call.call_id == plan.last_result_call_id
+                or attempt.call.capability_id != plan.steps[plan.cursor].call.capability_id
+                or (plan.status == "ready"
+                    and attempt.call.call_id != plan.steps[plan.cursor].call.call_id)):
+            return None
+        return attempt
+
     def _remember_plan_attempt(self, goal_id: str, attempt: CapabilityAttempt) -> None:
         provenance = None if attempt.result is None else attempt.result.provenance
         if (provenance is None or provenance.content_expires_at is None
@@ -2040,6 +2064,13 @@ class CoreAgent:
             changed = replace(plan, status="needs_core", next_due_at=None,
                               core_reentry_reason="plan_precondition_changed")
             return self._plan_checkpoint(snapshot, changed, "plan_precondition_changed"), "wake"
+        uncheckpointed = self._uncheckpointed_plan_attempt(snapshot)
+        if uncheckpointed is not None:
+            self._remember_plan_attempt(snapshot.state.goal_id, uncheckpointed)
+            changed = replace(plan, status="needs_core", next_due_at=None,
+                              core_reentry_reason="plan_result_uncheckpointed")
+            return self._plan_checkpoint(snapshot, changed,
+                                         "plan_result_uncheckpointed"), "wake"
         if plan.status == "waiting" and plan.next_due_at is not None:
             if self._clock() < plan.next_due_at:
                 return snapshot, "not_due"
@@ -2109,7 +2140,8 @@ class CoreAgent:
                          or (result.failure or {}).get("requires_judgement"))):
                 self._remember_plan_attempt(snapshot.state.goal_id, attempt)
                 plan = replace(plan, status="needs_core", next_due_at=None,
-                               core_reentry_reason="planned_evidence_requires_judgement")
+                               core_reentry_reason="planned_evidence_requires_judgement",
+                               last_result_call_id=call.call_id)
                 snapshot = self._plan_checkpoint(
                     snapshot, plan, "planned_evidence_requires_judgement",
                 )
@@ -2118,7 +2150,8 @@ class CoreAgent:
                     and result.state is CapabilityResultState.SUCCEEDED
                     and self._plan_conditions_match(document, step.completion_conditions)):
                 plan = replace(plan, cursor=plan.cursor + 1, status="ready",
-                               next_due_at=None, core_reentry_reason=None)
+                               next_due_at=None, core_reentry_reason=None,
+                               last_result_call_id=call.call_id)
                 if step.wake_core_on_completion:
                     self._remember_plan_attempt(snapshot.state.goal_id, attempt)
                     plan = replace(plan, status="needs_core",
@@ -2133,11 +2166,13 @@ class CoreAgent:
                     and self._plan_conditions_match(document, step.waiting_conditions)):
                 plan = replace(plan, status="waiting",
                                next_due_at=now + timedelta(seconds=step.wait_seconds),
-                               core_reentry_reason=None)
+                               core_reentry_reason=None,
+                               last_result_call_id=call.call_id)
                 snapshot = self._plan_checkpoint(snapshot, plan, "waiting")
                 return snapshot, "waiting"
             reason = "planned_result_unexpected"
             self._remember_plan_attempt(snapshot.state.goal_id, attempt)
+            plan = replace(plan, last_result_call_id=call.call_id)
             break
         else:
             plan = replace(plan, status="completed", next_due_at=None,

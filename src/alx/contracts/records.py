@@ -289,6 +289,7 @@ class ExecutionPlan:
     status: str = "ready"
     next_due_at: datetime | None = None
     core_reentry_reason: str | None = None
+    last_result_call_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("plan_id", "objective_source", "objective_summary"):
@@ -309,6 +310,8 @@ class ExecutionPlan:
             self.next_due_at.tzinfo is None or self.next_due_at.utcoffset() is None
         ):
             raise ValueError("plan due time must be timezone-aware")
+        if self.last_result_call_id is not None:
+            _required(self.last_result_call_id, "last_result_call_id")
 
 
 @dataclass(frozen=True, slots=True)

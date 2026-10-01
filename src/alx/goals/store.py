@@ -122,6 +122,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
             "status": goal.execution_plan.status,
             "next_due_at": _time_to_data(goal.execution_plan.next_due_at),
             "core_reentry_reason": goal.execution_plan.core_reentry_reason,
+            "last_result_call_id": goal.execution_plan.last_result_call_id,
             "steps": [
                 {
                     "call": [step.call.call_id, step.call.capability_id,
@@ -198,7 +199,7 @@ def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
         ),
         plan_data["context_preconditions"], plan_data["cursor"],
         plan_data["status"], _time_from_data(plan_data["next_due_at"]),
-        plan_data["core_reentry_reason"],
+        plan_data["core_reentry_reason"], plan_data.get("last_result_call_id"),
     )
     return GoalState(
         goal_id=goal_id,

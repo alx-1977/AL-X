@@ -535,7 +535,39 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "review_pending")
         self.assertEqual(self.calls, [])
         self.assertEqual(self.store.load("goal").state.execution_plan.core_reentry_reason,
-                         "plan_call_id_reused")
+                         "plan_result_uncheckpointed")
+
+    def test_waiting_failure_recorded_before_crash_is_not_polled_again(self):
+        workflow = plan(step("ci", completion=(
+            PlanCondition("values.state", "passed"),), waiting=(
+            PlanCondition("values.state", "pending"),)))
+        first_call = workflow.steps[0].call
+        retry_call = replace(first_call, call_id="ci-poll-2")
+        pending = CapabilityAttempt(
+            first_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(first_call.call_id, "ci", CapabilityResultState.SUCCEEDED,
+                             {"state": "pending"}),
+        )
+        failed = CapabilityAttempt(
+            retry_call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(retry_call.call_id, "ci", CapabilityResultState.SUCCEEDED,
+                             {"state": "failed"}),
+        )
+        waiting = replace(workflow, status="waiting", next_due_at=NOW,
+                          last_result_call_id=first_call.call_id)
+        snapshot = self.store.load("goal")
+        self.store.replace(
+            replace(snapshot.state, execution_plan=waiting,
+                    attempts=(pending, failed)),
+            snapshot.retention_until, snapshot.revision,
+        )
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        self.agent(Reasoner()).advance_due_plans(lambda _: conversation())
+        stored = self.store.load("goal").state.execution_plan
+        self.assertEqual(stored.status, "needs_core")
+        self.assertEqual(stored.core_reentry_reason, "plan_result_uncheckpointed")
+        self.assertEqual(self.calls, [])
 
     def test_crash_gap_blocker_applies_to_ordinary_goal_selection(self):
         workflow = plan(step("request_external_review"), step("merge"))
@@ -561,6 +593,43 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "review_pending")
         self.assertEqual(self.calls, [])
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "needs_core")
+
+    def test_blocker_survives_switch_to_another_goal(self):
+        self.store.create(replace(goal(), goal_id="goal-b",
+                                  execution_plan=plan(step("other"))),
+                          "thread", RETENTION)
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        reasoner = Reasoner(
+            AgentDecision(call=CapabilityCall("review-a", "request_external_review", {}),
+                          goal_id="goal"),
+            AgentDecision(call=CapabilityCall("merge-b", "merge", {}),
+                          goal_id="goal-b"),
+        )
+        outcome = self.agent(reasoner).process(
+            conversation(), RETENTION, 2, origin=CognitionOrigin.EXTERNAL_EVENT,
+        )
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertEqual(self.calls, ["request_external_review"])
+        self.assertEqual(self.store.load("goal-b").state.execution_plan.status, "ready")
+
+    def test_ordinary_selection_carries_available_plan_review_evidence(self):
+        workflow = plan(step("review"))
+        self.outputs["review"] = {"findings": ["repair required"]}
+        reasoner = Reasoner(
+            AgentDecision(execution_plan=workflow, goal_id="goal"),
+            AgentDecision(goal_id="goal"),
+            AgentDecision(response="I will assess the review.", goal_id="goal"),
+        )
+        agent = self.agent(reasoner, review_requires_judgment=True)
+        agent.process(conversation(), RETENTION, 1,
+                      origin=CognitionOrigin.EXTERNAL_EVENT)
+        agent.process(conversation(), RETENTION, 2,
+                      origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual(reasoner.contexts[2].transient_attempts[0].result.values["findings"],
+                         ("repair required",))
 
     def test_reinstalled_model_plan_id_gets_new_continuation_identity(self):
         class Ledger:
