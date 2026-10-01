@@ -99,6 +99,7 @@ DEFINITION = CapabilityDefinition(
     # said would make the goal store a second evidence store.
     durable_input_fields=("pull_request_number", "head_sha"),
     requires_core_judgment=True,
+    repeat_safe_observation=True,
 )
 
 

@@ -419,6 +419,7 @@ class CoreAgent:
                     )
             if mechanical_blocker is not None and (
                 decision.call is not None or decision.memory_query is not None
+                or decision.execution_plan is not None
             ):
                 if snapshot is not None:
                     snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
@@ -872,6 +873,9 @@ class CoreAgent:
                             or any(step.call.capability_id in self._turn_bound_capabilities
                                    for step in plan.steps)):
                         refused_calls = (*refused_calls, {"reason": "plan_precondition_invalid"},)
+                        continue
+                    if any(not self._plan_wait_is_safe(step) for step in plan.steps):
+                        refused_calls = (*refused_calls, {"reason": "plan_wait_unsafe"},)
                         continue
                     snapshot = self._store.replace(
                         replace(snapshot.state, execution_plan=plan),
@@ -1903,10 +1907,12 @@ class CoreAgent:
         for part in condition.path.split("."):
             next_values = []
             for value in values:
-                if part == "*" and isinstance(value, (tuple, list)):
+                if part == "*" and isinstance(value, (tuple, list)) and value:
                     next_values.extend(value)
                 elif isinstance(value, Mapping) and part in value:
                     next_values.append(value[part])
+                else:
+                    return False
             values = next_values
             if not values:
                 return False
@@ -1934,6 +1940,15 @@ class CoreAgent:
         cls, document: Mapping[str, Any], conditions: tuple[PlanCondition, ...]
     ) -> bool:
         return all(cls._plan_condition_matches(document, item) for item in conditions)
+
+    def _plan_wait_is_safe(self, step) -> bool:
+        if not step.waiting_conditions:
+            return True
+        definition = self._definition(step.call.capability_id)
+        return definition is not None and (
+            definition.side_effect is SideEffect.NONE
+            or definition.repeat_safe_observation
+        )
 
     def _plan_checkpoint(
         self, snapshot: GoalSnapshot, plan: ExecutionPlan, reason: str
@@ -1979,6 +1994,9 @@ class CoreAgent:
         while plan.cursor < len(plan.steps):
             step = plan.steps[plan.cursor]
             now = self._clock()
+            if not self._plan_wait_is_safe(step):
+                reason = "plan_wait_unsafe"
+                break
             if step.call.capability_id in self._turn_bound_capabilities:
                 reason = "plan_requires_fresh_authority"
                 break

@@ -122,6 +122,10 @@ class CapabilityDefinition:
     # A successful result whose meaning AL/X must judge before further work.
     # An execution plan may fetch it, but cannot skip the Core on arrival.
     requires_core_judgment: bool = False
+    # An observation that can safely be repeated while a declared result is
+    # pending. SideEffect.NONE already has this property; effectful reads must
+    # declare it explicitly, and consequential writes never do.
+    repeat_safe_observation: bool = False
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -134,6 +138,8 @@ class CapabilityDefinition:
             raise TypeError("transmits_authored_text must be a bool")
         if not isinstance(self.requires_core_judgment, bool):
             raise TypeError("requires_core_judgment must be a bool")
+        if not isinstance(self.repeat_safe_observation, bool):
+            raise TypeError("repeat_safe_observation must be a bool")
         codes = tuple(self.possible_failure_codes)
         object.__setattr__(self, "possible_failure_codes", codes)
         if any(not isinstance(item, str) or not item.strip() for item in codes):

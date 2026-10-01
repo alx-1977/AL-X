@@ -56,7 +56,10 @@ execution plan only when the sequence and its objective preconditions are alread
 decided and each step has an objectively checkable result. The executor advances
 those steps without asking you again. A plan does not grant approval or permission;
 any step needing a fresh person-turn approval must be called separately. State exact
-completion and pending conditions from structured capability results. Return to
+completion and pending conditions from structured capability results. Only a
+capability marked repeat_safe_observation may carry waiting conditions; start
+an external operation once, then use a separate observation call to wait.
+Return to
 reasoning for changed evidence, review judgement, failed checks, or ambiguity.
 A silent completion means you judge that no spoken or
 conversational response is useful; it is your semantic decision, never a transport or
@@ -678,6 +681,9 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
                     "purpose": item.purpose,
                     "side_effect": item.side_effect.value,
                     "requires_core_judgment": item.requires_core_judgment,
+                    "repeat_safe_observation": (
+                        item.side_effect.value == "none" or item.repeat_safe_observation
+                    ),
                     **_failure_code_payload(item, shared, code_sets),
                     "input_schema": _capability_schema_payload(item.input_schema),
                     "result_fields": _result_fields(item.output_schema),

@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.contracts import (  # noqa: E402
     AgentDecision, CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
-    ConversationOrigin, ConversationSnapshot, ConversationTurn, ExecutionPlan,
+    CognitionOrigin, ConversationOrigin, ConversationSnapshot, ConversationTurn, ExecutionPlan,
     ExecutionStep, GoalState, Objective, PlanCondition, SideEffect,
     StructuredSchema, SuccessCriterion, ValueKind,
 )
@@ -75,11 +75,15 @@ class ExecutionPlanTests(unittest.TestCase):
         self.calls = []
         self.outputs = {}
 
-    def agent(self, reasoner, *, turn_bound=frozenset(), review_requires_judgment=False):
-        names = ("coding", "review", "ci", "merge", "sync", "cleanup", "other")
+    def agent(self, reasoner, *, turn_bound=frozenset(),
+              review_requires_judgment=False, effectful=frozenset()):
+        names = ("coding", "review", "ci", "merge", "sync", "cleanup",
+                 "other", "request_external_review")
         definitions = tuple(CapabilityDefinition(
-            name, name, SCHEMA, SCHEMA, SideEffect.NONE,
+            name, name, SCHEMA, SCHEMA,
+            SideEffect.EFFECTFUL if name in effectful else SideEffect.NONE,
             requires_core_judgment=(name == "review" and review_requires_judgment),
+            repeat_safe_observation=(name == "review"),
         ) for name in names)
 
         def dispatch(call, _state):
@@ -189,11 +193,15 @@ class ExecutionPlanTests(unittest.TestCase):
             {"available": True},
         ]
         reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"))
-        self.agent(reasoner).process(conversation(), RETENTION, 2)
+        self.agent(reasoner, effectful=frozenset({"review"})).process(
+            conversation(), RETENTION, 2,
+        )
         self.assertEqual(reasoner.calls, 1)
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "waiting")
         self.now += timedelta(seconds=10)
-        self.agent(reasoner).advance_due_plans(lambda _: conversation())
+        self.agent(reasoner, effectful=frozenset({"review"})).advance_due_plans(
+            lambda _: conversation(),
+        )
         self.assertEqual(self.calls, ["review", "review"])
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "needs_core")
         self.assertEqual(reasoner.calls, 1)
@@ -324,3 +332,46 @@ class ExecutionPlanTests(unittest.TestCase):
         agent.advance_due_plans(lambda _: conversation())
         self.assertEqual(self.calls, ["ci", "ci", "merge"])
         self.assertEqual(reasoner.calls, 1)
+
+    def test_mechanical_blocker_also_blocks_a_new_plan(self):
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        reasoner = Reasoner(
+            AgentDecision(call=CapabilityCall("request-1", "request_external_review", {}),
+                          goal_id="goal"),
+            AgentDecision(execution_plan=plan(step("merge")), goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(
+            conversation(), RETENTION, 3,
+            origin=CognitionOrigin.EXTERNAL_EVENT,
+        )
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertEqual(self.calls, ["request_external_review"])
+        self.assertIsNone(self.store.load("goal").state.execution_plan)
+
+    def test_waiting_cannot_repeat_a_consequential_capability(self):
+        workflow = plan(step("merge", completion=(PlanCondition("values.state", "done"),),
+                             waiting=(PlanCondition("values.state", "pending"),)))
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+                            AgentDecision(response="Waiting requires observation.",
+                                          goal_id="goal"))
+        self.agent(reasoner, effectful=frozenset({"merge"})).process(
+            conversation(), RETENTION, 3,
+        )
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(self.store.load("goal").state.execution_plan)
+
+    def test_missing_wildcard_field_cannot_satisfy_all(self):
+        workflow = plan(step("ci", completion=(
+            PlanCondition("values.check_runs.*.conclusion", "success"),
+        )), step("merge"))
+        self.outputs["ci"] = {"check_runs": [{"conclusion": "success"}, {}]}
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+                            AgentDecision(response="Check evidence is incomplete.",
+                                          goal_id="goal"))
+        self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(self.calls, ["ci"])
+        self.assertEqual(self.store.load("goal").state.execution_plan.core_reentry_reason,
+                         "planned_result_unexpected")
