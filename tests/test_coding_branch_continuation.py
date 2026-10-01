@@ -1,4 +1,4 @@
-"""D-033 goal-owned continuation uses durable evidence and no new Git authority."""
+"""D-033 continuation is owned by one branch's durable verified commits."""
 from __future__ import annotations
 
 import ast
@@ -34,12 +34,17 @@ def goal(*attempts):
 
 
 def recorded(branch, sha, identity='record', *, capability='run_coding_task',
-             succeeded=True, durable=True):
+             succeeded=True, durable=True, implementation_reached=None):
     values = {'commit': {'branch': branch, 'commit_sha': sha}}
     call = CapabilityCall(identity, capability, {'task': 'work'})
+    failure = None
+    if not succeeded:
+        failure = {"code": "task_failed"}
+        if implementation_reached is not None:
+            failure["implementation_reached"] = implementation_reached
     result = CapabilityResult(identity, capability,
         CapabilityResultState.SUCCEEDED if succeeded else CapabilityResultState.FAILED,
-        values, failure=None if succeeded else {"code": "task_failed"},
+        values, failure=failure,
         durable_values=values if durable else {})
     return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
 
@@ -82,15 +87,40 @@ class Ownership(unittest.TestCase):
         self.assertEqual(captured[0].step_budget, 7)
         self.assertEqual(captured[0].resume_checkpoint['job_id'], 'job-2')
 
-    def test_latest_successful_commit_owns_branch_and_all_its_heads(self):
+    def test_requested_branch_owns_its_recorded_verified_heads(self):
         state = goal(recorded('feat/a', 'a', '1'), recorded('feat/b', 'b', '2'),
                      recorded('feat/a', 'c', '3'),
                      recorded('feat/b', 'd', '4', succeeded=False),
                      recorded('feat/b', 'e', '5', capability='repository_git'),
                      recorded('feat/b', 'f', '6', durable=False))
-        self.assertEqual(goal_coding_branch(state), BranchContinuation('feat/a', frozenset({'a', 'c'})))
-        self.assertIsNone(goal_coding_branch(goal()))
-        self.assertIsNone(goal_coding_branch(None))
+        self.assertEqual(
+            goal_coding_branch(state, 'feat/a'),
+            BranchContinuation('feat/a', frozenset({'a', 'c'})),
+        )
+        self.assertEqual(
+            goal_coding_branch(state, 'feat/b'),
+            BranchContinuation('feat/b', frozenset({'b'})),
+        )
+        self.assertIsNone(goal_coding_branch(state, 'feat/missing'))
+        self.assertIsNone(goal_coding_branch(state, ' feat/a'))
+        self.assertIsNone(goal_coding_branch(goal(), 'feat/a'))
+        self.assertIsNone(goal_coding_branch(None, 'feat/a'))
+        self.assertIn('same branch', DEFINITION.purpose)
+        self.assertIn('another branch', DEFINITION.purpose)
+
+    def test_malformed_successful_commit_fails_the_proof_closed(self):
+        good = recorded('feat/a', 'a', '1')
+        broken = (
+            recorded('feat/a', '', 'blank'),
+            recorded('feat/a', '   ', 'space'),
+            recorded('feat/a', 12, 'number'),
+            recorded('main', 'abc', 'mainline'),
+            recorded('../bad', 'abc', 'bad'),
+            recorded('feat/b', '', 'other-blank'),
+        )
+        for attempt in broken:
+            with self.subTest(identity=attempt.call.call_id):
+                self.assertIsNone(goal_coding_branch(goal(good, attempt), 'feat/a'))
 
     def test_contract_validates_and_freezes(self):
         for branch, heads in [('main', {'a'}), ('../bad', {'a'}), ('feat/a', set()), ('feat/a', {''})]:
@@ -174,12 +204,25 @@ class ContinuationJobs(unittest.TestCase):
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         return result.values['commit_sha']
 
-    def assert_refused(self, result):
+    def assert_refused(self, result, reason=None):
         self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure['code'], 'git_refused')
         self.assertIs(result.failure['implementation_reached'], False)
         self.assertEqual(self.sessions[-1].calls, [])
         self.assertEqual(CoreAgent._failed_coding_executions(self.state), 0)
         self.assertEqual(CoreAgent._request_conflict_coding_executions(self.state), 0)
+        if reason is not None:
+            self.assertEqual(result.failure['reason_code'], reason)
+
+    def plant(self, *attempts):
+        self.state = replace(self.state, attempts=(*self.state.attempts, *attempts))
+
+    def later_verified_branch(self, branch='feat/other'):
+        self.git('switch', 'main')
+        result = self.run_job({'other.md': f'{branch}\n'}, branch=branch)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertEqual(result.values['branch'], branch)
+        return result.values['commit_sha']
 
     def test_sequential_jobs_restart_and_only_own_delta(self):
         first_sha = self.first()
@@ -208,41 +251,151 @@ class ContinuationJobs(unittest.TestCase):
         self.assertFalse(result.values['tests_run'])
         self.assertTrue(result.values['all_required_verification_passed'])
         self.assertIn('BRANCH continued', [t.transition for t in self.telemetry])
-        self.assertEqual(goal_coding_branch(self.state).permitted_heads,
-                         frozenset({first_sha, result.values['commit_sha']}))
+        self.assertEqual(
+            goal_coding_branch(self.state, 'feat/goal').permitted_heads,
+            frozenset({first_sha, result.values['commit_sha']}),
+        )
+        self.assertIsNone(goal_coding_branch(self.state, 'feat/other'))
 
     def test_unrelated_goal_and_mismatched_request_cannot_continue(self):
         self.first()
         owned = self.state
         self.state = replace(goal(), goal_id='unrelated')
-        self.assert_refused(self.run_job(continuation=True))
+        self.assert_refused(self.run_job(continuation=True), 'continuation_ownership_unproven')
         self.state = owned
-        self.assert_refused(self.run_job(continuation=True, branch='feat/different'))
-        self.assert_refused(self.run_job(continuation=True, branch=' feat/goal '))
+        self.assert_refused(self.run_job(continuation=True, branch='feat/different'),
+                            'continuation_ownership_unproven')
+        self.assert_refused(self.run_job(continuation=True, branch=' feat/goal '),
+                            'continuation_ownership_unproven')
 
     def test_dirty_continuation_refused_and_preserved(self):
         self.first()
         (self.root / 'mine.txt').write_text('keep me\n')
-        self.assert_refused(self.run_job(continuation=True))
+        self.assert_refused(self.run_job(continuation=True), 'canonical_checkout_dirty')
         self.assertEqual((self.root / 'mine.txt').read_text(), 'keep me\n')
 
     def test_detached_wrong_branch_and_unrecorded_head_refused(self):
         sha = self.first()
         self.git('checkout', '--detach', sha)
-        self.assert_refused(self.run_job(continuation=True))
+        self.assert_refused(self.run_job(continuation=True), 'continuation_branch_mismatch')
         self.git('switch', 'main')
-        self.assert_refused(self.run_job(continuation=True))
+        self.assert_refused(self.run_job(continuation=True), 'continuation_branch_mismatch')
         self.git('switch', 'feat/goal')
         self.git('commit', '--allow-empty', '-m', 'AL/X authored, not a CA job')
-        self.assert_refused(self.run_job(continuation=True))
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), sha)
+        self.assert_refused(self.run_job(continuation=True), 'continuation_ownership_unproven')
 
     def test_each_low_level_precondition(self):
         sha = self.first()
-        for branch, heads in [('main', {sha}), ('../bad', {sha}), ('feat/other', {sha}), ('feat/goal', set()), ('feat/goal', {'unknown'})]:
-            with self.subTest(branch=branch, heads=heads), self.assertRaises(CodingError):
-                continue_feature_branch(self.root, branch, frozenset(heads))
+        for branch in ('main', '../bad'):
+            with self.subTest(branch=branch):
+                with self.assertRaises(CodingError) as caught:
+                    continue_feature_branch(self.root, branch, frozenset({sha}))
+                self.assertEqual(
+                    caught.exception.details['reason_code'], 'branch_name_not_permitted',
+                )
+        with self.assertRaises(CodingError) as caught:
+            continue_feature_branch(self.root, 'feat/other', frozenset({sha}))
+        self.assertEqual(
+            caught.exception.details['reason_code'], 'continuation_branch_mismatch',
+        )
+        for heads in (frozenset(), frozenset({'unknown'})):
+            with self.subTest(heads=heads):
+                with self.assertRaises(CodingError) as caught:
+                    continue_feature_branch(self.root, 'feat/goal', heads)
+                self.assertEqual(
+                    caught.exception.details['reason_code'],
+                    'continuation_ownership_unproven',
+                )
         self.assertEqual(continue_feature_branch(self.root, 'feat/goal', frozenset({sha})), 'feat/goal')
         self.assertEqual(self.git('rev-parse', 'HEAD'), sha)
+
+    def test_earlier_branch_continues_after_a_later_commit_on_another_branch(self):
+        sha = self.first()
+        other = self.later_verified_branch()
+        self.git('switch', 'feat/goal')
+        self.git('reset', '--hard', sha)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        owned = goal_coding_branch(self.state, 'feat/goal')
+        self.assertEqual(owned.permitted_heads, frozenset({sha}))
+        self.assertEqual(goal_coding_branch(self.state, 'feat/other').permitted_heads,
+                         frozenset({other}))
+        result = self.run_job({'rollback.md': 'Continued from the earlier branch.\n'},
+                              continuation=True)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertEqual(result.values['branch'], 'feat/goal')
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), sha)
+        self.assertEqual(self.git('branch', '--show-current'), 'feat/goal')
+
+    def test_recorded_descendant_continues_while_another_branch_is_newer(self):
+        first_sha = self.first()
+        later = self.run_job({'notes.md': 'Later commit on the same branch.\n'},
+                             continuation=True)
+        self.assertEqual(later.state, CapabilityResultState.SUCCEEDED, later.failure)
+        descendant = later.values['commit_sha']
+        other = self.later_verified_branch()
+        self.git('switch', 'feat/goal')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), descendant)
+        owned = goal_coding_branch(self.state, 'feat/goal')
+        self.assertEqual(owned.permitted_heads, frozenset({first_sha, descendant}))
+        self.assertNotIn(other, owned.permitted_heads)
+        result = self.run_job({'more.md': 'Continued from the recorded descendant.\n'},
+                              continuation=True)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), descendant)
+
+    def test_arbitrary_commit_is_unowned(self):
+        self.first()
+        self.git('switch', 'main')
+        self.git('commit', '--allow-empty', '-m', 'arbitrary commit')
+        arbitrary = self.git('rev-parse', 'HEAD')
+        self.git('switch', 'feat/goal')
+        self.git('reset', '--hard', arbitrary)
+        self.assertEqual(self.git('branch', '--show-current'), 'feat/goal')
+        self.assert_refused(self.run_job(continuation=True), 'continuation_ownership_unproven')
+
+    def test_holding_commit_that_is_not_a_recorded_verified_sha_is_unowned(self):
+        sha = self.first()
+        (self.root / 'hold.txt').write_text('held outside a verified coding commit\n')
+        self.git('add', 'hold.txt')
+        self.git('commit', '-m', 'holding commit')
+        holding = self.git('rev-parse', 'HEAD')
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), sha)
+        self.assertNotIn(holding, goal_coding_branch(self.state, 'feat/goal').permitted_heads)
+        self.assert_refused(self.run_job(continuation=True), 'continuation_ownership_unproven')
+        self.assertEqual((self.root / 'hold.txt').read_text(),
+                         'held outside a verified coding commit\n')
+
+    def test_failed_job_commit_is_unowned(self):
+        self.first()
+        self.git('commit', '--allow-empty', '-m', 'failed job commit')
+        failed_sha = self.git('rev-parse', 'HEAD')
+        self.plant(recorded('feat/goal', failed_sha, 'failed', succeeded=False,
+                            implementation_reached=False))
+        self.assertNotIn(failed_sha, goal_coding_branch(self.state, 'feat/goal').permitted_heads)
+        self.assert_refused(self.run_job(continuation=True), 'continuation_ownership_unproven')
+
+    def test_unverified_commit_is_unowned(self):
+        self.first()
+        self.git('commit', '--allow-empty', '-m', 'unverified commit')
+        loose = self.git('rev-parse', 'HEAD')
+        self.plant(recorded('feat/goal', loose, 'loose', durable=False))
+        self.assertNotIn(loose, goal_coding_branch(self.state, 'feat/goal').permitted_heads)
+        self.assert_refused(self.run_job(continuation=True), 'continuation_ownership_unproven')
+
+    def test_verified_commit_recorded_on_another_branch_is_unowned(self):
+        sha = self.first()
+        other = self.later_verified_branch()
+        self.git('switch', 'feat/goal')
+        self.git('reset', '--hard', other)
+        self.assertEqual(self.git('branch', '--show-current'), 'feat/goal')
+        self.assertNotIn(other, goal_coding_branch(self.state, 'feat/goal').permitted_heads)
+        self.assert_refused(self.run_job(continuation=True), 'continuation_ownership_unproven')
+        self.git('switch', 'feat/other')
+        self.assert_refused(self.run_job(continuation=True, branch='feat/goal'),
+                            'continuation_branch_mismatch')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), other)
+        self.assertIn(sha, goal_coding_branch(self.state, 'feat/goal').permitted_heads)
 
     def test_rollback_to_previously_recorded_goal_commit_can_continue(self):
         sha = self.first()
