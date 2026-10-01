@@ -409,13 +409,6 @@ class CoreAgent:
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
-            if mechanical_blocker is not None and (
-                decision.call is not None or decision.memory_query is not None
-                or decision.execution_plan is not None
-            ):
-                if snapshot is not None:
-                    snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
-                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
             continuation_notices = ()
             deferred_selection: str | None = None
             if decision.goal_id is not None:
@@ -486,6 +479,15 @@ class CoreAgent:
                                 "new_person_turn",
                             )
                     mechanical_blocker = self._plan_mechanical_blocker(snapshot)
+                    current_plan = snapshot.state.execution_plan
+                    if (mechanical_blocker is not None and current_plan is not None
+                            and current_plan.status in {"ready", "waiting"}):
+                        snapshot = self._plan_checkpoint(
+                            snapshot,
+                            replace(current_plan, status="needs_core", next_due_at=None,
+                                    core_reentry_reason="planned_result_unexpected"),
+                            "planned_result_unexpected",
+                        )
                     # A goal may be resumed from any conversation, but only one
                     # that was actually offered this turn. The check used to be
                     # that the goal belonged to this conversation, which made
@@ -520,6 +522,13 @@ class CoreAgent:
                         and not decision.memory_proposals
                     ):
                         continue
+            if mechanical_blocker is not None and (
+                decision.call is not None or decision.memory_query is not None
+                or decision.execution_plan is not None
+            ):
+                if snapshot is not None:
+                    snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
+                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
             decision = self._without_redundant_approval(decision)
             decision = replace(
                 decision,
@@ -1942,12 +1951,15 @@ class CoreAgent:
         if snapshot is None or snapshot.state.execution_plan is None:
             return None
         plan = snapshot.state.execution_plan
-        if (plan.status != "needs_core" or plan.cursor >= len(plan.steps)
+        if (plan.status not in {"ready", "waiting", "needs_core"}
+                or plan.cursor >= len(plan.steps)
                 or not snapshot.state.attempts):
             return None
         attempt = snapshot.state.attempts[-1]
         if (attempt.call is None
-                or attempt.call.capability_id != plan.steps[plan.cursor].call.capability_id):
+                or attempt.call.capability_id != plan.steps[plan.cursor].call.capability_id
+                or (plan.status == "ready"
+                    and attempt.call.call_id != plan.steps[plan.cursor].call.call_id)):
             return None
         return self._mechanical_blocker_from_attempt(attempt)
 
