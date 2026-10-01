@@ -136,6 +136,9 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
     "src/alx/providers/gated_transcription.py": (
         "tests/test_speech_transmission_gate.py",
     ),
+    "src/alx/providers/github_checks.py": (
+        "tests/test_pull_request_checks.py",
+    ),
     "src/alx/providers/github_merge.py": (
         "tests/test_merge_authority.py",
     ),
@@ -225,6 +228,9 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
         "tests/test_review_request.py",
         "tests/test_read_external_review.py",
     ),
+    "src/alx/tools/pull_request_checks.py": (
+        "tests/test_pull_request_checks.py",
+    ),
     "src/alx/tools/review_content.py": (
         "tests/test_read_external_review.py",
         "tests/test_review_request.py",
@@ -279,6 +285,9 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
     "src/alx/bootstrap/reasoning.py": (
         "tests/test_origin_selected_core.py",
         "tests/test_model_reasoner.py",
+    ),
+    "src/alx/bootstrap/pull_request_checks.py": (
+        "tests/test_pull_request_checks.py",
     ),
     "src/alx/bootstrap/repository.py": (
         "tests/test_merge_authority.py",
