@@ -434,6 +434,45 @@ class ExecutionPlanTests(unittest.TestCase):
         self.assertEqual(self.calls, ["request_external_review"])
         self.assertIsNone(self.store.load("goal").state.execution_plan)
 
+    def test_planned_review_failure_blocks_follow_up_action(self):
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        workflow = plan(step("request_external_review"), step("merge"))
+        reasoner = Reasoner(
+            AgentDecision(execution_plan=workflow, goal_id="goal"),
+            AgentDecision(call=CapabilityCall("merge-after-review", "merge", {}),
+                          goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(
+            conversation(), RETENTION, 2, origin=CognitionOrigin.EXTERNAL_EVENT,
+        )
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertEqual(self.calls, ["request_external_review"])
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "needs_core")
+
+    def test_planned_review_blocker_survives_restart(self):
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        workflow = plan(step("request_external_review"), step("merge"))
+        self.agent(Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"))).process(
+            conversation(), RETENTION, 1, origin=CognitionOrigin.EXTERNAL_EVENT,
+        )
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        reasoner = Reasoner(AgentDecision(
+            call=CapabilityCall("merge-after-restart", "merge", {}), goal_id="goal",
+        ))
+        outcome = self.agent(reasoner).process(
+            conversation(), RETENTION, 1, origin=CognitionOrigin.EXTERNAL_EVENT,
+            resume_plan_goal_id="goal",
+        )
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertEqual(self.calls, ["request_external_review"])
+
     def test_waiting_cannot_repeat_a_consequential_capability(self):
         workflow = plan(step("merge", completion=(PlanCondition("values.state", "done"),),
                              waiting=(PlanCondition("values.state", "pending"),)))

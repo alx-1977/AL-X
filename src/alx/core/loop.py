@@ -303,7 +303,7 @@ class CoreAgent:
         refused_calls: tuple[Mapping[str, Any], ...] = ()
         # A settled mechanical blocker is explained once. Pending external work
         # never reaches this boundary: its executor waits without reasoning.
-        mechanical_blocker: str | None = None
+        mechanical_blocker: str | None = self._plan_mechanical_blocker(snapshot)
         # One-shot notice that a call-less decision would have ended the turn
         # while remaining work was still immediately executable. Shown on the
         # next reasoning step, then cleared.
@@ -877,6 +877,7 @@ class CoreAgent:
                     carried_plan_attempt = self._active_plan_attempt(snapshot.state.goal_id)
                     if carried_plan_attempt is not None:
                         transient_attempts = (carried_plan_attempt,)
+                    mechanical_blocker = self._plan_mechanical_blocker(snapshot)
                     if plan_reason in {"waiting", "not_due"}:
                         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="plan_waiting")
                     if plan_reason == "inactive":
@@ -1128,11 +1129,9 @@ class CoreAgent:
                 # boundary, so a corrected call may still use the same turn.
                 approved_dispatches.add(decision.call.capability_id)
             snapshot = self._finalize_dispatch(snapshot, attempt, now)
-            if (decision.call.capability_id in {
-                "request_external_review", "read_external_review", "merge_pull_request"
-            } and attempt.result is not None
-                    and (attempt.result.failure or {}).get("requires_judgement")):
-                mechanical_blocker = str(attempt.result.failure["code"])
+            blocker = self._mechanical_blocker_from_attempt(attempt)
+            if blocker is not None:
+                mechanical_blocker = blocker
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
                         conversation_id, conversation, snapshot, reasoning_context,
@@ -1921,6 +1920,28 @@ class CoreAgent:
             self._plan_transient_attempts.pop(goal_id, None)
             return None
         return attempt
+
+    @staticmethod
+    def _mechanical_blocker_from_attempt(attempt: CapabilityAttempt) -> str | None:
+        if (attempt.call is None or attempt.call.capability_id not in {
+                "request_external_review", "read_external_review", "merge_pull_request"
+        } or attempt.result is None):
+            return None
+        failure = attempt.result.failure or {}
+        if not failure.get("requires_judgement"):
+            return None
+        code = failure.get("code")
+        return str(code) if code is not None else "planned_result_unexpected"
+
+    def _plan_mechanical_blocker(self, snapshot: GoalSnapshot | None) -> str | None:
+        if snapshot is None or snapshot.state.execution_plan is None:
+            return None
+        plan = snapshot.state.execution_plan
+        if (plan.status != "needs_core" or plan.core_reentry_reason not in {
+                "planned_result_unexpected", "planned_evidence_requires_judgement"
+        } or not snapshot.state.attempts):
+            return None
+        return self._mechanical_blocker_from_attempt(snapshot.state.attempts[-1])
 
     def _remember_plan_attempt(self, goal_id: str, attempt: CapabilityAttempt) -> None:
         provenance = None if attempt.result is None else attempt.result.provenance
