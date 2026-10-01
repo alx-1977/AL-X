@@ -1338,7 +1338,7 @@ class CoreTests(unittest.TestCase):
         reasoner = Queued(
             AgentDecision(call=first),
             AgentDecision(call=repeated),
-            AssertionError("third model decision occurred"),
+            AgentDecision(response="That approval is still invalid."),
             selects="goal-1",
         )
         dispatches = []
@@ -1357,8 +1357,14 @@ class CoreTests(unittest.TestCase):
         )
         outcome = agent.process(conversation(), RETENTION, 3)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
+        self.assertIs(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "That approval is still invalid.")
         self.assertEqual(dispatches, [first])
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "repeated_rejected_call")
+        self.assertEqual(reasoner.contexts[-1].refused_calls[-1]["subject"], "approval_invalid")
+        self.assertEqual(self.store.load("goal-1").state.attempts[0].reason_code,
+                         "approval_invalid")
 
     def test_interrupted_dispatch_recovers_without_repeating_the_action(self) -> None:
         """An interrupted dispatch must neither wedge the goal nor be retried.

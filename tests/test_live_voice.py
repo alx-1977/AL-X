@@ -839,7 +839,8 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(checkpoint.snapshot.state, preserved_state)
 
     async def test_other_checkpoint_reasons_use_the_same_voice_boundary(self) -> None:
-        for reason in ("budget_exhausted", "goal_selection_revisited"):
+        for reason in ("budget_exhausted", "goal_selection_revisited",
+                       "repeated_rejected_call"):
             with self.subTest(reason=reason):
                 gateway = FakeGateway((outcome(
                     GoalStatus.ACTIVE,

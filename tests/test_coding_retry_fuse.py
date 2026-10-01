@@ -290,7 +290,8 @@ class CodingRetryFuseTests(unittest.TestCase):
             refusals = [item for item in store.load("goal-a").state.attempts if item.reason_code == "coding_retry_exhausted"]
             self.assertEqual(len(refusals), 1)
             self.assertEqual(outcome.response, "The coding path is exhausted.")
-            self.assertEqual(reworded_outcome.reason, "budget_exhausted")
+            self.assertEqual(reworded_outcome.reason, "coding_retry_exhausted")
+            self.assertEqual(reworded_outcome.state.value, "checkpointed")
 
 
 def git(repository: Path, *argv: str) -> str:
