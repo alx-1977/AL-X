@@ -340,6 +340,28 @@ def _payload(values) -> bytes:
     raise MailAccessError("message_unavailable")
 
 
+def _listed_uids(values) -> tuple[str, ...]:
+    """Decimal UIDs from one UID SEARCH result, in server order."""
+    found: list[str] = []
+    for value in values or ():
+        if isinstance(value, bytes):
+            found.extend(
+                token.decode("ascii") for token in value.split() if token.isdigit()
+            )
+    return tuple(found)
+
+
+def _same_uid(left: str, right: str) -> bool:
+    """Whether two UID tokens name the same message.
+
+    Decimal tokens compare as integers, so leading zeros do not make them
+    different. Any other pair matches only when the two strings are equal.
+    """
+    if left.isdigit() and right.isdigit():
+        return int(left) == int(right)
+    return left == right
+
+
 class SQLiteMailObservationState:
     """Persist only IMAP references, headers, and presentation state—never bodies.
 
@@ -1342,15 +1364,25 @@ class ICloudMailAdapter:
                 return validity, destination
         return None
 
-    def _move_selected(self, connection, reference: MailReference, mailbox: str) -> MailMoveResult:
-        # A command whose response is lost may already have moved the item.
+    def _selected_message_id(self, connection, reference: MailReference) -> str | None:
+        """Message-ID of the already selected source message, when the server returns one."""
         try:
-            status, move_data = connection.uid("MOVE", reference.uid, self._quoted(mailbox))
+            status, values = connection.uid(
+                "fetch",
+                reference.uid,
+                "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+            )
+            if status != "OK":
+                return None
+            parsed = BytesParser(policy=policy.default).parsebytes(_payload(values))
         except Exception:
-            return MailMoveResult(mailbox)
-        if status != "OK":
-            raise MailAccessError("move_failed")
+            return None
+        return _identifier(parsed.get("Message-ID")) or None
 
+    def _copyuid_reference(
+        self, connection, reference: MailReference, mailbox: str, move_data,
+    ) -> MailReference | None:
+        """Destination identity from an RFC 4315 COPYUID, read back by UID."""
         try:
             _code, response_data = connection.response("COPYUID")
             mapping = self._copyuid(response_data, reference.uid, response_code=True)
@@ -1358,28 +1390,127 @@ class ICloudMailAdapter:
             mapping = None
         if mapping is None:
             mapping = self._copyuid(move_data, reference.uid)
+        if mapping is None:
+            return None
+        validity, uid = mapping
+        try:
+            selected, _values = connection.select(self._quoted(mailbox), readonly=True)
+            if selected == "OK" and _uid_validity(connection) == validity:
+                found, values = connection.uid("search", None, "UID", uid)
+                if found == "OK" and values and values[0] and values[0].split() == [uid.encode("ascii")]:
+                    return MailReference(mailbox, validity, uid)
+        except Exception:
+            # The accepted move stands; failed confirmation is partial.
+            return None
+        return None
 
-        destination_reference = None
-        if mapping is not None:
-            validity, uid = mapping
-            try:
-                selected, _ = connection.select(self._quoted(mailbox), readonly=True)
-                if selected == "OK" and _uid_validity(connection) == validity:
-                    found, values = connection.uid("search", None, "UID", uid)
-                    if found == "OK" and values and values[0] and values[0].split() == [uid.encode("ascii")]:
-                        destination_reference = MailReference(mailbox, validity, uid)
-            except Exception:
-                # The accepted move stands; failed confirmation is partial.
-                pass
+    def _source_uid_state(self, connection, reference: MailReference) -> str:
+        """Whether the source UID remains: present, gone, or unknown."""
+        try:
+            status, _values = connection.select(
+                self._quoted(reference.mailbox_id), readonly=True
+            )
+            if status != "OK":
+                return "unknown"
+            status, values = connection.uid("search", None, "UID", reference.uid)
+        except Exception:
+            return "unknown"
+        if status != "OK":
+            return "unknown"
+        if any(_same_uid(item, reference.uid) for item in _listed_uids(values)):
+            return "present"
+        return "gone"
 
+    def _destination_match(
+        self, connection, mailbox: str, message_id: str | None,
+    ) -> tuple[str, MailReference | None]:
+        """Unique Message-ID in the destination: found, missing, or unknown.
+
+        More than one UID is not an identity. An empty OK search means this
+        message is not in the mailbox. A select or search error cannot tell.
+        """
+        if not message_id:
+            return "unknown", None
+        try:
+            status, _values = connection.select(self._quoted(mailbox), readonly=True)
+            if status != "OK":
+                return "unknown", None
+            validity = _uid_validity(connection)
+            status, values = connection.uid(
+                "search", None, "HEADER", "Message-ID", self._search_text(message_id),
+            )
+        except Exception:
+            return "unknown", None
+        if status != "OK":
+            return "unknown", None
+        found = _listed_uids(values)
+        if len(found) != 1:
+            return ("missing" if not found else "unknown"), None
+        uid = found[0]
+        if not 0 < int(uid) <= 0xFFFFFFFF:
+            return "unknown", None
+        return "found", MailReference(mailbox, validity, uid)
+
+    def _release_attention(self, reference: MailReference) -> None:
+        """Drop local attention. Its failure does not change the move outcome."""
         try:
             self._observations.acknowledge(reference)
         except MailAccessError as error:
             if error.code != "observation_unavailable":
-                LOGGER.warning("Mail attention cleanup unavailable after UID MOVE: %s", error.code)
+                LOGGER.warning(
+                    "Mail attention cleanup unavailable after UID MOVE: %s",
+                    error.code,
+                )
         except Exception:
             LOGGER.warning("Mail attention cleanup unavailable after UID MOVE")
-        return MailMoveResult(mailbox, destination_reference)
+
+    def _move_selected(self, connection, reference: MailReference, mailbox: str) -> MailMoveResult:
+        """UID MOVE of the already selected message.
+
+        COPYUID and a unique destination Message-ID can name where the message
+        landed. A source UID that the post-move check still finds discards both
+        before the outcome is chosen, so the returned result carries no
+        destination reference. With the source present, a rejected MOVE raises
+        move_failed, an empty destination search raises move_failed, and an
+        accepted or lost MOVE in every other search state returns no destination
+        reference. The caller reports that return as partial mail_move_unconfirmed.
+        """
+        # Read the identifier first. The MOVE response can be lost after the
+        # message has already moved, and this connection then checks for itself.
+        message_id = self._selected_message_id(connection, reference)
+        try:
+            status, move_data = connection.uid(
+                "MOVE", reference.uid, self._quoted(mailbox)
+            )
+        except Exception:
+            status, move_data = None, None
+
+        destination = (
+            self._copyuid_reference(connection, reference, mailbox, move_data)
+            if status == "OK" else None
+        )
+        source_state = self._source_uid_state(connection, reference)
+        destination_state, matched = self._destination_match(
+            connection, mailbox, message_id
+        )
+        # A unique destination hit is the move. COPYUID is only a fallback
+        # when that search cannot name exactly one UID.
+        if destination_state == "found":
+            destination = matched
+        # Last assignment when the source UID remains. Clearing earlier would
+        # let the Message-ID match write a destination back. The search state
+        # itself is kept, so an empty destination search still fails below.
+        if source_state == "present":
+            destination = None
+
+        # Still in the source and absent from the destination: it did not move.
+        # A rejected command whose check cannot show a destination is the same.
+        if source_state == "present" and destination_state == "missing":
+            raise MailAccessError("move_failed")
+        if destination is None and status not in (None, "OK"):
+            raise MailAccessError("move_failed")
+        self._release_attention(reference)
+        return MailMoveResult(mailbox, destination)
 
     def file_message(self, reference: MailReference, mailbox: str) -> MailMoveResult:
         """Move one message to a named mailbox, releasing mail attention.

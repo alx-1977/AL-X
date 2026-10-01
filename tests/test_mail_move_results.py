@@ -23,6 +23,12 @@ from alx.tools import (  # noqa: E402
 
 SOURCE = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "42"}
 DESTINATION = {"mailbox_id": "Processed", "uid_validity": "888", "uid": "7"}
+MESSAGE_ID = "<invoice@example.test>"
+MESSAGE_BYTES = (
+    f"Message-ID: {MESSAGE_ID}\r\n"
+    "Subject: Invoice\r\n"
+    "\r\n"
+).encode()
 
 
 class MoveConnection:
@@ -30,11 +36,17 @@ class MoveConnection:
         self.selected = ""
         self.commands = []
         self.move_status = "OK"
+        self.move_error = None
         self.copyuid = b"888 42 7"
         self.move_data = [b"Move completed"]
         self.destination_select = "OK"
         self.destination_validity = "888"
+        # COPYUID read-back. Distinct from the post-move source and Message-ID
+        # searches so a canned hit here cannot pretend the presence check passed.
         self.destination_search = "OK", [b"7"]
+        self.message_bytes = None
+        self.source_search = "NO", []
+        self.header_search = "NO", []
 
     def login(self, *_):
         return "OK", []
@@ -62,8 +74,18 @@ class MoveConnection:
     def uid(self, operation, *arguments):
         self.commands.append(("UID", operation, *arguments))
         if operation == "MOVE":
+            if self.move_error is not None:
+                raise self.move_error
             return self.move_status, self.move_data
+        if operation == "fetch":
+            if self.message_bytes is None:
+                return "NO", []
+            return "OK", [(b"metadata", self.message_bytes), b")"]
         if operation == "search":
+            if "HEADER" in arguments:
+                return self.header_search
+            if arguments[-2:] == ("UID", SOURCE["uid"]):
+                return self.source_search
             return self.destination_search
         raise AssertionError(operation)
 
@@ -98,6 +120,22 @@ class MoveResultTests(unittest.TestCase):
                 "(mailbox_id, uid_validity, uid, event_json, state) "
                 "VALUES ('INBOX', '777', 42, '{}', 'done')"
             )
+
+    def hold_attention(self) -> None:
+        with self.observations._connection:
+            self.observations._connection.execute(
+                "INSERT INTO mail_observations "
+                "(mailbox_id, uid_validity, uid, event_json, state) "
+                "VALUES ('INBOX', '777', 42, '{}', 'pending')"
+            )
+
+    def attention_state(self) -> str:
+        row = self.observations._connection.execute(
+            "SELECT state FROM mail_observations "
+            "WHERE mailbox_id = 'INBOX' AND uid_validity = '777' AND uid = 42"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        return row[0]
 
     def assert_one_move(self):
         self.assertEqual(
@@ -166,6 +204,179 @@ class MoveResultTests(unittest.TestCase):
                 self.assertEqual(result.state, CapabilityResultState.FAILED)
                 self.assertEqual(result.failure["code"], "move_failed")
                 self.assert_one_move()
+
+    def test_failed_move_keeps_attention_for_both_capabilities(self):
+        """move_failed leaves the source in the INBOX, so attention stays."""
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name in ("source_still_present", "rejected_without_destination"):
+                with self.subTest(capability=capability, case=name):
+                    self._reset()
+                    self.hold_attention()
+                    if name == "source_still_present":
+                        # Empty destination search, source UID still present.
+                        self.connection.copyuid = None
+                        self.connection.message_bytes = MESSAGE_BYTES
+                        self.connection.source_search = "OK", [b"42"]
+                        self.connection.header_search = "OK", [b""]
+                    else:
+                        # Rejected MOVE and nothing names a destination.
+                        self.connection.move_status = "NO"
+                        self.connection.copyuid = None
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, CapabilityResultState.FAILED)
+                    self.assertEqual(result.failure["code"], "move_failed")
+                    self.assertEqual(self.attention_state(), "pending")
+                    self.assert_one_move()
+
+    def test_successful_or_unconfirmed_move_releases_attention_for_both_capabilities(self):
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name, prepare, state, code in (
+                ("succeeded", lambda: None, CapabilityResultState.SUCCEEDED, None),
+                (
+                    "unconfirmed",
+                    lambda: setattr(self.connection, "copyuid", None),
+                    CapabilityResultState.PARTIAL,
+                    "mail_move_unconfirmed",
+                ),
+            ):
+                with self.subTest(capability=capability, case=name):
+                    self._reset()
+                    self.hold_attention()
+                    prepare()
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, state)
+                    if code is None:
+                        self.assertIsNone(result.failure)
+                    else:
+                        self.assertEqual(result.failure["code"], code)
+                    self.assertEqual(self.attention_state(), "done")
+                    self.assert_one_move()
+
+    def _unavailable_observation(self) -> None:
+        self.observations.acknowledge = lambda _reference: (_ for _ in ()).throw(
+            MailAccessError("observation_unavailable")
+        )
+
+    def _arm_presence(self, source, header, *, lost: bool = False) -> None:
+        """COPYUID is absent. Only the post-move check can decide the outcome."""
+        self.connection.copyuid = None
+        self.connection.message_bytes = MESSAGE_BYTES
+        self.connection.source_search = source
+        self.connection.header_search = header
+        if lost:
+            self.connection.move_error = OSError("reset")
+        self._unavailable_observation()
+
+    def test_presence_confirms_a_move_copyuid_and_observation_cannot(self):
+        quoted = f'"{MESSAGE_ID}"'
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for lost in (False, True):
+                with self.subTest(capability=capability, lost=lost):
+                    self._reset()
+                    self._arm_presence(("OK", [b""]), ("OK", [b"7"]), lost=lost)
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+                    self.assertIsNone(result.failure)
+                    self.assertEqual(result.values["destination_reference"], DESTINATION)
+                    self.assertTrue(
+                        result.values["moved" if capability == MOVE_MAIL_MESSAGE_TO_TRASH else "filed"]
+                    )
+                    operations = [
+                        item[1] for item in self.connection.commands if item[0] == "UID"
+                    ]
+                    self.assertLess(operations.index("fetch"), operations.index("MOVE"))
+                    self.assertLess(operations.index("MOVE"), operations.index("search"))
+                    self.assertIn(
+                        ("UID", "search", None, "HEADER", "Message-ID", quoted),
+                        self.connection.commands,
+                    )
+                    self.assert_one_move()
+
+    def test_presence_failure_is_move_failed_for_both_capabilities(self):
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for lost in (False, True):
+                with self.subTest(capability=capability, lost=lost):
+                    self._reset()
+                    self._arm_presence(("OK", [b"42"]), ("OK", [b""]), lost=lost)
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, CapabilityResultState.FAILED)
+                    self.assertEqual(result.failure["code"], "move_failed")
+                    self.assertNotIn("destination_reference", result.values)
+                    self.assert_one_move()
+
+    def test_inconclusive_presence_stays_unconfirmed_for_both_capabilities(self):
+        shapes = {
+            "unknown": (("NO", []), ("NO", [])),
+            "left_without_match": (("OK", [b""]), ("OK", [b""])),
+            "several_matches": (("OK", [b""]), ("OK", [b"7 9"])),
+        }
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for lost in (False, True):
+                for name, (source, header) in shapes.items():
+                    with self.subTest(capability=capability, lost=lost, shape=name):
+                        self._reset()
+                        self._arm_presence(source, header, lost=lost)
+                        result = self.run_move(capability)
+                        self.assertEqual(result.state, CapabilityResultState.PARTIAL)
+                        self.assertEqual(result.failure["code"], "mail_move_unconfirmed")
+                        self.assertNotIn("destination_reference", result.values)
+                        self.assert_one_move()
+
+    def test_present_source_discards_valid_copyuid_for_both_capabilities(self):
+        responses = {
+            "rejected": ("NO", False, CapabilityResultState.FAILED, "move_failed"),
+            "accepted": ("OK", False, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+            "lost": ("OK", True, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+        }
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name, (status, lost, state, code) in responses.items():
+                with self.subTest(capability=capability, response=name):
+                    self._reset()
+                    self.connection.copyuid = b"888 42 7"
+                    self.connection.move_data = [b"[COPYUID 888 42 7] Move completed"]
+                    self.connection.move_status = status
+                    self.connection.source_search = "OK", [b"42"]
+                    if lost:
+                        self.connection.move_error = OSError("reset")
+                    result = self.run_move(capability)
+                    self.assertEqual(result.state, state)
+                    self.assertEqual(result.failure["code"], code)
+                    self.assertNotIn("destination_reference", result.values)
+                    if name == "accepted":
+                        self.assertIn(
+                            ("UID", "search", None, "UID", "7"),
+                            self.connection.commands,
+                        )
+                    self.assert_one_move()
+
+    def test_present_source_discards_preexisting_message_id_for_both_capabilities(self):
+        responses = {
+            "rejected": ("NO", False, CapabilityResultState.FAILED, "move_failed"),
+            "accepted": ("OK", False, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+            "lost": ("OK", True, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
+        }
+        quoted = f'"{MESSAGE_ID}"'
+        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+            for name, (status, lost, state, code) in responses.items():
+                with self.subTest(capability=capability, response=name):
+                    self._reset()
+                    self.connection.copyuid = None
+                    self.connection.message_bytes = MESSAGE_BYTES
+                    self.connection.source_search = "OK", [b"42"]
+                    self.connection.header_search = "OK", [b"7"]
+                    self.connection.move_status = status
+                    if lost:
+                        self.connection.move_error = OSError("reset")
+                    result = self.run_move(capability)
+                    self.assertNotEqual(result.state, CapabilityResultState.SUCCEEDED)
+                    self.assertEqual(result.state, state)
+                    self.assertEqual(result.failure["code"], code)
+                    self.assertNotIn("destination_reference", result.values)
+                    self.assertIn(
+                        ("UID", "search", None, "HEADER", "Message-ID", quoted),
+                        self.connection.commands,
+                    )
+                    self.assert_one_move()
 
     def test_local_acknowledge_error_does_not_downgrade_confirmed_move(self):
         for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
