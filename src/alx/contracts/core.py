@@ -367,6 +367,8 @@ class DurableGoalStore(Protocol):
         limit: int | None = None,
     ) -> tuple[GoalSummary, ...]: ...
 
+    def list_goals(self) -> tuple[GoalSnapshot, ...]: ...
+
     def replace(
         self,
         state: GoalState,

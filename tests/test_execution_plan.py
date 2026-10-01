@@ -15,7 +15,7 @@ from alx.contracts import (  # noqa: E402
     CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
     CognitionOrigin, ConversationOrigin, ConversationSnapshot, ConversationTurn, ExecutionPlan,
     ExecutionStep, GoalState, Objective, PlanCondition, SideEffect,
-    StructuredSchema, SuccessCriterion, ValueKind,
+    Evidence, GoalStatus, GoalStopReason, StructuredSchema, SuccessCriterion, ValueKind,
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.continuity.plan_source import PlanContinuationSource  # noqa: E402
@@ -257,6 +257,87 @@ class ExecutionPlanTests(unittest.TestCase):
         source = PlanContinuationSource(self.store, Ledger(), enabled=True)
         self.assertEqual(source.due_opportunities(), ())
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+
+    def test_completed_goal_with_undelivered_plan_response_is_reoffered(self):
+        workflow = replace(plan(step("coding")), cursor=1, status="completed")
+        snapshot = self.store.load("goal")
+        completed = replace(
+            snapshot.state,
+            status=GoalStatus.COMPLETED,
+            stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET,
+            evidence=(Evidence("done", "verification", supports=("done",),
+                              source_references=("attempt:merge",)),),
+            execution_plan=workflow,
+        )
+        self.store.replace(completed, snapshot.retention_until, snapshot.revision)
+
+        class Ledger:
+            def exists(self, _identifier):
+                return False
+
+        source = PlanContinuationSource(self.store, Ledger(), enabled=True)
+        opportunities = source.due_opportunities()
+        self.assertEqual(len(opportunities), 1)
+        conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(conversations.close)
+        created = conversations.create("thread", RETENTION)
+        conversations.append(conversation().turns[0], RETENTION, created.revision)
+        gateway = ConversationGateway(
+            self.agent(Reasoner(AgentDecision(response="Finished.", goal_id="goal"))),
+            conversations,
+        )
+        outcome = gateway.receive_cognition_opportunity(
+            "thread", opportunities[0], 1, RETENTION,
+        )
+        self.assertEqual(outcome.response, "Finished.")
+        self.assertEqual(conversations.load("thread").turns[-1].content, "Finished.")
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+
+    def test_spent_continuation_is_retained_and_reopened_with_new_generation(self):
+        class Ledger:
+            def __init__(self):
+                self.rows = {}
+                self.unreconciled = set()
+
+            def exists(self, identifier):
+                return identifier in self.rows
+
+            def record_created(self, opportunity):
+                self.rows[opportunity.opportunity_id] = {
+                    "opportunity_id": opportunity.opportunity_id,
+                    "refs": "\x1f".join(opportunity.references),
+                }
+                return True
+
+            def unfinished(self):
+                return tuple(self.rows.values())
+
+            def mark_unreconciled(self, identifier):
+                self.unreconciled.add(identifier)
+
+            def release(self, identifier):
+                self.rows.pop(identifier, None)
+
+        class Spend:
+            def dispatch_started(self, _identifier):
+                return True
+
+        workflow = replace(plan(step("coding")), cursor=1, status="completed")
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=workflow),
+                           snapshot.retention_until, snapshot.revision)
+        ledger = Ledger()
+        source = PlanContinuationSource(self.store, ledger, enabled=True)
+        first = source.due_opportunities()[0]
+        source.claim(first)
+        self.assertEqual(source.recover(Spend()), ())
+        self.assertIn(first.opportunity_id, ledger.unreconciled)
+        self.assertIn(first.opportunity_id, ledger.rows)
+        recovered_plan = self.store.load("goal").state.execution_plan
+        self.assertEqual(recovered_plan.continuation_generation, 1)
+        second = source.due_opportunities()
+        self.assertEqual(len(second), 1)
+        self.assertNotEqual(second[0].opportunity_id, first.opportunity_id)
 
     def test_intermediate_core_decision_does_not_consume_plan_continuation(self):
         workflow = plan(step("coding"))

@@ -290,6 +290,7 @@ class ExecutionPlan:
     next_due_at: datetime | None = None
     core_reentry_reason: str | None = None
     last_result_call_id: str | None = None
+    continuation_generation: int = 0
 
     def __post_init__(self) -> None:
         for name in ("plan_id", "objective_source", "objective_summary"):
@@ -312,6 +313,10 @@ class ExecutionPlan:
             raise ValueError("plan due time must be timezone-aware")
         if self.last_result_call_id is not None:
             _required(self.last_result_call_id, "last_result_call_id")
+        if (not isinstance(self.continuation_generation, int)
+                or isinstance(self.continuation_generation, bool)
+                or self.continuation_generation < 0):
+            raise ValueError("continuation generation must be a nonnegative integer")
 
 
 @dataclass(frozen=True, slots=True)
