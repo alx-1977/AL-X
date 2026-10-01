@@ -872,9 +872,10 @@ class CoreAgent:
                 # A bounded Coding Agent path is already closed. Treat even a
                 # repeated call identifier as the same capability refusal so
                 # it cannot escalate into a Core-level call-id failure.
-                if not self._coding_retry_already_exhausted(
+                already_exhausted = self._coding_retry_already_exhausted(
                     snapshot.state, coding_exhaustion
-                ):
+                )
+                if not already_exhausted:
                     refusal = CapabilityAttempt(
                         decision.call,
                         CapabilityAttemptDisposition.REJECTED,
@@ -896,6 +897,14 @@ class CoreAgent:
                     "reason": coding_exhaustion,
                     "subject": coding_exhaustion,
                 })
+                if already_exhausted and origin is CognitionOrigin.PERSON_TURN:
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, coding_exhaustion, decision_provenance,
+                        refused_calls,
+                    )
+                if already_exhausted:
+                    mechanical_blocker = coding_exhaustion
                 continue
             if self._call_id_exists(snapshot.state, decision.call.call_id):
                 if self._already_refused(
@@ -944,10 +953,22 @@ class CoreAgent:
                     snapshot,
                     reason="approval_capability_already_dispatched",
                 )
-            if self._repeats_rejected_call(snapshot.state, decision.call, now):
+            refusal = self._binding_rejected_call(snapshot.state, decision.call, now)
+            if refusal is not None:
+                refused_calls = (*refused_calls, {
+                    "call_id": decision.call.call_id,
+                    "capability_id": decision.call.capability_id,
+                    "reason": "repeated_rejected_call",
+                    "subject": refusal.reason_code,
+                })
+                if origin is CognitionOrigin.PERSON_TURN:
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, "repeated_rejected_call",
+                        decision_provenance, refused_calls,
+                    )
                 return CoreOutcome(
-                    CoreState.ERROR,
-                    snapshot,
+                    CoreState.CHECKPOINTED, snapshot,
                     reason="repeated_rejected_call",
                 )
             authority_state = snapshot.state
@@ -1001,7 +1022,7 @@ class CoreAgent:
                 mechanical_blocker = str(attempt.result.failure["code"])
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
-                        conversation_id, snapshot, reasoning_context,
+                        conversation_id, conversation, snapshot, reasoning_context,
                         transient_attempts, mechanical_blocker, decision_provenance,
                     )
             continuation_notice_issued = False
@@ -1044,20 +1065,24 @@ class CoreAgent:
     def _respond_to_terminal_blocker(
         self,
         conversation_id: str,
+        conversation: ConversationSnapshot,
         snapshot: GoalSnapshot,
         context: ReasoningContext,
         transient_attempts: tuple[CapabilityAttempt, ...],
         reason: str,
         provenance: ContentProvenance,
+        refused_calls: tuple[Mapping[str, Any], ...] = (),
     ) -> CoreOutcome:
         """Park the workflow and allow one response-only decision for a person."""
         snapshot = self._park_unfinished_goal(snapshot, provenance)
         terminal_context = replace(
             context,
             active_goal=snapshot.state,
+            turns=project_turns_for_reasoning(conversation.turns, snapshot.state),
             unfinished_goals=self._selectable_goals(conversation_id, snapshot),
             transient_attempts=transient_attempts,
             response_only_reason=reason,
+            refused_calls=refused_calls or context.refused_calls,
         )
         try:
             self._budget_check(conversation_id)
@@ -2027,23 +2052,25 @@ class CoreAgent:
     def _repeats_rejected_call(
         cls, state: GoalState, call: CapabilityCall, at: datetime
     ) -> bool:
+        return cls._binding_rejected_call(state, call, at) is not None
+
+    @classmethod
+    def _binding_rejected_call(
+        cls, state: GoalState, call: CapabilityCall, at: datetime
+    ) -> CapabilityAttempt | None:
         """Stop deterministic safety/input rejections from becoming model loops.
 
         The identity of a repeat is the capability and its arguments. A fresh
         call or approval identifier does not by itself make a refused action
         different, so retrying with new identifiers alone is still a loop.
 
-        One case is not a loop. A call rejected as `approval_invalid` names an
-        approval that did not authorise it; the action was never attempted and
-        nothing about it is settled. If the Core then obtains a real approval
-        that permits this exact call now, the authority state has changed, and
-        the retry is the correction this guard is meant to elicit rather than
-        punish. Refusing it cost a person their session on 2026-09-10 after
-        the Core had already recovered correctly.
+        A refusal whose mechanical predicate has since changed is not a loop.
+        Approval refusals require a newly valid approval. Coding fuse refusals
+        are re-evaluated against the current durable attempts, including the
+        historical timeout classification. All other refusals remain binding.
 
         The approval still has to be real: `permits` re-checks lifecycle,
-        identifier, expiry and scope against this call, so an absent, stale,
-        consumed or mismatched approval leaves the retry a repeat.
+        identifier, expiry and scope against this call.
         """
         repeats = [
             item
@@ -2052,25 +2079,40 @@ class CoreAgent:
             and item.disposition is CapabilityAttemptDisposition.REJECTED
             and item.call.capability_id == call.capability_id
             and item.call.arguments == call.arguments
+            and not (
+                call.capability_id == _RUN_CODING_TASK
+                and item.reason_code in {
+                    "coding_retry_exhausted", "coding_planning_exhausted",
+                    "coding_interruption_no_progress", "coding_interruption_exhausted",
+                }
+                and item.reason_code not in {
+                    cls._coding_exhaustion_reason(state),
+                    cls._coding_interruption_exhaustion_reason(state, call),
+                }
+            )
         ]
         if not repeats:
-            return False
-        if any(
-            item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS
-            for item in repeats
-        ):
+            return None
+        binding = next(
+            (item for item in reversed(repeats)
+             if item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS),
+            None,
+        )
+        if binding is not None:
             # A refusal this call cannot repair stands, whatever else happened.
-            return True
+            return binding
         if call.approval_id is None:
-            return True
+            return repeats[-1]
         if any(item.call.approval_id == call.approval_id for item in repeats):
             # The same approval identifier that was already refused.
-            return True
-        return not any(
+            return repeats[-1]
+        if any(
             approval.approval_id == call.approval_id
             and approval.permits(call, at)
             for approval in state.approvals
-        )
+        ):
+            return None
+        return repeats[-1]
 
     @staticmethod
     def _completed_unchanged_coding_result(item: CapabilityAttempt) -> bool:

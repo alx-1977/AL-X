@@ -408,7 +408,7 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
             AgentDecision(response="unreachable"),
         )
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 2)
 
