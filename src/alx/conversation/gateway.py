@@ -45,6 +45,10 @@ class ConversationGateway:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
 
+    def advance_due_plans(self) -> int:
+        """Advance already-decided work on the Core's existing goal store."""
+        return self._core.advance_due_plans(self._conversation_store.load)
+
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
@@ -148,6 +152,11 @@ class ConversationGateway:
             step_budget,
             trigger_event_id=event.event_id,
             origin=opportunity.origin,
+            resume_plan_goal_id=next(
+                (reference[len("execution_plan:"):]
+                 for reference in opportunity.references
+                 if reference.startswith("execution_plan:")), None,
+            ),
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
             response_turn = ConversationTurn(

@@ -15,6 +15,7 @@ from alx.contracts import (
     CapabilityResultState, ConversationOrigin, ConversationTurn, Evidence, GoalState,
     GoalStatus, GoalStopReason, MemoryKind, MemoryProposal, Objective,
     PendingMemoryBatch, ProgressRecord, Referent, SuccessCriterion, WorkItem,
+    ExecutionPlan, ExecutionStep, PlanCondition,
     GoalSnapshot, GoalSummary,
 )
 from alx.contracts.provenance import (
@@ -111,6 +112,29 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
             [item.approval_id, item.scope.capability_id, _data(item.scope.arguments), item.lifecycle.value, _time_to_data(item.expires_at)]
             for item in goal.approvals
         ],
+        "execution_plan": None if goal.execution_plan is None else {
+            "plan_id": goal.execution_plan.plan_id,
+            "objective_source": goal.execution_plan.objective_source,
+            "objective_summary": goal.execution_plan.objective_summary,
+            "source_turn_id": goal.execution_plan.source_turn_id,
+            "context_preconditions": _data(goal.execution_plan.context_preconditions),
+            "cursor": goal.execution_plan.cursor,
+            "status": goal.execution_plan.status,
+            "next_due_at": _time_to_data(goal.execution_plan.next_due_at),
+            "core_reentry_reason": goal.execution_plan.core_reentry_reason,
+            "steps": [
+                {
+                    "call": [step.call.call_id, step.call.capability_id,
+                             _data(step.call.durable_arguments), step.call.approval_id],
+                    "completion_conditions": [[item.path, _data(item.equals), item.quantifier, item.negate] for item in step.completion_conditions],
+                    "waiting_conditions": [[item.path, _data(item.equals), item.quantifier, item.negate] for item in step.waiting_conditions],
+                    "wait_seconds": step.wait_seconds,
+                    "wake_core_on_completion": step.wake_core_on_completion,
+                    "waiting_for": step.waiting_for,
+                }
+                for step in goal.execution_plan.steps
+            ],
+        },
         "status": goal.status.value,
         "stop_reason": None if goal.stop_reason is None else goal.stop_reason.value,
     }
@@ -158,6 +182,24 @@ def _is_unfinished(state: GoalState) -> int:
 
 
 def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
+    plan_data = data.get("execution_plan")
+    plan = None if plan_data is None else ExecutionPlan(
+        plan_data["plan_id"], plan_data["objective_source"],
+        plan_data["objective_summary"], plan_data["source_turn_id"],
+        tuple(
+            ExecutionStep(
+                CapabilityCall(*item["call"]),
+                tuple(PlanCondition(*condition) for condition in item["completion_conditions"]),
+                tuple(PlanCondition(*condition) for condition in item["waiting_conditions"]),
+                item["wait_seconds"], item["wake_core_on_completion"],
+                item.get("waiting_for"),
+            )
+            for item in plan_data["steps"]
+        ),
+        plan_data["context_preconditions"], plan_data["cursor"],
+        plan_data["status"], _time_from_data(plan_data["next_due_at"]),
+        plan_data["core_reentry_reason"],
+    )
     return GoalState(
         goal_id=goal_id,
         objective=Objective(*data["objective"]),
@@ -178,6 +220,7 @@ def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
             Approval(item[0], ApprovalScope(item[1], item[2]), ApprovalLifecycle(item[3]), _time_from_data(item[4]))
             for item in data["approvals"]
         ),
+        execution_plan=plan,
         status=GoalStatus(data["status"]),
         stop_reason=None if data["stop_reason"] is None else GoalStopReason(data["stop_reason"]),
     )

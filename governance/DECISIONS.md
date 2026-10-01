@@ -2256,3 +2256,12 @@ prohibition on unverified commits are unchanged.
 - **Scope.** The existing `accounting.contacts` OAuth scope covers creation. No scope changes.
 - **Boundary.** No other contact mutation, payment, bank reconciliation, sales document, journal or payroll action is authorised. No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 - **Review condition.** Revisit if a contact is created that Friedl did not intend, if a duplicate or near-duplicate supplier contact appears, or if any field other than Name is set on creation.
+
+## D-036 — Durable Core execution plans
+
+- **Date:** 2026-10-01
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-01.** Friedl requested a small durable execution-plan checkpoint after the PR #87 trace showed repeated Core calls between already-decided capability steps.
+- **Authority.** AL/X alone chooses the objective, ordered capability calls, arguments, objective preconditions, completion conditions, and points where evidence returns for judgment. The plan grants no permission or approval. Every call still crosses its existing broker, safety, authority, verification, review, and commit gates.
+- **Deterministic sequence under Law 2.** The Core persists her exact plan with its goal. Code advances its cursor after declared successful results, waits mechanically on declared pending results, and resumes a valid checkpoint after restart. Changed preconditions, unexpected results, failed checks, refused actions, interrupted dispatch, review judgment, or ambiguous evidence return to AL/X. A completed plan returns to her for the final response.
+- **Boundary.** This is a reusable continuation mechanism for capability work AL/X has already decided, not a PR-specific workflow or a second conversation authority. Consequential actions retain their existing per-action gates. It does not authorise new domain integrations, additional production writes, paid external review, or any exception to the Laws.

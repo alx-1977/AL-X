@@ -234,6 +234,84 @@ class CapabilityCall:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanCondition:
+    """An exact, model-chosen check on structured goal or capability data."""
+
+    path: str
+    equals: StructuredData | str | int | float | bool | None
+    quantifier: str = "all"
+    negate: bool = False
+
+    def __post_init__(self) -> None:
+        _required(self.path, "condition path")
+        if any(not part or part.startswith("_") for part in self.path.split(".")):
+            raise ValueError("condition paths must name public structured fields")
+        if self.quantifier not in {"all", "any"} or not isinstance(self.negate, bool):
+            raise ValueError("invalid plan condition quantifier")
+        object.__setattr__(self, "equals", _freeze_value(self.equals))
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStep:
+    """One exact capability call and the evidence that advances or pauses it."""
+
+    call: CapabilityCall
+    completion_conditions: tuple[PlanCondition, ...] = ()
+    waiting_conditions: tuple[PlanCondition, ...] = ()
+    wait_seconds: int = 0
+    wake_core_on_completion: bool = False
+    waiting_for: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "completion_conditions", tuple(self.completion_conditions))
+        object.__setattr__(self, "waiting_conditions", tuple(self.waiting_conditions))
+        if not self.completion_conditions:
+            raise ValueError("a planned step requires completion conditions")
+        if self.call.arguments != self.call.durable_arguments:
+            raise ValueError("planned arguments must be safe for durable storage")
+        if self.wait_seconds < 0 or (self.waiting_conditions and self.wait_seconds == 0):
+            raise ValueError("a waiting step requires a positive interval")
+        if self.waiting_for is not None:
+            _required(self.waiting_for, "waiting_for")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPlan:
+    """AL/X's durable intent, with only its mechanical cursor advanced by code."""
+
+    plan_id: str
+    objective_source: str
+    objective_summary: str
+    source_turn_id: str | None
+    steps: tuple[ExecutionStep, ...]
+    context_preconditions: StructuredData = field(default_factory=dict)
+    cursor: int = 0
+    status: str = "ready"
+    next_due_at: datetime | None = None
+    core_reentry_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("plan_id", "objective_source", "objective_summary"):
+            _required(getattr(self, name), name)
+        object.__setattr__(self, "steps", tuple(self.steps))
+        object.__setattr__(self, "context_preconditions", freeze_data(self.context_preconditions))
+        if not self.steps or len(self.steps) > 32 or not 0 <= self.cursor <= len(self.steps):
+            raise ValueError("plan requires steps and an in-range cursor")
+        if len({step.call.call_id for step in self.steps}) != len(self.steps):
+            raise ValueError("plan call identifiers must be unique")
+        if self.status not in {"ready", "waiting", "needs_core", "completed", "handled"}:
+            raise ValueError("invalid plan status")
+        if self.status == "waiting" and self.next_due_at is None:
+            raise ValueError("waiting plan requires a due time")
+        if self.status == "completed" and self.cursor != len(self.steps):
+            raise ValueError("completed plan requires its final cursor")
+        if self.next_due_at is not None and (
+            self.next_due_at.tzinfo is None or self.next_due_at.utcoffset() is None
+        ):
+            raise ValueError("plan due time must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
 class CapabilityResult:
     call_id: str
     capability_id: str
@@ -469,6 +547,7 @@ class GoalState:
     approvals: tuple[Approval, ...] = ()
     status: GoalStatus = GoalStatus.ACTIVE
     stop_reason: GoalStopReason | None = None
+    execution_plan: ExecutionPlan | None = None
 
     def __post_init__(self) -> None:
         _required(self.goal_id, "goal_id")
@@ -491,6 +570,9 @@ class GoalState:
             raise ValueError("an unresolved dispatch must be the latest attempt")
         if pending and self.status is not GoalStatus.ACTIVE:
             raise ValueError("an unresolved dispatch requires an active goal")
+        if self.execution_plan is not None and self.status is not GoalStatus.ACTIVE:
+            if self.execution_plan.status in {"ready", "waiting"}:
+                raise ValueError("an executable plan requires an active goal")
         for approval in self.approvals:
             if approval.lifecycle is ApprovalLifecycle.CLAIMED and not any(
                 item.call is not None

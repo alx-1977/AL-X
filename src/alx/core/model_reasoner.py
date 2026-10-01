@@ -23,6 +23,9 @@ from alx.contracts import (
     GoalMutationKind,
     GoalProposal,
     GoalState,
+    ExecutionPlan,
+    ExecutionStep,
+    PlanCondition,
     ModelMessage,
     ModelRequest,
     ModelRole,
@@ -43,12 +46,19 @@ from alx.contracts import (
 
 # Every conversation sends the same stable prefix, so they share one cache
 # rather than each warming a separate one.
-CACHE_KEY = "alx-core-v2"
+CACHE_KEY = "alx-core-v3"
 
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
 Interpret the continuous conversation and the optional active goal. Choose either
 one authoritative response, one silent completion, one reusable primitive capability
-call, or one memory retrieval. A silent completion means you judge that no spoken or
+call, one execution plan of exact capability calls, or one memory retrieval. Use an
+execution plan only when the sequence and its objective preconditions are already
+decided and each step has an objectively checkable result. The executor advances
+those steps without asking you again. A plan does not grant approval or permission;
+any step needing a fresh person-turn approval must be called separately. State exact
+completion and pending conditions from structured capability results. Return to
+reasoning for changed evidence, review judgement, failed checks, or ambiguity.
+A silent completion means you judge that no spoken or
 conversational response is useful; it is your semantic decision, never a transport or
 capability rule. Ordinary conversation does not require a goal update. When useful, propose
 a goal mutation separately; the runtime, not you, decides whether it becomes durable
@@ -502,6 +512,24 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
         "outstanding_work": [
             {"id": item.item_id, "summary": item.summary} for item in state.outstanding_work
         ],
+        "execution_plan": None if state.execution_plan is None else {
+            "plan_id": state.execution_plan.plan_id,
+            "cursor": state.execution_plan.cursor,
+            "status": state.execution_plan.status,
+            "current_step": (
+                None if state.execution_plan.cursor == len(state.execution_plan.steps)
+                else state.execution_plan.steps[state.execution_plan.cursor].call.capability_id
+            ),
+            "waiting_for": (
+                None if state.execution_plan.status != "waiting"
+                else state.execution_plan.steps[state.execution_plan.cursor].waiting_for
+            ),
+            "next_due_at": (
+                None if state.execution_plan.next_due_at is None
+                else state.execution_plan.next_due_at.isoformat()
+            ),
+            "core_reentry_reason": state.execution_plan.core_reentry_reason,
+        },
         "evidence": [
             {
                 "id": item.evidence_id,
@@ -649,6 +677,7 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
                     "id": item.capability_id,
                     "purpose": item.purpose,
                     "side_effect": item.side_effect.value,
+                    "requires_core_judgment": item.requires_core_judgment,
                     **_failure_code_payload(item, shared, code_sets),
                     "input_schema": _capability_schema_payload(item.input_schema),
                     "result_fields": _result_fields(item.output_schema),
@@ -1132,6 +1161,31 @@ def decision_schema() -> dict[str, Any]:
             "approval_proposal": approval_proposal,
         }
     )
+    plan_condition = _strict_object({
+        "path": string,
+        "equals_json": string,
+        "quantifier": {"type": "string", "enum": ["all", "any"]},
+        "negate": {"type": "boolean"},
+    })
+    plan_action = _strict_object({
+        "type": {"type": "string", "const": "execute_plan"},
+        "plan_id": string,
+        "cursor": {"type": "integer", "const": 0},
+        "objective_source": string,
+        "objective_summary": string,
+        "context_preconditions_json": string,
+        "steps": {**_array({
+            "call_id": string,
+            "capability_id": string,
+            "arguments_json": string,
+            "approval_id": nullable_string,
+            "completion_conditions": _array(plan_condition),
+            "waiting_conditions": _array(plan_condition),
+            "wait_seconds": {"type": "integer", "minimum": 0},
+            "wake_core_on_completion": {"type": "boolean"},
+            "waiting_for": nullable_string,
+        }), "minItems": 1, "maxItems": 32},
+    })
     memory_action = _strict_object(
         {
             "type": {"type": "string", "const": "retrieve_memories"},
@@ -1195,7 +1249,7 @@ def decision_schema() -> dict[str, Any]:
         },
         "action": {
             "anyOf": [
-                response_action, silent_action, capability_action, memory_action,
+                response_action, silent_action, capability_action, memory_action, plan_action,
                 select_goal_action,
             ]
         },
@@ -1459,6 +1513,47 @@ class ModelReasoner:
                 finish_silently=True,
                 goal_proposal=proposal,
                 memory_proposals=memory_proposals,
+                goal_id=goal_id,
+            )
+        if disposition == "execute_plan":
+            source_turn_id = next(
+                (item.turn_id for item in reversed(context.turns)
+                 if item.person_id is not None), None,
+            )
+            steps = []
+            for item in action["steps"]:
+                arguments = _object_json(item["arguments_json"], "plan arguments_json")
+                definition = next(
+                    (part for part in context.capabilities
+                     if part.capability_id == item["capability_id"]), None,
+                )
+                if definition is None:
+                    raise ValueError("plan capability is absent from catalogue")
+                if (definition.durable_input_fields is not None
+                        and set(arguments) - set(definition.durable_input_fields)):
+                    raise ValueError("planned arguments are not durable")
+                def conditions(values):
+                    return tuple(PlanCondition(
+                        entry["path"], json.loads(entry["equals_json"]),
+                        entry["quantifier"], entry["negate"],
+                    ) for entry in values)
+                steps.append(ExecutionStep(
+                    CapabilityCall(item["call_id"], item["capability_id"],
+                                   arguments, item["approval_id"]),
+                    conditions(item["completion_conditions"]),
+                    conditions(item["waiting_conditions"]),
+                    item["wait_seconds"], item["wake_core_on_completion"],
+                    item["waiting_for"],
+                ))
+            return AgentDecision(
+                execution_plan=ExecutionPlan(
+                    action["plan_id"], action["objective_source"],
+                    action["objective_summary"], source_turn_id, tuple(steps),
+                    _object_json(action["context_preconditions_json"],
+                                 "context_preconditions_json"),
+                    action["cursor"],
+                ),
+                goal_proposal=proposal, memory_proposals=memory_proposals,
                 goal_id=goal_id,
             )
         if disposition != "call_capability":

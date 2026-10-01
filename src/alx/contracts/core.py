@@ -18,6 +18,7 @@ from alx.contracts.records import (
     ConversationTurn,
     GoalMutationKind,
     GoalProposal,
+    ExecutionPlan,
     GoalState,
     GoalStatus,
     GoalStopReason,
@@ -294,11 +295,12 @@ class AgentDecision:
     # goal; None without one is goal-less conversation. A decision that
     # carries only a goal_id asks for that goal's full state before acting.
     goal_id: str | None = None
+    execution_plan: ExecutionPlan | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.finish_silently, bool):
             raise TypeError("finish_silently must be a bool")
-        chosen = sum(item is not None for item in (self.call, self.response, self.memory_query))
+        chosen = sum(item is not None for item in (self.call, self.response, self.memory_query, self.execution_plan))
         chosen += int(self.finish_silently)
         if chosen == 0 and self.goal_id is not None:
             # Selecting a goal may carry a mutation of that same goal: the
@@ -323,6 +325,8 @@ class AgentDecision:
             raise ValueError("only a response can depend on a goal commit")
         if self.approval_proposal is not None and self.call is None:
             raise ValueError("an approval proposal requires an exact capability call")
+        if self.execution_plan is not None and self.execution_plan.status != "ready":
+            raise ValueError("a new execution plan must start ready")
         object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
@@ -333,6 +337,7 @@ class AgentDecision:
         return (
             self.goal_id is not None
             and self.call is None
+            and self.execution_plan is None
             and self.response is None
             and self.memory_query is None
             and not self.finish_silently

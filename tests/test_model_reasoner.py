@@ -127,6 +127,30 @@ class ModelReasonerTests(unittest.TestCase):
             ),
         )
 
+    def test_plan_action_is_parsed_as_durable_structured_intent(self) -> None:
+        output = base_output(goal_id="goal-1")
+        output["action"] = {
+            "type": "execute_plan",
+            "plan_id": "plan-1",
+            "cursor": 0,
+            "objective_source": "turn:turn-1",
+            "objective_summary": "investigate",
+            "context_preconditions_json": "{}",
+            "steps": [{
+                "call_id": "call-1", "capability_id": "search_records",
+                "arguments_json": "{}", "approval_id": None,
+                "completion_conditions": [{"path": "values.ready", "equals_json": "true",
+                                           "quantifier": "all", "negate": False}],
+                "waiting_conditions": [{"path": "values.ready", "equals_json": "false",
+                                        "quantifier": "all", "negate": False}],
+                "wait_seconds": 30, "wake_core_on_completion": False,
+                "waiting_for": "CI",
+            }],
+        }
+        decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
+        self.assertEqual(decision.execution_plan.steps[0].completion_conditions[0].equals, True)
+        self.assertEqual(decision.execution_plan.source_turn_id, "turn-1")
+
     def test_respond_requires_nonblank_text_even_with_a_goal_id(self) -> None:
         for goal_id in (None, "goal-1"):
             for response in (None, "", " \n\t", 0, False, [], {}):

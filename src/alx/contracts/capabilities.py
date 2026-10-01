@@ -119,6 +119,9 @@ class CapabilityDefinition:
     # search argument `subject` once made every search look like unsent mail
     # and be refused. A capability that sends must therefore say so.
     transmits_authored_text: bool = False
+    # A successful result whose meaning AL/X must judge before further work.
+    # An execution plan may fetch it, but cannot skip the Core on arrival.
+    requires_core_judgment: bool = False
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -129,6 +132,8 @@ class CapabilityDefinition:
             raise TypeError("side_effect must be a SideEffect")
         if not isinstance(self.transmits_authored_text, bool):
             raise TypeError("transmits_authored_text must be a bool")
+        if not isinstance(self.requires_core_judgment, bool):
+            raise TypeError("requires_core_judgment must be a bool")
         codes = tuple(self.possible_failure_codes)
         object.__setattr__(self, "possible_failure_codes", codes)
         if any(not isinstance(item, str) or not item.strip() for item in codes):

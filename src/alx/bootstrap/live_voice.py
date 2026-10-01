@@ -72,6 +72,7 @@ from alx.config import (
     XeroSettings,
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
+from alx.continuity.plan_source import PlanContinuationSource
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity import (
@@ -947,6 +948,12 @@ async def run(repository_root: Path) -> None:
     # here rather than bringing a second tick, which would be a competing
     # production path to the same outcome.
     occasion_sources: list[Any] = [cognition_source]
+    plan_source = PlanContinuationSource(
+        goal_store, opportunity_ledger,
+        enabled=providers.autonomous is not None,
+    )
+    plan_source.recover(autonomous_budget)
+    occasion_sources.append(plan_source)
     # Observed mail joins them for the same reason, and to end the same
     # coupling the due-cognition tick was built to avoid. Mail used to reach
     # the Core only through a generator a live voice session drained, so
@@ -1022,6 +1029,7 @@ async def run(repository_root: Path) -> None:
         core_turn_lock,
         autonomous_due_check_seconds(environment),
         reopen=None if autonomous_holds is None else autonomous_holds.reopen,
+        advance_plans=gateway.advance_due_plans,
     )
     # Watching the mailbox is not a property of whether Friedl has a browser
     # open, so the scan lives here beside the transport rather than inside a

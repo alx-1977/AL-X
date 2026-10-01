@@ -41,6 +41,7 @@ class DueCognitionSource:
         # so a changed bound or a lapsed hold is offered again. One ledger
         # update; it starts no Core turn.
         reopen: Any = None,
+        advance_plans: Any = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -53,6 +54,7 @@ class DueCognitionSource:
         self._core_turn_lock = core_turn_lock
         self._interval_seconds = interval_seconds
         self._reopen = reopen
+        self._advance_plans = advance_plans
 
     async def run(self) -> None:
         """Tick for the life of the process."""
@@ -76,6 +78,9 @@ class DueCognitionSource:
         """
         # Occasions held because they did not fit are released first when
         # their hold has lapsed, so they are offered in this same tick.
+        if self._advance_plans is not None:
+            async with self._core_turn_lock:
+                await run_core_worker(self._advance_plans)
         if self._reopen is not None:
             await asyncio.to_thread(self._reopen)
         run = 0

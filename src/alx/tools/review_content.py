@@ -98,6 +98,7 @@ DEFINITION = CapabilityDefinition(
     # review's wording deliberately does not: a durable copy of what a reviewer
     # said would make the goal store a second evidence store.
     durable_input_fields=("pull_request_number", "head_sha"),
+    requires_core_judgment=True,
 )
 
 
