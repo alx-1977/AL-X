@@ -317,6 +317,11 @@ class CodingRequest:
     # Injected from the same goal's durable failed/cancelled attempt, never
     # supplied as free-form capability input.
     resume_checkpoint: dict[str, object] | None = None
+    # AL/X's diagnosis of a recorded failure and the repair she chose for it.
+    # Only a resume of a failed job may carry it; the failure it answers is
+    # injected beside it from that job's durable record, never supplied.
+    corrective_action: str = ""
+    corrected_failure: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -327,6 +332,8 @@ class CodingRequest:
             raise ValueError("context exceeds the permitted size")
         if len(self.test_guidance) > MAX_CONTEXT_CHARACTERS:
             raise ValueError("test_guidance exceeds the permitted size")
+        if len(self.corrective_action) > MAX_CONTEXT_CHARACTERS:
+            raise ValueError("corrective_action exceeds the permitted size")
         criteria = tuple(self.acceptance_criteria)
         object.__setattr__(self, "acceptance_criteria", criteria)
         if len(criteria) > MAX_CRITERIA:

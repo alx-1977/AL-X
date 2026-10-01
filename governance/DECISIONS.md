@@ -2169,6 +2169,66 @@ candidate. The existing completion, review, verification, and commit route and
 authority remain unchanged. Neither the Coding Agent nor the watchdog may
 switch branches, reset a checkout, approve a review, or merge.
 
+### Amendment — failure episodes replace the goal-wide coding fuse
+
+- **Date:** 2026-10-01
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-01.** Friedl explicitly approved
+  changing the D-030/D-033 rule that limited coding retries to two failures
+  per goal with no override, after a diagnosed repair of a recorded
+  verification failure could not run under the goal it belonged to.
+
+**Retry protection bounds repeated no-progress failure episodes, not all
+coding work across an entire goal.**
+
+A failure episode is the run of implementation-reaching `run_coding_task`
+failures in one durable goal since the last succeeded coding job or the last
+correction AL/X dispatched. Each failure in it is bound to its durable
+evidence: goal, job and resume lineage, checkpoint stage, failure code, phase,
+reason and class, the failed required checks with the identifiers of the
+tests that failed, and the checkpoint branch, HEAD and state digest. Two
+failures exhaust an episode. Further attempts without a new diagnosis are then
+refused with `coding_retry_exhausted` before any checkpoint or dispatch,
+however they are worded and whether they resume or start fresh.
+
+AL/X owns the transition to corrective work. She may resume a failed job of
+the same goal with `corrective_action`: her diagnosis of its recorded failure
+and the specific repair she chose. It is allowed when that failure belongs to
+the open episode, when the same diagnosis has not already been dispatched
+against the same failure, and when fewer than two corrections have answered
+a failure with the same signature (code, phase, reason, class, stage, failed
+checks and failing tests, independent of the tree). Otherwise it is refused
+with `coding_correction_unanchored`, `coding_correction_repeated` or
+`coding_correction_exhausted`. A correction cannot change the task,
+acceptance criteria, context, test guidance, step budget, blocked paths,
+branch or commit message, so it stays within the work already authorised.
+Whether a diagnosis is right, materially different or needs a new human
+decision is AL/X's judgement; deterministic code checks only the mechanical
+conditions above. There is no human reset, no override token, and no new goal
+is needed or permitted for the purpose.
+
+A correction resumes the exact preserved checkout under the existing branch,
+HEAD and state-digest proof, from a failed execution, review or test stage
+only. It reruns the required checks on that checkout, gives the coding session
+the recorded failure, the failing test identifiers, the bounded current check
+output and AL/X's corrective action, and then continues through local review,
+required verification and the commit gate unchanged. Durable checkpoints stay
+content-free: they record which tests failed, not their output. An interrupted
+correction resumes with its diagnosis.
+
+Interruptions, historical `session_timeout` attempts, refusals recorded under
+the earlier rule, and refusals before implementation neither count toward an
+episode nor open or close one. Planning failures and request conflicts keep
+their own goal-wide bounds of two. The interruption bounds per job remain.
+
+This supersedes D-030's fixed allowance keyed only by goal and capability and
+its statement that independent jobs share it, D-033's statement that the
+allowance is unchanged and not reset by branch work, and the implementation
+part of the request-conflict amendment's "at most two genuine implementation
+failures" per goal. It changes no authority: exact-checkout validation,
+Coding Agent verification, local review, commit gates, branch safety and the
+prohibition on unverified commits are unchanged.
+
 ## D-034 — Xero existing-contact rename
 
 - **Date:** 2026-09-27

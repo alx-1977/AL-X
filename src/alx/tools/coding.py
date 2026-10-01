@@ -219,7 +219,15 @@ DEFINITION = CapabilityDefinition(
     "exhausted the job stays uncommitted with diff_preserved and the branch "
     "name. AL/X may supply only resume_job_id for a failed or cancelled call "
     "from this active goal to retry only its recorded stage after the checkout "
-    "matches the durable branch, HEAD, and full state digest. The user can "
+    "matches the durable branch, HEAD, and full state digest. With a resume of "
+    "a failed job whose recorded stage is execution, review, or test, "
+    "AL/X may add corrective_action: her diagnosis of that recorded failure and "
+    "the specific repair she chose. The job then reruns its required checks on "
+    "the exact checkout, hands the coding session the recorded failure, the "
+    "reproduced check output, and her corrective_action, and continues through "
+    "review, verification, and commit unchanged. Repeating an attempt without "
+    "a new diagnosis is bounded per failure episode, and each recorded failure "
+    "admits a bounded number of distinct corrections. The user can "
     "stop an active job through the structured coding cancellation control; "
     "cancellation preserves its branch and diff and returns a checkpoint.",
     StructuredSchema(
@@ -235,6 +243,7 @@ DEFINITION = CapabilityDefinition(
             "commit_message": _STRING,
             "continue_goal_branch": _BOOLEAN,
             "resume_job_id": _STRING,
+            "corrective_action": _STRING,
         },
         (),
         extra_properties=False,
@@ -302,7 +311,7 @@ DEFINITION = CapabilityDefinition(
         "task", "context", "acceptance_criteria", "test_guidance",
         "step_budget", "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
-        "resume_job_id",
+        "resume_job_id", "corrective_action",
     ),
 )
 
@@ -456,8 +465,30 @@ def build_coding_executors(
             if request.repair_branch.strip() not in {requested_branch, checkpoint["branch"]}:
                 return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
                                implementation_reached=False)
+            corrected_failure = None
+            if request.corrective_action:
+                # A correction answers recorded failure evidence. An interruption
+                # or a cancellation recorded none, and a commit-stage candidate
+                # has already passed the session it would reopen.
+                failure = previous.result.failure or {}
+                if (previous.result.state is not CapabilityResultState.FAILED
+                        or failure.get("code") == "coding_cancelled"):
+                    return _failed(call_id, "arguments_unusable",
+                                   reason_code="corrective_action_without_failure",
+                                   implementation_reached=False)
+                if (checkpoint["stage"] not in {"execution", "review", "test"}
+                        or checkpoint.get("commit_candidate_sha")):
+                    return _failed(call_id, "arguments_unusable",
+                                   reason_code="corrective_action_stage_unsupported",
+                                   implementation_reached=False)
+                corrected_failure = {
+                    key: value for key, value in failure.items()
+                    if isinstance(value, (str, int, bool)) or value is None
+                }
             request = replace(original_request, repair_branch=checkpoint["branch"],
-                              resume_checkpoint=checkpoint)
+                              resume_checkpoint=checkpoint,
+                              corrective_action=request.corrective_action,
+                              corrected_failure=corrected_failure)
         elif arguments.get("continue_goal_branch", False):
             continuation = goal_coding_branch(goal_state_source())
             if continuation is None or request.repair_branch != continuation.branch:
@@ -592,6 +623,21 @@ def parse_coding_arguments(
     blocked, error = _optional_blocked_paths(arguments)
     if error is not None:
         return None, error
+    corrective_action, error = _optional_string(
+        arguments, "corrective_action", MAX_CONTEXT_CHARACTERS
+    )
+    if error is not None:
+        return None, error
+    if "corrective_action" in arguments and not corrective_action.strip():
+        return None, _argument_failure(
+            "corrective_action", "blank", "corrective_action must be a non-blank string"
+        )
+    if corrective_action and "resume_job_id" not in arguments:
+        return None, _argument_failure(
+            "corrective_action",
+            "requires_resume",
+            "corrective_action answers a recorded failure and requires resume_job_id",
+        )
     branch, error = _optional_string(
         arguments, "repair_branch", MAX_BRANCH_NAME_CHARACTERS
     )
@@ -625,6 +671,7 @@ def parse_coding_arguments(
             blocked_paths=blocked,
             repair_branch=branch,
             commit_message=message,
+            corrective_action=corrective_action,
         ),
         None,
     )
