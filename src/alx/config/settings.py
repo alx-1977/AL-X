@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -1086,6 +1087,43 @@ def _coding_effort(environment: Mapping[str, str], name: str = "ALX_CODING_EFFOR
     return effort
 
 
+# Where AL/X Core's own Claude login lives when ALX_CLAUDE_CONFIG_DIR is not
+# set: beside, never inside, the person's own Claude configuration.
+DEFAULT_CORE_CLAUDE_CONFIG_DIRNAME = ".claude-alx"
+
+
+def core_claude_identity(
+    environment: Mapping[str, str],
+) -> tuple[str, str | None]:
+    """The dedicated Claude configuration directory and expected account.
+
+    `ALX_CLAUDE_CONFIG_DIR` may use `~` or `$HOME`; unset, it is
+    `$HOME/.claude-alx`. It must be absolute after expansion and must not be
+    the person's own `$HOME/.claude`, so the Core can never be pointed at the
+    personal login by configuration either. `ALX_CLAUDE_ACCOUNT`, when set, is
+    the account the directory must be signed in as.
+    """
+    home = environment.get("HOME", "").strip() or str(Path.home())
+    configured = environment.get("ALX_CLAUDE_CONFIG_DIR", "").strip()
+    raw = configured or str(Path(home) / DEFAULT_CORE_CLAUDE_CONFIG_DIRNAME)
+    for prefix in ("${HOME}", "$HOME", "~"):
+        if raw == prefix or raw.startswith(prefix + "/"):
+            raw = home + raw[len(prefix):]
+            break
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ConfigurationError("ALX_CLAUDE_CONFIG_DIR must be an absolute path")
+    resolved = os.path.normpath(raw)
+    personal = os.path.normpath(home)
+    if resolved in (personal, os.path.join(personal, ".claude")):
+        raise ConfigurationError(
+            "ALX_CLAUDE_CONFIG_DIR must be AL/X's own Claude configuration, "
+            "not the personal one"
+        )
+    account = environment.get("ALX_CLAUDE_ACCOUNT", "").strip() or None
+    return resolved, account
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     reasoning: ReasoningSettings
@@ -1103,6 +1141,9 @@ class RuntimeSettings:
     coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
     text_to_speech: TextToSpeechSettings
+    # AL/X Core's dedicated Claude login, for the subscription Core only.
+    core_claude_config_dir: str | None = None
+    core_claude_account: str | None = None
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> RuntimeSettings:
@@ -1146,7 +1187,13 @@ class RuntimeSettings:
                 f"refusing {autonomous.provider}/{autonomous.model} beside "
                 f"{reasoning.provider}/{reasoning.model}"
             )
+        core_claude = (
+            core_claude_identity(environment)
+            if reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER else (None, None)
+        )
         return cls(
+            core_claude_config_dir=core_claude[0],
+            core_claude_account=core_claude[1],
             reasoning=reasoning,
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),

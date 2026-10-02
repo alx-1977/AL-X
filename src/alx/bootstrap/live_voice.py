@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-from alx.bootstrap.providers import build_runtime_providers
+from alx.bootstrap.providers import build_runtime_providers, verify_core_claude_identity
 from alx.bootstrap.mail import (
     build_mail_runtime,
     build_mail_send_runtime,
@@ -317,6 +317,9 @@ async def run(repository_root: Path) -> None:
         usage.record(task_id, values)
 
     providers = build_runtime_providers(provider_settings, telemetry)
+    # AL/X Core reasons as her own Claude account. Confirmed before anything is
+    # composed or served: a wrong or missing login stops startup here.
+    verify_core_claude_identity(providers)
     # The most input an autonomous turn may carry, derived once from the
     # conversational Core's recorded context window, because the autonomous
     # instance is that same Core. Refuses to start on a model with no window.

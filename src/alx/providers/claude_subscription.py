@@ -33,6 +33,16 @@ unavailable, exhausted, or unauthenticated, this raises a provider failure and
 the turn does not happen. It never reaches for another provider: selecting one
 is configuration, and a transport that chose its own replacement would be
 spending Friedl's money on a decision he did not make.
+
+**AL/X's own identity.** The Core reasons as a dedicated Claude account, held
+in its own Claude Code configuration directory (`ALX_CLAUDE_CONFIG_DIR`). The
+child is given exactly that directory, and any inherited `CLAUDE_CONFIG_DIR`
+or `CLAUDE_CODE_OAUTH_TOKEN` is dropped, so neither Friedl's personal login
+nor a token issued for another account can answer in its place. Before the
+first turn the directory's login is verified through the CLI's machine-readable
+`auth status --json`: signed in, through a claude.ai subscription login, at
+that directory, and as the expected account when one is configured. Anything
+else is a terminal refusal; there is no fallback identity.
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ import os
 import shutil
 import subprocess  # noqa: S404 - the governed reasoning transport, not an execution site
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
@@ -72,6 +83,42 @@ _TERMINAL_CODES = frozenset(
         "cli_not_installed",
     }
 )
+
+# Why the dedicated identity could not be confirmed. Each needs Friedl: none
+# clears on a timer, and none may be answered by trying another account.
+_IDENTITY_CODES = frozenset(
+    {
+        "subscription_config_missing",
+        "subscription_unauthenticated",
+        "subscription_login_not_claude_ai",
+        "subscription_config_mismatch",
+        "subscription_account_mismatch",
+        "subscription_identity_unverifiable",
+    }
+)
+
+# How long the identity check may take. It reads local login state only.
+IDENTITY_CHECK_TIMEOUT_SECONDS = 30
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionIdentity:
+    """Who the Core reasons as, as the CLI itself reports it. No credentials."""
+
+    config_dir: str
+    account: str
+    auth_method: str
+    subscription_type: str
+
+
+class SubscriptionIdentityError(Exception):
+    """The dedicated identity is missing, invalid, or not the expected one."""
+
+    def __init__(self, code: str) -> None:
+        if code not in _IDENTITY_CODES:
+            raise ValueError("identity failures must be declared")
+        self.code = code
+        super().__init__(code)
 
 # Exhaustion clears on its own when the subscription's window rolls over, so it
 # is latched with an expiry rather than permanently. Authentication does not:
@@ -177,6 +224,8 @@ class ClaudeSubscriptionReasoningModel:
         clock: Callable[[], float] = monotonic,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
+        config_dir: str | None = None,
+        expected_account: str | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -192,6 +241,15 @@ class ClaudeSubscriptionReasoningModel:
         # HTTP adapters inject a client. Production passes nothing.
         self._runner = runner or subprocess.run
         self._environment = os.environ if environment is None else environment
+        # The dedicated Claude configuration this Core reasons through. None
+        # only for callers outside the Core, which keep the CLI's own default.
+        if config_dir is not None and not os.path.isabs(config_dir):
+            raise ValueError("config_dir must be an absolute path")
+        self._config_dir = config_dir
+        self._expected_account = (
+            None if expected_account is None else expected_account.strip().casefold()
+        )
+        self._identity: SubscriptionIdentity | None = None
         self._availability_lock = Lock()
         self._terminal_failure: tuple[str, float | None] | None = None
         # Consecutive malformed answers. Reset by any completed turn, so a
@@ -243,9 +301,106 @@ class ClaudeSubscriptionReasoningModel:
             "SYSTEMROOT", "WINDIR", "CLAUDE_CONFIG_DIR",
             "CLAUDE_CODE_OAUTH_TOKEN",
         }
-        return {
+        if self._config_dir is not None:
+            # The dedicated identity, and nothing inherited that could stand in
+            # for it: a host CLAUDE_CONFIG_DIR would point at another login,
+            # and an OAuth token would authenticate as whoever issued it,
+            # overriding the directory's login altogether.
+            allowed -= {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
+        environment = {
             key: value for key, value in self._environment.items() if key in allowed
         }
+        if self._config_dir is not None:
+            environment["CLAUDE_CONFIG_DIR"] = self._config_dir
+        return environment
+
+    @property
+    def config_dir(self) -> str | None:
+        return self._config_dir
+
+    def verify_identity(self) -> SubscriptionIdentity:
+        """Confirm the dedicated configuration is AL/X's subscription login.
+
+        Read from `claude auth status --json`, the CLI's machine-readable
+        status, never from its human-formatted output. Only the fields named
+        here are read, and none of them is a credential. Raises
+        `SubscriptionIdentityError` rather than letting any other identity
+        answer.
+        """
+        if self._config_dir is None:
+            raise SubscriptionIdentityError("subscription_config_missing")
+        if not os.path.isdir(self._config_dir):
+            # Checked before the CLI runs: given a missing directory it would
+            # create an empty one and report a login that was never made.
+            raise SubscriptionIdentityError("subscription_config_missing")
+        try:
+            with TemporaryDirectory(prefix="alx-claude-") as working_directory:
+                from alx.providers.coding_process import run_coding_subprocess
+                completed = run_coding_subprocess(
+                    self._runner,
+                    [self._executable, "auth", "status", "--json"],
+                    capture_output=True, text=True,
+                    timeout=IDENTITY_CHECK_TIMEOUT_SECONDS,
+                    env=self.child_environment(), cwd=working_directory,
+                    shell=False, check=False,
+                )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise SubscriptionIdentityError(
+                "subscription_identity_unverifiable") from error
+        try:
+            status = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise SubscriptionIdentityError(
+                "subscription_identity_unverifiable") from error
+        if not isinstance(status, Mapping):
+            raise SubscriptionIdentityError("subscription_identity_unverifiable")
+        if status.get("loggedIn") is not True:
+            raise SubscriptionIdentityError("subscription_unauthenticated")
+        if status.get("authMethod") != "claude.ai" or status.get("apiProvider") != "firstParty":
+            # An API key or a third-party route would bill, which is the one
+            # thing this transport exists not to do.
+            raise SubscriptionIdentityError("subscription_login_not_claude_ai")
+        reported = status.get("configDirectory")
+        if not isinstance(reported, str) or (
+            os.path.realpath(reported) != os.path.realpath(self._config_dir)
+        ):
+            raise SubscriptionIdentityError("subscription_config_mismatch")
+        account = status.get("email")
+        if not isinstance(account, str) or not account.strip():
+            raise SubscriptionIdentityError("subscription_identity_unverifiable")
+        if (self._expected_account is not None
+                and account.strip().casefold() != self._expected_account):
+            raise SubscriptionIdentityError("subscription_account_mismatch")
+        subscription = status.get("subscriptionType")
+        identity = SubscriptionIdentity(
+            self._config_dir, account.strip(), "claude.ai",
+            subscription if isinstance(subscription, str) else "",
+        )
+        LOGGER.info(
+            "AL/X Core Claude identity verified: config_dir=%s account=%s "
+            "auth=%s subscription=%s",
+            identity.config_dir, identity.account, identity.auth_method,
+            identity.subscription_type or "unknown",
+        )
+        with self._availability_lock:
+            self._identity = identity
+        return identity
+
+    def _require_identity(self) -> None:
+        """Before any turn: the dedicated identity, verified, still present."""
+        if self._config_dir is None:
+            return
+        try:
+            if not os.path.isdir(self._config_dir):
+                raise SubscriptionIdentityError("subscription_config_missing")
+            if self._identity is None:
+                self.verify_identity()
+        except SubscriptionIdentityError as error:
+            with self._availability_lock:
+                # Latched without expiry: only Friedl can repair an identity.
+                self._terminal_failure = (error.code, None)
+            LOGGER.warning("AL/X Core Claude identity refused: %s", error.code)
+            raise_provider_failure(PROVIDER_NAME, error.code)
 
     def command(self, request: ModelRequest) -> list[str]:
         """The exact argument vector for one turn.
@@ -311,6 +466,7 @@ class ClaudeSubscriptionReasoningModel:
 
     def complete(self, request: ModelRequest) -> ModelCompletion:
         self.ensure_available()
+        self._require_identity()
         started_at = monotonic()
         LOGGER.info("Reasoning provider request started")
         try:
