@@ -31,6 +31,7 @@ from alx.contracts import (
     CapabilityResult,
     CapabilityResultState,
     ContentOrigin,
+    ExecutionOutcome,
     RetentionPolicy,
     SideEffect,
     StructuredSchema,
@@ -99,12 +100,9 @@ DEFINITION = CapabilityDefinition(
     # review's wording deliberately does not: a durable copy of what a reviewer
     # said would make the goal store a second evidence store.
     durable_input_fields=("pull_request_number", "head_sha"),
-    requires_core_judgment=True,
-    repeat_safe_observation=True,
-    # The reviewer has said it is still working on this revision. Nothing is
-    # readable and nothing needs judging yet; a failed round or a transport
-    # failure is not this, and wakes AL/X.
-    pending_failure_reasons=(("review_unavailable", REVIEW_IN_PROGRESS),),
+    # Reading a review again changes nothing on GitHub or at the reviewer, so
+    # a plan may wait on it.
+    plan_observation=True,
 )
 
 
@@ -131,8 +129,13 @@ def build_review_content_executors(
             if not content.available:
                 # A read is retrieval, never a second polling mechanism. The
                 # requested review was already awaited by the task runtime.
+                # Only a reviewer that says it is still working is pending;
+                # a failed round or a missing review is for AL/X to read.
                 return _failed(call_id, "review_unavailable",
-                               reason=content.unavailable_reason or "not_published")
+                               reason=content.unavailable_reason or "not_published",
+                               outcome=(ExecutionOutcome.PENDING
+                                        if content.unavailable_reason == REVIEW_IN_PROGRESS
+                                        else None))
             values = content.as_values()
             provenance = RetentionPolicy().non_mail(
                 ContentOrigin.EXTERNAL,
@@ -173,15 +176,19 @@ def build_review_content_executors(
             # a finding for something she reasoned or something code decided.
             # Not mail-derived, so no D-013 expiry.
             provenance=provenance,
+            # What a reviewer said is always hers to judge.
+            outcome=ExecutionOutcome.AMBIGUOUS,
         )
 
     return {READ_EXTERNAL_REVIEW: read_external_review}
 
 
-def _failed(call_id: str, code: str, **details) -> CapabilityResult:
+def _failed(call_id: str, code: str, outcome: ExecutionOutcome | None = None,
+            **details) -> CapabilityResult:
     return CapabilityResult(
         call_id,
         READ_EXTERNAL_REVIEW,
         CapabilityResultState.FAILED,
         failure={"code": code, **details, "requires_judgement": code != "arguments_unusable"},
+        outcome=outcome,
     )

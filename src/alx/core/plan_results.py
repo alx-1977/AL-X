@@ -1,27 +1,28 @@
 """The one interpretation of a planned capability result, and its one reduction.
 
-D-036 lets deterministic code advance a plan AL/X already decided. Every
-result that plan produces, whether fresh, recovered after a crash, or the
-next observation of a wait, is classified here exactly once, before anything
-waits or moves the cursor. Nothing else in the runtime may read a raw planned
-result to decide whether to advance, wait, or wake her.
+D-036 lets deterministic code advance a plan AL/X already decided. The whole
+lifecycle fits here:
 
-The precedence is fixed, and the first rule that applies sets the primary
-reason; later rules still contribute their facts, so one wake carries all of
-them:
+    RUNNING  --SUCCESS + completion-->  RUNNING (next step)
+    RUNNING  --PENDING / UNAVAILABLE--> WAITING --due--> RUNNING
+    RUNNING / WAITING --anything else--> NEEDS_CORE (attention seq + 1)
+    NEEDS_CORE --her resume / complete / cancel--> RUNNING / COMPLETED / CANCELLED
 
-1. the plan was changed, cancelled, or invalidated;
-2. the dispatch was interrupted, uncertain, or never checkpointed;
-3. the call was refused;
-4. the call failed terminally, including a settled check that contradicts
-   completion while others are still pending;
-5. the evidence needs AL/X's judgment;
-6. a pending state the plan declared, and the capability supports, is waiting;
-7. a result known to satisfy every declared completion condition advances;
-8. anything else is ambiguous and wakes her.
+A result belongs to the plan only when its call id is the plan's `inflight`
+dispatch; the caller proves that before classifying. Every such result is
+classified exactly once, here, by a fixed precedence:
 
-Rules 1 to 5 always outrank waiting and completion. Only rule 6 may wait, and
-only rule 7 may advance.
+1. the dispatch was interrupted with no result;
+2. the call was refused;
+3. the capability's outcome: FAILURE and AMBIGUOUS wake her, PENDING and
+   TEMPORARILY_UNAVAILABLE wait while the step allows it, SUCCESS advances
+   only when the declared completion conditions hold.
+
+Before each dispatch, `plan_invalidation_facts` checks what the plan
+declared it depends on; a change there wakes her instead of dispatching.
+
+Nothing here reads the shape of a condition to guess at failure. Whether a
+result is pending, failed or ambiguous is the capability's statement.
 """
 
 from __future__ import annotations
@@ -37,12 +38,15 @@ from alx.contracts import (
     CapabilityAttempt,
     CapabilityAttemptDisposition,
     CapabilityDefinition,
-    CapabilityResultState,
+    ExecutionOutcome,
     ExecutionPlan,
     ExecutionStep,
     GoalState,
     GoalStatus,
+    PlanAttention,
     PlanCondition,
+    PlanStatus,
+    outcome_of,
 )
 
 
@@ -58,82 +62,44 @@ class PlanResultClassification:
 
     kind: PlanResultKind
     facts: tuple[str, ...] = ()
-    # A review or merge result whose failure the reporting capability says
-    # needs judgment. It blocks follow-up actions until AL/X has responded.
-    blocker: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "facts", tuple(dict.fromkeys(self.facts)))
         if self.kind is PlanResultKind.WAKE_CORE and not self.facts:
             raise ValueError("a Core wake must name what woke her")
-        if self.kind is not PlanResultKind.WAKE_CORE and (self.facts or self.blocker):
+        if self.kind is not PlanResultKind.WAKE_CORE and self.facts:
             raise ValueError("only a Core wake carries facts")
 
 
-# Capabilities whose judgment-requiring failure blocks follow-up action. The
-# same rule applies to a direct call and a planned one.
-_BLOCKING_CAPABILITIES = frozenset({
-    "request_external_review", "read_external_review", "merge_pull_request",
-})
-# The only keys a declared pending failure may carry. Anything more is detail
-# the plan did not declare, and detail is for AL/X to read.
-_PENDING_FAILURE_KEYS = frozenset({"code", "reason", "requires_judgement"})
-
-
-def judgment_blocker(attempt: CapabilityAttempt) -> str | None:
-    """The blocker a review or merge result imposes, if it imposes one."""
-    if (attempt.call is None or attempt.call.capability_id not in _BLOCKING_CAPABILITIES
-            or attempt.result is None):
-        return None
-    failure = attempt.result.failure or {}
-    if not failure.get("requires_judgement"):
-        return None
-    code = failure.get("code")
-    return str(code) if code is not None else "planned_result_unexpected"
-
-
 def plan_invalidation_facts(
-    plan: ExecutionPlan, state: GoalState, latest_person_turn_id: str | None,
-    now: datetime, *, next_step: ExecutionStep | None = None,
+    plan: ExecutionPlan, state: GoalState, now: datetime,
 ) -> tuple[str, ...]:
-    """Rule 1: why the plan AL/X decided no longer describes this goal."""
+    """Rule 1: which declared precondition of the next step no longer holds.
+
+    Only what the plan declared, or what any dispatch needs: an active goal,
+    the objective it was bound to, its context preconditions, and a valid
+    approval for the step about to run. Nothing else about the goal or the
+    conversation touches a plan.
+    """
     facts = []
     if state.status is not GoalStatus.ACTIVE:
         facts.append("goal_inactive")
     if (state.objective.source_reference != plan.objective_source
             or state.objective.summary != plan.objective_summary
-            # Compared as the plan's conditions are: as JSON. A key the
-            # context no longer holds never satisfies a declared value.
             or any(key not in state.context or not json_equal(state.context[key], value)
                    for key, value in plan.context_preconditions.items())):
         facts.append("plan_precondition_changed")
-    if latest_person_turn_id != plan.source_turn_id:
-        facts.append("new_person_turn")
-    if next_step is not None and next_step.call.approval_id is not None:
-        approval = next(
-            (item for item in state.approvals
-             if item.approval_id == next_step.call.approval_id), None,
-        )
-        if (approval is None or approval.lifecycle is not ApprovalLifecycle.GRANTED
-                or not approval.scope.matches(next_step.call)
-                or (approval.expires_at is not None and approval.expires_at <= now)):
-            facts.append("plan_approval_invalid")
+    if plan.cursor < len(plan.steps):
+        approval_id = plan.steps[plan.cursor].call.approval_id
+        if approval_id is not None:
+            approval = next(
+                (item for item in state.approvals if item.approval_id == approval_id), None,
+            )
+            if (approval is None or approval.lifecycle is not ApprovalLifecycle.GRANTED
+                    or not approval.scope.matches(plan.steps[plan.cursor].call)
+                    or (approval.expires_at is not None and approval.expires_at <= now)):
+                facts.append("plan_approval_invalid")
     return tuple(facts)
-
-
-def declared_pending_failure(
-    definition: CapabilityDefinition | None, attempt: CapabilityAttempt,
-) -> bool:
-    """Whether a failure is exactly one the capability declares temporary."""
-    result = attempt.result
-    if (definition is None or result is None
-            or result.state is not CapabilityResultState.FAILED
-            or result.values or not result.failure):
-        return False
-    failure = result.failure
-    return (set(failure) <= _PENDING_FAILURE_KEYS
-            and (failure.get("code"), failure.get("reason"))
-            in definition.pending_failure_reasons)
 
 
 def classify_planned_result(
@@ -141,143 +107,125 @@ def classify_planned_result(
     attempt: CapabilityAttempt,
     definition: CapabilityDefinition | None,
     *,
-    invalidation: tuple[str, ...] = (),
-    recovered: bool = False,
-    judgment_wake: tuple[str, ...] = (),
+    wait_expired: bool = False,
 ) -> PlanResultClassification:
     """Classify one planned result exactly once, by the fixed precedence.
 
-    `judgment_wake` names the facts of a Core wake already under way, when
-    this result re-reads the evidence that wake needs after a restart lost
-    it. Such a result can only add to that wake: it never waits or advances.
-    When it carries no evidence for her to judge, the evidence stays
-    unavailable and holds follow-up action.
+    Preconditions are not this result's business: they are checked once, at
+    the boundary before the next dispatch, by `plan_invalidation_facts`.
     """
-    if judgment_wake:
-        reread = classify_planned_result(
-            step, attempt, definition, invalidation=invalidation, recovered=recovered,
-        )
-        facts = (*judgment_wake, "judgment_evidence_reobserved", *reread.facts)
-        if "planned_evidence_requires_judgement" in reread.facts:
-            return PlanResultClassification(PlanResultKind.WAKE_CORE, facts, reread.blocker)
-        return unavailable_judgment_evidence(facts, blocker=reread.blocker)
-    facts: list[str] = list(invalidation)
+    facts: list[str] = []
     result = attempt.result
-    pending_failure = declared_pending_failure(definition, attempt)
-    blocker = None if pending_failure else judgment_blocker(attempt)
-    # Rule 2: what happened is not certain, or was never checkpointed.
-    failure_code = None if result is None else (result.failure or {}).get("code")
-    uncertain = (attempt.disposition is CapabilityAttemptDisposition.PENDING
-                 or failure_code == "dispatch_interrupted"
-                 or (attempt.disposition is CapabilityAttemptDisposition.BROKER_FAILURE
-                     and attempt.implementation_invoked))
-    if uncertain:
-        facts.append("dispatch_interrupted" if failure_code == "dispatch_interrupted"
-                     or attempt.disposition is CapabilityAttemptDisposition.PENDING
-                     else "dispatch_uncertain")
-    if recovered:
-        facts.append("plan_result_uncheckpointed")
-    if attempt.call is None or attempt.call.capability_id != step.call.capability_id:
-        facts.append("planned_result_mismatch")
-    # Rule 3: a refusal is never progress and never a reason to wait.
-    if attempt.disposition is CapabilityAttemptDisposition.REJECTED:
+    observation = definition is not None and definition.plan_observation
+    interrupted = (attempt.disposition is CapabilityAttemptDisposition.PENDING
+                   or (result is not None
+                       and (result.failure or {}).get("code") == "dispatch_interrupted"))
+    if interrupted:
+        # An observation can simply be made again; anything else may already
+        # have acted, and only she can say what to do about that.
+        if observation and step.wait_seconds and not wait_expired:
+            return PlanResultClassification(PlanResultKind.WAIT)
+        facts.append("dispatch_interrupted")
+    elif attempt.disposition is CapabilityAttemptDisposition.REJECTED:
         facts.append("planned_call_refused")
-    # Rule 4: terminal failure.
-    if attempt.disposition is CapabilityAttemptDisposition.BROKER_FAILURE and not uncertain:
-        facts.append("planned_dispatch_failed")
-    if (attempt.disposition is CapabilityAttemptDisposition.EXECUTED
-            and result is not None and result.state is CapabilityResultState.FAILED
-            and not pending_failure):
-        facts.append("planned_result_failed")
-    document = _document(attempt)
-    waiting = bool(step.waiting_conditions) and conditions_match(
-        document, step.waiting_conditions)
-    if waiting and settled_contradiction(document, step):
-        facts.append("planned_check_failed")
-    # Rule 5: evidence AL/X must judge outranks both waiting and completion.
-    if result is not None and not pending_failure and (
-        (definition is not None and definition.requires_core_judgment
-         and result.state is CapabilityResultState.SUCCEEDED)
-        or (result.failure or {}).get("requires_judgement")
-    ):
-        facts.append("planned_evidence_requires_judgement")
+    elif result is None:
+        facts.append("planned_result_missing")
     if facts:
-        return PlanResultClassification(PlanResultKind.WAKE_CORE, tuple(facts), blocker)
-    if attempt.disposition is not CapabilityAttemptDisposition.EXECUTED or result is None:
-        return PlanResultClassification(PlanResultKind.WAKE_CORE,
-                                        ("planned_result_missing",))
-    completed = (result.state is CapabilityResultState.SUCCEEDED and not result.failure
-                 and conditions_match(document, step.completion_conditions))
-    if waiting and completed:
-        return PlanResultClassification(PlanResultKind.WAKE_CORE,
-                                        ("planned_result_conflicting",))
-    # Rule 6: only a declared pending state of an observation may wait.
-    if waiting and (pending_failure or (
-            result.state is CapabilityResultState.SUCCEEDED and not result.failure)):
+        return PlanResultClassification(PlanResultKind.WAKE_CORE, tuple(facts))
+    assert result is not None
+    outcome = outcome_of(result)
+    if outcome is ExecutionOutcome.FAILURE:
+        return PlanResultClassification(PlanResultKind.WAKE_CORE, ("planned_result_failed",))
+    if outcome is ExecutionOutcome.AMBIGUOUS:
+        return PlanResultClassification(
+            PlanResultKind.WAKE_CORE, ("planned_evidence_requires_judgement",))
+    if outcome in (ExecutionOutcome.PENDING, ExecutionOutcome.TEMPORARILY_UNAVAILABLE):
+        if not observation:
+            # Only a declared observation may say "not yet"; from anything
+            # else it is a result nobody declared, and she reads it.
+            return PlanResultClassification(
+                PlanResultKind.WAKE_CORE, ("planned_result_unexpected",))
+        if not step.wait_seconds:
+            return PlanResultClassification(PlanResultKind.WAKE_CORE, ("plan_step_pending",))
+        if wait_expired:
+            return PlanResultClassification(PlanResultKind.WAKE_CORE, ("plan_wait_exceeded",))
         return PlanResultClassification(PlanResultKind.WAIT)
-    # Rule 7: a known-safe completion.
-    if completed:
+    if conditions_match(_document(attempt), step.completion_conditions):
         return PlanResultClassification(PlanResultKind.ADVANCE)
-    # Rule 8: partial, missing, or anything the plan did not declare.
-    if result.state is CapabilityResultState.PARTIAL:
-        return PlanResultClassification(PlanResultKind.WAKE_CORE,
-                                        ("planned_result_partial",))
-    return PlanResultClassification(PlanResultKind.WAKE_CORE,
-                                    ("planned_result_unexpected",))
+    return PlanResultClassification(PlanResultKind.WAKE_CORE, ("planned_result_unexpected",))
 
 
 def reduce_plan(
     plan: ExecutionPlan, classification: PlanResultClassification, now: datetime,
-    *, result_call_id: str | None = None,
+    *, evidence_call_id: str | None = None,
 ) -> ExecutionPlan:
-    """Apply one classification: cursor, status, result identity, wait, wake."""
-    last = plan.last_result_call_id if result_call_id is None else result_call_id
+    """Apply one classification: cursor, status, wait, or a new attention."""
     if classification.kind is PlanResultKind.WAKE_CORE:
-        return replace(
-            plan, status="needs_core", next_due_at=None,
-            core_reentry_reason=classification.facts[0],
-            core_reentry_facts=classification.facts,
-            mechanical_blocker=classification.blocker,
-            last_result_call_id=last,
+        return raise_attention(
+            plan, classification.facts, now,
+            () if evidence_call_id is None else (evidence_call_id,),
         )
     step = plan.steps[plan.cursor]
     if classification.kind is PlanResultKind.WAIT:
         return replace(
-            plan, status="waiting",
+            plan, status=PlanStatus.WAITING, inflight=None,
             next_due_at=now + timedelta(seconds=step.wait_seconds),
-            core_reentry_reason=None, core_reentry_facts=(),
-            mechanical_blocker=None, last_result_call_id=last,
+            wait_deadline=(plan.wait_deadline
+                           or now + timedelta(seconds=step.max_wait_seconds)),
         )
-    advanced = replace(
-        plan, cursor=plan.cursor + 1, status="ready", next_due_at=None,
-        core_reentry_reason=None, core_reentry_facts=(),
-        mechanical_blocker=None, last_result_call_id=last,
-    )
+    evidence = () if evidence_call_id is None else (evidence_call_id,)
+    cursor = plan.cursor + 1
+    if cursor == len(plan.steps):
+        return raise_attention(plan, ("plan_steps_done",), now, evidence, cursor=cursor)
     if step.wake_core_on_completion:
-        return reduce_plan(advanced, PlanResultClassification(
-            PlanResultKind.WAKE_CORE, ("planned_evidence_requires_judgement",),
-        ), now)
-    if advanced.cursor == len(advanced.steps):
-        return replace(advanced, status="completed",
-                       core_reentry_reason="plan_completed",
-                       core_reentry_facts=("plan_completed",))
-    return advanced
+        return raise_attention(plan, ("plan_checkpoint",), now, evidence, cursor=cursor)
+    return replace(plan, cursor=cursor, status=PlanStatus.RUNNING, inflight=None,
+                   next_due_at=None, wait_deadline=None)
 
 
-def wake(*facts: str, blocker: str | None = None) -> PlanResultClassification:
-    """A Core wake that no capability result produced."""
-    return PlanResultClassification(PlanResultKind.WAKE_CORE, facts, blocker)
+def raise_attention(
+    plan: ExecutionPlan, facts: tuple[str, ...], now: datetime,
+    evidence_call_ids: tuple[str, ...] = (), *, cursor: int | None = None,
+) -> ExecutionPlan:
+    """RUNNING or WAITING to NEEDS_CORE: the only way a plan wakes her.
 
-
-def unavailable_judgment_evidence(
-    facts: tuple[str, ...], *more: str, blocker: str | None = None,
-) -> PlanResultClassification:
-    """A judgment wake whose evidence cannot be had: held until she responds."""
-    return PlanResultClassification(
-        PlanResultKind.WAKE_CORE,
-        (*facts, "judgment_evidence_unavailable", *more),
-        blocker or "judgment_evidence_unavailable",
+    `cursor` moves past a step that completed in the same transition.
+    """
+    seq = plan.attention_seq + 1
+    return replace(
+        plan, cursor=plan.cursor if cursor is None else cursor,
+        status=PlanStatus.NEEDS_CORE, inflight=None, next_due_at=None,
+        wait_deadline=None, attention_seq=seq,
+        attention=PlanAttention(seq, facts[0], facts, now, evidence_call_ids,
+                                next_offer_at=now),
     )
+
+
+def resume_plan(plan: ExecutionPlan, *, accept_current: bool = False) -> ExecutionPlan:
+    """Her answer that the same plan runs on: from its cursor, or after it.
+
+    Accepting takes the step at the cursor as done on her judgment, which is
+    how a result she was woken to judge lets the plan continue past it.
+    """
+    return replace(plan, cursor=plan.cursor + int(accept_current),
+                   status=PlanStatus.RUNNING, attention=None)
+
+
+def finish_plan(plan: ExecutionPlan, status: PlanStatus) -> ExecutionPlan:
+    """COMPLETED or CANCELLED: hers to say, or a finished goal's to imply."""
+    if status not in (PlanStatus.COMPLETED, PlanStatus.CANCELLED):
+        raise ValueError("a plan finishes completed or cancelled")
+    return replace(plan, status=status, inflight=None, next_due_at=None,
+                   wait_deadline=None, attention=None)
+
+
+def defer_plan(plan: ExecutionPlan, until: datetime) -> ExecutionPlan:
+    """Hold a step that could not be dispatched yet, without waking her.
+
+    Used when the execution budget refuses the dispatch: waking a paid
+    reasoner because spending has stopped would defeat the point.
+    """
+    return replace(plan, status=PlanStatus.WAITING, inflight=None, next_due_at=until)
 
 
 def conditions_match(document: Mapping[str, Any],
@@ -286,22 +234,15 @@ def conditions_match(document: Mapping[str, Any],
 
 
 def condition_matches(document: Any, condition: PlanCondition) -> bool:
-    values: list[Any] = [document]
+    value = document
     for part in condition.path.split("."):
-        next_values = []
-        for value in values:
-            if part == "*" and isinstance(value, (tuple, list)) and value:
-                next_values.extend(value)
-            elif isinstance(value, Mapping) and part in value:
-                next_values.append(value[part])
-            else:
-                return False
-        values = next_values
-        if not values:
+        if not isinstance(value, Mapping) or part not in value:
+            # A field the result does not have never satisfies a condition,
+            # negated or not: absence is not a value.
             return False
-    comparisons = (not json_equal(value, condition.equals) if condition.negate
-                   else json_equal(value, condition.equals) for value in values)
-    return any(comparisons) if condition.quantifier == "any" else all(comparisons)
+        value = value[part]
+    matched = json_equal(value, condition.equals)
+    return not matched if condition.negate else matched
 
 
 def json_equal(left: Any, right: Any) -> bool:
@@ -330,61 +271,6 @@ def json_equal(left: Any, right: Any) -> bool:
     return type(left) is type(right) and left == right
 
 
-def settled_contradiction(document: Mapping[str, Any], step: ExecutionStep) -> bool:
-    """Whether a settled element already fails completion while others wait.
-
-    A plan waits on a collection, such as check runs or commit statuses,
-    because some members are still pending. A member that is not pending is
-    settled, and a settled member that fails a completion condition is a
-    failure now: waiting cannot repair it. Members of a collection the
-    waiting conditions do not mention are all settled.
-    """
-    if any("*" not in item.path.split(".") for item in step.waiting_conditions):
-        # The whole result is declared pending; nothing in it is settled yet.
-        return False
-    pending_by_prefix: dict[str, list[tuple[str, PlanCondition]]] = {}
-    for item in step.waiting_conditions:
-        prefix, suffix = _split_wildcard(item.path)
-        pending_by_prefix.setdefault(prefix, []).append((suffix, item))
-    for item in step.completion_conditions:
-        if "*" not in item.path.split(".") or item.quantifier != "all":
-            continue
-        prefix, suffix = _split_wildcard(item.path)
-        members = _resolve(document, prefix)
-        if not isinstance(members, (tuple, list)):
-            continue
-        for member in members:
-            if any(_member_matches(member, waiting_suffix, waiting)
-                   for waiting_suffix, waiting in pending_by_prefix.get(prefix, ())):
-                continue
-            if not _member_matches(member, suffix, item):
-                return True
-    return False
-
-
-def _member_matches(member: Any, suffix: str, condition: PlanCondition) -> bool:
-    """Evaluate a wildcard condition against one member of its collection."""
-    if not suffix:
-        matched = json_equal(member, condition.equals)
-        return not matched if condition.negate else matched
-    return condition_matches(member, replace(condition, path=suffix))
-
-
-def _split_wildcard(path: str) -> tuple[str, str]:
-    parts = path.split(".")
-    index = parts.index("*")
-    return ".".join(parts[:index]), ".".join(parts[index + 1:])
-
-
-def _resolve(document: Any, path: str) -> Any:
-    value = document
-    for part in path.split("."):
-        if not isinstance(value, Mapping) or part not in value:
-            return None
-        value = value[part]
-    return value
-
-
 def _document(attempt: CapabilityAttempt) -> Mapping[str, Any]:
     result = attempt.result
     return {
@@ -400,12 +286,11 @@ __all__ = [
     "classify_planned_result",
     "condition_matches",
     "conditions_match",
-    "declared_pending_failure",
+    "defer_plan",
+    "finish_plan",
     "json_equal",
-    "judgment_blocker",
     "plan_invalidation_facts",
+    "raise_attention",
     "reduce_plan",
-    "settled_contradiction",
-    "unavailable_judgment_evidence",
-    "wake",
+    "resume_plan",
 ]

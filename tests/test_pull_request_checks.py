@@ -540,7 +540,10 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(token_arg.attr, "token")
         self.assertIsInstance(token_arg.value, ast.Name)
         self.assertEqual(token_arg.value.id, "merge_configuration")
-        self.assertIsInstance(call.args[2], ast.Lambda)
+        # The executing call's identifier, read from the dispatch context.
+        self.assertIsInstance(call.args[2], ast.Attribute)
+        self.assertEqual(call.args[2].attr, "get")
+        self.assertEqual(call.args[2].value.id, "current_call_id")
         parent = parents.get(id(call))
         while parent is not None:
             self.assertNotIsInstance(parent, ast.If)

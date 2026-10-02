@@ -25,7 +25,10 @@ from alx.contracts import (
     GoalState,
     ExecutionPlan,
     ExecutionStep,
+    MAX_PLAN_WAIT_SECONDS,
     PlanCondition,
+    PlanOperation,
+    PlanUpdate,
     ModelMessage,
     ModelRequest,
     ModelRole,
@@ -51,18 +54,23 @@ CACHE_KEY = "alx-core-v3"
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
 Interpret the continuous conversation and the optional active goal. Choose either
 one authoritative response, one silent completion, one reusable primitive capability
-call, one execution plan of exact capability calls, or one memory retrieval. Use an
-execution plan only when the sequence and its objective preconditions are already
-decided and each step has an objectively checkable result. The executor advances
-those steps without asking you again. A plan does not grant approval or permission;
-any step needing a fresh person-turn approval must be called separately. State exact
-completion and pending conditions from structured capability results. Only a
-capability marked repeat_safe_observation may carry waiting conditions; start
-an external operation once, then use a separate observation call to wait. A
-failed result can be waited on only when it is listed in that capability's
-pending_failure_reasons; every other failure, refusal, or judgment returns to you.
-Return to
-reasoning for changed evidence, review judgement, failed checks, or ambiguity.
+call, or one memory retrieval. A response or a silent completion may also carry one
+plan_update for the goal it works under. Install a plan only when the sequence of
+exact capability calls and its objective preconditions are already decided: a
+background executor then runs those steps without asking you again, and you stay
+available meanwhile. A plan grants no approval or permission; a step needing a fresh
+person-turn approval must be called separately. Each capability's result says whether
+it succeeded, is still pending, failed, is temporarily unavailable, or needs your
+judgment; completion_conditions add exact checks on a successful result. Only a
+capability marked plan_observation may wait: give that step wait_seconds and
+max_wait_seconds, and start an external operation once before observing it in a
+separate step. The plan returns to you with an attention on failure, judgment,
+ambiguity, a changed precondition or approval, a wait that outlasts its bound, a step
+marked wake_core_on_completion, and when its last step is done. A response alone
+leaves that attention waiting for you. Answer the attention you were shown: resume
+runs the current step, again if it already ran; accept takes the current step's result
+as done and runs on from the next; finish says the plan's work is done; cancel stops
+it. Or install a replacement.
 A silent completion means you judge that no spoken or
 conversational response is useful; it is your semantic decision, never a transport or
 capability rule. Ordinary conversation does not require a goal update. When useful, propose
@@ -517,25 +525,7 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
         "outstanding_work": [
             {"id": item.item_id, "summary": item.summary} for item in state.outstanding_work
         ],
-        "execution_plan": None if state.execution_plan is None else {
-            "plan_id": state.execution_plan.plan_id,
-            "cursor": state.execution_plan.cursor,
-            "status": state.execution_plan.status,
-            "current_step": (
-                None if state.execution_plan.cursor == len(state.execution_plan.steps)
-                else state.execution_plan.steps[state.execution_plan.cursor].call.capability_id
-            ),
-            "waiting_for": (
-                None if state.execution_plan.status != "waiting"
-                else state.execution_plan.steps[state.execution_plan.cursor].waiting_for
-            ),
-            "next_due_at": (
-                None if state.execution_plan.next_due_at is None
-                else state.execution_plan.next_due_at.isoformat()
-            ),
-            "core_reentry_reason": state.execution_plan.core_reentry_reason,
-            "core_reentry_facts": list(state.execution_plan.core_reentry_facts),
-        },
+        "execution_plan": _plan_payload(state.execution_plan),
         "evidence": [
             {
                 "id": item.evidence_id,
@@ -683,14 +673,7 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
                     "id": item.capability_id,
                     "purpose": item.purpose,
                     "side_effect": item.side_effect.value,
-                    "requires_core_judgment": item.requires_core_judgment,
-                    "repeat_safe_observation": (
-                        item.side_effect.value == "none" or item.repeat_safe_observation
-                    ),
-                    **({"pending_failure_reasons": [
-                        {"code": code, "reason": reason}
-                        for code, reason in item.pending_failure_reasons
-                    ]} if item.pending_failure_reasons else {}),
+                    "plan_observation": item.plan_observation,
                     **_failure_code_payload(item, shared, code_sets),
                     "input_schema": _capability_schema_payload(item.input_schema),
                     "result_fields": _result_fields(item.output_schema),
@@ -833,6 +816,9 @@ def _context_payload(context: ReasoningContext) -> str:
                     None if item.updated_at is None else item.updated_at.isoformat()
                 ),
                 "from_current_conversation": item.from_current_conversation,
+                "plan_status": item.plan_status,
+                "plan_attention_reason": item.plan_attention_reason,
+                "plan_automatic_offers_exhausted": item.plan_attention_blocked,
                 "selected": goal is not None and item.goal_id == goal.goal_id,
             }
             for item in context.unfinished_goals
@@ -974,6 +960,34 @@ def _strict_object(properties: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _plan_payload(plan: ExecutionPlan | None) -> dict[str, Any] | None:
+    """The goal's plan as she needs it to decide: where it is, and why she is needed."""
+    if plan is None:
+        return None
+    step = None if plan.cursor == len(plan.steps) else plan.steps[plan.cursor]
+    attention = plan.attention
+    return {
+        "plan_id": plan.plan_id,
+        "status": plan.status.value,
+        "cursor": plan.cursor,
+        "step_count": len(plan.steps),
+        "current_step": None if step is None else step.call.capability_id,
+        "waiting_for": None if step is None or plan.next_due_at is None else step.waiting_for,
+        "next_due_at": None if plan.next_due_at is None else plan.next_due_at.isoformat(),
+        "wait_deadline": (None if plan.wait_deadline is None
+                          else plan.wait_deadline.isoformat()),
+        "attention": None if attention is None else {
+            "seq": attention.seq,
+            "reason": attention.reason,
+            "facts": list(attention.facts),
+            "evidence_attempts": [f"attempt:{item}" for item in attention.evidence_call_ids],
+            "raised_at": attention.raised_at.isoformat(),
+            # Automatic offers have stopped; it waits for you to resolve it.
+            "automatic_offers_exhausted": attention.blocked,
+        },
+    }
+
+
 # The documents a planned result is matched against have these roots.
 _PLAN_CONDITION_ROOTS = frozenset({"state", "values", "failure"})
 
@@ -985,15 +999,55 @@ def _plan_conditions(values: Sequence[Mapping[str, Any]]) -> tuple[PlanCondition
         path = entry["path"]
         parts = path.split(".") if isinstance(path, str) else []
         if (not parts or parts[0] not in _PLAN_CONDITION_ROOTS
-                or any(not part or part.startswith("_") for part in parts)
-                or any("*" in part and part != "*" for part in parts)):
+                or any(not part or part.startswith("_") or "*" in part for part in parts)):
             raise ValueError(f"plan condition path is unusable: {path!r}")
         try:
             equals = json.loads(entry["equals_json"])
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError(f"plan condition equals_json is not JSON: {path!r}") from error
-        conditions.append(PlanCondition(path, equals, entry["quantifier"], entry["negate"]))
+        conditions.append(PlanCondition(path, equals, entry["negate"]))
     return tuple(conditions)
+
+
+def _plan_update(update: Mapping[str, Any] | None,
+                 context: ReasoningContext) -> PlanUpdate | None:
+    """The model's plan change, validated here before anything is built."""
+    if update is None:
+        return None
+    operation = PlanOperation(update["operation"])
+    if operation is not PlanOperation.INSTALL:
+        return PlanUpdate(operation)
+    definition = update["plan"]
+    call_ids = [item["call_id"] for item in definition["steps"]]
+    if len(call_ids) != len(set(call_ids)):
+        raise ValueError("plan call_id values must be unique")
+    steps = []
+    for item in definition["steps"]:
+        arguments = _object_json(item["arguments_json"], "plan arguments_json")
+        capability = next(
+            (part for part in context.capabilities
+             if part.capability_id == item["capability_id"]), None,
+        )
+        if capability is None:
+            raise ValueError("plan capability is absent from catalogue")
+        if (capability.durable_input_fields is not None
+                and set(arguments) - set(capability.durable_input_fields)):
+            raise ValueError("planned arguments are not durable")
+        steps.append(ExecutionStep(
+            CapabilityCall(item["call_id"], item["capability_id"],
+                           arguments, item["approval_id"]),
+            _plan_conditions(item["completion_conditions"]),
+            item["wait_seconds"], item["max_wait_seconds"],
+            item["wake_core_on_completion"], item["waiting_for"],
+        ))
+    return PlanUpdate(operation, ExecutionPlan(
+        # The objective, its source and the turn this plan answers are the
+        # goal's and the conversation's facts. The Core binds them when it
+        # installs the plan.
+        definition["plan_id"], None, None, None, tuple(steps),
+        _object_json(definition["context_preconditions_json"],
+                     "context_preconditions_json"),
+    ))
 
 
 def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
@@ -1203,7 +1257,6 @@ def decision_schema() -> dict[str, Any]:
     plan_condition = {
         "path": string,
         "equals_json": string,
-        "quantifier": {"type": "string", "enum": ["all", "any"]},
         "negate": {"type": "boolean"},
     }
     plan_step = {
@@ -1211,35 +1264,55 @@ def decision_schema() -> dict[str, Any]:
         "capability_id": string,
         "arguments_json": string,
         "approval_id": nullable_string,
-        "completion_conditions": {**_array(plan_condition), "minItems": 1},
+        "completion_conditions": _array(plan_condition),
         "wake_core_on_completion": {"type": "boolean"},
         "waiting_for": nullable_string,
     }
-    plan_action = _strict_object({
-        "type": {"type": "string", "const": "execute_plan"},
+    plan_definition = _strict_object({
         "plan_id": string,
-        "cursor": {"type": "integer", "const": 0},
         "context_preconditions_json": string,
         # The two step shapes ExecutionStep accepts, and no others: a step
-        # either never waits, or waits on at least one condition at a
-        # positive interval. Every step needs a completion condition.
+        # either never waits, or waits at a positive interval within a bound.
         "steps": {
             "type": "array",
             "items": {"anyOf": [
                 _strict_object({
                     **plan_step,
-                    "waiting_conditions": {**_array(plan_condition), "maxItems": 0},
                     "wait_seconds": {"type": "integer", "const": 0},
+                    "max_wait_seconds": {"type": "integer", "const": 0},
                 }),
                 _strict_object({
                     **plan_step,
-                    "waiting_conditions": {**_array(plan_condition), "minItems": 1},
                     "wait_seconds": {"type": "integer", "minimum": 1},
+                    "max_wait_seconds": {
+                        "type": "integer", "minimum": 1, "maximum": MAX_PLAN_WAIT_SECONDS,
+                    },
                 }),
             ]},
             "minItems": 1, "maxItems": 32,
         },
     })
+    plan_update = {"anyOf": [
+        {"type": "null"},
+        _strict_object({
+            "operation": {"type": "string", "const": PlanOperation.INSTALL.value},
+            "plan": plan_definition,
+        }),
+        _strict_object({
+            "operation": {
+                "type": "string",
+                "enum": [PlanOperation.RESUME.value, PlanOperation.ACCEPT.value,
+                         PlanOperation.FINISH.value, PlanOperation.CANCEL.value],
+                "description": (
+                    "Answer the attention of the plan you were shown. resume runs "
+                    "its current step, again if it already ran; accept takes the "
+                    "current step's result as done and runs on from the next; "
+                    "finish says its work is done; cancel stops it, and may also "
+                    "stop a plan that is still running."
+                ),
+            },
+        }),
+    ]}
     memory_action = _strict_object(
         {
             "type": {"type": "string", "const": "retrieve_memories"},
@@ -1303,11 +1376,12 @@ def decision_schema() -> dict[str, Any]:
         },
         "action": {
             "anyOf": [
-                response_action, silent_action, capability_action, memory_action, plan_action,
+                response_action, silent_action, capability_action, memory_action,
                 select_goal_action,
             ]
         },
         "goal_update": {"anyOf": [{"type": "null"}, goal_update]},
+        "plan_update": plan_update,
         "memory_proposals": {
             "type": "array",
             "items": {"anyOf": list(memory_variants)},
@@ -1332,6 +1406,7 @@ def response_only_schema() -> dict[str, Any]:
     properties["action"] = respond
     properties["goal_id"] = {"type": "null"}
     properties["goal_update"] = {"type": "null"}
+    properties["plan_update"] = {"type": "null"}
     properties["memory_proposals"] = {"type": "array", "maxItems": 0, "items": {"type": "object"}}
     return schema
 
@@ -1475,6 +1550,7 @@ class ModelReasoner:
             output["action"]["type"] != "respond"
             or output["goal_id"] is not None
             or output["goal_update"] is not None
+            or output.get("plan_update") is not None
             or output["memory_proposals"]
             or output["action"].get("response_requires_goal_commit") is not False
         ):
@@ -1524,6 +1600,9 @@ class ModelReasoner:
             )
             for item in output["memory_proposals"]
         )
+        plan_change = _plan_update(output.get("plan_update"), context)
+        if plan_change is not None and disposition not in ("respond", "finish_silently"):
+            raise ValueError("a plan update travels with a response or silence")
         if disposition == "select_goal":
             if goal_id is None:
                 raise ValueError("select_goal requires a goal_id")
@@ -1561,6 +1640,7 @@ class ModelReasoner:
                 response_requires_goal_commit=action["response_requires_goal_commit"],
                 memory_proposals=memory_proposals,
                 goal_id=goal_id,
+                plan_update=plan_change,
             )
         if disposition == "finish_silently":
             return AgentDecision(
@@ -1568,43 +1648,7 @@ class ModelReasoner:
                 goal_proposal=proposal,
                 memory_proposals=memory_proposals,
                 goal_id=goal_id,
-            )
-        if disposition == "execute_plan":
-            call_ids = [item["call_id"] for item in action["steps"]]
-            if len(call_ids) != len(set(call_ids)):
-                raise ValueError("plan call_id values must be unique")
-            steps = []
-            for item in action["steps"]:
-                arguments = _object_json(item["arguments_json"], "plan arguments_json")
-                definition = next(
-                    (part for part in context.capabilities
-                     if part.capability_id == item["capability_id"]), None,
-                )
-                if definition is None:
-                    raise ValueError("plan capability is absent from catalogue")
-                if (definition.durable_input_fields is not None
-                        and set(arguments) - set(definition.durable_input_fields)):
-                    raise ValueError("planned arguments are not durable")
-                steps.append(ExecutionStep(
-                    CapabilityCall(item["call_id"], item["capability_id"],
-                                   arguments, item["approval_id"]),
-                    _plan_conditions(item["completion_conditions"]),
-                    _plan_conditions(item["waiting_conditions"]),
-                    item["wait_seconds"], item["wake_core_on_completion"],
-                    item["waiting_for"],
-                ))
-            return AgentDecision(
-                execution_plan=ExecutionPlan(
-                    # The objective, its source and the turn this plan
-                    # answers are the goal's and the conversation's facts.
-                    # The Core binds them when it installs the plan.
-                    action["plan_id"], None, None, None, tuple(steps),
-                    _object_json(action["context_preconditions_json"],
-                                 "context_preconditions_json"),
-                    action["cursor"],
-                ),
-                goal_proposal=proposal, memory_proposals=memory_proposals,
-                goal_id=goal_id,
+                plan_update=plan_change,
             )
         if disposition != "call_capability":
             raise ValueError("unknown decision action")

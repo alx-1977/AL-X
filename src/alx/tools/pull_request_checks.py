@@ -26,6 +26,7 @@ from alx.contracts import (
     CapabilityResult,
     CapabilityResultState,
     ContentOrigin,
+    ExecutionOutcome,
     RetentionPolicy,
     SideEffect,
     StructuredSchema,
@@ -132,7 +133,43 @@ DEFINITION = CapabilityDefinition(
     CHECK_READ_FAILURES,
     durable_input_fields=("pull_request_number", "head_sha"),
     transmits_authored_text=False,
+    # Reading again changes nothing, so a plan may wait on it.
+    plan_observation=True,
 )
+
+# GitHub's own vocabulary, read the way its required-check rule reads it:
+# success, neutral and skipped pass; these have failed. Anything else that
+# has settled, such as action_required or stale, is for AL/X to read.
+_PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "cancelled", "startup_failure"})
+_FAILED_STATUSES = frozenset({"failure", "error"})
+# A read that may well succeed if simply made again.
+_TRANSIENT_READ_FAILURES = frozenset({"rate_limited", "provider_failed"})
+
+
+def _outcome(values: Mapping[str, Any]) -> ExecutionOutcome:
+    """Whether the checks have settled, and how, for work already decided.
+
+    Settlement, not permission: SUCCESS says every check passed by GitHub's
+    own rule, not that a merge should follow. A failure anywhere, including
+    a failed step of a job still running, is a failure now; waiting cannot
+    repair it. No checks yet is pending: they register after a push.
+    """
+    runs = values["check_runs"]
+    statuses = values["commit_statuses"]
+    conclusions = [run["conclusion"] for run in runs if run["status"] == "completed"]
+    conclusions += [step["conclusion"] for run in runs for step in run.get("steps", ())]
+    if (any(item in _FAILED_CONCLUSIONS for item in conclusions)
+            or any(item["state"] in _FAILED_STATUSES for item in statuses)):
+        return ExecutionOutcome.FAILURE
+    if (not runs and not statuses
+            or any(run["status"] != "completed" for run in runs)
+            or any(item["state"] == "pending" for item in statuses)):
+        return ExecutionOutcome.PENDING
+    if (all(run["conclusion"] in _PASSING_CONCLUSIONS for run in runs)
+            and all(item["state"] == "success" for item in statuses)):
+        return ExecutionOutcome.SUCCESS
+    return ExecutionOutcome.AMBIGUOUS
 
 
 def build_pull_request_checks_executors(
@@ -185,6 +222,7 @@ def build_pull_request_checks_executors(
                 "head_sha": values["head_sha"],
             },
             provenance=provenance,
+            outcome=_outcome(values),
         )
 
     return {READ_PULL_REQUEST_CHECKS: read_pull_request_checks}
@@ -200,6 +238,8 @@ def _failed(call_id: str, code: str, **details: object) -> CapabilityResult:
             **details,
             "requires_judgement": code != "arguments_unusable",
         },
+        outcome=(ExecutionOutcome.TEMPORARILY_UNAVAILABLE
+                 if code in _TRANSIENT_READ_FAILURES else None),
     )
 
 

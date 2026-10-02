@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from alx.contracts.capabilities import CapabilityDefinition
@@ -20,6 +21,7 @@ from alx.contracts.records import (
     GoalProposal,
     ExecutionPlan,
     GoalState,
+    PlanStatus,
     GoalStatus,
     GoalStopReason,
 )
@@ -92,6 +94,11 @@ class GoalSummary:
     # Provenance, not priority: the Core reads it to judge how current the work
     # is, and nothing infers relevance from it.
     from_current_conversation: bool = False
+    # The goal's execution plan, when it has one still open: its status, and
+    # while it needs her, why and whether automatic offers have stopped.
+    plan_status: str | None = None
+    plan_attention_reason: str | None = None
+    plan_attention_blocked: bool = False
 
     def __post_init__(self) -> None:
         if not self.goal_id.strip():
@@ -116,6 +123,9 @@ class GoalSummary:
         construction site stays correct and a summary built from state alone
         simply says nothing about scope or recency.
         """
+        plan = state.execution_plan
+        if plan is not None and plan.status in {PlanStatus.COMPLETED, PlanStatus.CANCELLED}:
+            plan = None
         return cls(
             state.goal_id,
             state.objective.summary,
@@ -130,6 +140,13 @@ class GoalSummary:
             project_id=project_id,
             updated_at=updated_at,
             from_current_conversation=from_current_conversation,
+            plan_status=None if plan is None else plan.status.value,
+            plan_attention_reason=(
+                None if plan is None or plan.attention is None else plan.attention.reason
+            ),
+            plan_attention_blocked=(
+                plan is not None and plan.attention is not None and plan.attention.blocked
+            ),
         )
 
     @property
@@ -280,6 +297,39 @@ class ReasoningContext:
         ):
             raise ValueError("trigger event must be present in reasoning context")
 
+class PlanOperation(str, Enum):
+    """What AL/X does with a goal's execution plan.
+
+    Install starts a new plan, replacing any other. The others answer the
+    plan's current attention: resume runs the step at its cursor, again if it
+    already ran; accept takes that step's result as done and runs on from the
+    next; finish says the plan's work is done; cancel stops it, and may also
+    stop a plan that is still running.
+    """
+
+    INSTALL = "install"
+    RESUME = "resume"
+    ACCEPT = "accept"
+    FINISH = "finish"
+    CANCEL = "cancel"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanUpdate:
+    operation: PlanOperation
+    plan: ExecutionPlan | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "operation", PlanOperation(self.operation))
+        if (self.operation is PlanOperation.INSTALL) != (self.plan is not None):
+            raise ValueError("exactly an install carries a plan")
+        if self.plan is not None and (
+            self.plan.status is not PlanStatus.RUNNING or self.plan.cursor != 0
+            or self.plan.attention_seq or self.plan.inflight is not None
+        ):
+            raise ValueError("a new execution plan starts running at its first step")
+
+
 @dataclass(frozen=True, slots=True)
 class AgentDecision:
     call: CapabilityCall | None = None
@@ -295,12 +345,14 @@ class AgentDecision:
     # goal; None without one is goal-less conversation. A decision that
     # carries only a goal_id asks for that goal's full state before acting.
     goal_id: str | None = None
-    execution_plan: ExecutionPlan | None = None
+    # A plan change travels with the words or silence that end the decision,
+    # the way a goal update does. It is never the decision's one action.
+    plan_update: PlanUpdate | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.finish_silently, bool):
             raise TypeError("finish_silently must be a bool")
-        chosen = sum(item is not None for item in (self.call, self.response, self.memory_query, self.execution_plan))
+        chosen = sum(item is not None for item in (self.call, self.response, self.memory_query))
         chosen += int(self.finish_silently)
         if chosen == 0 and self.goal_id is not None:
             # Selecting a goal may carry a mutation of that same goal: the
@@ -325,8 +377,8 @@ class AgentDecision:
             raise ValueError("only a response can depend on a goal commit")
         if self.approval_proposal is not None and self.call is None:
             raise ValueError("an approval proposal requires an exact capability call")
-        if self.execution_plan is not None and self.execution_plan.status != "ready":
-            raise ValueError("a new execution plan must start ready")
+        if self.plan_update is not None and self.response is None and not self.finish_silently:
+            raise ValueError("a plan update travels with a response or silence")
         object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
@@ -337,7 +389,6 @@ class AgentDecision:
         return (
             self.goal_id is not None
             and self.call is None
-            and self.execution_plan is None
             and self.response is None
             and self.memory_query is None
             and not self.finish_silently
@@ -369,7 +420,9 @@ class DurableGoalStore(Protocol):
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]: ...
 
-    def list_open_plan_goal_ids(self) -> tuple[str, ...]: ...
+    def list_open_plan_goal_ids(
+        self, *, needing_core: bool = False,
+    ) -> tuple[str, ...]: ...
 
     def replace(
         self,

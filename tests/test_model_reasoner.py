@@ -15,7 +15,7 @@ from alx.contracts import (  # noqa: E402
     CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
     ConversationOrigin, ConversationTurn, DecisionValidationError,
     GoalMutationKind, GoalState, GoalSummary, MemoryKind, ModelCompletion, Objective,
-    ReasoningContext, SideEffect, Evidence, history_evidence_ids,
+    PlanOperation, ReasoningContext, SideEffect, Evidence, history_evidence_ids,
     StructuredSchema, SuccessCriterion, ValueKind,
 )
 from alx.core import ModelReasoner  # noqa: E402
@@ -41,6 +41,7 @@ def base_output(**changes):
     values = {
         "goal_id": None,
         "goal_update": None,
+        "plan_update": None,
         "memory_proposals": [],
     }
     action_type = changes.pop("disposition", "respond")
@@ -127,81 +128,85 @@ class ModelReasonerTests(unittest.TestCase):
             ),
         )
 
-    def test_plan_action_is_parsed_as_durable_structured_intent(self) -> None:
-        output = base_output(goal_id="goal-1")
-        output["action"] = {
-            "type": "execute_plan",
-            "plan_id": "plan-1",
-            "cursor": 0,
-            "context_preconditions_json": "{}",
-            "steps": [{
-                "call_id": "call-1", "capability_id": "search_records",
-                "arguments_json": "{}", "approval_id": None,
-                "completion_conditions": [{"path": "values.ready", "equals_json": "true",
-                                           "quantifier": "all", "negate": False}],
-                "waiting_conditions": [{"path": "values.ready", "equals_json": "false",
-                                        "quantifier": "all", "negate": False}],
-                "wait_seconds": 30, "wake_core_on_completion": False,
-                "waiting_for": "CI",
-            }],
-        }
-        decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
-        self.assertEqual(decision.execution_plan.steps[0].completion_conditions[0].equals, True)
-        # Runtime-owned provenance: the Core binds it on installation.
-        self.assertIsNone(decision.execution_plan.source_turn_id)
-
-    def plan_step(self, *, completion=1, waiting=0, wait_seconds=0):
-        condition = {"path": "values.ready", "equals_json": "true",
-                     "quantifier": "all", "negate": False}
+    def plan_step(self, *, wait_seconds=0, max_wait_seconds=0, completion=1):
+        condition = {"path": "values.ready", "equals_json": "true", "negate": False}
         return {
             "call_id": "call-1", "capability_id": "search_records",
             "arguments_json": "{}", "approval_id": None,
             "completion_conditions": [condition] * completion,
-            "waiting_conditions": [dict(condition, equals_json="false")] * waiting,
-            "wait_seconds": wait_seconds, "wake_core_on_completion": False,
-            "waiting_for": "CI" if waiting else None,
+            "wait_seconds": wait_seconds, "max_wait_seconds": max_wait_seconds,
+            "wake_core_on_completion": False,
+            "waiting_for": "CI" if wait_seconds else None,
         }
 
+    def plan_output(self, *steps, disposition="respond", **plan):
+        output = base_output(goal_id="goal-1", disposition=disposition)
+        output["plan_update"] = {
+            "operation": "install",
+            "plan": {"plan_id": "plan-1", "context_preconditions_json": "{}",
+                     "steps": list(steps), **plan},
+        }
+        return output
+
     def plan_step_schema(self):
-        actions = decision_schema()["properties"]["action"]["anyOf"]
-        plan_action = next(item for item in actions
-                           if item["properties"]["type"].get("const") == "execute_plan")
-        return plan_action["properties"]["steps"]["items"]
+        install = decision_schema()["properties"]["plan_update"]["anyOf"][1]
+        return install["properties"]["plan"]["properties"]["steps"]["items"]
+
+    def test_plan_update_is_parsed_as_durable_structured_intent(self) -> None:
+        decision = ModelReasoner(
+            FakeModel(self.plan_output(self.plan_step(wait_seconds=30, max_wait_seconds=600))),
+            "laws", "identity",
+        ).decide(self.context())
+        update = decision.plan_update
+        self.assertEqual(update.operation, PlanOperation.INSTALL)
+        self.assertEqual(decision.response, "A normal response.")
+        step = update.plan.steps[0]
+        self.assertEqual((step.wait_seconds, step.max_wait_seconds), (30, 600))
+        self.assertIs(step.completion_conditions[0].equals, True)
+        # Runtime-owned provenance: the Core binds it on installation.
+        self.assertIsNone(update.plan.source_turn_id)
+
+    def test_resolution_carries_no_plan_and_travels_with_words_or_silence(self) -> None:
+        for operation in ("resume", "accept", "finish", "cancel"):
+            for disposition in ("respond", "finish_silently"):
+                with self.subTest(operation=operation, disposition=disposition):
+                    output = base_output(goal_id="goal-1", disposition=disposition)
+                    output["plan_update"] = {"operation": operation}
+                    self.assertTrue(_schema_accepts(decision_schema(), output))
+                    decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(
+                        self.context())
+                    self.assertEqual(decision.plan_update.operation.value, operation)
+                    self.assertIsNone(decision.plan_update.plan)
+
+    def test_plan_update_cannot_accompany_a_call(self) -> None:
+        output = base_output(goal_id="goal-1", disposition="call_capability",
+                             call_id="call-9", capability_id="search_records",
+                             arguments_json="{}")
+        output["plan_update"] = {"operation": "resume"}
+        with self.assertRaisesRegex(DecisionValidationError, "response or silence"):
+            ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
 
     def test_plan_step_schema_holds_the_execution_step_contract(self) -> None:
         schema = self.plan_step_schema()
         cases = {
-            "empty completion": (self.plan_step(completion=0), False),
-            "waiting at zero interval": (self.plan_step(waiting=1, wait_seconds=0), False),
-            "interval without waiting": (self.plan_step(wait_seconds=30), False),
+            "interval without bound": (self.plan_step(wait_seconds=30), False),
+            "bound without interval": (self.plan_step(max_wait_seconds=30), False),
             "valid no-wait step": (self.plan_step(), True),
-            "valid waiting step": (self.plan_step(waiting=1, wait_seconds=30), True),
+            "valid step without completion conditions": (self.plan_step(completion=0), True),
+            "valid waiting step": (self.plan_step(wait_seconds=30, max_wait_seconds=600), True),
         }
         for name, (step_value, accepted) in cases.items():
             with self.subTest(case=name):
                 self.assertEqual(_schema_accepts(schema, step_value), accepted)
                 if accepted:
                     # Whatever the schema accepts, ExecutionStep accepts too.
-                    output = base_output(goal_id="goal-1")
-                    output["action"] = {
-                        "type": "execute_plan", "plan_id": "plan-1", "cursor": 0,
-                        "context_preconditions_json": "{}", "steps": [step_value],
-                    }
-                    decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(
-                        self.context())
-                    self.assertEqual(len(decision.execution_plan.steps), 1)
-
-    def plan_output(self, *steps, **action):
-        output = base_output(goal_id="goal-1")
-        output["action"] = {
-            "type": "execute_plan", "plan_id": "plan-1", "cursor": 0,
-            "context_preconditions_json": "{}", "steps": list(steps), **action,
-        }
-        return output
+                    decision = ModelReasoner(
+                        FakeModel(self.plan_output(step_value)), "laws", "identity",
+                    ).decide(self.context())
+                    self.assertEqual(len(decision.plan_update.plan.steps), 1)
 
     def test_malformed_plan_inputs_are_rejected_at_the_parser_boundary(self) -> None:
-        condition = {"path": "values.ready", "equals_json": "true",
-                     "quantifier": "all", "negate": False}
+        condition = {"path": "values.ready", "equals_json": "true", "negate": False}
         cases = {
             "duplicate call ids": (
                 [self.plan_step(), self.plan_step()], "call_id values must be unique"),
@@ -214,13 +219,18 @@ class ModelReasonerTests(unittest.TestCase):
             "private path segment": (
                 [dict(self.plan_step(), completion_conditions=[dict(condition, path="values._x")])],
                 "path is unusable"),
-            "partial wildcard": (
-                [dict(self.plan_step(), completion_conditions=[dict(condition, path="values.x*")])],
+            # Collections are settled by their capability's outcome, so a
+            # condition names one field and never a wildcard.
+            "wildcard": (
+                [dict(self.plan_step(), completion_conditions=[dict(condition, path="values.*")])],
                 "path is unusable"),
             "equals_json not JSON": (
                 [dict(self.plan_step(),
                       completion_conditions=[dict(condition, equals_json="{not json")])],
                 "equals_json is not JSON"),
+            "capability absent from the catalogue": (
+                [dict(self.plan_step(), capability_id="invented")],
+                "absent from catalogue"),
         }
         for name, (steps, message) in cases.items():
             with self.subTest(case=name):
@@ -229,136 +239,26 @@ class ModelReasonerTests(unittest.TestCase):
                     reasoner.decide(self.context())
 
     def test_plan_schema_leaves_objective_and_source_turn_to_the_runtime(self) -> None:
-        actions = decision_schema()["properties"]["action"]["anyOf"]
-        plan_action = next(item for item in actions
-                           if item["properties"]["type"].get("const") == "execute_plan")
-        for runtime_owned in ("objective_source", "objective_summary", "source_turn_id"):
-            self.assertNotIn(runtime_owned, plan_action["properties"])
-        # A restated objective is not part of the contract the model meets.
+        install = decision_schema()["properties"]["plan_update"]["anyOf"][1]
+        plan = install["properties"]["plan"]
+        for runtime_owned in ("objective_source", "objective_summary", "source_turn_id",
+                              "cursor", "status", "attention"):
+            self.assertNotIn(runtime_owned, plan["properties"])
         restated = self.plan_output(self.plan_step(), objective_summary="investigate")
         self.assertFalse(_schema_accepts(decision_schema(), restated))
         decision = ModelReasoner(FakeModel(self.plan_output(self.plan_step())),
                                  "laws", "identity").decide(self.context())
-        self.assertIsNone(decision.execution_plan.objective_source)
-        self.assertIsNone(decision.execution_plan.objective_summary)
-
-    def test_provider_shaped_plan_passes_schema_parser_and_runtime(self) -> None:
-        """One raw decision, in the exact shape the model is asked for, end to end."""
-        import tempfile
-        from alx.contracts import CognitionOrigin, ConversationSnapshot
-        from alx.core import CoreAgent, CoreState
-        from alx.goals import SQLiteGoalStore
-        from alx.tools.pull_request_checks import DEFINITION as CHECKS
-
-        head = "c" * 40
-        running = {"path": "values.check_runs.*.status", "equals_json": '"completed"',
-                   "quantifier": "any", "negate": True}
-        raw = {
-            "goal_id": "goal-1",
-            "goal_update": None,
-            "memory_proposals": [],
-            "action": {
-                "type": "execute_plan",
-                "plan_id": "watch-and-record",
-                "cursor": 0,
-                "context_preconditions_json": json.dumps({"head": head}),
-                "steps": [
-                    {
-                        "call_id": "read-checks",
-                        "capability_id": "read_pull_request_checks",
-                        "arguments_json": json.dumps({"pull_request_number": 95,
-                                                      "head_sha": head}),
-                        "approval_id": None,
-                        "completion_conditions": [
-                            {"path": "values.check_runs.*.status", "equals_json": '"completed"',
-                             "quantifier": "all", "negate": False},
-                            {"path": "values.check_runs.*.conclusion",
-                             "equals_json": '"success"', "quantifier": "all", "negate": False},
-                        ],
-                        "waiting_conditions": [running],
-                        "wait_seconds": 60,
-                        "wake_core_on_completion": False,
-                        "waiting_for": "required checks",
-                    },
-                    {
-                        "call_id": "search-after",
-                        "capability_id": "search_records",
-                        "arguments_json": json.dumps({"query": {"pull_request": 95}}),
-                        "approval_id": None,
-                        "completion_conditions": [{"path": "state", "equals_json": '"succeeded"',
-                                                   "quantifier": "all", "negate": False}],
-                        "waiting_conditions": [],
-                        "wait_seconds": 0,
-                        "wake_core_on_completion": True,
-                        "waiting_for": None,
-                    },
-                ],
-            },
-        }
-        # 1. The exported schema accepts it.
-        self.assertTrue(_schema_accepts(decision_schema(), raw))
-        # 2. The parser reads it.
-        active = replace(goal(), context={"head": head})
-        context = replace(self.context(active), capabilities=(CAPABILITY, CHECKS))
-        decision = ModelReasoner(FakeModel(raw), "laws", "identity").decide(context)
-        # 3. It is a valid plan record.
-        proposed = decision.execution_plan
-        self.assertEqual([item.call.call_id for item in proposed.steps],
-                         ["read-checks", "search-after"])
-        first = proposed.steps[0]
-        self.assertEqual(first.call.arguments, {"pull_request_number": 95, "head_sha": head})
-        self.assertEqual((first.wait_seconds, len(first.completion_conditions),
-                          first.waiting_conditions[0].negate), (60, 2, True))
-        self.assertEqual(proposed.steps[1].call.arguments, {"query": {"pull_request": 95}})
-        # 4. It installs into a real active goal and runs to its first wait.
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
-        self.addCleanup(store.close)
-        retention = NOW.replace(year=NOW.year + 1)
-        store.create(active, "conversation-1", retention)
-        dispatched = []
-
-        def dispatch(call, _state):
-            dispatched.append(call)
-            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
-                                     CapabilityResult(call.call_id, call.capability_id,
-                                                      CapabilityResultState.SUCCEEDED, {
-                                                          "check_runs": [{"status": "queued",
-                                                                          "conclusion": None}],
-                                                      }))
-
-        class Decisions:
-            def __init__(self):
-                self.queue = [decision, AgentDecision(response="Watching the checks.",
-                                                      goal_id="goal-1")]
-
-            def decide(self, _context):
-                return self.queue.pop(0)
-
-        thread = ConversationSnapshot("conversation-1", context.turns, 1, retention)
-        outcome = CoreAgent(store, Decisions(), dispatch, (CAPABILITY, CHECKS),
-                            clock=lambda: NOW, plan_continuation=True).process(
-            thread, retention, 3, origin=CognitionOrigin.PERSON_TURN)
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.response, "Watching the checks.")
-        installed = store.load("goal-1").state.execution_plan
-        self.assertEqual((installed.status, installed.cursor), ("waiting", 0))
-        self.assertEqual(installed.objective_source, active.objective.source_reference)
-        self.assertEqual(installed.objective_summary, active.objective.summary)
-        self.assertEqual(installed.source_turn_id, "turn-1")
-        self.assertEqual([call.call_id for call in dispatched], ["read-checks"])
+        self.assertIsNone(decision.plan_update.plan.objective_source)
+        self.assertIsNone(decision.plan_update.plan.objective_summary)
 
     def test_malformed_condition_structures_are_rejected(self) -> None:
-        good = {"path": "values.ready", "equals_json": "true", "quantifier": "all",
-                "negate": False}
+        good = {"path": "values.ready", "equals_json": "true", "negate": False}
         nested = {"type": "object", "properties": good, "required": list(good),
                   "additionalProperties": False}
         cases = {
             "condition nested as a schema": nested,
             "condition missing a field": {key: good[key] for key in ("path", "equals_json")},
-            "condition with an extra field": dict(good, weight=1),
-            "quantifier outside its enum": dict(good, quantifier="most"),
+            "condition with an extra field": dict(good, quantifier="all"),
         }
         for name, condition in cases.items():
             with self.subTest(case=name):
@@ -369,6 +269,105 @@ class ModelReasonerTests(unittest.TestCase):
                     with self.assertRaises(DecisionValidationError):
                         ModelReasoner(FakeModel(output), "laws", "identity").decide(
                             self.context())
+
+    def test_response_only_schema_admits_no_plan_update(self) -> None:
+        from alx.core.model_reasoner import response_only_schema
+
+        output = base_output(goal_id=None)
+        output["plan_update"] = {"operation": "resume"}
+        self.assertFalse(_schema_accepts(response_only_schema(), output))
+
+    def test_provider_shaped_plan_passes_schema_parser_and_runtime(self) -> None:
+        """One raw decision, in the exact shape the model is asked for, end to end."""
+        import tempfile
+        from alx.contracts import CognitionOrigin, ConversationSnapshot, PlanStatus
+        from alx.core import CoreAgent, CoreState
+        from alx.goals import SQLiteGoalStore
+        from alx.tools.pull_request_checks import DEFINITION as CHECKS
+
+        head = "c" * 40
+        raw = {
+            "goal_id": "goal-1",
+            "goal_update": None,
+            "memory_proposals": [],
+            "action": {"type": "respond", "response": "Watching the checks.",
+                       "response_requires_goal_commit": False},
+            "plan_update": {
+                "operation": "install",
+                "plan": {
+                    "plan_id": "watch-and-record",
+                    "context_preconditions_json": json.dumps({"head": head}),
+                    "steps": [
+                        {
+                            "call_id": "read-checks",
+                            "capability_id": "read_pull_request_checks",
+                            "arguments_json": json.dumps({"pull_request_number": 95,
+                                                          "head_sha": head}),
+                            "approval_id": None,
+                            "completion_conditions": [],
+                            "wait_seconds": 60,
+                            "max_wait_seconds": 3600,
+                            "wake_core_on_completion": False,
+                            "waiting_for": "required checks",
+                        },
+                        {
+                            "call_id": "search-after",
+                            "capability_id": "search_records",
+                            "arguments_json": json.dumps({"query": {"pull_request": 95}}),
+                            "approval_id": None,
+                            "completion_conditions": [
+                                {"path": "state", "equals_json": '"succeeded"',
+                                 "negate": False}],
+                            "wait_seconds": 0,
+                            "max_wait_seconds": 0,
+                            "wake_core_on_completion": True,
+                            "waiting_for": None,
+                        },
+                    ],
+                },
+            },
+        }
+        # 1. The exported schema accepts it.
+        self.assertTrue(_schema_accepts(decision_schema(), raw))
+        # 2. The parser reads it.
+        active = replace(goal(), context={"head": head})
+        context = replace(self.context(active), capabilities=(CAPABILITY, CHECKS))
+        decision = ModelReasoner(FakeModel(raw), "laws", "identity").decide(context)
+        proposed = decision.plan_update.plan
+        self.assertEqual([item.call.call_id for item in proposed.steps],
+                         ["read-checks", "search-after"])
+        self.assertEqual(proposed.steps[0].call.arguments,
+                         {"pull_request_number": 95, "head_sha": head})
+        # 3. It installs into a real active goal, bound to the runtime's
+        # provenance, and nothing runs inside the turn: the executor does that.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        self.addCleanup(store.close)
+        retention = NOW.replace(year=NOW.year + 1)
+        store.create(active, "conversation-1", retention)
+        dispatched = []
+
+        def dispatch(call, _state):
+            dispatched.append(call)
+            raise AssertionError("no planned step runs inside a Core turn")
+
+        class Decisions:
+            def decide(self, _context):
+                return decision
+
+        thread = ConversationSnapshot("conversation-1", context.turns, 1, retention)
+        outcome = CoreAgent(store, Decisions(), dispatch, (CAPABILITY, CHECKS),
+                            clock=lambda: NOW, plan_continuation=True).process(
+            thread, retention, 3, origin=CognitionOrigin.PERSON_TURN)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Watching the checks.")
+        installed = store.load("goal-1").state.execution_plan
+        self.assertEqual((installed.status, installed.cursor), (PlanStatus.RUNNING, 0))
+        self.assertEqual(installed.objective_source, active.objective.source_reference)
+        self.assertEqual(installed.objective_summary, active.objective.summary)
+        self.assertEqual(installed.source_turn_id, "turn-1")
+        self.assertEqual(dispatched, [])
 
     def test_respond_requires_nonblank_text_even_with_a_goal_id(self) -> None:
         for goal_id in (None, "goal-1"):

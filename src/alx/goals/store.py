@@ -15,7 +15,8 @@ from alx.contracts import (
     CapabilityResultState, ConversationOrigin, ConversationTurn, Evidence, GoalState,
     GoalStatus, GoalStopReason, MemoryKind, MemoryProposal, Objective,
     PendingMemoryBatch, ProgressRecord, Referent, SuccessCriterion, WorkItem,
-    ExecutionPlan, ExecutionStep, PlanCondition,
+    ExecutionOutcome, ExecutionPlan, ExecutionStep, PlanAttention, PlanCondition,
+    PlanDispatch, PlanStatus,
     GoalSnapshot, GoalSummary,
 )
 from alx.contracts.provenance import (
@@ -99,7 +100,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
         "attempts": [
             [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.durable_arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
-             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs)], item.reason_code]
+             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs), None if item.result.outcome is None else item.result.outcome.value], item.reason_code]
             for item in goal.attempts
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
@@ -112,36 +113,87 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
             [item.approval_id, item.scope.capability_id, _data(item.scope.arguments), item.lifecycle.value, _time_to_data(item.expires_at)]
             for item in goal.approvals
         ],
-        "execution_plan": None if goal.execution_plan is None else {
-            "plan_id": goal.execution_plan.plan_id,
-            "objective_source": goal.execution_plan.objective_source,
-            "objective_summary": goal.execution_plan.objective_summary,
-            "source_turn_id": goal.execution_plan.source_turn_id,
-            "context_preconditions": _data(goal.execution_plan.context_preconditions),
-            "cursor": goal.execution_plan.cursor,
-            "status": goal.execution_plan.status,
-            "next_due_at": _time_to_data(goal.execution_plan.next_due_at),
-            "core_reentry_reason": goal.execution_plan.core_reentry_reason,
-            "last_result_call_id": goal.execution_plan.last_result_call_id,
-            "continuation_generation": goal.execution_plan.continuation_generation,
-            "core_reentry_facts": list(goal.execution_plan.core_reentry_facts),
-            "mechanical_blocker": goal.execution_plan.mechanical_blocker,
-            "steps": [
-                {
-                    "call": [step.call.call_id, step.call.capability_id,
-                             _data(step.call.durable_arguments), step.call.approval_id],
-                    "completion_conditions": [[item.path, _data(item.equals), item.quantifier, item.negate] for item in step.completion_conditions],
-                    "waiting_conditions": [[item.path, _data(item.equals), item.quantifier, item.negate] for item in step.waiting_conditions],
-                    "wait_seconds": step.wait_seconds,
-                    "wake_core_on_completion": step.wake_core_on_completion,
-                    "waiting_for": step.waiting_for,
-                }
-                for step in goal.execution_plan.steps
-            ],
-        },
+        "execution_plan": _plan_to_data(goal.execution_plan),
         "status": goal.status.value,
         "stop_reason": None if goal.stop_reason is None else goal.stop_reason.value,
     }
+
+
+def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
+    if plan is None:
+        return None
+    attention = plan.attention
+    return {
+        "plan_id": plan.plan_id,
+        "objective_source": plan.objective_source,
+        "objective_summary": plan.objective_summary,
+        "source_turn_id": plan.source_turn_id,
+        "context_preconditions": _data(plan.context_preconditions),
+        "cursor": plan.cursor,
+        "status": plan.status.value,
+        "next_due_at": _time_to_data(plan.next_due_at),
+        "wait_deadline": _time_to_data(plan.wait_deadline),
+        "inflight": None if plan.inflight is None else [
+            plan.inflight.step_index, plan.inflight.call_id,
+        ],
+        "attention_seq": plan.attention_seq,
+        "attention": None if attention is None else {
+            "seq": attention.seq,
+            "reason": attention.reason,
+            "facts": list(attention.facts),
+            "raised_at": _time_to_data(attention.raised_at),
+            "evidence_call_ids": list(attention.evidence_call_ids),
+            "offers": attention.offers,
+            "paid_offers": attention.paid_offers,
+            "next_offer_at": _time_to_data(attention.next_offer_at),
+            "blocked": attention.blocked,
+        },
+        "steps": [
+            {
+                "call": [step.call.call_id, step.call.capability_id,
+                         _data(step.call.durable_arguments), step.call.approval_id],
+                "completion_conditions": [
+                    [item.path, _data(item.equals), item.negate]
+                    for item in step.completion_conditions
+                ],
+                "wait_seconds": step.wait_seconds,
+                "max_wait_seconds": step.max_wait_seconds,
+                "wake_core_on_completion": step.wake_core_on_completion,
+                "waiting_for": step.waiting_for,
+            }
+            for step in plan.steps
+        ],
+    }
+
+
+def _plan_from_data(data: dict[str, Any] | None) -> ExecutionPlan | None:
+    if data is None:
+        return None
+    attention = data["attention"]
+    raised_at = None if attention is None else _time_from_data(attention["raised_at"])
+    return ExecutionPlan(
+        data["plan_id"], data["objective_source"], data["objective_summary"],
+        data["source_turn_id"],
+        tuple(
+            ExecutionStep(
+                CapabilityCall(*item["call"]),
+                tuple(PlanCondition(*condition) for condition in item["completion_conditions"]),
+                item["wait_seconds"], item["max_wait_seconds"],
+                item["wake_core_on_completion"], item["waiting_for"],
+            )
+            for item in data["steps"]
+        ),
+        data["context_preconditions"], data["cursor"], PlanStatus(data["status"]),
+        _time_from_data(data["next_due_at"]), _time_from_data(data["wait_deadline"]),
+        None if data["inflight"] is None else PlanDispatch(*data["inflight"]),
+        data["attention_seq"],
+        None if attention is None else PlanAttention(
+            attention["seq"], attention["reason"], tuple(attention["facts"]),
+            raised_at, tuple(attention["evidence_call_ids"]),
+            attention["offers"], attention["paid_offers"],
+            _time_from_data(attention["next_offer_at"]), attention["blocked"],
+        ),
+    )
 
 
 def _progress(values: list[list[Any]]) -> tuple[ProgressRecord, ...]:
@@ -163,7 +215,12 @@ def _attempts(data: dict[str, Any]) -> tuple[CapabilityAttempt, ...]:
         elif len(result_data) == 4:
             result = CapabilityResult(item[0], item[1], CapabilityResultState(result_data[0]), result_data[1], result_data[2], tuple(result_data[3]))
         else:
-            result = CapabilityResult(result_data[0], result_data[1], CapabilityResultState(result_data[2]), result_data[3], result_data[4], tuple(result_data[5]))
+            result = CapabilityResult(
+                result_data[0], result_data[1], CapabilityResultState(result_data[2]),
+                result_data[3], result_data[4], tuple(result_data[5]),
+                outcome=(None if len(result_data) < 7 or result_data[6] is None
+                         else ExecutionOutcome(result_data[6])),
+            )
         call = None if item[0] is None else CapabilityCall(item[0], item[1], item[2], item[3])
         values.append(CapabilityAttempt(call, CapabilityAttemptDisposition(item[4]), item[5], result, item[7]))
     return tuple(values)
@@ -186,27 +243,7 @@ def _is_unfinished(state: GoalState) -> int:
 
 
 def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
-    plan_data = data.get("execution_plan")
-    plan = None if plan_data is None else ExecutionPlan(
-        plan_data["plan_id"], plan_data["objective_source"],
-        plan_data["objective_summary"], plan_data["source_turn_id"],
-        tuple(
-            ExecutionStep(
-                CapabilityCall(*item["call"]),
-                tuple(PlanCondition(*condition) for condition in item["completion_conditions"]),
-                tuple(PlanCondition(*condition) for condition in item["waiting_conditions"]),
-                item["wait_seconds"], item["wake_core_on_completion"],
-                item.get("waiting_for"),
-            )
-            for item in plan_data["steps"]
-        ),
-        plan_data["context_preconditions"], plan_data["cursor"],
-        plan_data["status"], _time_from_data(plan_data["next_due_at"]),
-        plan_data["core_reentry_reason"], plan_data.get("last_result_call_id"),
-        plan_data.get("continuation_generation", 0),
-        tuple(plan_data.get("core_reentry_facts", ())),
-        plan_data.get("mechanical_blocker"),
-    )
+    plan = _plan_from_data(data.get("execution_plan"))
     return GoalState(
         goal_id=goal_id,
         objective=Objective(*data["objective"]),
@@ -497,6 +534,15 @@ class SQLiteGoalStore:
         # B-tree over the whole matching set, which was most of the cost the
         # index was added to remove.
         sources: list[tuple[str, tuple[Any, ...]]] = []
+        # A plan that needs her comes first, from whichever conversation, so
+        # work that only she can move on is never pushed out by the cap.
+        sources.append((
+            "SELECT goal_id, state_json, conversation_id, scope, updated_at "
+            "FROM goals WHERE unfinished = 1 "
+            "AND json_extract(state_json, '$.execution_plan.status') = 'needs_core' "
+            "ORDER BY updated_at DESC, goal_id DESC",
+            (),
+        ))
         if conversation_id is not None:
             sources.append((
                 "SELECT goal_id, state_json, conversation_id, scope, updated_at "
@@ -561,19 +607,25 @@ class SQLiteGoalStore:
         identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY rowid").fetchall()
         return tuple(self.load(item[0]) for item in identifiers)
 
-    def list_open_plan_goal_ids(self) -> tuple[str, ...]:
-        """Goals whose execution plan still needs the executor or AL/X.
+    def list_open_plan_goal_ids(
+        self, *, needing_core: bool = False,
+    ) -> tuple[str, ...]:
+        """Goals whose execution plan is not finished, in storage order.
 
-        The due tick runs this under the Core lock. Filtering in SQL keeps a
-        goal history of any length, completed, cancelled and handled plans
-        alike, from being decoded on every tick. Identifiers only, so each
-        caller loads one goal at a time and one unreadable goal cannot stop
-        the others.
+        The one query both the plan runner and the attention offers read, so
+        neither can see work the other cannot. A goal past its retention is
+        excluded from both. Filtered in SQL so a goal history of any length,
+        completed and cancelled plans alike, is not decoded on every tick;
+        identifiers only, so one unreadable goal cannot stop the others.
         """
+        statuses = ("needs_core",) if needing_core else (
+            "running", "waiting", "needs_core")
         return tuple(item[0] for item in self._connection.execute(
             "SELECT goal_id FROM goals "
             "WHERE json_extract(state_json, '$.execution_plan.status') "
-            "IN ('ready', 'waiting', 'needs_core', 'completed') ORDER BY rowid"
+            f"IN ({', '.join('?' for _ in statuses)}) "
+            "AND retention_until > ? ORDER BY rowid",
+            (*statuses, _time_to_data(self._now())),
         ).fetchall())
 
     def legacy_conversation_turns(self) -> tuple[ConversationTurn, ...]:

@@ -114,14 +114,6 @@ class SQLiteOpportunityLedger:
         ).fetchone()
         return row is not None
 
-    def outcome(self, opportunity_id: str) -> str | None:
-        """The recorded outcome of one claimed occasion, or None if unclaimed."""
-        row = self._connection.execute(
-            "SELECT outcome FROM cognition_opportunities WHERE opportunity_id = ?",
-            (opportunity_id,),
-        ).fetchone()
-        return None if row is None else str(row["outcome"])
-
     def defer(self, opportunity_id: str, marker: str, deferred_at: datetime) -> None:
         """Hold an occasion that could not be carried, without closing it.
 

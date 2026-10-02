@@ -146,13 +146,25 @@ forbidden = ["def receive_background_event"]
 
 [[outcomes]]
 id = "plan.result_is_classified"
-description = "A planned capability result is classified once as advance, wait, or Core wake."
+description = "A planned capability result is classified once as advance, wait, or Core attention."
 # D-036. Waiting, advancing, refusal, failure, recovery and judgment were
 # interpreted in separate places, and they disagreed. One classifier now reads
 # every fresh, recovered and resumed planned result; `tests/test_execution_plan.py`
 # proves it is the only caller-side interpreter in the Core loop.
 entry = "core/plan_results.py::classify_planned_result"
-forbidden = ["def _advance_execution_plan", "def _plan_condition_matches"]
+# The continuation lifecycle that surrounded it was replaced by the plan's own
+# attention: ownership, generations, settlement, handled acknowledgement,
+# unseen-wake notices and result matching by capability name are gone, and
+# so is inferring failure from the shape of a waiting condition.
+forbidden = [
+    "def _advance_execution_plan", "def _plan_condition_matches",
+    "class PlanContinuationSource", "continuation_generation",
+    "answered_continuation", "def acknowledge_plan_response",
+    "def plan_response_turn_id", "def _uncheckpointed_plan_attempt",
+    "def _plan_step_for", "def settled_contradiction", "waiting_conditions",
+    "plan_continuation_not_yet_seen", "pending_failure_reasons",
+    "requires_core_judgment", "repeat_safe_observation",
+]
 
 [[outcomes]]
 id = "conversation.person_turn_reaches_core"

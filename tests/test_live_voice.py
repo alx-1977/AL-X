@@ -1034,8 +1034,11 @@ class BudgetRecoveryReservationTests(unittest.IsolatedAsyncioTestCase):
                         if isinstance(node, ast.FunctionDef) and node.name == "budget_check")
         sink = next(node.value for node in ast.walk(run)
                     if isinstance(node, ast.keyword) and node.arg == "turn_origin_sink")
+        from contextvars import ContextVar
+
         namespace = {"usage": recorder, "BudgetExceeded": BudgetExceeded,
-                     "person_turn_in_progress": [False], "current_conversation_id": [""]}
+                     "person_turn_in_progress": [False],
+                     "current_conversation_id": ContextVar("conversation", default="")}
         exec(compile(ast.Module(body=[callback], type_ignores=[]), str(source), "exec"), namespace)
         origin_sink = eval(compile(ast.Expression(body=sink), str(source), "eval"), namespace)
 

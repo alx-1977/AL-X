@@ -45,46 +45,6 @@ class ConversationGateway:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
 
-    def _store_response(self, conversation_id: str, outcome: CoreOutcome,
-                        retention_until: datetime) -> None:
-        """Store her response first; plan bookkeeping can never cost it.
-
-        A response that answers a continuation its step saw carries the turn
-        identity derived from that continuation, so the stored turn is itself
-        the record that it was delivered. Acknowledging the plan afterwards is bookkeeping: if it
-        fails, or the process stops first, the next due tick finds the turn
-        and closes the continuation instead of offering it again.
-        """
-        current = self._conversation_store.load(conversation_id)
-        turn_id = (None if outcome.answered_continuation is None
-                   else self._core.plan_response_turn_id(outcome.answered_continuation))
-        if turn_id is None or any(item.turn_id == turn_id for item in current.turns):
-            # Not a continuation, or one already answered in this thread: a
-            # further answer is an ordinary response of its own.
-            turn_id = self._identifier_factory()
-        self._conversation_store.append(
-            ConversationTurn(
-                conversation_id,
-                turn_id,
-                ConversationOrigin.ALX_RESPONSE,
-                outcome.response,
-                self._clock(),
-                provenance=outcome.response_provenance,
-            ),
-            retention_until,
-            current.revision,
-        )
-        try:
-            self._core.acknowledge_plan_response(
-                outcome.snapshot, outcome.answered_continuation)
-        except Exception as error:  # noqa: BLE001 - the response is already stored
-            LOGGER.warning("Plan continuation acknowledgement failed: %s",
-                           type(error).__name__)
-
-    def advance_due_plans(self) -> int:
-        """Advance already-decided work on the Core's existing goal store."""
-        return self._core.advance_due_plans(self._conversation_store.load)
-
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
@@ -134,7 +94,19 @@ class ConversationGateway:
         conversation = self._with_contextual_events(conversation)
         outcome = self._core.process(conversation, retention_until, step_budget)
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            self._store_response(turn.conversation_id, outcome, retention_until)
+            response_turn = ConversationTurn(
+                turn.conversation_id,
+                self._identifier_factory(),
+                ConversationOrigin.ALX_RESPONSE,
+                outcome.response,
+                self._clock(),
+                provenance=outcome.response_provenance,
+            )
+            self._conversation_store.append(
+                response_turn,
+                retention_until,
+                self._conversation_store.load(turn.conversation_id).revision,
+            )
         return outcome
 
     def receive_cognition_opportunity(
@@ -176,6 +148,8 @@ class ConversationGateway:
             step_budget,
             trigger_event_id=event.event_id,
             origin=opportunity.origin,
+            # A plan attention names the goal it belongs to. A structured
+            # reference the plan source wrote, never anything said.
             resume_plan_goal_id=next(
                 (reference[len("execution_plan:"):]
                  for reference in opportunity.references
@@ -183,5 +157,17 @@ class ConversationGateway:
             ),
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            self._store_response(conversation_id, outcome, retention_until)
+            response_turn = ConversationTurn(
+                conversation_id,
+                self._identifier_factory(),
+                ConversationOrigin.ALX_RESPONSE,
+                outcome.response,
+                self._clock(),
+                provenance=outcome.response_provenance,
+            )
+            self._conversation_store.append(
+                response_turn,
+                retention_until,
+                self._conversation_store.load(conversation_id).revision,
+            )
         return outcome

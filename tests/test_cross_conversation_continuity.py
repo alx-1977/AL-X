@@ -463,7 +463,8 @@ class BoundedWorkTests(StoreTestCase):
         captured = self.captured_candidate_queries(
             "conv-1", project_id="pn532", limit=10
         )
-        self.assertEqual(len(captured), 3, "three bounded sources are expected")
+        # Plans that need AL/X come first, then the three ordinary sources.
+        self.assertEqual(len(captured), 4, "four bounded sources are expected")
 
         for sql, parameters in captured:
             with self.subTest(sql=sql):

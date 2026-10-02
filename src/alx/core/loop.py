@@ -20,8 +20,8 @@ from alx.contracts import (
     ConversationOrigin,
     CapabilityResultState, CognitionOrigin, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
-    ExecutionPlan,
-    MemoryIdentityConflict,
+    ExecutionPlan, MemoryIdentityConflict, PLAN_TERMINAL, PlanDispatch, PlanOperation,
+    PlanStatus, PlanUpdate,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, GoalSummary, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
@@ -30,11 +30,16 @@ from alx.contracts import (
 )
 
 from alx.core.plan_results import (
-    PlanResultClassification, classify_planned_result, judgment_blocker,
-    plan_invalidation_facts, reduce_plan, unavailable_judgment_evidence, wake,
+    classify_planned_result, defer_plan, finish_plan, plan_invalidation_facts,
+    raise_attention, reduce_plan, resume_plan,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# How long a planned step refused by the execution budget waits before it is
+# tried again. Mechanical: waking a paid reasoner because spending stopped
+# would defeat the point.
+PLAN_BUDGET_RETRY_SECONDS = 300
 
 # Why an autonomous turn did not happen when its request would not fit.
 INPUT_BOUND_EXCEEDED = "input_bound_exceeded"
@@ -82,16 +87,23 @@ class CoreOutcome:
     # durable record has to say plainly that the write did not happen.
     # None means nothing was proposed or everything proposed was stored.
     memory_state: str | None = None
-    # The plan continuation the deciding reasoning step actually saw, when the
-    # outcome answers it. Only this continuation may then be acknowledged; a
-    # wake the same decision created was never seen, and is left for her.
-    answered_continuation: str | None = None
 
     def __post_init__(self) -> None:
         if self.state is CoreState.RESPONDED and (
             not isinstance(self.response, str) or not self.response.strip()
         ):
             raise ValueError("responded outcomes require nonblank response text")
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedDispatch:
+    """One checkpointed planned step, handed to a background worker."""
+
+    goal_id: str
+    conversation_id: str
+    plan_id: str
+    call: CapabilityCall
+    authority: GoalState
 
 
 # The whole conversation is stored and never rewritten, but sending all of it
@@ -172,13 +184,25 @@ class CoreAgent:
                  open_notebook_threads: Callable[[], tuple] | None = None,
                  undelivered_responses: Callable[[], tuple] | None = None,
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None,
-                 plan_continuation: bool = False) -> None:
+                 plan_continuation: bool = False,
+                 bind_dispatch: Callable[[str], None] | None = None) -> None:
         self._store = store
-        # Whether the runtime can return a plan to her: completion, changed
-        # evidence, failure and judgment all reach the Core only through a
-        # plan continuation occasion. Without one a plan is never installed
-        # and no tick dispatches a planned step. Fails closed by default.
+        # Whether the runtime can return a plan to her: completion, failure,
+        # changed preconditions and judgment reach the Core only through a
+        # plan attention occasion. Without one no plan is installed and no
+        # tick dispatches a planned step. Fails closed by default.
         self._plan_continuation = plan_continuation
+        # Binds the goal's conversation for a planned dispatch running on a
+        # background worker, as a reasoning step's budget check binds it for
+        # the turn's own calls. It checks nothing and spends nothing.
+        self._bind_dispatch = bind_dispatch or (lambda _conversation_id: None)
+        # Planned dispatches a background worker in this process is running.
+        # A pending attempt not listed here was interrupted by a restart.
+        self._live_plan_dispatches: set[str] = set()
+        # The full results an attention cites, when they arrived in this
+        # process. Content may be transient by contract, so after a restart
+        # only durable metadata remains and an observation is made again.
+        self._plan_evidence_cache: dict[str, CapabilityAttempt] = {}
         self._reasoner = reasoner
         # Mechanical record of a refused goal proposal, for diagnosis. The
         # cited references, mutation and response dependence: enough to diagnose
@@ -234,61 +258,6 @@ class CoreAgent:
         # opportunity ledger; the Core is shown that it happened and nothing
         # deterministic decides whether it still matters.
         self._undelivered_responses = undelivered_responses or (lambda: ())
-        # Full external evidence may be transient by contract. Carry it only
-        # between a plan's mechanical tick and the next Core occasion in this
-        # process; the durable attempt keeps its allowed metadata on restart.
-        self._plan_transient_attempts: dict[str, CapabilityAttempt] = {}
-        # Continuations whose stored response the due tick has already looked
-        # for in this process; the thread is not reloaded for them every tick.
-        self._checked_plan_responses: set[str] = set()
-
-    def advance_due_plans(
-        self, load_conversation: Callable[[str], ConversationSnapshot]
-    ) -> int:
-        """Reconcile and resume durable procedures without the reasoning provider.
-
-        This is restart reconciliation and wait resumption at once: an
-        interrupted dispatch is closed, any result not yet checkpointed is
-        classified, a response stored before a crash is recognised, and a
-        due plan advances. Scheduling reads only the plan state this leaves.
-        """
-        for goal_id in tuple(self._plan_transient_attempts):
-            self._active_plan_attempt(goal_id)
-        advanced = 0
-        for goal_id in self._store.list_open_plan_goal_ids():
-            try:
-                snapshot = self._store.load(goal_id)
-                plan = snapshot.state.execution_plan
-                if plan is None:
-                    continue
-                if plan.status in {"needs_core", "completed"}:
-                    # Once per continuation per process, for a response stored
-                    # before a restart. A later duplicate is stopped where the
-                    # conversation is already loaded, when it is resumed.
-                    turn_id = self._continuation_identity(snapshot.state)
-                    if turn_id not in self._checked_plan_responses:
-                        self._reconcile_plan_response(
-                            snapshot, load_conversation(snapshot.conversation_id))
-                        self._checked_plan_responses.add(turn_id)
-                    continue
-                if plan.status not in {"ready", "waiting"}:
-                    continue
-                if any(item.disposition is CapabilityAttemptDisposition.PENDING
-                       for item in snapshot.state.attempts):
-                    snapshot = self._close_interrupted_dispatch(snapshot)
-                _, reason = self._reconcile_plan(
-                    snapshot, load_conversation(snapshot.conversation_id),
-                    dispatch=self._plan_continuation,
-                )
-            except Exception as error:  # noqa: BLE001 - one plan must not stop the rest
-                # Its durable state is whatever it last reached, so the next
-                # tick tries it again; nothing records it as reconciled.
-                LOGGER.warning("Plan reconciliation failed for goal %s: %s",
-                               goal_id, type(error).__name__)
-                continue
-            if reason != "not_due":
-                advanced += 1
-        return advanced
 
     def process(self, conversation: ConversationSnapshot, retention_until: datetime,
                 step_budget: int, trigger_event_id: str | None = None,
@@ -323,25 +292,20 @@ class CoreAgent:
                 return CoreOutcome(CoreState.ERROR, None, reason="memory_persistence_error")
 
         snapshot: GoalSnapshot | None = None
+        # Results a plan's attention asks her to judge, shown to every step.
+        plan_evidence: tuple[CapabilityAttempt, ...] = ()
         if resume_plan_goal_id is not None:
+            # A plan attention occasion. It names its goal, so the goal is the
+            # one the turn works under; whether it still needs her is read
+            # from the plan, never from the occasion.
             snapshot = self._store.load(resume_plan_goal_id)
             if snapshot.conversation_id != conversation_id:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="plan_conversation_changed")
-            snapshot, plan_reason = self._reconcile_plan(
-                snapshot, conversation, dispatch=self._plan_continuation)
-            if plan_reason == "waiting":
-                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="plan_waiting")
-            if plan_reason == "not_due":
-                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="plan_not_due")
-            if self._plan_response_stored(snapshot, conversation):
-                # Her answer to this continuation is already in the thread; a
-                # crash only kept it from being acknowledged. Answering again
-                # would say it twice.
-                snapshot = self._handle_resolved_plan(snapshot)
             plan = snapshot.state.execution_plan
-            if plan is None or plan.status not in {"needs_core", "completed"}:
-                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="plan_inactive")
-            snapshot, _ = self._plan_evidence(snapshot)
+            if plan is None or plan.status is not PlanStatus.NEEDS_CORE:
+                return CoreOutcome(CoreState.CHECKPOINTED, snapshot,
+                                   reason="plan_attention_resolved")
+            snapshot, plan_evidence = self._plan_evidence(snapshot)
         retrieved_memories: tuple[MemorySnapshot, ...] = ()
         # Identifier clashes seen this turn, handed to the next reasoning call
         # so she can resolve them. Cleared once she stops proposing the
@@ -351,15 +315,11 @@ class CoreAgent:
         refused_calls: tuple[Mapping[str, Any], ...] = ()
         # A settled mechanical blocker is explained once. Pending external work
         # never reaches this boundary: its executor waits without reasoning.
-        mechanical_blocker: str | None = self._plan_mechanical_blocker(snapshot)
+        mechanical_blocker: str | None = None
         # One-shot notice that a call-less decision would have ended the turn
         # while remaining work was still immediately executable. Shown on the
         # next reasoning step, then cleared.
         continuation_notices: tuple[Mapping[str, Any], ...] = ()
-        # The continuation shown to the step now deciding, and whether this
-        # turn has already given her a step to see a wake she had not seen.
-        observed_continuation: str | None = None
-        unseen_wake_notice_issued = False
         refused_goal_selections: tuple[Mapping[str, Any], ...] = ()
         continuation_notice_issued = False
         # Capabilities this turn has already dispatched under an approval.
@@ -379,13 +339,7 @@ class CoreAgent:
         conflict_response: str | None = None
         conflict_provenance: ContentProvenance | None = None
         conflict_silent = False
-        conflict_observed: str | None = None
-        carried_plan_attempt = (
-            None if snapshot is None else self._active_plan_attempt(snapshot.state.goal_id)
-        )
-        transient_attempts: tuple[CapabilityAttempt, ...] = (
-            () if carried_plan_attempt is None else (carried_plan_attempt,)
-        )
+        transient_attempts: tuple[CapabilityAttempt, ...] = plan_evidence
         memory_query_ids: set[str] = set()
         # Loading a goal's full state is one useful inspection this turn.
         # A later choice may inspect a different offered goal, but never one
@@ -442,7 +396,7 @@ class CoreAgent:
                     continuation_notices=continuation_notices,
                     refused_goal_selections=refused_goal_selections,
                 )
-                observed_continuation = self._continuation_identity(reasoning_context.active_goal)
+                rendered_plan = self._rendered_plan(reasoning_context.active_goal)
                 decision = self._reasoner.decide(reasoning_context)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
@@ -463,6 +417,12 @@ class CoreAgent:
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
+            if mechanical_blocker is not None and (
+                decision.call is not None or decision.memory_query is not None
+            ):
+                if snapshot is not None:
+                    snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
+                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
             continuation_notices = ()
             deferred_selection: str | None = None
             if decision.goal_id is not None:
@@ -532,28 +492,11 @@ class CoreAgent:
                         return CoreOutcome(
                             CoreState.ERROR, None, reason="goal_selection_unknown"
                         )
-                    # Selection consumes reconciled plan state only. A
-                    # result never checkpointed, a new person turn, or a
-                    # changed precondition is reduced here; nothing new runs.
-                    snapshot, _ = self._reconcile_plan(snapshot, conversation, dispatch=False)
-                    snapshot, selected_plan_attempt = self._plan_evidence(snapshot)
-                    if snapshot.conversation_id != conversation_id:
-                        # A re-observation bound the goal's own conversation.
-                        # This step's own dispatch belongs to the turn's.
-                        try:
-                            self._budget_check(conversation_id)
-                        except Exception as error:
-                            LOGGER.warning("Reasoning stopped by execution budget: %s", error)
-                            return CoreOutcome(
-                                CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
-                            )
-                    mechanical_blocker = (
-                        self._plan_mechanical_blocker(snapshot) or mechanical_blocker
-                    )
-                    transient_attempts = (
-                        () if selected_plan_attempt is None else (selected_plan_attempt,)
-                    )
                     selected_goals.add(decision.goal_id)
+                    snapshot, selected_evidence = self._plan_evidence(snapshot)
+                    transient_attempts = (*transient_attempts, *(
+                        item for item in selected_evidence if item not in transient_attempts
+                    ))
                     # The selected goal is now a reasoning input, so the
                     # provenance of everything this step persists must include
                     # it. It was computed before the goal was known.
@@ -573,21 +516,6 @@ class CoreAgent:
                         and not decision.memory_proposals
                     ):
                         continue
-            if mechanical_blocker is not None and (
-                decision.call is not None or decision.memory_query is not None
-                or decision.execution_plan is not None
-            ):
-                if origin is CognitionOrigin.PERSON_TURN and snapshot is not None:
-                    # Refused work is not an answer. A person hears one
-                    # response-only step about the blocker instead of silence.
-                    return self._respond_to_terminal_blocker(
-                        conversation_id, conversation, snapshot, reasoning_context,
-                        transient_attempts, mechanical_blocker, decision_provenance,
-                        refused_calls,
-                    )
-                if snapshot is not None:
-                    snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
-                return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
             decision = self._without_redundant_approval(decision)
             decision = replace(
                 decision,
@@ -650,7 +578,6 @@ class CoreAgent:
                     conflict_response = decision.response
                     conflict_provenance = decision_provenance
                     conflict_silent = decision.finish_silently
-                    conflict_observed = observed_continuation
                 continue
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
@@ -899,6 +826,31 @@ class CoreAgent:
                 continue
 
             if decision.call is None:
+                if decision.plan_update is not None:
+                    plan_refusal = self._plan_update_refusal(
+                        decision.plan_update, snapshot, rendered_plan,
+                        proposal_error, mechanical_blocker,
+                    )
+                    if plan_refusal is not None:
+                        # Refused before anything else in the decision is
+                        # written. Her words or silence claimed the plan
+                        # change, so they are not delivered; she reasons again
+                        # with the refusal, once.
+                        LOGGER.info("Plan update refused: %s", plan_refusal)
+                        subject = f"{decision.plan_update.operation.value}:{plan_refusal}"
+                        if self._already_refused(refused_calls, plan_refusal, subject):
+                            if origin is CognitionOrigin.PERSON_TURN and snapshot is not None:
+                                return self._respond_to_terminal_blocker(
+                                    conversation_id, conversation, snapshot,
+                                    reasoning_context, transient_attempts, plan_refusal,
+                                    decision_provenance, refused_calls, park=False,
+                                )
+                            return CoreOutcome(CoreState.CHECKPOINTED, snapshot,
+                                               reason=plan_refusal)
+                        refused_calls = (*refused_calls, {
+                            "reason": plan_refusal, "subject": subject,
+                        })
+                        continue
                 try:
                     snapshot, committed = self._commit_memories(
                         snapshot, decision.memory_proposals, retention_until)
@@ -913,86 +865,15 @@ class CoreAgent:
                     conflict_response = decision.response
                     conflict_provenance = decision_provenance
                     conflict_silent = decision.finish_silently
-                    conflict_observed = observed_continuation
                     continue
                 memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
-                if decision.execution_plan is not None:
-                    plan_refusal = None
-                    # The turn a plan answers is provenance the runtime owns,
-                    # read from the whole conversation. The model saw only a
-                    # projected window and is never asked to name it.
-                    latest_person = self._latest_person_turn(conversation)
-                    proposed = replace(decision.execution_plan, source_turn_id=latest_person)
-                    if snapshot is not None:
-                        # So is the objective it serves: the goal's own
-                        # record, never the model's restatement of it.
-                        proposed = replace(
-                            proposed,
-                            objective_source=snapshot.state.objective.source_reference,
-                            objective_summary=snapshot.state.objective.summary,
-                        )
-                    if not self._plan_continuation:
-                        plan_refusal = "plan_continuation_unavailable"
-                    elif proposal_error is not None:
-                        plan_refusal = "plan_goal_mutation_rejected"
-                    elif snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
-                        plan_refusal = "plan_requires_active_goal"
-                    else:
-                        if any(step.call.capability_id in self._turn_bound_capabilities
-                               for step in proposed.steps):
-                            plan_refusal = "plan_precondition_invalid"
-                        elif any(not self._plan_wait_is_safe(step) for step in proposed.steps):
-                            plan_refusal = "plan_wait_unsafe"
-                    if plan_refusal is not None:
-                        subject = self._plan_refusal_subject(proposed, snapshot)
-                        if self._already_refused(refused_calls, plan_refusal, subject):
-                            # The same plan against the same goal state was
-                            # already refused this turn. Reasoning again cannot
-                            # change the answer, so no further workflow step is
-                            # bought. A person still hears one response-only
-                            # step; an autonomous turn ends here.
-                            if origin is CognitionOrigin.PERSON_TURN and snapshot is not None:
-                                return self._respond_to_terminal_blocker(
-                                    conversation_id, conversation, snapshot,
-                                    reasoning_context, transient_attempts, plan_refusal,
-                                    decision_provenance, refused_calls, park=False,
-                                )
-                            return CoreOutcome(CoreState.CHECKPOINTED, snapshot,
-                                               reason=plan_refusal)
-                        refused_calls = (*refused_calls, {
-                            "reason": plan_refusal, "subject": subject,
-                        })
-                        continue
-                    # Each installation needs a distinct durable identity:
-                    # the model may reuse its plan_id when it revises a plan,
-                    # but an earlier cognition opportunity may be claimed.
-                    plan = replace(proposed, plan_id=f"{proposed.plan_id}:{uuid4()}")
-                    snapshot = self._store.replace(
-                        replace(snapshot.state, execution_plan=plan),
-                        snapshot.retention_until, snapshot.revision, decision_provenance,
+                if decision.plan_update is not None:
+                    assert snapshot is not None
+                    snapshot = self._apply_plan_update(
+                        snapshot, decision.plan_update, conversation, decision_provenance,
                     )
-                    snapshot, plan_reason = self._reconcile_plan(snapshot, conversation)
-                    carried_plan_attempt = self._active_plan_attempt(snapshot.state.goal_id)
-                    if carried_plan_attempt is not None:
-                        transient_attempts = (carried_plan_attempt,)
-                    mechanical_blocker = self._plan_mechanical_blocker(snapshot)
-                    if plan_reason in {"waiting", "not_due", "inactive"}:
-                        checkpoint = ("plan_inactive" if plan_reason == "inactive"
-                                      else "plan_waiting")
-                        if origin is CognitionOrigin.PERSON_TURN:
-                            # She chose the plan as this turn's one action, so
-                            # she has not yet spoken. One response-only step
-                            # lets her say what is now running; the plan is
-                            # left exactly as the executor reconciled it.
-                            return self._respond_to_terminal_blocker(
-                                conversation_id, conversation, snapshot, reasoning_context,
-                                transient_attempts, checkpoint, decision_provenance,
-                                refused_calls, park=False,
-                            )
-                        return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=checkpoint)
-                    continue
                 if mechanical_blocker is not None:
                     if snapshot is not None:
                         snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
@@ -1000,8 +881,6 @@ class CoreAgent:
                         CoreState.RESPONDED if decision.response is not None else CoreState.CHECKPOINTED,
                         snapshot, response=decision.response, reason=mechanical_blocker,
                         response_provenance=decision_provenance,
-                        answered_continuation=self._answered_continuation(
-                            snapshot, observed_continuation),
                     )
                 if decision.selects_only:
                     if (proposal_error is None and decision.goal_proposal is not None
@@ -1034,25 +913,7 @@ class CoreAgent:
                         continuation_notice_issued = True
                         continuation_notices = deferred
                         continue
-                unseen = self._continuation_identity(
-                    None if snapshot is None else snapshot.state)
-                if (unseen is not None and unseen != observed_continuation
-                        and not unseen_wake_notice_issued and step_index + 1 < step_budget):
-                    # This decision was composed without the continuation now
-                    # standing: often its own goal update woke the plan. Its
-                    # writes stand, but it may not answer a wake it never saw.
-                    # She reasons once more with the wake in view.
-                    LOGGER.info("Unseen plan continuation: one further step")
-                    unseen_wake_notice_issued = True
-                    continuation_notices = ({
-                        "reason": "plan_continuation_not_yet_seen",
-                        "goal_id": snapshot.state.goal_id,
-                    },)
-                    continue
-                answered = self._answered_continuation(snapshot, observed_continuation)
                 if decision.finish_silently:
-                    if answered is not None:
-                        snapshot = self._handle_resolved_plan(snapshot)
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,
                         snapshot,
@@ -1064,7 +925,6 @@ class CoreAgent:
                     response=decision.response,
                     reason="goal_proposal_rejected" if proposal_error else deferred_selection,
                     response_provenance=decision_provenance,
-                    answered_continuation=answered,
                 )
 
             if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
@@ -1259,9 +1119,11 @@ class CoreAgent:
                 # boundary, so a corrected call may still use the same turn.
                 approved_dispatches.add(decision.call.capability_id)
             snapshot = self._finalize_dispatch(snapshot, attempt, now)
-            blocker = judgment_blocker(attempt)
-            if blocker is not None:
-                mechanical_blocker = blocker
+            if (decision.call.capability_id in {
+                "request_external_review", "read_external_review", "merge_pull_request"
+            } and attempt.result is not None
+                    and (attempt.result.failure or {}).get("requires_judgement")):
+                mechanical_blocker = str(attempt.result.failure["code"])
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
                         conversation_id, conversation, snapshot, reasoning_context,
@@ -1301,9 +1163,6 @@ class CoreAgent:
                 reason="core_selected_silence" if conflict_silent else None,
                 response_provenance=None if conflict_silent else conflict_provenance,
                 memory_state="unresolved_identity_conflict",
-                answered_continuation=(
-                    None if conflict_silent
-                    else self._answered_continuation(snapshot, conflict_observed)),
             )
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
 
@@ -1321,14 +1180,11 @@ class CoreAgent:
     ) -> CoreOutcome:
         """Allow one response-only decision for a person, parking stopped work.
 
-        Work still running in the background, such as a plan that is waiting,
-        is not parked: it continues, and she only says what is happening.
+        A refused plan change stops nothing that was running, so it parks
+        nothing: she only says what happened.
         """
         if park:
             snapshot = self._park_unfinished_goal(snapshot, provenance)
-        # Distinguishable from a workflow step in every record of it: the
-        # reasoning context carries the reason, and the log says so here.
-        LOGGER.info("Response-only Core step: %s", reason)
         terminal_context = replace(
             context,
             active_goal=snapshot.state,
@@ -1338,7 +1194,6 @@ class CoreAgent:
             response_only_reason=reason,
             refused_calls=refused_calls or context.refused_calls,
         )
-        observed = self._continuation_identity(terminal_context.active_goal)
         try:
             self._budget_check(conversation_id)
         except Exception as error:
@@ -1369,7 +1224,6 @@ class CoreAgent:
         return CoreOutcome(
             CoreState.RESPONDED, snapshot, response=decision.response,
             reason=reason, response_provenance=provenance,
-            answered_continuation=self._answered_continuation(snapshot, observed),
         )
 
     def _close_interrupted_dispatch(self, snapshot: GoalSnapshot) -> GoalSnapshot:
@@ -1379,6 +1233,10 @@ class CoreAgent:
         if len(pending) != 1 or pending[0].call is None:
             return snapshot
         call = pending[0].call
+        if call.call_id in self._live_plan_dispatches:
+            # A planned step a background worker is still running. It has
+            # not been interrupted; its worker records the result.
+            return snapshot
         closed = CapabilityAttempt(
             call,
             CapabilityAttemptDisposition.BROKER_FAILURE,
@@ -1392,9 +1250,6 @@ class CoreAgent:
             "dispatch_interrupted",
         )
         LOGGER.info("Closing interrupted dispatch for %s", call.capability_id)
-        # A planned call closed here is an uncheckpointed planned result. Plan
-        # reconciliation classifies it with every other fact about the plan,
-        # so an interruption and a changed precondition wake her once.
         return self._finalize_dispatch(snapshot, closed, self._clock())
 
     def reconcile_dispatch(self, goal_id: str, attempt: CapabilityAttempt) -> CoreOutcome:
@@ -1464,11 +1319,6 @@ class CoreAgent:
         if history_error:
             return evidence_only, history_error
         try:
-            retained_plan = state.execution_plan
-            if retained_plan is not None and retained_plan.status in {"ready", "waiting"}:
-                retained_plan = reduce_plan(
-                    retained_plan, wake("goal_state_changed"), self._clock(),
-                )
             updated = replace(
                 state,
                 objective=state.objective if proposal.objective_summary is None else Objective(state.objective.source_reference, proposal.objective_summary),
@@ -1481,7 +1331,6 @@ class CoreAgent:
                 blockers=state.blockers if proposal.blockers is None else proposal.blockers,
                 outstanding_work=state.outstanding_work if proposal.outstanding_work is None else proposal.outstanding_work,
                 evidence=(*state.evidence, *proposal.new_evidence),
-                execution_plan=retained_plan,
                 status=GoalStatus.ACTIVE, stop_reason=None,
             )
             updated = self._derive_goal_status(updated, proposal.kind)
@@ -1637,7 +1486,8 @@ class CoreAgent:
             return False
         if approved_dispatches & self._turn_bound_capabilities:
             return False
-        return True
+        # Remaining work a plan is executing is not this turn's to run.
+        return not self._plan_is_executing(state)
 
     def _park_unfinished_goal(
         self,
@@ -1652,19 +1502,16 @@ class CoreAgent:
         state = snapshot.state
         if state.status is not GoalStatus.ACTIVE:
             return snapshot
+        if self._plan_is_executing(state):
+            # Work the plan executor is carrying out is going to execute. It
+            # is not parked because a turn ended; only she stops it.
+            return snapshot
         if state.blockers:
             kind = GoalMutationKind.BLOCK
         elif state.outstanding_work:
             kind = GoalMutationKind.AWAIT_INPUT
         else:
             return snapshot
-        plan = state.execution_plan
-        if plan is not None and plan.status in {"ready", "waiting"}:
-            # A parked goal cannot hold work the executor would still run.
-            # The plan returns to her through the one reducer, cursor intact,
-            # before the goal leaves ACTIVE; nothing is advanced or dropped.
-            snapshot = self._apply_plan_result(snapshot, wake("goal_parked"))
-            state = snapshot.state
         return self._store.replace(
             self._derive_goal_status(state, kind),
             snapshot.retention_until,
@@ -1721,6 +1568,11 @@ class CoreAgent:
         impossible rather than merely refused, and reasoning again from the
         same state cannot make it possible.
         """
+        if state is not None and self._has_pending_dispatch(state):
+            # A planned step is running on this goal in the background. One
+            # dispatch at a time per goal; the plan's own result decides
+            # what follows it.
+            return "plan_step_in_flight"
         definition = self._definition(call.capability_id)
         if definition is not None and definition.side_effect in (
             SideEffect.NONE,
@@ -2014,8 +1866,19 @@ class CoreAgent:
                 and item.scope.matches(attempt.call)) else item
             for item in snapshot.state.approvals
         )
+        attempts = snapshot.state.attempts
+        # The pending attempt this result closes, found by its call. A plan's
+        # background step is the latest attempt too, but finding it by
+        # identity is what makes that a fact rather than an assumption.
+        index = next(
+            (position for position in range(len(attempts) - 1, -1, -1)
+             if attempts[position].call is not None
+             and attempts[position].call.call_id == attempt.call.call_id
+             and attempts[position].disposition is CapabilityAttemptDisposition.PENDING),
+            len(attempts) - 1,
+        )
         updated = replace(snapshot.state,
-                          attempts=(*snapshot.state.attempts[:-1], attempt),
+                          attempts=(*attempts[:index], attempt, *attempts[index + 1:]),
                           approvals=approvals)
         inputs = tuple(
             item
@@ -2037,371 +1900,393 @@ class CoreAgent:
             provenance,
         )
 
-    def _active_plan_attempt(self, goal_id: str) -> CapabilityAttempt | None:
-        attempt = self._plan_transient_attempts.get(goal_id)
-        provenance = None if attempt is None or attempt.result is None else attempt.result.provenance
-        if (provenance is not None and provenance.content_expires_at is not None
-                and provenance.content_expires_at <= self._clock()):
-            self._plan_transient_attempts.pop(goal_id, None)
-            return None
-        return attempt
+    # ------------------------------------------------------------------
+    # D-036 execution plans. The runner below advances work AL/X decided;
+    # every result passes `classify_planned_result` and `reduce_plan` once.
+    # She changes a plan only through `_apply_plan_update`.
+    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _plan_mechanical_blocker(snapshot: GoalSnapshot | None) -> str | None:
-        """The blocker the reconciled plan holds; raw results are never reread."""
-        if snapshot is None or snapshot.state.execution_plan is None:
-            return None
-        plan = snapshot.state.execution_plan
-        return plan.mechanical_blocker if plan.status == "needs_core" else None
+    def advance_due_plans(self) -> tuple[PlannedDispatch, ...]:
+        """Reconcile every open plan and checkpoint the steps now due.
 
-    @staticmethod
-    def _uncheckpointed_plan_attempt(
-        snapshot: GoalSnapshot,
-    ) -> CapabilityAttempt | None:
-        plan = snapshot.state.execution_plan
-        if (plan is None or plan.status not in {"ready", "waiting"}
-                or plan.cursor >= len(plan.steps) or not snapshot.state.attempts):
-            return None
-        attempt = snapshot.state.attempts[-1]
-        if (attempt.call is None
-                or attempt.disposition is CapabilityAttemptDisposition.PENDING
-                or attempt.call.call_id == plan.last_result_call_id
-                or attempt.call.capability_id != plan.steps[plan.cursor].call.capability_id
-                or (plan.status == "ready"
-                    and attempt.call.call_id != plan.steps[plan.cursor].call.call_id)):
-            return None
-        return attempt
-
-    def _remember_plan_attempt(self, goal_id: str, attempt: CapabilityAttempt) -> None:
-        provenance = None if attempt.result is None else attempt.result.provenance
-        if (provenance is None or provenance.content_expires_at is None
-                or provenance.content_expires_at > self._clock()):
-            self._plan_transient_attempts[goal_id] = attempt
-
-    def _plan_wait_is_safe(self, step) -> bool:
-        if not step.waiting_conditions:
-            return True
-        definition = self._definition(step.call.capability_id)
-        return definition is not None and (
-            definition.side_effect is SideEffect.NONE
-            or definition.repeat_safe_observation
-        )
-
-    def _plan_checkpoint(
-        self, snapshot: GoalSnapshot, plan: ExecutionPlan, reason: str
-    ) -> GoalSnapshot:
-        LOGGER.info(
-            "Execution plan %s step=%s cursor=%d status=%s waiting_for=%s core_reentry=%s",
-            plan.plan_id,
-            None if plan.cursor == len(plan.steps) else plan.steps[plan.cursor].call.capability_id,
-            plan.cursor, plan.status,
-            (None if plan.status != "waiting" else
-             plan.steps[plan.cursor].waiting_for),
-            ",".join(plan.core_reentry_facts) or plan.core_reentry_reason or reason,
-        )
-        return self._store.replace(
-            replace(snapshot.state, execution_plan=plan),
-            snapshot.retention_until, snapshot.revision, snapshot.provenance,
-        )
-
-    def _apply_plan_result(
-        self, snapshot: GoalSnapshot, classification: PlanResultClassification,
-        attempt: CapabilityAttempt | None = None,
-    ) -> GoalSnapshot:
-        """The one transition: reduce a classification into durable plan state."""
-        plan = reduce_plan(
-            snapshot.state.execution_plan, classification, self._clock(),
-            result_call_id=None if attempt is None or attempt.call is None
-            else attempt.call.call_id,
-        )
-        if attempt is not None and plan.status == "needs_core":
-            # Full external evidence may be transient by contract; it reaches
-            # her next occasion in this process, never durable state.
-            self._remember_plan_attempt(snapshot.state.goal_id, attempt)
-        return self._plan_checkpoint(snapshot, plan, classification.kind.value)
-
-    def _classify_and_apply(
-        self, snapshot: GoalSnapshot, step, attempt: CapabilityAttempt,
-        **context: Any,
-    ) -> GoalSnapshot:
-        """Classify one planned result once and apply it: the only route for either."""
-        classification = classify_planned_result(
-            step, attempt, self._definition(step.call.capability_id), **context,
-        )
-        return self._apply_plan_result(snapshot, classification, attempt)
-
-    def _handle_resolved_plan(self, snapshot: GoalSnapshot | None) -> GoalSnapshot | None:
-        if snapshot is None or snapshot.state.execution_plan is None:
-            return snapshot
-        plan = snapshot.state.execution_plan
-        if plan.status not in {"needs_core", "completed"}:
-            return snapshot
-        self._plan_transient_attempts.pop(snapshot.state.goal_id, None)
-        return self._plan_checkpoint(
-            snapshot,
-            replace(plan, status="handled", mechanical_blocker=None),
-            "core_responded",
-        )
-
-    @staticmethod
-    def _continuation_identity(state: GoalState | None) -> str | None:
-        """The continuation a goal holds for her: one wake of one plan.
-
-        A plan that needs her, or has completed, stays so until it is handled,
-        so its goal, plan and cursor name exactly one wake.
+        Runs under the Core-turn lock, so it only reads and writes durable
+        state: a recorded result is reduced, an interrupted dispatch is
+        closed, a finished goal's plan is closed, and each step that is due
+        is checkpointed and returned for a background worker to dispatch.
+        This is also restart recovery; there is no other.
         """
-        plan = None if state is None else state.execution_plan
-        if plan is None or plan.status not in {"needs_core", "completed"}:
-            return None
-        return f"{state.goal_id}:{plan.plan_id}:{plan.cursor}"
+        jobs = []
+        for goal_id in self._store.list_open_plan_goal_ids():
+            try:
+                job = self._advance_plan(self._store.load(goal_id))
+            except Exception as error:  # noqa: BLE001 - one plan must not stop the rest
+                # Its durable state is whatever it last reached, so the next
+                # tick tries again from there.
+                LOGGER.warning("Plan reconciliation failed for goal %s: %s",
+                               goal_id, type(error).__name__)
+                continue
+            if job is not None:
+                jobs.append(job)
+        return tuple(jobs)
 
-    def _answered_continuation(
-        self, snapshot: GoalSnapshot | None, observed: str | None,
-    ) -> str | None:
-        """The continuation an outcome answers: the one its step saw, if still standing."""
-        current = self._continuation_identity(None if snapshot is None else snapshot.state)
-        return current if current is not None and current == observed else None
+    def run_planned_dispatch(self, job: PlannedDispatch) -> CapabilityAttempt | None:
+        """Dispatch one checkpointed step. Runs off the lock, on a worker.
 
-    @staticmethod
-    def plan_response_turn_id(continuation: str) -> str:
-        """The response turn identity for one answered continuation.
-
-        Derived from the continuation itself, so the stored response is its
-        own durable record: nothing is written before the response, and a
-        restart recognises a delivered answer by finding this turn.
+        Touches no store: the checkpoint is already durable and the result is
+        recorded by `finish_planned_dispatch`. None means the dispatch did
+        not return a usable attempt, which is recorded as an interruption.
         """
-        return f"alx-plan-response:{continuation}"
-
-    def _plan_response_stored(
-        self, snapshot: GoalSnapshot, conversation: ConversationSnapshot,
-    ) -> bool:
-        continuation = self._continuation_identity(snapshot.state)
-        if continuation is None:
-            return False
-        turn_id = self.plan_response_turn_id(continuation)
-        return any(item.turn_id == turn_id for item in conversation.turns)
-
-    def acknowledge_plan_response(self, snapshot: GoalSnapshot | None,
-                                  continuation: str | None) -> None:
-        """Close the continuation a stored response answered, and only that one."""
-        if snapshot is None or continuation is None:
-            return
-        current = self._store.load(snapshot.state.goal_id)
-        if self._continuation_identity(current.state) == continuation:
-            self._handle_resolved_plan(current)
-
-    def _reconcile_plan_response(
-        self, snapshot: GoalSnapshot, conversation: ConversationSnapshot,
-    ) -> None:
-        """Close a continuation whose response was stored but not acknowledged."""
-        if self._plan_response_stored(snapshot, conversation):
-            self._handle_resolved_plan(snapshot)
-
-    @staticmethod
-    def _latest_person_turn(conversation: ConversationSnapshot) -> str | None:
-        return next(
-            (item.turn_id for item in reversed(conversation.turns)
-             if item.person_id is not None), None,
-        )
-
-    def _plan_dispatch_refusal(self, snapshot: GoalSnapshot, step, call: CapabilityCall,
-                               now: datetime) -> str | None:
-        """Why the executor may not dispatch this step itself, if it may not."""
-        if not self._plan_wait_is_safe(step):
-            return "plan_wait_unsafe"
-        if step.call.capability_id in self._turn_bound_capabilities:
-            return "plan_requires_fresh_authority"
-        if self._dispatch_blocked_reason(call, snapshot.state) is not None:
-            return "plan_dispatch_blocked"
-        if (self._coding_exhaustion_reason(snapshot.state, call) is not None
-                or self._coding_interruption_exhaustion_reason(snapshot.state, call) is not None):
-            return "plan_coding_exhausted"
-        if self._binding_rejected_call(snapshot.state, call, now) is not None:
-            return "plan_repeated_rejection"
-        return None
-
-    def _dispatch_planned_call(
-        self, snapshot: GoalSnapshot, call: CapabilityCall,
-    ) -> tuple[GoalSnapshot, CapabilityAttempt | None, str | None]:
-        """Checkpoint, dispatch and record one call AL/X already decided.
-
-        Returns a refusal instead when the goal's own conversation may not
-        execute now. Nothing is checkpointed or dispatched in that case.
-        """
+        self._bind_dispatch(job.conversation_id)
         try:
-            # The same check a reasoning step makes, against the goal's own
-            # conversation. The runtime binds that conversation for the call's
-            # executors here; without it a background step ran under whichever
-            # conversation the last turn had named, and outside the ceiling.
-            self._budget_check(snapshot.conversation_id)
-        except Exception as error:  # noqa: BLE001 - any stop is a refusal
-            LOGGER.warning("Planned dispatch stopped by execution budget: %s",
-                           type(error).__name__)
-            return snapshot, None, "plan_budget_exceeded"
+            attempt = self._dispatch(job.call, job.authority)
+        except Exception as error:  # noqa: BLE001 - recorded, never replayed
+            LOGGER.warning("Planned dispatch raised for %s: %s",
+                           job.call.capability_id, type(error).__name__)
+            return None
+        if attempt.call != job.call or attempt.disposition is CapabilityAttemptDisposition.PENDING:
+            return None
+        return attempt
+
+    def finish_planned_dispatch(
+        self, job: PlannedDispatch, attempt: CapabilityAttempt | None,
+    ) -> tuple[PlannedDispatch, ...]:
+        """Record a background step's result and reduce it. Under the lock.
+
+        The result is always recorded on the goal. It moves the plan only if
+        the plan still holds this exact dispatch in flight: a plan she
+        cancelled or replaced meanwhile is untouched. When the plan can run
+        on, its next step is checkpointed and returned at once.
+        """
+        self._live_plan_dispatches.discard(job.call.call_id)
+        snapshot = self._store.load(job.goal_id)
+        if attempt is None:
+            attempt = self._interrupted(job.call)
+        if any(item.call is not None and item.call.call_id == job.call.call_id
+               and item.disposition is CapabilityAttemptDisposition.PENDING
+               for item in snapshot.state.attempts):
+            snapshot = self._finalize_dispatch(snapshot, attempt, self._clock())
+        plan = snapshot.state.execution_plan
+        if (plan is None or plan.plan_id != job.plan_id or plan.inflight is None
+                or plan.inflight.call_id != job.call.call_id):
+            LOGGER.info("Planned result for %s no longer belongs to a plan", job.goal_id)
+            return ()
+        snapshot = self._reduce_planned_result(snapshot)
+        next_job = self._advance_plan(snapshot)
+        return () if next_job is None else (next_job,)
+
+    def _advance_plan(self, snapshot: GoalSnapshot) -> PlannedDispatch | None:
+        """Take one goal's plan as far as it goes without a dispatch."""
+        state = snapshot.state
+        plan = state.execution_plan
+        if plan is None or plan.status in PLAN_TERMINAL:
+            return None
+        if state.status in (GoalStatus.COMPLETED, GoalStatus.CANCELLED):
+            # A finished goal has no work left to run, and no attention left
+            # to answer: one objective closure, not a judgment.
+            self._write_plan(snapshot, finish_plan(
+                plan, PlanStatus.COMPLETED if plan.cursor == len(plan.steps)
+                else PlanStatus.CANCELLED,
+            ))
+            return None
+        if plan.status is PlanStatus.NEEDS_CORE:
+            return None
+        if plan.inflight is not None:
+            attempt = self._attempt_for(state, plan.inflight.call_id)
+            if attempt.disposition is CapabilityAttemptDisposition.PENDING:
+                if plan.inflight.call_id in self._live_plan_dispatches:
+                    return None
+                # Checkpointed and never recorded: the process stopped.
+                snapshot = self._finalize_dispatch(
+                    snapshot, self._interrupted(attempt.call), self._clock())
+            snapshot = self._reduce_planned_result(snapshot)
+            state, plan = snapshot.state, snapshot.state.execution_plan
+            if plan.status is not PlanStatus.RUNNING:
+                return None
         now = self._clock()
-        authority_state = snapshot.state
-        pending = CapabilityAttempt(
-            call, CapabilityAttemptDisposition.PENDING, None,
-            reason_code="dispatch_pending",
-        )
+        if plan.status is PlanStatus.WAITING and now < plan.next_due_at:
+            return None
+        if not self._plan_continuation:
+            # Nothing could return this plan to her, so nothing is dispatched.
+            return None
+        if self._has_pending_dispatch(state):
+            # A step of a plan she replaced: still running here, or stopped
+            # by a restart, in which case it is closed the way a turn closes
+            # any interrupted dispatch, and never replayed.
+            snapshot = self._close_interrupted_dispatch(snapshot)
+            state, plan = snapshot.state, snapshot.state.execution_plan
+            if self._has_pending_dispatch(state):
+                return None
+        facts = plan_invalidation_facts(plan, state, now)
+        step = plan.steps[plan.cursor]
+        refusal = None if facts else self._plan_dispatch_refusal(snapshot, step, now)
+        if facts or refusal is not None:
+            self._write_plan(snapshot, raise_attention(
+                plan, facts or (refusal,), now))
+            return None
+        try:
+            # The gate a reasoning step would face. Refused, the step waits
+            # and is tried again; nothing is checkpointed and she is not woken.
+            self._budget_check(snapshot.conversation_id)
+        except Exception as error:  # noqa: BLE001 - any stop is a deferral
+            LOGGER.info("Planned dispatch deferred by execution budget: %s",
+                        type(error).__name__)
+            self._write_plan(snapshot, defer_plan(
+                plan, now + timedelta(seconds=PLAN_BUDGET_RETRY_SECONDS)))
+            return None
+        # Each dispatch has its own identity, written to the plan before the
+        # call is made. Only a result carrying it can move this plan.
+        call = replace(step.call, call_id=f"plan:{uuid4()}")
         approvals = tuple(
             replace(item, lifecycle=ApprovalLifecycle.CLAIMED)
             if (item.lifecycle is ApprovalLifecycle.GRANTED
                 and item.approval_id == call.approval_id
                 and item.scope.matches(call)) else item
-            for item in authority_state.approvals
+            for item in state.approvals
         )
+        pending = CapabilityAttempt(call, CapabilityAttemptDisposition.PENDING, None,
+                                    reason_code="dispatch_pending")
+        checkpoint = self._store.replace(
+            replace(state, attempts=(*state.attempts, pending), approvals=approvals,
+                    execution_plan=replace(
+                        plan, status=PlanStatus.RUNNING, next_due_at=None,
+                        inflight=PlanDispatch(plan.cursor, call.call_id))),
+            snapshot.retention_until, snapshot.revision, snapshot.provenance,
+        )
+        self._live_plan_dispatches.add(call.call_id)
+        LOGGER.info("Execution plan %s step=%d %s dispatched",
+                    plan.plan_id, plan.cursor, call.capability_id)
+        return PlannedDispatch(
+            checkpoint.state.goal_id, checkpoint.conversation_id, plan.plan_id, call,
+            # The pre-claim state, where the exact approval is still GRANTED,
+            # as the safety gate evaluates every dispatch.
+            state,
+        )
+
+    def _reduce_planned_result(self, snapshot: GoalSnapshot) -> GoalSnapshot:
+        """Classify the in-flight dispatch's recorded result once, and apply it."""
+        plan = snapshot.state.execution_plan
+        assert plan is not None and plan.inflight is not None
+        attempt = self._attempt_for(snapshot.state, plan.inflight.call_id)
+        step = plan.steps[plan.inflight.step_index]
+        now = self._clock()
+        classification = classify_planned_result(
+            step, attempt, self._definition(step.call.capability_id),
+            wait_expired=plan.wait_deadline is not None and now >= plan.wait_deadline,
+        )
+        reduced = reduce_plan(plan, classification, now,
+                              evidence_call_id=attempt.call.call_id)
+        if reduced.attention is not None and attempt.result is not None:
+            self._plan_evidence_cache[attempt.call.call_id] = attempt
+        LOGGER.info("Execution plan %s step=%d %s -> %s %s",
+                    plan.plan_id, plan.inflight.step_index, step.call.capability_id,
+                    reduced.status.value, ",".join(classification.facts))
+        return self._write_plan(snapshot, reduced)
+
+    def _plan_dispatch_refusal(self, snapshot: GoalSnapshot, step,
+                               now: datetime) -> str | None:
+        """Why the executor may not dispatch this step itself, if it may not."""
+        definition = self._definition(step.call.capability_id)
+        if definition is None:
+            return "plan_capability_unknown"
+        if step.wait_seconds and not definition.plan_observation:
+            return "plan_wait_unsafe"
+        if step.call.capability_id in self._turn_bound_capabilities:
+            return "plan_requires_fresh_authority"
+        if self._dispatch_blocked_reason(step.call, snapshot.state) is not None:
+            return "plan_dispatch_blocked"
+        if (self._coding_exhaustion_reason(snapshot.state, step.call) is not None
+                or self._coding_interruption_exhaustion_reason(
+                    snapshot.state, step.call) is not None):
+            return "plan_coding_exhausted"
+        if self._binding_rejected_call(snapshot.state, step.call, now) is not None:
+            return "plan_repeated_rejection"
+        return None
+
+    def _write_plan(self, snapshot: GoalSnapshot, plan: ExecutionPlan) -> GoalSnapshot:
+        return self._store.replace(
+            replace(snapshot.state, execution_plan=plan),
+            snapshot.retention_until, snapshot.revision, snapshot.provenance,
+        )
+
+    @staticmethod
+    def _attempt_for(state: GoalState, call_id: str) -> CapabilityAttempt:
+        return next(item for item in reversed(state.attempts)
+                    if item.call is not None and item.call.call_id == call_id)
+
+    @staticmethod
+    def _interrupted(call: CapabilityCall) -> CapabilityAttempt:
+        return CapabilityAttempt(
+            call, CapabilityAttemptDisposition.BROKER_FAILURE, True,
+            CapabilityResult(call.call_id, call.capability_id, CapabilityResultState.FAILED,
+                             failure={"code": "dispatch_interrupted"}),
+            "dispatch_interrupted",
+        )
+
+    @staticmethod
+    def _plan_is_executing(state: GoalState) -> bool:
+        plan = state.execution_plan
+        return CoreAgent._has_pending_dispatch(state) or (
+            plan is not None and plan.status in (PlanStatus.RUNNING, PlanStatus.WAITING)
+        )
+
+    @staticmethod
+    def _rendered_plan(state: GoalState | None) -> tuple[str, int] | None:
+        """The plan, and its attention, a reasoning step was shown in full."""
+        plan = None if state is None else state.execution_plan
+        if plan is None:
+            return None
+        return plan.plan_id, plan.attention_seq
+
+    def _plan_evidence(
+        self, snapshot: GoalSnapshot,
+    ) -> tuple[GoalSnapshot, tuple[CapabilityAttempt, ...]]:
+        """The results the plan's attention asks her to judge, in full.
+
+        The same three sources in every process: the full result if it
+        arrived in this one; otherwise an observation made again, because its
+        content may have been transient by contract; otherwise the durable
+        record, which carries only metadata. A re-observation is evidence for
+        her, not a plan result: it moves nothing.
+        """
+        plan = snapshot.state.execution_plan
+        if plan is None or plan.attention is None:
+            return snapshot, ()
+        evidence = []
+        for call_id in plan.attention.evidence_call_ids:
+            cached = self._plan_evidence_cache.get(call_id)
+            expires = (None if cached is None or cached.result is None
+                       or cached.result.provenance is None
+                       else cached.result.provenance.content_expires_at)
+            if cached is not None and (expires is None or expires > self._clock()):
+                evidence.append(cached)
+                continue
+            self._plan_evidence_cache.pop(call_id, None)
+            stored = next((item for item in snapshot.state.attempts
+                           if item.call is not None and item.call.call_id == call_id), None)
+            if stored is None:
+                continue
+            definition = self._definition(stored.call.capability_id)
+            if (definition is not None and definition.plan_observation
+                    and snapshot.state.status is GoalStatus.ACTIVE
+                    and self._dispatch_blocked_reason(stored.call, snapshot.state) is None):
+                snapshot, observed = self._observe_again(snapshot, stored.call)
+                if observed is not None:
+                    self._plan_evidence_cache[call_id] = observed
+                    evidence.append(observed)
+                    continue
+            evidence.append(stored)
+        return snapshot, tuple(evidence)
+
+    def _observe_again(
+        self, snapshot: GoalSnapshot, call: CapabilityCall,
+    ) -> tuple[GoalSnapshot, CapabilityAttempt | None]:
+        """Repeat one observation, checkpointed and recorded like any call."""
+        call = replace(call, call_id=f"plan-evidence:{uuid4()}")
+        pending = CapabilityAttempt(call, CapabilityAttemptDisposition.PENDING, None,
+                                    reason_code="dispatch_pending")
+        state = snapshot.state
         snapshot = self._store.replace(
-            replace(authority_state, attempts=(*authority_state.attempts, pending),
-                    approvals=approvals),
+            replace(state, attempts=(*state.attempts, pending)),
             snapshot.retention_until, snapshot.revision, snapshot.provenance,
         )
         try:
-            attempt = self._dispatch(call, authority_state)
-        except Exception:
-            # The pending dispatch survives. Recovery closes it as
-            # uncertain; the plan is never replayed blindly.
-            return snapshot, None, None
-        if attempt.call != call or attempt.disposition is CapabilityAttemptDisposition.PENDING:
-            return snapshot, None, None
-        return self._finalize_dispatch(snapshot, attempt, now), attempt, None
+            attempt = self._dispatch(call, state)
+        except Exception as error:  # noqa: BLE001 - recorded as interrupted
+            LOGGER.warning("Evidence observation raised for %s: %s",
+                           call.capability_id, type(error).__name__)
+            attempt = None
+        if (attempt is None or attempt.call != call
+                or attempt.disposition is CapabilityAttemptDisposition.PENDING):
+            return self._finalize_dispatch(snapshot, self._interrupted(call), self._clock()), None
+        return self._finalize_dispatch(snapshot, attempt, self._clock()), attempt
 
-    def _reconcile_plan(
-        self, snapshot: GoalSnapshot, conversation: ConversationSnapshot,
-        *, dispatch: bool = True,
-    ) -> tuple[GoalSnapshot, str]:
-        """The one path from durable plan state to its next reconciled state.
+    def _plan_update_refusal(
+        self, update: PlanUpdate, snapshot: GoalSnapshot | None,
+        rendered: tuple[str, int] | None, proposal_error: str | None,
+        mechanical_blocker: str | None,
+    ) -> str | None:
+        """Why a plan change she proposed cannot be applied, if it cannot.
 
-        Fresh execution, a recovered result, restart reconciliation, a due
-        wait, and goal selection all arrive here. Every result is classified
-        once by `classify_planned_result` and applied by `reduce_plan`;
-        nothing else decides whether a plan advances, waits, or wakes her.
-        Without `dispatch` the plan is reconciled but nothing new is called.
+        Resume, accept and finish answer one attention, so they need the step that
+        proposed them to have been shown that exact attention. Cancel needs
+        it to have been shown that plan. Install needs an active goal, and a
+        plan she can see if it replaces one.
         """
-        plan = snapshot.state.execution_plan
-        if plan is None or plan.status not in {"ready", "waiting"}:
-            return snapshot, "inactive"
-        if plan.cursor >= len(plan.steps):
-            return self._apply_plan_result(snapshot, wake("planned_result_unexpected")), "wake"
-        latest_person = self._latest_person_turn(conversation)
-        invalidation = plan_invalidation_facts(
-            plan, snapshot.state, latest_person, self._clock(),
-        )
-        recovered = self._uncheckpointed_plan_attempt(snapshot)
-        if recovered is not None:
-            return self._classify_and_apply(
-                snapshot, plan.steps[plan.cursor], recovered,
-                invalidation=invalidation, recovered=True,
-            ), "wake"
-        if invalidation:
-            return self._apply_plan_result(snapshot, wake(*invalidation)), "wake"
-        if not dispatch:
-            return snapshot, "held"
-        if (plan.status == "waiting" and plan.next_due_at is not None
-                and self._clock() < plan.next_due_at):
-            return snapshot, "not_due"
-        while True:
-            plan = snapshot.state.execution_plan
-            if plan.status in {"needs_core", "completed"}:
-                return snapshot, "wake"
-            step = plan.steps[plan.cursor]
-            now = self._clock()
-            call = step.call
-            if self._call_id_exists(snapshot.state, call.call_id):
-                # A wait is a fresh observation, never a replay of a dispatched
-                # call. The original identifier remains a stable step identity.
-                if plan.status != "waiting":
-                    return self._apply_plan_result(snapshot, wake("plan_call_id_reused")), "wake"
-                call = replace(call, call_id=str(uuid4()))
-            facts = plan_invalidation_facts(plan, snapshot.state, latest_person, now,
-                                            next_step=step)
-            refusal = self._plan_dispatch_refusal(snapshot, step, call, now)
-            if facts or refusal is not None:
-                return self._apply_plan_result(
-                    snapshot, wake(*facts, *(() if refusal is None else (refusal,))),
-                ), "wake"
-            snapshot, attempt, refusal = self._dispatch_planned_call(snapshot, call)
-            if refusal is not None:
-                return self._apply_plan_result(snapshot, wake(refusal)), "wake"
-            if attempt is None:
-                return snapshot, "inactive"
-            snapshot = self._classify_and_apply(snapshot, step, attempt)
-            if snapshot.state.execution_plan.status == "waiting":
-                return snapshot, "waiting"
-
-    def _plan_evidence(
-        self, snapshot: GoalSnapshot | None,
-    ) -> tuple[GoalSnapshot | None, CapabilityAttempt | None]:
-        """The full evidence a judgment wake needs, never only its metadata.
-
-        Judgment evidence is transient by contract, so a restart leaves only
-        the durable metadata of the result she must judge. That metadata
-        cannot stand in for it: a repeat-safe observation is made again, and
-        anything else is reported to her as unavailable and holds follow-up
-        action until she has responded.
-        """
+        operation = update.operation
+        runs_on = (PlanOperation.INSTALL, PlanOperation.RESUME, PlanOperation.ACCEPT)
+        if not self._plan_continuation and operation in runs_on:
+            return "plan_continuation_unavailable"
         if snapshot is None:
-            return snapshot, None
-        carried = self._active_plan_attempt(snapshot.state.goal_id)
-        plan = snapshot.state.execution_plan
-        if (plan is None or plan.status != "needs_core" or plan.last_result_call_id is None
-                or "planned_evidence_requires_judgement" not in plan.core_reentry_facts):
-            return snapshot, carried
-        if (carried is not None and carried.call is not None
-                and carried.call.call_id == plan.last_result_call_id):
-            return snapshot, carried
-        stored = next((item for item in reversed(snapshot.state.attempts)
-                       if item.call is not None
-                       and item.call.call_id == plan.last_result_call_id), None)
-        definition = None if stored is None else self._definition(stored.call.capability_id)
-        if definition is None or not definition.requires_core_judgment:
-            return snapshot, carried
-        step = self._plan_step_for(plan, stored.call)
-        refusal = None
-        # Only an ACTIVE goal may carry a new dispatch. A parked or finished
-        # goal falls through to unavailable evidence rather than re-observing.
-        if (step is not None
-                and (definition.side_effect is SideEffect.NONE
-                     or definition.repeat_safe_observation)
-                and snapshot.state.status is GoalStatus.ACTIVE
-                and self._dispatch_blocked_reason(stored.call, snapshot.state) is None):
-            call = replace(stored.call, call_id=str(uuid4()))
-            snapshot, observed, refusal = self._dispatch_planned_call(snapshot, call)
-            if observed is None and refusal is None:
-                # The dispatch never returned a usable attempt. Its unresolved
-                # attempt is closed the way restart recovery closes one, so
-                # the goal holds no open dispatch for the rest of this turn,
-                # and the closed attempt is the result that is classified.
-                snapshot = self._close_interrupted_dispatch(snapshot)
-                observed = snapshot.state.attempts[-1]
-            if observed is not None:
-                # The re-read is a planned result like any other: classified
-                # once and applied by the reducer, inside the wake under way.
-                snapshot = self._classify_and_apply(
-                    snapshot, step, observed,
-                    judgment_wake=snapshot.state.execution_plan.core_reentry_facts,
-                )
-                return snapshot, self._active_plan_attempt(snapshot.state.goal_id)
-        plan = snapshot.state.execution_plan
-        snapshot = self._apply_plan_result(snapshot, unavailable_judgment_evidence(
-            plan.core_reentry_facts, *(() if refusal is None else (refusal,)),
-            blocker=plan.mechanical_blocker,
-        ))
-        return snapshot, None
-
-    @staticmethod
-    def _plan_step_for(plan: ExecutionPlan, call: CapabilityCall):
-        """The planned step a stored call carried out, if one can be named."""
-        exact = next((item for item in plan.steps if item.call.call_id == call.call_id), None)
-        if exact is not None:
-            return exact
-        # A wait observes again under a fresh identifier, and a step that
-        # woke her on completion has already moved the cursor past itself.
-        for index in (plan.cursor, plan.cursor - 1):
-            if 0 <= index < len(plan.steps) and (
-                    plan.steps[index].call.capability_id == call.capability_id):
-                return plan.steps[index]
+            return "plan_requires_goal"
+        if proposal_error is not None:
+            return "plan_goal_mutation_rejected"
+        if mechanical_blocker is not None and operation in runs_on:
+            return mechanical_blocker
+        current = snapshot.state.execution_plan
+        open_plan = current is not None and current.status not in PLAN_TERMINAL
+        if operation is PlanOperation.INSTALL:
+            if snapshot.state.status is not GoalStatus.ACTIVE:
+                return "plan_requires_active_goal"
+            if open_plan and (rendered is None or rendered[0] != current.plan_id):
+                return "plan_replaces_unseen_plan"
+            for step in update.plan.steps:
+                definition = self._definition(step.call.capability_id)
+                if definition is None:
+                    return "plan_capability_unknown"
+                if step.call.capability_id in self._turn_bound_capabilities:
+                    return "plan_requires_fresh_authority"
+                if step.wait_seconds and not definition.plan_observation:
+                    return "plan_wait_unsafe"
+            return None
+        if not open_plan or rendered is None or rendered[0] != current.plan_id:
+            return "plan_not_current"
+        if operation is PlanOperation.CANCEL:
+            return None
+        if (current.status is not PlanStatus.NEEDS_CORE
+                or rendered[1] != current.attention_seq):
+            return "plan_attention_not_current"
+        if operation in (PlanOperation.RESUME, PlanOperation.ACCEPT):
+            if snapshot.state.status is not GoalStatus.ACTIVE:
+                return "plan_requires_active_goal"
+            if current.cursor + int(operation is PlanOperation.ACCEPT) >= len(current.steps):
+                return "plan_has_no_remaining_steps"
         return None
+
+    def _apply_plan_update(
+        self, snapshot: GoalSnapshot, update: PlanUpdate,
+        conversation: ConversationSnapshot, provenance: ContentProvenance,
+    ) -> GoalSnapshot:
+        """Apply a plan change `_plan_update_refusal` accepted. One write."""
+        current = snapshot.state.execution_plan
+        if update.operation is PlanOperation.INSTALL:
+            plan = replace(
+                update.plan,
+                # Each installation has its own identity, though she may reuse
+                # a plan_id when she revises one.
+                plan_id=f"{update.plan.plan_id}:{uuid4()}",
+                # What the plan serves and answers is the runtime's record,
+                # never the model's restatement of it.
+                objective_source=snapshot.state.objective.source_reference,
+                objective_summary=snapshot.state.objective.summary,
+                source_turn_id=next(
+                    (item.turn_id for item in reversed(conversation.turns)
+                     if item.person_id is not None), None),
+            )
+        elif update.operation in (PlanOperation.RESUME, PlanOperation.ACCEPT):
+            plan = resume_plan(current,
+                               accept_current=update.operation is PlanOperation.ACCEPT)
+        else:
+            plan = finish_plan(current, PlanStatus.COMPLETED
+                               if update.operation is PlanOperation.FINISH
+                               else PlanStatus.CANCELLED)
+        if current is not None and current.attention is not None:
+            for call_id in current.attention.evidence_call_ids:
+                self._plan_evidence_cache.pop(call_id, None)
+        LOGGER.info("Execution plan %s: %s", plan.plan_id, update.operation.value)
+        return self._store.replace(
+            replace(snapshot.state, execution_plan=plan),
+            snapshot.retention_until, snapshot.revision, provenance,
+        )
 
     def _commit_memories(self, snapshot: GoalSnapshot | None,
                          proposals: tuple[MemoryProposal, ...],
@@ -2631,25 +2516,6 @@ class CoreAgent:
         user_turns = [item for item in conversation.turns
                       if item.origin.value != "alx_response"]
         return bool(user_turns) and user_turns[-1].person_id == query.person_id
-
-    @staticmethod
-    def _plan_refusal_subject(
-        plan: ExecutionPlan, snapshot: GoalSnapshot | None,
-    ) -> str:
-        """A refused plan's identity: what she proposed, against which state.
-
-        The model may reuse a plan_id when she revises a plan, so the id alone
-        would suppress a genuine revision. Her exact steps, conditions and
-        preconditions, and the goal revision they were checked against, make
-        an identical proposal on unchanged state recognisable, and let a
-        changed plan or changed goal be considered afresh.
-        """
-        digest = hashlib.sha256(repr((
-            plan.objective_source, plan.objective_summary, plan.source_turn_id,
-            plan.context_preconditions, plan.steps,
-        )).encode()).hexdigest()[:16]
-        revision = None if snapshot is None else snapshot.revision
-        return f"{plan.plan_id}:{digest}:{revision}"
 
     # Category A recovery: a decision refused for a correctable slip in its own
     # fields. Nothing was read, written or dispatched under it, so the state

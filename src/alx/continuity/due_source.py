@@ -41,6 +41,7 @@ class DueCognitionSource:
         # so a changed bound or a lapsed hold is offered again. One ledger
         # update; it starts no Core turn.
         reopen: Any = None,
+        # An async callable: `PlanWorkers.advance`. No Core turn, no claim.
         advance_plans: Any = None,
     ) -> None:
         if interval_seconds <= 0:
@@ -76,11 +77,14 @@ class DueCognitionSource:
         tuple when the master switch is off or no `not_before` has matured, and
         this never reaches the runner.
         """
+        # Execution plans first: reconcile them and start any step now due.
+        # It takes the Core-turn lock itself, and only to checkpoint; the
+        # steps run on their own workers. It also settles plan attentions, so
+        # what is offered below is what the plans now say.
+        if self._advance_plans is not None:
+            await self._advance_plans()
         # Occasions held because they did not fit are released first when
         # their hold has lapsed, so they are offered in this same tick.
-        if self._advance_plans is not None:
-            async with self._core_turn_lock:
-                await run_core_worker(self._advance_plans)
         if self._reopen is not None:
             await asyncio.to_thread(self._reopen)
         run = 0

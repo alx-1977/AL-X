@@ -72,7 +72,7 @@ from alx.config import (
     XeroSettings,
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
-from alx.continuity.plan_source import PlanContinuationSource
+from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity import (
@@ -270,8 +270,13 @@ async def run(repository_root: Path) -> None:
     activity = VoiceActivityStatus()
     usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
     # The Core names the conversation on every budget check, so a dispatch can
-    # arm the ceiling for the task that is actually running.
-    current_conversation_id = [""]
+    # arm the ceiling for the task that is actually running. A context
+    # variable, as the call below is: a planned step runs on a background
+    # worker while a turn dispatches on another thread, and each must see its
+    # own conversation and call, never whichever was named last.
+    current_conversation_id: ContextVar[str] = ContextVar(
+        "alx_current_conversation_id", default=""
+    )
 
     # Whether the turn now reaching the Core came from Friedl. Set by the
     # transport, which is the only place that knows; the Core is never told
@@ -296,7 +301,7 @@ async def run(repository_root: Path) -> None:
         before Friedl typed, and the conversation could no longer reason at
         all. Reserving it is what keeps the recovery for the person it is for.
         """
-        current_conversation_id[0] = conversation_id
+        current_conversation_id.set(conversation_id)
         try:
             usage.check(
                 conversation_id, allow_recovery=person_turn_in_progress[0]
@@ -327,7 +332,11 @@ async def run(repository_root: Path) -> None:
     migrate_legacy_conversations(goal_store, conversation_store)
     memory_store = SQLiteMemoryStore(storage_root / "memories.sqlite3")
     registry = CapabilityRegistry()
-    current_call_id = [""]
+    current_call_id: ContextVar[str] = ContextVar("alx_current_call_id", default="")
+    # Coding jobs running now, by call, with the conversation each belongs
+    # to. What the console's cancel control checks, since a job may be a
+    # planned step on a background worker as well as a turn's own call.
+    running_coding_jobs: dict[str, str] = {}
     current_goal_state: ContextVar[Any] = ContextVar(
         "alx_current_goal_state", default=None
     )
@@ -335,7 +344,7 @@ async def run(repository_root: Path) -> None:
     mail_runtime = build_mail_runtime(
         mail_settings,
         storage_root,
-        lambda: current_call_id[0],
+        current_call_id.get,
     )
     for definition in mail_runtime.definitions:
         registry.register(definition)
@@ -372,7 +381,7 @@ async def run(repository_root: Path) -> None:
     notebook_runtime = build_notebook_runtime(
         storage_root,
         voice_settings.goal_retention_days,
-        lambda: current_call_id[0],
+        current_call_id.get,
         provenance_of=notebook_provenance,
     )
     for definition in notebook_runtime.definitions:
@@ -390,12 +399,12 @@ async def run(repository_root: Path) -> None:
     continuity_runtime = build_continuity_runtime(
         storage_root,
         voice_settings.goal_retention_days,
-        lambda: current_call_id[0],
+        current_call_id.get,
         # The conversation the executing Core turn belongs to, taken from the
         # runtime rather than from AL/X. A capability argument could name any
         # thread, and a thought would then be able to attach itself to a
         # conversation it did not arise in.
-        conversation_id_source=lambda: current_conversation_id[0],
+        conversation_id_source=current_conversation_id.get,
         # So she can close an undelivered occasion once she has decided what
         # to do about it. Only she may: nothing expires it.
         occasions=opportunity_ledger,
@@ -458,7 +467,7 @@ async def run(repository_root: Path) -> None:
     research_runtime = build_research_runtime(
         provider_settings.research,
         storage_root,
-        lambda: current_call_id[0],
+        current_call_id.get,
         telemetry,
     )
     if research_runtime is None:
@@ -475,7 +484,7 @@ async def run(repository_root: Path) -> None:
     # no network. Absent unless this runtime was told it may read.
     web_runtime = build_web_runtime(
         voice_settings.web_read_enabled,
-        lambda: current_call_id[0],
+        current_call_id.get,
         voice_settings.web_search,
         storage_root,
     )
@@ -507,7 +516,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.sandbox.is_usable,
         sandbox_workspace_root,
         sandbox_ledger_path,
-        lambda: current_call_id[0],
+        current_call_id.get,
         denied_read_paths=(
             repository_root,
             storage_root,
@@ -533,11 +542,11 @@ async def run(repository_root: Path) -> None:
         review_configuration.is_usable,
         review_configuration.repository,
         review_configuration.token,
-        lambda: current_call_id[0],
+        current_call_id.get,
         reviewer=review_configuration.reviewer,
         started=lambda number, sha, requested_at: _watch_review(
             task_runtime,
-            current_conversation_id[0],
+            current_conversation_id.get(),
             number,
             sha,
             requested_at,
@@ -613,7 +622,7 @@ async def run(repository_root: Path) -> None:
         repository_runtime_configuration.root,
         repository_runtime_configuration.repository_identity,
         repository_runtime_configuration.timeout_seconds,
-        lambda: current_call_id[0],
+        current_call_id.get,
         merge_configuration.token,
     )
     if repository_runtime is not None:
@@ -630,7 +639,7 @@ async def run(repository_root: Path) -> None:
         merge_configuration.is_usable,
         merge_configuration.repository,
         merge_configuration.token,
-        lambda: current_call_id[0],
+        current_call_id.get,
         repository_runtime=repository_runtime,
     )
     if merge_runtime is not None:
@@ -647,7 +656,7 @@ async def run(repository_root: Path) -> None:
     checks_runtime = build_pull_request_checks_runtime(
         merge_configuration.repository,
         merge_configuration.token,
-        lambda: current_call_id[0],
+        current_call_id.get,
     )
     if checks_runtime is not None:
         for definition in checks_runtime.definitions:
@@ -675,7 +684,7 @@ async def run(repository_root: Path) -> None:
     coding_runtime = build_coding_runtime(
         provider_settings.coding.enabled,
         providers.coding,
-        lambda: current_call_id[0],
+        current_call_id.get,
         session=providers.coding_session,
         reviewer=providers.coding_reviewer,
         activity_sink=activity.set,
@@ -713,7 +722,7 @@ async def run(repository_root: Path) -> None:
             xero_settings,
             storage_root,
             mail_runtime.source,
-            lambda: current_call_id[0],
+            current_call_id.get,
             extractor,
         )
         for definition in xero_runtime.definitions:
@@ -728,7 +737,7 @@ async def run(repository_root: Path) -> None:
         dhl_runtime = build_dhl_runtime(
             mail_runtime.source,
             xero_runtime.adapter,
-            lambda: current_call_id[0],
+            current_call_id.get,
             xero_settings.import_vat_account,
             xero_settings.customs_duty_account,
             xero_settings.clearance_account,
@@ -752,7 +761,7 @@ async def run(repository_root: Path) -> None:
         approval_ttl_seconds = send_settings.approval_ttl_seconds
         send_definitions, send_policies, send_executors, send_permissions = (
             build_mail_send_runtime(
-                send_settings, mail_runtime.source, lambda: current_call_id[0]
+                send_settings, mail_runtime.source, current_call_id.get
             )
         )
         for definition in send_definitions:
@@ -764,7 +773,9 @@ async def run(repository_root: Path) -> None:
     broker = CapabilityBroker(registry, SafetyGate(policies), executors)
 
     def dispatch(call, state):
-        current_call_id[0] = call.call_id
+        current_call_id.set(call.call_id)
+        if call.capability_id == "run_coding_task":
+            running_coding_jobs[call.call_id] = current_conversation_id.get()
         goal_state_token = current_goal_state.set(state)
         # Reaching for any bill capability declares the task routine, so the
         # ceiling applies from the first one rather than from the commit.
@@ -774,7 +785,7 @@ async def run(repository_root: Path) -> None:
             # boundary between autonomous and conversational turns; no model
             # selection or authority changes here.
             usage.set_budget(
-                current_conversation_id[0],
+                current_conversation_id.get(),
                 _bill_budget_for_turn(
                     provider_settings,
                     occasion_spend.current_opportunity_id(),
@@ -796,12 +807,13 @@ async def run(repository_root: Path) -> None:
             )
         finally:
             current_goal_state.reset(goal_state_token)
+            running_coding_jobs.pop(call.call_id, None)
         # A finished bill closes its ceiling window, so the next invoice gets
         # its own. Only a completed capture counts: settling after a refusal
         # or a returned ambiguity would hand the same bill a fresh ceiling and
         # let it keep reasoning.
         if call.capability_id in BILL_EXECUTION_CAPABILITIES and _completed(attempt):
-            usage.settle(current_conversation_id[0])
+            usage.settle(current_conversation_id.get())
         return attempt
 
     # The shortest configured approval window governs, so a capability cannot
@@ -856,6 +868,9 @@ async def run(repository_root: Path) -> None:
         registry.list_definitions(),
         memory_store,
         plan_continuation=plan_continuation,
+        # A planned step on a background worker names its goal's conversation
+        # for the executors, exactly as a reasoning step's budget check does.
+        bind_dispatch=current_conversation_id.set,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
         # Read from the policies themselves, so a capability that requires an
@@ -940,8 +955,7 @@ async def run(repository_root: Path) -> None:
         CODE_ROOT / "src/alx/interfaces/assets",
         cancel_coding=(
             lambda job_id, conversation_id: (
-                job_id == current_call_id[0]
-                and conversation_id == current_conversation_id[0]
+                running_coding_jobs.get(job_id) == conversation_id
                 and coding_runtime.agent.cancel(job_id)
             )
             if coding_runtime is not None else None
@@ -952,12 +966,19 @@ async def run(repository_root: Path) -> None:
     # here rather than bringing a second tick, which would be a competing
     # production path to the same outcome.
     occasion_sources: list[Any] = [cognition_source]
-    plan_source = PlanContinuationSource(
+    # A plan that needs her is offered through the same runner. Its
+    # attention, offers and cap live on the plan; when automatic offers are
+    # exhausted it is announced on the console as a structural notice, which
+    # costs no reasoning call. There is no startup recovery: the first tick
+    # reconciles every plan exactly as every later tick does.
+    plan_source = PlanAttentionSource(
         goal_store, opportunity_ledger, enabled=plan_continuation,
-        spend=autonomous_budget,
+        notify=lambda conversation_id, values: diagnostics.publish(
+            conversation_id, {"code": "plan.attention", **values}
+        ),
     )
-    plan_source.recover()
     occasion_sources.append(plan_source)
+    plan_workers = PlanWorkers(core, core_turn_lock, plan_source)
     # Observed mail joins them for the same reason, and to end the same
     # coupling the due-cognition tick was built to avoid. Mail used to reach
     # the Core only through a generator a live voice session drained, so
@@ -1033,7 +1054,7 @@ async def run(repository_root: Path) -> None:
         core_turn_lock,
         autonomous_due_check_seconds(environment),
         reopen=None if autonomous_holds is None else autonomous_holds.reopen,
-        advance_plans=lambda: (gateway.advance_due_plans(), plan_source.settle()),
+        advance_plans=plan_workers.advance,
     )
     # Watching the mailbox is not a property of whether Friedl has a browser
     # open, so the scan lives here beside the transport rather than inside a
