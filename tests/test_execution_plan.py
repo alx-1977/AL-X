@@ -297,7 +297,7 @@ class ExecutionPlanTests(PlanHarness):
         agent = self.agent(reasoner)
         outcome = agent.process(conversation(), RETENTION, 3)
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
-        agent.acknowledge_plan_response(outcome.snapshot)
+        agent.acknowledge_plan_response(outcome.snapshot, outcome.answered_continuation)
 
         class Ledger:
             def exists(self, _identifier):
@@ -408,7 +408,7 @@ class ExecutionPlanTests(PlanHarness):
                                 resume_plan_goal_id="goal")
         self.assertEqual(outcome.response, "Done.")
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
-        agent.acknowledge_plan_response(outcome.snapshot)
+        agent.acknowledge_plan_response(outcome.snapshot, outcome.answered_continuation)
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
 
     def test_gateway_handles_plan_only_after_response_is_stored(self):
@@ -418,12 +418,27 @@ class ExecutionPlanTests(PlanHarness):
                            snapshot.retention_until, snapshot.revision)
         conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
         self.addCleanup(conversations.close)
+        # One step that selects the goal and answers at once never saw its plan
+        # (summaries carry no plan state), so it cannot close the continuation.
         gateway = ConversationGateway(
             self.agent(Reasoner(AgentDecision(response="Done.", goal_id="goal"))),
             conversations,
         )
         gateway.receive_conversation_turn(conversation().turns[0], 1, RETENTION)
         self.assertEqual(conversations.load("thread").turns[-1].content, "Done.")
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
+        # With a step to see it, her answer is the one that closes it.
+        reasoner = Reasoner(AgentDecision(response="Done.", goal_id="goal"),
+                            AgentDecision(response="The work is finished.", goal_id="goal"))
+        gateway = ConversationGateway(self.agent(reasoner), conversations)
+        gateway.receive_conversation_turn(
+            ConversationTurn("thread", "person-2", ConversationOrigin.TYPED, "Status?", NOW,
+                             "friedl"), 2, RETENTION)
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(reasoner.contexts[1].continuation_notices[0]["reason"],
+                         "plan_continuation_not_yet_seen")
+        self.assertEqual(conversations.load("thread").turns[-1].content,
+                         "The work is finished.")
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
 
     def test_failed_response_persistence_keeps_plan_continuation(self):
@@ -516,7 +531,7 @@ class ExecutionPlanTests(PlanHarness):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Checks passed.")
         self.assertEqual(reasoner.calls, 3)
-        agent.acknowledge_plan_response(outcome.snapshot)
+        agent.acknowledge_plan_response(outcome.snapshot, outcome.answered_continuation)
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
 
     def test_array_conditions_keep_mixed_ci_pending_without_reasoning(self):
@@ -1754,12 +1769,17 @@ class ParkingWithExecutablePlanTests(PlanHarness):
 
     def test_autonomous_call_less_end_parks_awaiting_input_and_keeps_response(self):
         self.waiting(outstanding_work=(WorkItem("ci", "Wait for checks"),))
+        # Parking wakes the plan inside that same decision, so she gets one
+        # further step that sees the wake before the turn ends.
         reasoner = Reasoner(AgentDecision(response="Checks still running.", goal_id="goal"),
-                            AgentDecision(response="Checks still running.", goal_id="goal"))
+                            AgentDecision(response="Checks still running.", goal_id="goal"),
+                            AgentDecision(response="Parked until you reply.", goal_id="goal"))
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 3,
                                                origin=CognitionOrigin.EXTERNAL_EVENT)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.response, "Checks still running.")
+        self.assertEqual(outcome.response, "Parked until you reply.")
+        self.assertEqual(reasoner.contexts[2].active_goal.execution_plan.core_reentry_reason,
+                         "goal_parked")
         self.assert_parked(GoalStatus.AWAITING_INPUT, "outstanding_work")
 
     def test_blocked_parking_wakes_the_plan(self):
@@ -1812,6 +1832,7 @@ class ParkingWithExecutablePlanTests(PlanHarness):
         created = conversations.create("thread", RETENTION)
         conversations.append(conversation().turns[0], RETENTION, created.revision)
         gateway = ConversationGateway(self.agent(Reasoner(
+            AgentDecision(response="Checks still running.", goal_id="goal"),
             AgentDecision(response="Checks still running.", goal_id="goal"),
             AgentDecision(response="Checks still running.", goal_id="goal"),
         )), conversations)
@@ -2658,3 +2679,208 @@ class JsonConditionEqualityTests(unittest.TestCase):
         document = {"values": {"checks": ({"done": True, "ok": 1},
                                           {"done": False, "ok": None})}}
         self.assertTrue(settled_contradiction(document, workflow_step))
+
+
+class MutationCreatedWakeTests(PlanHarness):
+    """A decision that wakes a plan cannot also answer that wake."""
+
+    UPDATE = GoalProposal(GoalMutationKind.UPDATE, context={"note": "progress"})
+
+    def setUp(self):
+        super().setUp()
+        self.waiting("goal")
+        self.conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(self.conversations.close)
+        created = self.conversations.create("thread", RETENTION)
+        self.conversations.append(conversation().turns[0], RETENTION, created.revision)
+
+    def waiting(self, goal_id):
+        workflow = replace(
+            plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
+                      waiting=(PlanCondition("values.state", "pending"),))),
+            plan_id=f"plan-{goal_id}", status="waiting",
+            next_due_at=NOW + timedelta(seconds=60), last_result_call_id="call-ci",
+        )
+        snapshot = self.store.load(goal_id)
+        self.store.replace(replace(snapshot.state, execution_plan=workflow),
+                           snapshot.retention_until, snapshot.revision)
+
+    def gateway(self, *decisions):
+        self.reasoner = Reasoner(*decisions)
+        self.core = self.agent(self.reasoner)
+        return ConversationGateway(self.core, self.conversations)
+
+    def mail(self, gateway, budget=3, name="mail:1"):
+        return gateway.receive_cognition_opportunity(
+            "thread", CognitionOpportunity(name, CognitionOrigin.EXTERNAL_EVENT, NOW, "thread"),
+            budget, RETENTION)
+
+    def responses(self):
+        return [item.content for item in self.conversations.load("thread").turns
+                if item.origin is ConversationOrigin.ALX_RESPONSE]
+
+    def plan_state(self, goal_id="goal"):
+        return self.store.load(goal_id).state.execution_plan
+
+    def assert_saw_the_wake(self, context):
+        self.assertEqual(context.active_goal.execution_plan.core_reentry_reason,
+                         "goal_state_changed")
+        self.assertEqual(context.continuation_notices[0]["reason"],
+                         "plan_continuation_not_yet_seen")
+
+    def test_response_composed_before_the_wake_cannot_handle_it(self):
+        gateway = self.gateway(
+            AgentDecision(response="CI is still running.", goal_id="goal",
+                          goal_proposal=self.UPDATE),
+            AgentDecision(response="The goal changed, so I stopped waiting.", goal_id="goal"),
+        )
+        self.mail(gateway)
+        self.assertEqual(self.reasoner.calls, 2)
+        self.assert_saw_the_wake(self.reasoner.contexts[1])
+        self.assertEqual(self.responses(), ["The goal changed, so I stopped waiting."])
+        self.assertEqual(self.plan_state().status, "handled")
+
+    def test_silence_composed_before_the_wake_cannot_handle_it(self):
+        gateway = self.gateway(
+            AgentDecision(finish_silently=True, goal_id="goal", goal_proposal=self.UPDATE),
+            AgentDecision(finish_silently=True, goal_id="goal"),
+        )
+        outcome = self.mail(gateway)
+        self.assertEqual(outcome.state, CoreState.FINISHED_SILENTLY)
+        self.assertEqual(self.reasoner.calls, 2)
+        self.assert_saw_the_wake(self.reasoner.contexts[1])
+        self.assertEqual(self.plan_state().status, "handled")
+
+    def test_person_turn_equivalent(self):
+        gateway = self.gateway(
+            AgentDecision(response="Still waiting.", goal_id="goal", goal_proposal=self.UPDATE),
+            AgentDecision(response="Your change ended the wait.", goal_id="goal"),
+        )
+        gateway.receive_conversation_turn(
+            ConversationTurn("thread", "person-2", ConversationOrigin.TYPED, "Note this", NOW,
+                             "friedl"), 3, RETENTION)
+        self.assertEqual(self.reasoner.calls, 2)
+        # The wake arose during her first step, which never saw it.
+        self.assertIsNone(self.reasoner.contexts[0].active_goal)
+        self.assertEqual(self.reasoner.contexts[1].active_goal.execution_plan.status,
+                         "needs_core")
+        self.assertEqual(self.responses(), ["Your change ended the wait."])
+        self.assertEqual(self.plan_state().status, "handled")
+
+    def test_without_a_step_left_the_wake_survives_for_its_own_occasion(self):
+        gateway = self.gateway(AgentDecision(response="CI is still running.", goal_id="goal",
+                                             goal_proposal=self.UPDATE))
+        outcome = self.mail(gateway, budget=1)
+        self.assertIsNone(outcome.answered_continuation)
+        self.assertEqual(self.plan_state().status, "needs_core")
+        self.assertEqual(self.plan_state().core_reentry_reason, "goal_state_changed")
+
+        class Ledger:
+            def exists(self, _identifier):
+                return False
+
+        offered = PlanContinuationSource(self.store, Ledger(), enabled=True).due_opportunities()
+        self.assertEqual(len(offered), 1)
+        gateway = self.gateway(AgentDecision(response="The goal changed.", goal_id="goal"))
+        gateway.receive_cognition_opportunity("thread", offered[0], 1, RETENTION)
+        self.assertEqual(self.reasoner.contexts[0].active_goal.execution_plan.core_reentry_reason,
+                         "goal_state_changed")
+        self.assertEqual(self.responses(), ["CI is still running.", "The goal changed."])
+        self.assertEqual(self.plan_state().status, "handled")
+
+    def test_crash_before_the_follow_up_step_loses_neither_wake_nor_answer(self):
+        class Halting(Reasoner):
+            def decide(self, context):
+                if self.calls == 1:
+                    self.calls += 1
+                    raise Crash()
+                return super().decide(context)
+
+        self.reasoner = Halting(AgentDecision(response="CI is still running.", goal_id="goal",
+                                              goal_proposal=self.UPDATE))
+        gateway = ConversationGateway(self.agent(self.reasoner), self.conversations)
+        with self.assertRaises(Crash):
+            self.mail(gateway)
+        self.assertEqual(self.responses(), [])
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        self.assertEqual(self.plan_state().status, "needs_core")
+        restarted = self.gateway(AgentDecision(response="The goal changed.", goal_id="goal"))
+        restarted.advance_due_plans()
+
+        class Ledger:
+            def exists(self, _identifier):
+                return False
+
+        offered = PlanContinuationSource(self.store, Ledger(), enabled=True).due_opportunities()
+        self.assertEqual(len(offered), 1)
+        restarted.receive_cognition_opportunity("thread", offered[0], 1, RETENTION)
+        self.assertEqual(self.responses(), ["The goal changed."])
+        self.assertEqual(self.plan_state().status, "handled")
+        restarted.advance_due_plans()
+        self.assertEqual(PlanContinuationSource(self.store, Ledger(),
+                                                enabled=True).due_opportunities(), ())
+
+    def test_silence_without_a_step_left_leaves_the_wake_standing(self):
+        gateway = self.gateway(AgentDecision(finish_silently=True, goal_id="goal",
+                                             goal_proposal=self.UPDATE))
+        outcome = self.mail(gateway, budget=1)
+        self.assertEqual(outcome.state, CoreState.FINISHED_SILENTLY)
+        self.assertEqual(self.plan_state().status, "needs_core")
+
+    def test_acknowledgement_closes_only_the_continuation_it_answered(self):
+        self.mail(self.gateway(AgentDecision(response="Noted.", goal_id="goal",
+                                             goal_proposal=self.UPDATE)), budget=1)
+        snapshot = self.store.load("goal")
+        standing = self.plan_state()
+        for other in ("goal:another-plan:0", f"goal:{standing.plan_id}:1"):
+            with self.subTest(continuation=other):
+                self.core.acknowledge_plan_response(snapshot, other)
+                self.assertEqual(self.plan_state().status, "needs_core")
+        self.core.acknowledge_plan_response(snapshot, f"goal:{standing.plan_id}:0")
+        self.assertEqual(self.plan_state().status, "handled")
+
+    def test_one_further_step_per_turn_and_never_a_loop(self):
+        self.store.create(replace(goal(), goal_id="goal-b"), "thread", RETENTION)
+        self.waiting("goal-b")
+        gateway = self.gateway(
+            AgentDecision(response="A noted.", goal_id="goal", goal_proposal=self.UPDATE),
+            AgentDecision(response="B noted.", goal_id="goal-b", goal_proposal=self.UPDATE),
+            AgentDecision(response="Never asked.", goal_id="goal"),
+        )
+        self.mail(gateway, budget=5)
+        self.assertEqual(self.reasoner.calls, 2)
+        self.assertEqual(self.responses(), ["B noted."])
+        # Neither wake was answered by a step that saw it, so both remain.
+        self.assertEqual(self.plan_state("goal").status, "needs_core")
+        self.assertEqual(self.plan_state("goal-b").status, "needs_core")
+
+
+class JsonPreconditionTests(unittest.TestCase):
+    """A plan's context preconditions compare as JSON, like its conditions."""
+
+    def facts(self, precondition, context):
+        workflow = replace(plan(step("ci")), context_preconditions=precondition)
+        return plan_invalidation_facts(workflow, replace(goal(), context=context),
+                                       "person-1", NOW)
+
+    def test_preconditions_use_json_equality(self):
+        changed = (
+            ({"ready": True}, {"ready": 1}),
+            ({"ready": False}, {"ready": 0}),
+            ({"ready": None}, {}),
+            ({"nested": {"a": [True]}}, {"nested": {"a": [1]}}),
+            ({"nested": {"a": False}}, {"nested": {"a": 0}}),
+        )
+        for precondition, context in changed:
+            with self.subTest(precondition=precondition, context=context):
+                self.assertEqual(self.facts(precondition, context),
+                                 ("plan_precondition_changed",))
+        unchanged = (
+            ({"count": 1}, {"count": 1.0}),
+            ({"ready": None}, {"ready": None}),
+            ({"nested": {"a": [True]}}, {"nested": {"a": [True]}, "other": 2}),
+        )
+        for precondition, context in unchanged:
+            with self.subTest(precondition=precondition, context=context):
+                self.assertEqual(self.facts(precondition, context), ())

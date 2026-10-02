@@ -49,14 +49,15 @@ class ConversationGateway:
                         retention_until: datetime) -> None:
         """Store her response first; plan bookkeeping can never cost it.
 
-        A continuation's response carries the turn identity derived from that
-        continuation, so the stored turn is itself the record that it was
-        delivered. Acknowledging the plan afterwards is bookkeeping: if it
+        A response that answers a continuation its step saw carries the turn
+        identity derived from that continuation, so the stored turn is itself
+        the record that it was delivered. Acknowledging the plan afterwards is bookkeeping: if it
         fails, or the process stops first, the next due tick finds the turn
         and closes the continuation instead of offering it again.
         """
         current = self._conversation_store.load(conversation_id)
-        turn_id = self._core.plan_response_turn_id(outcome.snapshot)
+        turn_id = (None if outcome.answered_continuation is None
+                   else self._core.plan_response_turn_id(outcome.answered_continuation))
         if turn_id is None or any(item.turn_id == turn_id for item in current.turns):
             # Not a continuation, or one already answered in this thread: a
             # further answer is an ordinary response of its own.
@@ -74,7 +75,8 @@ class ConversationGateway:
             current.revision,
         )
         try:
-            self._core.acknowledge_plan_response(outcome.snapshot)
+            self._core.acknowledge_plan_response(
+                outcome.snapshot, outcome.answered_continuation)
         except Exception as error:  # noqa: BLE001 - the response is already stored
             LOGGER.warning("Plan continuation acknowledgement failed: %s",
                            type(error).__name__)

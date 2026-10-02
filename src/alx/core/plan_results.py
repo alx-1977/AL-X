@@ -102,7 +102,9 @@ def plan_invalidation_facts(
         facts.append("goal_inactive")
     if (state.objective.source_reference != plan.objective_source
             or state.objective.summary != plan.objective_summary
-            or any(state.context.get(key) != value
+            # Compared as the plan's conditions are: as JSON. A key the
+            # context no longer holds never satisfies a declared value.
+            or any(key not in state.context or not json_equal(state.context[key], value)
                    for key, value in plan.context_preconditions.items())):
         facts.append("plan_precondition_changed")
     if latest_person_turn_id != plan.source_turn_id:

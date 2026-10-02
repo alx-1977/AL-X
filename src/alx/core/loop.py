@@ -82,6 +82,10 @@ class CoreOutcome:
     # durable record has to say plainly that the write did not happen.
     # None means nothing was proposed or everything proposed was stored.
     memory_state: str | None = None
+    # The plan continuation the deciding reasoning step actually saw, when the
+    # outcome answers it. Only this continuation may then be acknowledged; a
+    # wake the same decision created was never seen, and is left for her.
+    answered_continuation: str | None = None
 
     def __post_init__(self) -> None:
         if self.state is CoreState.RESPONDED and (
@@ -261,7 +265,7 @@ class CoreAgent:
                     # Once per continuation per process, for a response stored
                     # before a restart. A later duplicate is stopped where the
                     # conversation is already loaded, when it is resumed.
-                    turn_id = self.plan_response_turn_id(snapshot)
+                    turn_id = self._continuation_identity(snapshot.state)
                     if turn_id not in self._checked_plan_responses:
                         self._reconcile_plan_response(
                             snapshot, load_conversation(snapshot.conversation_id))
@@ -352,6 +356,10 @@ class CoreAgent:
         # while remaining work was still immediately executable. Shown on the
         # next reasoning step, then cleared.
         continuation_notices: tuple[Mapping[str, Any], ...] = ()
+        # The continuation shown to the step now deciding, and whether this
+        # turn has already given her a step to see a wake she had not seen.
+        observed_continuation: str | None = None
+        unseen_wake_notice_issued = False
         refused_goal_selections: tuple[Mapping[str, Any], ...] = ()
         continuation_notice_issued = False
         # Capabilities this turn has already dispatched under an approval.
@@ -371,6 +379,7 @@ class CoreAgent:
         conflict_response: str | None = None
         conflict_provenance: ContentProvenance | None = None
         conflict_silent = False
+        conflict_observed: str | None = None
         carried_plan_attempt = (
             None if snapshot is None else self._active_plan_attempt(snapshot.state.goal_id)
         )
@@ -433,6 +442,7 @@ class CoreAgent:
                     continuation_notices=continuation_notices,
                     refused_goal_selections=refused_goal_selections,
                 )
+                observed_continuation = self._continuation_identity(reasoning_context.active_goal)
                 decision = self._reasoner.decide(reasoning_context)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
@@ -640,6 +650,7 @@ class CoreAgent:
                     conflict_response = decision.response
                     conflict_provenance = decision_provenance
                     conflict_silent = decision.finish_silently
+                    conflict_observed = observed_continuation
                 continue
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
@@ -902,6 +913,7 @@ class CoreAgent:
                     conflict_response = decision.response
                     conflict_provenance = decision_provenance
                     conflict_silent = decision.finish_silently
+                    conflict_observed = observed_continuation
                     continue
                 memory_conflicts = ()
                 if not committed:
@@ -988,6 +1000,8 @@ class CoreAgent:
                         CoreState.RESPONDED if decision.response is not None else CoreState.CHECKPOINTED,
                         snapshot, response=decision.response, reason=mechanical_blocker,
                         response_provenance=decision_provenance,
+                        answered_continuation=self._answered_continuation(
+                            snapshot, observed_continuation),
                     )
                 if decision.selects_only:
                     if (proposal_error is None and decision.goal_proposal is not None
@@ -1020,8 +1034,25 @@ class CoreAgent:
                         continuation_notice_issued = True
                         continuation_notices = deferred
                         continue
+                unseen = self._continuation_identity(
+                    None if snapshot is None else snapshot.state)
+                if (unseen is not None and unseen != observed_continuation
+                        and not unseen_wake_notice_issued and step_index + 1 < step_budget):
+                    # This decision was composed without the continuation now
+                    # standing: often its own goal update woke the plan. Its
+                    # writes stand, but it may not answer a wake it never saw.
+                    # She reasons once more with the wake in view.
+                    LOGGER.info("Unseen plan continuation: one further step")
+                    unseen_wake_notice_issued = True
+                    continuation_notices = ({
+                        "reason": "plan_continuation_not_yet_seen",
+                        "goal_id": snapshot.state.goal_id,
+                    },)
+                    continue
+                answered = self._answered_continuation(snapshot, observed_continuation)
                 if decision.finish_silently:
-                    snapshot = self._handle_resolved_plan(snapshot)
+                    if answered is not None:
+                        snapshot = self._handle_resolved_plan(snapshot)
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,
                         snapshot,
@@ -1033,6 +1064,7 @@ class CoreAgent:
                     response=decision.response,
                     reason="goal_proposal_rejected" if proposal_error else deferred_selection,
                     response_provenance=decision_provenance,
+                    answered_continuation=answered,
                 )
 
             if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
@@ -1269,6 +1301,9 @@ class CoreAgent:
                 reason="core_selected_silence" if conflict_silent else None,
                 response_provenance=None if conflict_silent else conflict_provenance,
                 memory_state="unresolved_identity_conflict",
+                answered_continuation=(
+                    None if conflict_silent
+                    else self._answered_continuation(snapshot, conflict_observed)),
             )
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
 
@@ -1303,6 +1338,7 @@ class CoreAgent:
             response_only_reason=reason,
             refused_calls=refused_calls or context.refused_calls,
         )
+        observed = self._continuation_identity(terminal_context.active_goal)
         try:
             self._budget_check(conversation_id)
         except Exception as error:
@@ -1333,6 +1369,7 @@ class CoreAgent:
         return CoreOutcome(
             CoreState.RESPONDED, snapshot, response=decision.response,
             reason=reason, response_provenance=provenance,
+            answered_continuation=self._answered_continuation(snapshot, observed),
         )
 
     def _close_interrupted_dispatch(self, snapshot: GoalSnapshot) -> GoalSnapshot:
@@ -2107,33 +2144,50 @@ class CoreAgent:
         )
 
     @staticmethod
-    def plan_response_turn_id(snapshot: GoalSnapshot | None) -> str | None:
-        """The response turn identity for the continuation this snapshot holds.
+    def _continuation_identity(state: GoalState | None) -> str | None:
+        """The continuation a goal holds for her: one wake of one plan.
+
+        A plan that needs her, or has completed, stays so until it is handled,
+        so its goal, plan and cursor name exactly one wake.
+        """
+        plan = None if state is None else state.execution_plan
+        if plan is None or plan.status not in {"needs_core", "completed"}:
+            return None
+        return f"{state.goal_id}:{plan.plan_id}:{plan.cursor}"
+
+    def _answered_continuation(
+        self, snapshot: GoalSnapshot | None, observed: str | None,
+    ) -> str | None:
+        """The continuation an outcome answers: the one its step saw, if still standing."""
+        current = self._continuation_identity(None if snapshot is None else snapshot.state)
+        return current if current is not None and current == observed else None
+
+    @staticmethod
+    def plan_response_turn_id(continuation: str) -> str:
+        """The response turn identity for one answered continuation.
 
         Derived from the continuation itself, so the stored response is its
         own durable record: nothing is written before the response, and a
         restart recognises a delivered answer by finding this turn.
         """
-        if snapshot is None or snapshot.state.execution_plan is None:
-            return None
-        plan = snapshot.state.execution_plan
-        if plan.status not in {"needs_core", "completed"}:
-            return None
-        return f"alx-plan-response:{snapshot.state.goal_id}:{plan.plan_id}:{plan.cursor}"
+        return f"alx-plan-response:{continuation}"
 
     def _plan_response_stored(
         self, snapshot: GoalSnapshot, conversation: ConversationSnapshot,
     ) -> bool:
-        turn_id = self.plan_response_turn_id(snapshot)
-        return turn_id is not None and any(
-            item.turn_id == turn_id for item in conversation.turns)
+        continuation = self._continuation_identity(snapshot.state)
+        if continuation is None:
+            return False
+        turn_id = self.plan_response_turn_id(continuation)
+        return any(item.turn_id == turn_id for item in conversation.turns)
 
-    def acknowledge_plan_response(self, snapshot: GoalSnapshot | None) -> None:
-        """Close a cognitive continuation only after its response is stored."""
-        if snapshot is None or snapshot.state.execution_plan is None:
+    def acknowledge_plan_response(self, snapshot: GoalSnapshot | None,
+                                  continuation: str | None) -> None:
+        """Close the continuation a stored response answered, and only that one."""
+        if snapshot is None or continuation is None:
             return
         current = self._store.load(snapshot.state.goal_id)
-        if current.revision == snapshot.revision:
+        if self._continuation_identity(current.state) == continuation:
             self._handle_resolved_plan(current)
 
     def _reconcile_plan_response(
