@@ -28,6 +28,7 @@ from alx.contracts import (
     MAX_PLAN_WAIT_SECONDS,
     PlanCondition,
     PlanOperation,
+    plan_condition_path_error,
     PlanUpdate,
     ModelMessage,
     ModelRequest,
@@ -988,19 +989,15 @@ def _plan_payload(plan: ExecutionPlan | None) -> dict[str, Any] | None:
     }
 
 
-# The documents a planned result is matched against have these roots.
-_PLAN_CONDITION_ROOTS = frozenset({"state", "values", "failure"})
-
 
 def _plan_conditions(values: Sequence[Mapping[str, Any]]) -> tuple[PlanCondition, ...]:
-    """Validate the model's plan conditions here, before any plan is built."""
+    """Build the model's plan conditions. PlanCondition validates each path."""
     conditions = []
     for entry in values:
         path = entry["path"]
-        parts = path.split(".") if isinstance(path, str) else []
-        if (not parts or parts[0] not in _PLAN_CONDITION_ROOTS
-                or any(not part or part.startswith("_") or "*" in part for part in parts)):
-            raise ValueError(f"plan condition path is unusable: {path!r}")
+        error = plan_condition_path_error(path)
+        if error is not None:
+            raise ValueError(error)
         try:
             equals = json.loads(entry["equals_json"])
         except (TypeError, json.JSONDecodeError) as error:
@@ -1255,7 +1252,16 @@ def decision_schema() -> dict[str, Any]:
     # only permitted keys became type, properties, required and
     # additionalProperties, and no schema-following model could state one.
     plan_condition = {
-        "path": string,
+        "path": {
+            "type": "string",
+            "description": (
+                "Which field of the step's result to compare: exactly `state`, "
+                "or `values` / `failure` followed by dot-separated field names, "
+                "such as values.merged or failure.code. Not a bare value: to "
+                "require success, use path `state` with equals_json "
+                "'\"succeeded\"'."
+            ),
+        },
         "equals_json": string,
         "negate": {"type": "boolean"},
     }

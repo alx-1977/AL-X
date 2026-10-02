@@ -1320,12 +1320,21 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(reasoner.contexts[1].transient_attempts, (attempt,))
 
-    def test_provider_validation_error_is_not_retried(self) -> None:
+    def test_provider_validation_error_gets_one_correction_and_no_more(self) -> None:
+        # The rejection is new evidence, so she may correct it once. A second
+        # rejection buys no further planning: a person hears one response-only
+        # step, and nothing is ever asked a fourth time.
         reasoner = Queued(DecisionValidationError("malformed"),
-                          AssertionError("retry occurred"))
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
-        self.assertEqual(outcome.reason, "reasoner_error")
-        self.assertEqual(len(reasoner.contexts), 1)
+                          DecisionValidationError("malformed again"),
+                          AgentDecision(response="I could not do that."),
+                          AssertionError("a further attempt occurred"))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 6)
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(reasoner.contexts[1].refused_calls[-1],
+                         {"reason": "decision_rejected", "subject": "malformed"})
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "decision_rejected")
+        self.assertEqual((outcome.state, outcome.response),
+                         (CoreState.RESPONDED, "I could not do that."))
 
     def test_same_deterministic_rejection_cannot_loop_through_dispatch(self) -> None:
         effectful = CapabilityDefinition(

@@ -1764,6 +1764,67 @@ class ReplyDurabilityTests(PlanHarness):
         self.assertEqual([item.content for item in self.replies()], ["Stopped it."])
 
 
+class RejectedDecisionCorrectionTests(PlanHarness):
+    """A decision the validator rejects gets one correction, never more."""
+
+    class Rejecting(Reasoner):
+        def decide(self, context):
+            self.contexts.append(context)
+            item = self.decisions.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    def rejected(self, path="succeeded"):
+        from alx.contracts import DecisionValidationError
+        return DecisionValidationError(f"plan condition path is unusable: {path!r}")
+
+    def test_a_corrected_decision_installs_normally_after_one_rejection(self):
+        reasoner = self.Rejecting(self.rejected(), install(plan(step("coding", completion=(
+            PlanCondition("state", "succeeded"),))), "Started; I will report back."))
+        outcome = self.person(self.agent(reasoner))
+        self.assertEqual(reasoner.calls, 2)
+        (refusal,) = reasoner.contexts[1].refused_calls
+        self.assertEqual(refusal, {"reason": "decision_rejected",
+                                   "subject": "plan condition path is unusable: 'succeeded'"})
+        self.assertEqual((outcome.state, outcome.response),
+                         (CoreState.RESPONDED, "Started; I will report back."))
+        self.assertEqual(self.plan_of().status, PlanStatus.RUNNING)
+        self.work(self.agent())
+        self.assertEqual(self.names(), ["coding"])
+
+    def test_a_second_rejection_stops_and_the_person_is_still_answered(self):
+        reasoner = self.Rejecting(self.rejected(), self.rejected("values..x"),
+                                  AgentDecision(response="I could not start that work."))
+        outcome = self.person(self.agent(reasoner), budget=6)
+        # Two decisions that could plan, then one that can only speak.
+        self.assertEqual(reasoner.calls, 3)
+        self.assertIsNone(reasoner.contexts[1].response_only_reason)
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "decision_rejected")
+        self.assertEqual([item["subject"] for item in reasoner.contexts[2].refused_calls],
+                         ["plan condition path is unusable: 'succeeded'",
+                          "plan condition path is unusable: 'values..x'"])
+        self.assertEqual((outcome.state, outcome.response),
+                         (CoreState.RESPONDED, "I could not start that work."))
+        self.assertIsNone(self.plan_of())
+        self.assertEqual(self.state().attempts, ())
+        self.assertEqual(self.calls, [])
+
+    def test_an_autonomous_turn_stops_after_one_correction_without_speaking(self):
+        reasoner = self.Rejecting(self.rejected(), self.rejected())
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 6,
+                                               origin=CognitionOrigin.WORK_COMPLETED)
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual((outcome.state, outcome.reason), (CoreState.ERROR, "decision_rejected"))
+        self.assertIsNone(self.plan_of())
+
+    def test_no_correction_is_bought_without_a_step_to_spend(self):
+        reasoner = self.Rejecting(self.rejected(), AgentDecision(response="Could not start."))
+        outcome = self.person(self.agent(reasoner), budget=1)
+        self.assertEqual(reasoner.contexts[1].response_only_reason, "decision_rejected")
+        self.assertEqual(outcome.response, "Could not start.")
+
+
 class GateTests(PlanHarness):
     """Expiry, budget, finished goals, and installation refusals."""
 
@@ -1870,6 +1931,17 @@ class RecordTests(unittest.TestCase):
                  next_due_at=NOW, **bound)
         with self.assertRaises(ValueError):
             PlanAttention(1, "reason", ("other",), NOW)
+
+    def test_condition_paths_follow_the_one_grammar(self):
+        for path in ("state", "values", "values.merged", "values.check.conclusion",
+                     "failure", "failure.code", "failure.details.reason"):
+            with self.subTest(accepted=path):
+                self.assertEqual(PlanCondition(path, True).path, path)
+        for path in ("succeeded", "state.x", "result.state", "values..x", "values._x",
+                     "values.*", "failure.co*de", "", " "):
+            with self.subTest(rejected=path):
+                with self.assertRaisesRegex(ValueError, "plan condition path is unusable"):
+                    PlanCondition(path, True)
 
     def test_a_goal_cannot_claim_a_dispatch_it_did_not_record(self):
         with self.assertRaisesRegex(ValueError, "recorded attempt"):

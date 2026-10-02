@@ -249,6 +249,26 @@ class CapabilityCall:
         object.__setattr__(self, "durable_arguments", durable)
 
 
+# What a planned result exposes to its completion conditions: its state, its
+# structured values and its failure details. The one statement of the path
+# grammar; everything that accepts a plan constructs PlanCondition.
+PLAN_CONDITION_ROOTS = ("state", "values", "failure")
+
+
+def plan_condition_path_error(path: object) -> str | None:
+    """Why a completion-condition path is unusable, or None when it is usable.
+
+    `state` alone, or `values` / `failure` optionally followed by public
+    field names, dot-separated. No wildcard, empty or private segment.
+    """
+    parts = path.split(".") if isinstance(path, str) else []
+    if (not parts or parts[0] not in PLAN_CONDITION_ROOTS
+            or (parts[0] == "state" and len(parts) != 1)
+            or any(not part.strip() or part.startswith("_") or "*" in part for part in parts)):
+        return f"plan condition path is unusable: {path!r}"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class PlanCondition:
     """An exact, model-chosen completion check on one structured result field."""
@@ -258,10 +278,9 @@ class PlanCondition:
     negate: bool = False
 
     def __post_init__(self) -> None:
-        _required(self.path, "condition path")
-        if any(not part or part.startswith("_") or part == "*"
-               for part in self.path.split(".")):
-            raise ValueError("condition paths must name public structured fields")
+        error = plan_condition_path_error(self.path)
+        if error is not None:
+            raise ValueError(error)
         if not isinstance(self.negate, bool):
             raise TypeError("negate must be a bool")
         object.__setattr__(self, "equals", _freeze_value(self.equals))

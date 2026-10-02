@@ -270,6 +270,68 @@ class ModelReasonerTests(unittest.TestCase):
                         ModelReasoner(FakeModel(output), "laws", "identity").decide(
                             self.context())
 
+    def test_the_acceptance_failure_is_corrected_once_and_the_plan_installs(self) -> None:
+        """Regression: the real run's first decision used condition path `succeeded`."""
+        import tempfile
+        from alx.contracts import CognitionOrigin, ConversationSnapshot, PlanStatus
+        from alx.core import CoreAgent, CoreState
+        from alx.goals import SQLiteGoalStore
+
+        def output(path, equals):
+            step = dict(self.plan_step(), completion_conditions=[
+                {"path": path, "equals_json": equals, "negate": False}])
+            return dict(self.plan_output(step), action={
+                "type": "respond", "response": "Started; I will report back.",
+                "response_requires_goal_commit": False})
+
+        class Sequence:
+            def __init__(self, *outputs):
+                self.outputs = list(outputs)
+                self.requests = []
+
+            def complete(self, request):
+                self.requests.append(request)
+                return ModelCompletion("fake", "fake-model", self.outputs.pop(0))
+
+        model = Sequence(output("succeeded", '"succeeded"'), output("state", '"succeeded"'))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
+        self.addCleanup(store.close)
+        retention = NOW.replace(year=NOW.year + 1)
+        store.create(goal(), "conversation-1", retention)
+        context = self.context()
+        thread = ConversationSnapshot("conversation-1", context.turns, 1, retention)
+        outcome = CoreAgent(store, ModelReasoner(model, "laws", "identity"),
+                            lambda call, state: None, (CAPABILITY,), clock=lambda: NOW,
+                            plan_continuation=True).process(
+            thread, retention, 4, origin=CognitionOrigin.PERSON_TURN)
+        self.assertEqual(len(model.requests), 2)
+        second = "\n".join(message.content for message in model.requests[1].messages)
+        self.assertIn("plan condition path is unusable: 'succeeded'", second)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        installed = store.load("goal-1").state.execution_plan
+        self.assertEqual(installed.status, PlanStatus.RUNNING)
+        self.assertEqual(installed.steps[0].completion_conditions[0].path, "state")
+
+    def test_the_autonomous_core_parses_with_the_same_rules(self) -> None:
+        from alx.bootstrap import build_model_reasoner
+
+        reasoner = build_model_reasoner(FakeModel(self.plan_output(dict(
+            self.plan_step(), completion_conditions=[
+                {"path": "succeeded", "equals_json": "true", "negate": False}]))),
+            Path(__file__).resolve().parents[1])
+        with self.assertRaisesRegex(DecisionValidationError,
+                                    "plan condition path is unusable: 'succeeded'"):
+            reasoner.decide(self.context())
+
+    def test_the_schema_describes_the_path_grammar(self) -> None:
+        install = decision_schema()["properties"]["plan_update"]["anyOf"][1]
+        step = install["properties"]["plan"]["properties"]["steps"]["items"]["anyOf"][0]
+        path = step["properties"]["completion_conditions"]["items"]["properties"]["path"]
+        self.assertIn("state", path["description"])
+        self.assertIn("values", path["description"])
+
     def test_response_only_schema_admits_no_plan_update(self) -> None:
         from alx.core.model_reasoner import response_only_schema
 

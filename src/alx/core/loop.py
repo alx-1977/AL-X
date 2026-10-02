@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from alx.contracts import (
     AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled,
+    DecisionValidationError,
     AutonomousRequestUnbounded,
     CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityDispatch, CapabilityResult,
@@ -364,6 +365,9 @@ class CoreAgent:
         # bound traversal without requiring an unrelated durable mutation.
         selected_goals: set[str] = set()
         prior_goal_provenance: tuple[ContentProvenance, ...] = ()
+        # Whether this turn has already had its one correction of a decision
+        # the deterministic validator rejected.
+        decision_corrected = False
         for step_index in range(step_budget):
             try:
                 now = self._clock()
@@ -431,6 +435,30 @@ class CoreAgent:
                 return CoreOutcome(
                     CoreState.ERROR, snapshot, reason=INPUT_BOUND_EXCEEDED
                 )
+            except DecisionValidationError as error:
+                # Her decision broke a deterministic rule, such as a plan
+                # condition naming no result field. Nothing was applied. The
+                # exact reason is new evidence, so she may correct it once;
+                # the correction is validated exactly as the first was.
+                LOGGER.info("Core decision rejected by validation: %s", error.reason)
+                if not decision_corrected and step_index + 1 < step_budget:
+                    decision_corrected = True
+                    refused_calls = (*refused_calls, {
+                        "reason": "decision_rejected", "subject": error.reason,
+                    })
+                    continue
+                # Rejected again, or no step left: there is no third attempt.
+                if origin is CognitionOrigin.PERSON_TURN:
+                    # A person is never left in silence. One response-only
+                    # step, which can only speak, says what could not start.
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, "decision_rejected", decision_provenance,
+                        (*refused_calls, {"reason": "decision_rejected",
+                                          "subject": error.reason}),
+                        park=False,
+                    )
+                return CoreOutcome(CoreState.ERROR, snapshot, reason="decision_rejected")
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
@@ -1206,7 +1234,7 @@ class CoreAgent:
         self,
         conversation_id: str,
         conversation: ConversationSnapshot,
-        snapshot: GoalSnapshot,
+        snapshot: GoalSnapshot | None,
         context: ReasoningContext,
         transient_attempts: tuple[CapabilityAttempt, ...],
         reason: str,
@@ -1217,14 +1245,16 @@ class CoreAgent:
         """Allow one response-only decision for a person, parking stopped work.
 
         A refused plan change stops nothing that was running, so it parks
-        nothing: she only says what happened.
+        nothing: she only says what happened. There may be no goal at all,
+        when what was refused was the decision that would have created one.
         """
-        if park:
+        if park and snapshot is not None:
             snapshot = self._park_unfinished_goal(snapshot, provenance)
+        state = None if snapshot is None else snapshot.state
         terminal_context = replace(
             context,
-            active_goal=snapshot.state,
-            turns=project_turns_for_reasoning(conversation.turns, snapshot.state),
+            active_goal=state,
+            turns=project_turns_for_reasoning(conversation.turns, state),
             unfinished_goals=self._selectable_goals(conversation_id, snapshot),
             transient_attempts=transient_attempts,
             response_only_reason=reason,
@@ -1248,7 +1278,7 @@ class CoreAgent:
             decision.response is None
             or decision.call is not None
             or decision.memory_query is not None
-            or decision.goal_id not in (None, snapshot.state.goal_id)
+            or decision.goal_id not in (None, None if state is None else state.goal_id)
             or decision.goal_proposal is not None
             or decision.memory_proposals
             or decision.approval_proposal is not None
