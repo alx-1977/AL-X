@@ -440,7 +440,8 @@ class ExecutionPlan:
     attention_seq: int = 0
     attention: PlanAttention | None = None
     # Set with a finish or cancel she answered in words, until those words
-    # are stored in the conversation.
+    # are stored in the conversation. A plan installed in its place carries
+    # it on, so a replacement can never discard it.
     announcement: PlanAnnouncement | None = None
 
     def __post_init__(self) -> None:
@@ -478,9 +479,6 @@ class ExecutionPlan:
             raise ValueError("attention_seq must be a nonnegative integer")
         if self.attention is not None and self.attention.seq != self.attention_seq:
             raise ValueError("the current attention carries the plan's attention_seq")
-        if self.announcement is not None and self.status not in (
-                PlanStatus.COMPLETED, PlanStatus.CANCELLED):
-            raise ValueError("only a finished or cancelled plan holds an announcement")
 
 
 @dataclass(frozen=True, slots=True)

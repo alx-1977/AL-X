@@ -302,11 +302,21 @@ class PlanWorkers:
         """Wait until no planned step is running here."""
         while self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+            # Gathering finished tasks need not yield to the loop, so their
+            # done callbacks may not have removed them yet.
+            self._tasks.difference_update(
+                [task for task in self._tasks if task.done()])
 
     async def stop(self) -> None:
         """Stop starting work, and wait for started work to be recorded."""
+        # Set at once, so a worker still waiting for its boundary never
+        # crosses it. Then read the started calls under the lock every
+        # boundary is crossed under: a worker inside `begin_planned_dispatch`
+        # finishes and registers first, so it is asked to cancel too.
         self._stopping = True
-        for job in tuple(self._started.values()):
+        async with self._lock:
+            started = tuple(self._started.values())
+        for job in started:
             try:
                 self._cancel_dispatch(job)
             except Exception as error:  # noqa: BLE001 - still waited for
@@ -329,7 +339,12 @@ class PlanWorkers:
             if self._stopping:
                 # Never crossed: restart drops this checkpoint and runs it.
                 return
-            started = await run_core_worker(self._core.begin_planned_dispatch, job)
+            try:
+                started = await run_core_worker(self._core.begin_planned_dispatch, job)
+            except Exception as error:  # noqa: BLE001 - the next tick reconciles it
+                LOGGER.warning("Planned step for goal %s could not start: %s",
+                               job.goal_id, type(error).__name__)
+                return
             if started is None:
                 return
             if task is not None:

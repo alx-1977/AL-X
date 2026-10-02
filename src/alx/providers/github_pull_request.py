@@ -175,6 +175,9 @@ class GitHubPullRequests:
         """Open a pull request for a published branch, or return the open one."""
         existing = self._existing(request.branch)
         if existing is not None:
+            if request.draft and not (isinstance(existing, dict) and existing.get("draft") is True):
+                # Returning it would report a draft that does not exist.
+                raise PullRequestError("pull_request_not_draft")
             return self._outcome(existing, request.branch, created=False)
 
         payload: dict[str, object] = {

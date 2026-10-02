@@ -2028,7 +2028,18 @@ class CoreAgent:
         linearization point for cancellation: a cancel or replacement that
         commits before it prevents the call; one after it can stop only
         what follows.
+
+        If this raises, for instance because the `started` write failed, the
+        job is no longer live here, so the next tick reconciles its checkpoint
+        rather than waiting on a worker that has gone.
         """
+        try:
+            return self._begin_planned_dispatch(job)
+        except Exception:
+            self._live_plan_dispatches.discard(job.call.call_id)
+            raise
+
+    def _begin_planned_dispatch(self, job: PlannedDispatch) -> PlannedDispatch | None:
         snapshot = self._store.load(job.goal_id)
         state = snapshot.state
         if not any(item.call is not None and item.call.call_id == job.call.call_id
@@ -2530,6 +2541,9 @@ class CoreAgent:
         if update.operation is PlanOperation.INSTALL:
             plan = replace(
                 update.plan,
+                # A finish or cancel reply not yet stored travels with the
+                # replacement until it is: the plan is its only copy.
+                announcement=None if current is None else current.announcement,
                 # Each installation has its own identity, though she may reuse
                 # a plan_id when she revises one.
                 plan_id=f"{update.plan.plan_id}:{uuid4()}",

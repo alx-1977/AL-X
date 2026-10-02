@@ -35,6 +35,8 @@ PULL_REQUEST_FAILURES = (
     "pull_request_unavailable",
     # GitHub refused to open it.
     "pull_request_refused",
+    # A draft was asked for, and the branch's open pull request is not one.
+    "pull_request_not_draft",
 )
 
 

@@ -311,6 +311,26 @@ class DraftPullRequestTests(unittest.TestCase):
         self.assertFalse(any("requested_reviewers" in url or "reviews" in url
                              for _method, url, _payload in self.requests))
 
+    def test_an_open_ready_pull_request_does_not_answer_a_draft_request(self):
+        from alx.contracts.github_pull_request import PullRequestRequest
+
+        def existing(draft):
+            def request(method, url, **keywords):
+                return _Response([{"number": 12, "state": "open", "draft": draft,
+                                   "head": {"ref": "acceptance/pr95-marker", "sha": "a" * 40},
+                                   "base": {"ref": "main"}}])
+            original = module.httpx.request
+            module.httpx.request = request
+            self.addCleanup(setattr, module.httpx, "request", original)
+            return GitHubPullRequests("owner/repo", "token")
+        wanted = PullRequestRequest("acceptance/pr95-marker", "Marker", "", True)
+        with self.assertRaises(PullRequestError) as raised:
+            existing(False).open(wanted)
+        self.assertEqual(raised.exception.code, "pull_request_not_draft")
+        self.assertEqual(existing(True).open(wanted).pull_request_number, 12)
+        ordinary = PullRequestRequest("acceptance/pr95-marker", "Marker")
+        self.assertEqual(existing(False).open(ordinary).pull_request_number, 12)
+
     def test_draft_must_be_a_boolean(self):
         from alx.contracts.github_pull_request import PullRequestRequest
 

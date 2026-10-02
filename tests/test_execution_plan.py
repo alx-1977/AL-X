@@ -1906,6 +1906,73 @@ class PlannedCallIdentityTests(PlanHarness):
         self.assertNotIn('call_id=f"plan-evidence:', source)
 
 
+class LatestReviewRegressionTests(PlanHarness):
+    """Greptile's review of 0c47fb2: a failed start, and a replaced plan's reply."""
+
+    def test_a_failed_started_write_never_strands_the_plan(self):
+        agent = self.installed(step("coding"))
+        (job,) = agent.advance_due_plans()
+        original = self.store.replace
+
+        def failing(state, *arguments, **keywords):
+            plan_ = state.execution_plan
+            if plan_ is not None and plan_.inflight is not None and plan_.inflight.started:
+                raise OSError("goal store unavailable")
+            return original(state, *arguments, **keywords)
+        self.store.replace = failing
+        with self.assertRaises(OSError):
+            agent.begin_planned_dispatch(job)
+        self.store.replace = original
+        self.assertNotIn(job.call.call_id, agent._live_plan_dispatches)
+        self.work(agent)                      # the same process, storage recovered
+        self.assertEqual(self.names(), ["coding"])
+        self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+
+    def test_a_replacement_plan_keeps_a_reply_not_yet_stored(self):
+        from alx.contracts import PlanAnnouncement
+
+        agent = self.installed(step("coding"))
+        self.work(agent)
+        finished = replace(self.plan_of(), status=PlanStatus.COMPLETED, attention=None,
+                           announcement=PlanAnnouncement("alx-plan-reply:1", "Done."))
+        self.set_goal(execution_plan=finished)
+        self.person(self.same_process(agent, Reasoner(install(plan(step("cleanup")),
+                                                              "Next job started."))))
+        replacement = self.plan_of()
+        self.assertEqual(replacement.status, PlanStatus.RUNNING)
+        self.assertEqual(replacement.announcement,
+                         PlanAnnouncement("alx-plan-reply:1", "Done."))
+
+
+class StopDuringBeginTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
+    def setUp(self):
+        PlanHarness.setUp(self)
+
+    async def test_shutdown_during_the_dispatch_boundary_still_asks_the_step_to_cancel(self):
+        agent = self.installed(step("coding"))
+        inside, release = threading.Event(), threading.Event()
+        original = agent.begin_planned_dispatch
+
+        def slow_begin(job):
+            inside.set()
+            release.wait(5)
+            return original(job)
+        agent.begin_planned_dispatch = slow_begin
+        cancelled = []
+        workers = PlanWorkers(agent, asyncio.Lock(),
+                              cancel_dispatch=lambda job: cancelled.append(job.call.call_id))
+        await workers.advance()
+        self.assertTrue(await asyncio.to_thread(inside.wait, 5))
+        stopping = asyncio.ensure_future(workers.stop())
+        await asyncio.sleep(0.05)
+        release.set()
+        await stopping
+        # The worker crossed the boundary before stop took effect, so it was
+        # registered in time to be asked to cancel.
+        self.assertEqual(len(cancelled), 1)
+        self.assertEqual(workers._tasks, set())
+
+
 class GateTests(PlanHarness):
     """Expiry, budget, finished goals, and installation refusals."""
 
