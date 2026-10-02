@@ -29,6 +29,7 @@ from alx.contracts.review_content import (  # noqa: E402
     REVIEW_FAILED, REVIEW_IN_PROGRESS, ReviewContent, ReviewReadError,
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
+from alx.core.loop import REASONING_TURN_WINDOW, project_turns_for_reasoning  # noqa: E402
 from alx.core.plan_results import (  # noqa: E402
     PlanResultKind, classify_planned_result, plan_invalidation_facts, reduce_plan,
 )
@@ -75,6 +76,10 @@ def step(name, *, completion=(), waiting=(), wake=False):
     )
 
 
+# A person who starts background work hears one response-only step about it.
+ACK = AgentDecision(response="Started; I will report back.", goal_id="goal")
+
+
 class Reasoner:
     def __init__(self, *decisions):
         self.decisions = list(decisions)
@@ -101,7 +106,7 @@ class PlanHarness(unittest.TestCase):
 
     def agent(self, reasoner, *, turn_bound=frozenset(),
               review_requires_judgment=False, effectful=frozenset(),
-              extra_definitions=(), budget_check=None):
+              extra_definitions=(), budget_check=None, plan_continuation=True):
         names = ("coding", "review", "ci", "merge", "sync", "cleanup",
                  "other", "request_external_review")
         definitions = tuple(CapabilityDefinition(
@@ -140,7 +145,8 @@ class PlanHarness(unittest.TestCase):
                          clock=lambda: self.now,
                          identifier_factory=lambda: f"repeat-{len(self.calls)}",
                          turn_bound_capabilities=turn_bound,
-                         budget_check=budget_check)
+                         budget_check=budget_check,
+                         plan_continuation=plan_continuation)
 
     def reset_goal(self):
         snapshot = self.store.load("goal")
@@ -169,14 +175,16 @@ class ExecutionPlanTests(PlanHarness):
                              waiting=(PlanCondition("values.state", "pending"),)))
         self.outputs["ci"] = [{"state": "pending"}, {"state": "pending"},
                               {"state": "failed"}]
-        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"))
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"), ACK)
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
         self.assertEqual(outcome.reason, "plan_waiting")
-        self.assertEqual(reasoner.calls, 1)
+        # The person who started it hears one response; the wait continues.
+        self.assertEqual(outcome.response, ACK.response)
+        self.assertEqual(reasoner.calls, 2)
         self.assertEqual(self.agent(reasoner).advance_due_plans(lambda _: conversation()), 0)
         self.now += timedelta(seconds=10)
         self.assertEqual(self.agent(reasoner).advance_due_plans(lambda _: conversation()), 1)
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 2)
         self.now += timedelta(seconds=10)
         self.agent(reasoner).advance_due_plans(lambda _: conversation())
         self.assertEqual(self.store.load("goal").state.execution_plan.core_reentry_reason,
@@ -253,11 +261,11 @@ class ExecutionPlanTests(PlanHarness):
              {"code": "review_unavailable", "reason": "review_in_progress"}),
             {"available": True},
         ]
-        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"))
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"), ACK)
         self.agent(reasoner, effectful=frozenset({"review"})).process(
             conversation(), RETENTION, 2,
         )
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 2)
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "waiting")
         self.now += timedelta(seconds=10)
         self.agent(reasoner, effectful=frozenset({"review"})).advance_due_plans(
@@ -265,7 +273,7 @@ class ExecutionPlanTests(PlanHarness):
         )
         self.assertEqual(self.calls, ["review", "review"])
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "needs_core")
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 2)
 
     def test_failed_test_and_merge_refusal_stop_before_next_step(self):
         for name in ("ci", "merge"):
@@ -444,7 +452,7 @@ class ExecutionPlanTests(PlanHarness):
         workflow = plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
                              waiting=(PlanCondition("values.state", "pending"),)))
         self.outputs["ci"] = [{"state": "pending"}, {"state": "failed"}]
-        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"), ACK,
                             AgentDecision(response="CI failed; I will repair it.",
                                           goal_id="goal"))
         agent = self.agent(reasoner)
@@ -471,8 +479,8 @@ class ExecutionPlanTests(PlanHarness):
         outcome = agent.process(conversation(), RETENTION, 2,
                                 resume_plan_goal_id="goal")
         self.assertEqual(outcome.response, "CI failed; I will repair it.")
-        self.assertEqual(reasoner.calls, 2)
-        self.assertEqual(reasoner.contexts[1].transient_attempts[0].result.values["state"],
+        self.assertEqual(reasoner.calls, 3)
+        self.assertEqual(reasoner.contexts[2].transient_attempts[0].result.values["state"],
                          "failed")
 
     def test_interrupted_dispatch_is_never_replayed(self):
@@ -496,7 +504,7 @@ class ExecutionPlanTests(PlanHarness):
         workflow = plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
                              waiting=(PlanCondition("values.state", "pending"),)))
         self.outputs["ci"] = [{"state": "pending"}, {"state": "passed"}]
-        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"), ACK,
                             AgentDecision(response="Checks passed.", goal_id="goal"))
         agent = self.agent(reasoner)
         agent.process(conversation(), RETENTION, 2)
@@ -506,7 +514,7 @@ class ExecutionPlanTests(PlanHarness):
                                 resume_plan_goal_id="goal")
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Checks passed.")
-        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(reasoner.calls, 3)
         agent.acknowledge_plan_response(outcome.snapshot)
         self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
 
@@ -527,15 +535,15 @@ class ExecutionPlanTests(PlanHarness):
                 {"status": "completed", "conclusion": "success"},
             ]},
         ]
-        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"))
+        reasoner = Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"), ACK)
         agent = self.agent(reasoner)
         agent.process(conversation(), RETENTION, 2)
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 2)
         self.assertEqual(self.calls, ["ci"])
         self.now += timedelta(seconds=10)
         agent.advance_due_plans(lambda _: conversation())
         self.assertEqual(self.calls, ["ci", "ci", "merge"])
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 2)
 
     def test_mechanical_blocker_also_blocks_a_new_plan(self):
         self.outputs["request_external_review"] = (
@@ -1109,14 +1117,14 @@ class PlanResultInvariantTests(PlanHarness):
         workflow = plan(check_step(completion=(*RUNS_DONE, *STATUSES_DONE),
                                    waiting=(*RUNS_PENDING, *STATUSES_PENDING)),
                         step("merge"))
-        agent, reasoner, _ = self.install(workflow)
+        agent, reasoner, _ = self.install(workflow, ACK)
         self.assertEqual(self.plan_state().status, "waiting")
         self.now += timedelta(seconds=10)
         agent.advance_due_plans(lambda _: conversation())
         self.assertEqual(self.calls, [READ_PULL_REQUEST_CHECKS, READ_PULL_REQUEST_CHECKS,
                                       "merge"])
         self.assertEqual(self.plan_state().status, "completed")
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 2)
 
     def test_production_review_unavailable_distinguishes_its_reasons(self):
         cases = (
@@ -2298,3 +2306,184 @@ class InterruptedRereadTests(PlanHarness):
         self.assertFalse(any(item.disposition is CapabilityAttemptDisposition.PENDING
                              for item in state.attempts))
         self.assertIs(state.status, GoalStatus.AWAITING_INPUT)
+
+
+class PlanContinuationAvailabilityTests(PlanHarness):
+    """CodeRabbit 85c4b6c #1: no plan runs where it can never return to her."""
+
+    def test_without_continuation_no_plan_is_installed_and_she_answers(self):
+        reasoner = Reasoner(
+            AgentDecision(execution_plan=plan(step("coding"), step("merge")), goal_id="goal"),
+            AgentDecision(response="I cannot run that in the background here.", goal_id="goal"),
+        )
+        outcome = self.agent(reasoner, plan_continuation=False).process(
+            conversation(), RETENTION, 3)
+        self.assertEqual(outcome.response, "I cannot run that in the background here.")
+        self.assertIsNone(self.store.load("goal").state.execution_plan)
+        self.assertEqual(self.calls, [])
+        refusals = reasoner.contexts[1].refused_calls
+        self.assertEqual([item["reason"] for item in refusals], ["plan_continuation_unavailable"])
+
+    def test_without_continuation_ticks_never_dispatch_an_existing_plan(self):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=plan(step("merge"))),
+                           snapshot.retention_until, snapshot.revision)
+        agent = self.agent(Reasoner(), plan_continuation=False, effectful=frozenset({"merge"}))
+        for _ in range(3):
+            agent.advance_due_plans(lambda _: conversation())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "ready")
+
+    def test_without_continuation_ordinary_calls_are_unaffected(self):
+        reasoner = Reasoner(AgentDecision(call=CapabilityCall("ci-1", "ci", {}), goal_id="goal"),
+                            AgentDecision(response="Checks read.", goal_id="goal"))
+        outcome = self.agent(reasoner, plan_continuation=False).process(
+            conversation(), RETENTION, 3)
+        self.assertEqual(self.calls, ["ci"])
+        self.assertEqual(outcome.response, "Checks read.")
+
+    def test_with_continuation_the_plan_installs_and_runs(self):
+        reasoner = Reasoner(AgentDecision(execution_plan=plan(step("coding")), goal_id="goal"),
+                            AgentDecision(response="Done.", goal_id="goal"))
+        self.agent(reasoner, plan_continuation=True).process(conversation(), RETENTION, 3)
+        self.assertEqual(self.calls, ["coding"])
+
+    def test_runtime_binds_installation_and_continuation_to_one_condition(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "alx" / "bootstrap"
+                  / "live_voice.py").read_text()
+        self.assertIn("plan_continuation = providers.autonomous is not None", source)
+        self.assertIn("plan_continuation=plan_continuation,", source)
+        self.assertIn("goal_store, opportunity_ledger, enabled=plan_continuation,", source)
+
+
+class PersonTurnPlanAcknowledgementTests(PlanHarness):
+    """CodeRabbit 85c4b6c #2: a person who starts work always hears one response."""
+
+    def waiting_plan(self):
+        self.outputs["ci"] = {"state": "pending"}
+        return plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
+                         waiting=(PlanCondition("values.state", "pending"),)), step("merge"))
+
+    def test_person_turn_gets_exactly_one_response_and_the_wait_continues(self):
+        reasoner = Reasoner(AgentDecision(execution_plan=self.waiting_plan(), goal_id="goal"),
+                            ACK, AgentDecision(response="A second answer.", goal_id="goal"))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, ACK.response)
+        self.assertEqual(outcome.reason, "plan_waiting")
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(reasoner.contexts[1].response_only_reason, "plan_waiting")
+        stored = self.store.load("goal").state
+        self.assertEqual((stored.execution_plan.status, stored.execution_plan.cursor),
+                         ("waiting", 0))
+        self.assertIs(stored.status, GoalStatus.ACTIVE)
+        self.assertEqual(self.calls, ["ci"])
+
+    def test_response_only_pass_cannot_dispatch_or_change_the_plan(self):
+        reasoner = Reasoner(
+            AgentDecision(execution_plan=self.waiting_plan(), goal_id="goal"),
+            AgentDecision(call=CapabilityCall("merge-now", "merge", {}), goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(self.calls, ["ci"])
+        stored = self.store.load("goal").state.execution_plan
+        self.assertEqual((stored.status, stored.cursor), ("waiting", 0))
+
+    def test_autonomous_turn_stays_silent(self):
+        reasoner = Reasoner(AgentDecision(execution_plan=self.waiting_plan(), goal_id="goal"))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3,
+                                               origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.reason, "plan_waiting")
+        self.assertEqual(reasoner.calls, 1)
+
+    def test_person_turn_hears_a_response_when_the_first_dispatch_fails(self):
+        def explode(_call):
+            raise RuntimeError("executor crashed")
+
+        self.outputs["coding"] = explode
+        reasoner = Reasoner(AgentDecision(execution_plan=plan(step("coding")), goal_id="goal"),
+                            AgentDecision(response="The job did not start.", goal_id="goal"))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.response, "The job did not start.")
+        self.assertEqual(outcome.reason, "plan_inactive")
+        self.assertEqual(reasoner.calls, 2)
+
+    def test_person_turn_blocked_by_a_plan_blocker_hears_a_response(self):
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        self.agent(Reasoner(AgentDecision(
+            execution_plan=plan(step("request_external_review"), step("merge")), goal_id="goal",
+        ))).process(conversation(), RETENTION, 1, origin=CognitionOrigin.EXTERNAL_EVENT)
+        reasoner = Reasoner(
+            AgentDecision(call=CapabilityCall("merge-p", "merge", {}), goal_id="goal"),
+            AgentDecision(response="The review is still pending.", goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "The review is still pending.")
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertNotIn("merge", self.calls)
+
+
+class RuntimeOwnedSourceTurnTests(PlanHarness):
+    """CodeRabbit 85c4b6c #4: the turn a plan answers is bound by the runtime."""
+
+    def long_thread(self):
+        turns = [ConversationTurn("thread", "person-1", ConversationOrigin.TYPED,
+                                  "Please do the work", NOW, "friedl"),
+                 ConversationTurn("thread", "person-2", ConversationOrigin.TYPED,
+                                  "And merge it when ready", NOW, "friedl")]
+        turns += [ConversationTurn("thread", f"alx-{index}", ConversationOrigin.ALX_RESPONSE,
+                                   f"Update {index}", NOW)
+                  for index in range(REASONING_TURN_WINDOW + 3)]
+        return ConversationSnapshot("thread", tuple(turns), len(turns), RETENTION)
+
+    def test_plan_installs_after_more_than_a_window_of_her_turns(self):
+        thread = self.long_thread()
+        # The latest person turn is outside what reasoning was shown.
+        projected = project_turns_for_reasoning(thread.turns, self.store.load("goal").state)
+        self.assertNotIn("person-2", [item.turn_id for item in projected])
+        proposed = replace(plan(step("coding")), source_turn_id=None)
+        reasoner = Reasoner(AgentDecision(execution_plan=proposed, goal_id="goal"),
+                            AgentDecision(response="Done.", goal_id="goal"))
+        self.agent(reasoner).process(thread, RETENTION, 3)
+        self.assertEqual(self.calls, ["coding"])
+        self.assertEqual(self.store.load("goal").state.execution_plan.source_turn_id, "person-2")
+
+    def test_model_cannot_choose_the_source_turn(self):
+        forged = replace(plan(step("coding")), source_turn_id="someone-else")
+        reasoner = Reasoner(AgentDecision(execution_plan=forged, goal_id="goal"),
+                            AgentDecision(response="Done.", goal_id="goal"))
+        self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(self.store.load("goal").state.execution_plan.source_turn_id, "person-1")
+
+    def test_a_later_person_turn_still_invalidates_the_stamped_plan(self):
+        self.outputs["ci"] = {"state": "pending"}
+        workflow = plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
+                             waiting=(PlanCondition("values.state", "pending"),)))
+        agent = self.agent(Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"), ACK))
+        agent.process(conversation(), RETENTION, 3)
+        self.now += timedelta(seconds=10)
+        agent.advance_due_plans(lambda _: conversation("person-9"))
+        self.assertEqual(self.store.load("goal").state.execution_plan.core_reentry_reason,
+                         "new_person_turn")
+
+    def test_acknowledgement_does_not_park_background_work(self):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state,
+                                   outstanding_work=(WorkItem("merge", "Merge when green"),)),
+                           snapshot.retention_until, snapshot.revision)
+        self.outputs["ci"] = {"state": "pending"}
+        workflow = plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
+                             waiting=(PlanCondition("values.state", "pending"),)))
+        outcome = self.agent(Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+                                      ACK)).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.response, ACK.response)
+        state = self.store.load("goal").state
+        self.assertIs(state.status, GoalStatus.ACTIVE)
+        self.assertEqual(state.execution_plan.status, "waiting")

@@ -1174,12 +1174,25 @@ def decision_schema() -> dict[str, Any]:
             "approval_proposal": approval_proposal,
         }
     )
-    plan_condition = _strict_object({
+    # Field mapping, not an object schema: `_array` builds the item object.
+    # Passing a built schema here nested it a second time, so each condition's
+    # only permitted keys became type, properties, required and
+    # additionalProperties, and no schema-following model could state one.
+    plan_condition = {
         "path": string,
         "equals_json": string,
         "quantifier": {"type": "string", "enum": ["all", "any"]},
         "negate": {"type": "boolean"},
-    })
+    }
+    plan_step = {
+        "call_id": string,
+        "capability_id": string,
+        "arguments_json": string,
+        "approval_id": nullable_string,
+        "completion_conditions": {**_array(plan_condition), "minItems": 1},
+        "wake_core_on_completion": {"type": "boolean"},
+        "waiting_for": nullable_string,
+    }
     plan_action = _strict_object({
         "type": {"type": "string", "const": "execute_plan"},
         "plan_id": string,
@@ -1187,17 +1200,25 @@ def decision_schema() -> dict[str, Any]:
         "objective_source": string,
         "objective_summary": string,
         "context_preconditions_json": string,
-        "steps": {**_array({
-            "call_id": string,
-            "capability_id": string,
-            "arguments_json": string,
-            "approval_id": nullable_string,
-            "completion_conditions": _array(plan_condition),
-            "waiting_conditions": _array(plan_condition),
-            "wait_seconds": {"type": "integer", "minimum": 0},
-            "wake_core_on_completion": {"type": "boolean"},
-            "waiting_for": nullable_string,
-        }), "minItems": 1, "maxItems": 32},
+        # The two step shapes ExecutionStep accepts, and no others: a step
+        # either never waits, or waits on at least one condition at a
+        # positive interval. Every step needs a completion condition.
+        "steps": {
+            "type": "array",
+            "items": {"anyOf": [
+                _strict_object({
+                    **plan_step,
+                    "waiting_conditions": {**_array(plan_condition), "maxItems": 0},
+                    "wait_seconds": {"type": "integer", "const": 0},
+                }),
+                _strict_object({
+                    **plan_step,
+                    "waiting_conditions": {**_array(plan_condition), "minItems": 1},
+                    "wait_seconds": {"type": "integer", "minimum": 1},
+                }),
+            ]},
+            "minItems": 1, "maxItems": 32,
+        },
     })
     memory_action = _strict_object(
         {
@@ -1529,10 +1550,6 @@ class ModelReasoner:
                 goal_id=goal_id,
             )
         if disposition == "execute_plan":
-            source_turn_id = next(
-                (item.turn_id for item in reversed(context.turns)
-                 if item.person_id is not None), None,
-            )
             steps = []
             for item in action["steps"]:
                 arguments = _object_json(item["arguments_json"], "plan arguments_json")
@@ -1561,7 +1578,9 @@ class ModelReasoner:
             return AgentDecision(
                 execution_plan=ExecutionPlan(
                     action["plan_id"], action["objective_source"],
-                    action["objective_summary"], source_turn_id, tuple(steps),
+                    # The Core binds the turn this plan answers when it
+                    # installs it, from the whole conversation.
+                    action["objective_summary"], None, tuple(steps),
                     _object_json(action["context_preconditions_json"],
                                  "context_preconditions_json"),
                     action["cursor"],

@@ -846,12 +846,16 @@ async def run(repository_root: Path) -> None:
         ),
     )
 
+    # One condition for both halves of D-036's continuation: the Core may
+    # install a plan, and a plan may return to her, only together.
+    plan_continuation = providers.autonomous is not None
     core = CoreAgent(
         goal_store,
         reasoner,
         dispatch,
         registry.list_definitions(),
         memory_store,
+        plan_continuation=plan_continuation,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
         # Read from the policies themselves, so a capability that requires an
@@ -949,8 +953,7 @@ async def run(repository_root: Path) -> None:
     # production path to the same outcome.
     occasion_sources: list[Any] = [cognition_source]
     plan_source = PlanContinuationSource(
-        goal_store, opportunity_ledger,
-        enabled=providers.autonomous is not None,
+        goal_store, opportunity_ledger, enabled=plan_continuation,
     )
     plan_source.recover(autonomous_budget)
     occasion_sources.append(plan_source)

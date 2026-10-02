@@ -167,8 +167,14 @@ class CoreAgent:
                  pending_revisits: Callable[[], tuple] | None = None,
                  open_notebook_threads: Callable[[], tuple] | None = None,
                  undelivered_responses: Callable[[], tuple] | None = None,
-                 record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None) -> None:
+                 record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None,
+                 plan_continuation: bool = False) -> None:
         self._store = store
+        # Whether the runtime can return a plan to her: completion, changed
+        # evidence, failure and judgment all reach the Core only through a
+        # plan continuation occasion. Without one a plan is never installed
+        # and no tick dispatches a planned step. Fails closed by default.
+        self._plan_continuation = plan_continuation
         self._reasoner = reasoner
         # Mechanical record of a refused goal proposal, for diagnosis. The
         # cited references, mutation and response dependence: enough to diagnose
@@ -267,7 +273,9 @@ class CoreAgent:
                        for item in snapshot.state.attempts):
                     snapshot = self._close_interrupted_dispatch(snapshot)
                 _, reason = self._reconcile_plan(
-                    snapshot, load_conversation(snapshot.conversation_id))
+                    snapshot, load_conversation(snapshot.conversation_id),
+                    dispatch=self._plan_continuation,
+                )
             except Exception as error:  # noqa: BLE001 - one plan must not stop the rest
                 # Its durable state is whatever it last reached, so the next
                 # tick tries it again; nothing records it as reconciled.
@@ -315,7 +323,8 @@ class CoreAgent:
             snapshot = self._store.load(resume_plan_goal_id)
             if snapshot.conversation_id != conversation_id:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="plan_conversation_changed")
-            snapshot, plan_reason = self._reconcile_plan(snapshot, conversation)
+            snapshot, plan_reason = self._reconcile_plan(
+                snapshot, conversation, dispatch=self._plan_continuation)
             if plan_reason == "waiting":
                 return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="plan_waiting")
             if plan_reason == "not_due":
@@ -558,6 +567,14 @@ class CoreAgent:
                 decision.call is not None or decision.memory_query is not None
                 or decision.execution_plan is not None
             ):
+                if origin is CognitionOrigin.PERSON_TURN and snapshot is not None:
+                    # Refused work is not an answer. A person hears one
+                    # response-only step about the blocker instead of silence.
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, mechanical_blocker, decision_provenance,
+                        refused_calls,
+                    )
                 if snapshot is not None:
                     snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
                 return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
@@ -891,23 +908,27 @@ class CoreAgent:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 if decision.execution_plan is not None:
                     plan_refusal = None
-                    if proposal_error is not None:
+                    # The turn a plan answers is provenance the runtime owns,
+                    # read from the whole conversation. The model saw only a
+                    # projected window and is never asked to name it.
+                    latest_person = self._latest_person_turn(conversation)
+                    proposed = replace(decision.execution_plan, source_turn_id=latest_person)
+                    if not self._plan_continuation:
+                        plan_refusal = "plan_continuation_unavailable"
+                    elif proposal_error is not None:
                         plan_refusal = "plan_goal_mutation_rejected"
                     elif snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
                         plan_refusal = "plan_requires_active_goal"
                     else:
-                        latest_person = self._latest_person_turn(conversation)
-                        proposed = decision.execution_plan
                         if (proposed.objective_source != snapshot.state.objective.source_reference
                                 or proposed.objective_summary != snapshot.state.objective.summary
-                                or proposed.source_turn_id != latest_person
                                 or any(step.call.capability_id in self._turn_bound_capabilities
                                        for step in proposed.steps)):
                             plan_refusal = "plan_precondition_invalid"
                         elif any(not self._plan_wait_is_safe(step) for step in proposed.steps):
                             plan_refusal = "plan_wait_unsafe"
                     if plan_refusal is not None:
-                        subject = self._plan_refusal_subject(decision.execution_plan, snapshot)
+                        subject = self._plan_refusal_subject(proposed, snapshot)
                         if self._already_refused(refused_calls, plan_refusal, subject):
                             # The same plan against the same goal state was
                             # already refused this turn. Reasoning again cannot
@@ -921,8 +942,7 @@ class CoreAgent:
                     # Each installation needs a distinct durable identity:
                     # the model may reuse its plan_id when it revises a plan,
                     # but an earlier cognition opportunity may be claimed.
-                    plan = replace(decision.execution_plan,
-                                   plan_id=f"{decision.execution_plan.plan_id}:{uuid4()}")
+                    plan = replace(proposed, plan_id=f"{proposed.plan_id}:{uuid4()}")
                     snapshot = self._store.replace(
                         replace(snapshot.state, execution_plan=plan),
                         snapshot.retention_until, snapshot.revision, decision_provenance,
@@ -932,10 +952,20 @@ class CoreAgent:
                     if carried_plan_attempt is not None:
                         transient_attempts = (carried_plan_attempt,)
                     mechanical_blocker = self._plan_mechanical_blocker(snapshot)
-                    if plan_reason in {"waiting", "not_due"}:
-                        return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="plan_waiting")
-                    if plan_reason == "inactive":
-                        return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="plan_inactive")
+                    if plan_reason in {"waiting", "not_due", "inactive"}:
+                        checkpoint = ("plan_inactive" if plan_reason == "inactive"
+                                      else "plan_waiting")
+                        if origin is CognitionOrigin.PERSON_TURN:
+                            # She chose the plan as this turn's one action, so
+                            # she has not yet spoken. One response-only step
+                            # lets her say what is now running; the plan is
+                            # left exactly as the executor reconciled it.
+                            return self._respond_to_terminal_blocker(
+                                conversation_id, conversation, snapshot, reasoning_context,
+                                transient_attempts, checkpoint, decision_provenance,
+                                refused_calls, park=False,
+                            )
+                        return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=checkpoint)
                     continue
                 if mechanical_blocker is not None:
                     if snapshot is not None:
@@ -1238,9 +1268,15 @@ class CoreAgent:
         reason: str,
         provenance: ContentProvenance,
         refused_calls: tuple[Mapping[str, Any], ...] = (),
+        park: bool = True,
     ) -> CoreOutcome:
-        """Park the workflow and allow one response-only decision for a person."""
-        snapshot = self._park_unfinished_goal(snapshot, provenance)
+        """Allow one response-only decision for a person, parking stopped work.
+
+        Work still running in the background, such as a plan that is waiting,
+        is not parked: it continues, and she only says what is happening.
+        """
+        if park:
+            snapshot = self._park_unfinished_goal(snapshot, provenance)
         terminal_context = replace(
             context,
             active_goal=snapshot.state,

@@ -149,7 +149,50 @@ class ModelReasonerTests(unittest.TestCase):
         }
         decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
         self.assertEqual(decision.execution_plan.steps[0].completion_conditions[0].equals, True)
-        self.assertEqual(decision.execution_plan.source_turn_id, "turn-1")
+        # Runtime-owned provenance: the Core binds it on installation.
+        self.assertIsNone(decision.execution_plan.source_turn_id)
+
+    def plan_step(self, *, completion=1, waiting=0, wait_seconds=0):
+        condition = {"path": "values.ready", "equals_json": "true",
+                     "quantifier": "all", "negate": False}
+        return {
+            "call_id": "call-1", "capability_id": "search_records",
+            "arguments_json": "{}", "approval_id": None,
+            "completion_conditions": [condition] * completion,
+            "waiting_conditions": [dict(condition, equals_json="false")] * waiting,
+            "wait_seconds": wait_seconds, "wake_core_on_completion": False,
+            "waiting_for": "CI" if waiting else None,
+        }
+
+    def plan_step_schema(self):
+        actions = decision_schema()["properties"]["action"]["anyOf"]
+        plan_action = next(item for item in actions
+                           if item["properties"]["type"].get("const") == "execute_plan")
+        return plan_action["properties"]["steps"]["items"]
+
+    def test_plan_step_schema_holds_the_execution_step_contract(self) -> None:
+        schema = self.plan_step_schema()
+        cases = {
+            "empty completion": (self.plan_step(completion=0), False),
+            "waiting at zero interval": (self.plan_step(waiting=1, wait_seconds=0), False),
+            "interval without waiting": (self.plan_step(wait_seconds=30), False),
+            "valid no-wait step": (self.plan_step(), True),
+            "valid waiting step": (self.plan_step(waiting=1, wait_seconds=30), True),
+        }
+        for name, (step_value, accepted) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(_schema_accepts(schema, step_value), accepted)
+                if accepted:
+                    # Whatever the schema accepts, ExecutionStep accepts too.
+                    output = base_output(goal_id="goal-1")
+                    output["action"] = {
+                        "type": "execute_plan", "plan_id": "plan-1", "cursor": 0,
+                        "objective_source": "turn:turn-1", "objective_summary": "investigate",
+                        "context_preconditions_json": "{}", "steps": [step_value],
+                    }
+                    decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(
+                        self.context())
+                    self.assertEqual(len(decision.execution_plan.steps), 1)
 
     def test_respond_requires_nonblank_text_even_with_a_goal_id(self) -> None:
         for goal_id in (None, "goal-1"):
@@ -635,6 +678,40 @@ class ModelReasonerTests(unittest.TestCase):
         constitutional = model.requests[0].messages[0].content
         self.assertIn("Laws of AL/X", constitutional)
         self.assertIn("AL/X Identity and Memory", constitutional)
+
+def _schema_accepts(schema, value) -> bool:
+    """A strict checker for the JSON-schema keywords the decision schema uses."""
+    if "anyOf" in schema:
+        return any(_schema_accepts(item, value) for item in schema["anyOf"])
+    if "const" in schema and value != schema["const"]:
+        return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    kinds = schema.get("type")
+    kinds = [kinds] if isinstance(kinds, str) else (kinds or [])
+    python = {"object": dict, "array": list, "string": str, "boolean": bool, "null": type(None)}
+    if kinds:
+        def matches(kind):
+            if kind == "integer":
+                return isinstance(value, int) and not isinstance(value, bool)
+            return isinstance(value, python[kind])
+        if not any(matches(kind) for kind in kinds):
+            return False
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        if any(key not in value for key in schema.get("required", ())):
+            return False
+        if schema.get("additionalProperties") is False and set(value) - set(properties):
+            return False
+        return all(_schema_accepts(properties[key], item)
+                   for key, item in value.items() if key in properties)
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", len(value)):
+            return False
+        return all(_schema_accepts(schema.get("items", {}), item) for item in value)
+    if isinstance(value, int) and "minimum" in schema and value < schema["minimum"]:
+        return False
+    return True
 
 
 if __name__ == "__main__":
