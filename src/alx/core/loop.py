@@ -879,28 +879,39 @@ class CoreAgent:
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 if decision.execution_plan is not None:
+                    plan_refusal = None
                     if proposal_error is not None:
-                        refused_calls = (*refused_calls, {"reason": "plan_goal_mutation_rejected"},)
-                        continue
-                    if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
-                        refused_calls = (*refused_calls, {"reason": "plan_requires_active_goal"},)
+                        plan_refusal = "plan_goal_mutation_rejected"
+                    elif snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
+                        plan_refusal = "plan_requires_active_goal"
+                    else:
+                        latest_person = self._latest_person_turn(conversation)
+                        proposed = decision.execution_plan
+                        if (proposed.objective_source != snapshot.state.objective.source_reference
+                                or proposed.objective_summary != snapshot.state.objective.summary
+                                or proposed.source_turn_id != latest_person
+                                or any(step.call.capability_id in self._turn_bound_capabilities
+                                       for step in proposed.steps)):
+                            plan_refusal = "plan_precondition_invalid"
+                        elif any(not self._plan_wait_is_safe(step) for step in proposed.steps):
+                            plan_refusal = "plan_wait_unsafe"
+                    if plan_refusal is not None:
+                        subject = self._plan_refusal_subject(decision.execution_plan, snapshot)
+                        if self._already_refused(refused_calls, plan_refusal, subject):
+                            # The same plan against the same goal state was
+                            # already refused this turn. Reasoning again cannot
+                            # change the answer, so the turn ends here.
+                            return CoreOutcome(CoreState.CHECKPOINTED, snapshot,
+                                               reason=plan_refusal)
+                        refused_calls = (*refused_calls, {
+                            "reason": plan_refusal, "subject": subject,
+                        })
                         continue
                     # Each installation needs a distinct durable identity:
                     # the model may reuse its plan_id when it revises a plan,
                     # but an earlier cognition opportunity may be claimed.
                     plan = replace(decision.execution_plan,
                                    plan_id=f"{decision.execution_plan.plan_id}:{uuid4()}")
-                    latest_person = self._latest_person_turn(conversation)
-                    if (plan.objective_source != snapshot.state.objective.source_reference
-                            or plan.objective_summary != snapshot.state.objective.summary
-                            or plan.source_turn_id != latest_person
-                            or any(step.call.capability_id in self._turn_bound_capabilities
-                                   for step in plan.steps)):
-                        refused_calls = (*refused_calls, {"reason": "plan_precondition_invalid"},)
-                        continue
-                    if any(not self._plan_wait_is_safe(step) for step in plan.steps):
-                        refused_calls = (*refused_calls, {"reason": "plan_wait_unsafe"},)
-                        continue
                     snapshot = self._store.replace(
                         replace(snapshot.state, execution_plan=plan),
                         snapshot.retention_until, snapshot.revision, decision_provenance,
@@ -1546,6 +1557,13 @@ class CoreAgent:
             kind = GoalMutationKind.AWAIT_INPUT
         else:
             return snapshot
+        plan = state.execution_plan
+        if plan is not None and plan.status in {"ready", "waiting"}:
+            # A parked goal cannot hold work the executor would still run.
+            # The plan returns to her through the one reducer, cursor intact,
+            # before the goal leaves ACTIVE; nothing is advanced or dropped.
+            snapshot = self._apply_plan_result(snapshot, wake("goal_parked"))
+            state = snapshot.state
         return self._store.replace(
             self._derive_goal_status(state, kind),
             snapshot.retention_until,
@@ -2475,6 +2493,25 @@ class CoreAgent:
         user_turns = [item for item in conversation.turns
                       if item.origin.value != "alx_response"]
         return bool(user_turns) and user_turns[-1].person_id == query.person_id
+
+    @staticmethod
+    def _plan_refusal_subject(
+        plan: ExecutionPlan, snapshot: GoalSnapshot | None,
+    ) -> str:
+        """A refused plan's identity: what she proposed, against which state.
+
+        The model may reuse a plan_id when she revises a plan, so the id alone
+        would suppress a genuine revision. Her exact steps, conditions and
+        preconditions, and the goal revision they were checked against, make
+        an identical proposal on unchanged state recognisable, and let a
+        changed plan or changed goal be considered afresh.
+        """
+        digest = hashlib.sha256(repr((
+            plan.objective_source, plan.objective_summary, plan.source_turn_id,
+            plan.context_preconditions, plan.steps,
+        )).encode()).hexdigest()[:16]
+        revision = None if snapshot is None else snapshot.revision
+        return f"{plan.plan_id}:{digest}:{revision}"
 
     # Category A recovery: a decision refused for a correctable slip in its own
     # fields. Nothing was read, written or dispatched under it, so the state

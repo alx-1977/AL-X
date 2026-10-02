@@ -77,18 +77,41 @@ class PlanContinuationSource:
         pass
 
     def recover(self, spend=None) -> tuple[str, ...]:
+        """Reclaim unfinished plan occasions at startup, one at a time.
+
+        Runs while the runtime is composed. One stale or unreadable record
+        must not stop AL/X starting, so each is isolated: a failure is
+        logged and the occasion retained as unreconciled, never replayed.
+        """
         reclaimed = []
         for row in self._ledger.unfinished():
             identifier = row["opportunity_id"]
             if not identifier.startswith("execution_plan:"):
                 continue
-            if spend is not None and spend.dispatch_started(identifier):
-                self._advance_recovery_generation(row)
-                self._ledger.mark_unreconciled(identifier)
-                continue
-            self._ledger.release(identifier)
-            reclaimed.append(identifier)
+            try:
+                if spend is not None and spend.dispatch_started(identifier):
+                    self._advance_recovery_generation(row)
+                    self._ledger.mark_unreconciled(identifier)
+                    continue
+                self._ledger.release(identifier)
+                reclaimed.append(identifier)
+            except Exception as error:  # noqa: BLE001 - one record must not stop startup
+                LOGGER.warning(
+                    "Plan continuation recovery failed for opportunity %s (goal %s): %s",
+                    identifier, self._goal_reference(row), type(error).__name__,
+                )
+                try:
+                    self._ledger.mark_unreconciled(identifier)
+                except Exception as mark_error:  # noqa: BLE001 - still keep starting
+                    LOGGER.warning("Could not retain opportunity %s as unreconciled: %s",
+                                   identifier, type(mark_error).__name__)
         return tuple(reclaimed)
+
+    @staticmethod
+    def _goal_reference(row) -> str | None:
+        refs = str(row.get("refs") or "").split("\x1f")
+        goal_ref = next((item for item in refs if item.startswith("execution_plan:")), None)
+        return None if goal_ref is None else goal_ref[len("execution_plan:"):]
 
     def _advance_recovery_generation(self, row) -> None:
         refs = tuple(row.get("refs", "").split("\x1f"))

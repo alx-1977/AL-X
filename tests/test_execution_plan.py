@@ -21,6 +21,7 @@ from alx.contracts import (  # noqa: E402
 from alx.contracts import (  # noqa: E402
     Approval, ApprovalLifecycle, ApprovalScope, GoalMutationKind, GoalProposal, WorkItem,
 )
+from alx.contracts.continuity import CognitionOpportunity  # noqa: E402
 from alx.contracts.pull_request_checks import (  # noqa: E402
     CheckRun, CommitStatus, PullRequestChecks,
 )
@@ -1672,3 +1673,289 @@ class AdversarialFollowUpTests(PlanHarness):
         agent = self.agent(reasoner, extra_definitions=(judged,), budget_check=budget_check)
         agent.process(conversation(), RETENTION, 1, origin=CognitionOrigin.EXTERNAL_EVENT)
         self.assertEqual(seen, [("assess", "other-thread"), ("ci", "thread")])
+
+
+class StartupRecoveryIsolationTests(PlanHarness):
+    """CodeRabbit b039f45 #1: one stale record cannot stop AL/X starting."""
+
+    class Ledger:
+        def __init__(self, *goal_ids):
+            self.rows = {}
+            for goal_id in goal_ids:
+                identifier = f"execution_plan:{goal_id}:plan-{goal_id}:1"
+                self.rows[identifier] = {
+                    "opportunity_id": identifier,
+                    "refs": "\x1f".join((
+                        f"execution_plan:{goal_id}", f"execution_plan_id:plan-{goal_id}",
+                        "execution_plan_cursor:1", "execution_plan_generation:0",
+                    )),
+                }
+            self.unreconciled = []
+            self.released = []
+
+        def unfinished(self):
+            return tuple(self.rows.values())
+
+        def mark_unreconciled(self, identifier):
+            self.unreconciled.append(identifier)
+
+        def release(self, identifier):
+            self.released.append(identifier)
+
+    class Spend:
+        def dispatch_started(self, _identifier):
+            return True
+
+    def completed_goal(self, goal_id):
+        self.store.create(replace(goal(), goal_id=goal_id, execution_plan=replace(
+            plan(step("coding")), plan_id=f"plan-{goal_id}", cursor=1, status="completed")),
+            "thread", RETENTION)
+
+    def test_missing_and_undecodable_goals_do_not_stop_later_recovery(self):
+        import sqlite3
+        self.completed_goal("corrupt")
+        self.completed_goal("valid")
+        raw = sqlite3.connect(self.path)
+        raw.execute("UPDATE goals SET state_json = json_set(state_json, "
+                    "'$.execution_plan.cursor', 99) WHERE goal_id = 'corrupt'")
+        raw.commit()
+        raw.close()
+        ledger = self.Ledger("missing", "corrupt", "valid")
+        source = PlanContinuationSource(self.store, ledger, enabled=True)
+        with self.assertLogs("alx.continuity.plan_source", level="WARNING") as logs:
+            source.recover(self.Spend())
+        self.assertEqual(sorted(ledger.unreconciled), sorted(ledger.rows))
+        self.assertEqual(ledger.released, [])
+        self.assertEqual(
+            self.store.load("valid").state.execution_plan.continuation_generation, 1)
+        for goal_id, error in (("missing", "GoalNotFound"), ("corrupt", "ValueError")):
+            self.assertTrue(any(f"execution_plan:{goal_id}:" in line and f"goal {goal_id}" in line
+                                and error in line for line in logs.output), logs.output)
+
+    def test_ledger_failure_on_one_record_still_recovers_the_next(self):
+        self.completed_goal("valid")
+        ledger = self.Ledger("broken", "valid")
+        original = ledger.mark_unreconciled
+        failed = []
+
+        def mark(identifier):
+            if "broken" in identifier and not failed:
+                failed.append(identifier)
+                raise RuntimeError("ledger busy")
+            original(identifier)
+
+        ledger.mark_unreconciled = mark
+        with self.assertLogs("alx.continuity.plan_source", level="WARNING"):
+            PlanContinuationSource(self.store, ledger, enabled=True).recover(self.Spend())
+        # Recovery continued past the failure. The failed record stays
+        # unfinished for the next startup to retain; it is never released
+        # for replay.
+        self.assertEqual(ledger.unreconciled, ["execution_plan:valid:plan-valid:1"])
+        self.assertEqual(failed, ["execution_plan:broken:plan-broken:1"])
+        self.assertEqual(ledger.released, [])
+
+
+class ParkingWithExecutablePlanTests(PlanHarness):
+    """CodeRabbit b039f45 #2: a parked goal never keeps an executable plan."""
+
+    def waiting(self, **state_changes):
+        workflow = replace(
+            plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
+                      waiting=(PlanCondition("values.state", "pending"),)), step("merge")),
+            status="waiting", next_due_at=NOW + timedelta(seconds=60),
+            last_result_call_id="call-ci",
+        )
+        prior = CapabilityAttempt(
+            workflow.steps[0].call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult("call-ci", "ci", CapabilityResultState.SUCCEEDED,
+                             {"state": "pending"}))
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=workflow, attempts=(prior,),
+                                   **state_changes),
+                           snapshot.retention_until, snapshot.revision)
+        return workflow
+
+    def assert_parked(self, status, work_field):
+        state = self.store.load("goal").state
+        self.assertIs(state.status, status)
+        self.assertEqual(state.execution_plan.status, "needs_core")
+        self.assertEqual(state.execution_plan.core_reentry_reason, "goal_parked")
+        self.assertEqual(state.execution_plan.cursor, 0)
+        self.assertTrue(getattr(state, work_field))
+        self.assertNotIn("merge", self.calls)
+        return state
+
+    def test_autonomous_call_less_end_parks_awaiting_input_and_keeps_response(self):
+        self.waiting(outstanding_work=(WorkItem("ci", "Wait for checks"),))
+        reasoner = Reasoner(AgentDecision(response="Checks still running.", goal_id="goal"),
+                            AgentDecision(response="Checks still running.", goal_id="goal"))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3,
+                                               origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Checks still running.")
+        self.assert_parked(GoalStatus.AWAITING_INPUT, "outstanding_work")
+
+    def test_blocked_parking_wakes_the_plan(self):
+        self.waiting(blockers=(WorkItem("ci", "Checks need a decision"),))
+        reasoner = Reasoner(AgentDecision(response="Blocked on checks.", goal_id="goal"),
+                            AgentDecision(response="Blocked on checks.", goal_id="goal"))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3,
+                                               origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual(outcome.response, "Blocked on checks.")
+        self.assert_parked(GoalStatus.BLOCKED, "blockers")
+
+    def test_mechanical_blocker_parks_another_goal_with_a_waiting_plan(self):
+        self.waiting(outstanding_work=(WorkItem("ci", "Wait for checks"),))
+        self.store.create(replace(goal(), goal_id="review-goal"), "thread", RETENTION)
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        reasoner = Reasoner(
+            AgentDecision(call=CapabilityCall("review-a", "request_external_review", {}),
+                          goal_id="review-goal"),
+            AgentDecision(call=CapabilityCall("ci-direct", "ci", {}), goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3,
+                                               origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual(outcome.reason, "review_pending")
+        self.assertNotIn("ci", self.calls)
+        self.assert_parked(GoalStatus.AWAITING_INPUT, "outstanding_work")
+
+    def test_terminal_blocker_response_parks_without_losing_it(self):
+        self.waiting(outstanding_work=(WorkItem("ci", "Wait for checks"),))
+        self.outputs["request_external_review"] = (
+            CapabilityResultState.FAILED,
+            {"code": "review_pending", "requires_judgement": True},
+        )
+        reasoner = Reasoner(
+            AgentDecision(call=CapabilityCall("review-p", "request_external_review", {}),
+                          goal_id="goal"),
+            AgentDecision(response="The review is still pending.", goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "The review is still pending.")
+        self.assert_parked(GoalStatus.AWAITING_INPUT, "outstanding_work")
+
+    def test_gateway_stores_the_response_from_a_parking_turn(self):
+        self.waiting(outstanding_work=(WorkItem("ci", "Wait for checks"),))
+        conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(conversations.close)
+        created = conversations.create("thread", RETENTION)
+        conversations.append(conversation().turns[0], RETENTION, created.revision)
+        gateway = ConversationGateway(self.agent(Reasoner(
+            AgentDecision(response="Checks still running.", goal_id="goal"),
+            AgentDecision(response="Checks still running.", goal_id="goal"),
+        )), conversations)
+        opportunity = CognitionOpportunity("mail:1", CognitionOrigin.EXTERNAL_EVENT, NOW,
+                                           "thread")
+        gateway.receive_cognition_opportunity("thread", opportunity, 3, RETENTION)
+        self.assertEqual(conversations.load("thread").turns[-1].content,
+                         "Checks still running.")
+        state = self.store.load("goal").state
+        self.assertIs(state.status, GoalStatus.AWAITING_INPUT)
+        self.assertNotIn(state.execution_plan.status, {"ready", "waiting"})
+
+
+class RepeatedPlanRefusalTests(PlanHarness):
+    """CodeRabbit b039f45 #3: an unchanged refusal never buys another Core call."""
+
+    def invalid(self, plan_id="plan-x", summary="Different work"):
+        return replace(plan(step("coding")), plan_id=plan_id, objective_summary=summary)
+
+    def test_identical_refusal_ends_the_turn_without_another_reasoning_call(self):
+        reasoner = Reasoner(*(AgentDecision(execution_plan=self.invalid(), goal_id="goal")
+                              for _ in range(5)))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 5)
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.reason, "plan_precondition_invalid")
+        first = reasoner.contexts[1].refused_calls
+        self.assertEqual([item["reason"] for item in first], ["plan_precondition_invalid"])
+        self.assertTrue(first[0]["subject"].startswith("plan-x:"))
+        self.assertEqual(self.calls, [])
+
+    def test_every_plan_refusal_reason_is_suppressed_on_repeat(self):
+        unsafe = replace(plan(step("merge", completion=(PlanCondition("values.state", "done"),),
+                                   waiting=(PlanCondition("values.state", "pending"),))),
+                         plan_id="plan-unsafe")
+        cases = {
+            "plan_precondition_invalid": (self.invalid(), {}),
+            "plan_wait_unsafe": (unsafe, {"effectful": frozenset({"merge"})}),
+        }
+        for reason, (workflow, options) in cases.items():
+            with self.subTest(reason=reason):
+                self.reset_goal()
+                reasoner = Reasoner(*(AgentDecision(execution_plan=workflow, goal_id="goal")
+                                      for _ in range(4)))
+                outcome = self.agent(reasoner, **options).process(conversation(), RETENTION, 4)
+                self.assertEqual((reasoner.calls, outcome.reason), (2, reason))
+
+    def test_inactive_goal_refusal_is_suppressed_on_repeat(self):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, status=GoalStatus.AWAITING_INPUT,
+                                   stop_reason=GoalStopReason.REQUIRED_INPUT,
+                                   outstanding_work=(WorkItem("x", "Need input"),)),
+                           snapshot.retention_until, snapshot.revision)
+        reasoner = Reasoner(*(AgentDecision(execution_plan=plan(step("coding")), goal_id="goal")
+                              for _ in range(4)))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4,
+                                               origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual((reasoner.calls, outcome.reason), (2, "plan_requires_active_goal"))
+
+    def test_rejected_goal_mutation_refusal_is_suppressed_on_repeat(self):
+        rejected = GoalProposal(GoalMutationKind.REQUEST_COMPLETION)
+        reasoner = Reasoner(*(AgentDecision(execution_plan=plan(step("coding")), goal_id="goal",
+                                            goal_proposal=rejected) for _ in range(4)))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
+        # The proposal's own refusal is checked first and stops the repeat;
+        # the plan refusal it carried is recorded with a subject beside it.
+        self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(self.calls, [])
+        plan_refusals = [item for item in reasoner.contexts[1].refused_calls
+                         if item["reason"] == "plan_goal_mutation_rejected"]
+        self.assertEqual(len(plan_refusals), 1)
+        self.assertTrue(plan_refusals[0]["subject"].startswith("plan-1:"))
+
+    def test_different_plan_is_not_suppressed(self):
+        reasoner = Reasoner(AgentDecision(execution_plan=self.invalid("plan-a"), goal_id="goal"),
+                            AgentDecision(execution_plan=self.invalid("plan-b"), goal_id="goal"),
+                            AgentDecision(response="I will restate the objective.",
+                                          goal_id="goal"))
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
+        self.assertEqual(reasoner.calls, 3)
+        self.assertEqual(outcome.response, "I will restate the objective.")
+        self.assertEqual([item["reason"] for item in reasoner.contexts[2].refused_calls],
+                         ["plan_precondition_invalid", "plan_precondition_invalid"])
+
+    def test_same_plan_is_reconsidered_after_the_goal_genuinely_changed(self):
+        same = self.invalid(summary="Revised work")
+        reasoner = Reasoner(
+            AgentDecision(execution_plan=same, goal_id="goal"),
+            AgentDecision(execution_plan=same, goal_id="goal", goal_proposal=GoalProposal(
+                GoalMutationKind.UPDATE, objective_summary="Revised work")),
+            AgentDecision(response="Done.", goal_id="goal"),
+        )
+        self.agent(reasoner).process(conversation(), RETENTION, 4)
+        self.assertEqual(self.calls, ["coding"])
+        self.assertEqual(self.store.load("goal").state.objective.summary, "Revised work")
+
+    def test_same_refusal_after_changed_goal_state_gets_another_step(self):
+        # The goal changed between the two proposals, so the second refusal is
+        # new evidence for her rather than a repeat, and she reasons again.
+        reasoner = Reasoner(
+            AgentDecision(execution_plan=self.invalid(), goal_id="goal"),
+            AgentDecision(execution_plan=self.invalid(), goal_id="goal",
+                          goal_proposal=GoalProposal(GoalMutationKind.UPDATE,
+                                                     context={"head": "b" * 40})),
+            AgentDecision(response="The objective no longer matches.", goal_id="goal"),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
+        self.assertEqual(reasoner.calls, 3)
+        self.assertEqual(outcome.response, "The objective no longer matches.")
+        subjects = [item["subject"] for item in reasoner.contexts[2].refused_calls
+                    if item["reason"] == "plan_precondition_invalid"]
+        self.assertEqual(len(subjects), 2)
+        self.assertNotEqual(subjects[0], subjects[1])
