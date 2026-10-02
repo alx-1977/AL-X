@@ -447,6 +447,8 @@ ARGUMENTS: dict[Operation, dict[str, tuple[str, bool]]] = {
         "branch": ("the source branch to propose; it must already be pushed", True),
         "title": ("the pull request title", True),
         "body": ("the pull request description", False),
+        "draft": ("true opens it as a GitHub draft pull request, not ready for "
+                  "review; false or omitted opens an ordinary one", False),
     },
     Operation.UPDATE_PULL_REQUEST: {
         "pull_request_number": ("which pull request to revise", True),

@@ -638,10 +638,14 @@ class RepositoryAuthority:
                     # broker as an executor fault rather than as the declared
                     # "these arguments cannot be used".
                     try:
+                        draft = arguments.get("draft", False)
+                        if not isinstance(draft, bool):
+                            raise TypeError("draft must be true or false")
                         proposal = PullRequestRequest(
                             _ref(arguments, "branch"),
                             _text(arguments, "title"),
                             str(arguments.get("body", "") or ""),
+                            draft,
                         )
                     except (TypeError, ValueError) as error:
                         raise RepositoryAuthorityError(

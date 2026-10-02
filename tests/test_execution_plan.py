@@ -1527,7 +1527,7 @@ class OrphanedEvidenceReadTests(PlanHarness):
         self.restart()
         stopped = self.agent()
         (read,) = stopped.advance_due_plans()        # checkpointed ...
-        self.assertTrue(read.call.call_id.startswith("plan-evidence:"))
+        self.assertTrue(read.call.call_id.startswith("plan-evidence-"))
         self.restart()                                # ... and the process stops
         recovered = self.agent()
         self.assertEqual(self.offerable(recovered), ())
@@ -1564,7 +1564,7 @@ class OrphanedEvidenceReadTests(PlanHarness):
 
         def failing_once(state, *arguments, **keywords):
             if not failures and any(item.call is not None
-                                    and item.call.call_id.startswith("plan-evidence:")
+                                    and item.call.call_id.startswith("plan-evidence-")
                                     for item in state.attempts):
                 failures.append(True)
                 raise OSError("disk full")
@@ -1823,6 +1823,87 @@ class RejectedDecisionCorrectionTests(PlanHarness):
         outcome = self.person(self.agent(reasoner), budget=1)
         self.assertEqual(reasoner.contexts[1].response_only_reason, "decision_rejected")
         self.assertEqual(outcome.response, "Could not start.")
+
+
+class PlannedCallIdentityTests(PlanHarness):
+    """Planned call ids obey the contract of the capabilities that consume them."""
+
+    def test_a_planned_coding_step_passes_the_real_coding_validation(self):
+        from alx.contracts.coding import job_id_permitted
+        from alx.tools.coding import DEFINITION as CODING, build_coding_executors
+
+        current = {"call_id": ""}
+        jobs = []
+
+        def run_job(request):
+            jobs.append(request)
+            raise RuntimeError("the job itself is not under test")
+        executors = build_coding_executors(run_job, lambda: current["call_id"],
+                                           lambda: self.state())
+
+        def dispatch(call, _state):
+            current["call_id"] = call.call_id
+            self.calls.append(call)
+            result = executors["run_coding_task"](dict(call.arguments))
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+        # The exact arguments Core planned in the real acceptance run.
+        workflow = plan(ExecutionStep(CapabilityCall("code", "run_coding_task", {
+            "task": "Append exactly one new line to the end of docs/FOUNDATION_PROOF.md "
+                    "that reads: Acceptance run marker for PR #95 (throwaway, do not "
+                    "merge).  Change nothing else in the file or repository.",
+            "acceptance_criteria": [
+                "The last line of docs/FOUNDATION_PROOF.md is exactly: Acceptance run "
+                "marker for PR #95 (throwaway, do not merge).",
+                "No other file or existing line is changed."],
+            "context": "Acceptance test of background execution plans in a scratch clone.",
+            "repair_branch": "acceptance/pr95-marker",
+            "commit_message": "docs: add throwaway acceptance run marker for PR #95",
+            "step_budget": 8,
+        }), ()))
+        agent = CoreAgent(self.store, Reasoner(install(workflow)), dispatch,
+                          (*DEFINITIONS, CODING), clock=lambda: self.now,
+                          budget_check=self.budget, plan_continuation=True)
+        self.person(agent)
+        (job,) = agent.advance_due_plans()
+        self.assertTrue(job_id_permitted(job.call.call_id))
+        job = agent.begin_planned_dispatch(job)
+        attempt = agent.run_planned_dispatch(job)
+        # Validation accepted the planned id: the job runner was reached with it.
+        self.assertEqual([item.job_id for item in jobs], [job.call.call_id])
+        self.assertNotEqual((attempt.result.failure or {}).get("code"), "arguments_unusable")
+        agent.finish_planned_dispatch(job, attempt)
+        (recorded,) = [item for item in self.state().attempts
+                       if item.call.call_id == job.call.call_id]
+        self.assertIs(recorded.disposition, CapabilityAttemptDisposition.EXECUTED)
+
+    def test_every_planned_call_id_is_a_valid_workspace_identity_and_unique(self):
+        from alx.contracts.coding import job_id_permitted
+        from alx.core.loop import planned_call_id
+
+        identifiers = [planned_call_id(prefix) for prefix in ("plan", "plan-evidence")
+                       for _ in range(200)]
+        self.assertEqual(len(set(identifiers)), len(identifiers))
+        self.assertTrue(all(job_id_permitted(item) and ":" not in item
+                            for item in identifiers))
+
+    def test_the_runner_produces_only_valid_ids_for_steps_and_evidence_reads(self):
+        from alx.contracts.coding import job_id_permitted
+
+        agent = self.installed(step("review", wait=10))
+        self.outputs["review"] = [JUDGE, JUDGE]
+        self.work(agent)
+        self.restart()
+        agent = self.agent()
+        (read,) = agent.advance_due_plans()
+        self.assertTrue(read.call.call_id.startswith("plan-evidence-"))
+        planned = [item.call.call_id for item in self.state().attempts]
+        self.assertTrue(planned)
+        self.assertTrue(all(job_id_permitted(item) for item in planned))
+
+    def test_no_runtime_source_generates_a_colon_call_id(self):
+        source = (SRC / "core" / "loop.py").read_text()
+        self.assertNotIn('call_id=f"plan:', source)
+        self.assertNotIn('call_id=f"plan-evidence:', source)
 
 
 class GateTests(PlanHarness):

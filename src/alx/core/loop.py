@@ -37,6 +37,17 @@ from alx.core.plan_results import (
 
 LOGGER = logging.getLogger(__name__)
 
+def planned_call_id(prefix: str) -> str:
+    """A fresh identity for one planned dispatch.
+
+    Capabilities may use a call id as more than a label: the Coding Agent
+    makes it the job's workspace path and branch element, and accepts only
+    letters, digits, `-` and `_` (`job_id_permitted`). The producer obeys
+    that contract, so every planned call id is made of those characters.
+    """
+    return f"{prefix}-{uuid4()}"
+
+
 # How long a planned step refused by the execution budget waits before it is
 # tried again. Mechanical: waking a paid reasoner because spending stopped
 # would defeat the point.
@@ -2184,7 +2195,7 @@ class CoreAgent:
                     or not self._needs_reread(state, call_id)):
                 continue
             stored = self._attempt_for(state, call_id)
-            call = replace(stored.call, call_id=f"plan-evidence:{uuid4()}")
+            call = replace(stored.call, call_id=planned_call_id("plan-evidence"))
             pending = CapabilityAttempt(call, CapabilityAttemptDisposition.PENDING, None,
                                         reason_code="dispatch_pending")
             checkpoint = self._store.replace(
@@ -2280,7 +2291,7 @@ class CoreAgent:
             return None
         # Each dispatch has its own identity, written to the plan before the
         # call is made. Only a result carrying it can move this plan.
-        call = replace(step.call, call_id=f"plan:{uuid4()}")
+        call = replace(step.call, call_id=planned_call_id("plan"))
         approvals = tuple(
             replace(item, lifecycle=ApprovalLifecycle.CLAIMED)
             if (item.lifecycle is ApprovalLifecycle.GRANTED

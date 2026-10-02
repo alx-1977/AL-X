@@ -267,5 +267,56 @@ class MalformedResponseTests(unittest.TestCase):
         self.assertEqual(outcome.branch, "fix/thing")
 
 
+class DraftPullRequestTests(unittest.TestCase):
+    """A draft is GitHub's own state, asked for explicitly; nothing else changes."""
+
+    def transport(self):
+        self.requests: list[tuple] = []
+
+        def request(method, url, **keywords):
+            self.requests.append((method, url, keywords.get("json")))
+            if method == "GET":
+                return _Response([])
+            return _Response({"number": 12, "state": "open", "draft": True,
+                              "head": {"ref": "acceptance/pr95-marker", "sha": "a" * 40},
+                              "base": {"ref": "main"}}, 201)
+        original = module.httpx.request
+        module.httpx.request = request
+        self.addCleanup(setattr, module.httpx, "request", original)
+        return GitHubPullRequests("owner/repo", "token")
+
+    def opened(self, **options):
+        from alx.contracts.github_pull_request import PullRequestRequest
+
+        self.transport().open(PullRequestRequest("acceptance/pr95-marker", "Marker", "Body.",
+                                                 **options))
+        (post,) = [item for item in self.requests if item[0] == "POST"]
+        return post
+
+    def test_an_ordinary_request_is_exactly_what_it_was(self):
+        for options in ({}, {"draft": False}):
+            with self.subTest(options=options):
+                method, url, payload = self.opened(**options)
+                self.assertEqual((method, url.endswith("/repos/owner/repo/pulls")), ("POST", True))
+                self.assertEqual(payload, {"title": "Marker", "body": "Body.",
+                                           "head": "acceptance/pr95-marker", "base": "main"})
+
+    def test_a_draft_request_asks_github_for_a_draft(self):
+        _method, _url, payload = self.opened(draft=True)
+        self.assertIs(payload["draft"], True)
+        self.assertEqual(payload["base"], "main")
+
+    def test_opening_never_requests_a_review(self):
+        self.opened(draft=True)
+        self.assertFalse(any("requested_reviewers" in url or "reviews" in url
+                             for _method, url, _payload in self.requests))
+
+    def test_draft_must_be_a_boolean(self):
+        from alx.contracts.github_pull_request import PullRequestRequest
+
+        with self.assertRaises(TypeError):
+            PullRequestRequest("acceptance/pr95-marker", "Marker", "", "yes")
+
+
 if __name__ == "__main__":
     unittest.main()

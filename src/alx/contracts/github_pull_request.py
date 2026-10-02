@@ -132,12 +132,17 @@ class PullRequestRequest:
     branch: str
     title: str
     body: str = ""
+    # GitHub's own draft state: not ready for review, and not mergeable until
+    # it is marked ready. Never inferred from a title.
+    draft: bool = False
 
     def __post_init__(self) -> None:
         if not publishable_branch(self.branch):
             raise ValueError("branch is not one this capability may publish")
         if not self.title.strip():
             raise ValueError("a pull request needs a title")
+        if not isinstance(self.draft, bool):
+            raise TypeError("draft must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
