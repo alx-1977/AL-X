@@ -30,7 +30,7 @@ from alx.contracts.review_content import (  # noqa: E402
 )
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.core.plan_results import (  # noqa: E402
-    PlanResultKind, classify_planned_result, plan_invalidation_facts,
+    PlanResultKind, classify_planned_result, plan_invalidation_facts, reduce_plan,
 )
 from alx.tools.pull_request_checks import (  # noqa: E402
     DEFINITION as PULL_REQUEST_CHECKS_DEFINITION, READ_PULL_REQUEST_CHECKS,
@@ -1279,65 +1279,6 @@ class PlanResultInvariantTests(PlanHarness):
                 self.assertEqual(stored.status, "needs_core")
                 self.assertEqual(stored.core_reentry_reason, name.split(":")[0])
 
-    def test_crash_after_final_response_storage_cannot_answer_twice(self):
-        workflow = replace(plan(step("coding")), cursor=1, status="completed",
-                           core_reentry_reason="plan_completed",
-                           core_reentry_facts=("plan_completed",))
-        snapshot = self.store.load("goal")
-        self.store.replace(replace(snapshot.state, execution_plan=workflow),
-                           snapshot.retention_until, snapshot.revision)
-        conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
-        self.addCleanup(conversations.close)
-        created = conversations.create("thread", RETENTION)
-        conversations.append(conversation().turns[0], RETENTION, created.revision)
-
-        class Ledger:
-            def exists(self, _identifier):
-                return False
-
-            def record_created(self, _opportunity):
-                return True
-
-        source = PlanContinuationSource(self.store, Ledger(), enabled=True)
-        reasoner = Reasoner(AgentDecision(response="Finished.", goal_id="goal"))
-        agent = self.agent(reasoner)
-        gateway = ConversationGateway(agent, conversations)
-        opportunity = source.due_opportunities()[0]
-        with patch.object(agent, "acknowledge_plan_response",
-                          side_effect=RuntimeError("process stopped")):
-            with self.assertRaisesRegex(RuntimeError, "process stopped"):
-                gateway.receive_cognition_opportunity("thread", opportunity, 1, RETENTION)
-        self.assertEqual(conversations.load("thread").turns[-1].content, "Finished.")
-        self.store.close()
-        self.store = SQLiteGoalStore(self.path)
-        source = PlanContinuationSource(self.store, Ledger(), enabled=True)
-        self.assertEqual(source.due_opportunities(), ())
-        restarted = ConversationGateway(self.agent(Reasoner()), conversations)
-        restarted.advance_due_plans()
-        self.assertEqual(self.plan_state().status, "handled")
-        self.assertEqual(source.due_opportunities(), ())
-        responses = [item for item in conversations.load("thread").turns
-                     if item.origin is ConversationOrigin.ALX_RESPONSE]
-        self.assertEqual(len(responses), 1)
-        self.assertEqual(reasoner.calls, 1)
-
-    def test_crash_before_response_storage_offers_the_continuation_again(self):
-        workflow = replace(plan(step("coding")), cursor=1, status="completed",
-                           response_turn_id="never-stored")
-        snapshot = self.store.load("goal")
-        self.store.replace(replace(snapshot.state, execution_plan=workflow),
-                           snapshot.retention_until, snapshot.revision)
-
-        class Ledger:
-            def exists(self, _identifier):
-                return False
-
-        source = PlanContinuationSource(self.store, Ledger(), enabled=True)
-        self.assertEqual(source.due_opportunities(), ())
-        self.agent(Reasoner()).advance_due_plans(lambda _: conversation())
-        self.assertIsNone(self.plan_state().response_turn_id)
-        self.assertEqual(len(source.due_opportunities()), 1)
-
     def test_judgement_evidence_after_restart_is_reobserved_not_metadata(self):
         self.outputs[READ_EXTERNAL_REVIEW] = review_result(published_review())
         self.install(plan(review_step(), step("merge")))
@@ -1398,10 +1339,27 @@ class PlanResultSinglePathTests(unittest.TestCase):
                         found.add(function.name)
         return found
 
+    def callers_of_method(self, name):
+        tree = ast.parse(self.LOOP.read_text())
+        found = set()
+        for function in ast.walk(tree):
+            if isinstance(function, ast.FunctionDef):
+                for node in ast.walk(function):
+                    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == name):
+                        found.add(function.name)
+        return found
+
     def test_results_are_classified_and_reduced_in_one_place(self):
-        self.assertEqual(self.callers("classify_planned_result"), {"_reconcile_plan"})
+        self.assertEqual(self.callers("classify_planned_result"), {"_classify_and_apply"})
+        # Fresh, recovered and resumed results, and a restart's re-read.
+        self.assertEqual(self.callers_of_method("_classify_and_apply"),
+                         {"_reconcile_plan", "_plan_evidence"})
         self.assertEqual(self.callers("reduce_plan"),
                          {"_apply_plan_result", "_reduce_goal_proposal"})
+        # The blocker rule is read directly only for a call she made herself;
+        # every planned result gets its blocker from the classifier.
+        self.assertEqual(self.callers("judgment_blocker"), {"process"})
 
     def test_superseded_interpreters_are_deleted(self):
         source = self.LOOP.read_text()
@@ -1959,3 +1917,266 @@ class RepeatedPlanRefusalTests(PlanHarness):
                     if item["reason"] == "plan_precondition_invalid"]
         self.assertEqual(len(subjects), 2)
         self.assertNotEqual(subjects[0], subjects[1])
+
+
+
+class Crash(BaseException):
+    """The process stopping: nothing in the gateway may catch it."""
+
+
+class ResponseDurabilityTests(PlanHarness):
+    """A stored response never depends on plan bookkeeping, and is never repeated."""
+
+    def setUp(self):
+        super().setUp()
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=replace(
+            plan(step("coding")), cursor=1, status="completed",
+            core_reentry_reason="plan_completed", core_reentry_facts=("plan_completed",))),
+            snapshot.retention_until, snapshot.revision)
+        self.conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(self.conversations.close)
+        created = self.conversations.create("thread", RETENTION)
+        self.conversations.append(conversation().turns[0], RETENTION, created.revision)
+
+    class Ledger:
+        def exists(self, _identifier):
+            return False
+
+        def record_created(self, _opportunity):
+            return True
+
+    def offered(self):
+        return PlanContinuationSource(self.store, self.Ledger(), enabled=True).due_opportunities()
+
+    def gateway(self, *decisions):
+        self.reasoner = Reasoner(*decisions)
+        self.core = self.agent(self.reasoner)
+        return ConversationGateway(self.core, self.conversations)
+
+    def deliver(self, gateway):
+        return gateway.receive_cognition_opportunity("thread", self.offered()[0], 1, RETENTION)
+
+    def responses(self):
+        return [item for item in self.conversations.load("thread").turns
+                if item.origin is ConversationOrigin.ALX_RESPONSE]
+
+    def restart(self):
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        return self.gateway()
+
+    def test_acknowledgement_failure_keeps_the_stored_response(self):
+        gateway = self.gateway(AgentDecision(response="Finished.", goal_id="goal"))
+        with patch.object(self.core, "acknowledge_plan_response",
+                          side_effect=RuntimeError("goal store busy")):
+            with self.assertLogs("alx.conversation.gateway", level="WARNING"):
+                outcome = self.deliver(gateway)
+        self.assertEqual(outcome.response, "Finished.")
+        self.assertEqual([item.content for item in self.responses()], ["Finished."])
+        # Bookkeeping is recovered from the stored turn, without a second answer.
+        self.restart().advance_due_plans()
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+        self.assertEqual(self.offered(), ())
+        self.assertEqual(len(self.responses()), 1)
+
+    def test_response_store_failure_is_never_treated_as_delivered(self):
+        gateway = self.gateway(AgentDecision(response="Finished.", goal_id="goal"))
+        original = self.conversations.append
+
+        def append(turn, retention_until, expected_revision):
+            if turn.origin is ConversationOrigin.ALX_RESPONSE:
+                raise RuntimeError("conversation store unavailable")
+            return original(turn, retention_until, expected_revision)
+
+        with patch.object(self.conversations, "append", side_effect=append):
+            with self.assertRaisesRegex(RuntimeError, "conversation store unavailable"):
+                self.deliver(gateway)
+        self.assertEqual(self.responses(), [])
+        self.restart().advance_due_plans()
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "completed")
+        self.assertEqual(len(self.offered()), 1)
+
+    def test_crash_before_storage_answers_exactly_once_after_restart(self):
+        gateway = self.gateway(AgentDecision(response="Finished.", goal_id="goal"))
+        with patch.object(self.conversations, "append", side_effect=Crash()):
+            with self.assertRaises(Crash):
+                self.deliver(gateway)
+        restarted = self.restart()
+        restarted.advance_due_plans()
+        self.assertEqual(len(self.offered()), 1)
+        gateway = self.gateway(AgentDecision(response="Finished.", goal_id="goal"))
+        self.deliver(gateway)
+        self.assertEqual(len(self.responses()), 1)
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+
+    def test_crash_between_storage_and_acknowledgement_never_answers_twice(self):
+        gateway = self.gateway(AgentDecision(response="Finished.", goal_id="goal"))
+        opportunity = self.offered()[0]
+        with patch.object(self.core, "acknowledge_plan_response", side_effect=Crash()):
+            with self.assertRaises(Crash):
+                gateway.receive_cognition_opportunity("thread", opportunity, 1, RETENTION)
+        self.assertEqual(len(self.responses()), 1)
+        # Even offered again before any tick reconciles, she is not asked twice.
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        resumed = self.gateway(AgentDecision(response="Finished again.", goal_id="goal"))
+        outcome = resumed.receive_cognition_opportunity("thread", opportunity, 1, RETENTION)
+        self.assertEqual(outcome.reason, "plan_inactive")
+        self.assertEqual(self.reasoner.calls, 0)
+        self.assertEqual([item.content for item in self.responses()], ["Finished."])
+        self.assertEqual(self.store.load("goal").state.execution_plan.status, "handled")
+
+    def test_restart_after_acknowledgement_offers_nothing(self):
+        self.deliver(self.gateway(AgentDecision(response="Finished.", goal_id="goal")))
+        self.restart().advance_due_plans()
+        self.assertEqual(self.offered(), ())
+        self.assertEqual(len(self.responses()), 1)
+
+    def test_person_turn_after_an_unacknowledged_answer_is_still_stored(self):
+        gateway = self.gateway(AgentDecision(response="Finished.", goal_id="goal"))
+        with patch.object(self.core, "acknowledge_plan_response", side_effect=Crash()):
+            with self.assertRaises(Crash):
+                self.deliver(gateway)
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        gateway = self.gateway(AgentDecision(response="Here is more.", goal_id="goal"))
+        follow_up = ConversationTurn("thread", "person-2", ConversationOrigin.TYPED,
+                                     "And then?", NOW, "friedl")
+        gateway.receive_conversation_turn(follow_up, 1, RETENTION)
+        self.assertEqual([item.content for item in self.responses()],
+                         ["Finished.", "Here is more."])
+
+
+class JudgmentRereadClassificationTests(PlanHarness):
+    """The restart re-read of judgment evidence is a planned result like any other."""
+
+    def production_agent(self, reasoner):
+        return self.agent(reasoner, extra_definitions=(REVIEW_CONTENT_DEFINITION,))
+
+    def woken_by_review(self):
+        self.outputs[READ_EXTERNAL_REVIEW] = review_result(published_review())
+        self.production_agent(Reasoner(AgentDecision(
+            execution_plan=plan(review_step(), step("merge")), goal_id="goal",
+        ))).process(conversation(), RETENTION, 1)
+        before = self.store.load("goal").state.execution_plan
+        self.assertEqual(before.status, "needs_core")
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        return before
+
+    def resume(self, *decisions):
+        reasoner = Reasoner(*decisions)
+        outcome = self.production_agent(reasoner).process(
+            conversation(), RETENTION, len(decisions) or 1,
+            origin=CognitionOrigin.WORK_COMPLETED, resume_plan_goal_id="goal",
+        )
+        return reasoner, outcome, self.store.load("goal").state.execution_plan
+
+    def test_reread_passes_through_the_classifier_and_wakes_core(self):
+        before = self.woken_by_review()
+        with patch("alx.core.loop.classify_planned_result",
+                   wraps=classify_planned_result) as classifier:
+            reasoner, outcome, after = self.resume(
+                AgentDecision(response="One defect to repair.", goal_id="goal"))
+        rereads = [item for item in classifier.call_args_list
+                   if item.kwargs.get("judgment_wake")]
+        self.assertEqual(len(rereads), 1)
+        self.assertEqual(rereads[0].kwargs["judgment_wake"], before.core_reentry_facts)
+        self.assertEqual(after.status, "needs_core")
+        self.assertEqual(after.cursor, before.cursor)
+        self.assertIn("planned_evidence_requires_judgement", after.core_reentry_facts)
+        self.assertIn("judgment_evidence_reobserved", after.core_reentry_facts)
+        self.assertNotEqual(after.last_result_call_id, before.last_result_call_id)
+        self.assertEqual(reasoner.contexts[0].transient_attempts[0].result.values["summary"],
+                         "One defect in the reducer.")
+        self.assertEqual(outcome.response, "One defect to repair.")
+
+    def test_reread_that_would_wait_or_fail_holds_follow_up_action(self):
+        cases = {
+            "in_progress": (review_result(unavailable_review(REVIEW_IN_PROGRESS)),
+                            "judgment_evidence_unavailable"),
+            "failed": (review_result(unavailable_review(REVIEW_FAILED)), "review_unavailable"),
+            "transport": (review_result(ReviewReadError("review_unavailable")),
+                          "review_unavailable"),
+            "refused": (refused, "judgment_evidence_unavailable"),
+            "broker_failure": (broker_failure("executor_error", True),
+                               "judgment_evidence_unavailable"),
+        }
+        for name, (reread, blocker) in cases.items():
+            with self.subTest(case=name):
+                self.reset_goal()
+                self.calls.clear()
+                before = self.woken_by_review()
+                self.outputs[READ_EXTERNAL_REVIEW] = reread
+                self.calls.clear()
+                _, outcome, after = self.resume(AgentDecision(
+                    call=CapabilityCall(f"merge-{name}", "merge", {}), goal_id="goal"))
+                self.assertEqual(after.status, "needs_core")
+                self.assertEqual(after.cursor, before.cursor)
+                self.assertIsNone(after.next_due_at)
+                self.assertEqual(after.mechanical_blocker, blocker)
+                self.assertEqual(outcome.reason, blocker)
+                self.assertNotIn("merge", self.calls)
+
+    def test_unrepeatable_evidence_is_reduced_not_written_directly(self):
+        judged = CapabilityDefinition("assess", "assess", SCHEMA, SCHEMA,
+                                      SideEffect.EFFECTFUL, requires_core_judgment=True)
+        self.outputs["assess"] = lambda call: CapabilityAttempt(
+            call, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(call.call_id, "assess", CapabilityResultState.SUCCEEDED,
+                             {"verdict": "unclear"}, durable_values={}))
+        self.agent(Reasoner(AgentDecision(execution_plan=plan(step("assess")), goal_id="goal")),
+                   extra_definitions=(judged,)).process(conversation(), RETENTION, 1)
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        with patch("alx.core.loop.reduce_plan", wraps=reduce_plan) as reducer:
+            self.agent(Reasoner(AgentDecision(response="I cannot judge it.", goal_id="goal")),
+                       extra_definitions=(judged,)).process(
+                conversation(), RETENTION, 1, origin=CognitionOrigin.WORK_COMPLETED,
+                resume_plan_goal_id="goal",
+            )
+        self.assertTrue(any("judgment_evidence_unavailable" in item.args[1].facts
+                            for item in reducer.call_args_list))
+        self.assertEqual(self.calls, ["assess"])
+
+
+class ReviewFollowUpTests(PlanHarness):
+    """Gaps found by local review of the re-read and response-durability fixes."""
+
+    def test_reread_whose_dispatch_raises_is_classified_as_interrupted(self):
+        self.outputs[READ_EXTERNAL_REVIEW] = review_result(published_review())
+        agent = self.agent(Reasoner(AgentDecision(
+            execution_plan=plan(review_step(), step("merge")), goal_id="goal")),
+            extra_definitions=(REVIEW_CONTENT_DEFINITION,))
+        agent.process(conversation(), RETENTION, 1)
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+
+        def explode(_call):
+            raise RuntimeError("transport dropped")
+
+        self.outputs[READ_EXTERNAL_REVIEW] = explode
+        reasoner = Reasoner(AgentDecision(call=CapabilityCall("merge-x", "merge", {}),
+                                          goal_id="goal"))
+        outcome = self.agent(reasoner, extra_definitions=(REVIEW_CONTENT_DEFINITION,)).process(
+            conversation(), RETENTION, 1, origin=CognitionOrigin.WORK_COMPLETED,
+            resume_plan_goal_id="goal",
+        )
+        stored = self.store.load("goal").state.execution_plan
+        self.assertIn("dispatch_interrupted", stored.core_reentry_facts)
+        self.assertIn("judgment_evidence_unavailable", stored.core_reentry_facts)
+        self.assertEqual(stored.mechanical_blocker, "judgment_evidence_unavailable")
+        self.assertEqual(outcome.reason, "judgment_evidence_unavailable")
+        self.assertNotIn("merge", self.calls)
+
+    def test_due_tick_loads_a_waiting_continuations_thread_once(self):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=replace(
+            plan(step("coding")), cursor=1, status="completed")),
+            snapshot.retention_until, snapshot.revision)
+        loads = []
+        agent = self.agent(Reasoner())
+        for _ in range(3):
+            agent.advance_due_plans(lambda cid: loads.append(cid) or conversation())
+        self.assertEqual(loads, ["thread"])

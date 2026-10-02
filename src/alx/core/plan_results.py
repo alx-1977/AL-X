@@ -141,8 +141,24 @@ def classify_planned_result(
     *,
     invalidation: tuple[str, ...] = (),
     recovered: bool = False,
+    judgment_wake: tuple[str, ...] = (),
 ) -> PlanResultClassification:
-    """Classify one planned result exactly once, by the fixed precedence."""
+    """Classify one planned result exactly once, by the fixed precedence.
+
+    `judgment_wake` names the facts of a Core wake already under way, when
+    this result re-reads the evidence that wake needs after a restart lost
+    it. Such a result can only add to that wake: it never waits or advances.
+    When it carries no evidence for her to judge, the evidence stays
+    unavailable and holds follow-up action.
+    """
+    if judgment_wake:
+        reread = classify_planned_result(
+            step, attempt, definition, invalidation=invalidation, recovered=recovered,
+        )
+        facts = (*judgment_wake, "judgment_evidence_reobserved", *reread.facts)
+        if "planned_evidence_requires_judgement" in reread.facts:
+            return PlanResultClassification(PlanResultKind.WAKE_CORE, facts, reread.blocker)
+        return unavailable_judgment_evidence(facts, blocker=reread.blocker)
     facts: list[str] = list(invalidation)
     result = attempt.result
     pending_failure = declared_pending_failure(definition, attempt)
@@ -251,6 +267,17 @@ def wake(*facts: str, blocker: str | None = None) -> PlanResultClassification:
     return PlanResultClassification(PlanResultKind.WAKE_CORE, facts, blocker)
 
 
+def unavailable_judgment_evidence(
+    facts: tuple[str, ...], *more: str, blocker: str | None = None,
+) -> PlanResultClassification:
+    """A judgment wake whose evidence cannot be had: held until she responds."""
+    return PlanResultClassification(
+        PlanResultKind.WAKE_CORE,
+        (*facts, "judgment_evidence_unavailable", *more),
+        blocker or "judgment_evidence_unavailable",
+    )
+
+
 def conditions_match(document: Mapping[str, Any],
                      conditions: tuple[PlanCondition, ...]) -> bool:
     return all(condition_matches(document, item) for item in conditions)
@@ -349,5 +376,6 @@ __all__ = [
     "plan_invalidation_facts",
     "reduce_plan",
     "settled_contradiction",
+    "unavailable_judgment_evidence",
     "wake",
 ]

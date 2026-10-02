@@ -126,7 +126,6 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
             "continuation_generation": goal.execution_plan.continuation_generation,
             "core_reentry_facts": list(goal.execution_plan.core_reentry_facts),
             "mechanical_blocker": goal.execution_plan.mechanical_blocker,
-            "response_turn_id": goal.execution_plan.response_turn_id,
             "steps": [
                 {
                     "call": [step.call.call_id, step.call.capability_id,
@@ -207,7 +206,6 @@ def _goal_from_data(goal_id: str, data: dict[str, Any]) -> GoalState:
         plan_data.get("continuation_generation", 0),
         tuple(plan_data.get("core_reentry_facts", ())),
         plan_data.get("mechanical_blocker"),
-        plan_data.get("response_turn_id"),
     )
     return GoalState(
         goal_id=goal_id,

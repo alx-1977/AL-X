@@ -90,6 +90,17 @@ inadequate.
       conversationally while CA work continues.
   10. Usage-aware scheduling/budgeting so AL/X can avoid beginning work that
       cannot be completed with available provider capacity.
+- [ ] **One unreadable record can stop recovery or every turn.** Found
+  during the PR #95 local review on 2026-10-02 and present on `main`; not
+  fixed there. Plan continuation recovery and the due-plan tick were
+  isolated per record in PR #95; these were not:
+  1. The other startup recovery sources (`cognition_source.recover`,
+     mail cognition recovery, completed-work recovery in
+     `bootstrap/live_voice.py`) do not isolate a stale or undecodable
+     record, so one can stop the runtime from starting.
+  2. `CoreAgent.process()` decodes every unfinished goal at the start of
+     each turn (`list_unfinished()` for interrupted-dispatch and memory
+     recovery), so one undecodable unfinished goal fails every turn.
 
 ## Planned
 
