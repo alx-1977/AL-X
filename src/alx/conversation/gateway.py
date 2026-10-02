@@ -106,12 +106,16 @@ class ConversationGateway:
                 self._clock(),
                 provenance=outcome.response_provenance,
             )
+            # The continuation names its response before it is stored, so a
+            # restart in between can tell a delivered answer from a lost one.
+            snapshot = self._core.prepare_plan_response(
+                outcome.snapshot, response_turn.turn_id)
             self._conversation_store.append(
                 response_turn,
                 retention_until,
                 self._conversation_store.load(turn.conversation_id).revision,
             )
-            self._core.acknowledge_plan_response(outcome.snapshot)
+            self._core.acknowledge_plan_response(snapshot)
         return outcome
 
     def receive_cognition_opportunity(
@@ -168,10 +172,14 @@ class ConversationGateway:
                 self._clock(),
                 provenance=outcome.response_provenance,
             )
+            # The continuation names its response before it is stored, so a
+            # restart in between can tell a delivered answer from a lost one.
+            snapshot = self._core.prepare_plan_response(
+                outcome.snapshot, response_turn.turn_id)
             self._conversation_store.append(
                 response_turn,
                 retention_until,
                 self._conversation_store.load(conversation_id).revision,
             )
-            self._core.acknowledge_plan_response(outcome.snapshot)
+            self._core.acknowledge_plan_response(snapshot)
         return outcome

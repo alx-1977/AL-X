@@ -28,7 +28,10 @@ class PlanContinuationSource:
             if snapshot.retention_until <= now:
                 continue
             plan = snapshot.state.execution_plan
-            if plan is None or plan.status not in {"needs_core", "completed"}:
+            if (plan is None or plan.status not in {"needs_core", "completed"}
+                    or plan.response_turn_id is not None):
+                # A response already being stored is reconciled by the Core's
+                # due tick, never offered as a second occasion.
                 continue
             identifier = self._opportunity_id(snapshot.state.goal_id, plan)
             if self._ledger.exists(identifier):

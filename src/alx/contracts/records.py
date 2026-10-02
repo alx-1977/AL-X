@@ -291,6 +291,13 @@ class ExecutionPlan:
     core_reentry_reason: str | None = None
     last_result_call_id: str | None = None
     continuation_generation: int = 0
+    # Set only by the one plan reducer. Every fact behind a Core wake, the
+    # first being core_reentry_reason; a review or merge blocker that holds
+    # follow-up action until she has responded; and the response turn being
+    # stored for this continuation, so a restart can tell it was delivered.
+    core_reentry_facts: tuple[str, ...] = ()
+    mechanical_blocker: str | None = None
+    response_turn_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("plan_id", "objective_source", "objective_summary"):
@@ -317,6 +324,16 @@ class ExecutionPlan:
                 or isinstance(self.continuation_generation, bool)
                 or self.continuation_generation < 0):
             raise ValueError("continuation generation must be a nonnegative integer")
+        object.__setattr__(self, "core_reentry_facts", tuple(self.core_reentry_facts))
+        for fact in self.core_reentry_facts:
+            _required(fact, "core reentry fact")
+        if self.core_reentry_facts and self.core_reentry_facts[0] != self.core_reentry_reason:
+            raise ValueError("the first reentry fact is the reentry reason")
+        for name in ("mechanical_blocker", "response_turn_id"):
+            if getattr(self, name) is not None:
+                _required(getattr(self, name), name)
+        if self.mechanical_blocker is not None and self.status != "needs_core":
+            raise ValueError("a plan blocker holds only while AL/X is needed")
 
 
 @dataclass(frozen=True, slots=True)

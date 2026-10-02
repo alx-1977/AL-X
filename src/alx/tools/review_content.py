@@ -37,6 +37,7 @@ from alx.contracts import (
     ValueKind,
 )
 from alx.contracts.review_content import (
+    REVIEW_IN_PROGRESS,
     REVIEW_READ_FAILURES,
     ReviewContent,
     ReviewContentRequest,
@@ -100,6 +101,10 @@ DEFINITION = CapabilityDefinition(
     durable_input_fields=("pull_request_number", "head_sha"),
     requires_core_judgment=True,
     repeat_safe_observation=True,
+    # The reviewer has said it is still working on this revision. Nothing is
+    # readable and nothing needs judging yet; a failed round or a transport
+    # failure is not this, and wakes AL/X.
+    pending_failure_reasons=(("review_unavailable", REVIEW_IN_PROGRESS),),
 )
 
 

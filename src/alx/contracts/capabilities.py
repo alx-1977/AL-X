@@ -126,6 +126,10 @@ class CapabilityDefinition:
     # pending. SideEffect.NONE already has this property; effectful reads must
     # declare it explicitly, and consequential writes never do.
     repeat_safe_observation: bool = False
+    # Exact (failure code, reason) pairs this capability reports while an
+    # external state is still settling and nothing yet needs judgment. Only
+    # these failures may hold a planned wait; every other failure wakes AL/X.
+    pending_failure_reasons: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -146,6 +150,14 @@ class CapabilityDefinition:
             raise ValueError("failure codes must not be blank")
         if len(set(codes)) != len(codes):
             raise ValueError("failure codes must be unique")
+        pending = tuple(tuple(item) for item in self.pending_failure_reasons)
+        object.__setattr__(self, "pending_failure_reasons", pending)
+        if any(len(item) != 2 or item[0] not in codes
+               or not isinstance(item[1], str) or not item[1].strip()
+               for item in pending):
+            raise ValueError("pending failures must pair a declared code with a reason")
+        if pending and not (self.side_effect is SideEffect.NONE or self.repeat_safe_observation):
+            raise ValueError("only a repeat-safe observation may declare pending failures")
         if self.durable_input_fields is not None:
             fields = tuple(self.durable_input_fields)
             if len(fields) != len(set(fields)):

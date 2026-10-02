@@ -145,6 +145,16 @@ entry = "conversation/gateway.py::ConversationGateway.receive_cognition_opportun
 forbidden = ["def receive_background_event"]
 
 [[outcomes]]
+id = "plan.result_is_classified"
+description = "A planned capability result is classified once as advance, wait, or Core wake."
+# D-036. Waiting, advancing, refusal, failure, recovery and judgment were
+# interpreted in separate places, and they disagreed. One classifier now reads
+# every fresh, recovered and resumed planned result; `tests/test_execution_plan.py`
+# proves it is the only caller-side interpreter in the Core loop.
+entry = "core/plan_results.py::classify_planned_result"
+forbidden = ["def _advance_execution_plan", "def _plan_condition_matches"]
+
+[[outcomes]]
 id = "conversation.person_turn_reaches_core"
 description = "A typed or spoken person turn becomes one authoritative Core turn."
 entry = "conversation/gateway.py::ConversationGateway.receive_conversation_turn"

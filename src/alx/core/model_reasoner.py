@@ -58,7 +58,9 @@ those steps without asking you again. A plan does not grant approval or permissi
 any step needing a fresh person-turn approval must be called separately. State exact
 completion and pending conditions from structured capability results. Only a
 capability marked repeat_safe_observation may carry waiting conditions; start
-an external operation once, then use a separate observation call to wait.
+an external operation once, then use a separate observation call to wait. A
+failed result can be waited on only when it is listed in that capability's
+pending_failure_reasons; every other failure, refusal, or judgment returns to you.
 Return to
 reasoning for changed evidence, review judgement, failed checks, or ambiguity.
 A silent completion means you judge that no spoken or
@@ -532,6 +534,7 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
                 else state.execution_plan.next_due_at.isoformat()
             ),
             "core_reentry_reason": state.execution_plan.core_reentry_reason,
+            "core_reentry_facts": list(state.execution_plan.core_reentry_facts),
         },
         "evidence": [
             {
@@ -684,6 +687,10 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
                     "repeat_safe_observation": (
                         item.side_effect.value == "none" or item.repeat_safe_observation
                     ),
+                    **({"pending_failure_reasons": [
+                        {"code": code, "reason": reason}
+                        for code, reason in item.pending_failure_reasons
+                    ]} if item.pending_failure_reasons else {}),
                     **_failure_code_payload(item, shared, code_sets),
                     "input_schema": _capability_schema_payload(item.input_schema),
                     "result_fields": _result_fields(item.output_schema),
