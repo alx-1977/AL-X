@@ -31,7 +31,8 @@ from alx.contracts.review_content import (  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.core.loop import REASONING_TURN_WINDOW, project_turns_for_reasoning  # noqa: E402
 from alx.core.plan_results import (  # noqa: E402
-    PlanResultKind, classify_planned_result, plan_invalidation_facts, reduce_plan,
+    PlanResultKind, _member_matches, classify_planned_result, condition_matches,
+    json_equal, plan_invalidation_facts, reduce_plan, settled_contradiction,
 )
 from alx.tools.pull_request_checks import (  # noqa: E402
     DEFINITION as PULL_REQUEST_CHECKS_DEFINITION, READ_PULL_REQUEST_CHECKS,
@@ -2590,3 +2591,70 @@ class RuntimeOwnedObjectiveTests(PlanHarness):
         unbound = replace(plan(step("coding")), objective_source=None, objective_summary=None)
         with self.assertRaisesRegex(ValueError, "bound to its objective"):
             replace(goal(), execution_plan=unbound)
+
+
+class JsonConditionEqualityTests(unittest.TestCase):
+    """Plan conditions compare as JSON: a boolean is never a number."""
+
+    def matches(self, value, equals, negate=False):
+        return condition_matches({"values": {"x": value}},
+                                 PlanCondition("values.x", equals, negate=negate))
+
+    def test_json_equal_keeps_booleans_and_numbers_distinct(self):
+        cases = (
+            (True, 1, False), (1, True, False), (False, 0, False), (0, False, False),
+            (1, 1.0, True), (True, True, True), (False, False, True),
+            (None, None, True), (None, 0, False), (None, False, False), ("1", 1, False),
+            ("text", "text", True),
+            ((True,), (1,), False), ([True], (True,), True), ((1, 2), (1, 2, 3), False),
+            ({"a": False}, {"a": 0}, False), ({"a": [1.0]}, {"a": (1,)}, True),
+            ({"a": 1}, {"a": 1, "b": 2}, False),
+            ({"a": {"b": [True]}}, {"a": {"b": [1]}}, False),
+        )
+        for left, right, expected in cases:
+            with self.subTest(left=left, right=right):
+                self.assertIs(json_equal(left, right), expected)
+                self.assertIs(json_equal(right, left), expected)
+
+    def test_conditions_use_json_semantics(self):
+        self.assertFalse(self.matches(1, True))
+        self.assertFalse(self.matches(0, False))
+        self.assertTrue(self.matches(1.0, 1))
+        self.assertFalse(self.matches((1,), (True,)))
+        self.assertFalse(self.matches({"a": 0}, {"a": False}))
+        self.assertTrue(self.matches(True, True))
+
+    def test_negated_conditions_invert_json_semantics(self):
+        self.assertTrue(self.matches(1, True, negate=True))
+        self.assertTrue(self.matches(0, False, negate=True))
+        self.assertFalse(self.matches(1.0, 1, negate=True))
+        self.assertFalse(self.matches(True, True, negate=True))
+
+    def test_collection_members_use_the_same_semantics(self):
+        # A wildcard member compared whole, and a member's field.
+        self.assertFalse(_member_matches(1, "", PlanCondition("values.x.*", True)))
+        self.assertTrue(_member_matches(1, "", PlanCondition("values.x.*", True, negate=True)))
+        self.assertTrue(_member_matches(1.0, "", PlanCondition("values.x.*", 1)))
+        self.assertFalse(_member_matches({"ok": 0}, "ok",
+                                         PlanCondition("values.x.*.ok", False)))
+
+    def test_integer_result_cannot_advance_a_boolean_completion(self):
+        call = CapabilityCall("call-ci", "ci", {})
+        attempt = CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                    CapabilityResult("call-ci", "ci",
+                                                     CapabilityResultState.SUCCEEDED,
+                                                     {"passed": 1}))
+        outcome = classify_planned_result(
+            step("ci", completion=(PlanCondition("values.passed", True),)), attempt, None)
+        self.assertIs(outcome.kind, PlanResultKind.WAKE_CORE)
+        self.assertEqual(outcome.facts, ("planned_result_unexpected",))
+
+    def test_settled_member_with_a_number_for_a_boolean_is_a_failure(self):
+        workflow_step = ExecutionStep(
+            CapabilityCall("call-ci", "ci", {}),
+            (PlanCondition("values.checks.*.ok", True),),
+            (PlanCondition("values.checks.*.done", False, "any"),), 10,
+        )
+        document = {"values": {"checks": ({"done": True, "ok": 1},
+                                          {"done": False, "ok": None})}}
+        self.assertTrue(settled_contradiction(document, workflow_step))

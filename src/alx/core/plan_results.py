@@ -297,9 +297,35 @@ def condition_matches(document: Any, condition: PlanCondition) -> bool:
         values = next_values
         if not values:
             return False
-    comparisons = (value != condition.equals if condition.negate
-                   else value == condition.equals for value in values)
+    comparisons = (not json_equal(value, condition.equals) if condition.negate
+                   else json_equal(value, condition.equals) for value in values)
     return any(comparisons) if condition.quantifier == "any" else all(comparisons)
+
+
+def json_equal(left: Any, right: Any) -> bool:
+    """Equality as JSON defines it, which Python's == does not.
+
+    A boolean equals only a boolean, so true is never 1 and false never 0,
+    however deeply nested. Other numbers compare as JSON numbers, so 1 equals
+    1.0. Null equals only null. Objects need identical keys and equal values;
+    arrays need equal length and equal values in order, whether the result
+    was frozen to a tuple or arrived as a list.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return (isinstance(left, Mapping) and isinstance(right, Mapping)
+                and set(left) == set(right)
+                and all(json_equal(left[key], right[key]) for key in left))
+    if isinstance(left, (tuple, list)) or isinstance(right, (tuple, list)):
+        return (isinstance(left, (tuple, list)) and isinstance(right, (tuple, list))
+                and len(left) == len(right)
+                and all(json_equal(a, b) for a, b in zip(left, right)))
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    return type(left) is type(right) and left == right
 
 
 def settled_contradiction(document: Mapping[str, Any], step: ExecutionStep) -> bool:
@@ -337,7 +363,8 @@ def settled_contradiction(document: Mapping[str, Any], step: ExecutionStep) -> b
 def _member_matches(member: Any, suffix: str, condition: PlanCondition) -> bool:
     """Evaluate a wildcard condition against one member of its collection."""
     if not suffix:
-        return (member != condition.equals) if condition.negate else member == condition.equals
+        matched = json_equal(member, condition.equals)
+        return not matched if condition.negate else matched
     return condition_matches(member, replace(condition, path=suffix))
 
 
@@ -372,6 +399,7 @@ __all__ = [
     "condition_matches",
     "conditions_match",
     "declared_pending_failure",
+    "json_equal",
     "judgment_blocker",
     "plan_invalidation_facts",
     "reduce_plan",
