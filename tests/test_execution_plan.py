@@ -42,7 +42,9 @@ from alx.tools.review_content import (  # noqa: E402
     DEFINITION as REVIEW_CONTENT_DEFINITION, READ_EXTERNAL_REVIEW,
     build_review_content_executors,
 )
-from alx.continuity.plan_source import PlanContinuationSource  # noqa: E402
+from alx.continuity.plan_source import (  # noqa: E402
+    MAX_CONTINUATION_GENERATION, PlanContinuationSource,
+)
 from alx.conversation import ConversationGateway, SQLiteConversationStore  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 
@@ -2884,3 +2886,237 @@ class JsonPreconditionTests(unittest.TestCase):
         for precondition, context in unchanged:
             with self.subTest(precondition=precondition, context=context):
                 self.assertEqual(self.facts(precondition, context), ())
+
+
+class ContinuationDispositionTests(PlanHarness):
+    """Every claimed continuation ends handled, released, or retried within a cap."""
+
+    class Spend:
+        def __init__(self):
+            self.dispatched = set()
+
+        def dispatch_started(self, identifier):
+            return identifier in self.dispatched
+
+    def setUp(self):
+        super().setUp()
+        from alx.continuity.ledger import SQLiteOpportunityLedger
+        self.ledger_path = self.path.with_name("opportunities.sqlite3")
+        self.ledger = SQLiteOpportunityLedger(self.ledger_path)
+        self.addCleanup(lambda: self.ledger._connection.close())
+        self.spend = self.Spend()
+        self.source = self.plan_source()
+        self.conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(self.conversations.close)
+        created = self.conversations.create("thread", RETENTION)
+        self.conversations.append(conversation().turns[0], RETENTION, created.revision)
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=replace(
+            plan(step("coding")), cursor=1, status="completed")),
+            snapshot.retention_until, snapshot.revision)
+
+    def plan_source(self):
+        return PlanContinuationSource(self.store, self.ledger, enabled=True, spend=self.spend,
+                                      clock=lambda: self.now)
+
+    def restart(self):
+        from alx.continuity.ledger import SQLiteOpportunityLedger
+        self.ledger._connection.close()
+        self.ledger = SQLiteOpportunityLedger(self.ledger_path)
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+        self.source = self.plan_source()
+
+    def run_turn(self, *decisions, budget_check=None):
+        from alx.bootstrap.autonomous import AutonomousCognitionRunner
+        self.reasoner = Reasoner(*decisions)
+        gateway = ConversationGateway(self.agent(self.reasoner, budget_check=budget_check),
+                                      self.conversations)
+        runner = AutonomousCognitionRunner(self.source, self.ledger, gateway, 3, 30,
+                                           clock=lambda: self.now)
+        offered = self.source.due_opportunities()
+        self.assertEqual(len(offered), 1)
+        runner.run_one(offered[0])
+        return offered[0]
+
+    def responses(self):
+        return [item.content for item in self.conversations.load("thread").turns
+                if item.origin is ConversationOrigin.ALX_RESPONSE]
+
+    def plan_state(self):
+        return self.store.load("goal").state.execution_plan
+
+    def test_budget_stop_before_dispatch_is_released_after_a_delay(self):
+        def refuse(_conversation):
+            raise RuntimeError("execution ceiling reached")
+
+        first = self.run_turn(budget_check=refuse)
+        self.assertEqual(self.ledger.outcome(first.opportunity_id), "checkpointed")
+        self.assertEqual(self.source.settle(), (first.opportunity_id,))
+        self.assertIsNone(self.ledger.outcome(first.opportunity_id))
+        self.assertEqual(self.source.due_opportunities(), ())
+        self.now += timedelta(seconds=301)
+        again = self.run_turn(AgentDecision(response="Finished.", goal_id="goal"))
+        self.assertEqual(again.opportunity_id, first.opportunity_id)
+        self.assertEqual(self.plan_state().status, "handled")
+        self.assertEqual(self.source.settle(), ())
+        self.assertEqual(self.source.due_opportunities(), ())
+        self.assertEqual(self.responses(), ["Finished."])
+
+    def test_step_budget_exhausted_before_dispatch_is_retryable(self):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=replace(
+            snapshot.state.execution_plan, status="needs_core", cursor=0,
+            core_reentry_reason="planned_result_unexpected",
+            core_reentry_facts=("planned_result_unexpected",))),
+            snapshot.retention_until, snapshot.revision)
+        first = self.run_turn(*(AgentDecision(call=CapabilityCall(f"c{i}", "ci", {}),
+                                              goal_id="goal") for i in range(3)))
+        self.assertEqual(self.ledger.outcome(first.opportunity_id), "checkpointed")
+        self.source.settle()
+        self.now += timedelta(seconds=301)
+        self.assertEqual([item.opportunity_id for item in self.source.due_opportunities()],
+                         [first.opportunity_id])
+
+    def test_reasoner_error_before_dispatch_is_released_by_the_runner(self):
+        class Broken(Reasoner):
+            def decide(self, context):
+                self.calls += 1
+                raise RuntimeError("provider preflight failed")
+
+        from alx.bootstrap.autonomous import AutonomousCognitionRunner
+        gateway = ConversationGateway(self.agent(Broken()), self.conversations)
+        runner = AutonomousCognitionRunner(self.source, self.ledger, gateway, 3, 30,
+                                           clock=lambda: self.now)
+        offered = self.source.due_opportunities()[0]
+        runner.run_one(offered)
+        self.assertIsNone(self.ledger.outcome(offered.opportunity_id))
+        self.assertEqual([item.opportunity_id for item in self.source.due_opportunities()],
+                         [offered.opportunity_id])
+
+    def test_dispatched_but_unanswered_is_retried_under_a_new_generation_not_replayed(self):
+        first = self.run_turn(AgentDecision(goal_id="goal"))  # reasons, never answers
+        self.spend.dispatched.add(first.opportunity_id)
+        self.assertEqual(self.plan_state().status, "completed")
+        self.assertEqual(self.source.settle(), (first.opportunity_id,))
+        # The paid identity is never offered again; the next generation is.
+        self.assertTrue(self.ledger.exists(first.opportunity_id))
+        retry = self.source.due_opportunities()
+        self.assertEqual(len(retry), 1)
+        self.assertNotEqual(retry[0].opportunity_id, first.opportunity_id)
+        self.assertEqual(self.plan_state().continuation_generation, 1)
+        self.run_turn(AgentDecision(response="Finished.", goal_id="goal"))
+        self.assertEqual(self.plan_state().status, "handled")
+        self.assertEqual(self.responses(), ["Finished."])
+
+    def test_reasoner_error_after_dispatch_is_retried_not_replayed(self):
+        offered = self.source.due_opportunities()[0]
+        self.assertTrue(self.source.claim(offered))
+        # The runner's own path for a failed turn whose provider was reached.
+        self.ledger.mark_unreconciled(offered.opportunity_id)
+        self.spend.dispatched.add(offered.opportunity_id)
+        self.source.settle()
+        retry = self.source.due_opportunities()
+        self.assertEqual(len(retry), 1)
+        self.assertNotEqual(retry[0].opportunity_id, offered.opportunity_id)
+        self.assertEqual(self.ledger.outcome(offered.opportunity_id), "unreconciled")
+
+    def test_retries_are_capped_and_the_plan_stays_reachable(self):
+        attempts = 0
+        with self.assertLogs("alx.continuity.plan_source", level="WARNING") as logs:
+            for _ in range(MAX_CONTINUATION_GENERATION + 3):
+                offered = self.source.due_opportunities()
+                if not offered:
+                    break
+                attempts += 1
+                self.source.claim(offered[0])
+                self.ledger.record_outcome(offered[0].opportunity_id, "checkpointed")
+                self.spend.dispatched.add(offered[0].opportunity_id)
+                self.source.settle()
+        # The first attempt and at most MAX_CONTINUATION_GENERATION retries.
+        self.assertEqual(attempts, MAX_CONTINUATION_GENERATION + 1)
+        self.assertEqual(self.plan_state().continuation_generation, MAX_CONTINUATION_GENERATION)
+        self.assertEqual(sum("exhausted its retries" in line for line in logs.output), 1)
+        with self.assertNoLogs("alx.continuity.plan_source", level="WARNING"):
+            self.source.settle()
+        self.assertEqual(self.source.due_opportunities(), ())
+        # Not lost: the plan still stands where any turn selecting its goal sees it.
+        self.assertEqual(self.plan_state().status, "completed")
+        reasoner = Reasoner(AgentDecision(response="Finished.", goal_id="goal"),
+                            AgentDecision(response="Finished.", goal_id="goal"))
+        ConversationGateway(self.agent(reasoner), self.conversations).receive_conversation_turn(
+            ConversationTurn("thread", "person-2", ConversationOrigin.TYPED, "Done yet?", NOW,
+                             "friedl"), 3, RETENTION)
+        self.assertEqual(self.plan_state().status, "handled")
+
+    def test_settling_twice_never_double_retries(self):
+        first = self.run_turn(AgentDecision(goal_id="goal"))
+        self.spend.dispatched.add(first.opportunity_id)
+        self.source.settle()
+        self.source.settle()
+        self.assertEqual(self.plan_state().continuation_generation, 1)
+        self.assertEqual(len(self.source.due_opportunities()), 1)
+
+    def test_restart_after_each_state_keeps_a_path_forward(self):
+        def refuse(_conversation):
+            raise RuntimeError("execution ceiling reached")
+
+        # Released before dispatch, then restarted: offered again.
+        released = self.run_turn(budget_check=refuse)
+        self.source.settle()
+        self.restart()
+        self.assertEqual([item.opportunity_id for item in self.source.due_opportunities()],
+                         [released.opportunity_id])
+        # Dispatched and unanswered, restarted before settling: settled after.
+        paid = self.run_turn(AgentDecision(goal_id="goal"))
+        self.spend.dispatched.add(paid.opportunity_id)
+        self.restart()
+        self.source.recover()
+        self.source.settle()
+        retry = self.source.due_opportunities()
+        self.assertEqual(len(retry), 1)
+        self.assertNotEqual(retry[0].opportunity_id, paid.opportunity_id)
+        # Crashed mid-turn after dispatch, restarted: recovery retries once.
+        self.source.claim(retry[0])
+        self.spend.dispatched.add(retry[0].opportunity_id)
+        self.restart()
+        self.source.recover()
+        self.source.recover()
+        self.assertEqual(self.plan_state().continuation_generation, 2)
+        self.restart()
+        self.source.recover()
+        self.assertEqual(self.plan_state().continuation_generation, 2)
+
+    def test_a_turn_still_running_is_never_settled(self):
+        offered = self.source.due_opportunities()[0]
+        self.source.claim(offered)
+        self.spend.dispatched.add(offered.opportunity_id)
+        for outcome in ("created", "reserved", "deferred_input_bound:1000"):
+            with self.subTest(outcome=outcome):
+                if outcome != "created":
+                    self.ledger._connection.execute(
+                        "UPDATE cognition_opportunities SET outcome = ? WHERE opportunity_id = ?",
+                        (outcome, offered.opportunity_id))
+                    self.ledger._connection.commit()
+                self.assertEqual(self.source.settle(), ())
+                self.assertEqual(self.ledger.outcome(offered.opportunity_id), outcome)
+                self.assertEqual(self.plan_state().continuation_generation, 0)
+
+    def test_handled_continuation_closes_exactly_once(self):
+        self.run_turn(AgentDecision(response="Finished.", goal_id="goal"))
+        self.assertEqual(self.plan_state().status, "handled")
+        for _ in range(3):
+            self.assertEqual(self.source.settle(), ())
+            self.assertEqual(self.source.due_opportunities(), ())
+        self.restart()
+        self.source.recover()
+        self.assertEqual(self.source.settle(), ())
+        self.assertEqual(self.source.due_opportunities(), ())
+        self.assertEqual(self.responses(), ["Finished."])
+
+    def test_runtime_settles_continuations_under_the_core_lock_each_tick(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "alx" / "bootstrap"
+                  / "live_voice.py").read_text()
+        self.assertIn("advance_plans=lambda: (gateway.advance_due_plans(), plan_source.settle()),",
+                      source)
+        self.assertIn("spend=autonomous_budget,", source)

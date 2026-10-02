@@ -954,8 +954,9 @@ async def run(repository_root: Path) -> None:
     occasion_sources: list[Any] = [cognition_source]
     plan_source = PlanContinuationSource(
         goal_store, opportunity_ledger, enabled=plan_continuation,
+        spend=autonomous_budget,
     )
-    plan_source.recover(autonomous_budget)
+    plan_source.recover()
     occasion_sources.append(plan_source)
     # Observed mail joins them for the same reason, and to end the same
     # coupling the due-cognition tick was built to avoid. Mail used to reach
@@ -1032,7 +1033,7 @@ async def run(repository_root: Path) -> None:
         core_turn_lock,
         autonomous_due_check_seconds(environment),
         reopen=None if autonomous_holds is None else autonomous_holds.reopen,
-        advance_plans=gateway.advance_due_plans,
+        advance_plans=lambda: (gateway.advance_due_plans(), plan_source.settle()),
     )
     # Watching the mailbox is not a property of whether Friedl has a browser
     # open, so the scan lives here beside the transport rather than inside a

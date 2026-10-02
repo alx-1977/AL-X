@@ -1,22 +1,52 @@
-"""Offer a completed or interrupted execution plan to the existing Core runner."""
+"""Offer a completed or interrupted execution plan to the existing Core runner.
+
+Every continuation this source offers and the runner claims ends in exactly
+one of three ways:
+
+- handled: a Core decision that saw it answered it, and the plan says so;
+- released: its turn ended without reaching the provider, so offering the
+  same continuation again costs nothing that was not already refused;
+- retried: its turn reached the provider and still left the plan standing, so
+  the same identity is never replayed; a new generation is offered instead,
+  at most MAX_CONTINUATION_GENERATION times. After that the plan stays where
+  any turn that selects its goal can see it, and no occasion repeats it.
+"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
 
 LOGGER = logging.getLogger(__name__)
 
+# Paid retries of one continuation, after its first attempt. Shared by the
+# settle step and by startup recovery, so restarts cannot extend it.
+MAX_CONTINUATION_GENERATION = 2
+# How long a released continuation waits before it is offered again. A turn
+# refused before reasoning, such as by an exhausted execution budget, would
+# otherwise be refused again on every tick.
+RELEASE_RETRY_SECONDS = 300
+# Ledger outcomes that mean the claiming turn has not finished yet.
+_IN_PROGRESS = frozenset({"created", "reserved"})
+
 
 class PlanContinuationSource:
-    def __init__(self, goals, ledger, enabled: bool = False) -> None:
+    def __init__(self, goals, ledger, enabled: bool = False, spend=None,
+                 clock=None, retry_seconds: float = RELEASE_RETRY_SECONDS) -> None:
         self._goals = goals
         self._ledger = ledger
         self._enabled = enabled
+        # The durable record of whether an occasion's call reached the
+        # provider. Without it, a turn is assumed to have reached it.
+        self._spend = spend
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._retry = timedelta(seconds=retry_seconds)
+        self._not_before: dict[str, datetime] = {}
+        self._exhausted_reported: set[str] = set()
 
     @property
     def enabled(self) -> bool:
@@ -26,7 +56,7 @@ class PlanContinuationSource:
         if not self._enabled:
             return ()
         result = []
-        now = datetime.now(UTC)
+        now = self._clock()
         for goal_id in self._goals.list_open_plan_goal_ids():
             try:
                 snapshot = self._goals.load(goal_id)
@@ -40,7 +70,7 @@ class PlanContinuationSource:
             if plan is None or plan.status not in {"needs_core", "completed"}:
                 continue
             identifier = self._opportunity_id(snapshot.state.goal_id, plan)
-            if self._ledger.exists(identifier):
+            if self._ledger.exists(identifier) or self._not_before.get(identifier, now) > now:
                 continue
             result.append(CognitionOpportunity(
                 identifier, CognitionOrigin.WORK_COMPLETED,
@@ -71,9 +101,68 @@ class PlanContinuationSource:
         self._ledger.release(opportunity.opportunity_id)
 
     def mark_honoured(self, opportunity: CognitionOpportunity) -> None:
+        # Whether the turn answered the continuation is a fact about the plan,
+        # not about the turn's outcome; `settle` reads it from both.
         pass
 
+    def settle(self) -> tuple[str, ...]:
+        """Give every finished, unanswered continuation its next state.
+
+        Runs under the Core lock at the start of each tick, after plans have
+        been reconciled. A continuation whose claim row records a finished
+        turn while the plan still stands at that same identity was not
+        answered. It is released when the provider was never reached, and
+        retried under a new generation when it was. Returns what changed.
+        """
+        if not self._enabled:
+            return ()
+        settled = []
+        now = self._clock()
+        for goal_id in self._goals.list_open_plan_goal_ids():
+            try:
+                snapshot = self._goals.load(goal_id)
+                plan = snapshot.state.execution_plan
+                if plan is None or plan.status not in {"needs_core", "completed"}:
+                    continue
+                identifier = self._opportunity_id(goal_id, plan)
+                outcome = self._ledger.outcome(identifier)
+                # No claim, a turn still running, or an occasion held by the
+                # input-bound mechanism, whose markers carry their bound.
+                if outcome is None or outcome in _IN_PROGRESS or ":" in outcome:
+                    continue
+                if self._spend is not None and not self._spend.dispatch_started(identifier):
+                    self._ledger.release(identifier)
+                    self._not_before[identifier] = now + self._retry
+                    settled.append(identifier)
+                elif self._retry_generation(snapshot, identifier):
+                    settled.append(identifier)
+            except Exception as error:  # noqa: BLE001 - one goal must not stop the rest
+                LOGGER.warning("Plan continuation could not be settled for goal %s: %s",
+                               goal_id, type(error).__name__)
+        return tuple(settled)
+
+    def _retry_generation(self, snapshot, identifier: str) -> bool:
+        """Offer an unanswered, possibly paid continuation once more, within the cap."""
+        plan = snapshot.state.execution_plan
+        if plan.continuation_generation >= MAX_CONTINUATION_GENERATION:
+            if identifier not in self._exhausted_reported:
+                self._exhausted_reported.add(identifier)
+                LOGGER.warning(
+                    "Plan continuation %s exhausted its retries; it waits for a turn "
+                    "that selects goal %s", identifier, snapshot.state.goal_id)
+            return False
+        self._goals.replace(
+            replace(snapshot.state, execution_plan=replace(
+                plan, continuation_generation=plan.continuation_generation + 1)),
+            snapshot.retention_until, snapshot.revision, snapshot.provenance,
+        )
+        return True
+
     def recover(self, spend=None) -> tuple[str, ...]:
+        spend = self._spend if spend is None else spend
+        return self._recover(spend)
+
+    def _recover(self, spend) -> tuple[str, ...]:
         """Reclaim unfinished plan occasions at startup, one at a time.
 
         Runs while the runtime is composed. One stale or unreadable record
@@ -132,8 +221,4 @@ class PlanContinuationSource:
                 or plan.continuation_generation != generation
                 or plan.status not in {"needs_core", "completed"}):
             return
-        updated = replace(plan, continuation_generation=generation + 1)
-        self._goals.replace(
-            replace(snapshot.state, execution_plan=updated),
-            snapshot.retention_until, snapshot.revision, snapshot.provenance,
-        )
+        self._retry_generation(snapshot, row["opportunity_id"])
