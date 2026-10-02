@@ -19,7 +19,7 @@ from alx.contracts import (  # noqa: E402
     Evidence, GoalStatus, GoalStopReason, StructuredSchema, SuccessCriterion, ValueKind,
 )
 from alx.contracts import (  # noqa: E402
-    Approval, ApprovalLifecycle, ApprovalScope, GoalMutationKind, GoalProposal,
+    Approval, ApprovalLifecycle, ApprovalScope, GoalMutationKind, GoalProposal, WorkItem,
 )
 from alx.contracts.pull_request_checks import (  # noqa: E402
     CheckRun, CommitStatus, PullRequestChecks,
@@ -100,7 +100,7 @@ class PlanHarness(unittest.TestCase):
 
     def agent(self, reasoner, *, turn_bound=frozenset(),
               review_requires_judgment=False, effectful=frozenset(),
-              extra_definitions=()):
+              extra_definitions=(), budget_check=None):
         names = ("coding", "review", "ci", "merge", "sync", "cleanup",
                  "other", "request_external_review")
         definitions = tuple(CapabilityDefinition(
@@ -138,12 +138,14 @@ class PlanHarness(unittest.TestCase):
         return CoreAgent(self.store, reasoner, dispatch, definitions,
                          clock=lambda: self.now,
                          identifier_factory=lambda: f"repeat-{len(self.calls)}",
-                         turn_bound_capabilities=turn_bound)
+                         turn_bound_capabilities=turn_bound,
+                         budget_check=budget_check)
 
     def reset_goal(self):
         snapshot = self.store.load("goal")
         self.store.replace(replace(snapshot.state, execution_plan=None, attempts=(),
-                                   status=GoalStatus.ACTIVE, stop_reason=None),
+                                   status=GoalStatus.ACTIVE, stop_reason=None,
+                                   blockers=(), outstanding_work=(), evidence=()),
                            snapshot.retention_until, snapshot.revision)
         self.calls.clear()
 
@@ -1409,3 +1411,264 @@ class PlanResultSinglePathTests(unittest.TestCase):
         for fragment in ('status="needs_core"', 'status="waiting"',
                          "core_reentry_reason=", "cursor=plan.cursor"):
             self.assertNotIn(fragment, source)
+
+
+class OpenPlanScanTests(PlanHarness):
+    """Finding 1: the due path reads only goals whose plan is still open."""
+
+    def test_store_returns_only_open_plans_in_storage_order(self):
+        def add(goal_id, status=GoalStatus.ACTIVE, plan_status=None, **extra):
+            workflow = None
+            if plan_status is not None:
+                workflow = replace(plan(step("ci")), plan_id=f"plan-{goal_id}",
+                                   status=plan_status,
+                                   cursor=1 if plan_status == "completed" else 0,
+                                   next_due_at=NOW if plan_status == "waiting" else None)
+            self.store.create(replace(goal(), goal_id=goal_id, status=status,
+                                      execution_plan=workflow, **extra),
+                              "thread", RETENTION)
+
+        add("no-plan")
+        add("cancelled", GoalStatus.CANCELLED, stop_reason=GoalStopReason.CANCELLED)
+        add("handled", plan_status="handled")
+        add("waiting", plan_status="waiting")
+        add("cancelled-handled", GoalStatus.CANCELLED, "handled",
+            stop_reason=GoalStopReason.CANCELLED)
+        add("needs-core", GoalStatus.BLOCKED, "needs_core",
+            stop_reason=GoalStopReason.GENUINELY_BLOCKED,
+            blockers=(WorkItem("review", "Review needs judgment"),))
+        add("ready", plan_status="ready")
+        add("completed", plan_status="completed")
+        self.assertEqual(self.store.list_open_plan_goal_ids(),
+                         ("waiting", "needs-core", "ready", "completed"))
+
+    def test_due_path_never_decodes_the_full_goal_history(self):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=plan(step("ci"))),
+                           snapshot.retention_until, snapshot.revision)
+
+        class Ledger:
+            def exists(self, _identifier):
+                return False
+
+        with patch.object(self.store, "list_goals",
+                          side_effect=AssertionError("full history scanned")):
+            self.agent(Reasoner()).advance_due_plans(lambda _: conversation())
+            offered = PlanContinuationSource(self.store, Ledger(),
+                                             enabled=True).due_opportunities()
+        self.assertEqual(self.calls, ["ci"])
+        self.assertEqual(len(offered), 1)
+
+
+class PlanFailureIsolationTests(PlanHarness):
+    """Finding 2: one goal's failure does not stop another's reconciliation."""
+
+    def test_failing_goal_is_logged_and_later_goal_still_reconciles(self):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=plan(step("coding"))),
+                           snapshot.retention_until, snapshot.revision)
+        self.store.create(replace(goal(), goal_id="goal-b",
+                                  execution_plan=replace(plan(step("ci")), plan_id="plan-b")),
+                          "thread", RETENTION)
+        loads = []
+
+        def load(_conversation_id):
+            loads.append(_conversation_id)
+            if len(loads) == 1:
+                raise LookupError("conversation unreadable")
+            return conversation()
+
+        with self.assertLogs("alx.core.loop", level="WARNING") as logs:
+            advanced = self.agent(Reasoner()).advance_due_plans(load)
+        self.assertEqual(advanced, 1)
+        self.assertEqual(self.calls, ["ci"])
+        self.assertEqual(self.store.load("goal-b").state.execution_plan.status, "completed")
+        # The failed goal is neither advanced nor recorded as reconciled.
+        failed = self.store.load("goal").state.execution_plan
+        self.assertEqual((failed.status, failed.cursor), ("ready", 0))
+        self.assertTrue(any("goal" in line and "LookupError" in line
+                            for line in logs.output))
+
+
+class PlannedDispatchConversationTests(PlanHarness):
+    """Finding 3: a planned call runs under its goal's own conversation."""
+
+    def setUp(self):
+        super().setUp()
+        # The runtime's binding, as live voice keeps it: only the budget
+        # check names the conversation that executors then read.
+        self.current = ["unrelated-earlier-thread"]
+        self.seen = []
+        self.budget_refused = False
+
+    def budget_check(self, conversation_id):
+        self.current[0] = conversation_id
+        if self.budget_refused:
+            raise RuntimeError("execution ceiling reached")
+
+    def watching_agent(self, reasoner=None):
+        def record(call):
+            self.seen.append((call.capability_id, self.current[0]))
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.SUCCEEDED,
+                                                      {"state": "done"}))
+        self.outputs["ci"] = record
+        self.outputs["coding"] = record
+        return self.agent(reasoner or Reasoner(), budget_check=self.budget_check)
+
+    def install(self, *steps):
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=plan(*steps)),
+                           snapshot.retention_until, snapshot.revision)
+
+    def test_due_tick_dispatch_binds_the_goals_conversation(self):
+        self.install(step("coding"), step("ci"))
+        self.watching_agent().advance_due_plans(lambda _: conversation())
+        self.assertEqual(self.seen, [("coding", "thread"), ("ci", "thread")])
+
+    def test_resumed_dispatch_binds_the_goals_conversation(self):
+        self.install(step("ci"))
+        self.watching_agent(Reasoner(AgentDecision(response="Done.", goal_id="goal"))).process(
+            conversation(), RETENTION, 1, origin=CognitionOrigin.WORK_COMPLETED,
+            resume_plan_goal_id="goal",
+        )
+        self.assertEqual(self.seen, [("ci", "thread")])
+
+    def test_exceeded_budget_wakes_core_without_dispatching(self):
+        self.install(step("ci"), step("merge"))
+        self.budget_refused = True
+        self.watching_agent().advance_due_plans(lambda _: conversation())
+        stored = self.store.load("goal").state
+        self.assertEqual(self.seen, [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(stored.attempts, ())
+        self.assertEqual(stored.execution_plan.status, "needs_core")
+        self.assertEqual(stored.execution_plan.core_reentry_reason, "plan_budget_exceeded")
+        self.assertEqual(stored.execution_plan.cursor, 0)
+
+
+class NonActiveJudgmentEvidenceTests(PlanHarness):
+    """Finding 4: a goal that is not ACTIVE never receives a new dispatch."""
+
+    def test_restart_never_reobserves_for_a_non_active_goal(self):
+        judged = CapabilityDefinition("assess", "assess", SCHEMA, SCHEMA,
+                                      SideEffect.NONE, requires_core_judgment=True)
+        call = CapabilityCall("call-assess", "assess", {})
+        stored = CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                   CapabilityResult(call.call_id, "assess",
+                                                    CapabilityResultState.SUCCEEDED,
+                                                    {"verdict": "unclear"}))
+        woken = replace(
+            plan(ExecutionStep(call, (PlanCondition("state", "succeeded"),)), step("merge")),
+            status="needs_core", last_result_call_id=call.call_id,
+            core_reentry_reason="planned_evidence_requires_judgement",
+            core_reentry_facts=("planned_evidence_requires_judgement",),
+        )
+        evidence = (Evidence("done", "verification", supports=("done",),
+                             source_references=("attempt:call-assess",)),)
+        work = (WorkItem("assess", "Judge the assessment"),)
+        cases = (
+            (GoalStatus.AWAITING_INPUT, GoalStopReason.REQUIRED_INPUT, (),
+             {"outstanding_work": work}),
+            (GoalStatus.BLOCKED, GoalStopReason.GENUINELY_BLOCKED, (), {"blockers": work}),
+            (GoalStatus.COMPLETED, GoalStopReason.SUCCESS_CRITERIA_MET, evidence, {}),
+        )
+        for status, reason, proof, parked in cases:
+            with self.subTest(status=status):
+                self.reset_goal()
+                snapshot = self.store.load("goal")
+                self.store.replace(
+                    replace(snapshot.state, status=status, stop_reason=reason,
+                            evidence=proof, attempts=(stored,), execution_plan=woken,
+                            **parked),
+                    snapshot.retention_until, snapshot.revision,
+                )
+                self.store.close()
+                self.store = SQLiteGoalStore(self.path)
+                reasoner = Reasoner(AgentDecision(response="I need to read it again.",
+                                                  goal_id="goal"))
+                self.agent(reasoner, extra_definitions=(judged,)).process(
+                    conversation(), RETENTION, 1, origin=CognitionOrigin.WORK_COMPLETED,
+                    resume_plan_goal_id="goal",
+                )
+                state = self.store.load("goal").state
+                self.assertEqual(self.calls, [])
+                self.assertEqual(state.attempts, (stored,))
+                self.assertFalse(any(item.disposition is CapabilityAttemptDisposition.PENDING
+                                     for item in state.attempts))
+                self.assertIn("judgment_evidence_unavailable",
+                              state.execution_plan.core_reentry_facts)
+                self.assertEqual(reasoner.contexts[0].transient_attempts, ())
+
+
+class AdversarialFollowUpTests(PlanHarness):
+    """Gaps found by local review of the four fixes."""
+
+    def test_undecodable_goal_does_not_stop_other_plans_or_occasions(self):
+        import sqlite3
+        self.store.create(replace(goal(), goal_id="goal-b",
+                                  execution_plan=replace(plan(step("ci")), plan_id="plan-b")),
+                          "thread", RETENTION)
+        self.store.create(replace(goal(), goal_id="goal-c", execution_plan=replace(
+            plan(step("coding")), plan_id="plan-c", cursor=1, status="completed")),
+            "thread", RETENTION)
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, execution_plan=plan(step("other"))),
+                           snapshot.retention_until, snapshot.revision)
+        # The plan still reads as open in SQL but no longer decodes.
+        raw = sqlite3.connect(self.path)
+        raw.execute("UPDATE goals SET state_json = json_set(state_json, "
+                    "'$.execution_plan.cursor', 99) WHERE goal_id = 'goal'")
+        raw.commit()
+        raw.close()
+
+        class Ledger:
+            def exists(self, _identifier):
+                return False
+
+        with self.assertLogs(level="WARNING"):
+            self.agent(Reasoner()).advance_due_plans(lambda _: conversation())
+            offered = PlanContinuationSource(self.store, Ledger(),
+                                             enabled=True).due_opportunities()
+        self.assertEqual(self.calls, ["ci"])
+        self.assertEqual({item.references[0] for item in offered},
+                         {"execution_plan:goal-b", "execution_plan:goal-c"})
+
+    def test_selection_reobservation_does_not_rebind_the_turns_dispatch(self):
+        current = ["thread"]
+        seen = []
+
+        def budget_check(conversation_id):
+            current[0] = conversation_id
+
+        judged = CapabilityDefinition("assess", "assess", SCHEMA, SCHEMA,
+                                      SideEffect.NONE, requires_core_judgment=True)
+
+        def record(call):
+            seen.append((call.capability_id, current[0]))
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.SUCCEEDED,
+                                                      {"state": "done"}))
+
+        self.outputs["assess"] = record
+        self.outputs["ci"] = record
+        call = CapabilityCall("call-assess", "assess", {})
+        stored = CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                   CapabilityResult(call.call_id, "assess",
+                                                    CapabilityResultState.SUCCEEDED,
+                                                    {"verdict": "unclear"}))
+        woken = replace(
+            plan(ExecutionStep(call, (PlanCondition("state", "succeeded"),))),
+            status="needs_core", last_result_call_id=call.call_id,
+            core_reentry_reason="planned_evidence_requires_judgement",
+            core_reentry_facts=("planned_evidence_requires_judgement",),
+        )
+        self.store.create(replace(goal(), goal_id="elsewhere", attempts=(stored,),
+                                  execution_plan=woken), "other-thread", RETENTION)
+        reasoner = Reasoner(AgentDecision(call=CapabilityCall("turn-ci", "ci", {}),
+                                          goal_id="elsewhere"))
+        agent = self.agent(reasoner, extra_definitions=(judged,), budget_check=budget_check)
+        agent.process(conversation(), RETENTION, 1, origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual(seen, [("assess", "other-thread"), ("ci", "thread")])

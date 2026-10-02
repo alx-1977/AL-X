@@ -242,21 +242,29 @@ class CoreAgent:
         for goal_id in tuple(self._plan_transient_attempts):
             self._active_plan_attempt(goal_id)
         advanced = 0
-        for snapshot in self._store.list_goals():
-            plan = snapshot.state.execution_plan
-            if plan is None:
-                continue
-            if plan.response_turn_id is not None:
-                self._reconcile_plan_response(
+        for goal_id in self._store.list_open_plan_goal_ids():
+            try:
+                snapshot = self._store.load(goal_id)
+                plan = snapshot.state.execution_plan
+                if plan is None:
+                    continue
+                if plan.response_turn_id is not None:
+                    self._reconcile_plan_response(
+                        snapshot, load_conversation(snapshot.conversation_id))
+                    continue
+                if plan.status not in {"ready", "waiting"}:
+                    continue
+                if any(item.disposition is CapabilityAttemptDisposition.PENDING
+                       for item in snapshot.state.attempts):
+                    snapshot = self._close_interrupted_dispatch(snapshot)
+                _, reason = self._reconcile_plan(
                     snapshot, load_conversation(snapshot.conversation_id))
+            except Exception as error:  # noqa: BLE001 - one plan must not stop the rest
+                # Its durable state is whatever it last reached, so the next
+                # tick tries it again; nothing records it as reconciled.
+                LOGGER.warning("Plan reconciliation failed for goal %s: %s",
+                               goal_id, type(error).__name__)
                 continue
-            if plan.status not in {"ready", "waiting"}:
-                continue
-            if any(item.disposition is CapabilityAttemptDisposition.PENDING
-                   for item in snapshot.state.attempts):
-                snapshot = self._close_interrupted_dispatch(snapshot)
-            _, reason = self._reconcile_plan(
-                snapshot, load_conversation(snapshot.conversation_id))
             if reason != "not_due":
                 advanced += 1
         return advanced
@@ -499,6 +507,16 @@ class CoreAgent:
                     # changed precondition is reduced here; nothing new runs.
                     snapshot, _ = self._reconcile_plan(snapshot, conversation, dispatch=False)
                     snapshot, selected_plan_attempt = self._plan_evidence(snapshot)
+                    if snapshot.conversation_id != conversation_id:
+                        # A re-observation bound the goal's own conversation.
+                        # This step's own dispatch belongs to the turn's.
+                        try:
+                            self._budget_check(conversation_id)
+                        except Exception as error:
+                            LOGGER.warning("Reasoning stopped by execution budget: %s", error)
+                            return CoreOutcome(
+                                CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
+                            )
                     mechanical_blocker = (
                         self._plan_mechanical_blocker(snapshot) or mechanical_blocker
                     )
@@ -2061,8 +2079,22 @@ class CoreAgent:
 
     def _dispatch_planned_call(
         self, snapshot: GoalSnapshot, call: CapabilityCall,
-    ) -> tuple[GoalSnapshot, CapabilityAttempt | None]:
-        """Checkpoint, dispatch and record one call AL/X already decided."""
+    ) -> tuple[GoalSnapshot, CapabilityAttempt | None, str | None]:
+        """Checkpoint, dispatch and record one call AL/X already decided.
+
+        Returns a refusal instead when the goal's own conversation may not
+        execute now. Nothing is checkpointed or dispatched in that case.
+        """
+        try:
+            # The same check a reasoning step makes, against the goal's own
+            # conversation. The runtime binds that conversation for the call's
+            # executors here; without it a background step ran under whichever
+            # conversation the last turn had named, and outside the ceiling.
+            self._budget_check(snapshot.conversation_id)
+        except Exception as error:  # noqa: BLE001 - any stop is a refusal
+            LOGGER.warning("Planned dispatch stopped by execution budget: %s",
+                           type(error).__name__)
+            return snapshot, None, "plan_budget_exceeded"
         now = self._clock()
         authority_state = snapshot.state
         pending = CapabilityAttempt(
@@ -2086,10 +2118,10 @@ class CoreAgent:
         except Exception:
             # The pending dispatch survives. Recovery closes it as
             # uncertain; the plan is never replayed blindly.
-            return snapshot, None
+            return snapshot, None, None
         if attempt.call != call or attempt.disposition is CapabilityAttemptDisposition.PENDING:
-            return snapshot, None
-        return self._finalize_dispatch(snapshot, attempt, now), attempt
+            return snapshot, None, None
+        return self._finalize_dispatch(snapshot, attempt, now), attempt, None
 
     def _reconcile_plan(
         self, snapshot: GoalSnapshot, conversation: ConversationSnapshot,
@@ -2147,7 +2179,9 @@ class CoreAgent:
                 return self._apply_plan_result(
                     snapshot, wake(*facts, *(() if refusal is None else (refusal,))),
                 ), "wake"
-            snapshot, attempt = self._dispatch_planned_call(snapshot, call)
+            snapshot, attempt, refusal = self._dispatch_planned_call(snapshot, call)
+            if refusal is not None:
+                return self._apply_plan_result(snapshot, wake(refusal)), "wake"
             if attempt is None:
                 return snapshot, "inactive"
             classification = classify_planned_result(
@@ -2184,10 +2218,14 @@ class CoreAgent:
         definition = None if stored is None else self._definition(stored.call.capability_id)
         if definition is None or not definition.requires_core_judgment:
             return snapshot, carried
+        refusal = None
+        # Only an ACTIVE goal may carry a new dispatch. A parked or finished
+        # goal falls through to unavailable evidence rather than re-observing.
         if ((definition.side_effect is SideEffect.NONE or definition.repeat_safe_observation)
+                and snapshot.state.status is GoalStatus.ACTIVE
                 and self._dispatch_blocked_reason(stored.call, snapshot.state) is None):
             call = replace(stored.call, call_id=str(uuid4()))
-            snapshot, observed = self._dispatch_planned_call(snapshot, call)
+            snapshot, observed, refusal = self._dispatch_planned_call(snapshot, call)
             if (observed is not None and observed.result is not None
                     and observed.disposition is CapabilityAttemptDisposition.EXECUTED):
                 plan = snapshot.state.execution_plan
@@ -2203,7 +2241,8 @@ class CoreAgent:
         snapshot = self._plan_checkpoint(snapshot, replace(
             plan,
             core_reentry_facts=tuple(dict.fromkeys(
-                (*plan.core_reentry_facts, "judgment_evidence_unavailable"))),
+                (*plan.core_reentry_facts, "judgment_evidence_unavailable",
+                 *(() if refusal is None else (refusal,))))),
             mechanical_blocker=plan.mechanical_blocker or "judgment_evidence_unavailable",
         ), "judgment_evidence_unavailable")
         return snapshot, None

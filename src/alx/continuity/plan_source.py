@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PlanContinuationSource:
@@ -24,7 +27,13 @@ class PlanContinuationSource:
             return ()
         result = []
         now = datetime.now(UTC)
-        for snapshot in self._goals.list_goals():
+        for goal_id in self._goals.list_open_plan_goal_ids():
+            try:
+                snapshot = self._goals.load(goal_id)
+            except Exception as error:  # noqa: BLE001 - one goal must not hide the rest
+                LOGGER.warning("Plan continuation unreadable for goal %s: %s",
+                               goal_id, type(error).__name__)
+                continue
             if snapshot.retention_until <= now:
                 continue
             plan = snapshot.state.execution_plan

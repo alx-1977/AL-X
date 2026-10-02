@@ -563,6 +563,21 @@ class SQLiteGoalStore:
         identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY rowid").fetchall()
         return tuple(self.load(item[0]) for item in identifiers)
 
+    def list_open_plan_goal_ids(self) -> tuple[str, ...]:
+        """Goals whose execution plan still needs the executor or AL/X.
+
+        The due tick runs this under the Core lock. Filtering in SQL keeps a
+        goal history of any length, completed, cancelled and handled plans
+        alike, from being decoded on every tick. Identifiers only, so each
+        caller loads one goal at a time and one unreadable goal cannot stop
+        the others.
+        """
+        return tuple(item[0] for item in self._connection.execute(
+            "SELECT goal_id FROM goals "
+            "WHERE json_extract(state_json, '$.execution_plan.status') "
+            "IN ('ready', 'waiting', 'needs_core', 'completed') ORDER BY rowid"
+        ).fetchall())
+
     def legacy_conversation_turns(self) -> tuple[ConversationTurn, ...]:
         """Expose pre-v4 turns solely for one-way migration to their own store."""
         rows = self._connection.execute(
