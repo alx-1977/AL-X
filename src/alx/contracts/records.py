@@ -280,8 +280,8 @@ class ExecutionPlan:
     """AL/X's durable intent, with only its mechanical cursor advanced by code."""
 
     plan_id: str
-    objective_source: str
-    objective_summary: str
+    objective_source: str | None
+    objective_summary: str | None
     source_turn_id: str | None
     steps: tuple[ExecutionStep, ...]
     context_preconditions: StructuredData = field(default_factory=dict)
@@ -298,8 +298,12 @@ class ExecutionPlan:
     mechanical_blocker: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("plan_id", "objective_source", "objective_summary"):
-            _required(getattr(self, name), name)
+        _required(self.plan_id, "plan_id")
+        # The objective a plan serves is the goal's, bound by the Core when it
+        # installs the plan. A proposal arriving from reasoning carries none.
+        for name in ("objective_source", "objective_summary"):
+            if getattr(self, name) is not None:
+                _required(getattr(self, name), name)
         object.__setattr__(self, "steps", tuple(self.steps))
         object.__setattr__(self, "context_preconditions", freeze_data(self.context_preconditions))
         if not self.steps or len(self.steps) > 32 or not 0 <= self.cursor <= len(self.steps):
@@ -592,6 +596,11 @@ class GoalState:
             raise ValueError("an unresolved dispatch must be the latest attempt")
         if pending and self.status is not GoalStatus.ACTIVE:
             raise ValueError("an unresolved dispatch requires an active goal")
+        if self.execution_plan is not None and (
+            self.execution_plan.objective_source is None
+            or self.execution_plan.objective_summary is None
+        ):
+            raise ValueError("a goal's plan must be bound to its objective")
         if self.execution_plan is not None and self.status is not GoalStatus.ACTIVE:
             if self.execution_plan.status in {"ready", "waiting"}:
                 raise ValueError("an executable plan requires an active goal")

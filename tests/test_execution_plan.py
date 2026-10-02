@@ -1825,37 +1825,90 @@ class ParkingWithExecutablePlanTests(PlanHarness):
 
 
 class RepeatedPlanRefusalTests(PlanHarness):
-    """CodeRabbit b039f45 #3: an unchanged refusal never buys another Core call."""
+    """An unchanged plan refusal never buys another workflow reasoning step.
 
-    def invalid(self, plan_id="plan-x", summary="Different work"):
-        return replace(plan(step("coding")), plan_id=plan_id, objective_summary=summary)
+    A person still hears exactly one response-only step about it; an
+    autonomous turn ends silently.
+    """
 
-    def test_identical_refusal_ends_the_turn_without_another_reasoning_call(self):
+    TURN_BOUND = frozenset({"review"})
+
+    def invalid(self, plan_id="plan-x"):
+        # A step needing a fresh person-turn approval cannot be planned.
+        return replace(plan(step("review")), plan_id=plan_id)
+
+    def refusing_agent(self, reasoner, **options):
+        return self.agent(reasoner, turn_bound=self.TURN_BOUND, **options)
+
+    def workflow_steps(self, reasoner):
+        return [item for item in reasoner.contexts if item.response_only_reason is None]
+
+    def test_identical_refusal_buys_no_workflow_step_but_the_person_is_answered(self):
         reasoner = Reasoner(*(AgentDecision(execution_plan=self.invalid(), goal_id="goal")
-                              for _ in range(5)))
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 5)
-        self.assertEqual(reasoner.calls, 2)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+                              for _ in range(2)),
+                            AgentDecision(response="That needs your approval first.",
+                                          goal_id="goal"),
+                            *(AgentDecision(execution_plan=self.invalid(), goal_id="goal")
+                              for _ in range(3)))
+        outcome = self.refusing_agent(reasoner).process(conversation(), RETENTION, 6)
+        self.assertEqual(len(self.workflow_steps(reasoner)), 2)
+        self.assertEqual(reasoner.calls, 3)
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "plan_precondition_invalid")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "That needs your approval first.")
         self.assertEqual(outcome.reason, "plan_precondition_invalid")
         first = reasoner.contexts[1].refused_calls
         self.assertEqual([item["reason"] for item in first], ["plan_precondition_invalid"])
         self.assertTrue(first[0]["subject"].startswith("plan-x:"))
         self.assertEqual(self.calls, [])
+        self.assertIsNone(self.store.load("goal").state.execution_plan)
+
+    def test_response_only_step_cannot_dispatch_or_change_anything(self):
+        before = self.store.load("goal")
+        attempts = (
+            AgentDecision(call=CapabilityCall("ci-x", "ci", {}), goal_id="goal"),
+            AgentDecision(execution_plan=plan(step("coding")), goal_id="goal"),
+            AgentDecision(response="Changed.", goal_id="goal", goal_proposal=GoalProposal(
+                GoalMutationKind.UPDATE, objective_summary="Something else")),
+        )
+        for index, attempt in enumerate(attempts):
+            with self.subTest(attempt=index):
+                reasoner = Reasoner(AgentDecision(execution_plan=self.invalid(), goal_id="goal"),
+                                    AgentDecision(execution_plan=self.invalid(), goal_id="goal"),
+                                    attempt)
+                outcome = self.refusing_agent(reasoner).process(conversation(), RETENTION, 6)
+                self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+                self.assertEqual(reasoner.calls, 3)
+                self.assertEqual(self.calls, [])
+                after = self.store.load("goal")
+                self.assertEqual(after.state.objective, before.state.objective)
+                self.assertIsNone(after.state.execution_plan)
+
+    def test_autonomous_turn_stays_silent_on_a_repeated_refusal(self):
+        reasoner = Reasoner(*(AgentDecision(execution_plan=self.invalid(), goal_id="goal")
+                              for _ in range(4)))
+        outcome = self.refusing_agent(reasoner).process(
+            conversation(), RETENTION, 4, origin=CognitionOrigin.EXTERNAL_EVENT)
+        self.assertEqual((reasoner.calls, outcome.state, outcome.reason),
+                         (2, CoreState.CHECKPOINTED, "plan_precondition_invalid"))
 
     def test_every_plan_refusal_reason_is_suppressed_on_repeat(self):
         unsafe = replace(plan(step("merge", completion=(PlanCondition("values.state", "done"),),
                                    waiting=(PlanCondition("values.state", "pending"),))),
                          plan_id="plan-unsafe")
         cases = {
-            "plan_precondition_invalid": (self.invalid(), {}),
+            "plan_precondition_invalid": (self.invalid(), {"turn_bound": self.TURN_BOUND}),
             "plan_wait_unsafe": (unsafe, {"effectful": frozenset({"merge"})}),
+            "plan_continuation_unavailable": (plan(step("coding")),
+                                              {"plan_continuation": False}),
         }
         for reason, (workflow, options) in cases.items():
             with self.subTest(reason=reason):
                 self.reset_goal()
                 reasoner = Reasoner(*(AgentDecision(execution_plan=workflow, goal_id="goal")
                                       for _ in range(4)))
-                outcome = self.agent(reasoner, **options).process(conversation(), RETENTION, 4)
+                outcome = self.agent(reasoner, **options).process(
+                    conversation(), RETENTION, 4, origin=CognitionOrigin.EXTERNAL_EVENT)
                 self.assertEqual((reasoner.calls, outcome.reason), (2, reason))
 
     def test_inactive_goal_refusal_is_suppressed_on_repeat(self):
@@ -1888,45 +1941,45 @@ class RepeatedPlanRefusalTests(PlanHarness):
     def test_different_plan_is_not_suppressed(self):
         reasoner = Reasoner(AgentDecision(execution_plan=self.invalid("plan-a"), goal_id="goal"),
                             AgentDecision(execution_plan=self.invalid("plan-b"), goal_id="goal"),
-                            AgentDecision(response="I will restate the objective.",
-                                          goal_id="goal"))
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
-        self.assertEqual(reasoner.calls, 3)
-        self.assertEqual(outcome.response, "I will restate the objective.")
+                            AgentDecision(response="It needs your approval.", goal_id="goal"))
+        outcome = self.refusing_agent(reasoner).process(conversation(), RETENTION, 4)
+        self.assertEqual(len(self.workflow_steps(reasoner)), 3)
+        self.assertEqual(outcome.response, "It needs your approval.")
         self.assertEqual([item["reason"] for item in reasoner.contexts[2].refused_calls],
                          ["plan_precondition_invalid", "plan_precondition_invalid"])
 
     def test_same_plan_is_reconsidered_after_the_goal_genuinely_changed(self):
-        same = self.invalid(summary="Revised work")
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state, status=GoalStatus.AWAITING_INPUT,
+                                   stop_reason=GoalStopReason.REQUIRED_INPUT,
+                                   outstanding_work=(WorkItem("x", "Need input"),)),
+                           snapshot.retention_until, snapshot.revision)
+        same = plan(step("coding"))
         reasoner = Reasoner(
             AgentDecision(execution_plan=same, goal_id="goal"),
             AgentDecision(execution_plan=same, goal_id="goal", goal_proposal=GoalProposal(
-                GoalMutationKind.UPDATE, objective_summary="Revised work")),
+                GoalMutationKind.UPDATE, outstanding_work=())),
             AgentDecision(response="Done.", goal_id="goal"),
         )
-        self.agent(reasoner).process(conversation(), RETENTION, 4)
+        self.agent(reasoner).process(conversation(), RETENTION, 4,
+                                     origin=CognitionOrigin.EXTERNAL_EVENT)
         self.assertEqual(self.calls, ["coding"])
-        self.assertEqual(self.store.load("goal").state.objective.summary, "Revised work")
 
     def test_same_refusal_after_changed_goal_state_gets_another_step(self):
-        # The goal changed between the two proposals, so the second refusal is
-        # new evidence for her rather than a repeat, and she reasons again.
         reasoner = Reasoner(
             AgentDecision(execution_plan=self.invalid(), goal_id="goal"),
             AgentDecision(execution_plan=self.invalid(), goal_id="goal",
                           goal_proposal=GoalProposal(GoalMutationKind.UPDATE,
                                                      context={"head": "b" * 40})),
-            AgentDecision(response="The objective no longer matches.", goal_id="goal"),
+            AgentDecision(response="It still needs your approval.", goal_id="goal"),
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
-        self.assertEqual(reasoner.calls, 3)
-        self.assertEqual(outcome.response, "The objective no longer matches.")
+        outcome = self.refusing_agent(reasoner).process(conversation(), RETENTION, 4)
+        self.assertEqual(len(self.workflow_steps(reasoner)), 3)
+        self.assertEqual(outcome.response, "It still needs your approval.")
         subjects = [item["subject"] for item in reasoner.contexts[2].refused_calls
                     if item["reason"] == "plan_precondition_invalid"]
         self.assertEqual(len(subjects), 2)
         self.assertNotEqual(subjects[0], subjects[1])
-
-
 
 class Crash(BaseException):
     """The process stopping: nothing in the gateway may catch it."""
@@ -2487,3 +2540,53 @@ class RuntimeOwnedSourceTurnTests(PlanHarness):
         state = self.store.load("goal").state
         self.assertIs(state.status, GoalStatus.ACTIVE)
         self.assertEqual(state.execution_plan.status, "waiting")
+
+
+
+class RuntimeOwnedObjectiveTests(PlanHarness):
+    """The objective a plan serves is the goal's record, never the model's copy."""
+
+    def test_model_cannot_alter_the_objective_or_its_source(self):
+        forged = replace(plan(step("coding")), objective_source="turn:forged",
+                         objective_summary="Something else entirely")
+        reasoner = Reasoner(AgentDecision(execution_plan=forged, goal_id="goal"),
+                            AgentDecision(response="Done.", goal_id="goal"))
+        self.agent(reasoner).process(conversation(), RETENTION, 3)
+        installed = self.store.load("goal").state.execution_plan
+        self.assertEqual((installed.objective_source, installed.objective_summary),
+                         ("turn:person-1", "Do the work"))
+        self.assertEqual(self.calls, ["coding"])
+
+    def test_imperfect_restatement_cannot_cause_a_refusal(self):
+        for summary in (None, "Do the work.", "do the work", "Do the"):
+            with self.subTest(summary=summary):
+                self.reset_goal()
+                proposal = replace(plan(step("coding")), objective_summary=summary,
+                                   objective_source=None)
+                reasoner = Reasoner(AgentDecision(execution_plan=proposal, goal_id="goal"),
+                                    AgentDecision(response="Done.", goal_id="goal"))
+                self.agent(reasoner).process(conversation(), RETENTION, 3)
+                self.assertEqual(self.calls, ["coding"])
+                self.assertEqual(reasoner.contexts[1].refused_calls, ())
+
+    def test_a_real_objective_change_still_invalidates_the_plan(self):
+        self.outputs["ci"] = {"state": "pending"}
+        workflow = plan(step("ci", completion=(PlanCondition("values.state", "passed"),),
+                             waiting=(PlanCondition("values.state", "pending"),)))
+        agent = self.agent(Reasoner(AgentDecision(execution_plan=workflow, goal_id="goal"),
+                                    ACK))
+        agent.process(conversation(), RETENTION, 3)
+        snapshot = self.store.load("goal")
+        self.store.replace(replace(snapshot.state,
+                                   objective=Objective("turn:person-1", "Different work")),
+                           snapshot.retention_until, snapshot.revision)
+        self.now += timedelta(seconds=10)
+        agent.advance_due_plans(lambda _: conversation())
+        stored = self.store.load("goal").state.execution_plan
+        self.assertEqual(stored.core_reentry_reason, "plan_precondition_changed")
+        self.assertEqual(self.calls, ["ci"])
+
+    def test_a_stored_plan_must_be_bound_to_its_goals_objective(self):
+        unbound = replace(plan(step("coding")), objective_source=None, objective_summary=None)
+        with self.assertRaisesRegex(ValueError, "bound to its objective"):
+            replace(goal(), execution_plan=unbound)

@@ -913,6 +913,14 @@ class CoreAgent:
                     # projected window and is never asked to name it.
                     latest_person = self._latest_person_turn(conversation)
                     proposed = replace(decision.execution_plan, source_turn_id=latest_person)
+                    if snapshot is not None:
+                        # So is the objective it serves: the goal's own
+                        # record, never the model's restatement of it.
+                        proposed = replace(
+                            proposed,
+                            objective_source=snapshot.state.objective.source_reference,
+                            objective_summary=snapshot.state.objective.summary,
+                        )
                     if not self._plan_continuation:
                         plan_refusal = "plan_continuation_unavailable"
                     elif proposal_error is not None:
@@ -920,10 +928,8 @@ class CoreAgent:
                     elif snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
                         plan_refusal = "plan_requires_active_goal"
                     else:
-                        if (proposed.objective_source != snapshot.state.objective.source_reference
-                                or proposed.objective_summary != snapshot.state.objective.summary
-                                or any(step.call.capability_id in self._turn_bound_capabilities
-                                       for step in proposed.steps)):
+                        if any(step.call.capability_id in self._turn_bound_capabilities
+                               for step in proposed.steps):
                             plan_refusal = "plan_precondition_invalid"
                         elif any(not self._plan_wait_is_safe(step) for step in proposed.steps):
                             plan_refusal = "plan_wait_unsafe"
@@ -932,7 +938,15 @@ class CoreAgent:
                         if self._already_refused(refused_calls, plan_refusal, subject):
                             # The same plan against the same goal state was
                             # already refused this turn. Reasoning again cannot
-                            # change the answer, so the turn ends here.
+                            # change the answer, so no further workflow step is
+                            # bought. A person still hears one response-only
+                            # step; an autonomous turn ends here.
+                            if origin is CognitionOrigin.PERSON_TURN and snapshot is not None:
+                                return self._respond_to_terminal_blocker(
+                                    conversation_id, conversation, snapshot,
+                                    reasoning_context, transient_attempts, plan_refusal,
+                                    decision_provenance, refused_calls, park=False,
+                                )
                             return CoreOutcome(CoreState.CHECKPOINTED, snapshot,
                                                reason=plan_refusal)
                         refused_calls = (*refused_calls, {
@@ -1277,6 +1291,9 @@ class CoreAgent:
         """
         if park:
             snapshot = self._park_unfinished_goal(snapshot, provenance)
+        # Distinguishable from a workflow step in every record of it: the
+        # reasoning context carries the reason, and the log says so here.
+        LOGGER.info("Response-only Core step: %s", reason)
         terminal_context = replace(
             context,
             active_goal=snapshot.state,

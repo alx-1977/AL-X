@@ -974,6 +974,28 @@ def _strict_object(properties: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+# The documents a planned result is matched against have these roots.
+_PLAN_CONDITION_ROOTS = frozenset({"state", "values", "failure"})
+
+
+def _plan_conditions(values: Sequence[Mapping[str, Any]]) -> tuple[PlanCondition, ...]:
+    """Validate the model's plan conditions here, before any plan is built."""
+    conditions = []
+    for entry in values:
+        path = entry["path"]
+        parts = path.split(".") if isinstance(path, str) else []
+        if (not parts or parts[0] not in _PLAN_CONDITION_ROOTS
+                or any(not part or part.startswith("_") for part in parts)
+                or any("*" in part and part != "*" for part in parts)):
+            raise ValueError(f"plan condition path is unusable: {path!r}")
+        try:
+            equals = json.loads(entry["equals_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError(f"plan condition equals_json is not JSON: {path!r}") from error
+        conditions.append(PlanCondition(path, equals, entry["quantifier"], entry["negate"]))
+    return tuple(conditions)
+
+
 def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
     return {"anyOf": [{"type": "null"}, dict(schema)]}
 
@@ -1197,8 +1219,6 @@ def decision_schema() -> dict[str, Any]:
         "type": {"type": "string", "const": "execute_plan"},
         "plan_id": string,
         "cursor": {"type": "integer", "const": 0},
-        "objective_source": string,
-        "objective_summary": string,
         "context_preconditions_json": string,
         # The two step shapes ExecutionStep accepts, and no others: a step
         # either never waits, or waits on at least one condition at a
@@ -1550,6 +1570,9 @@ class ModelReasoner:
                 goal_id=goal_id,
             )
         if disposition == "execute_plan":
+            call_ids = [item["call_id"] for item in action["steps"]]
+            if len(call_ids) != len(set(call_ids)):
+                raise ValueError("plan call_id values must be unique")
             steps = []
             for item in action["steps"]:
                 arguments = _object_json(item["arguments_json"], "plan arguments_json")
@@ -1562,25 +1585,20 @@ class ModelReasoner:
                 if (definition.durable_input_fields is not None
                         and set(arguments) - set(definition.durable_input_fields)):
                     raise ValueError("planned arguments are not durable")
-                def conditions(values):
-                    return tuple(PlanCondition(
-                        entry["path"], json.loads(entry["equals_json"]),
-                        entry["quantifier"], entry["negate"],
-                    ) for entry in values)
                 steps.append(ExecutionStep(
                     CapabilityCall(item["call_id"], item["capability_id"],
                                    arguments, item["approval_id"]),
-                    conditions(item["completion_conditions"]),
-                    conditions(item["waiting_conditions"]),
+                    _plan_conditions(item["completion_conditions"]),
+                    _plan_conditions(item["waiting_conditions"]),
                     item["wait_seconds"], item["wake_core_on_completion"],
                     item["waiting_for"],
                 ))
             return AgentDecision(
                 execution_plan=ExecutionPlan(
-                    action["plan_id"], action["objective_source"],
-                    # The Core binds the turn this plan answers when it
-                    # installs it, from the whole conversation.
-                    action["objective_summary"], None, tuple(steps),
+                    # The objective, its source and the turn this plan
+                    # answers are the goal's and the conversation's facts.
+                    # The Core binds them when it installs the plan.
+                    action["plan_id"], None, None, None, tuple(steps),
                     _object_json(action["context_preconditions_json"],
                                  "context_preconditions_json"),
                     action["cursor"],
