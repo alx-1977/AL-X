@@ -29,6 +29,7 @@ from alx.contracts.scope import (
     scope_from_storage,
     scope_to_storage,
 )
+from alx.contracts.storage import serialized_store
 
 
 SCHEMA_VERSION = 8
@@ -312,6 +313,7 @@ def _memory_proposal_from_data(value: str) -> MemoryProposal:
     )
 
 
+@serialized_store
 class SQLiteGoalStore:
     """Small transactional store; it persists facts but never reads their meaning."""
 

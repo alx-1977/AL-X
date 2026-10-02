@@ -274,7 +274,16 @@ class PlanWorkers:
         task.add_done_callback(self._tasks.discard)
 
     async def _run(self, job: Any) -> None:
-        attempt = await asyncio.to_thread(self._core.run_planned_dispatch, job)
+        try:
+            attempt = await asyncio.to_thread(self._core.run_planned_dispatch, job)
+        except asyncio.CancelledError:
+            # Shutdown. The checkpoint stays pending; the next process closes
+            # it as interrupted and never replays it.
+            raise
+        except Exception as error:  # noqa: BLE001 - recorded as interrupted
+            LOGGER.warning("Planned step for goal %s raised: %s",
+                           job.goal_id, type(error).__name__)
+            attempt = None
         try:
             async with self._lock:
                 following = await run_core_worker(

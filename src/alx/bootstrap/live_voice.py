@@ -336,6 +336,15 @@ async def run(repository_root: Path) -> None:
     memory_store = SQLiteMemoryStore(storage_root / "memories.sqlite3")
     registry = CapabilityRegistry()
     current_call_id: ContextVar[str] = ContextVar("alx_current_call_id", default="")
+    # Set only on a planned step's background worker. Such a step belongs to
+    # no occasion: whatever occasion is running on the Core thread meanwhile
+    # is someone else's, and must not choose its budget.
+    planned_dispatch: ContextVar[bool] = ContextVar("alx_planned_dispatch", default=False)
+
+    def bind_planned_dispatch(conversation_id: str) -> None:
+        """The whole ambient context a background planned step runs under."""
+        current_conversation_id.set(conversation_id)
+        planned_dispatch.set(True)
     # Coding jobs running now, by call, with the conversation each belongs
     # to. What the console's cancel control checks, since a job may be a
     # planned step on a background worker as well as a turn's own call.
@@ -791,7 +800,8 @@ async def run(repository_root: Path) -> None:
                 current_conversation_id.get(),
                 _bill_budget_for_turn(
                     provider_settings,
-                    occasion_spend.current_opportunity_id(),
+                    "" if planned_dispatch.get()
+                    else occasion_spend.current_opportunity_id(),
                 ),
             )
         try:
@@ -873,7 +883,7 @@ async def run(repository_root: Path) -> None:
         plan_continuation=plan_continuation,
         # A planned step on a background worker names its goal's conversation
         # for the executors, exactly as a reasoning step's budget check does.
-        bind_dispatch=current_conversation_id.set,
+        bind_dispatch=bind_planned_dispatch,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
         # Read from the policies themselves, so a capability that requires an

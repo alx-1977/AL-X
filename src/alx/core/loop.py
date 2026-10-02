@@ -20,8 +20,8 @@ from alx.contracts import (
     ConversationOrigin,
     CapabilityResultState, CognitionOrigin, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
-    ExecutionPlan, MemoryIdentityConflict, PLAN_TERMINAL, PlanDispatch, PlanOperation,
-    PlanStatus, PlanUpdate,
+    ExecutionPlan, MemoryIdentityConflict, PLAN_TERMINAL, PlanDispatch,
+    PlanOperation, PlanStatus, PlanUpdate,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, GoalSummary, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
@@ -2250,7 +2250,34 @@ class CoreAgent:
                 return "plan_requires_active_goal"
             if current.cursor + int(operation is PlanOperation.ACCEPT) >= len(current.steps):
                 return "plan_has_no_remaining_steps"
+        if operation is PlanOperation.ACCEPT and not self._judged_observation(
+                snapshot.state, current):
+            return "plan_step_not_acceptable"
         return None
+
+    def _judged_observation(self, state: GoalState, plan: ExecutionPlan) -> bool:
+        """Whether accepting may move the plan past its current step.
+
+        Only when that step already happened and only her judgment remains:
+        the classifier raised the attention for completed evidence needing
+        judgment, from the current step's own executed dispatch of a declared
+        plan observation. Nothing else completed: a failure, a refusal, an
+        interruption, or a consequential call such as a merge that reported
+        it needs judgment rather than having happened. The result itself is
+        not read again here; the classifier is its one interpreter.
+        """
+        attention = plan.attention
+        if (attention is None or attention.reason != "planned_evidence_requires_judgement"
+                or len(attention.evidence_call_ids) != 1):
+            return False
+        step = plan.steps[plan.cursor]
+        definition = self._definition(step.call.capability_id)
+        attempt = next((item for item in state.attempts if item.call is not None
+                        and item.call.call_id == attention.evidence_call_ids[0]), None)
+        return (definition is not None and definition.plan_observation
+                and attempt is not None
+                and attempt.call.capability_id == step.call.capability_id
+                and attempt.disposition is CapabilityAttemptDisposition.EXECUTED)
 
     def _apply_plan_update(
         self, snapshot: GoalSnapshot, update: PlanUpdate,

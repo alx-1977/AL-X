@@ -38,6 +38,7 @@ from alx.contracts.provenance import (
     provenance_from_storage,
     provenance_to_storage,
 )
+from alx.contracts.storage import serialized_store
 
 
 SCHEMA_VERSION = 2
@@ -96,6 +97,7 @@ def _aware(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be timezone-aware")
 
 
+@serialized_store
 class SQLiteResearchStore:
     """Persist research threads and their revised entries."""
 

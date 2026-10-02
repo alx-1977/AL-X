@@ -38,6 +38,7 @@ from alx.contracts import (
     CapabilityAttempt,
     CapabilityAttemptDisposition,
     CapabilityDefinition,
+    CapabilityResultState,
     ExecutionOutcome,
     ExecutionPlan,
     ExecutionStep,
@@ -137,6 +138,15 @@ def classify_planned_result(
     if outcome is ExecutionOutcome.FAILURE:
         return PlanResultClassification(PlanResultKind.WAKE_CORE, ("planned_result_failed",))
     if outcome is ExecutionOutcome.AMBIGUOUS:
+        # Only a result that completed is evidence awaiting her judgment; a
+        # failed or partial one that needs judgment is still a failed or
+        # partial step, and is named as one.
+        if result.state is CapabilityResultState.FAILED:
+            return PlanResultClassification(
+                PlanResultKind.WAKE_CORE, ("planned_result_failed",))
+        if result.state is CapabilityResultState.PARTIAL:
+            return PlanResultClassification(
+                PlanResultKind.WAKE_CORE, ("planned_result_partial",))
         return PlanResultClassification(
             PlanResultKind.WAKE_CORE, ("planned_evidence_requires_judgement",))
     if outcome in (ExecutionOutcome.PENDING, ExecutionOutcome.TEMPORARILY_UNAVAILABLE):
