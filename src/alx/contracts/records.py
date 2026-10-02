@@ -384,6 +384,24 @@ class PlanAttention:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanAnnouncement:
+    """AL/X's own reply to a finish or cancel, held until it is stored.
+
+    Written in the same goal write as the resolution it announces, because
+    the conversation is a separate store and no transaction spans both. The
+    turn id is fixed here, so storing it is idempotent and recovery can tell
+    whether it already was.
+    """
+
+    turn_id: str
+    text: str
+
+    def __post_init__(self) -> None:
+        _required(self.turn_id, "turn_id")
+        _required(self.text, "announcement text")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionPlan:
     """AL/X's durable intent, with only its mechanical cursor advanced by code."""
 
@@ -402,6 +420,9 @@ class ExecutionPlan:
     # Counts every attention this plan has raised; the current one has it.
     attention_seq: int = 0
     attention: PlanAttention | None = None
+    # Set with a finish or cancel she answered in words, until those words
+    # are stored in the conversation.
+    announcement: PlanAnnouncement | None = None
 
     def __post_init__(self) -> None:
         _required(self.plan_id, "plan_id")
@@ -438,6 +459,9 @@ class ExecutionPlan:
             raise ValueError("attention_seq must be a nonnegative integer")
         if self.attention is not None and self.attention.seq != self.attention_seq:
             raise ValueError("the current attention carries the plan's attention_seq")
+        if self.announcement is not None and self.status not in (
+                PlanStatus.COMPLETED, PlanStatus.CANCELLED):
+            raise ValueError("only a finished or cancelled plan holds an announcement")
 
 
 @dataclass(frozen=True, slots=True)

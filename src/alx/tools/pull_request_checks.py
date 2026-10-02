@@ -159,13 +159,16 @@ def _outcome(values: Mapping[str, Any]) -> ExecutionOutcome:
     runs = values["check_runs"]
     statuses = values["commit_statuses"]
     settled = [run["conclusion"] for run in runs if run["status"] == "completed"]
-    steps = [step["conclusion"] for run in runs for step in run.get("steps", ())]
+    # A step with a conclusion has settled, even inside a run still going;
+    # one without is still running.
+    settled += [step["conclusion"] for run in runs for step in run.get("steps", ())
+                if step["conclusion"] is not None]
     # 1. A failure anywhere is a failure now.
-    if (any(item in _FAILED_CONCLUSIONS for item in (*settled, *steps))
+    if (any(item in _FAILED_CONCLUSIONS for item in settled)
             or any(item["state"] in _FAILED_STATUSES for item in statuses)):
         return ExecutionOutcome.FAILURE
-    # 2. A settled result outside the passing vocabulary is hers to read now,
-    #    whatever else is still running: waiting cannot change it.
+    # 2. A settled run, step or status outside the passing vocabulary is hers
+    #    to read now, whatever else is still running: waiting cannot change it.
     if (any(item not in _PASSING_CONCLUSIONS for item in settled)
             or any(item["state"] not in ("success", "pending") for item in statuses)):
         return ExecutionOutcome.AMBIGUOUS

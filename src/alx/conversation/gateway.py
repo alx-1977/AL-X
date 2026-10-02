@@ -45,6 +45,55 @@ class ConversationGateway:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
 
+    def _store_response(self, conversation_id: str, outcome: CoreOutcome,
+                        retention_until: datetime) -> None:
+        """Store her reply. A plan's finish or cancel reply keeps its fixed id."""
+        turn_id = outcome.response_turn_id or self._identifier_factory()
+        self._append_reply(conversation_id, turn_id, outcome.response,
+                           outcome.response_provenance, retention_until)
+        if outcome.response_turn_id is not None and outcome.snapshot is not None:
+            self._acknowledge(outcome.snapshot.state.goal_id, turn_id)
+
+    def _append_reply(self, conversation_id: str, turn_id: str, text: str,
+                      provenance, retention_until: datetime) -> None:
+        """Append one reply turn, unless that exact turn is already stored."""
+        current = self._conversation_store.load(conversation_id)
+        if any(item.turn_id == turn_id for item in current.turns):
+            return
+        self._conversation_store.append(
+            ConversationTurn(conversation_id, turn_id, ConversationOrigin.ALX_RESPONSE,
+                             text, self._clock(), provenance=provenance),
+            retention_until, current.revision,
+        )
+
+    def _acknowledge(self, goal_id: str, turn_id: str) -> None:
+        try:
+            self._core.plan_announcement_stored(goal_id, turn_id)
+        except Exception as error:  # noqa: BLE001 - stored; the next tick clears it
+            LOGGER.warning("Plan reply acknowledgement failed: %s", type(error).__name__)
+
+    def reconcile_plan_announcements(self) -> int:
+        """Store any finish or cancel reply a failure kept from the conversation.
+
+        Her own words, already authored and held on the plan with their turn
+        id; nothing is composed here. Stored at most once, by that id, then
+        cleared from the plan. Runs on each tick, under the Core lock.
+        """
+        stored = 0
+        for snapshot in self._core.pending_plan_announcements():
+            announcement = snapshot.state.execution_plan.announcement
+            try:
+                self._append_reply(snapshot.conversation_id, announcement.turn_id,
+                                   announcement.text, snapshot.provenance,
+                                   snapshot.retention_until)
+            except Exception as error:  # noqa: BLE001 - kept for the next tick
+                LOGGER.warning("Plan reply for goal %s not stored: %s",
+                               snapshot.state.goal_id, type(error).__name__)
+                continue
+            self._acknowledge(snapshot.state.goal_id, announcement.turn_id)
+            stored += 1
+        return stored
+
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
@@ -94,19 +143,7 @@ class ConversationGateway:
         conversation = self._with_contextual_events(conversation)
         outcome = self._core.process(conversation, retention_until, step_budget)
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            response_turn = ConversationTurn(
-                turn.conversation_id,
-                self._identifier_factory(),
-                ConversationOrigin.ALX_RESPONSE,
-                outcome.response,
-                self._clock(),
-                provenance=outcome.response_provenance,
-            )
-            self._conversation_store.append(
-                response_turn,
-                retention_until,
-                self._conversation_store.load(turn.conversation_id).revision,
-            )
+            self._store_response(turn.conversation_id, outcome, retention_until)
         return outcome
 
     def receive_cognition_opportunity(
@@ -157,17 +194,5 @@ class ConversationGateway:
             ),
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            response_turn = ConversationTurn(
-                conversation_id,
-                self._identifier_factory(),
-                ConversationOrigin.ALX_RESPONSE,
-                outcome.response,
-                self._clock(),
-                provenance=outcome.response_provenance,
-            )
-            self._conversation_store.append(
-                response_turn,
-                retention_until,
-                self._conversation_store.load(conversation_id).revision,
-            )
+            self._store_response(conversation_id, outcome, retention_until)
         return outcome

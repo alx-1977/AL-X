@@ -20,7 +20,7 @@ from alx.contracts import (
     ConversationOrigin,
     CapabilityResultState, CognitionOrigin, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
-    ExecutionPlan, MemoryIdentityConflict, PLAN_TERMINAL, PlanDispatch,
+    ExecutionPlan, MemoryIdentityConflict, PLAN_TERMINAL, PlanAnnouncement, PlanDispatch,
     PlanOperation, PlanStatus, PlanUpdate,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, GoalSummary, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
@@ -87,6 +87,9 @@ class CoreOutcome:
     # durable record has to say plainly that the write did not happen.
     # None means nothing was proposed or everything proposed was stored.
     memory_state: str | None = None
+    # The fixed turn id of a reply that announces a finish or cancel, held
+    # on the plan until it is stored. None: an ordinary reply, any id.
+    response_turn_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.state is CoreState.RESPONDED and (
@@ -214,6 +217,9 @@ class CoreAgent:
         # attention and evidence: each is read at most once per attention.
         self._evidence_scheduled: set[tuple[str, int, str]] = set()
         self._evidence_settled: set[tuple[str, int, str]] = set()
+        # Which scheduled read each evidence dispatch is, so a read stopped
+        # before its result was recorded can be scheduled again.
+        self._evidence_reads: dict[str, tuple[str, int, str]] = {}
         self._reasoner = reasoner
         # Mechanical record of a refused goal proposal, for diagnosis. The
         # cited references, mutation and response dependence: enough to diagnose
@@ -880,18 +886,30 @@ class CoreAgent:
                 memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
-                if decision.plan_update is not None:
+                # A plan that runs on is applied now, before anything below
+                # can park the goal. A finish or cancel is applied only where
+                # this decision actually ends, in one write with her reply.
+                closing = (decision.plan_update is not None and decision.plan_update.operation
+                           in (PlanOperation.FINISH, PlanOperation.CANCEL))
+                if decision.plan_update is not None and not closing:
                     assert snapshot is not None
-                    snapshot = self._apply_plan_update(
+                    snapshot, _ = self._apply_plan_update(
                         snapshot, decision.plan_update, conversation, decision_provenance,
                     )
                 if mechanical_blocker is not None:
+                    reply_turn = None
+                    if closing:
+                        snapshot, reply_turn = self._apply_plan_update(
+                            snapshot, decision.plan_update, conversation,
+                            decision_provenance, decision.response,
+                        )
                     if snapshot is not None:
                         snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
                     return CoreOutcome(
                         CoreState.RESPONDED if decision.response is not None else CoreState.CHECKPOINTED,
                         snapshot, response=decision.response, reason=mechanical_blocker,
                         response_provenance=decision_provenance,
+                        response_turn_id=reply_turn,
                     )
                 if decision.selects_only:
                     if (proposal_error is None and decision.goal_proposal is not None
@@ -924,6 +942,12 @@ class CoreAgent:
                         continuation_notice_issued = True
                         continuation_notices = deferred
                         continue
+                reply_turn = None
+                if closing:
+                    snapshot, reply_turn = self._apply_plan_update(
+                        snapshot, decision.plan_update, conversation,
+                        decision_provenance, decision.response,
+                    )
                 if decision.finish_silently:
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,
@@ -936,6 +960,7 @@ class CoreAgent:
                     response=decision.response,
                     reason="goal_proposal_rejected" if proposal_error else deferred_selection,
                     response_provenance=decision_provenance,
+                    response_turn_id=reply_turn,
                 )
 
             if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
@@ -2059,6 +2084,7 @@ class CoreAgent:
             snapshot = self._finalize_dispatch(snapshot, attempt, self._clock())
         plan = snapshot.state.execution_plan
         if job.evidence_for is not None:
+            self._evidence_reads.pop(job.call.call_id, None)
             self._evidence_settled.add((job.goal_id, job.attention_seq, job.evidence_for))
             if (plan is not None and plan.plan_id == job.plan_id
                     and plan.attention_seq == job.attention_seq
@@ -2108,16 +2134,25 @@ class CoreAgent:
         and evidence in this process, whatever its outcome.
         """
         state = snapshot.state
+        if self._has_pending_dispatch(state):
+            # A read no live worker owns was stopped by a restart or a failed
+            # record. Closed as interrupted, by the same rule as any other,
+            # and read again below: it is a repeat-safe observation.
+            pending = next(item for item in state.attempts
+                           if item.disposition is CapabilityAttemptDisposition.PENDING)
+            snapshot = self._close_interrupted_dispatch(snapshot)
+            state = snapshot.state
+            if self._has_pending_dispatch(state):
+                return None
+            self._evidence_scheduled.discard(self._evidence_reads.pop(pending.call.call_id, None))
         plan = state.execution_plan
-        if (plan.attention is None or state.status is not GoalStatus.ACTIVE
-                or self._has_pending_dispatch(state)):
+        if plan.attention is None or state.status is not GoalStatus.ACTIVE:
             return None
         for call_id in plan.attention.evidence_call_ids:
             key = (state.goal_id, plan.attention_seq, call_id)
             if (call_id in self._plan_evidence_cache or key in self._evidence_scheduled
                     or not self._needs_reread(state, call_id)):
                 continue
-            self._evidence_scheduled.add(key)
             stored = self._attempt_for(state, call_id)
             call = replace(stored.call, call_id=f"plan-evidence:{uuid4()}")
             pending = CapabilityAttempt(call, CapabilityAttemptDisposition.PENDING, None,
@@ -2126,6 +2161,10 @@ class CoreAgent:
                 replace(state, attempts=(*state.attempts, pending)),
                 snapshot.retention_until, snapshot.revision, snapshot.provenance,
             )
+            # Scheduled only once its checkpoint is durable: a failed write
+            # leaves nothing marked, and the next tick tries again.
+            self._evidence_scheduled.add(key)
+            self._evidence_reads[call.call_id] = key
             self._live_plan_dispatches.add(call.call_id)
             return PlannedDispatch(
                 state.goal_id, checkpoint.conversation_id, plan.plan_id, call, state,
@@ -2437,8 +2476,15 @@ class CoreAgent:
     def _apply_plan_update(
         self, snapshot: GoalSnapshot, update: PlanUpdate,
         conversation: ConversationSnapshot, provenance: ContentProvenance,
-    ) -> GoalSnapshot:
-        """Apply a plan change `_plan_update_refusal` accepted. One write."""
+        reply: str | None = None,
+    ) -> tuple[GoalSnapshot, str | None]:
+        """Apply a plan change `_plan_update_refusal` accepted. One write.
+
+        A finish or cancel she answered in words carries those words, under a
+        fixed turn id, in the same write: the conversation is another store,
+        and this is what lets the reply be stored exactly once whatever
+        fails between the two. Returns that turn id, if any.
+        """
         current = snapshot.state.execution_plan
         if update.operation is PlanOperation.INSTALL:
             plan = replace(
@@ -2461,14 +2507,37 @@ class CoreAgent:
             plan = finish_plan(current, PlanStatus.COMPLETED
                                if update.operation is PlanOperation.FINISH
                                else PlanStatus.CANCELLED)
+            if reply is not None:
+                plan = replace(plan, announcement=PlanAnnouncement(
+                    f"alx-plan-reply:{uuid4()}", reply))
         if current is not None and current.attention is not None:
             for call_id in current.attention.evidence_call_ids:
                 self._plan_evidence_cache.pop(call_id, None)
         LOGGER.info("Execution plan %s: %s", plan.plan_id, update.operation.value)
-        return self._store.replace(
+        snapshot = self._store.replace(
             replace(snapshot.state, execution_plan=plan),
             snapshot.retention_until, snapshot.revision, provenance,
         )
+        return snapshot, None if plan.announcement is None else plan.announcement.turn_id
+
+    def pending_plan_announcements(self) -> tuple[GoalSnapshot, ...]:
+        """Goals whose finish or cancel reply is not yet known to be stored."""
+        found = []
+        for goal_id in self._store.list_plan_announcement_goal_ids():
+            try:
+                found.append(self._store.load(goal_id))
+            except Exception as error:  # noqa: BLE001 - one goal must not hide the rest
+                LOGGER.warning("Plan announcement unreadable for goal %s: %s",
+                               goal_id, type(error).__name__)
+        return tuple(found)
+
+    def plan_announcement_stored(self, goal_id: str, turn_id: str) -> None:
+        """The reply is in the conversation: the plan no longer holds it."""
+        snapshot = self._store.load(goal_id)
+        plan = snapshot.state.execution_plan
+        if plan is None or plan.announcement is None or plan.announcement.turn_id != turn_id:
+            return
+        self._write_plan(snapshot, replace(plan, announcement=None))
 
     def _commit_memories(self, snapshot: GoalSnapshot | None,
                          proposals: tuple[MemoryProposal, ...],

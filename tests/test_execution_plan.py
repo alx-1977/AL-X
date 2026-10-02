@@ -1513,6 +1513,257 @@ class EvidenceConcurrencyTests(PlanHarness):
         self.assertNotIn(job.evidence_for, agent._plan_evidence_cache)
 
 
+class OrphanedEvidenceReadTests(PlanHarness):
+    """TREX: an evidence read stopped mid-flight must recover on ticks alone."""
+
+    def offerable(self, agent):
+        return PlanAttentionSource(self.store, Ledger(), True, clock=lambda: self.now,
+                                   ready=agent.plan_evidence_ready).due_opportunities()
+
+    def test_a_read_stopped_by_a_restart_recovers_without_any_core_turn(self):
+        agent = self.installed(step("review", wait=10))
+        self.outputs["review"] = [JUDGE, JUDGE]
+        self.work(agent)
+        self.restart()
+        stopped = self.agent()
+        (read,) = stopped.advance_due_plans()        # checkpointed ...
+        self.assertTrue(read.call.call_id.startswith("plan-evidence:"))
+        self.restart()                                # ... and the process stops
+        recovered = self.agent()
+        self.assertEqual(self.offerable(recovered), ())
+        self.work(recovered)                          # ticks only: no person, no Core
+        self.assertEqual(self.names(), ["review", "review"])
+        orphan = next(item for item in self.state().attempts
+                      if item.call.call_id == read.call.call_id)
+        self.assertEqual(orphan.reason_code, "dispatch_interrupted")
+        self.assertTrue(recovered.plan_evidence_ready("goal"))
+        self.assertEqual(len(self.offerable(recovered)), 1)
+
+    def test_a_read_whose_result_was_not_recorded_is_read_again_in_process(self):
+        agent = self.installed(step("review", wait=10))
+        self.outputs["review"] = [JUDGE, JUDGE, JUDGE]
+        self.work(agent)
+        self.restart()
+        agent = self.agent()
+        (read,) = agent.advance_due_plans()
+        read = agent.begin_planned_dispatch(read)
+        agent.run_planned_dispatch(read)
+        agent._live_plan_dispatches.discard(read.call.call_id)  # recording failed
+        self.work(agent)
+        self.assertTrue(agent.plan_evidence_ready("goal"))
+        self.assertEqual(self.names(), ["review", "review", "review"])
+
+    def test_a_failed_checkpoint_write_leaves_nothing_scheduled_and_is_retried(self):
+        agent = self.installed(step("review", wait=10))
+        self.outputs["review"] = [JUDGE, JUDGE]
+        self.work(agent)
+        self.restart()
+        agent = self.agent()
+        original = self.store.replace
+        failures = []
+
+        def failing_once(state, *arguments, **keywords):
+            if not failures and any(item.call is not None
+                                    and item.call.call_id.startswith("plan-evidence:")
+                                    for item in state.attempts):
+                failures.append(True)
+                raise OSError("disk full")
+            return original(state, *arguments, **keywords)
+        self.store.replace = failing_once
+        self.assertEqual(agent.advance_due_plans(), ())
+        self.assertEqual(agent._evidence_scheduled, set())
+        self.assertFalse(agent.plan_evidence_ready("goal"))
+        self.work(agent)                              # the store has recovered
+        self.assertEqual(failures, [True])
+        self.assertTrue(agent.plan_evidence_ready("goal"))
+        self.assertEqual(len(self.offerable(agent)), 1)
+
+
+class CheckStepPrecedenceTests(unittest.TestCase):
+    @staticmethod
+    def outcome(*runs):
+        def read(_request):
+            return PullRequestChecks(95, HEAD, tuple(runs), ())
+        return build_pull_request_checks_executors(read, lambda: "r")[
+            "read_pull_request_checks"]({"pull_request_number": 95, "head_sha": HEAD}).outcome
+
+    @staticmethod
+    def run_(status, conclusion=None, steps=None):
+        return CheckRun("check", status, conclusion, None, None, None, "github-actions",
+                        "Actions", None, None, steps)
+
+    def test_a_settled_step_is_never_hidden_by_anything_still_running(self):
+        queued = self.run_("queued")
+        cases = {
+            "action_required step in a running job": (
+                (self.run_("in_progress", None, (("build", "success"),
+                                                 ("approve", "action_required"))), queued),
+                ExecutionOutcome.AMBIGUOUS),
+            "stale step in a running job": (
+                (self.run_("in_progress", None, (("lint", "stale"),)), queued),
+                ExecutionOutcome.AMBIGUOUS),
+            "failed step beside an action_required one": (
+                (self.run_("in_progress", None, (("test", "failure"),
+                                                 ("approve", "action_required"))),),
+                ExecutionOutcome.FAILURE),
+            "steps still running": (
+                (self.run_("in_progress", None, (("build", "success"), ("test", None))), queued),
+                ExecutionOutcome.PENDING),
+            "completed with passing steps": (
+                (self.run_("completed", "success", (("build", "success"), ("docs", "skipped"))),),
+                ExecutionOutcome.SUCCESS),
+        }
+        for name, (runs, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.outcome(*runs), expected)
+
+
+class ReplyDurabilityTests(PlanHarness):
+    """A finish or cancel and the reply announcing it are never inconsistent."""
+
+    def setUp(self):
+        PlanHarness.setUp(self)
+        from alx.conversation import ConversationGateway, SQLiteConversationStore
+
+        self.conversation_path = self.path.with_name("conversations.sqlite3")
+        self.conversations = SQLiteConversationStore(self.conversation_path)
+        self.addCleanup(lambda: self.conversations.close())
+        self.gateway_class = ConversationGateway
+
+    def finish_ready(self):
+        agent = self.installed(step("coding"))
+        self.work(agent)
+        self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+
+    def gateway(self, reasoner):
+        return self.gateway_class(self.agent(reasoner), self.conversations)
+
+    def finish_turn(self, gateway):
+        turn = ConversationTurn("thread", f"person-{len(self.calls)}-{self.now.timestamp()}",
+                                ConversationOrigin.TYPED, "Thanks, close it.", self.now, "friedl")
+        return gateway.receive_conversation_turn(turn, 4, RETENTION)
+
+    def replies(self):
+        return [item for item in self.conversations.load("thread").turns
+                if item.origin is ConversationOrigin.ALX_RESPONSE]
+
+    def finishing(self):
+        return Reasoner(SELECT, resolve(PlanOperation.FINISH, "It is merged and done."))
+
+    def test_the_ordinary_path_stores_the_reply_once_and_clears_it(self):
+        self.finish_ready()
+        gateway = self.gateway(self.finishing())
+        self.finish_turn(gateway)
+        self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+        self.assertIsNone(self.plan_of().announcement)
+        self.assertEqual(gateway.reconcile_plan_announcements(), 0)
+        self.assertEqual(len(self.replies()), 1)
+
+    def test_a_failed_resolution_write_stores_no_reply(self):
+        self.finish_ready()
+        gateway = self.gateway(self.finishing())
+        original = self.store.replace
+
+        def failing(state, *arguments, **keywords):
+            if (state.execution_plan is not None
+                    and state.execution_plan.status is PlanStatus.COMPLETED):
+                raise OSError("goal store unavailable")
+            return original(state, *arguments, **keywords)
+        self.store.replace = failing
+        with self.assertRaises(OSError):
+            self.finish_turn(gateway)
+        self.store.replace = original
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
+        self.assertEqual(gateway.reconcile_plan_announcements(), 0)
+        self.assertEqual(self.replies(), [])
+
+    def test_a_failed_reply_store_is_recovered_once(self):
+        self.finish_ready()
+        gateway = self.gateway(self.finishing())
+        original = self.conversations.append
+        state = {"failed": False}
+
+        def failing(turn, *arguments, **keywords):
+            if turn.origin is ConversationOrigin.ALX_RESPONSE and not state["failed"]:
+                state["failed"] = True
+                raise OSError("conversation store unavailable")
+            return original(turn, *arguments, **keywords)
+        self.conversations.append = failing
+        with self.assertRaises(OSError):
+            self.finish_turn(gateway)
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+        self.assertIsNotNone(self.plan_of().announcement)
+        self.assertEqual(gateway.reconcile_plan_announcements(), 1)
+        self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertIsNone(self.plan_of().announcement)
+
+    def test_a_crash_between_the_writes_is_recovered_after_restart(self):
+        self.finish_ready()
+        self.conversations.create("thread", RETENTION)          # the person's turn was stored
+        agent = self.agent(self.finishing())
+        outcome = agent.process(conversation(), RETENTION, 4)   # the gateway never runs
+        self.assertIsNotNone(outcome.response_turn_id)
+        self.restart()
+        gateway = self.gateway(Reasoner())
+        self.assertEqual(gateway.reconcile_plan_announcements(), 1)
+        self.assertEqual(gateway.reconcile_plan_announcements(), 0)
+        (reply,) = self.replies()
+        self.assertEqual((reply.turn_id, reply.content),
+                         (outcome.response_turn_id, "It is merged and done."))
+
+    def test_a_failed_acknowledgement_never_duplicates_the_reply(self):
+        self.finish_ready()
+        gateway = self.gateway(self.finishing())
+        original = gateway._core.plan_announcement_stored
+        gateway._core.plan_announcement_stored = lambda *_arguments: (_ for _ in ()).throw(
+            OSError("goal store unavailable"))
+        self.finish_turn(gateway)
+        self.assertIsNotNone(self.plan_of().announcement)
+        gateway._core.plan_announcement_stored = original
+        self.restart()
+        gateway = self.gateway(Reasoner())
+        gateway.reconcile_plan_announcements()
+        self.assertEqual(len(self.replies()), 1)
+        self.assertIsNone(self.plan_of().announcement)
+
+    def test_a_reply_she_did_not_deliver_is_never_announced(self):
+        self.finish_ready()
+        # Remaining work is immediately executable, so the first answer is
+        # deferred; her second step answers without closing the plan.
+        self.set_goal(outstanding_work=(WorkItem("notes", "write release notes"),))
+        reasoner = Reasoner(SELECT, resolve(PlanOperation.FINISH, "All done."),
+                            AgentDecision(response="Writing the release notes next.",
+                                          goal_id="goal"))
+        gateway = self.gateway(reasoner)
+        self.finish_turn(gateway)
+        self.assertEqual([item.content for item in self.replies()],
+                         ["Writing the release notes next."])
+        self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
+        self.assertIsNone(self.plan_of().announcement)
+        self.assertEqual(gateway.reconcile_plan_announcements(), 0)
+
+    def test_cancel_follows_the_same_rule(self):
+        self.finish_ready()
+        gateway = self.gateway(Reasoner(SELECT, resolve(PlanOperation.CANCEL, "Stopped it.")))
+        original = self.conversations.append
+        calls = {"n": 0}
+
+        def failing(turn, *arguments, **keywords):
+            if turn.origin is ConversationOrigin.ALX_RESPONSE and calls["n"] == 0:
+                calls["n"] += 1
+                raise OSError("down")
+            return original(turn, *arguments, **keywords)
+        self.conversations.append = failing
+        with self.assertRaises(OSError):
+            self.finish_turn(gateway)
+        self.assertEqual(self.plan_of().status, PlanStatus.CANCELLED)
+        gateway.reconcile_plan_announcements()
+        self.assertEqual([item.content for item in self.replies()], ["Stopped it."])
+
+
 class GateTests(PlanHarness):
     """Expiry, budget, finished goals, and installation refusals."""
 
@@ -1692,7 +1943,12 @@ class SinglePathTests(unittest.TestCase):
         self.assertFalse(hasattr(PlanAttentionSource, "recover"))
         self.assertFalse(hasattr(ledger.SQLiteOpportunityLedger, "outcome"))
         self.assertFalse(hasattr(gateway.ConversationGateway, "advance_due_plans"))
-        self.assertFalse(hasattr(gateway.ConversationGateway, "_store_response"))
+        # The gateway stores replies through one idempotent append; only a
+        # finish or cancel reply carries a fixed id, and it is held on the
+        # plan, not on any continuation identity.
+        self.assertEqual(self.callers("_append_reply"),
+                         ["conversation/gateway.py::_store_response",
+                          "conversation/gateway.py::reconcile_plan_announcements"])
 
 
 if __name__ == "__main__":

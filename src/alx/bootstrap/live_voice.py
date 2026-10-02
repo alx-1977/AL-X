@@ -1002,6 +1002,7 @@ async def run(repository_root: Path) -> None:
             None if coding_runtime is None
             else lambda job: coding_runtime.agent.cancel(job.call.call_id)
         ),
+        reconcile_replies=gateway.reconcile_plan_announcements,
     )
     # Observed mail joins them for the same reason, and to end the same
     # coupling the due-cognition tick was built to avoid. Mail used to reach

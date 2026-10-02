@@ -269,13 +269,16 @@ class PlanWorkers:
 
     def __init__(self, core: Any, core_turn_lock: asyncio.Lock,
                  attention: PlanAttentionSource | None = None,
-                 cancel_dispatch: Callable[[Any], None] | None = None) -> None:
+                 cancel_dispatch: Callable[[Any], None] | None = None,
+                 reconcile_replies: Callable[[], Any] | None = None) -> None:
         self._core = core
         self._lock = core_turn_lock
         self._attention = attention
         # A capability's own cancel, where one exists (a coding job). Asked,
         # never relied on: shutdown still waits for the call to return.
         self._cancel_dispatch = cancel_dispatch or (lambda _job: None)
+        # Stores a finish or cancel reply a failure kept from the conversation.
+        self._reconcile_replies = reconcile_replies
         self._tasks: set[asyncio.Task] = set()
         # Workers past the dispatch boundary, by task: these are waited for.
         self._started: dict[asyncio.Task, Any] = {}
@@ -286,6 +289,8 @@ class PlanWorkers:
         if self._stopping:
             return 0
         async with self._lock:
+            if self._reconcile_replies is not None:
+                await run_core_worker(self._reconcile_replies)
             jobs = await run_core_worker(self._core.advance_due_plans)
             if self._attention is not None:
                 await run_core_worker(self._attention.settle)

@@ -15,8 +15,8 @@ from alx.contracts import (
     CapabilityResultState, ConversationOrigin, ConversationTurn, Evidence, GoalState,
     GoalStatus, GoalStopReason, MemoryKind, MemoryProposal, Objective,
     PendingMemoryBatch, ProgressRecord, Referent, SuccessCriterion, WorkItem,
-    ExecutionOutcome, ExecutionPlan, ExecutionStep, PlanAttention, PlanCondition,
-    PlanDispatch, PlanStatus,
+    ExecutionOutcome, ExecutionPlan, ExecutionStep, PlanAnnouncement, PlanAttention,
+    PlanCondition, PlanDispatch, PlanStatus,
     GoalSnapshot, GoalSummary,
 )
 from alx.contracts.provenance import (
@@ -138,6 +138,9 @@ def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
             plan.inflight.step_index, plan.inflight.call_id, plan.inflight.started,
         ],
         "attention_seq": plan.attention_seq,
+        "announcement": None if plan.announcement is None else [
+            plan.announcement.turn_id, plan.announcement.text,
+        ],
         "attention": None if attention is None else {
             "seq": attention.seq,
             "reason": attention.reason,
@@ -194,6 +197,8 @@ def _plan_from_data(data: dict[str, Any] | None) -> ExecutionPlan | None:
             attention["offers"], attention["paid_offers"],
             _time_from_data(attention["next_offer_at"]), attention["blocked"],
         ),
+        None if data.get("announcement") is None
+        else PlanAnnouncement(*data["announcement"]),
     )
 
 
@@ -650,6 +655,14 @@ class SQLiteGoalStore:
             f"IN ({', '.join('?' for _ in statuses)}) "
             "AND retention_until > ? ORDER BY rowid",
             (*statuses, _time_to_data(self._now())),
+        ).fetchall())
+
+    def list_plan_announcement_goal_ids(self) -> tuple[str, ...]:
+        """Goals whose finished plan still holds a reply not yet stored."""
+        return tuple(item[0] for item in self._connection.execute(
+            "SELECT goal_id FROM goals "
+            "WHERE json_extract(state_json, '$.execution_plan.announcement') IS NOT NULL "
+            "ORDER BY rowid"
         ).fetchall())
 
     def legacy_conversation_turns(self) -> tuple[ConversationTurn, ...]:
