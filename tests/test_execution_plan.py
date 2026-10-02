@@ -2180,3 +2180,121 @@ class ReviewFollowUpTests(PlanHarness):
         for _ in range(3):
             agent.advance_due_plans(lambda cid: loads.append(cid) or conversation())
         self.assertEqual(loads, ["thread"])
+
+
+
+class InterruptedRereadTests(PlanHarness):
+    """CodeRabbit 0b81a6c: an interrupted re-read never leaves an open dispatch."""
+
+    def woken_then_reread_raises(self, **state_changes):
+        self.outputs[READ_EXTERNAL_REVIEW] = review_result(published_review())
+        self.agent(Reasoner(AgentDecision(
+            execution_plan=plan(review_step(), step("merge")), goal_id="goal",
+        )), extra_definitions=(REVIEW_CONTENT_DEFINITION,)).process(conversation(), RETENTION, 1)
+        if state_changes:
+            snapshot = self.store.load("goal")
+            self.store.replace(replace(snapshot.state, **state_changes),
+                               snapshot.retention_until, snapshot.revision)
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path)
+
+        def explode(_call):
+            raise RuntimeError("transport dropped")
+
+        self.outputs[READ_EXTERNAL_REVIEW] = explode
+
+    def resume(self, *decisions):
+        with patch("alx.core.loop.classify_planned_result",
+                   wraps=classify_planned_result) as classifier:
+            self.reasoner = Reasoner(*decisions)
+            outcome = self.agent(self.reasoner, extra_definitions=(REVIEW_CONTENT_DEFINITION,)).process(
+                conversation(), RETENTION, len(decisions), origin=CognitionOrigin.WORK_COMPLETED,
+                resume_plan_goal_id="goal",
+            )
+        self.rereads = [item for item in classifier.call_args_list
+                        if item.kwargs.get("judgment_wake")]
+        return outcome
+
+    def assert_closed_and_classified(self):
+        state = self.store.load("goal").state
+        self.assertFalse(any(item.disposition is CapabilityAttemptDisposition.PENDING
+                             for item in state.attempts))
+        closed = [item for item in state.attempts
+                  if item.reason_code == "dispatch_interrupted"]
+        self.assertEqual(len(closed), 1)
+        self.assertIs(closed[0].disposition, CapabilityAttemptDisposition.BROKER_FAILURE)
+        # The classifier read the closed attempt, once, inside the wake.
+        self.assertEqual(len(self.rereads), 1)
+        self.assertIs(self.rereads[0].args[1].disposition,
+                      CapabilityAttemptDisposition.BROKER_FAILURE)
+        plan_state = state.execution_plan
+        self.assertIn("dispatch_interrupted", plan_state.core_reentry_facts)
+        self.assertIn("judgment_evidence_unavailable", plan_state.core_reentry_facts)
+        self.assertEqual(plan_state.mechanical_blocker, "judgment_evidence_unavailable")
+        self.assertEqual(plan_state.last_result_call_id, closed[0].call.call_id)
+        # Her evidence is the closed result, not an open dispatch.
+        self.assertIs(self.reasoner.contexts[0].transient_attempts[0].disposition,
+                      CapabilityAttemptDisposition.BROKER_FAILURE)
+        return state
+
+    def test_interrupted_reread_is_closed_and_classified_before_she_responds(self):
+        self.woken_then_reread_raises()
+        outcome = self.resume(AgentDecision(response="I could not read it.", goal_id="goal"))
+        self.assertEqual(outcome.response, "I could not read it.")
+        self.assert_closed_and_classified()
+
+    def test_direct_call_after_interrupted_reread_is_refused_without_a_second_dispatch(self):
+        # CodeRabbit's second-PENDING crash: not reachable, because the blocker
+        # refuses the call before any dispatch is checkpointed.
+        self.woken_then_reread_raises()
+        outcome = self.resume(AgentDecision(call=CapabilityCall("merge-now", "merge", {}),
+                                            goal_id="goal"))
+        self.assertEqual(outcome.reason, "judgment_evidence_unavailable")
+        self.assertNotIn("merge", self.calls)
+        state = self.assert_closed_and_classified()
+        self.assertFalse(any(item.call is not None and item.call.call_id == "merge-now"
+                             for item in state.attempts))
+
+    def test_parking_after_interrupted_reread_keeps_outstanding_work(self):
+        work = (WorkItem("judge", "Judge the review"),)
+        cases = {
+            "refused_direct_call": (AgentDecision(call=CapabilityCall("merge-p", "merge", {}),
+                                                  goal_id="goal"),),
+            "call_less_end": (AgentDecision(response="I could not read it.", goal_id="goal"),
+                              AgentDecision(response="I could not read it.", goal_id="goal")),
+        }
+        for name, decisions in cases.items():
+            with self.subTest(case=name):
+                self.reset_goal()
+                self.calls.clear()
+                self.woken_then_reread_raises(outstanding_work=work)
+                outcome = self.resume(*decisions)
+                state = self.assert_closed_and_classified()
+                self.assertIs(state.status, GoalStatus.AWAITING_INPUT)
+                self.assertEqual(state.outstanding_work, work)
+                self.assertNotIn("merge", self.calls)
+                if name == "call_less_end":
+                    self.assertEqual(outcome.response, "I could not read it.")
+
+    def test_gateway_stores_the_response_after_an_interrupted_reread(self):
+        self.woken_then_reread_raises(outstanding_work=(WorkItem("judge", "Judge the review"),))
+        conversations = SQLiteConversationStore(self.path.with_name("conversation.sqlite3"))
+        self.addCleanup(conversations.close)
+        created = conversations.create("thread", RETENTION)
+        conversations.append(conversation().turns[0], RETENTION, created.revision)
+
+        class Ledger:
+            def exists(self, _identifier):
+                return False
+
+        opportunity = PlanContinuationSource(self.store, Ledger(), enabled=True).due_opportunities()[0]
+        gateway = ConversationGateway(self.agent(Reasoner(
+            AgentDecision(response="I could not read it.", goal_id="goal"),
+            AgentDecision(response="I could not read it.", goal_id="goal"),
+        ), extra_definitions=(REVIEW_CONTENT_DEFINITION,)), conversations)
+        gateway.receive_cognition_opportunity("thread", opportunity, 2, RETENTION)
+        self.assertEqual(conversations.load("thread").turns[-1].content, "I could not read it.")
+        state = self.store.load("goal").state
+        self.assertFalse(any(item.disposition is CapabilityAttemptDisposition.PENDING
+                             for item in state.attempts))
+        self.assertIs(state.status, GoalStatus.AWAITING_INPUT)

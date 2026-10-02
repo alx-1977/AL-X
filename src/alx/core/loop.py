@@ -2261,8 +2261,11 @@ class CoreAgent:
             call = replace(stored.call, call_id=str(uuid4()))
             snapshot, observed, refusal = self._dispatch_planned_call(snapshot, call)
             if observed is None and refusal is None:
-                # The dispatch never returned a usable attempt. What it left
-                # behind is the result: classified as interrupted, not skipped.
+                # The dispatch never returned a usable attempt. Its unresolved
+                # attempt is closed the way restart recovery closes one, so
+                # the goal holds no open dispatch for the rest of this turn,
+                # and the closed attempt is the result that is classified.
+                snapshot = self._close_interrupted_dispatch(snapshot)
                 observed = snapshot.state.attempts[-1]
             if observed is not None:
                 # The re-read is a planned result like any other: classified
