@@ -1094,14 +1094,16 @@ DEFAULT_CORE_CLAUDE_CONFIG_DIRNAME = ".claude-alx"
 
 def core_claude_identity(
     environment: Mapping[str, str],
-) -> tuple[str, str | None]:
+) -> tuple[str, str]:
     """The dedicated Claude configuration directory and expected account.
 
     `ALX_CLAUDE_CONFIG_DIR` may use `~` or `$HOME`; unset, it is
-    `$HOME/.claude-alx`. It must be absolute after expansion and must not be
-    the person's own `$HOME/.claude`, so the Core can never be pointed at the
-    personal login by configuration either. `ALX_CLAUDE_ACCOUNT`, when set, is
-    the account the directory must be signed in as.
+    `$HOME/.claude-alx`. It must be absolute after expansion, and its real
+    path, symlinks resolved, must not be `$HOME` or the person's own
+    `$HOME/.claude`, so the Core can never be pointed at the personal login,
+    directly or through an alias. The resolved path is what the CLI is given.
+    `ALX_CLAUDE_ACCOUNT` is required: the exact account that directory must
+    be signed in as.
     """
     home = environment.get("HOME", "").strip() or str(Path.home())
     configured = environment.get("ALX_CLAUDE_CONFIG_DIR", "").strip()
@@ -1113,15 +1115,24 @@ def core_claude_identity(
     path = Path(raw)
     if not path.is_absolute():
         raise ConfigurationError("ALX_CLAUDE_CONFIG_DIR must be an absolute path")
-    resolved = os.path.normpath(raw)
-    personal = os.path.normpath(home)
-    if resolved in (personal, os.path.join(personal, ".claude")):
+    resolved = os.path.realpath(raw)
+    if resolved in personal_claude_paths(home):
         raise ConfigurationError(
             "ALX_CLAUDE_CONFIG_DIR must be AL/X's own Claude configuration, "
             "not the personal one"
         )
-    account = environment.get("ALX_CLAUDE_ACCOUNT", "").strip() or None
+    account = environment.get("ALX_CLAUDE_ACCOUNT", "").strip()
+    if not account:
+        raise ConfigurationError(
+            "ALX_CLAUDE_ACCOUNT must name the Claude account AL/X Core reasons as"
+        )
     return resolved, account
+
+
+def personal_claude_paths(home: str) -> frozenset[str]:
+    """Real paths the Core's Claude configuration may never be."""
+    personal = os.path.realpath(home)
+    return frozenset({personal, os.path.realpath(os.path.join(personal, ".claude"))})
 
 
 @dataclass(frozen=True, slots=True)

@@ -160,6 +160,10 @@ def classify_planned_result(
         if wait_expired:
             return PlanResultClassification(PlanResultKind.WAKE_CORE, ("plan_wait_exceeded",))
         return PlanResultClassification(PlanResultKind.WAIT)
+    if wait_expired:
+        # Its wait bound passed before this result was recorded. Advancing
+        # would treat the bound as if it did not exist; she decides.
+        return PlanResultClassification(PlanResultKind.WAKE_CORE, ("plan_wait_exceeded",))
     if conditions_match(_document(attempt), step.completion_conditions):
         return PlanResultClassification(PlanResultKind.ADVANCE)
     return PlanResultClassification(PlanResultKind.WAKE_CORE, ("planned_result_unexpected",))
@@ -177,11 +181,13 @@ def reduce_plan(
         )
     step = plan.steps[plan.cursor]
     if classification.kind is PlanResultKind.WAIT:
+        deadline = plan.wait_deadline or now + timedelta(seconds=step.max_wait_seconds)
         return replace(
             plan, status=PlanStatus.WAITING, inflight=None,
-            next_due_at=now + timedelta(seconds=step.wait_seconds),
-            wait_deadline=(plan.wait_deadline
-                           or now + timedelta(seconds=step.max_wait_seconds)),
+            # Never later than the bound: the poll due at the deadline is the
+            # runner's cue to stop observing and tell her.
+            next_due_at=min(now + timedelta(seconds=step.wait_seconds), deadline),
+            wait_deadline=deadline,
         )
     evidence = () if evidence_call_id is None else (evidence_call_id,)
     cursor = plan.cursor + 1

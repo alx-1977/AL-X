@@ -94,6 +94,7 @@ _IDENTITY_CODES = frozenset(
         "subscription_config_mismatch",
         "subscription_account_mismatch",
         "subscription_identity_unverifiable",
+        "subscription_config_personal",
     }
 )
 
@@ -245,6 +246,9 @@ class ClaudeSubscriptionReasoningModel:
         # only for callers outside the Core, which keep the CLI's own default.
         if config_dir is not None and not os.path.isabs(config_dir):
             raise ValueError("config_dir must be an absolute path")
+        if config_dir is not None and not (expected_account or "").strip():
+            # A dedicated directory proves nothing about who signed into it.
+            raise ValueError("a dedicated config_dir requires its expected account")
         self._config_dir = config_dir
         self._expected_account = (
             None if expected_account is None else expected_account.strip().casefold()
@@ -333,6 +337,11 @@ class ClaudeSubscriptionReasoningModel:
             # Checked before the CLI runs: given a missing directory it would
             # create an empty one and report a login that was never made.
             raise SubscriptionIdentityError("subscription_config_missing")
+        home = self._environment.get("HOME", "")
+        personal = {os.path.realpath(home), os.path.realpath(os.path.join(home, ".claude"))}
+        if home and os.path.realpath(self._config_dir) in personal:
+            # However it is named, it must not resolve to the person's login.
+            raise SubscriptionIdentityError("subscription_config_personal")
         try:
             with TemporaryDirectory(prefix="alx-claude-") as working_directory:
                 from alx.providers.coding_process import run_coding_subprocess
@@ -368,33 +377,37 @@ class ClaudeSubscriptionReasoningModel:
         account = status.get("email")
         if not isinstance(account, str) or not account.strip():
             raise SubscriptionIdentityError("subscription_identity_unverifiable")
-        if (self._expected_account is not None
-                and account.strip().casefold() != self._expected_account):
+        if account.strip().casefold() != self._expected_account:
             raise SubscriptionIdentityError("subscription_account_mismatch")
         subscription = status.get("subscriptionType")
         identity = SubscriptionIdentity(
             self._config_dir, account.strip(), "claude.ai",
             subscription if isinstance(subscription, str) else "",
         )
-        LOGGER.info(
-            "AL/X Core Claude identity verified: config_dir=%s account=%s "
-            "auth=%s subscription=%s",
-            identity.config_dir, identity.account, identity.auth_method,
-            identity.subscription_type or "unknown",
-        )
         with self._availability_lock:
+            changed = identity != self._identity
             self._identity = identity
+        if changed:
+            # Once per identity, not once per turn: the account and the
+            # directory, never a credential or any configuration content.
+            LOGGER.info(
+                "AL/X Core Claude identity verified: config_dir=%s account=%s "
+                "auth=%s subscription=%s",
+                identity.config_dir, identity.account, identity.auth_method,
+                identity.subscription_type or "unknown",
+            )
         return identity
 
     def _require_identity(self) -> None:
-        """Before any turn: the dedicated identity, verified, still present."""
+        """Before every turn: the dedicated identity, verified again.
+
+        A login can change while the runtime runs, so a check at startup
+        alone would not hold. One local status read per turn.
+        """
         if self._config_dir is None:
             return
         try:
-            if not os.path.isdir(self._config_dir):
-                raise SubscriptionIdentityError("subscription_config_missing")
-            if self._identity is None:
-                self.verify_identity()
+            self.verify_identity()
         except SubscriptionIdentityError as error:
             with self._availability_lock:
                 # Latched without expiry: only Friedl can repair an identity.

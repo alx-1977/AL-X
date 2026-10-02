@@ -186,8 +186,9 @@ class PlanHarness(unittest.TestCase):
         """Every due step, run to the next wait or attention, as workers would."""
         jobs = list(agent.advance_due_plans())
         while jobs:
-            job = jobs.pop(0)
-            jobs.extend(agent.finish_planned_dispatch(job, agent.run_planned_dispatch(job)))
+            job = agent.begin_planned_dispatch(jobs.pop(0))
+            if job is not None:
+                jobs.extend(agent.finish_planned_dispatch(job, agent.run_planned_dispatch(job)))
 
     def person(self, agent, *turns, budget=4):
         return agent.process(conversation(*turns), RETENTION, budget)
@@ -404,28 +405,84 @@ class PreconditionTests(PlanHarness):
 class ResultIdentityTests(PlanHarness):
     """Acceptance invariant 5: a result moves the plan only by its in-flight identity."""
 
-    def test_late_result_of_a_cancelled_plan_is_recorded_and_moves_nothing(self):
-        agent = self.installed(step("coding"), step("merge"))
-        (job,) = agent.advance_due_plans()
-        # She stops it while the step is still running in the background.
+    def cancel(self, agent):
         self.person(self.same_process(
             agent, Reasoner(SELECT, resolve(PlanOperation.CANCEL, "Stopped."))))
         self.assertEqual(self.plan_of().status, PlanStatus.CANCELLED)
+
+    def replace_plan(self, agent):
+        self.person(self.same_process(
+            agent, Reasoner(SELECT, install(plan(step("cleanup")), "Replaced."))))
+
+    def test_cancel_before_the_dispatch_boundary_means_the_call_never_happens(self):
+        for stop in (self.cancel, self.replace_plan):
+            with self.subTest(stop=stop.__name__):
+                self.set_goal(execution_plan=None, attempts=())
+                self.calls.clear()
+                agent = self.installed(step("coding"), step("merge"))
+                (job,) = agent.advance_due_plans()
+                stop(agent)
+                self.assertIsNone(agent.begin_planned_dispatch(job))
+                self.assertNotIn("coding", self.names())
+                (closed,) = [item for item in self.state().attempts
+                             if item.call.call_id == job.call.call_id]
+                self.assertEqual((closed.reason_code, closed.implementation_invoked),
+                                 ("plan_dispatch_withdrawn", False))
+
+    def test_cancel_after_the_boundary_records_the_result_and_runs_nothing_more(self):
+        agent = self.installed(step("coding"), step("merge"))
+        (job,) = agent.advance_due_plans()
+        job = agent.begin_planned_dispatch(job)
+        self.assertTrue(self.plan_of().inflight.started)
+        self.cancel(agent)
         self.assertEqual(agent.finish_planned_dispatch(job, agent.run_planned_dispatch(job)), ())
-        recorded = [item for item in self.state().attempts
-                    if item.call.call_id == job.call.call_id]
-        self.assertEqual(recorded[0].disposition, CapabilityAttemptDisposition.EXECUTED)
+        (recorded,) = [item for item in self.state().attempts
+                       if item.call.call_id == job.call.call_id]
+        self.assertEqual(recorded.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertEqual(self.plan_of().status, PlanStatus.CANCELLED)
+        self.work(agent)
         self.assertEqual(self.names(), ["coding"])
+
+    def test_a_started_dispatch_is_never_begun_twice_or_relabelled(self):
+        agent = self.installed(step("coding"))
+        (job,) = agent.advance_due_plans()
+        self.assertIsNotNone(agent.begin_planned_dispatch(job))
+        self.assertIsNone(agent.begin_planned_dispatch(job))
+        (pending,) = [item for item in self.state().attempts
+                      if item.call.call_id == job.call.call_id]
+        self.assertIs(pending.disposition, CapabilityAttemptDisposition.PENDING)
 
     def test_late_result_of_a_replaced_plan_moves_nothing(self):
         agent = self.installed(step("coding"))
         (job,) = agent.advance_due_plans()
-        self.person(self.same_process(
-            agent, Reasoner(SELECT, install(plan(step("cleanup")), "Replaced."))))
+        job = agent.begin_planned_dispatch(job)
+        self.replace_plan(agent)
         replacement = self.plan_of()
         agent.finish_planned_dispatch(job, agent.run_planned_dispatch(job))
         self.assertEqual(self.plan_of(), replacement)
+
+    def test_an_approval_withdrawn_before_the_boundary_stops_the_call(self):
+        scope = ApprovalScope("merge", {})
+        self.set_goal(approvals=(Approval("ok", scope, ApprovalLifecycle.GRANTED),))
+        agent = self.installed(step("merge", approval_id="ok"))
+        (job,) = agent.advance_due_plans()
+        self.assertIs(next(item for item in self.state().approvals).lifecycle,
+                      ApprovalLifecycle.CLAIMED)
+        self.set_goal(approvals=(Approval("ok", scope, ApprovalLifecycle.WITHDRAWN),))
+        self.assertIsNone(agent.begin_planned_dispatch(job))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.plan_of().attention.reason, "plan_approval_invalid")
+
+    def test_a_claimed_approval_reaches_the_gate_as_the_grant_it_is(self):
+        scope = ApprovalScope("merge", {})
+        self.set_goal(approvals=(Approval("ok", scope, ApprovalLifecycle.GRANTED),))
+        agent = self.installed(step("merge", approval_id="ok"))
+        (job,) = agent.advance_due_plans()
+        started = agent.begin_planned_dispatch(job)
+        (approval,) = started.authority.approvals
+        self.assertIs(approval.lifecycle, ApprovalLifecycle.GRANTED)
+        agent.finish_planned_dispatch(started, agent.run_planned_dispatch(started))
+        self.assertIs(self.state().approvals[0].lifecycle, ApprovalLifecycle.CONSUMED)
 
     def test_a_direct_call_on_the_goal_is_refused_while_a_step_is_in_flight(self):
         agent = self.installed(step("coding"))
@@ -437,6 +494,7 @@ class ResultIdentityTests(PlanHarness):
         )
         self.person(self.same_process(agent, reasoner))
         self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"], "plan_step_in_flight")
+        job = agent.begin_planned_dispatch(job)
         agent.finish_planned_dispatch(job, agent.run_planned_dispatch(job))
         self.assertEqual(self.names(), ["coding"])
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
@@ -611,15 +669,29 @@ class RestartTests(PlanHarness):
 
     def test_interrupted_effectful_step_wakes_her_and_is_never_replayed(self):
         agent = self.installed(step("coding"), step("merge"))
-        agent.advance_due_plans()
+        (job,) = agent.advance_due_plans()
+        self.assertIsNotNone(agent.begin_planned_dispatch(job))
         self.restart()
         self.work(self.agent())
         self.assertEqual(self.plan_of().attention.reason, "dispatch_interrupted")
         self.assertEqual(self.calls, [])
 
+    def test_a_checkpoint_never_started_is_simply_run_after_restart(self):
+        agent = self.installed(step("coding"), step("merge"))
+        agent.advance_due_plans()
+        self.restart()
+        self.work(self.agent())
+        self.assertEqual(self.names(), ["coding", "merge"])
+        self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+        dropped = [item for item in self.state().attempts
+                   if item.reason_code == "dispatch_not_started"]
+        self.assertEqual(len(dropped), 1)
+        self.assertFalse(dropped[0].implementation_invoked)
+
     def test_interrupted_observation_is_observed_again_without_her(self):
         agent = self.installed(step("ci", wait=10))
-        agent.advance_due_plans()
+        (job,) = agent.advance_due_plans()
+        agent.begin_planned_dispatch(job)
         self.restart()
         agent = self.agent()
         self.work(agent)
@@ -649,6 +721,7 @@ class RestartTests(PlanHarness):
     def test_recorded_but_unreduced_result_is_reduced_not_redispatched(self):
         agent = self.installed(step("coding"), step("merge"))
         (job,) = agent.advance_due_plans()
+        job = agent.begin_planned_dispatch(job)
         attempt = agent.run_planned_dispatch(job)
         # The process stops after the result is recorded, before the plan moves.
         snapshot = self.store.load("goal")
@@ -666,10 +739,17 @@ class RestartTests(PlanHarness):
         self.work(agent)
         self.restart()
         reasoner = Reasoner(AgentDecision(response="Reading it.", goal_id="goal"))
-        self.occasion(self.agent(reasoner))
+        agent = self.agent(reasoner)
+        # Not offered over metadata alone: the read must come first.
+        self.assertFalse(agent.plan_evidence_ready("goal"))
+        # Read on a worker, by the runner, never inside a Core turn.
+        self.work(agent)
+        self.assertTrue(agent.plan_evidence_ready("goal"))
+        self.assertEqual(self.names(), ["review", "review"])
+        self.occasion(agent)
+        self.assertEqual(self.names(), ["review", "review"])
         evidence = reasoner.contexts[0].transient_attempts
         self.assertEqual(evidence[0].result.values["findings"], ("fix",))
-        self.assertEqual(self.names(), ["review", "review"])
         # Evidence for her, not a plan result: the plan has not moved.
         self.assertEqual(self.plan_of().attention.reason, "planned_evidence_requires_judgement")
 
@@ -710,9 +790,9 @@ class AttentionTests(PlanHarness):
         self.work(agent)
         return agent
 
-    def source(self, notices=None):
+    def source(self, notices=None, spend=None):
         return PlanAttentionSource(
-            self.store, Ledger(), enabled=True, clock=lambda: self.now,
+            self.store, Ledger(), enabled=True, clock=lambda: self.now, spend=spend,
             notify=(lambda conversation_id, values: notices.append((conversation_id, values)))
             if notices is not None else None,
         )
@@ -720,10 +800,12 @@ class AttentionTests(PlanHarness):
     def test_exhausted_offers_block_and_notify_once_without_reasoning(self):
         self.needing_core()
         notices = []
-        source = self.source(notices)
+        spend = Spend()
+        source = self.source(notices, spend)
         for _ in range(MAX_PAID_PLAN_OFFERS):
             (offer,) = source.due_opportunities()
             self.assertTrue(source.claim(offer))
+            spend.reached.add(offer.opportunity_id)   # the provider was reached
             source.mark_honoured(offer)
             self.later(PLAN_BACKOFF_CAP)
             source.settle()
@@ -737,7 +819,7 @@ class AttentionTests(PlanHarness):
         # A restart cannot extend the cap, and shows the block again.
         self.restart()
         restarted = []
-        self.source(restarted).settle()
+        self.source(restarted, spend).settle()
         self.assertEqual([values["state"] for _thread, values in restarted], ["blocked"])
         self.assertEqual(self.source().due_opportunities(), ())
 
@@ -795,6 +877,16 @@ class AttentionTests(PlanHarness):
 
 # The longest backoff an offer can carry: five minutes doubled four times.
 PLAN_BACKOFF_CAP = 300 * 16 + 1
+
+
+class Spend:
+    """The spend ledger's durable record of which occasions reached a provider."""
+
+    def __init__(self):
+        self.reached = set()
+
+    def dispatch_started(self, opportunity_id):
+        return opportunity_id in self.reached
 
 
 class Ledger:
@@ -935,7 +1027,8 @@ class AcceptSafetyTests(PlanHarness):
 
     def test_an_interrupted_effectful_step_cannot_be_accepted(self):
         def crash(agent):
-            agent.advance_due_plans()
+            (job,) = agent.advance_due_plans()
+            agent.begin_planned_dispatch(job)
             self.restart()
             fresh = self.agent(Reasoner(resolve(PlanOperation.ACCEPT),
                                         AgentDecision(response="Checking.", goal_id="goal")))
@@ -997,6 +1090,7 @@ class ContextIsolationTests(PlanHarness):
                            budget_check=conversation_var.set)
         self.person(agent)
         (job,) = agent.advance_due_plans()
+        job = agent.begin_planned_dispatch(job)
         self.assertEqual(job.conversation_id, "thread")
         context = contextvars.copy_context()
         worker = threading.Thread(target=lambda: context.run(
@@ -1123,7 +1217,7 @@ class WorkerLifecycleTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         agent = self.installed(step("coding"))
         original = agent.finish_planned_dispatch
 
-        def failing(job, attempt):
+        def failing(job, attempt, **_options):
             agent._live_plan_dispatches.discard(job.call.call_id)
             raise RuntimeError("store unavailable")
         agent.finish_planned_dispatch = failing
@@ -1158,6 +1252,265 @@ class WorkerLifecycleTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         self.work(self.agent())
         self.assertEqual(self.plan_of().attention.reason, "dispatch_interrupted")
         self.assertEqual(self.names(), ["coding"])
+
+
+class ShutdownTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
+    """Stores close only after every started step has recorded its result."""
+
+    def setUp(self):
+        PlanHarness.setUp(self)
+
+    def long(self, name, release, started):
+        def run(call):
+            started.set()
+            release.wait(5)
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.SUCCEEDED))
+        self.outputs[name] = run
+
+    async def stop_during(self, name, *steps, cancel=None):
+        release, started = threading.Event(), threading.Event()
+        self.long(name, release, started)
+        agent = self.installed(*steps)
+        cancelled = []
+
+        def cancel_dispatch(job):
+            cancelled.append(job.call.capability_id)
+            release.set()
+        workers = PlanWorkers(agent, asyncio.Lock(), cancel_dispatch=cancel or cancel_dispatch)
+        await workers.advance()
+        self.assertTrue(await asyncio.to_thread(started.wait, 5))
+        stopping = asyncio.ensure_future(workers.stop())
+        await asyncio.sleep(0.05)
+        return agent, workers, stopping, release, cancelled
+
+    async def test_shutdown_while_coding_runs_waits_for_its_recorded_result(self):
+        _agent, workers, stopping, _release, cancelled = await self.stop_during(
+            "coding", step("coding"), step("merge"))
+        await stopping
+        # The coding job was asked to stop; its result was recorded first.
+        self.assertEqual(cancelled, ["coding"])
+        self.assertEqual(workers._tasks, set())
+        recorded = [item for item in self.state().attempts if item.call.capability_id == "coding"]
+        self.assertEqual(recorded[0].disposition, CapabilityAttemptDisposition.EXECUTED)
+        # Nothing further started while stopping, and a restart does not
+        # treat the recorded completion as an interruption.
+        self.assertEqual(self.names(), ["coding"])
+        self.restart()
+        self.work(self.agent())
+        self.assertEqual(self.names(), ["coding", "merge"])
+        self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+
+    async def test_shutdown_while_an_observation_runs_cannot_close_the_store_under_it(self):
+        _agent, workers, stopping, release, _cancelled = await self.stop_during(
+            "ci", step("ci", wait=10), cancel=lambda _job: None)
+        # The step has no cancel of its own: shutdown waits for it.
+        await asyncio.sleep(0.1)
+        self.assertFalse(stopping.done())
+        release.set()
+        await stopping
+        self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+
+    async def test_a_step_not_yet_started_at_shutdown_never_starts(self):
+        agent = self.installed(step("coding"))
+        lock = asyncio.Lock()
+        workers = PlanWorkers(agent, lock)
+        await workers.advance()
+        # A Core turn takes the lock before the worker reaches its boundary,
+        # and shutdown begins meanwhile.
+        await lock.acquire()
+        stopping = asyncio.ensure_future(workers.stop())
+        await asyncio.sleep(0.05)
+        lock.release()
+        await stopping
+        self.assertEqual(self.calls, [])
+        # Its checkpoint was never started, so restart simply runs it.
+        self.assertFalse(self.plan_of().inflight.started)
+        self.restart()
+        self.work(self.agent())
+        self.assertEqual(self.names(), ["coding"])
+
+    async def test_a_runtime_killed_mid_step_restarts_into_interruption(self):
+        release, started = threading.Event(), threading.Event()
+        self.long("coding", release, started)
+        agent = self.installed(step("coding"))
+        workers = PlanWorkers(agent, asyncio.Lock())
+        await workers.advance()
+        self.assertTrue(await asyncio.to_thread(started.wait, 5))
+        # No stop: the process simply dies with the call in flight.
+        for task in tuple(workers._tasks):
+            task.cancel()
+        release.set()
+        await asyncio.gather(*tuple(workers._tasks), return_exceptions=True)
+        self.restart()
+        self.work(self.agent())
+        self.assertEqual(self.plan_of().attention.reason, "dispatch_interrupted")
+        self.assertEqual(self.names(), ["coding"])
+
+
+class PaidOfferTests(PlanHarness):
+    """Only an offer that reached a provider is paid."""
+
+    def needing_core(self):
+        agent = self.installed(step("coding"))
+        self.outputs["coding"] = FAILED
+        self.work(agent)
+
+    def test_refusals_before_the_provider_never_block_but_still_back_off(self):
+        self.needing_core()
+        spend = Spend()
+        source = PlanAttentionSource(self.store, Ledger(), True, clock=lambda: self.now,
+                                     spend=spend)
+        for _ in range(MAX_PAID_PLAN_OFFERS + 2):
+            (offer,) = source.due_opportunities()
+            source.claim(offer)
+            # A budget stop or disabled reasoner: the turn checkpointed, the
+            # runner honoured it, and the spend ledger shows no dispatch.
+            source.mark_honoured(offer)
+            source.settle()
+            self.assertEqual(source.due_opportunities(), ())   # backed off
+            self.later(PLAN_BACKOFF_CAP)
+        attention = self.plan_of().attention
+        self.assertEqual((attention.paid_offers, attention.blocked), (0, False))
+        self.assertEqual(attention.offers, MAX_PAID_PLAN_OFFERS + 2)
+
+    def test_the_paid_count_is_read_from_the_ledger_after_restart(self):
+        self.needing_core()
+        spend = Spend()
+        source = PlanAttentionSource(self.store, Ledger(), True, clock=lambda: self.now,
+                                     spend=spend)
+        (offer,) = source.due_opportunities()
+        source.claim(offer)
+        spend.reached.add(offer.opportunity_id)
+        self.restart()
+        PlanAttentionSource(self.store, Ledger(), True, clock=lambda: self.now,
+                            spend=spend).settle()
+        self.assertEqual(self.plan_of().attention.paid_offers, 1)
+
+
+class CandidateFairnessTests(PlanHarness):
+    def test_plans_needing_her_cannot_crowd_out_this_conversations_goals(self):
+        attention = PlanAttention(1, "planned_result_failed", ("planned_result_failed",), NOW)
+        for index in range(12):
+            goal_id = f"attention-{index}"
+            self.store.create(new_goal(goal_id), "elsewhere", RETENTION)
+            snapshot = self.store.load(goal_id)
+            self.store.replace(replace(snapshot.state, execution_plan=plan(
+                step("coding"), plan_id=goal_id, objective_source="turn:person-1",
+                objective_summary="Do the work", status=PlanStatus.NEEDS_CORE,
+                attention_seq=1, attention=attention)),
+                snapshot.retention_until, snapshot.revision)
+        for index in range(3):
+            self.store.create(new_goal(f"mine-{index}"), "thread", RETENTION)
+        reasoner = Reasoner(AgentDecision(response="Hello."))
+        self.person(self.agent(reasoner))
+        listed = [item.goal_id for item in reasoner.contexts[0].unfinished_goals]
+        for goal_id in ("goal", "mine-0", "mine-1", "mine-2"):
+            self.assertIn(goal_id, listed)
+        needing = [goal_id for goal_id in listed if goal_id.startswith("attention-")]
+        self.assertTrue(needing)
+        self.assertLessEqual(len(needing), 10 + 5)
+        self.assertLessEqual(len(listed), 10 + 5)
+
+
+class CheckPrecedenceTests(unittest.TestCase):
+    def outcome(self, *runs, statuses=()):
+        def read(_request):
+            return PullRequestChecks(95, HEAD, tuple(runs), tuple(statuses))
+        return build_pull_request_checks_executors(read, lambda: "r")[
+            "read_pull_request_checks"]({"pull_request_number": 95, "head_sha": HEAD}).outcome
+
+    @staticmethod
+    def run_(status, conclusion=None):
+        return CheckRun("check", status, conclusion, None, None, None, "github-actions",
+                        "Actions", None, None, None)
+
+    def test_failure_then_judgment_then_pending_then_success(self):
+        queued = self.run_("queued")
+        cases = {
+            "action_required beside queued": ((self.run_("completed", "action_required"), queued),
+                                              (), ExecutionOutcome.AMBIGUOUS),
+            "stale beside queued": ((self.run_("completed", "stale"), queued), (),
+                                    ExecutionOutcome.AMBIGUOUS),
+            "failure beside action_required": ((self.run_("completed", "failure"),
+                                                self.run_("completed", "action_required")),
+                                               (), ExecutionOutcome.FAILURE),
+            "unknown status state beside pending": (
+                (), (CommitStatus("a", "expected", None, None),
+                     CommitStatus("b", "pending", None, None)), ExecutionOutcome.AMBIGUOUS),
+            "only unresolved": ((queued,), (CommitStatus("a", "pending", None, None),),
+                                ExecutionOutcome.PENDING),
+            "all passing": ((self.run_("completed", "neutral"),),
+                            (CommitStatus("a", "success", None, None),), ExecutionOutcome.SUCCESS),
+        }
+        for name, (runs, statuses, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.outcome(*runs, statuses=statuses), expected)
+
+
+class WaitDeadlineTests(PlanHarness):
+    def test_polls_never_pass_the_deadline_and_the_deadline_wakes_her(self):
+        agent = self.installed(ExecutionStep(CapabilityCall("ci", "ci", {}), (), 15, 24))
+        self.outputs["ci"] = [PENDING, PENDING]
+        self.work(agent)
+        self.assertEqual(self.plan_of().next_due_at, NOW + timedelta(seconds=15))
+        self.later(15)
+        self.work(agent)
+        # 30s would pass the 24s bound: the next poll is the bound itself.
+        self.assertEqual(self.plan_of().next_due_at, NOW + timedelta(seconds=24))
+        self.later(9)
+        self.work(agent)
+        self.assertEqual(self.plan_of().attention.reason, "plan_wait_exceeded")
+        # No observation was made at or after the deadline.
+        self.assertEqual(self.names(), ["ci", "ci"])
+
+    def test_a_success_recorded_after_the_deadline_does_not_advance(self):
+        agent = self.installed(ExecutionStep(CapabilityCall("ci", "ci", {}), (), 10, 20),
+                               step("merge"))
+        self.outputs["ci"] = [PENDING, SUCCESS]
+        self.work(agent)
+        self.later(10)
+        (job,) = agent.advance_due_plans()
+        job = agent.begin_planned_dispatch(job)
+        attempt = agent.run_planned_dispatch(job)
+        # The observation returns exactly at the deadline: that is too late.
+        self.later(10)
+        agent.finish_planned_dispatch(job, attempt)
+        self.assertEqual(self.plan_of().attention.reason, "plan_wait_exceeded")
+        self.assertNotIn("merge", self.names())
+
+
+class EvidenceConcurrencyTests(PlanHarness):
+    def needing_judgment_after_restart(self):
+        agent = self.installed(step("review", wait=10))
+        self.outputs["review"] = [JUDGE, JUDGE]
+        self.work(agent)
+        self.restart()
+
+    def test_a_person_turn_never_waits_on_an_evidence_read(self):
+        self.needing_judgment_after_restart()
+        reasoner = Reasoner(SELECT, AgentDecision(response="Still reading.", goal_id="goal"))
+        agent = self.agent(reasoner)
+        (job,) = agent.advance_due_plans()            # scheduled, not yet run
+        self.person(self.same_process(agent, reasoner))
+        self.assertEqual(self.names(), ["review"])    # the turn read nothing
+        job = agent.begin_planned_dispatch(job)
+        agent.finish_planned_dispatch(job, agent.run_planned_dispatch(job))
+        self.assertTrue(agent.plan_evidence_ready("goal"))
+
+    def test_a_late_evidence_read_cannot_serve_a_newer_attention(self):
+        self.needing_judgment_after_restart()
+        agent = self.agent()
+        (job,) = agent.advance_due_plans()
+        job = agent.begin_planned_dispatch(job)
+        attempt = agent.run_planned_dispatch(job)
+        # Meanwhile the attention was answered and a new one raised.
+        current = self.plan_of()
+        self.set_goal(execution_plan=replace(current, attention_seq=2, attention=replace(
+            current.attention, seq=2)))
+        agent.finish_planned_dispatch(job, attempt)
+        self.assertNotIn(job.evidence_for, agent._plan_evidence_cache)
 
 
 class GateTests(PlanHarness):

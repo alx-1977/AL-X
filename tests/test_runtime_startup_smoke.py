@@ -218,6 +218,7 @@ class StartupSmokeTest(unittest.TestCase):
             # EX-001 as amended 2026-09-27: autonomous turns are answered by
             # the conversational subscription Core, so both name it.
             "ALX_REASONING_PROVIDER": "claude_subscription",
+            "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
             "ALX_REASONING_MODEL": "claude-opus-5-5",
             "ALX_AUTONOMOUS_PROVIDER": "claude_subscription",
             "ALX_AUTONOMOUS_MODEL": "claude-opus-5-5",

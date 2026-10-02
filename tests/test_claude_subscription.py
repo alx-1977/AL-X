@@ -7,6 +7,7 @@ this file locks. Installed-CLI help wording lives under evaluation/toolchain.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -774,6 +775,7 @@ class ConfigurationTest(unittest.TestCase):
 
     BASE = {
         "ALX_REASONING_PROVIDER": "claude_subscription",
+        "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
         "ALX_REASONING_MODEL": "opus",
         "ALX_STT_PROVIDER": "cartesia",
         "ALX_STT_MODEL": "ink-whisper",
@@ -944,6 +946,7 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
 
     ENVIRONMENT = {
         "ALX_REASONING_PROVIDER": "claude_subscription",
+        "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
         "ALX_REASONING_MODEL": "opus",
         "ALX_STT_PROVIDER": "cartesia",
         "ALX_STT_MODEL": "ink-whisper",
@@ -1026,7 +1029,7 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
         dedicated.mkdir()
         status = json.dumps({
             "loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
-            "email": "alx@fire-fli.co.za", "configDirectory": str(dedicated),
+            "email": "core@example.invalid", "configDirectory": str(dedicated),
         })
         turn = _Recorder(_envelope(DECISION))
 
@@ -1053,7 +1056,8 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
                          ["auth", "--print"])
         for call in turn.calls:
             self.assertEqual(call["command"][0], "claude")
-            self.assertEqual(call["env"]["CLAUDE_CONFIG_DIR"], str(dedicated))
+            # The canonical path: symlinks resolved before anything is used.
+            self.assertEqual(call["env"]["CLAUDE_CONFIG_DIR"], os.path.realpath(dedicated))
             self.assertNotIn("ANTHROPIC_API_KEY", call["env"])
 
 

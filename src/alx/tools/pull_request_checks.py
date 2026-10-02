@@ -151,25 +151,32 @@ def _outcome(values: Mapping[str, Any]) -> ExecutionOutcome:
     """Whether the checks have settled, and how, for work already decided.
 
     Settlement, not permission: SUCCESS says every check passed by GitHub's
-    own rule, not that a merge should follow. A failure anywhere, including
-    a failed step of a job still running, is a failure now; waiting cannot
-    repair it. No checks yet is pending: they register after a push.
+    own rule, not that a merge should follow; merge authority stays with the
+    merge capability and its gates. Precedence is fixed: a failure anywhere,
+    including a failed step of a job still running, then any settled result
+    needing judgment, then pending, then success.
     """
     runs = values["check_runs"]
     statuses = values["commit_statuses"]
-    conclusions = [run["conclusion"] for run in runs if run["status"] == "completed"]
-    conclusions += [step["conclusion"] for run in runs for step in run.get("steps", ())]
-    if (any(item in _FAILED_CONCLUSIONS for item in conclusions)
+    settled = [run["conclusion"] for run in runs if run["status"] == "completed"]
+    steps = [step["conclusion"] for run in runs for step in run.get("steps", ())]
+    # 1. A failure anywhere is a failure now.
+    if (any(item in _FAILED_CONCLUSIONS for item in (*settled, *steps))
             or any(item["state"] in _FAILED_STATUSES for item in statuses)):
         return ExecutionOutcome.FAILURE
+    # 2. A settled result outside the passing vocabulary is hers to read now,
+    #    whatever else is still running: waiting cannot change it.
+    if (any(item not in _PASSING_CONCLUSIONS for item in settled)
+            or any(item["state"] not in ("success", "pending") for item in statuses)):
+        return ExecutionOutcome.AMBIGUOUS
+    # 3. Only then is anything unresolved pending. No checks yet is pending:
+    #    they register after a push.
     if (not runs and not statuses
             or any(run["status"] != "completed" for run in runs)
             or any(item["state"] == "pending" for item in statuses)):
         return ExecutionOutcome.PENDING
-    if (all(run["conclusion"] in _PASSING_CONCLUSIONS for run in runs)
-            and all(item["state"] == "success" for item in statuses)):
-        return ExecutionOutcome.SUCCESS
-    return ExecutionOutcome.AMBIGUOUS
+    # 4. Everything settled and passing.
+    return ExecutionOutcome.SUCCESS
 
 
 def build_pull_request_checks_executors(

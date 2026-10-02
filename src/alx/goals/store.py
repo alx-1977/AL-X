@@ -135,7 +135,7 @@ def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
         "next_due_at": _time_to_data(plan.next_due_at),
         "wait_deadline": _time_to_data(plan.wait_deadline),
         "inflight": None if plan.inflight is None else [
-            plan.inflight.step_index, plan.inflight.call_id,
+            plan.inflight.step_index, plan.inflight.call_id, plan.inflight.started,
         ],
         "attention_seq": plan.attention_seq,
         "attention": None if attention is None else {
@@ -536,15 +536,6 @@ class SQLiteGoalStore:
         # B-tree over the whole matching set, which was most of the cost the
         # index was added to remove.
         sources: list[tuple[str, tuple[Any, ...]]] = []
-        # A plan that needs her comes first, from whichever conversation, so
-        # work that only she can move on is never pushed out by the cap.
-        sources.append((
-            "SELECT goal_id, state_json, conversation_id, scope, updated_at "
-            "FROM goals WHERE unfinished = 1 "
-            "AND json_extract(state_json, '$.execution_plan.status') = 'needs_core' "
-            "ORDER BY updated_at DESC, goal_id DESC",
-            (),
-        ))
         if conversation_id is not None:
             sources.append((
                 "SELECT goal_id, state_json, conversation_id, scope, updated_at "
@@ -604,6 +595,37 @@ class SQLiteGoalStore:
                 if limit is not None and len(summaries) >= limit:
                     break
         return tuple(summaries)
+
+    def list_needing_core(
+        self, limit: int, exclude: frozenset[str] = frozenset(),
+    ) -> tuple[GoalSummary, ...]:
+        """Unfinished goals whose plans need AL/X, newest first, at most `limit`.
+
+        The Core lists these beside the ordinary candidates, in an allocation
+        of their own: neither can crowd the other out. `exclude` names goals
+        already listed, so the allocation is filled by others.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive int")
+        found: list[GoalSummary] = []
+        for goal_id, state_json, scope, updated_at in self._connection.execute(
+            "SELECT goal_id, state_json, scope, updated_at "
+            "FROM goals WHERE unfinished = 1 "
+            "AND json_extract(state_json, '$.execution_plan.status') = 'needs_core' "
+            "ORDER BY updated_at DESC, goal_id DESC LIMIT ?",
+            (limit + len(exclude),),
+        ):
+            if goal_id in exclude:
+                continue
+            scope_reference = scope_from_storage(scope)
+            found.append(GoalSummary.of(
+                _goal_from_data(goal_id, json.loads(state_json)),
+                project_id=None if scope_reference is None else scope_reference.project_id,
+                updated_at=None if updated_at is None else _time_from_data(updated_at),
+            ))
+            if len(found) >= limit:
+                break
+        return tuple(found)
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]:
         identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY rowid").fetchall()

@@ -323,15 +323,21 @@ class PlanDispatch:
 
     A result belongs to the plan only when its call carries this call_id,
     which the runner generates for each dispatch and writes here first.
+    `started` is the dispatch boundary: false, the capability has certainly
+    not been called and a cancel or restart may simply drop it; true, the
+    call may be in flight and only its own result can say what happened.
     """
 
     step_index: int
     call_id: str
+    started: bool = False
 
     def __post_init__(self) -> None:
         _required(self.call_id, "call_id")
         if not isinstance(self.step_index, int) or self.step_index < 0:
             raise ValueError("step_index must be a nonnegative integer")
+        if not isinstance(self.started, bool):
+            raise TypeError("started must be a bool")
 
 
 @dataclass(frozen=True, slots=True)

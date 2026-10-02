@@ -21,6 +21,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 from alx.contracts import run_core_worker
@@ -49,6 +50,11 @@ class PlanAttentionSource:
         enabled: bool = False,
         notify: Callable[[str, Mapping[str, Any]], None] | None = None,
         clock: Callable[[], datetime] | None = None,
+        # The autonomous spend ledger. Its durable record that an occasion
+        # reached the provider is the only thing that makes an offer paid.
+        spend: Any = None,
+        # Whether a goal's attention can be shown with its evidence yet.
+        ready: Callable[[str], bool] | None = None,
         max_paid_offers: int = MAX_PAID_PLAN_OFFERS,
         backoff_seconds: float = PLAN_OFFER_BACKOFF_SECONDS,
     ) -> None:
@@ -61,6 +67,8 @@ class PlanAttentionSource:
         # and a state, never words in AL/X's voice.
         self._notify = notify or (lambda _conversation_id, _values: None)
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._spend = spend
+        self._ready = ready or (lambda _goal_id: True)
         self._max_paid_offers = max_paid_offers
         self._backoff = timedelta(seconds=backoff_seconds)
         # Blocked attentions already shown in this process, and where.
@@ -88,6 +96,14 @@ class PlanAttentionSource:
                     or snapshot.state.status is not GoalStatus.ACTIVE
                     or (attention.next_offer_at is not None and attention.next_offer_at > now)):
                 continue
+            try:
+                ready = self._ready(goal_id)
+            except Exception as error:  # noqa: BLE001 - not offered this tick
+                LOGGER.warning("Plan attention readiness unknown for goal %s: %s",
+                               goal_id, type(error).__name__)
+                ready = False
+            if not ready:
+                continue
             due.append(CognitionOpportunity(
                 self._opportunity_id(goal_id, plan), CognitionOrigin.WORK_COMPLETED,
                 now, snapshot.conversation_id, references=(f"{_REFERENCE}{goal_id}",),
@@ -95,18 +111,20 @@ class PlanAttentionSource:
         return tuple(due)
 
     @staticmethod
-    def _opportunity_id(goal_id: str, plan: Any) -> str:
+    def _opportunity_id(goal_id: str, plan: Any, offer: int | None = None) -> str:
         attention = plan.attention
-        return f"{_REFERENCE}{goal_id}:{plan.plan_id}:{attention.seq}:{attention.offers}"
+        number = attention.offers if offer is None else offer
+        return f"{_REFERENCE}{goal_id}:{plan.plan_id}:{attention.seq}:{number}"
 
     def owns(self, opportunity: CognitionOpportunity) -> bool:
         return any(item.startswith(_REFERENCE) for item in opportunity.references)
 
     def claim(self, opportunity: CognitionOpportunity) -> bool:
-        """Count the offer on the plan before anything is spent.
+        """Record the offer, and its backoff, before anything is spent.
 
-        Counted as paid until the runner says the provider was never reached,
-        so a crash during the turn counts against the cap rather than for it.
+        Whether it was paid is not decided here or from how the turn ended:
+        `settle` reads it from the spend ledger, which records that the
+        provider was about to be reached before the call is made.
         """
         snapshot = self._current(opportunity, offers_delta=0)
         if snapshot is None:
@@ -118,7 +136,6 @@ class PlanAttentionSource:
             self._goals.replace(
                 replace(snapshot.state, execution_plan=replace(plan, attention=replace(
                     attention, offers=attention.offers + 1,
-                    paid_offers=attention.paid_offers + 1,
                     next_offer_at=now + self._backoff * (2 ** min(attention.offers, 4)),
                 ))),
                 snapshot.retention_until, snapshot.revision, snapshot.provenance,
@@ -133,24 +150,7 @@ class PlanAttentionSource:
         return True
 
     def release(self, opportunity: CognitionOpportunity) -> None:
-        """The turn never reached a provider: that offer cost nothing.
-
-        Its backoff stands, so a budget refusal is not offered again on every
-        tick; only the paid count is returned.
-        """
-        snapshot = self._current(opportunity, offers_delta=1)
-        if snapshot is not None:
-            plan = snapshot.state.execution_plan
-            attention = plan.attention
-            try:
-                self._goals.replace(
-                    replace(snapshot.state, execution_plan=replace(plan, attention=replace(
-                        attention, paid_offers=max(0, attention.paid_offers - 1),
-                    ))),
-                    snapshot.retention_until, snapshot.revision, snapshot.provenance,
-                )
-            except Exception as error:  # noqa: BLE001 - counted as paid: the safe side
-                LOGGER.warning("Plan offer could not be released: %s", type(error).__name__)
+        """The turn did not happen. Its backoff stands; only the audit row goes."""
         try:
             self._ledger.release(opportunity.opportunity_id)
         except Exception as error:  # noqa: BLE001 - audit only
@@ -199,15 +199,19 @@ class PlanAttentionSource:
                 attention = None if plan is None else plan.attention
                 if attention is None:
                     continue
-                if not attention.blocked and attention.paid_offers >= self._max_paid_offers:
-                    attention = replace(attention, blocked=True)
+                paid = self._paid_offers(goal_id, plan)
+                if paid != attention.paid_offers or (
+                        not attention.blocked and paid >= self._max_paid_offers):
+                    attention = replace(attention, paid_offers=paid,
+                                        blocked=attention.blocked or paid >= self._max_paid_offers)
                     self._goals.replace(
                         replace(snapshot.state,
                                 execution_plan=replace(plan, attention=attention)),
                         snapshot.retention_until, snapshot.revision, snapshot.provenance,
                     )
-                    LOGGER.warning("Plan attention %s:%d blocked after %d paid offers",
-                                   plan.plan_id, attention.seq, attention.paid_offers)
+                    if attention.blocked:
+                        LOGGER.warning("Plan attention %s:%d blocked after %d paid offers",
+                                       plan.plan_id, attention.seq, attention.paid_offers)
                     changed.append(goal_id)
                 if attention.blocked:
                     blocked_now[(goal_id, plan.plan_id, attention.seq)] = (
@@ -227,6 +231,15 @@ class PlanAttentionSource:
         self._notified = blocked_now
         return tuple(changed)
 
+    def _paid_offers(self, goal_id: str, plan: Any) -> int:
+        """How many of this attention's offers reached a provider, durably."""
+        if self._spend is None:
+            return plan.attention.paid_offers
+        return sum(
+            1 for offer in range(plan.attention.offers)
+            if self._spend.dispatch_started(self._opportunity_id(goal_id, plan, offer))
+        )
+
     def _publish(self, conversation_id: str, goal_id: str, plan_id: str, seq: int,
                  state: str, reason: str | None) -> None:
         try:
@@ -241,20 +254,37 @@ class PlanAttentionSource:
 class PlanWorkers:
     """Dispatch checkpointed steps on background workers.
 
-    The Core-turn lock is held only to checkpoint and to record: never across
-    a dispatch. Each worker records its own result and starts the plan's next
-    step, so a running plan does not wait for the next tick between steps.
+    The Core-turn lock is held only to checkpoint, to cross the dispatch
+    boundary, and to record: never across a dispatch. Each worker records
+    its own result and starts the plan's next step, so a running plan does
+    not wait for the next tick between steps.
+
+    Shutdown (`stop`) is the same rule a Core turn already follows: stores
+    close only after the work using them has reached a durable boundary.
+    A worker that has not crossed the dispatch boundary declines to: its
+    checkpoint stays unstarted and is dropped and run again after restart.
+    A worker whose call has started is asked to cancel where its capability
+    supports that, and is waited for until its result is recorded.
     """
 
     def __init__(self, core: Any, core_turn_lock: asyncio.Lock,
-                 attention: PlanAttentionSource | None = None) -> None:
+                 attention: PlanAttentionSource | None = None,
+                 cancel_dispatch: Callable[[Any], None] | None = None) -> None:
         self._core = core
         self._lock = core_turn_lock
         self._attention = attention
+        # A capability's own cancel, where one exists (a coding job). Asked,
+        # never relied on: shutdown still waits for the call to return.
+        self._cancel_dispatch = cancel_dispatch or (lambda _job: None)
         self._tasks: set[asyncio.Task] = set()
+        # Workers past the dispatch boundary, by task: these are waited for.
+        self._started: dict[asyncio.Task, Any] = {}
+        self._stopping = False
 
     async def advance(self) -> int:
         """One tick: reconcile, checkpoint due steps, start their workers."""
+        if self._stopping:
+            return 0
         async with self._lock:
             jobs = await run_core_worker(self._core.advance_due_plans)
             if self._attention is not None:
@@ -268,32 +298,62 @@ class PlanWorkers:
         while self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
 
+    async def stop(self) -> None:
+        """Stop starting work, and wait for started work to be recorded."""
+        self._stopping = True
+        for job in tuple(self._started.values()):
+            try:
+                self._cancel_dispatch(job)
+            except Exception as error:  # noqa: BLE001 - still waited for
+                LOGGER.warning("Planned step cancel request failed: %s",
+                               type(error).__name__)
+        await self.drain()
+
     def _start(self, job: Any) -> None:
+        if self._stopping:
+            return
         task = asyncio.ensure_future(self._run(job))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _run(self, job: Any) -> None:
+        task = asyncio.current_task()
+        # The dispatch boundary, under the lock: a cancel or replacement that
+        # committed first means the call is never made.
+        async with self._lock:
+            if self._stopping:
+                # Never crossed: restart drops this checkpoint and runs it.
+                return
+            started = await run_core_worker(self._core.begin_planned_dispatch, job)
+            if started is None:
+                return
+            if task is not None:
+                self._started[task] = started
         try:
-            attempt = await asyncio.to_thread(self._core.run_planned_dispatch, job)
-        except asyncio.CancelledError:
-            # Shutdown. The checkpoint stays pending; the next process closes
-            # it as interrupted and never replays it.
-            raise
-        except Exception as error:  # noqa: BLE001 - recorded as interrupted
-            LOGGER.warning("Planned step for goal %s raised: %s",
-                           job.goal_id, type(error).__name__)
-            attempt = None
-        try:
-            async with self._lock:
-                following = await run_core_worker(
-                    self._core.finish_planned_dispatch, job, attempt)
-        except Exception as error:  # noqa: BLE001 - restart recovery closes it
-            # The result is not recorded. The checkpoint stays pending and is
-            # closed as interrupted, never replayed.
-            LOGGER.warning("Planned result for goal %s not recorded: %s",
-                           job.goal_id, type(error).__name__)
-            return
+            try:
+                attempt = await asyncio.to_thread(self._core.run_planned_dispatch, started)
+            except asyncio.CancelledError:
+                # Not sent by `stop`, which waits for a started call. Only a
+                # cancelled runtime gets here; restart records it as interrupted.
+                raise
+            except Exception as error:  # noqa: BLE001 - recorded as interrupted
+                LOGGER.warning("Planned step for goal %s raised: %s",
+                               job.goal_id, type(error).__name__)
+                attempt = None
+            try:
+                async with self._lock:
+                    following = await run_core_worker(partial(
+                        self._core.finish_planned_dispatch, started, attempt,
+                        continue_plan=not self._stopping))
+            except Exception as error:  # noqa: BLE001 - restart recovery closes it
+                # The result is not recorded. The checkpoint stays pending and
+                # is closed as interrupted, never replayed.
+                LOGGER.warning("Planned result for goal %s not recorded: %s",
+                               job.goal_id, type(error).__name__)
+                return
+        finally:
+            if task is not None:
+                self._started.pop(task, None)
         for item in following:
             self._start(item)
 

@@ -989,9 +989,20 @@ async def run(repository_root: Path) -> None:
         notify=lambda conversation_id, values: diagnostics.publish(
             conversation_id, {"code": "plan.attention", **values}
         ),
+        # An offer is paid only if the spend ledger recorded that it reached
+        # the provider; a budget stop or a disabled reasoner costs nothing.
+        spend=autonomous_budget,
+        ready=core.plan_evidence_ready,
     )
     occasion_sources.append(plan_source)
-    plan_workers = PlanWorkers(core, core_turn_lock, plan_source)
+    plan_workers = PlanWorkers(
+        core, core_turn_lock, plan_source,
+        # The one capability with its own cancel: a running coding job.
+        cancel_dispatch=(
+            None if coding_runtime is None
+            else lambda job: coding_runtime.agent.cancel(job.call.call_id)
+        ),
+    )
     # Observed mail joins them for the same reason, and to end the same
     # coupling the due-cognition tick was built to avoid. Mail used to reach
     # the Core only through a generator a live voice session drained, so
@@ -1096,6 +1107,10 @@ async def run(repository_root: Path) -> None:
                 # bytes indefinitely.
                 runtime_tasks.create_task(sandbox_runtime.retention.run())
     finally:
+        # Planned steps run outside the Core lock, so the lock alone cannot
+        # say they are done. Stop starting them and wait for each started one
+        # to record its result before anything below closes a store.
+        await plan_workers.stop()
         # Cancelling the producer does not stop work already running inside
         # asyncio.to_thread: the coroutine unwinds while the worker keeps going.
         # Closing the stores here would then pull SQLite connections out from

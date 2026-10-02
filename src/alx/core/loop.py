@@ -104,6 +104,10 @@ class PlannedDispatch:
     plan_id: str
     call: CapabilityCall
     authority: GoalState
+    # Set for an evidence read: the call whose result it re-observes, and the
+    # attention it is for. Such a job never moves the plan.
+    evidence_for: str | None = None
+    attention_seq: int = 0
 
 
 # The whole conversation is stored and never rewritten, but sending all of it
@@ -120,6 +124,9 @@ REASONING_TURN_WINDOW = 12
 # would eventually carry every goal AL/X has ever left unfinished. The cap is
 # on the final projection, not on each source that feeds it.
 UNFINISHED_GOAL_CANDIDATES = 10
+# Plans that need AL/X, listed beside those candidates in their own bound so
+# that neither can crowd the other out.
+PLAN_ATTENTION_CANDIDATES = 5
 
 
 def project_turns_for_reasoning(
@@ -203,6 +210,10 @@ class CoreAgent:
         # process. Content may be transient by contract, so after a restart
         # only durable metadata remains and an observation is made again.
         self._plan_evidence_cache: dict[str, CapabilityAttempt] = {}
+        # Evidence reads scheduled, and returned, in this process, by goal,
+        # attention and evidence: each is read at most once per attention.
+        self._evidence_scheduled: set[tuple[str, int, str]] = set()
+        self._evidence_settled: set[tuple[str, int, str]] = set()
         self._reasoner = reasoner
         # Mechanical record of a refused goal proposal, for diagnosis. The
         # cited references, mutation and response dependence: enough to diagnose
@@ -1421,11 +1432,12 @@ class CoreAgent:
             if snapshot is None or snapshot.scope is None
             else snapshot.scope.project_id
         )
-        summaries = self._store.list_unfinished(
+        ordinary = self._store.list_unfinished(
             conversation_id,
             project_id=active_project,
             limit=UNFINISHED_GOAL_CANDIDATES,
         )
+        summaries = self._with_attention(ordinary)
         if snapshot is None:
             return summaries
         if any(item.goal_id == snapshot.state.goal_id for item in summaries):
@@ -1441,8 +1453,15 @@ class CoreAgent:
                 snapshot.conversation_id == conversation_id
             ),
         )
-        kept = summaries[: UNFINISHED_GOAL_CANDIDATES - 1]
-        return (*kept, selected)
+        kept = ordinary[: UNFINISHED_GOAL_CANDIDATES - 1]
+        return self._with_attention((*kept, selected))
+
+    def _with_attention(self, ordinary: tuple[GoalSummary, ...]) -> tuple[GoalSummary, ...]:
+        """The ordinary candidates, then plans that need her, separately bounded."""
+        return (*ordinary, *self._store.list_needing_core(
+            PLAN_ATTENTION_CANDIDATES,
+            exclude=frozenset(item.goal_id for item in ordinary),
+        ))
 
     @staticmethod
     def _goal_selection_error(decision: AgentDecision, snapshot: GoalSnapshot | None,
@@ -1911,8 +1930,9 @@ class CoreAgent:
 
         Runs under the Core-turn lock, so it only reads and writes durable
         state: a recorded result is reduced, an interrupted dispatch is
-        closed, a finished goal's plan is closed, and each step that is due
-        is checkpointed and returned for a background worker to dispatch.
+        closed, a finished goal's plan is closed, each step that is due is
+        checkpointed, and evidence an attention lost to a restart is
+        scheduled to be read again. Each is returned for a background worker.
         This is also restart recovery; there is no other.
         """
         jobs = []
@@ -1929,8 +1949,77 @@ class CoreAgent:
                 jobs.append(job)
         return tuple(jobs)
 
+    def begin_planned_dispatch(self, job: PlannedDispatch) -> PlannedDispatch | None:
+        """Cross the dispatch boundary, or decline to. Under the lock.
+
+        Immediately before a worker calls the capability, the plan must still
+        hold this exact checkpoint: the same plan, step and dispatch, still
+        executable, its declared preconditions and approval still valid. Then
+        `started` is written durably and the job is returned, with the
+        authority the safety gate will evaluate. Otherwise nothing is called:
+        the checkpoint is closed as never invoked, its approval is returned,
+        and only a plan that is still current is told why. This is the
+        linearization point for cancellation: a cancel or replacement that
+        commits before it prevents the call; one after it can stop only
+        what follows.
+        """
+        snapshot = self._store.load(job.goal_id)
+        state = snapshot.state
+        if not any(item.call is not None and item.call.call_id == job.call.call_id
+                   and item.disposition is CapabilityAttemptDisposition.PENDING
+                   for item in state.attempts):
+            self._live_plan_dispatches.discard(job.call.call_id)
+            return None
+        plan = state.execution_plan
+        if job.evidence_for is not None:
+            if (plan is not None and plan.plan_id == job.plan_id
+                    and plan.status is PlanStatus.NEEDS_CORE
+                    and plan.attention_seq == job.attention_seq
+                    and state.status is GoalStatus.ACTIVE):
+                return job
+            self._withdraw_dispatch(snapshot, job, "plan_evidence_withdrawn")
+            return None
+        if (plan is not None and plan.inflight is not None
+                and plan.inflight.call_id == job.call.call_id and plan.inflight.started):
+            # Already across the boundary: the call may be in flight, so its
+            # record is left exactly as it is. Never begun twice.
+            return None
+        if (plan is None or plan.plan_id != job.plan_id
+                or plan.status is not PlanStatus.RUNNING or plan.inflight is None
+                or plan.inflight.call_id != job.call.call_id):
+            # Cancelled or replaced before the call: it never happens.
+            self._withdraw_dispatch(snapshot, job, "plan_dispatch_withdrawn")
+            return None
+        now = self._clock()
+        # The approval was claimed at the checkpoint. The gate sees it as the
+        # grant it still is, unless it has since been withdrawn or expired.
+        authority = replace(state, approvals=tuple(
+            replace(item, lifecycle=ApprovalLifecycle.GRANTED)
+            if (item.lifecycle is ApprovalLifecycle.CLAIMED
+                and item.approval_id == job.call.approval_id
+                and item.scope.matches(job.call)) else item
+            for item in state.approvals
+        ))
+        facts = plan_invalidation_facts(plan, authority, now)
+        if facts:
+            snapshot = self._withdraw_dispatch(snapshot, job, "plan_dispatch_withdrawn")
+            self._write_plan(snapshot, raise_attention(
+                snapshot.state.execution_plan, facts, now))
+            return None
+        self._write_plan(snapshot, replace(
+            plan, inflight=replace(plan.inflight, started=True)))
+        return replace(job, authority=authority)
+
+    def _withdraw_dispatch(self, snapshot: GoalSnapshot, job: PlannedDispatch,
+                           reason: str) -> GoalSnapshot:
+        """Close a checkpoint whose call was never made, and return its approval."""
+        self._live_plan_dispatches.discard(job.call.call_id)
+        LOGGER.info("Planned dispatch for goal %s withdrawn: %s", job.goal_id, reason)
+        return self._finalize_dispatch(snapshot, self._never_called(job.call, reason),
+                                       self._clock())
+
     def run_planned_dispatch(self, job: PlannedDispatch) -> CapabilityAttempt | None:
-        """Dispatch one checkpointed step. Runs off the lock, on a worker.
+        """Dispatch one started step. Runs off the lock, on a worker.
 
         Touches no store: the checkpoint is already durable and the result is
         recorded by `finish_planned_dispatch`. None means the dispatch did
@@ -1949,13 +2038,16 @@ class CoreAgent:
 
     def finish_planned_dispatch(
         self, job: PlannedDispatch, attempt: CapabilityAttempt | None,
+        *, continue_plan: bool = True,
     ) -> tuple[PlannedDispatch, ...]:
         """Record a background step's result and reduce it. Under the lock.
 
         The result is always recorded on the goal. It moves the plan only if
         the plan still holds this exact dispatch in flight: a plan she
-        cancelled or replaced meanwhile is untouched. When the plan can run
-        on, its next step is checkpointed and returned at once.
+        cancelled or replaced meanwhile is untouched. An evidence read is
+        kept only for the attention it was read for. When the plan can run
+        on, and the runtime is not stopping, its next step is checkpointed
+        and returned at once.
         """
         self._live_plan_dispatches.discard(job.call.call_id)
         snapshot = self._store.load(job.goal_id)
@@ -1966,13 +2058,80 @@ class CoreAgent:
                for item in snapshot.state.attempts):
             snapshot = self._finalize_dispatch(snapshot, attempt, self._clock())
         plan = snapshot.state.execution_plan
+        if job.evidence_for is not None:
+            self._evidence_settled.add((job.goal_id, job.attention_seq, job.evidence_for))
+            if (plan is not None and plan.plan_id == job.plan_id
+                    and plan.attention_seq == job.attention_seq
+                    and plan.status is PlanStatus.NEEDS_CORE
+                    and attempt.disposition is CapabilityAttemptDisposition.EXECUTED):
+                self._plan_evidence_cache[job.evidence_for] = attempt
+            return ()
         if (plan is None or plan.plan_id != job.plan_id or plan.inflight is None
                 or plan.inflight.call_id != job.call.call_id):
             LOGGER.info("Planned result for %s no longer belongs to a plan", job.goal_id)
             return ()
         snapshot = self._reduce_planned_result(snapshot)
+        if not continue_plan:
+            return ()
         next_job = self._advance_plan(snapshot)
         return () if next_job is None else (next_job,)
+
+    def plan_evidence_ready(self, goal_id: str) -> bool:
+        """Whether a plan's attention can be shown to her with its evidence.
+
+        False only while an evidence read this process scheduled, or must
+        still schedule, has not returned. Offering the attention then would
+        buy a reasoning call over metadata alone.
+        """
+        snapshot = self._store.load(goal_id)
+        plan = snapshot.state.execution_plan
+        if plan is None or plan.attention is None or snapshot.state.status is not GoalStatus.ACTIVE:
+            return True
+        return all(
+            call_id in self._plan_evidence_cache
+            or not self._needs_reread(snapshot.state, call_id)
+            or (goal_id, plan.attention_seq, call_id) in self._evidence_settled
+            for call_id in plan.attention.evidence_call_ids
+        )
+
+    def _needs_reread(self, state: GoalState, call_id: str) -> bool:
+        stored = next((item for item in state.attempts
+                       if item.call is not None and item.call.call_id == call_id), None)
+        definition = None if stored is None else self._definition(stored.call.capability_id)
+        return definition is not None and definition.plan_observation
+
+    def _evidence_job(self, snapshot: GoalSnapshot) -> PlannedDispatch | None:
+        """Schedule the read of evidence a restart left as metadata only.
+
+        Only a declared observation is read again, on a background worker
+        like any planned step, never inside a Core turn. Once per attention
+        and evidence in this process, whatever its outcome.
+        """
+        state = snapshot.state
+        plan = state.execution_plan
+        if (plan.attention is None or state.status is not GoalStatus.ACTIVE
+                or self._has_pending_dispatch(state)):
+            return None
+        for call_id in plan.attention.evidence_call_ids:
+            key = (state.goal_id, plan.attention_seq, call_id)
+            if (call_id in self._plan_evidence_cache or key in self._evidence_scheduled
+                    or not self._needs_reread(state, call_id)):
+                continue
+            self._evidence_scheduled.add(key)
+            stored = self._attempt_for(state, call_id)
+            call = replace(stored.call, call_id=f"plan-evidence:{uuid4()}")
+            pending = CapabilityAttempt(call, CapabilityAttemptDisposition.PENDING, None,
+                                        reason_code="dispatch_pending")
+            checkpoint = self._store.replace(
+                replace(state, attempts=(*state.attempts, pending)),
+                snapshot.retention_until, snapshot.revision, snapshot.provenance,
+            )
+            self._live_plan_dispatches.add(call.call_id)
+            return PlannedDispatch(
+                state.goal_id, checkpoint.conversation_id, plan.plan_id, call, state,
+                evidence_for=call_id, attention_seq=plan.attention_seq,
+            )
+        return None
 
     def _advance_plan(self, snapshot: GoalSnapshot) -> PlannedDispatch | None:
         """Take one goal's plan as far as it goes without a dispatch."""
@@ -1989,22 +2148,39 @@ class CoreAgent:
             ))
             return None
         if plan.status is PlanStatus.NEEDS_CORE:
-            return None
+            return self._evidence_job(snapshot)
         if plan.inflight is not None:
             attempt = self._attempt_for(state, plan.inflight.call_id)
             if attempt.disposition is CapabilityAttemptDisposition.PENDING:
                 if plan.inflight.call_id in self._live_plan_dispatches:
                     return None
-                # Checkpointed and never recorded: the process stopped.
-                snapshot = self._finalize_dispatch(
-                    snapshot, self._interrupted(attempt.call), self._clock())
-            snapshot = self._reduce_planned_result(snapshot)
-            state, plan = snapshot.state, snapshot.state.execution_plan
-            if plan.status is not PlanStatus.RUNNING:
-                return None
+                if not plan.inflight.started:
+                    # Checkpointed, never called: the boundary was not
+                    # crossed, so it is dropped and the step simply runs.
+                    snapshot = self._finalize_dispatch(
+                        snapshot, self._never_called(attempt.call, "dispatch_not_started"),
+                        self._clock())
+                    snapshot = self._write_plan(snapshot, replace(
+                        snapshot.state.execution_plan, inflight=None))
+                    state, plan = snapshot.state, snapshot.state.execution_plan
+                else:
+                    # Started and never recorded: the process stopped. Only
+                    # the classifier decides what an interruption means.
+                    snapshot = self._finalize_dispatch(
+                        snapshot, self._interrupted(attempt.call), self._clock())
+            if plan.inflight is not None:
+                snapshot = self._reduce_planned_result(snapshot)
+                state, plan = snapshot.state, snapshot.state.execution_plan
+                if plan.status is not PlanStatus.RUNNING:
+                    return None
         now = self._clock()
-        if plan.status is PlanStatus.WAITING and now < plan.next_due_at:
-            return None
+        if plan.status is PlanStatus.WAITING:
+            if plan.wait_deadline is not None and now >= plan.wait_deadline:
+                # The bound has passed: no further observation, she is told.
+                self._write_plan(snapshot, raise_attention(plan, ("plan_wait_exceeded",), now))
+                return None
+            if now < plan.next_due_at:
+                return None
         if not self._plan_continuation:
             # Nothing could return this plan to her, so nothing is dispatched.
             return None
@@ -2053,12 +2229,11 @@ class CoreAgent:
             snapshot.retention_until, snapshot.revision, snapshot.provenance,
         )
         self._live_plan_dispatches.add(call.call_id)
-        LOGGER.info("Execution plan %s step=%d %s dispatched",
+        LOGGER.info("Execution plan %s step=%d %s checkpointed",
                     plan.plan_id, plan.cursor, call.capability_id)
         return PlannedDispatch(
             checkpoint.state.goal_id, checkpoint.conversation_id, plan.plan_id, call,
-            # The pre-claim state, where the exact approval is still GRANTED,
-            # as the safety gate evaluates every dispatch.
+            # Replaced at the dispatch boundary by the state current then.
             state,
         )
 
@@ -2114,6 +2289,20 @@ class CoreAgent:
                     if item.call is not None and item.call.call_id == call_id)
 
     @staticmethod
+    def _never_called(call: CapabilityCall, reason: str) -> CapabilityAttempt:
+        """A checkpoint whose capability was certainly never called.
+
+        Not a refusal: nothing refused it, so it binds no later call. Not
+        invoked, so its approval returns and nothing can cite it as evidence.
+        """
+        return CapabilityAttempt(
+            call, CapabilityAttemptDisposition.BROKER_FAILURE, False,
+            CapabilityResult(call.call_id, call.capability_id, CapabilityResultState.FAILED,
+                             failure={"code": reason}),
+            reason,
+        )
+
+    @staticmethod
     def _interrupted(call: CapabilityCall) -> CapabilityAttempt:
         return CapabilityAttempt(
             call, CapabilityAttemptDisposition.BROKER_FAILURE, True,
@@ -2142,11 +2331,10 @@ class CoreAgent:
     ) -> tuple[GoalSnapshot, tuple[CapabilityAttempt, ...]]:
         """The results the plan's attention asks her to judge, in full.
 
-        The same three sources in every process: the full result if it
-        arrived in this one; otherwise an observation made again, because its
-        content may have been transient by contract; otherwise the durable
-        record, which carries only metadata. A re-observation is evidence for
-        her, not a plan result: it moves nothing.
+        The full result if it arrived in this process, or was read again on a
+        background worker after a restart; otherwise the durable record,
+        which carries only metadata. Nothing is dispatched here: a Core turn
+        never waits on an observation.
         """
         plan = snapshot.state.execution_plan
         if plan is None or plan.attention is None:
@@ -2163,42 +2351,9 @@ class CoreAgent:
             self._plan_evidence_cache.pop(call_id, None)
             stored = next((item for item in snapshot.state.attempts
                            if item.call is not None and item.call.call_id == call_id), None)
-            if stored is None:
-                continue
-            definition = self._definition(stored.call.capability_id)
-            if (definition is not None and definition.plan_observation
-                    and snapshot.state.status is GoalStatus.ACTIVE
-                    and self._dispatch_blocked_reason(stored.call, snapshot.state) is None):
-                snapshot, observed = self._observe_again(snapshot, stored.call)
-                if observed is not None:
-                    self._plan_evidence_cache[call_id] = observed
-                    evidence.append(observed)
-                    continue
-            evidence.append(stored)
+            if stored is not None:
+                evidence.append(stored)
         return snapshot, tuple(evidence)
-
-    def _observe_again(
-        self, snapshot: GoalSnapshot, call: CapabilityCall,
-    ) -> tuple[GoalSnapshot, CapabilityAttempt | None]:
-        """Repeat one observation, checkpointed and recorded like any call."""
-        call = replace(call, call_id=f"plan-evidence:{uuid4()}")
-        pending = CapabilityAttempt(call, CapabilityAttemptDisposition.PENDING, None,
-                                    reason_code="dispatch_pending")
-        state = snapshot.state
-        snapshot = self._store.replace(
-            replace(state, attempts=(*state.attempts, pending)),
-            snapshot.retention_until, snapshot.revision, snapshot.provenance,
-        )
-        try:
-            attempt = self._dispatch(call, state)
-        except Exception as error:  # noqa: BLE001 - recorded as interrupted
-            LOGGER.warning("Evidence observation raised for %s: %s",
-                           call.capability_id, type(error).__name__)
-            attempt = None
-        if (attempt is None or attempt.call != call
-                or attempt.disposition is CapabilityAttemptDisposition.PENDING):
-            return self._finalize_dispatch(snapshot, self._interrupted(call), self._clock()), None
-        return self._finalize_dispatch(snapshot, attempt, self._clock()), attempt
 
     def _plan_update_refusal(
         self, update: PlanUpdate, snapshot: GoalSnapshot | None,

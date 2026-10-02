@@ -420,6 +420,10 @@ class DurableGoalStore(Protocol):
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]: ...
 
+    def list_needing_core(
+        self, limit: int, exclude: frozenset[str] = frozenset(),
+    ) -> tuple[GoalSummary, ...]: ...
+
     def list_open_plan_goal_ids(
         self, *, needing_core: bool = False,
     ) -> tuple[str, ...]: ...

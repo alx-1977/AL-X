@@ -112,13 +112,27 @@ class DedicatedDirectoryTests(IdentityHarness):
         for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
             self.assertNotIn(name, environment)
 
-    def test_the_identity_is_verified_once_and_not_on_every_turn(self):
+    def test_the_identity_is_verified_before_every_turn(self):
         runner = Runner(status(str(self.dedicated)))
         model = self.model(runner)
         model.complete(request())
         model.complete(request())
-        statuses = [call for call in runner.calls if call["command"][1:2] == ["auth"]]
-        self.assertEqual(len(statuses), 1)
+        kinds = [call["command"][1] for call in runner.calls]
+        self.assertEqual(kinds, ["auth", "--print", "auth", "--print"])
+
+    def test_a_login_changed_while_running_stops_the_next_turn(self):
+        runner = Runner(status(str(self.dedicated)))
+        model = self.model(runner)
+        model.complete(request())
+        runner.status_stdout = status(str(self.dedicated), email="someone@else.example")
+        with self.assertRaises(ProviderError):
+            model.complete(request())
+        self.assertEqual([call["command"][1] for call in runner.calls],
+                         ["auth", "--print", "auth"])
+        # And it stays refused: no later turn falls back to anyone.
+        runner.status_stdout = status(str(self.dedicated))
+        with self.assertRaises(ProviderError):
+            model.complete(request())
 
 
 class FailsVisiblyTests(IdentityHarness):
@@ -183,45 +197,79 @@ class PersonalConfigurationTests(IdentityHarness):
             self.assertNotIn(str(self.personal), call["env"].values())
 
     def test_configuration_cannot_point_the_core_at_the_personal_login(self):
-        for value in ("~/.claude", "$HOME/.claude", str(self.personal), "~"):
+        self.personal.mkdir()
+        alias = self.home / "alias-to-personal"
+        alias.symlink_to(self.personal)
+        home_alias = self.home / "alias-to-home"
+        home_alias.symlink_to(self.home)
+        for value in ("~/.claude", "$HOME/.claude", str(self.personal), "~",
+                      str(alias), str(home_alias), str(home_alias / ".claude")):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ConfigurationError, "not the personal"):
-                    core_claude_identity({"HOME": str(self.home),
+                    core_claude_identity({"HOME": str(self.home), "ALX_CLAUDE_ACCOUNT": ACCOUNT,
                                           "ALX_CLAUDE_CONFIG_DIR": value})
+
+    def test_the_provider_refuses_a_directory_that_resolves_to_the_personal_login(self):
+        self.personal.mkdir()
+        alias = self.home / "alias-to-personal"
+        alias.symlink_to(self.personal)
+        runner = Runner(status(str(self.personal)))
+        with self.assertRaises(SubscriptionIdentityError) as raised:
+            self.model(runner, config_dir=alias).verify_identity()
+        self.assertEqual(raised.exception.code, "subscription_config_personal")
+        self.assertEqual(runner.calls, [])
 
 
 class SettingsTests(unittest.TestCase):
-    def test_the_default_is_beside_the_personal_configuration(self):
-        self.assertEqual(core_claude_identity({"HOME": "/home/alx"}),
-                         ("/home/alx/.claude-alx", None))
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.home = os.path.realpath(directory.name)
+        self.environment = {"HOME": self.home, "ALX_CLAUDE_ACCOUNT": ACCOUNT}
 
-    def test_home_relative_and_explicit_directories_and_the_account(self):
-        environment = {"HOME": "/home/alx", "ALX_CLAUDE_ACCOUNT": ACCOUNT}
-        for value, expected in (("~/.claude-core", "/home/alx/.claude-core"),
-                                ("$HOME/.claude-core", "/home/alx/.claude-core"),
-                                ("${HOME}/x/../.claude-core", "/home/alx/.claude-core"),
-                                ("/srv/alx/claude", "/srv/alx/claude")):
+    def test_the_default_is_beside_the_personal_configuration(self):
+        self.assertEqual(core_claude_identity(self.environment),
+                         (os.path.join(self.home, ".claude-alx"), ACCOUNT))
+
+    def test_home_relative_explicit_and_aliased_directories_resolve(self):
+        target = os.path.join(self.home, ".claude-core")
+        os.mkdir(target)
+        os.symlink(target, os.path.join(self.home, "core-alias"))
+        for value in ("~/.claude-core", "$HOME/.claude-core", "${HOME}/x/../.claude-core",
+                      target, os.path.join(self.home, "core-alias")):
             with self.subTest(value=value):
                 self.assertEqual(
-                    core_claude_identity({**environment, "ALX_CLAUDE_CONFIG_DIR": value}),
-                    (expected, ACCOUNT))
+                    core_claude_identity({**self.environment, "ALX_CLAUDE_CONFIG_DIR": value}),
+                    (target, ACCOUNT))
 
     def test_a_relative_directory_is_refused(self):
         with self.assertRaisesRegex(ConfigurationError, "absolute"):
-            core_claude_identity({"HOME": "/home/alx", "ALX_CLAUDE_CONFIG_DIR": "claude"})
+            core_claude_identity({**self.environment, "ALX_CLAUDE_CONFIG_DIR": "claude"})
+
+    def test_the_account_is_required(self):
+        for value in ("", "   "):
+            with self.subTest(value=repr(value)):
+                with self.assertRaisesRegex(ConfigurationError, "ALX_CLAUDE_ACCOUNT"):
+                    core_claude_identity({"HOME": self.home, "ALX_CLAUDE_ACCOUNT": value})
+        with self.assertRaisesRegex(ConfigurationError, "ALX_CLAUDE_ACCOUNT"):
+            RuntimeSettings.from_environment({**BASE_ENVIRONMENT, "HOME": self.home,
+                                              "ALX_CLAUDE_ACCOUNT": ""})
+        with self.assertRaisesRegex(ValueError, "expected account"):
+            ClaudeSubscriptionReasoningModel("claude-opus-5-5", 60,
+                                             config_dir=os.path.join(self.home, ".claude-alx"))
 
     def test_both_subscription_cores_are_given_the_dedicated_identity(self):
         settings = RuntimeSettings.from_environment({
-            **BASE_ENVIRONMENT, "HOME": "/home/alx", "ALX_CLAUDE_ACCOUNT": ACCOUNT,
+            **BASE_ENVIRONMENT, **self.environment,
             "ALX_AUTONOMOUS_PROVIDER": "claude_subscription",
             "ALX_AUTONOMOUS_MODEL": "claude-opus-5-5",
             # A host value naming another login has no say.
-            "CLAUDE_CONFIG_DIR": "/home/alx/.claude",
+            "CLAUDE_CONFIG_DIR": os.path.join(self.home, ".claude"),
         })
         with patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
             providers = build_runtime_providers(settings)
         for model in (providers.reasoning, providers.autonomous):
-            self.assertEqual(model.config_dir, "/home/alx/.claude-alx")
+            self.assertEqual(model.config_dir, os.path.join(self.home, ".claude-alx"))
             self.assertEqual(model._expected_account, ACCOUNT)
 
     def test_a_metered_core_has_no_claude_identity(self):
