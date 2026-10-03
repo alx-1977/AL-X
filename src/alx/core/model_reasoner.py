@@ -71,7 +71,9 @@ marked wake_core_on_completion, and when its last step is done. A response alone
 leaves that attention waiting for you. Answer the attention you were shown: resume
 runs the current step, again if it already ran; accept takes the current step's result
 as done and runs on from the next; finish says the plan's work is done; cancel stops
-it. Or install a replacement.
+it. Or install a replacement. Long-running coding is always a plan step: whenever
+plans can run, a direct run_coding_task call is refused as
+coding_requires_execution_plan, so install a plan containing it instead.
 A silent completion means you judge that no spoken or
 conversational response is useful; it is your semantic decision, never a transport or
 capability rule. Ordinary conversation does not require a goal update. When useful, propose

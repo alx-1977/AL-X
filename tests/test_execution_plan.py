@@ -37,6 +37,7 @@ from alx.contracts.review_content import (  # noqa: E402
 from alx.continuity.plan_source import (  # noqa: E402
     MAX_PAID_PLAN_OFFERS, PlanAttentionSource, PlanWorkers,
 )
+from alx.conversation import ConversationGateway, SQLiteConversationStore  # noqa: E402
 from alx.core import CoreAgent, CoreState  # noqa: E402
 from alx.core.plan_results import (  # noqa: E402
     PlanResultKind, classify_planned_result, condition_matches, json_equal,
@@ -942,6 +943,83 @@ class AvailabilityTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         release.set()
         await workers.drain()
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+
+
+class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
+    """A person turn never waits behind coding: it runs only as a plan step.
+
+    Production, 2026-10-03: Core dispatched run_coding_task directly inside a
+    person turn, held the Core-turn lock for the whole job, and an unrelated
+    question waited minutes behind it.
+    """
+
+    def setUp(self):
+        PlanHarness.setUp(self)
+
+    async def test_direct_coding_is_refused_and_planned_coding_leaves_turns_free(self):
+        coding = CapabilityDefinition("run_coding_task", "code", SCHEMA, SCHEMA,
+                                      SideEffect.EFFECTFUL)
+        direct = AgentDecision(goal_id="goal", call=CapabilityCall(
+            "call-direct", "run_coding_task", {}))
+        chat = AgentDecision(response="Quiet so far.")
+        reasoner = Reasoner(direct, install(plan(step("run_coding_task"), step("merge"))),
+                            chat)
+        agent = self.agent(reasoner, definitions=(*DEFINITIONS, coding))
+        lock = asyncio.Lock()
+        workers = PlanWorkers(agent, lock)
+        started, release = threading.Event(), threading.Event()
+
+        def blocked_coding(call):
+            started.set()
+            release.wait(10)
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.SUCCEEDED))
+        self.outputs["run_coding_task"] = blocked_coding
+        conversations = SQLiteConversationStore(Path(self.path).with_name("turns.sqlite3"))
+        self.addCleanup(conversations.close)
+        gateway = ConversationGateway(agent, conversations, clock=lambda: self.now)
+
+        async def person_turn(turn_id):
+            # As the live session's run_turn: one Core turn under the shared lock.
+            turn = ConversationTurn("thread", turn_id, ConversationOrigin.TYPED,
+                                    "Words", self.now, "friedl")
+            async with lock:
+                return await asyncio.to_thread(
+                    gateway.receive_conversation_turn, turn, 4, RETENTION)
+
+        first = await person_turn("person-1")
+        self.assertEqual(first.state, CoreState.RESPONDED, first.reason)
+        # Refused before dispatch, returned to her once, and corrected by her.
+        self.assertEqual(self.calls, [])
+        self.assertEqual(reasoner.contexts[1].refused_calls, ({
+            "call_id": "call-direct", "capability_id": "run_coding_task",
+            "reason": "coding_requires_execution_plan", "subject": "run_coding_task",
+        },))
+        self.assertEqual(self.plan_of().status, PlanStatus.RUNNING)
+
+        await workers.advance()
+        self.assertTrue(await asyncio.to_thread(started.wait, 5))
+        self.assertFalse(lock.locked())
+        before = self.store.load("goal")
+        second = await asyncio.wait_for(person_turn("person-2"), 5)
+        # Answered while coding is still held: the step never owned the lock.
+        self.assertFalse(release.is_set())
+        self.assertEqual((second.state, second.response),
+                         (CoreState.RESPONDED, "Quiet so far."))
+        self.assertEqual(self.store.load("goal"), before)
+
+        release.set()
+        await workers.drain()
+        self.assertEqual(self.names(), ["run_coding_task", "merge"])
+        self.assertNotIn("call-direct", [call.call_id for call in self.calls])
+        recorded = [item for item in self.state().attempts
+                    if item.call.capability_id == "run_coding_task"]
+        self.assertEqual([(item.call.call_id, item.disposition) for item in recorded],
+                         [(self.calls[0].call_id, CapabilityAttemptDisposition.EXECUTED)])
+        self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+        # One reasoning call per new piece of evidence, none while it ran.
+        self.assertEqual(reasoner.calls, 3)
 
 
 class DueTickTests(unittest.IsolatedAsyncioTestCase):

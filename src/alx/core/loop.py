@@ -705,7 +705,17 @@ class CoreAgent:
                 else (None if snapshot is None else snapshot.state)
             )
             if decision.call is not None:
-                blocked = self._dispatch_blocked_reason(decision.call, effective)
+                if (self._plan_continuation
+                        and decision.call.capability_id == _RUN_CODING_TASK):
+                    # A coding job runs for minutes. Dispatched from a Core
+                    # turn it held that turn, and the Core-turn lock, until it
+                    # returned, so on 2026-10-03 a person's unrelated question
+                    # waited behind it. As a plan step it runs on a background
+                    # worker outside the lock. She installs that plan herself;
+                    # nothing converts the call.
+                    blocked = "coding_requires_execution_plan"
+                else:
+                    blocked = self._dispatch_blocked_reason(decision.call, effective)
                 if blocked is not None:
                     # Eligibility is checked before any approval is recorded
                     # and before another reasoning step is bought. A dispatch
