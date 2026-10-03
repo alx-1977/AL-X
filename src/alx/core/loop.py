@@ -2535,15 +2535,16 @@ class CoreAgent:
         A finish or cancel she answered in words carries those words, under a
         fixed turn id, in the same write: the conversation is another store,
         and this is what lets the reply be stored exactly once whatever
-        fails between the two. Returns that turn id, if any.
+        fails between the two. Returns that new turn id, if any.
         """
         current = snapshot.state.execution_plan
+        reply_turn = None
         if update.operation is PlanOperation.INSTALL:
             plan = replace(
                 update.plan,
-                # A finish or cancel reply not yet stored travels with the
-                # replacement until it is: the plan is its only copy.
-                announcement=None if current is None else current.announcement,
+                # Finish or cancel replies not yet stored travel with the
+                # replacement until they are: the plan is their only copy.
+                announcements=() if current is None else current.announcements,
                 # Each installation has its own identity, though she may reuse
                 # a plan_id when she revises one.
                 plan_id=f"{update.plan.plan_id}:{uuid4()}",
@@ -2563,8 +2564,10 @@ class CoreAgent:
                                if update.operation is PlanOperation.FINISH
                                else PlanStatus.CANCELLED)
             if reply is not None:
-                plan = replace(plan, announcement=PlanAnnouncement(
-                    f"alx-plan-reply:{uuid4()}", reply))
+                # Added after any earlier reply still held, never over it.
+                reply_turn = f"alx-plan-reply:{uuid4()}"
+                plan = replace(plan, announcements=(
+                    *plan.announcements, PlanAnnouncement(reply_turn, reply)))
         if current is not None and current.attention is not None:
             for call_id in current.attention.evidence_call_ids:
                 self._plan_evidence_cache.pop(call_id, None)
@@ -2573,7 +2576,7 @@ class CoreAgent:
             replace(snapshot.state, execution_plan=plan),
             snapshot.retention_until, snapshot.revision, provenance,
         )
-        return snapshot, None if plan.announcement is None else plan.announcement.turn_id
+        return snapshot, reply_turn
 
     def pending_plan_announcements(self) -> tuple[GoalSnapshot, ...]:
         """Goals whose finish or cancel reply is not yet known to be stored."""
@@ -2590,9 +2593,10 @@ class CoreAgent:
         """The reply is in the conversation: the plan no longer holds it."""
         snapshot = self._store.load(goal_id)
         plan = snapshot.state.execution_plan
-        if plan is None or plan.announcement is None or plan.announcement.turn_id != turn_id:
+        if plan is None or not any(item.turn_id == turn_id for item in plan.announcements):
             return
-        self._write_plan(snapshot, replace(plan, announcement=None))
+        self._write_plan(snapshot, replace(plan, announcements=tuple(
+            item for item in plan.announcements if item.turn_id != turn_id)))
 
     def _commit_memories(self, snapshot: GoalSnapshot | None,
                          proposals: tuple[MemoryProposal, ...],

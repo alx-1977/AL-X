@@ -439,10 +439,11 @@ class ExecutionPlan:
     # Counts every attention this plan has raised; the current one has it.
     attention_seq: int = 0
     attention: PlanAttention | None = None
-    # Set with a finish or cancel she answered in words, until those words
-    # are stored in the conversation. A plan installed in its place carries
-    # it on, so a replacement can never discard it.
-    announcement: PlanAnnouncement | None = None
+    # Each finish or cancel she answered in words, oldest first, until those
+    # words are stored in the conversation. A plan installed in its place
+    # carries them on, so neither a replacement nor a later reply can
+    # discard one.
+    announcements: tuple[PlanAnnouncement, ...] = ()
 
     def __post_init__(self) -> None:
         _required(self.plan_id, "plan_id")
@@ -452,6 +453,7 @@ class ExecutionPlan:
             if getattr(self, name) is not None:
                 _required(getattr(self, name), name)
         object.__setattr__(self, "steps", tuple(self.steps))
+        object.__setattr__(self, "announcements", tuple(self.announcements))
         object.__setattr__(self, "context_preconditions", freeze_data(self.context_preconditions))
         object.__setattr__(self, "status", PlanStatus(self.status))
         if not self.steps or len(self.steps) > 32 or not 0 <= self.cursor <= len(self.steps):

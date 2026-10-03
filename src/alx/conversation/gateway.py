@@ -47,12 +47,21 @@ class ConversationGateway:
 
     def _store_response(self, conversation_id: str, outcome: CoreOutcome,
                         retention_until: datetime) -> None:
-        """Store her reply. A plan's finish or cancel reply keeps its fixed id."""
-        turn_id = outcome.response_turn_id or self._identifier_factory()
-        self._append_reply(conversation_id, turn_id, outcome.response,
-                           outcome.response_provenance, retention_until)
-        if outcome.response_turn_id is not None and outcome.snapshot is not None:
-            self._acknowledge(outcome.snapshot.state.goal_id, turn_id)
+        """Store her reply. A plan's finish or cancel reply keeps its fixed id,
+        and any earlier one the plan still holds is stored before it."""
+        if outcome.response_turn_id is None or outcome.snapshot is None:
+            self._append_reply(conversation_id, self._identifier_factory(),
+                               outcome.response, outcome.response_provenance,
+                               retention_until)
+            return
+        snapshot = outcome.snapshot
+        for announcement in snapshot.state.execution_plan.announcements:
+            self._append_reply(
+                conversation_id, announcement.turn_id, announcement.text,
+                outcome.response_provenance
+                if announcement.turn_id == outcome.response_turn_id
+                else snapshot.provenance, retention_until)
+            self._acknowledge(snapshot.state.goal_id, announcement.turn_id)
 
     def _append_reply(self, conversation_id: str, turn_id: str, text: str,
                       provenance, retention_until: datetime) -> None:
@@ -81,17 +90,18 @@ class ConversationGateway:
         """
         stored = 0
         for snapshot in self._core.pending_plan_announcements():
-            announcement = snapshot.state.execution_plan.announcement
-            try:
-                self._append_reply(snapshot.conversation_id, announcement.turn_id,
-                                   announcement.text, snapshot.provenance,
-                                   snapshot.retention_until)
-            except Exception as error:  # noqa: BLE001 - kept for the next tick
-                LOGGER.warning("Plan reply for goal %s not stored: %s",
-                               snapshot.state.goal_id, type(error).__name__)
-                continue
-            self._acknowledge(snapshot.state.goal_id, announcement.turn_id)
-            stored += 1
+            # Oldest first; one not stored holds back the later ones.
+            for announcement in snapshot.state.execution_plan.announcements:
+                try:
+                    self._append_reply(snapshot.conversation_id, announcement.turn_id,
+                                       announcement.text, snapshot.provenance,
+                                       snapshot.retention_until)
+                except Exception as error:  # noqa: BLE001 - kept for the next tick
+                    LOGGER.warning("Plan reply for goal %s not stored: %s",
+                                   snapshot.state.goal_id, type(error).__name__)
+                    break
+                self._acknowledge(snapshot.state.goal_id, announcement.turn_id)
+                stored += 1
         return stored
 
     def _with_contextual_events(

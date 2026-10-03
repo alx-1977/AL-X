@@ -1656,7 +1656,7 @@ class ReplyDurabilityTests(PlanHarness):
         self.finish_turn(gateway)
         self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
         self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
-        self.assertIsNone(self.plan_of().announcement)
+        self.assertEqual(self.plan_of().announcements, ())
         self.assertEqual(gateway.reconcile_plan_announcements(), 0)
         self.assertEqual(len(self.replies()), 1)
 
@@ -1695,10 +1695,10 @@ class ReplyDurabilityTests(PlanHarness):
             self.finish_turn(gateway)
         self.assertEqual(self.replies(), [])
         self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
-        self.assertIsNotNone(self.plan_of().announcement)
+        self.assertTrue(self.plan_of().announcements)
         self.assertEqual(gateway.reconcile_plan_announcements(), 1)
         self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
-        self.assertIsNone(self.plan_of().announcement)
+        self.assertEqual(self.plan_of().announcements, ())
 
     def test_a_crash_between_the_writes_is_recovered_after_restart(self):
         self.finish_ready()
@@ -1721,13 +1721,13 @@ class ReplyDurabilityTests(PlanHarness):
         gateway._core.plan_announcement_stored = lambda *_arguments: (_ for _ in ()).throw(
             OSError("goal store unavailable"))
         self.finish_turn(gateway)
-        self.assertIsNotNone(self.plan_of().announcement)
+        self.assertTrue(self.plan_of().announcements)
         gateway._core.plan_announcement_stored = original
         self.restart()
         gateway = self.gateway(Reasoner())
         gateway.reconcile_plan_announcements()
         self.assertEqual(len(self.replies()), 1)
-        self.assertIsNone(self.plan_of().announcement)
+        self.assertEqual(self.plan_of().announcements, ())
 
     def test_a_reply_she_did_not_deliver_is_never_announced(self):
         self.finish_ready()
@@ -1742,7 +1742,7 @@ class ReplyDurabilityTests(PlanHarness):
         self.assertEqual([item.content for item in self.replies()],
                          ["Writing the release notes next."])
         self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
-        self.assertIsNone(self.plan_of().announcement)
+        self.assertEqual(self.plan_of().announcements, ())
         self.assertEqual(gateway.reconcile_plan_announcements(), 0)
 
     def test_cancel_follows_the_same_rule(self):
@@ -1762,6 +1762,35 @@ class ReplyDurabilityTests(PlanHarness):
         self.assertEqual(self.plan_of().status, PlanStatus.CANCELLED)
         gateway.reconcile_plan_announcements()
         self.assertEqual([item.content for item in self.replies()], ["Stopped it."])
+
+    def test_a_replacement_closing_before_reconciliation_loses_no_reply(self):
+        self.finish_ready()
+        original = self.conversations.append
+        storage = {"down": True}
+
+        def failing(turn, *arguments, **keywords):
+            if storage["down"] and turn.turn_id.startswith("alx-plan-reply:"):
+                raise OSError("conversation store unavailable")
+            return original(turn, *arguments, **keywords)
+        self.conversations.append = failing
+        with self.assertRaises(OSError):                      # plan A's reply
+            self.finish_turn(self.gateway(self.finishing()))
+        self.now += timedelta(seconds=1)
+        self.finish_turn(self.gateway(Reasoner(            # plan B replaces it
+            SELECT, install(plan(step("cleanup")), "Starting the cleanup."))))
+        self.work(self.agent())
+        self.now += timedelta(seconds=1)
+        with self.assertRaises(OSError):                      # plan B's reply
+            self.finish_turn(self.gateway(Reasoner(
+                SELECT, resolve(PlanOperation.CANCEL, "Cleanup stopped."))))
+        self.assertEqual(len(self.plan_of().announcements), 2)
+        storage["down"] = False
+        gateway = self.gateway(Reasoner())
+        self.assertEqual(gateway.reconcile_plan_announcements(), 2)
+        self.assertEqual(gateway.reconcile_plan_announcements(), 0)
+        self.assertEqual([item.content for item in self.replies()],
+                         ["Starting the cleanup.", "It is merged and done.", "Cleanup stopped."])
+        self.assertEqual(self.plan_of().announcements, ())
 
 
 class RejectedDecisionCorrectionTests(PlanHarness):
@@ -1934,14 +1963,14 @@ class LatestReviewRegressionTests(PlanHarness):
         agent = self.installed(step("coding"))
         self.work(agent)
         finished = replace(self.plan_of(), status=PlanStatus.COMPLETED, attention=None,
-                           announcement=PlanAnnouncement("alx-plan-reply:1", "Done."))
+                           announcements=(PlanAnnouncement("alx-plan-reply:1", "Done."),))
         self.set_goal(execution_plan=finished)
         self.person(self.same_process(agent, Reasoner(install(plan(step("cleanup")),
                                                               "Next job started."))))
         replacement = self.plan_of()
         self.assertEqual(replacement.status, PlanStatus.RUNNING)
-        self.assertEqual(replacement.announcement,
-                         PlanAnnouncement("alx-plan-reply:1", "Done."))
+        self.assertEqual(replacement.announcements,
+                         (PlanAnnouncement("alx-plan-reply:1", "Done."),))
 
 
 class StopDuringBeginTests(unittest.IsolatedAsyncioTestCase, PlanHarness):

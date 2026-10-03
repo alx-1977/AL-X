@@ -138,9 +138,7 @@ def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
             plan.inflight.step_index, plan.inflight.call_id, plan.inflight.started,
         ],
         "attention_seq": plan.attention_seq,
-        "announcement": None if plan.announcement is None else [
-            plan.announcement.turn_id, plan.announcement.text,
-        ],
+        "announcements": [[item.turn_id, item.text] for item in plan.announcements],
         "attention": None if attention is None else {
             "seq": attention.seq,
             "reason": attention.reason,
@@ -197,8 +195,7 @@ def _plan_from_data(data: dict[str, Any] | None) -> ExecutionPlan | None:
             attention["offers"], attention["paid_offers"],
             _time_from_data(attention["next_offer_at"]), attention["blocked"],
         ),
-        None if data.get("announcement") is None
-        else PlanAnnouncement(*data["announcement"]),
+        tuple(PlanAnnouncement(*item) for item in data.get("announcements", ())),
     )
 
 
@@ -658,10 +655,10 @@ class SQLiteGoalStore:
         ).fetchall())
 
     def list_plan_announcement_goal_ids(self) -> tuple[str, ...]:
-        """Goals whose finished plan still holds a reply not yet stored."""
+        """Goals whose plan still holds a reply not yet stored."""
         return tuple(item[0] for item in self._connection.execute(
             "SELECT goal_id FROM goals "
-            "WHERE json_extract(state_json, '$.execution_plan.announcement') IS NOT NULL "
+            "WHERE json_array_length(state_json, '$.execution_plan.announcements') > 0 "
             "ORDER BY rowid"
         ).fetchall())
 
