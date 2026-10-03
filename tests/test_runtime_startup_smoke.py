@@ -101,6 +101,7 @@ class StartupSmokeTest(unittest.TestCase):
         observed: dict = {
             "served": False,
             "provider_calls": 0,
+            "identity_checks": [],
             "ticks": 0,
             "synthesis_calls": 0,
             "bound_sockets": 0,
@@ -133,6 +134,11 @@ class StartupSmokeTest(unittest.TestCase):
                 observed["ticks"] += 1
                 await asyncio.Event().wait()
 
+            def verify_identity(model):
+                # The CLI's local login status, faked: reading it is not a
+                # reasoning call, and CI has no Claude login to read.
+                observed["identity_checks"].append(model.config_dir)
+
             def refuse_provider_call(*_args, **_kwargs):
                 observed["provider_calls"] += 1
                 raise AssertionError("startup must not call a provider")
@@ -153,6 +159,7 @@ class StartupSmokeTest(unittest.TestCase):
                 (OpenAIReasoningModel, "complete", refuse_provider_call),
                 (XAIReasoningModel, "complete", refuse_provider_call),
                 (ClaudeSubscriptionReasoningModel, "complete", refuse_provider_call),
+                (ClaudeSubscriptionReasoningModel, "verify_identity", verify_identity),
                 # The CLI's presence is checked at composition; nothing runs it.
                 (runtime_providers, "subscription_cli_present", lambda: True),
             ]
@@ -211,6 +218,7 @@ class StartupSmokeTest(unittest.TestCase):
             # EX-001 as amended 2026-09-27: autonomous turns are answered by
             # the conversational subscription Core, so both name it.
             "ALX_REASONING_PROVIDER": "claude_subscription",
+            "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
             "ALX_REASONING_MODEL": "claude-opus-5-5",
             "ALX_AUTONOMOUS_PROVIDER": "claude_subscription",
             "ALX_AUTONOMOUS_MODEL": "claude-opus-5-5",
@@ -245,6 +253,17 @@ class StartupSmokeTest(unittest.TestCase):
                 observed = self._run_runtime(overrides)
                 self.assertEqual(observed["provider_calls"], 0)
                 self.assertEqual(observed["synthesis_calls"], 0)
+
+    def test_startup_verifies_the_core_claude_identity_first(self) -> None:
+        # The template's Core is metered and has no Claude identity; the
+        # commissioning runtime has two subscription Cores, both checked.
+        for label, overrides, cores in (
+            ("disabled", {}, 0), ("commissioning", self._commissioning(), 2),
+        ):
+            with self.subTest(configuration=label):
+                checks = self._run_runtime(overrides)["identity_checks"]
+                self.assertEqual(len(checks), cores)
+                self.assertTrue(all(path.endswith("/.claude-alx") for path in checks))
 
     def test_startup_creates_no_cognition_opportunity(self) -> None:
         """A composed runtime is inert until something is genuinely due."""

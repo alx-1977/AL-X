@@ -7,6 +7,7 @@ this file locks. Installed-CLI help wording lives under evaluation/toolchain.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -774,6 +775,7 @@ class ConfigurationTest(unittest.TestCase):
 
     BASE = {
         "ALX_REASONING_PROVIDER": "claude_subscription",
+        "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
         "ALX_REASONING_MODEL": "opus",
         "ALX_STT_PROVIDER": "cartesia",
         "ALX_STT_MODEL": "ink-whisper",
@@ -944,6 +946,7 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
 
     ENVIRONMENT = {
         "ALX_REASONING_PROVIDER": "claude_subscription",
+        "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
         "ALX_REASONING_MODEL": "opus",
         "ALX_STT_PROVIDER": "cartesia",
         "ALX_STT_MODEL": "ink-whisper",
@@ -1018,21 +1021,44 @@ class ZeroMeteredApiConfigurationTest(unittest.TestCase):
         from alx.bootstrap.providers import build_runtime_providers
         from alx.config.settings import RuntimeSettings
 
-        runner = _Recorder(_envelope(DECISION))
+        import tempfile
+
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        dedicated = Path(home.name) / ".claude-alx"
+        dedicated.mkdir()
+        status = json.dumps({
+            "loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
+            "email": "core@example.invalid", "configDirectory": str(dedicated),
+        })
+        turn = _Recorder(_envelope(DECISION))
+
+        def runner(command, **kwargs):
+            if command[1:] == ["auth", "status", "--json"]:
+                turn.calls.append({"command": command, **kwargs})
+                return subprocess.CompletedProcess(command, 0, status, "")
+            return turn(command, **kwargs)
+
         with (
             patch("alx.bootstrap.providers.subscription_cli_present", return_value=True),
             patch("alx.providers.claude_subscription.subprocess.run", runner),
             patch("alx.providers.claude_subscription.os.environ", {"PATH": "/usr/bin"}),
         ):
             providers = build_runtime_providers(
-                RuntimeSettings.from_environment(dict(self.ENVIRONMENT))
+                RuntimeSettings.from_environment(
+                    {**self.ENVIRONMENT, "HOME": home.name})
             )
             completion = providers.reasoning.complete(_request())
 
         self.assertEqual(completion.provider, PROVIDER_NAME)
-        self.assertEqual(len(runner.calls), 1)
-        self.assertEqual(runner.calls[0]["command"][0], "claude")
-        self.assertNotIn("ANTHROPIC_API_KEY", runner.calls[0]["env"])
+        # The dedicated identity is confirmed once, then the one turn runs.
+        self.assertEqual([call["command"][1] for call in turn.calls],
+                         ["auth", "--print"])
+        for call in turn.calls:
+            self.assertEqual(call["command"][0], "claude")
+            # The canonical path: symlinks resolved before anything is used.
+            self.assertEqual(call["env"]["CLAUDE_CONFIG_DIR"], os.path.realpath(dedicated))
+            self.assertNotIn("ANTHROPIC_API_KEY", call["env"])
 
 
 if __name__ == "__main__":

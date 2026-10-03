@@ -24,7 +24,9 @@ from alx.providers import (
     OpenAIReasoningModel,
     XAIReasoningModel,
 )
-from alx.providers.claude_subscription import subscription_cli_present
+from alx.providers.claude_subscription import (
+    SubscriptionIdentityError, subscription_cli_present,
+)
 from alx.providers.codex_subscription import subscription_cli_present as codex_subscription_cli_present
 from alx.contracts import CodingSession
 from alx.providers.coding_session import GrokCodingSession
@@ -231,6 +233,25 @@ def _build_coding_reviewer_model(
     )
 
 
+def verify_core_claude_identity(providers: "RuntimeProviders") -> None:
+    """Confirm every subscription Core reasons as AL/X's dedicated account.
+
+    Run once at startup, before anything is served. A missing, signed-out,
+    API-key or wrongly signed-in configuration stops the runtime with a
+    configuration error rather than letting another identity answer.
+    """
+    for model in (providers.reasoning, providers.autonomous):
+        if not isinstance(model, ClaudeSubscriptionReasoningModel):
+            continue
+        try:
+            model.verify_identity()
+        except SubscriptionIdentityError as error:
+            raise ConfigurationError(
+                f"AL/X Core Claude identity unavailable ({error.code}) for "
+                f"config directory {model.config_dir}"
+            ) from None
+
+
 def build_runtime_providers(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
@@ -249,6 +270,9 @@ def build_runtime_providers(
             settings.reasoning.model,
             settings.reasoning.timeout_seconds,
             telemetry_sink=telemetry_sink,
+            # AL/X's own Claude login, never the person's.
+            config_dir=settings.core_claude_config_dir,
+            expected_account=settings.core_claude_account,
         )
     elif settings.reasoning.provider == "openai":
         reasoning = OpenAIReasoningModel(
@@ -287,6 +311,8 @@ def build_runtime_providers(
             settings.autonomous.model,
             settings.autonomous.timeout_seconds,
             telemetry_sink=telemetry_sink,
+            config_dir=settings.core_claude_config_dir,
+            expected_account=settings.core_claude_account,
         )
     )
     coding = _build_coding_model(settings, telemetry_sink)

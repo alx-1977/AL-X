@@ -91,6 +91,7 @@ OVERDUE = (
 
 BASE_ENVIRONMENT = {
     "ALX_REASONING_PROVIDER": "claude_subscription",
+    "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
     "ALX_REASONING_MODEL": "claude-opus-5-5",
     "ALX_REASONING_TIMEOUT_SECONDS": "300",
     "ALX_STT_PROVIDER": "cartesia",

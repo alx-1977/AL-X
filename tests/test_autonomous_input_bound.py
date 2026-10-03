@@ -222,6 +222,9 @@ class CoreNamesTheRefusalTests(unittest.TestCase):
             def list_unfinished(self, *args, **kwargs):
                 return ()
 
+            def list_needing_core(self, *args, **kwargs):
+                return ()
+
         outcome = CoreAgent(NoGoals(), Refusing(), lambda call, state: None, (),
                             clock=lambda: NOW).process(
             ConversationSnapshot("c1", (), 1, NOW + timedelta(days=1)),

@@ -44,6 +44,7 @@ from alx.providers.pdf_limits import (
     PDF_DECODED_STREAM_BYTES,
     enforce_pdf_decode_limits,
 )
+from alx.contracts.storage import serialized_store
 
 
 ConnectionFactory = Callable[..., Any]
@@ -362,6 +363,7 @@ def _same_uid(left: str, right: str) -> bool:
     return left == right
 
 
+@serialized_store
 class SQLiteMailObservationState:
     """Persist only IMAP references, headers, and presentation state—never bodies.
 

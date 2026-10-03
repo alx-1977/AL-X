@@ -1453,6 +1453,42 @@ class PullRequestArgumentShapeTests(RealRepositoryHarness):
             self.github.opened[0].branch, "fix/review-status-surfacing-4"
         )
 
+    def test_draft_reaches_github_only_when_asked(self) -> None:
+        for arguments, expected in (({}, False), ({"draft": False}, False),
+                                    ({"draft": True}, True)):
+            with self.subTest(arguments=arguments):
+                self.github.opened.clear()
+                result = self.executor()({
+                    "operation": "open_pull_request",
+                    "arguments": {"branch": "fix/thing", "title": "T", **arguments},
+                })
+                self.assertEqual(result.values["pull_request_number"], 7)
+                self.assertIs(self.github.opened[0].draft, expected)
+
+    def test_a_draft_flag_that_is_not_a_boolean_is_refused(self) -> None:
+        result = self.executor()({
+            "operation": "open_pull_request",
+            "arguments": {"branch": "fix/thing", "title": "T", "draft": "true"},
+        })
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertEqual(self.github.opened, [])
+
+    def test_core_is_told_the_draft_option_exists(self) -> None:
+        from alx.tools.repository_authority import DEFINITION
+
+        purpose = DEFINITION.purpose
+        opening = purpose[purpose.index("`open_pull_request`"):]
+        opening = opening[:opening.index("`update_pull_request`")]
+        self.assertIn("`draft`", opening)
+        self.assertIn("draft pull request", opening)
+
+    def test_merge_authority_is_untouched(self) -> None:
+        from alx.contracts.repository_authority import ARGUMENTS, GITHUB_OPERATIONS
+
+        self.assertFalse(any("merge" in item.value for item in GITHUB_OPERATIONS))
+        self.assertEqual(set(ARGUMENTS[Operation.OPEN_PULL_REQUEST]),
+                         {"branch", "title", "body", "draft"})
+
     def test_the_shapes_she_tried_reach_github(self) -> None:
         """`head`, `source_branch` and a redundant `repository` and `base`.
 

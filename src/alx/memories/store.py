@@ -28,6 +28,7 @@ from alx.contracts.provenance import (
     provenance_to_storage,
 )
 from alx.contracts.scope import scope_from_storage, scope_to_storage
+from alx.contracts.storage import serialized_store
 
 
 LOGGER = logging.getLogger(__name__)
@@ -155,6 +156,7 @@ def _decode_revision(
     )
 
 
+@serialized_store
 class SQLiteMemoryStore:
     """Validates and persists Core proposals without assessing significance."""
 

@@ -26,6 +26,7 @@ from alx.contracts import (
     CapabilityResult,
     CapabilityResultState,
     ContentOrigin,
+    ExecutionOutcome,
     RetentionPolicy,
     SideEffect,
     StructuredSchema,
@@ -132,7 +133,53 @@ DEFINITION = CapabilityDefinition(
     CHECK_READ_FAILURES,
     durable_input_fields=("pull_request_number", "head_sha"),
     transmits_authored_text=False,
+    # Reading again changes nothing, so a plan may wait on it.
+    plan_observation=True,
 )
+
+# GitHub's own vocabulary, read the way its required-check rule reads it:
+# success, neutral and skipped pass; these have failed. Anything else that
+# has settled, such as action_required or stale, is for AL/X to read.
+_PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "cancelled", "startup_failure"})
+_FAILED_STATUSES = frozenset({"failure", "error"})
+# A read that may well succeed if simply made again.
+_TRANSIENT_READ_FAILURES = frozenset({"rate_limited", "provider_failed"})
+
+
+def _outcome(values: Mapping[str, Any]) -> ExecutionOutcome:
+    """Whether the checks have settled, and how, for work already decided.
+
+    Settlement, not permission: SUCCESS says every check passed by GitHub's
+    own rule, not that a merge should follow; merge authority stays with the
+    merge capability and its gates. Precedence is fixed: a failure anywhere,
+    including a failed step of a job still running, then any settled result
+    needing judgment, then pending, then success.
+    """
+    runs = values["check_runs"]
+    statuses = values["commit_statuses"]
+    settled = [run["conclusion"] for run in runs if run["status"] == "completed"]
+    # A step with a conclusion has settled, even inside a run still going;
+    # one without is still running.
+    settled += [step["conclusion"] for run in runs for step in run.get("steps", ())
+                if step["conclusion"] is not None]
+    # 1. A failure anywhere is a failure now.
+    if (any(item in _FAILED_CONCLUSIONS for item in settled)
+            or any(item["state"] in _FAILED_STATUSES for item in statuses)):
+        return ExecutionOutcome.FAILURE
+    # 2. A settled run, step or status outside the passing vocabulary is hers
+    #    to read now, whatever else is still running: waiting cannot change it.
+    if (any(item not in _PASSING_CONCLUSIONS for item in settled)
+            or any(item["state"] not in ("success", "pending") for item in statuses)):
+        return ExecutionOutcome.AMBIGUOUS
+    # 3. Only then is anything unresolved pending. No checks yet is pending:
+    #    they register after a push.
+    if (not runs and not statuses
+            or any(run["status"] != "completed" for run in runs)
+            or any(item["state"] == "pending" for item in statuses)):
+        return ExecutionOutcome.PENDING
+    # 4. Everything settled and passing.
+    return ExecutionOutcome.SUCCESS
 
 
 def build_pull_request_checks_executors(
@@ -185,6 +232,7 @@ def build_pull_request_checks_executors(
                 "head_sha": values["head_sha"],
             },
             provenance=provenance,
+            outcome=_outcome(values),
         )
 
     return {READ_PULL_REQUEST_CHECKS: read_pull_request_checks}
@@ -200,6 +248,8 @@ def _failed(call_id: str, code: str, **details: object) -> CapabilityResult:
             **details,
             "requires_judgement": code != "arguments_unusable",
         },
+        outcome=(ExecutionOutcome.TEMPORARILY_UNAVAILABLE
+                 if code in _TRANSIENT_READ_FAILURES else None),
     )
 
 

@@ -90,6 +90,20 @@ inadequate.
       conversationally while CA work continues.
   10. Usage-aware scheduling/budgeting so AL/X can avoid beginning work that
       cannot be completed with available provider capacity.
+- [ ] **Recovery without per-record isolation.** Found during the PR #95
+  local review on 2026-10-02 and present on `main`; not fixed there. Plan
+  continuation recovery and the due-plan tick were isolated per record in
+  PR #95; these were not:
+  1. The other startup recovery sources (`cognition_source.recover`,
+     mail cognition recovery, completed-work recovery in
+     `bootstrap/live_voice.py`) do not isolate exceptions raised during
+     per-record recovery. The code does not show that an ordinary stale or
+     undecodable ledger row raises: `SQLiteOpportunityLedger.unfinished()`
+     returns raw rows without decoding them.
+  2. `CoreAgent.process()` calls `list_unfinished()` at the start of each
+     turn, which decodes every unfinished goal with no exception boundary.
+     One unfinished goal that does not decode therefore fails each turn
+     while it remains unfinished.
 
 ## Planned
 

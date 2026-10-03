@@ -119,6 +119,11 @@ class CapabilityDefinition:
     # search argument `subject` once made every search look like unsent mail
     # and be refused. A capability that sends must therefore say so.
     transmits_authored_text: bool = False
+    # An observation an execution plan may repeat while it waits. Only such a
+    # capability may report a PENDING or TEMPORARILY_UNAVAILABLE outcome; for
+    # any other a plan never waits. Declared, never inferred from side_effect,
+    # and a capability that changes anything never declares it.
+    plan_observation: bool = False
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -129,6 +134,10 @@ class CapabilityDefinition:
             raise TypeError("side_effect must be a SideEffect")
         if not isinstance(self.transmits_authored_text, bool):
             raise TypeError("transmits_authored_text must be a bool")
+        if not isinstance(self.plan_observation, bool):
+            raise TypeError("plan_observation must be a bool")
+        if self.plan_observation and self.transmits_authored_text:
+            raise ValueError("a capability that sends cannot be a plan observation")
         codes = tuple(self.possible_failure_codes)
         object.__setattr__(self, "possible_failure_codes", codes)
         if any(not isinstance(item, str) or not item.strip() for item in codes):

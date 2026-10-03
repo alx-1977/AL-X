@@ -599,18 +599,45 @@ class SingleExecutionSiteTest(unittest.TestCase):
         )
         self.assertIn(reference, tuple(ast.walk(constructor)))
 
-        self.assertEqual(len(runner_calls), 1)
         completion = next(
             node for node in model_class.body
             if isinstance(node, ast.FunctionDef) and node.name == "complete"
         )
-        runner_call = runner_calls[0]
-        self.assertIn(runner_call, tuple(ast.walk(completion)))
+        turns = [call for call in runner_calls if call in tuple(ast.walk(completion))]
+        self.assertEqual(len(turns), 1)
+        runner_call = turns[0]
         keywords = {keyword.arg: keyword.value for keyword in runner_call.keywords}
         for name in ("input", "timeout", "env", "cwd", "shell", "check"):
             self.assertIn(name, keywords)
         self.assertIs(keywords["shell"].value, False)
         self.assertIs(keywords["check"].value, False)
+        probes = [call for call in runner_calls if call not in turns]
+        if model_class_name != "ClaudeSubscriptionReasoningModel":
+            self.assertEqual(probes, [])
+            return
+        # The Claude transport alone has one more: confirming AL/X's own
+        # Claude login before any turn. Fixed to `auth status --json` in
+        # verify_identity, with the same stripped environment and no shell.
+        self.assertLessEqual(len(probes), 1)
+        if not probes:
+            return
+        verify = next(
+            node for node in model_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "verify_identity"
+        )
+        probe = probes[0]
+        self.assertIn(probe, tuple(ast.walk(verify)))
+        argv = probe.args[1]
+        self.assertIsInstance(argv, ast.List)
+        self.assertEqual([item.value for item in argv.elts[1:]],
+                         ["auth", "status", "--json"])
+        self.assertEqual((argv.elts[0].value.id, argv.elts[0].attr),
+                         ("self", "_executable"))
+        keywords = {keyword.arg: keyword.value for keyword in probe.keywords}
+        self.assertIs(keywords["shell"].value, False)
+        self.assertIs(keywords["check"].value, False)
+        self.assertNotIn("input", keywords)
+        self.assertEqual(keywords["env"].func.attr, "child_environment")
 
     def _assert_repository_runtime_process_boundary(self, source: str) -> None:
         """D-030 permits one fixed Git runner, not a module-wide exemption."""

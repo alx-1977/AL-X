@@ -491,6 +491,9 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
             def list_unfinished(self, _conversation_id=None, *, project_id=None, limit=None):
                 return ()
 
+            def list_needing_core(self, limit, exclude=frozenset()):
+                return ()
+
         def check(_task_id):
             raise BudgetExceeded("task-1", 5, 4)
 

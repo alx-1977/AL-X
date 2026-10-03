@@ -24,10 +24,12 @@ from alx.contracts.continuity import (
     FutureCognitionStatus,
 )
 from alx.contracts.provenance import provenance_from_storage, provenance_to_storage
+from alx.contracts.storage import serialized_store
 
 SCHEMA_VERSION = 1
 
 
+@serialized_store
 class SQLiteContinuityStore:
     """The one durable home for future cognition requests."""
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from alx.contracts import ConversationOrigin, ConversationSnapshot, ConversationTurn
 from alx.contracts.provenance import provenance_from_storage, provenance_to_storage
+from alx.contracts.storage import serialized_store
 
 
 SCHEMA_VERSION = 2
@@ -80,6 +81,7 @@ def _turn_from_row(row: tuple[str, str | None, str | None, str | None, str | Non
     )
 
 
+@serialized_store
 class SQLiteConversationStore:
     """Stores conversation independently; it never interprets or routes content."""
 

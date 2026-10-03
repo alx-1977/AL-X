@@ -121,6 +121,19 @@ from alx.contracts.records import (
     ApprovalScope,
     BackgroundEvent,
     CapabilityCall,
+    ExecutionOutcome,
+    ExecutionPlan,
+    ExecutionStep,
+    MAX_PLAN_WAIT_SECONDS,
+    PLAN_TERMINAL,
+    PlanAnnouncement,
+    PlanAttention,
+    PlanCondition,
+    PlanDispatch,
+    PlanStatus,
+    outcome_of,
+    PLAN_CONDITION_ROOTS,
+    plan_condition_path_error,
     CapabilityAttempt,
     CapabilityAttemptDisposition,
     CapabilityResult,
@@ -155,7 +168,7 @@ from alx.contracts.scope import (
     scope_to_storage,
 )
 from alx.contracts.capabilities import CapabilityDefinition, SideEffect, StructuredSchema, ValueKind
-from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, GoalSummary, PendingMemoryBatch, ReasoningContext, ReasoningProvider
+from alx.contracts.core import AgentDecision, CapabilityDispatch, ConversationSnapshot, DecisionValidationError, DurableConversationStore, DurableGoalStore, DurableMemoryStore, GoalSnapshot, GoalSummary, PendingMemoryBatch, PlanOperation, PlanUpdate, ReasoningContext, ReasoningProvider
 from alx.contracts.records import StructuredData
 from alx.contracts.specialists import SpecialistError, SpecialistModel, SpecialistQuestion
 from alx.contracts.speech import (
@@ -303,13 +316,16 @@ __all__ = [
     "Project", "ProjectStatus", "ScopeReference",
     "scope_from_storage", "scope_to_storage",
     "Approval", "ApprovalProposal", "ApprovalLifecycle", "ApprovalScope", "BackgroundEvent", "CapabilityCall", "CapabilityAttempt", "CapabilityAttemptDisposition",
+    "ExecutionOutcome", "ExecutionPlan", "ExecutionStep", "MAX_PLAN_WAIT_SECONDS",
+    "PLAN_TERMINAL", "PlanAnnouncement", "PlanAttention", "PlanCondition", "PlanDispatch", "PlanStatus",
+    "outcome_of", "PLAN_CONDITION_ROOTS", "plan_condition_path_error",
     "CapabilityResult", "CapabilityResultState", "ConversationOrigin",
     "ConversationTurn", "Evidence", "history_evidence_ids", "GoalMutationKind", "GoalProposal", "GoalState", "GoalStatus", "GoalStopReason",
     "Objective", "ProgressRecord", "Referent", "SuccessCriterion", "WorkItem",
     "CapabilityDefinition", "SideEffect", "StructuredSchema", "ValueKind",
     "StructuredData",
     "SpecialistError", "SpecialistModel", "SpecialistQuestion",
-    "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "GoalSummary", "PendingMemoryBatch", "ReasoningContext", "ReasoningProvider",
+    "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "GoalSummary", "PendingMemoryBatch", "PlanOperation", "PlanUpdate", "ReasoningContext", "ReasoningProvider",
     "AudioChunk", "SpeechSynthesizer", "SpeechTranscriber", "TranscriptionEvent",
     "TranscriptionState",
     "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",

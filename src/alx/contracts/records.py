@@ -199,6 +199,22 @@ class CapabilityResultState(str, Enum):
     FAILED = "failed"
 
 
+class ExecutionOutcome(str, Enum):
+    """What one result means for work already decided, said by its capability.
+
+    Settlement, never permission: SUCCESS says the operation finished as
+    asked, not that anything may follow it. Only a plan observation may report
+    PENDING or TEMPORARILY_UNAVAILABLE. A result that names none has the
+    outcome its state implies (see `outcome_of`).
+    """
+
+    SUCCESS = "success"
+    PENDING = "pending"
+    FAILURE = "failure"
+    TEMPORARILY_UNAVAILABLE = "temporarily_unavailable"
+    AMBIGUOUS = "ambiguous"
+
+
 class CapabilityAttemptDisposition(str, Enum):
     PENDING = "pending"
     EXECUTED = "executed"
@@ -233,6 +249,240 @@ class CapabilityCall:
         object.__setattr__(self, "durable_arguments", durable)
 
 
+# What a planned result exposes to its completion conditions: its state, its
+# structured values and its failure details. The one statement of the path
+# grammar; everything that accepts a plan constructs PlanCondition.
+PLAN_CONDITION_ROOTS = ("state", "values", "failure")
+
+
+def plan_condition_path_error(path: object) -> str | None:
+    """Why a completion-condition path is unusable, or None when it is usable.
+
+    `state` alone, or `values` / `failure` optionally followed by public
+    field names, dot-separated. No wildcard, empty or private segment.
+    """
+    parts = path.split(".") if isinstance(path, str) else []
+    if (not parts or parts[0] not in PLAN_CONDITION_ROOTS
+            or (parts[0] == "state" and len(parts) != 1)
+            or any(not part.strip() or part.startswith("_") or "*" in part for part in parts)):
+        return f"plan condition path is unusable: {path!r}"
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanCondition:
+    """An exact, model-chosen completion check on one structured result field."""
+
+    path: str
+    equals: StructuredData | str | int | float | bool | None
+    negate: bool = False
+
+    def __post_init__(self) -> None:
+        error = plan_condition_path_error(self.path)
+        if error is not None:
+            raise ValueError(error)
+        if not isinstance(self.negate, bool):
+            raise TypeError("negate must be a bool")
+        object.__setattr__(self, "equals", _freeze_value(self.equals))
+
+
+# The longest a plan may keep observing one pending step before AL/X is told.
+MAX_PLAN_WAIT_SECONDS = 86_400
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStep:
+    """One exact capability call AL/X decided, and how long it may wait."""
+
+    call: CapabilityCall
+    # Checked only on a SUCCESS outcome. Empty means SUCCESS alone completes.
+    completion_conditions: tuple[PlanCondition, ...] = ()
+    # Zero: the step never waits. Otherwise a pending observation is repeated
+    # every `wait_seconds` until `max_wait_seconds` have passed.
+    wait_seconds: int = 0
+    max_wait_seconds: int = 0
+    # Advance, then return to AL/X with this step's result.
+    wake_core_on_completion: bool = False
+    waiting_for: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "completion_conditions", tuple(self.completion_conditions))
+        if self.call.arguments != self.call.durable_arguments:
+            raise ValueError("planned arguments must be safe for durable storage")
+        for name in ("wait_seconds", "max_wait_seconds"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if self.wait_seconds and not (
+            self.wait_seconds <= self.max_wait_seconds <= MAX_PLAN_WAIT_SECONDS
+        ):
+            raise ValueError("a waiting step needs a bound between its interval and a day")
+        if not self.wait_seconds and self.max_wait_seconds:
+            raise ValueError("only a waiting step has a wait bound")
+        if not isinstance(self.wake_core_on_completion, bool):
+            raise TypeError("wake_core_on_completion must be a bool")
+        if self.waiting_for is not None:
+            _required(self.waiting_for, "waiting_for")
+
+
+class PlanStatus(str, Enum):
+    RUNNING = "running"
+    WAITING = "waiting"
+    NEEDS_CORE = "needs_core"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+PLAN_TERMINAL = frozenset({PlanStatus.COMPLETED, PlanStatus.CANCELLED})
+
+
+@dataclass(frozen=True, slots=True)
+class PlanDispatch:
+    """The one planned dispatch checkpointed and not yet reduced.
+
+    A result belongs to the plan only when its call carries this call_id,
+    which the runner generates for each dispatch and writes here first.
+    `started` is the dispatch boundary: false, the capability has certainly
+    not been called and a cancel or restart may simply drop it; true, the
+    call may be in flight and only its own result can say what happened.
+    """
+
+    step_index: int
+    call_id: str
+    started: bool = False
+
+    def __post_init__(self) -> None:
+        _required(self.call_id, "call_id")
+        if not isinstance(self.step_index, int) or self.step_index < 0:
+            raise ValueError("step_index must be a nonnegative integer")
+        if not isinstance(self.started, bool):
+            raise TypeError("started must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanAttention:
+    """Why a plan needs AL/X, and how often it has been offered to her.
+
+    The plan owns this: nothing else records whether she is needed. It is
+    cleared only by her resolving this exact `seq`.
+    """
+
+    seq: int
+    reason: str
+    facts: tuple[str, ...]
+    raised_at: datetime
+    # The plan's own dispatches whose results she is to judge.
+    evidence_call_ids: tuple[str, ...] = ()
+    # Automatic offers made, and how many of them may have reached a paid
+    # reasoning call. Exhaustion is counted from paid offers alone.
+    offers: int = 0
+    paid_offers: int = 0
+    next_offer_at: datetime | None = None
+    # No further automatic offer. Still owned and still shown to her.
+    blocked: bool = False
+
+    def __post_init__(self) -> None:
+        _required(self.reason, "attention reason")
+        object.__setattr__(self, "facts", tuple(self.facts))
+        object.__setattr__(self, "evidence_call_ids", tuple(self.evidence_call_ids))
+        if not self.facts or self.facts[0] != self.reason:
+            raise ValueError("the first attention fact is its reason")
+        for item in (*self.facts, *self.evidence_call_ids):
+            _required(item, "attention fact")
+        _aware(self.raised_at, "raised_at")
+        if self.next_offer_at is not None:
+            _aware(self.next_offer_at, "next_offer_at")
+        for name in ("seq", "offers", "paid_offers"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if self.seq < 1 or self.paid_offers > self.offers:
+            raise ValueError("attention counters are inconsistent")
+        if not isinstance(self.blocked, bool):
+            raise TypeError("blocked must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanAnnouncement:
+    """AL/X's own reply to a finish or cancel, held until it is stored.
+
+    Written in the same goal write as the resolution it announces, because
+    the conversation is a separate store and no transaction spans both. The
+    turn id is fixed here, so storing it is idempotent and recovery can tell
+    whether it already was.
+    """
+
+    turn_id: str
+    text: str
+
+    def __post_init__(self) -> None:
+        _required(self.turn_id, "turn_id")
+        _required(self.text, "announcement text")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPlan:
+    """AL/X's durable intent, with only its mechanical cursor advanced by code."""
+
+    plan_id: str
+    objective_source: str | None
+    objective_summary: str | None
+    source_turn_id: str | None
+    steps: tuple[ExecutionStep, ...]
+    context_preconditions: StructuredData = field(default_factory=dict)
+    cursor: int = 0
+    status: PlanStatus = PlanStatus.RUNNING
+    next_due_at: datetime | None = None
+    # When a waiting step stops waiting and returns to her.
+    wait_deadline: datetime | None = None
+    inflight: PlanDispatch | None = None
+    # Counts every attention this plan has raised; the current one has it.
+    attention_seq: int = 0
+    attention: PlanAttention | None = None
+    # Each finish or cancel she answered in words, oldest first, until those
+    # words are stored in the conversation. A plan installed in its place
+    # carries them on, so neither a replacement nor a later reply can
+    # discard one.
+    announcements: tuple[PlanAnnouncement, ...] = ()
+
+    def __post_init__(self) -> None:
+        _required(self.plan_id, "plan_id")
+        # The objective a plan serves is the goal's, bound by the Core when it
+        # installs the plan. A proposal arriving from reasoning carries none.
+        for name in ("objective_source", "objective_summary"):
+            if getattr(self, name) is not None:
+                _required(getattr(self, name), name)
+        object.__setattr__(self, "steps", tuple(self.steps))
+        object.__setattr__(self, "announcements", tuple(self.announcements))
+        object.__setattr__(self, "context_preconditions", freeze_data(self.context_preconditions))
+        object.__setattr__(self, "status", PlanStatus(self.status))
+        if not self.steps or len(self.steps) > 32 or not 0 <= self.cursor <= len(self.steps):
+            raise ValueError("plan requires steps and an in-range cursor")
+        if len({step.call.call_id for step in self.steps}) != len(self.steps):
+            raise ValueError("plan call identifiers must be unique")
+        for name in ("next_due_at", "wait_deadline"):
+            if getattr(self, name) is not None:
+                _aware(getattr(self, name), name)
+        executable = self.status in {PlanStatus.RUNNING, PlanStatus.WAITING}
+        if executable and self.cursor == len(self.steps):
+            raise ValueError("an executable plan needs a step at its cursor")
+        if (self.status is PlanStatus.WAITING) != (self.next_due_at is not None):
+            raise ValueError("exactly a waiting plan has a due time")
+        if self.wait_deadline is not None and not executable:
+            raise ValueError("only an executable plan has a wait deadline")
+        if self.inflight is not None and (
+            self.status is not PlanStatus.RUNNING or self.inflight.step_index != self.cursor
+        ):
+            raise ValueError("only a running plan has a dispatch in flight, at its cursor")
+        if (self.status is PlanStatus.NEEDS_CORE) != (self.attention is not None):
+            raise ValueError("exactly a plan that needs AL/X carries an attention")
+        if (not isinstance(self.attention_seq, int) or isinstance(self.attention_seq, bool)
+                or self.attention_seq < 0):
+            raise ValueError("attention_seq must be a nonnegative integer")
+        if self.attention is not None and self.attention.seq != self.attention_seq:
+            raise ValueError("the current attention carries the plan's attention_seq")
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityResult:
     call_id: str
@@ -243,10 +493,20 @@ class CapabilityResult:
     evidence_refs: tuple[str, ...] = ()
     durable_values: StructuredData | None = None
     provenance: ContentProvenance | None = None
+    # Set by a capability that knows more than its state says: still pending,
+    # temporarily unavailable, needing AL/X's judgment, or a read that
+    # succeeded in observing work that failed. None means the outcome its
+    # state implies.
+    outcome: ExecutionOutcome | None = None
 
     def __post_init__(self) -> None:
         _required(self.call_id, "call_id")
         _required(self.capability_id, "capability_id")
+        if self.outcome is not None:
+            object.__setattr__(self, "outcome", ExecutionOutcome(self.outcome))
+            if (self.outcome is ExecutionOutcome.SUCCESS
+                    and self.state is not CapabilityResultState.SUCCEEDED):
+                raise ValueError("only a succeeded result can report success")
         object.__setattr__(self, "evidence_refs", _references(self.evidence_refs, "evidence references"))
         object.__setattr__(self, "values", freeze_data(self.values))
         durable_values = self.values if self.durable_values is None else self.durable_values
@@ -264,6 +524,24 @@ class CapabilityResult:
 
             if not isinstance(self.provenance, ContentProvenance):
                 raise TypeError("result provenance must be ContentProvenance or None")
+
+
+def outcome_of(result: CapabilityResult) -> ExecutionOutcome:
+    """The outcome a result reports, or the one its state implies.
+
+    A failure the capability marks as needing judgment is AMBIGUOUS, and a
+    partial result always is: only a whole success or a settled failure is
+    known without her.
+    """
+    if result.outcome is not None:
+        return result.outcome
+    if result.state is CapabilityResultState.SUCCEEDED:
+        return ExecutionOutcome.SUCCESS
+    if result.state is CapabilityResultState.FAILED and not (
+        result.failure or {}
+    ).get("requires_judgement"):
+        return ExecutionOutcome.FAILURE
+    return ExecutionOutcome.AMBIGUOUS
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +747,7 @@ class GoalState:
     approvals: tuple[Approval, ...] = ()
     status: GoalStatus = GoalStatus.ACTIVE
     stop_reason: GoalStopReason | None = None
+    execution_plan: ExecutionPlan | None = None
 
     def __post_init__(self) -> None:
         _required(self.goal_id, "goal_id")
@@ -491,6 +770,17 @@ class GoalState:
             raise ValueError("an unresolved dispatch must be the latest attempt")
         if pending and self.status is not GoalStatus.ACTIVE:
             raise ValueError("an unresolved dispatch requires an active goal")
+        if self.execution_plan is not None and (
+            self.execution_plan.objective_source is None
+            or self.execution_plan.objective_summary is None
+        ):
+            raise ValueError("a goal's plan must be bound to its objective")
+        inflight = None if self.execution_plan is None else self.execution_plan.inflight
+        if inflight is not None and not any(
+            item.call is not None and item.call.call_id == inflight.call_id
+            for item in self.attempts
+        ):
+            raise ValueError("a plan's dispatch in flight must be a recorded attempt")
         for approval in self.approvals:
             if approval.lifecycle is ApprovalLifecycle.CLAIMED and not any(
                 item.call is not None

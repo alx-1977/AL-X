@@ -35,6 +35,7 @@ from pathlib import Path
 
 from alx.contracts.provenance import provenance_from_storage, provenance_to_storage
 from alx.contracts.scope import Project, ProjectStatus
+from alx.contracts.storage import serialized_store
 
 SCHEMA_VERSION = 1
 PROVENANCE_COLUMNS = (
@@ -66,6 +67,7 @@ def _aware(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be timezone-aware")
 
 
+@serialized_store
 class SQLiteProjectStore:
     """Persist project scopes without interpreting what they contain."""
 

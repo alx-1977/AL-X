@@ -259,6 +259,7 @@ class CodexSubscriptionReviewerCompositionTests(unittest.TestCase):
     def test_reviewer_selection_needs_no_openai_api_key_or_openai_adapter(self) -> None:
         environment = {
             "ALX_REASONING_PROVIDER": "claude_subscription",
+            "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
             "ALX_REASONING_MODEL": "claude-haiku-4-5",
             "ALX_CODING_ENABLED": "true",
             "ALX_CODING_PROVIDER": "grok_subscription",

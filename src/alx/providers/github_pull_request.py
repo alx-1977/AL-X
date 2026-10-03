@@ -175,19 +175,22 @@ class GitHubPullRequests:
         """Open a pull request for a published branch, or return the open one."""
         existing = self._existing(request.branch)
         if existing is not None:
+            if request.draft and not (isinstance(existing, dict) and existing.get("draft") is True):
+                # Returning it would report a draft that does not exist.
+                raise PullRequestError("pull_request_not_draft")
             return self._outcome(existing, request.branch, created=False)
 
-        created = self._request(
-            "POST",
-            f"/repos/{self._repository}/pulls",
-            {
-                "title": request.title,
-                "body": request.body,
-                "head": request.branch,
-                # Fixed, never taken from the caller.
-                "base": BASE,
-            },
-        )
+        payload: dict[str, object] = {
+            "title": request.title,
+            "body": request.body,
+            "head": request.branch,
+            # Fixed, never taken from the caller.
+            "base": BASE,
+        }
+        if request.draft:
+            # Only when asked: an ordinary proposal sends exactly what it did.
+            payload["draft"] = True
+        created = self._request("POST", f"/repos/{self._repository}/pulls", payload)
         return self._outcome(created, request.branch, created=True)
 
     # ---- the rest of ordinary pull-request work -------------------------

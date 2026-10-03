@@ -136,6 +136,7 @@ class _StubSession:
 def _environment(**changes: str) -> dict[str, str]:
     values = {
         "ALX_REASONING_PROVIDER": "claude_subscription",
+        "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
         "ALX_REASONING_MODEL": "opus",
         "ALX_STT_PROVIDER": "cartesia",
         "ALX_STT_MODEL": "stt-model",

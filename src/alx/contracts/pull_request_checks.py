@@ -10,9 +10,12 @@ no longer points at is not evidence about the one under consideration. When
 the live head differs, the result says so and carries that head, and nothing
 else is read.
 
-What GitHub reports is carried as GitHub reported it. There is no combined
-status, no pass count, and no blocking flag: whether the results permit a
-merge is a judgement, and it is not made here.
+What GitHub reports is carried as GitHub reported it. There is no pass count
+and no blocking flag: whether the results permit a merge is a judgement, and
+it is not made here. The read's execution outcome says only whether the
+checks have settled and how, by GitHub's own required-check vocabulary, so a
+plan AL/X already decided knows whether to keep waiting; anything outside
+that vocabulary is returned to her as ambiguous.
 """
 
 from __future__ import annotations

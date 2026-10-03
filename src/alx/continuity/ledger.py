@@ -17,10 +17,12 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from alx.contracts.storage import serialized_store
 
 SCHEMA_VERSION = 1
 
 
+@serialized_store
 class SQLiteOpportunityLedger:
     """One durable row per cognition opportunity."""
 
