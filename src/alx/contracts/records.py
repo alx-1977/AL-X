@@ -291,10 +291,46 @@ MAX_PLAN_WAIT_SECONDS = 86_400
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionStep:
-    """One exact capability call AL/X decided, and how long it may wait."""
+class PlannedGoalMutation:
+    """One exact change to another goal that AL/X has already justified.
 
-    call: CapabilityCall
+    Only a closing mutation (see `PLANNED_GOAL_MUTATIONS`), with her reason
+    and any evidence she cites. The Core binds it, when it installs the plan,
+    to the revision of the goal she decided it against; a proposal from
+    reasoning carries none. A goal that has moved on since is hers again.
+    """
+
+    step_id: str
+    goal_id: str
+    kind: GoalMutationKind
+    reason: str
+    evidence: tuple[Evidence, ...] = ()
+    expected_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        _required(self.step_id, "step_id")
+        _required(self.goal_id, "goal_id")
+        _required(self.reason, "reason")
+        object.__setattr__(self, "kind", GoalMutationKind(self.kind))
+        if self.kind not in PLANNED_GOAL_MUTATIONS:
+            raise ValueError("a plan may only cancel a goal or request its completion")
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+        if self.expected_revision is not None and (
+            not isinstance(self.expected_revision, int)
+            or isinstance(self.expected_revision, bool) or self.expected_revision < 1
+        ):
+            raise ValueError("expected_revision must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStep:
+    """One exact capability call or goal mutation AL/X decided.
+
+    Exactly one of the two. Only a call may wait or carry completion
+    conditions: a goal mutation is applied or refused, never pending.
+    """
+
+    call: CapabilityCall | None
     # Checked only on a SUCCESS outcome. Empty means SUCCESS alone completes.
     completion_conditions: tuple[PlanCondition, ...] = ()
     # Zero: the step never waits. Otherwise a pending observation is repeated
@@ -304,10 +340,21 @@ class ExecutionStep:
     # Advance, then return to AL/X with this step's result.
     wake_core_on_completion: bool = False
     waiting_for: str | None = None
+    goal_mutation: PlannedGoalMutation | None = None
+
+    @property
+    def step_id(self) -> str:
+        return self.call.call_id if self.call is not None else self.goal_mutation.step_id
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "completion_conditions", tuple(self.completion_conditions))
-        if self.call.arguments != self.call.durable_arguments:
+        if (self.call is None) == (self.goal_mutation is None):
+            raise ValueError("a plan step is exactly one call or one goal mutation")
+        if self.goal_mutation is not None and (
+            self.completion_conditions or self.wait_seconds or self.waiting_for is not None
+        ):
+            raise ValueError("a goal mutation step neither waits nor has conditions")
+        if self.call is not None and self.call.arguments != self.call.durable_arguments:
             raise ValueError("planned arguments must be safe for durable storage")
         for name in ("wait_seconds", "max_wait_seconds"):
             value = getattr(self, name)
@@ -444,9 +491,15 @@ class ExecutionPlan:
     # carries them on, so neither a replacement nor a later reply can
     # discard one.
     announcements: tuple[PlanAnnouncement, ...] = ()
+    # The conversation she installed it from: where its wakes and her replies
+    # belong, whichever goal hosts it. None for a plan recorded before this
+    # was kept, which answers in its goal's conversation as it always did.
+    source_conversation_id: str | None = None
 
     def __post_init__(self) -> None:
         _required(self.plan_id, "plan_id")
+        if self.source_conversation_id is not None:
+            _required(self.source_conversation_id, "source_conversation_id")
         # The objective a plan serves is the goal's, bound by the Core when it
         # installs the plan. A proposal arriving from reasoning carries none.
         for name in ("objective_source", "objective_summary"):
@@ -458,8 +511,13 @@ class ExecutionPlan:
         object.__setattr__(self, "status", PlanStatus(self.status))
         if not self.steps or len(self.steps) > 32 or not 0 <= self.cursor <= len(self.steps):
             raise ValueError("plan requires steps and an in-range cursor")
-        if len({step.call.call_id for step in self.steps}) != len(self.steps):
+        if len({step.step_id for step in self.steps}) != len(self.steps):
             raise ValueError("plan call identifiers must be unique")
+        targets = [step.goal_mutation.goal_id for step in self.steps
+                   if step.goal_mutation is not None]
+        if len(targets) != len(set(targets)):
+            # The second would always meet a revision the first had changed.
+            raise ValueError("a plan mutates each goal at most once")
         for name in ("next_due_at", "wait_deadline"):
             if getattr(self, name) is not None:
                 _aware(getattr(self, name), name)
@@ -679,6 +737,11 @@ class GoalMutationKind(str, Enum):
     REQUEST_COMPLETION = "request_completion"
 
 
+# The goal mutations an execution plan may carry: the two that close a goal.
+PLANNED_GOAL_MUTATIONS = frozenset({GoalMutationKind.CANCEL,
+                                    GoalMutationKind.REQUEST_COMPLETION})
+
+
 @dataclass(frozen=True, slots=True)
 class GoalProposal:
     """A model-authored suggestion; only the Core may reduce it into goal truth."""
@@ -775,6 +838,15 @@ class GoalState:
             or self.execution_plan.objective_summary is None
         ):
             raise ValueError("a goal's plan must be bound to its objective")
+        for step in () if self.execution_plan is None else self.execution_plan.steps:
+            if step.goal_mutation is None:
+                continue
+            if step.goal_mutation.expected_revision is None:
+                raise ValueError("a goal's plan must bind each goal mutation to a revision")
+            if step.goal_mutation.goal_id == self.goal_id:
+                # Closing its own goal would close the plan before it could
+                # return to her; she closes her own goal herself.
+                raise ValueError("a plan cannot mutate the goal it belongs to")
         inflight = None if self.execution_plan is None else self.execution_plan.inflight
         if inflight is not None and not any(
             item.call is not None and item.call.call_id == inflight.call_id

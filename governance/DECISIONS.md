@@ -2265,3 +2265,13 @@ prohibition on unverified commits are unchanged.
 - **Authority.** AL/X alone chooses the objective, ordered capability calls, arguments, objective preconditions, completion conditions, and points where evidence returns for judgment. The plan grants no permission or approval. Every call still crosses its existing broker, safety, authority, verification, review, and commit gates.
 - **Deterministic sequence under Law 2.** The Core persists her exact plan with its goal. Code advances its cursor after declared successful results, waits mechanically on declared pending results, and resumes a valid checkpoint after restart. Changed preconditions, unexpected results, failed checks, refused actions, interrupted dispatch, review judgment, or ambiguous evidence return to AL/X. A completed plan returns to her for the final response.
 - **Boundary.** This is a reusable continuation mechanism for capability work AL/X has already decided, not a PR-specific workflow or a second conversation authority. Consequential actions retain their existing per-action gates. It does not authorise new domain integrations, additional production writes, paid external review, or any exception to the Laws.
+
+### Clarification — Already-decided goal mutations
+
+- **Date:** 2026-10-04
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-04.** Requested after AL/X closed one goal per message during a cleanup he had asked her to finish in one go.
+
+A plan step may be one exact mutation of another goal she was offered, instead of a capability call: cancel it or request its completion, with her reason and any evidence. AL/X alone decides which goals and which mutation. The runtime binds each step to the goal's revision when the plan is installed, and the runner applies it through the same goal reducer and revision-checked write as a mutation she proposes in a turn, at most once. A changed revision, changed plan precondition, refusal or failed write leaves the goal untouched and returns the plan to her. A plan never mutates the goal it belongs to.
+
+This grants no authority a single goal update lacks: completion still requires sourced evidence for every criterion, and nothing here touches capabilities, approvals or production writes. The boundary above is otherwise unchanged.

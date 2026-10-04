@@ -16,7 +16,7 @@ from alx.contracts import (
     GoalStatus, GoalStopReason, MemoryKind, MemoryProposal, Objective,
     PendingMemoryBatch, ProgressRecord, Referent, SuccessCriterion, WorkItem,
     ExecutionOutcome, ExecutionPlan, ExecutionStep, PlanAnnouncement, PlanAttention,
-    PlanCondition, PlanDispatch, PlanStatus,
+    PlanCondition, PlanDispatch, PlanStatus, PlannedGoalMutation, GoalMutationKind,
     GoalSnapshot, GoalSummary,
 )
 from alx.contracts.provenance import (
@@ -106,10 +106,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
         "outstanding_work": [[item.item_id, item.summary] for item in goal.outstanding_work],
-        "evidence": [
-            [item.evidence_id, item.kind, _data(item.attributes), list(item.supports), list(item.source_references)]
-            for item in goal.evidence
-        ],
+        "evidence": _evidence_to_data(goal.evidence),
         "approvals": [
             [item.approval_id, item.scope.capability_id, _data(item.scope.arguments), item.lifecycle.value, _time_to_data(item.expires_at)]
             for item in goal.approvals
@@ -129,6 +126,7 @@ def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
         "objective_source": plan.objective_source,
         "objective_summary": plan.objective_summary,
         "source_turn_id": plan.source_turn_id,
+        "source_conversation_id": plan.source_conversation_id,
         "context_preconditions": _data(plan.context_preconditions),
         "cursor": plan.cursor,
         "status": plan.status.value,
@@ -150,22 +148,61 @@ def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
             "next_offer_at": _time_to_data(attention.next_offer_at),
             "blocked": attention.blocked,
         },
-        "steps": [
-            {
-                "call": [step.call.call_id, step.call.capability_id,
-                         _data(step.call.durable_arguments), step.call.approval_id],
-                "completion_conditions": [
-                    [item.path, _data(item.equals), item.negate]
-                    for item in step.completion_conditions
-                ],
-                "wait_seconds": step.wait_seconds,
-                "max_wait_seconds": step.max_wait_seconds,
-                "wake_core_on_completion": step.wake_core_on_completion,
-                "waiting_for": step.waiting_for,
-            }
-            for step in plan.steps
-        ],
+        "steps": [_step_to_data(step) for step in plan.steps],
     }
+
+
+def _step_to_data(step: ExecutionStep) -> dict[str, Any]:
+    mutation = step.goal_mutation
+    if mutation is not None:
+        return {
+            "goal_mutation": [
+                mutation.step_id, mutation.goal_id, mutation.kind.value, mutation.reason,
+                _evidence_to_data(mutation.evidence), mutation.expected_revision,
+            ],
+            "wake_core_on_completion": step.wake_core_on_completion,
+        }
+    return {
+        "call": [step.call.call_id, step.call.capability_id,
+                 _data(step.call.durable_arguments), step.call.approval_id],
+        "completion_conditions": [
+            [item.path, _data(item.equals), item.negate]
+            for item in step.completion_conditions
+        ],
+        "wait_seconds": step.wait_seconds,
+        "max_wait_seconds": step.max_wait_seconds,
+        "wake_core_on_completion": step.wake_core_on_completion,
+        "waiting_for": step.waiting_for,
+    }
+
+
+def _step_from_data(item: dict[str, Any]) -> ExecutionStep:
+    if "goal_mutation" in item:
+        step_id, goal_id, kind, reason, evidence, revision = item["goal_mutation"]
+        return ExecutionStep(
+            None, wake_core_on_completion=item["wake_core_on_completion"],
+            goal_mutation=PlannedGoalMutation(
+                step_id, goal_id, GoalMutationKind(kind), reason,
+                _evidence_from_data(evidence), revision,
+            ),
+        )
+    return ExecutionStep(
+        CapabilityCall(*item["call"]),
+        tuple(PlanCondition(*condition) for condition in item["completion_conditions"]),
+        item["wait_seconds"], item["max_wait_seconds"],
+        item["wake_core_on_completion"], item["waiting_for"],
+    )
+
+
+def _evidence_to_data(evidence: tuple[Evidence, ...]) -> list[list[Any]]:
+    return [
+        [item.evidence_id, item.kind, _data(item.attributes), list(item.supports), list(item.source_references)]
+        for item in evidence
+    ]
+
+
+def _evidence_from_data(values: list[list[Any]]) -> tuple[Evidence, ...]:
+    return tuple(Evidence(item[0], item[1], item[2], tuple(item[3]), tuple(item[4])) for item in values)
 
 
 def _plan_from_data(data: dict[str, Any] | None) -> ExecutionPlan | None:
@@ -176,15 +213,7 @@ def _plan_from_data(data: dict[str, Any] | None) -> ExecutionPlan | None:
     return ExecutionPlan(
         data["plan_id"], data["objective_source"], data["objective_summary"],
         data["source_turn_id"],
-        tuple(
-            ExecutionStep(
-                CapabilityCall(*item["call"]),
-                tuple(PlanCondition(*condition) for condition in item["completion_conditions"]),
-                item["wait_seconds"], item["max_wait_seconds"],
-                item["wake_core_on_completion"], item["waiting_for"],
-            )
-            for item in data["steps"]
-        ),
+        tuple(_step_from_data(item) for item in data["steps"]),
         data["context_preconditions"], data["cursor"], PlanStatus(data["status"]),
         _time_from_data(data["next_due_at"]), _time_from_data(data["wait_deadline"]),
         None if data["inflight"] is None else PlanDispatch(*data["inflight"]),
@@ -196,6 +225,7 @@ def _plan_from_data(data: dict[str, Any] | None) -> ExecutionPlan | None:
             _time_from_data(attention["next_offer_at"]), attention["blocked"],
         ),
         tuple(PlanAnnouncement(*item) for item in data.get("announcements", ())),
+        data.get("source_conversation_id"),
     )
 
 

@@ -64,6 +64,15 @@ class GoalSnapshot:
         if not self.conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
 
+    @property
+    def plan_conversation_id(self) -> str:
+        """Where this goal's plan answers: the conversation it was installed
+        from, else the goal's own. The one rule for a plan's wakes and replies."""
+        plan = self.state.execution_plan
+        if plan is not None and plan.source_conversation_id is not None:
+            return plan.source_conversation_id
+        return self.conversation_id
+
 
 @dataclass(frozen=True, slots=True)
 class GoalSummary:
