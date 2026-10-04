@@ -489,6 +489,11 @@ class LiveVoiceServer:
             "/app.js": "app.js",
             "/pcm-worklet.js": "pcm-worklet.js",
             "/background.mp4": "background.mp4",
+            "/tiles": "tiles.html",
+            "/tile.css": "tile.css",
+            "/tile.js": "tile.js",
+            "/tile-fixtures.js": "tile-fixtures.js",
+            "/tile-bhl-venue.jpg": "tile-bhl-venue.jpg",
         }.get(parsed.path)
         if relative is None:
             return self._response(404, b"Not found", "text/plain; charset=utf-8")
