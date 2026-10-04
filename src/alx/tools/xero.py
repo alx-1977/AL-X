@@ -14,6 +14,7 @@ from alx.contracts import (
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
+    ExecutionOutcome,
     MailAccessError,
     MailAccount,
     MailReference,
@@ -177,7 +178,7 @@ LIST_TAX_RATES_DEFINITION = CapabilityDefinition(
 
 FIND_BILL_DEFINITION = CapabilityDefinition(
     FIND_XERO_BILL,
-    "Find an accounts-payable bill by its exact supplier invoice number without changing it.",
+    "Find an accounts-payable bill by its exact supplier invoice number without changing it. capture_supplier_invoice runs its own duplicate check, so this is not a step before capturing.",
     _object(
         {"invoice_number": _STRING, "contact_id": _STRING},
         ("invoice_number",),
@@ -209,7 +210,12 @@ _SOURCE_DOCUMENT = _object(
 
 CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
     CAPTURE_SUPPLIER_INVOICE,
-    "Read one identified mail attachment as a supplier invoice, resolve its supplier and accounting treatment from this organisation's own records, and commit the bill when every one of those is unambiguous; otherwise return what is unresolved without acting. Optional currency is an explicit ISO-style three-letter code resolved by AL/X; it may fill a missing extracted currency but cannot override a conflicting one.",
+    "Read one identified mail attachment as a supplier invoice, resolve its supplier and accounting treatment from this organisation's own records, and commit the bill when every one of those is unambiguous; otherwise return what is unresolved without acting. "
+    "Before writing it checks the invoice number itself: under this supplier, a bill already beyond draft returns as duplicate_bill and a matching draft is resumed; under any other contact it returns as invoice_number_under_other_contact. No separate lookup is needed first. "
+    "authorise true finishes the bill AUTHORISED, which is what processing a supplier invoice means; false leaves an unfinished DRAFT, for when you have a reason the bill must not be authorised yet. Both are covered by this capability's one authority. "
+    "context_line is given to the document reader and becomes the bill's reference; without it a resumed draft keeps its own reference and a new bill takes the invoice's own description. "
+    "A result with completed false needs your judgement. "
+    "Optional currency is an explicit ISO-style three-letter code resolved by AL/X; it may fill a missing extracted currency but cannot override a conflicting one.",
     _object(
         {
             "mailbox_id": _STRING,
@@ -360,6 +366,7 @@ def _invoice_validation_detail(error: ValueError, stage: str) -> dict[str, str]:
         "line_amount_types": "Exclusive, Inclusive or NoTax",
         "source_documents": "nonempty structured document references",
         "authorise": "boolean",
+        "reference_supplied": "boolean",
         "context_line": "string",
         "mailbox_id": "nonblank string",
         "uid_validity": "nonblank string",
@@ -731,6 +738,22 @@ def _draft_payload(
     )
 
 
+def _bill_reference(
+    context_line: str, invoice: Mapping[str, Any], filename: str
+) -> str:
+    """The bill's reference, from the best evidence present.
+
+    AL/X's own context line comes first. Without one, what the invoice itself
+    says it is for: a bill referenced only by its PDF's file name tells the
+    reader nothing. The file name is left for an invoice that states no
+    description. Nothing here composes a reference.
+    """
+    for candidate in (context_line, invoice.get("description")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return filename
+
+
 def _sha256(value: Any, name: str) -> str:
     if not isinstance(value, str):
         raise ValueError(name)
@@ -959,6 +982,9 @@ def build_xero_executors(
                     "attached": tuple(attached),
                     "steps": tuple(steps),
                 },
+                # A return is evidence awaiting her judgement, not a finished
+                # bill: an execution plan must stop here rather than run on.
+                outcome=ExecutionOutcome.AMBIGUOUS,
             )
 
         try:
@@ -968,10 +994,26 @@ def build_xero_executors(
             authorise_requested = arguments.get("authorise")
             if not isinstance(authorise_requested, bool):
                 raise ValueError("authorise")
+            reference_supplied = arguments.get("reference_supplied")
+            if not isinstance(reference_supplied, bool):
+                raise ValueError("reference_supplied")
             bill_payload, expected_total = _draft_payload(arguments, account)
             contact_id = str(bill_payload["Contact"]["ContactID"])
             invoice_number = str(bill_payload["InvoiceNumber"])
             steps.append("validated_supplied_values")
+
+            # The same invoice number under another contact may be this bill
+            # posted against the wrong supplier, or a different supplier's
+            # unrelated invoice. Which it is, is AL/X's judgement.
+            other = account.find_bill(invoice_number)
+            elsewhere = _bill_values(other)
+            if elsewhere["found"] and elsewhere["contact_id"] != contact_id:
+                return returned(
+                    "invoice_number_under_other_contact",
+                    f"bill {invoice_number} already exists under "
+                    f"{elsewhere['contact_name'] or 'another contact'}",
+                    other,
+                )
 
             # Idempotency. A prior attempt may have created this bill before
             # failing, so an existing draft for the same supplier and invoice
@@ -997,9 +1039,13 @@ def build_xero_executors(
                 # whole draft is compared against the requested bill, read
                 # fresh rather than from the search projection, because a
                 # search result carries less than the bill actually holds.
-                mismatch = _draft_mismatch(
-                    account.read_bill(current["invoice_id"]), bill_payload
-                )
+                draft = account.read_bill(current["invoice_id"])
+                # Without a reference from AL/X, the draft keeps the one it
+                # already holds: whichever rule wrote it, it is not a
+                # difference in the bill. Every other field stays strict.
+                if not reference_supplied and draft is not None:
+                    bill_payload["Reference"] = str(draft.get("Reference") or "").strip()
+                mismatch = _draft_mismatch(draft, bill_payload)
                 if mismatch:
                     return returned(
                         "existing_draft_differs",
@@ -1172,6 +1218,7 @@ def build_xero_executors(
                     "attached": (),
                     "steps": tuple(steps),
                 },
+                outcome=ExecutionOutcome.AMBIGUOUS,
             )
 
         def currency_unresolved(reason: str, *, extracted: str = "", supplied: str = "") -> CapabilityResult:
@@ -1320,7 +1367,8 @@ def build_xero_executors(
                 # the same choice, and it is recorded in D-020.
                 "due_date": invoice["due_date"] or invoice["invoice_date"],
                 "currency": invoice["currency"],
-                "reference": context_line or attachment.filename,
+                "reference": _bill_reference(context_line, invoice, attachment.filename),
+                "reference_supplied": bool(context_line.strip()),
                 "line_amount_types": coding["line_amount_types"] or "NoTax",
                 "expected_total": invoice["total"],
                 "line_items": [
@@ -1355,6 +1403,7 @@ def build_xero_executors(
                 "invoice": invoice,
                 "steps": (*steps, *outcome.values["steps"]),
             },
+            outcome=outcome.outcome,
         )
 
     def delete_draft(arguments: StructuredData) -> CapabilityResult:

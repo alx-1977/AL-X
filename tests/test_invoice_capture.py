@@ -1084,10 +1084,10 @@ class CurrencyResolutionTests(unittest.TestCase):
         self.assertTrue(result.values["completed"])
 
     def test_known_internal_payload_failure_is_bounded_and_not_arguments_unusable(self):
-        result = self.capture(extracted(), context_line="   ")
+        result = self.capture(extracted(invoice_date=""))
         self.assertEqual(result.failure, {
             "code": "invoice_validation_failed", "stage": "bill_payload",
-            "field": "reference", "reason": "value_invalid", "expected": "nonblank string",
+            "field": "date", "reason": "value_invalid", "expected": "ISO date",
         })
         self.assertEqual(self.xero.created, 0)
 
