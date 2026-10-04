@@ -30,6 +30,8 @@ from alx.contracts import (
     PlanOperation,
     plan_condition_path_error,
     PlanUpdate,
+    PLANNED_GOAL_MUTATIONS,
+    PlannedGoalMutation,
     ModelMessage,
     ModelRequest,
     ModelRole,
@@ -63,7 +65,16 @@ available meanwhile. Once the remaining calls are decided, prefer one plan to ca
 them one at a time: each direct call costs another reasoning step only to choose what
 is already known, while the plan still returns to you whenever a result needs you.
 A plan grants no approval or permission; a step needing a fresh person-turn approval
-must be called separately. Each capability's result says whether
+must be called separately. A plan step may instead be one exact mutation of another
+goal you were offered: cancel it, or request its completion, with your reason and any
+evidence, exactly as you would propose it under that goal. Once you have decided
+several such mutations, put them in one plan rather than proposing them one step at a
+time. Each is bound to that goal as it is now: if the goal has changed by the time the
+step runs, or the mutation is refused or fails, the goal is left untouched and the plan
+returns to you. Leave out any goal whose mutation is not clear. A plan never mutates
+the goal it belongs to. Goal mutations at the start of a plan are applied at once, and
+the plan comes back to you within the same turn: words sent with the install are not
+delivered, so install it silently and give your one reply when it comes back. Each capability's result says whether
 it succeeded, is still pending, failed, is temporarily unavailable, or needs your
 judgment; completion_conditions add exact checks on a successful result. Only a
 capability marked plan_observation may wait: give that step wait_seconds and
@@ -980,7 +991,11 @@ def _plan_payload(plan: ExecutionPlan | None) -> dict[str, Any] | None:
         "status": plan.status.value,
         "cursor": plan.cursor,
         "step_count": len(plan.steps),
-        "current_step": None if step is None else step.call.capability_id,
+        "current_step": None if step is None or step.call is None else step.call.capability_id,
+        "current_goal_mutation": None if step is None or step.goal_mutation is None else {
+            "goal_id": step.goal_mutation.goal_id,
+            "operation": step.goal_mutation.kind.value,
+        },
         "waiting_for": None if step is None or plan.next_due_at is None else step.waiting_for,
         "next_due_at": None if plan.next_due_at is None else plan.next_due_at.isoformat(),
         "wait_deadline": (None if plan.wait_deadline is None
@@ -1023,11 +1038,20 @@ def _plan_update(update: Mapping[str, Any] | None,
     if operation is not PlanOperation.INSTALL:
         return PlanUpdate(operation)
     definition = update["plan"]
-    call_ids = [item["call_id"] for item in definition["steps"]]
+    call_ids = [item.get("call_id", item.get("step_id")) for item in definition["steps"]]
     if len(call_ids) != len(set(call_ids)):
         raise ValueError("plan call_id values must be unique")
     steps = []
     for item in definition["steps"]:
+        if "goal_id" in item:
+            steps.append(ExecutionStep(
+                None, wake_core_on_completion=item["wake_core_on_completion"],
+                goal_mutation=PlannedGoalMutation(
+                    item["step_id"], item["goal_id"], GoalMutationKind(item["operation"]),
+                    item["reason"], _records(item["new_evidence"], Evidence, "new_evidence"),
+                ),
+            ))
+            continue
         arguments = _object_json(item["arguments_json"], "plan arguments_json")
         capability = next(
             (part for part in context.capabilities
@@ -1112,6 +1136,32 @@ def decision_schema() -> dict[str, Any]:
             }
         ),
     )
+    evidence_item = {
+        "id": string,
+        "kind": string,
+        "attributes_json": string,
+        "supports": {
+            "type": "array",
+            "items": string,
+            "description": (
+                "Success criterion identifiers this evidence proves. "
+                "Must already exist in success_criteria or be created "
+                "in this same mutation. Never a decision, correction, "
+                "or progress identifier. Empty if it proves none."
+            ),
+        },
+        "source_references": {
+            "type": "array",
+            "items": string,
+            "description": (
+                "Where this evidence came from, using an available "
+                "durable reference exactly as supplied: turn:<id>, "
+                "event:<id>, or attempt:<call_id>. Each must appear "
+                "in available_memory_sources now; an attempt that "
+                "has not run yet is not a source."
+            ),
+        },
+    }
     goal_update = _strict_object(
         {
             # await_approval is deliberately absent. It demands a requested
@@ -1142,34 +1192,7 @@ def decision_schema() -> dict[str, Any]:
             "new_progress": _array(progress),
             "blockers": _nullable(_array({"id": string, "summary": string})),
             "outstanding_work": _nullable(_array({"id": string, "summary": string})),
-            "new_evidence": _array(
-                {
-                    "id": string,
-                    "kind": string,
-                    "attributes_json": string,
-                    "supports": {
-                        "type": "array",
-                        "items": string,
-                        "description": (
-                            "Success criterion identifiers this evidence proves. "
-                            "Must already exist in success_criteria or be created "
-                            "in this same mutation. Never a decision, correction, "
-                            "or progress identifier. Empty if it proves none."
-                        ),
-                    },
-                    "source_references": {
-                        "type": "array",
-                        "items": string,
-                        "description": (
-                            "Where this evidence came from, using an available "
-                            "durable reference exactly as supplied: turn:<id>, "
-                            "event:<id>, or attempt:<call_id>. Each must appear "
-                            "in available_memory_sources now; an attempt that "
-                            "has not run yet is not a source."
-                        ),
-                    },
-                }
-            ),
+            "new_evidence": _array(evidence_item),
         }
     )
     approval_proposal = {
@@ -1301,6 +1324,19 @@ def decision_schema() -> dict[str, Any]:
                     "max_wait_seconds": {
                         "type": "integer", "minimum": 1, "maximum": MAX_PLAN_WAIT_SECONDS,
                     },
+                }),
+                # Or one exact mutation of another offered goal, already
+                # justified. It never waits and has no result to check.
+                _strict_object({
+                    "step_id": string,
+                    "goal_id": string,
+                    "operation": {
+                        "type": "string",
+                        "enum": sorted(item.value for item in PLANNED_GOAL_MUTATIONS),
+                    },
+                    "reason": string,
+                    "new_evidence": _array(evidence_item),
+                    "wake_core_on_completion": {"type": "boolean"},
                 }),
             ]},
             "minItems": 1, "maxItems": 32,

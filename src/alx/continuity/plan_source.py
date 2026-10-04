@@ -106,7 +106,7 @@ class PlanAttentionSource:
                 continue
             due.append(CognitionOpportunity(
                 self._opportunity_id(goal_id, plan), CognitionOrigin.WORK_COMPLETED,
-                now, snapshot.conversation_id, references=(f"{_REFERENCE}{goal_id}",),
+                now, snapshot.plan_conversation_id, references=(f"{_REFERENCE}{goal_id}",),
             ))
         return tuple(due)
 
@@ -215,9 +215,9 @@ class PlanAttentionSource:
                     changed.append(goal_id)
                 if attention.blocked:
                     blocked_now[(goal_id, plan.plan_id, attention.seq)] = (
-                        snapshot.conversation_id)
+                        snapshot.plan_conversation_id)
                     if (goal_id, plan.plan_id, attention.seq) not in self._notified:
-                        self._publish(snapshot.conversation_id, goal_id, plan.plan_id,
+                        self._publish(snapshot.plan_conversation_id, goal_id, plan.plan_id,
                                       attention.seq, "blocked", attention.reason)
             except Exception as error:  # noqa: BLE001 - one goal must not stop the rest
                 LOGGER.warning("Plan attention could not be settled for goal %s: %s",

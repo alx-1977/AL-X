@@ -93,7 +93,7 @@ class ConversationGateway:
             # Oldest first; one not stored holds back the later ones.
             for announcement in snapshot.state.execution_plan.announcements:
                 try:
-                    self._append_reply(snapshot.conversation_id, announcement.turn_id,
+                    self._append_reply(snapshot.plan_conversation_id, announcement.turn_id,
                                        announcement.text, snapshot.provenance,
                                        snapshot.retention_until)
                 except Exception as error:  # noqa: BLE001 - kept for the next tick

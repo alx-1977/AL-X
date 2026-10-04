@@ -1732,7 +1732,7 @@ class ReasoningProjectionTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "src/alx/core/loop.py"
         ).read_text()
         self.assertIn(
-            'known = {f"turn:{item.turn_id}" for item in conversation.turns}', source
+            '*(f"turn:{item.turn_id}" for item in conversation.turns),', source
         )
         self.assertIn(
             'turns = {f"turn:{item.turn_id}": item.person_id '
@@ -1820,7 +1820,7 @@ class AttemptEvidenceCitationTests(unittest.TestCase):
             source_references=(source,),
         )
         return CoreAgent._evidence_grounding_error(
-            conversation(),
+            CoreAgent._conversation_sources(conversation()),
             goal(attempts=attempts),
             (),
             (evidence,),

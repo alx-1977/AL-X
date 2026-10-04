@@ -2253,7 +2253,11 @@ class SinglePathTests(unittest.TestCase):
     def test_results_are_classified_and_reduced_in_one_place(self):
         self.assertEqual(self.callers("classify_planned_result"),
                          ["core/loop.py::_reduce_planned_result"])
-        self.assertEqual(self.callers("reduce_plan"), ["core/loop.py::_reduce_planned_result"])
+        # One plan reducer: a capability result reaches it through the one
+        # classifier, a goal-mutation step (which has no result) directly.
+        self.assertEqual(self.callers("reduce_plan"),
+                         ["core/loop.py::_apply_planned_goal_mutation",
+                          "core/loop.py::_reduce_planned_result"])
         self.assertEqual(self.callers("outcome_of"),
                          ["core/plan_results.py::classify_planned_result"])
 

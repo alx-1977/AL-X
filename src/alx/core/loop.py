@@ -22,7 +22,7 @@ from alx.contracts import (
     CapabilityResultState, CognitionOrigin, ConversationSnapshot, ConversationTurn,
     DurableGoalStore, DurableMemoryStore, GoalMutationKind, GoalProposal,
     ExecutionPlan, MemoryIdentityConflict, PLAN_TERMINAL, PlanAnnouncement, PlanDispatch,
-    PlanOperation, PlanStatus, PlanUpdate,
+    PlanOperation, PlanStatus, PlanUpdate, PlannedGoalMutation, ProgressRecord,
     GoalSnapshot, GoalState, GoalStatus, GoalStopReason, GoalSummary, MemoryKind,
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
@@ -31,6 +31,7 @@ from alx.contracts import (
 )
 
 from alx.core.plan_results import (
+    PlanResultClassification, PlanResultKind,
     classify_planned_result, defer_plan, finish_plan, plan_invalidation_facts,
     raise_attention, reduce_plan, resume_plan,
 )
@@ -328,7 +329,7 @@ class CoreAgent:
             # one the turn works under; whether it still needs her is read
             # from the plan, never from the occasion.
             snapshot = self._store.load(resume_plan_goal_id)
-            if snapshot.conversation_id != conversation_id:
+            if snapshot.plan_conversation_id != conversation_id:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="plan_conversation_changed")
             plan = snapshot.state.execution_plan
             if plan is None or plan.status is not PlanStatus.NEEDS_CORE:
@@ -379,6 +380,9 @@ class CoreAgent:
         # Whether this turn has already had its one correction of a decision
         # the deterministic validator rejected.
         decision_corrected = False
+        # The goal whose plan attention this turn is answering: the one its
+        # occasion names, or one whose decided work finished within it.
+        answering_plan = resume_plan_goal_id
         for step_index in range(step_budget):
             try:
                 now = self._clock()
@@ -687,6 +691,24 @@ class CoreAgent:
                     # Also when no step remains to reason again in: the turn
                     # ends on the refusal itself rather than a budget reason
                     # that would hide it.
+                    if answering_plan is not None:
+                        # She is answering a plan, whose reply is owed to the
+                        # person whatever happens to this mutation. She was
+                        # told once and reconsidered once; the state has not
+                        # changed, so a further step, or a further offer of
+                        # the attention, would buy the same refusal. Her words
+                        # claimed a commit that did not happen, so one
+                        # response-only step, which knows the refusal, says
+                        # what is actually true.
+                        self._hold_plan_attention(answering_plan)
+                        kind = decision.goal_proposal.kind.value
+                        return self._respond_to_terminal_blocker(
+                            conversation_id, conversation, snapshot, reasoning_context,
+                            transient_attempts, "goal_proposal_invalid", decision_provenance,
+                            (*refused_calls, {"reason": proposal_error, "subject": kind,
+                                              "mutation_kind": kind}),
+                            park=False,
+                        )
                     return CoreOutcome(
                         CoreState.CHECKPOINTED, snapshot, reason="goal_proposal_invalid",
                     )
@@ -895,7 +917,7 @@ class CoreAgent:
                 if decision.plan_update is not None:
                     plan_refusal = self._plan_update_refusal(
                         decision.plan_update, snapshot, rendered_plan,
-                        proposal_error, mechanical_blocker,
+                        proposal_error, mechanical_blocker, summaries, conversation,
                     )
                     if plan_refusal is not None:
                         # Refused before anything else in the decision is
@@ -945,6 +967,19 @@ class CoreAgent:
                     snapshot, _ = self._apply_plan_update(
                         snapshot, decision.plan_update, conversation, decision_provenance,
                     )
+                    snapshot = self._run_planned_mutations(snapshot)
+                    if (snapshot.state.execution_plan.status is PlanStatus.NEEDS_CORE
+                            and step_index + 1 < step_budget):
+                        # The decided work already ran, or stopped for her.
+                        # The words that installed it were written before
+                        # either, so they are not delivered: she answers once,
+                        # from the plan's attention, in this same turn.
+                        snapshot, evidence = self._plan_evidence(snapshot)
+                        transient_attempts = (*transient_attempts, *(
+                            item for item in evidence if item not in transient_attempts))
+                        continuation_notice_issued = False
+                        answering_plan = snapshot.state.goal_id
+                        continue
                 if mechanical_blocker is not None:
                     reply_turn = None
                     if closing:
@@ -1388,7 +1423,18 @@ class CoreAgent:
             # Creating one never depends on the state of another: the goal
             # the Core was working under, if any, is left exactly as it is.
             return self._create_goal(proposal, conversation, trigger_event_id)
-        state = snapshot.state
+        return self._reduce_goal_mutation(
+            snapshot.state, proposal, self._conversation_sources(conversation))
+
+    def _reduce_goal_mutation(self, state: GoalState, proposal: GoalProposal,
+                              sources: frozenset[str]) -> tuple[GoalState, str | None]:
+        """Reduce a mutation of an existing goal: the one canonical reduction.
+
+        `sources` are the conversation references evidence may cite. A Core
+        step passes its conversation's; a plan's goal-mutation step passes
+        the ones its evidence cites, which this same reduction grounded
+        against the conversation when she installed it.
+        """
         if state.status in (GoalStatus.COMPLETED, GoalStatus.CANCELLED):
             return state, "goal_inactive"
         proposal, replay_error = self._without_replayed_evidence(state, proposal)
@@ -1398,7 +1444,7 @@ class CoreAgent:
             state, evidence=(*state.evidence, *proposal.new_evidence),
         )
         error = self._evidence_grounding_error(
-            conversation, evidence_only, state.evidence, proposal.new_evidence,
+            sources, evidence_only, state.evidence, proposal.new_evidence,
         )
         if error:
             return state, error
@@ -1474,7 +1520,8 @@ class CoreAgent:
             outstanding_work=() if proposal.outstanding_work is None else proposal.outstanding_work,
             evidence=proposal.new_evidence,
         )
-        error = self._evidence_grounding_error(conversation, state, (), proposal.new_evidence)
+        error = self._evidence_grounding_error(
+            self._conversation_sources(conversation), state, (), proposal.new_evidence)
         if error:
             return None, error
         return state, None
@@ -1895,11 +1942,18 @@ class CoreAgent:
         }
 
     @staticmethod
-    def _evidence_grounding_error(conversation: ConversationSnapshot,
+    def _conversation_sources(conversation: ConversationSnapshot) -> frozenset[str]:
+        """The conversation references evidence may cite."""
+        return frozenset((
+            *(f"turn:{item.turn_id}" for item in conversation.turns),
+            *(f"event:{item.event_id}" for item in conversation.events),
+        ))
+
+    @staticmethod
+    def _evidence_grounding_error(sources: frozenset[str],
                                   state: GoalState, existing: tuple,
                                   proposed: tuple) -> str | None:
-        known = {f"turn:{item.turn_id}" for item in conversation.turns}
-        known.update(f"event:{item.event_id}" for item in conversation.events)
+        known = set(sources)
         known.update(
             f"attempt:{item.call.call_id}"
             for item in state.attempts
@@ -2234,8 +2288,13 @@ class CoreAgent:
             )
         return None
 
-    def _advance_plan(self, snapshot: GoalSnapshot) -> PlannedDispatch | None:
-        """Take one goal's plan as far as it goes without a dispatch."""
+    def _advance_plan(self, snapshot: GoalSnapshot, *,
+                      mutations_only: bool = False) -> PlannedDispatch | None:
+        """Take one goal's plan as far as it goes without a dispatch.
+
+        `mutations_only` stops at the first step that is not a goal mutation,
+        leaving it, and any wait or evidence read, to the background runner.
+        """
         state = snapshot.state
         plan = state.execution_plan
         if plan is None or plan.status in PLAN_TERMINAL:
@@ -2249,7 +2308,7 @@ class CoreAgent:
             ))
             return None
         if plan.status is PlanStatus.NEEDS_CORE:
-            return self._evidence_job(snapshot)
+            return None if mutations_only else self._evidence_job(snapshot)
         if plan.inflight is not None:
             attempt = self._attempt_for(state, plan.inflight.call_id)
             if attempt.disposition is CapabilityAttemptDisposition.PENDING:
@@ -2295,11 +2354,20 @@ class CoreAgent:
                 return None
         facts = plan_invalidation_facts(plan, state, now)
         step = plan.steps[plan.cursor]
-        refusal = None if facts else self._plan_dispatch_refusal(snapshot, step, now)
+        if mutations_only and step.goal_mutation is None:
+            return None
+        refusal = (None if facts or step.call is None
+                   else self._plan_dispatch_refusal(snapshot, step, now))
         if facts or refusal is not None:
             self._write_plan(snapshot, raise_attention(
                 plan, facts or (refusal,), now))
             return None
+        if step.goal_mutation is not None:
+            # A durable write made here, under the lock: no worker, no
+            # dispatch and no spend. Then on to whatever follows it.
+            return self._advance_plan(
+                self._apply_planned_goal_mutation(snapshot, step.goal_mutation),
+                mutations_only=mutations_only)
         try:
             # The gate a reasoning step would face. Refused, the step waits
             # and is tried again; nothing is checkpointed and she is not woken.
@@ -2337,6 +2405,114 @@ class CoreAgent:
             # Replaced at the dispatch boundary by the state current then.
             state,
         )
+
+    def _hold_plan_attention(self, goal_id: str) -> None:
+        """No further automatic offer of an attention a wake could not resolve.
+
+        Its wake ended on a refusal that unchanged state would repeat, so
+        offering it again would only buy the same refusal. It is the state an
+        exhausted attention reaches: still owned, still shown to her on every
+        turn, until she resolves it.
+        """
+        snapshot = self._store.load(goal_id)
+        plan = snapshot.state.execution_plan
+        if plan is None or plan.attention is None or plan.attention.blocked:
+            return
+        self._write_plan(snapshot, replace(
+            plan, attention=replace(plan.attention, blocked=True)))
+
+    def _run_planned_mutations(self, snapshot: GoalSnapshot) -> GoalSnapshot:
+        """Apply a plan's leading goal mutations in the turn that decided them.
+
+        They are durable writes under the lock this turn already holds, so
+        nothing is gained by leaving them to the next tick, and doing so would
+        have her answer before the work her answer describes. Everything else
+        stays with the background runner.
+        """
+        plan = snapshot.state.execution_plan
+        if (plan is None or plan.status is not PlanStatus.RUNNING
+                or plan.steps[plan.cursor].goal_mutation is None):
+            return snapshot
+        self._advance_plan(snapshot, mutations_only=True)
+        return self._store.load(snapshot.state.goal_id)
+
+    @staticmethod
+    def _planned_mutation_proposal(plan_id: str,
+                                   mutation: PlannedGoalMutation) -> GoalProposal:
+        """The goal proposal a planned mutation is, for the one reducer.
+
+        Her reason is recorded on the goal as a decision whose identifier
+        names this plan and step. That record is how a restart knows the
+        mutation already happened, so it is never applied twice.
+        """
+        return GoalProposal(
+            mutation.kind,
+            new_decisions=(ProgressRecord(
+                f"plan-mutation:{plan_id}:{mutation.step_id}", mutation.reason,
+                tuple(item.evidence_id for item in mutation.evidence),
+            ),),
+            new_evidence=mutation.evidence,
+        )
+
+    def _apply_planned_goal_mutation(
+        self, snapshot: GoalSnapshot, mutation: PlannedGoalMutation,
+    ) -> GoalSnapshot:
+        """Apply one planned goal mutation, at most once, or return it to her.
+
+        Only to the exact goal revision it was decided against, and only
+        through the same reducer and revision-checked write as a mutation
+        she proposes in a turn. Anything else raises an attention and leaves
+        the goal untouched.
+        """
+        plan = snapshot.state.execution_plan
+        now = self._clock()
+        proposal = self._planned_mutation_proposal(plan.plan_id, mutation)
+        marker = proposal.new_decisions[0].record_id
+        facts: tuple[str, ...] = ()
+        try:
+            target = self._store.load(mutation.goal_id)
+        except Exception as error:  # noqa: BLE001 - hers to judge, not to retry
+            LOGGER.info("Planned goal mutation target unreadable: %s", type(error).__name__)
+            facts = ("plan_goal_unavailable",)
+        else:
+            # Her decision record already on the goal means this step was
+            # written before a restart could move the cursor past it.
+            if not any(item.record_id == marker for item in target.state.decisions):
+                facts = self._write_planned_mutation(snapshot, target, mutation,
+                                                     proposal, now)
+        LOGGER.info("Execution plan %s step=%d goal %s %s -> %s",
+                    plan.plan_id, plan.cursor, mutation.goal_id, mutation.kind.value,
+                    ",".join(facts) or "applied")
+        return self._write_plan(snapshot, reduce_plan(plan, PlanResultClassification(
+            PlanResultKind.WAKE_CORE if facts else PlanResultKind.ADVANCE, facts), now))
+
+    def _write_planned_mutation(
+        self, snapshot: GoalSnapshot, target: GoalSnapshot,
+        mutation: PlannedGoalMutation, proposal: GoalProposal, now: datetime,
+    ) -> tuple[str, ...]:
+        """Reduce and write one planned mutation; what stopped it, if anything."""
+        if target.revision != mutation.expected_revision:
+            return ("plan_goal_revision_changed",)
+        candidate, error_code = self._reduce_goal_mutation(
+            target.state, proposal,
+            frozenset(reference for item in mutation.evidence
+                      for reference in item.source_references
+                      if reference.startswith(("turn:", "event:"))),
+        )
+        if error_code is not None:
+            return ("plan_goal_mutation_refused", error_code)
+        inputs = tuple(item for item in (target.provenance, snapshot.provenance)
+                       if item is not None)
+        try:
+            self._store.replace(
+                candidate, target.retention_until, target.revision,
+                None if not inputs
+                else RetentionPolicy().derive(ContentOrigin.ALX, now, inputs),
+            )
+        except Exception as error:  # noqa: BLE001 - never retried blindly
+            LOGGER.info("Planned goal mutation not written: %s", type(error).__name__)
+            return ("plan_goal_mutation_failed",)
+        return ()
 
     def _reduce_planned_result(self, snapshot: GoalSnapshot) -> GoalSnapshot:
         """Classify the in-flight dispatch's recorded result once, and apply it."""
@@ -2460,13 +2636,15 @@ class CoreAgent:
         self, update: PlanUpdate, snapshot: GoalSnapshot | None,
         rendered: tuple[str, int] | None, proposal_error: str | None,
         mechanical_blocker: str | None,
+        summaries: tuple[GoalSummary, ...] = (),
+        conversation: ConversationSnapshot | None = None,
     ) -> str | None:
         """Why a plan change she proposed cannot be applied, if it cannot.
 
         Resume, accept and finish answer one attention, so they need the step that
         proposed them to have been shown that exact attention. Cancel needs
-        it to have been shown that plan. Install needs an active goal, and a
-        plan she can see if it replaces one.
+        it to have been shown that plan. Install needs an active goal, a
+        plan she can see if it replaces one, and every goal mutation valid now.
         """
         operation = update.operation
         runs_on = (PlanOperation.INSTALL, PlanOperation.RESUME, PlanOperation.ACCEPT)
@@ -2486,6 +2664,13 @@ class CoreAgent:
             if open_plan and (rendered is None or rendered[0] != current.plan_id):
                 return "plan_replaces_unseen_plan"
             for step in update.plan.steps:
+                if step.goal_mutation is not None:
+                    refusal = self._planned_mutation_refusal(
+                        snapshot, update.plan.plan_id, step.goal_mutation,
+                        summaries, conversation)
+                    if refusal is not None:
+                        return refusal
+                    continue
                 definition = self._definition(step.call.capability_id)
                 if definition is None:
                     return "plan_capability_unknown"
@@ -2510,6 +2695,29 @@ class CoreAgent:
                 snapshot.state, current):
             return "plan_step_not_acceptable"
         return None
+
+    def _planned_mutation_refusal(
+        self, snapshot: GoalSnapshot, plan_id: str, mutation: PlannedGoalMutation,
+        summaries: tuple[GoalSummary, ...], conversation: ConversationSnapshot | None,
+    ) -> str | None:
+        """Why a goal mutation cannot join a plan, if it cannot.
+
+        Its goal must be another goal she was offered this turn, and the
+        mutation must reduce cleanly against that goal as it is now, with
+        the evidence grounded in this conversation. A plan carries only
+        mutations that are already valid; the runner checks again.
+        """
+        if mutation.goal_id == snapshot.state.goal_id:
+            return "plan_mutation_targets_own_goal"
+        if conversation is None or not any(
+                item.goal_id == mutation.goal_id for item in summaries):
+            return "plan_goal_not_offered"
+        _, error = self._reduce_goal_mutation(
+            self._store.load(mutation.goal_id).state,
+            self._planned_mutation_proposal(plan_id, mutation),
+            self._conversation_sources(conversation),
+        )
+        return None if error is None else f"plan_goal_mutation_refused:{mutation.goal_id}:{error}"
 
     def _judged_observation(self, state: GoalState, plan: ExecutionPlan) -> bool:
         """Whether accepting may move the plan past its current step.
@@ -2558,6 +2766,16 @@ class CoreAgent:
                 # Each installation has its own identity, though she may reuse
                 # a plan_id when she revises one.
                 plan_id=f"{update.plan.plan_id}:{uuid4()}",
+                # Each goal mutation is bound to the revision of its goal she
+                # decided it against, which under this lock is the current one.
+                steps=tuple(
+                    step if step.goal_mutation is None else replace(
+                        step, goal_mutation=replace(
+                            step.goal_mutation,
+                            expected_revision=self._store.load(
+                                step.goal_mutation.goal_id).revision))
+                    for step in update.plan.steps
+                ),
                 # What the plan serves and answers is the runtime's record,
                 # never the model's restatement of it.
                 objective_source=snapshot.state.objective.source_reference,
@@ -2565,6 +2783,8 @@ class CoreAgent:
                 source_turn_id=next(
                     (item.turn_id for item in reversed(conversation.turns)
                      if item.person_id is not None), None),
+                # Its wakes and her replies return here, whichever goal hosts it.
+                source_conversation_id=conversation.conversation_id,
             )
         elif update.operation in (PlanOperation.RESUME, PlanOperation.ACCEPT):
             plan = resume_plan(current,

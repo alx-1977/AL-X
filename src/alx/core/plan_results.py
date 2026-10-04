@@ -21,6 +21,11 @@ classified exactly once, here, by a fixed precedence:
 Before each dispatch, `plan_invalidation_facts` checks what the plan
 declared it depends on; a change there wakes her instead of dispatching.
 
+A goal-mutation step has no result to classify. The Core applies it through
+the one goal reducer, advancing here exactly as a SUCCESS would, or raises
+an attention naming why it could not: the goal moved on, the reducer
+refused, or the write failed.
+
 Nothing here reads the shape of a condition to guess at failure. Whether a
 result is pending, failed or ambiguous is the capability's statement.
 """
@@ -90,7 +95,7 @@ def plan_invalidation_facts(
             or any(key not in state.context or not json_equal(state.context[key], value)
                    for key, value in plan.context_preconditions.items())):
         facts.append("plan_precondition_changed")
-    if plan.cursor < len(plan.steps):
+    if plan.cursor < len(plan.steps) and plan.steps[plan.cursor].call is not None:
         approval_id = plan.steps[plan.cursor].call.approval_id
         if approval_id is not None:
             approval = next(
