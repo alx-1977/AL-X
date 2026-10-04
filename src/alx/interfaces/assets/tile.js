@@ -121,11 +121,17 @@ export function surfaceTile(host, data) {
       card = replacement;
     },
     dismiss() {
-      card.classList.add('is-leaving');
-      const done = () => card.remove();
-      card.addEventListener('animationend', done, { once: true });
+      const leaving = card;
+      leaving.classList.add('is-leaving');
+      // Only the card's own exit ends it; child animations bubble here too.
+      const done = (event) => {
+        if (event && (event.target !== leaving || event.animationName !== 'alx-tile-out')) return;
+        leaving.removeEventListener('animationend', done);
+        leaving.remove();
+      };
+      leaving.addEventListener('animationend', done);
       // Reduced motion has no animation to end.
-      if (getComputedStyle(card).animationName === 'none') done();
+      if (getComputedStyle(leaving).animationName === 'none') done();
     }
   };
 }

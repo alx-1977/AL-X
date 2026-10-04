@@ -11,11 +11,13 @@
   --tile-ink: #0f1b2d;
   --tile-muted: rgba(15, 27, 45, 0.6);
   --tile-faint: rgba(15, 27, 45, 0.42);
+  --tile-disabled-ink: rgba(15, 27, 45, 0.56);
   --tile-tone: var(--tile-ok);
 
   position: relative;
   box-sizing: border-box;
   width: 37em;
+  max-width: 100%;
   padding: 1.4em 1.6em 1.25em;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.75);
@@ -202,7 +204,7 @@
   background: rgba(255, 255, 255, 0.28);
 }
 .alx-tile__fact[data-tone="disabled"] .alx-tile__fact-icon { background: rgba(15, 27, 45, 0.06); color: var(--tile-faint); }
-.alx-tile__fact[data-tone="disabled"] .alx-tile__fact-label { color: var(--tile-faint); }
+.alx-tile__fact[data-tone="disabled"] .alx-tile__fact-label { color: var(--tile-disabled-ink); }
 
 @keyframes alx-tile-in { from { opacity: 0; transform: translateY(0.6em) scale(0.98); } }
 @keyframes alx-tile-out { to { opacity: 0; transform: translateY(0.4em) scale(0.98); } }
