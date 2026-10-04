@@ -336,6 +336,85 @@ class ReferenceTests(unittest.TestCase):
         )
 
 
+class LegacyDraftReferenceTests(unittest.TestCase):
+    """A resumed draft keeps its own reference unless AL/X gives one."""
+
+    LINE = {"AccountCode": "310", "TaxType": "NONE", "LineAmount": 180.0,
+            "Description": "Electronic components", "TaxAmount": 0.0}
+
+    def draft(self, reference: str, **changes):
+        self.xero = FakeXero()
+        capture = build_xero_executors(
+            self.xero, FakeMail(), lambda: "c", lambda *_: extracted(), "310", "INPUT3"
+        )[CAPTURE_SUPPLIER_INVOICE]
+        capture(arguments())
+        bill = self.xero.bills["bill-1"]
+        bill.update(Status="DRAFT", Reference=reference, **changes)
+        return capture
+
+    @staticmethod
+    def without_context_line() -> dict:
+        values = arguments()
+        del values["context_line"]
+        return values
+
+    def assert_resumed(self, result, reference):
+        self.assertTrue(result.values["completed"], result)
+        self.assertIn("resumed_existing_draft", result.values["steps"])
+        self.assertEqual(result.values["bill"]["status"], "AUTHORISED")
+        self.assertEqual(result.values["bill"]["reference"], reference)
+        self.assertEqual(self.xero.created, 1)
+
+    def test_a_filename_reference_draft_resumes_without_a_context_line(self):
+        capture = self.draft("Invoice-2W54YRN2-0021.pdf")
+        self.assert_resumed(capture(self.without_context_line()), "Invoice-2W54YRN2-0021.pdf")
+
+    def test_an_older_context_line_reference_resumes_without_a_context_line(self):
+        older = "Anthropic, PBC invoice 2W54YRN2-0020 (receipt #2654-7523-2378)"
+        capture = self.draft(older)
+        self.assert_resumed(capture(self.without_context_line()), older)
+
+    def test_a_blank_context_line_also_keeps_the_stored_reference(self):
+        capture = self.draft("Invoice-2W54YRN2-0021.pdf")
+        self.assert_resumed(capture(arguments(context_line="  ")), "Invoice-2W54YRN2-0021.pdf")
+
+    def test_an_explicit_different_context_line_is_still_a_difference(self):
+        capture = self.draft("Invoice-2W54YRN2-0021.pdf")
+        result = capture(arguments(context_line="Team plan, October 2026"))
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "existing_draft_differs")
+        self.assertIn("reference", result.values["detail"])
+        self.assertEqual(self.xero.bills["bill-1"]["Status"], "DRAFT")
+
+    def test_every_other_draft_field_stays_strict_without_a_context_line(self):
+        for label, change in (
+            ("contact", {"Contact": {"ContactID": "c-9", "Name": "Other"}}),
+            ("date", {"Date": "1999-01-01"}),
+            ("due date", {"DueDate": "1999-01-01"}),
+            ("currency", {"CurrencyCode": "EUR"}),
+            ("total", {"Total": "999.00"}),
+            ("line amount type", {"LineAmountTypes": "Inclusive"}),
+            ("account", {"LineItems": [{**self.LINE, "AccountCode": "WRONG"}]}),
+            ("tax type", {"LineItems": [{**self.LINE, "TaxType": "INPUT3"}]}),
+            ("description", {"LineItems": [{**self.LINE, "Description": "Wrong"}]}),
+            ("tax amount", {"LineItems": [{**self.LINE, "TaxAmount": 99.0}]}),
+        ):
+            with self.subTest(altered=label):
+                capture = self.draft("Invoice-2W54YRN2-0021.pdf", **change)
+                result = capture(self.without_context_line())
+                self.assertFalse(result.values["completed"],
+                                 f"a draft with a changed {label} was authorised")
+                self.assertEqual(self.xero.bills["bill-1"]["Status"], "DRAFT")
+
+    def test_changed_attachment_bytes_stay_strict_without_a_context_line(self):
+        capture = self.draft("Invoice-2W54YRN2-0021.pdf")
+        self.xero.attachments["bill-1"] = [("invoice.pdf", b"other bytes")]
+        result = capture(self.without_context_line())
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(result.failure["code"], "supporting_document_mismatch")
+        self.assertEqual(self.xero.bills["bill-1"]["Status"], "DRAFT")
+
+
 class CompletionGuidanceTests(unittest.TestCase):
     """Routine completions are brief by general guidance, not invoice wording."""
 
