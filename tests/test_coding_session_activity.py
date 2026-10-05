@@ -112,18 +112,50 @@ class StreamedActivityTests(unittest.TestCase):
     def test_session_output_is_spooled_to_disk_not_held_in_memory(self) -> None:
         """No deadline, so output must not accumulate in the runtime's memory."""
         seen: dict = {}
+        real = coding_process.run_coding_subprocess
 
-        def record(argv, **kwargs):
+        def record(runner, argv, **kwargs):
             seen.update(kwargs)
-            return subprocess.CompletedProcess(argv, 0, json.dumps(
-                {"type": "end", "stopReason": "end_turn", "num_turns": 1}), "")
+            return real(runner, argv, **kwargs)
 
-        GrokCodingSession("grok-test", stall_seconds=10, runner=record).run_session(
-            self._request(), "briefing")
-        self.assertNotIn("capture_output", seen)
-        self.assertTrue(hasattr(seen["stdout"], "fileno"))
-        self.assertTrue(hasattr(seen["stderr"], "fileno"))
+        cli = _fake_cli(Path(self.directory.name), STREAMING_READER)
+        with mock.patch.object(coding_process, "run_coding_subprocess", record):
+            self._session(cli).run_session(self._request(), "briefing")
+        self.assertEqual(len(seen["spool_to"]), 2)
+        self.assertGreater(seen["output_limit_bytes"], 0)
         self.assertIsNone(seen["timeout"])
+        for held in ("capture_output", "stdout", "stderr"):
+            self.assertNotIn(held, seen)
+
+    def test_relayed_output_never_exceeds_the_bound_on_disk(self) -> None:
+        """Enforced where bytes are written: one burst past it is cut at it."""
+        out = Path(self.directory.name) / "out"
+        err = Path(self.directory.name) / "err"
+        burst = "import sys; sys.stdout.buffer.write(b'x' * 2_000_000); sys.stdout.flush()"
+        with self.assertRaises(CodingError) as raised:
+            coding_process.CodingCancellation().run(
+                subprocess.run, [sys.executable, "-c", burst],
+                timeout=None, inactivity_timeout=10, activity_root=str(self.root),
+                spool_to=(out, err), output_limit_bytes=1_000_000,
+                stdin=subprocess.DEVNULL, shell=False, check=False,
+            )
+        self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
+        self.assertLessEqual(out.stat().st_size + err.stat().st_size, 1_000_000)
+
+    def test_relayed_output_reaches_the_spool_and_not_memory(self) -> None:
+        out = Path(self.directory.name) / "out"
+        err = Path(self.directory.name) / "err"
+        result = coding_process.CodingCancellation().run(
+            subprocess.run,
+            [sys.executable, "-c", "import sys; print('hello'); print('oops', file=sys.stderr)"],
+            timeout=None, inactivity_timeout=10, activity_root=str(self.root),
+            spool_to=(out, err), output_limit_bytes=1_000_000,
+            stdin=subprocess.DEVNULL, shell=False, check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNone(result.stdout)
+        self.assertEqual(out.read_text(), "hello\n")
+        self.assertEqual(err.read_text(), "oops\n")
 
     def test_what_the_agent_read_is_not_kept_to_read_the_result(self) -> None:
         reader = """

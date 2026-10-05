@@ -325,29 +325,27 @@ class SubscriptionCodingSession:
             # otherwise grow the runtime's memory for as long as it ran.
             stdout_path = Path(working_directory) / "session.stdout"
             stderr_path = Path(working_directory) / "session.stderr"
+            stdout_path.touch()
+            stderr_path.touch()
             try:
                 from alx.providers.coding_process import run_coding_subprocess
-                with open(stdout_path, "wb") as stdout_file, \
-                        open(stderr_path, "wb") as stderr_file:
-                    completed = run_coding_subprocess(self._runner,
-                        command,
-                        stdout=stdout_file,
-                        stderr=stderr_file,
-                        # No deadline: inactivity is the session's only bound.
-                        # Growth of the spooled output is activity, and its
-                        # size is bounded instead of its duration.
-                        timeout=None,
-                        inactivity_timeout=self._stall_seconds,
-                        activity_root=worktree,
-                        activity_blocked_paths=request.blocked_paths,
-                        activity_files=(stdout_path, stderr_path),
-                        output_limit_bytes=MAX_SESSION_OUTPUT_BYTES,
-                        env=self.child_environment(home),
-                        cwd=str(worktree),
-                        stdin=subprocess.DEVNULL,
-                        shell=False,
-                        check=False,
-                    )
+                completed = run_coding_subprocess(self._runner,
+                    command,
+                    # No deadline: inactivity is the session's only bound.
+                    # Relayed output is activity, and its size is bounded
+                    # where it is written instead of its duration.
+                    timeout=None,
+                    inactivity_timeout=self._stall_seconds,
+                    activity_root=worktree,
+                    activity_blocked_paths=request.blocked_paths,
+                    spool_to=(stdout_path, stderr_path),
+                    output_limit_bytes=MAX_SESSION_OUTPUT_BYTES,
+                    env=self.child_environment(home),
+                    cwd=str(worktree),
+                    stdin=subprocess.DEVNULL,
+                    shell=False,
+                    check=False,
+                )
             except FileNotFoundError as error:
                 raise CodingError(
                     "coding_unavailable", reason_code="cli_not_installed"

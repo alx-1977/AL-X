@@ -95,9 +95,10 @@ class CodingCancellation:
         inactivity_timeout = kwargs.pop("inactivity_timeout", None)
         activity_root = kwargs.pop("activity_root", None)
         activity_blocked_paths = tuple(kwargs.pop("activity_blocked_paths", ()))
-        # Files the child's output is spooled to. Their growth is activity,
-        # and their total size is bounded by `output_limit_bytes`.
-        activity_files = tuple(Path(item) for item in kwargs.pop("activity_files", ()))
+        # Files the child's output is relayed to, through pipes, by counting
+        # threads: bytes relayed are activity, and no byte past
+        # `output_limit_bytes` is ever written.
+        spool_to = tuple(Path(item) for item in kwargs.pop("spool_to", ()))
         output_limit = kwargs.pop("output_limit_bytes", None)
         activity_path = Path(activity_root) if activity_root is not None else None
         if runner is not subprocess.run:
@@ -114,7 +115,13 @@ class CodingCancellation:
             kwargs["stdin"] = subprocess.PIPE
         kwargs.pop("check", None)
         kwargs["start_new_session"] = True
+        relay = _SpoolRelay(spool_to, output_limit) if spool_to else None
+        if relay is not None:
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.PIPE
         process = subprocess.Popen(argv, **kwargs)
+        if relay is not None:
+            relay.start((process.stdout, process.stderr))
         stop_input = Event()
         with self._lock:
             self._process = process
@@ -149,10 +156,19 @@ class CodingCancellation:
                 _activity_snapshot(activity_path, activity_blocked_paths)
                 if activity_path is not None else None
             )
-            observed_spool = _spool_sizes(activity_files)
+            observed_relay = relay.last_write if relay is not None else None
             next_file_check = started
             while True:
                 now = monotonic()
+                if relay is not None and process.poll() is not None:
+                    # The CLI has exited. Whatever is left of its group is
+                    # stopped, the relays drain to EOF, and only then is the
+                    # result known: it may have reached the output bound.
+                    _stop_remaining(process)
+                    relay.finish(STOP_WAIT_SECONDS)
+                    self.check()
+                    relay.require_within_limit()
+                    return subprocess.CompletedProcess(argv, process.returncode, None, None)
                 if process.poll() is not None:
                     try:
                         stdout, stderr = process.communicate(timeout=0)
@@ -162,9 +178,6 @@ class CodingCancellation:
                         pass
                     else:
                         self.check()
-                        if activity_files:
-                            _stop_remaining(process)
-                        _within_output_limit(activity_files, output_limit)
                         return subprocess.CompletedProcess(
                             argv, process.returncode, stdout, stderr
                         )
@@ -173,14 +186,14 @@ class CodingCancellation:
                     # deadline: its only bound is the inactivity check below.
                     _stop(process)
                     raise subprocess.TimeoutExpired(argv, timeout)
-                spool = _spool_sizes(activity_files)
-                if spool != observed_spool:
-                    observed_spool = spool
-                    last_activity = now
-                    self._activity_seen(now)
-                if output_limit is not None and sum(spool) > output_limit:
-                    _stop(process)
-                    _within_output_limit(activity_files, output_limit)
+                if relay is not None:
+                    if relay.limit_reached.is_set():
+                        _stop(process)
+                        relay.require_within_limit()
+                    if relay.last_write != observed_relay:
+                        observed_relay = relay.last_write
+                        last_activity = now
+                        self._activity_seen(now)
                 if observed_files is not None and now >= next_file_check:
                     current_files = _activity_snapshot(activity_path, activity_blocked_paths)
                     if current_files != observed_files:
@@ -201,14 +214,19 @@ class CodingCancellation:
                     0.1,
                     *(value for value in (remaining, idle_remaining) if value is not None),
                 )
+                if relay is not None:
+                    # The relays own the pipes; communicate() would compete
+                    # with them for the output.
+                    try:
+                        process.wait(timeout=poll)
+                    except subprocess.TimeoutExpired:
+                        self.check()
+                    continue
                 try:
                     stdout, stderr = process.communicate(
                         timeout=poll,
                     )
                     self.check()
-                    if activity_files:
-                        _stop_remaining(process)
-                    _within_output_limit(activity_files, output_limit)
                     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
                 except subprocess.TimeoutExpired as pending:
                     self.check()
@@ -223,14 +241,26 @@ class CodingCancellation:
                 self._process = None
             if process.poll() is None:
                 _stop(process)
-            try:
-                process.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
-                # A grandchild that escaped its parent's process group may
-                # still hold a pipe open. It must not hold the Core worker.
-                for pipe in (process.stdout, process.stderr, process.stdin):
+            if relay is not None:
+                # The relays own the pipes: let them drain within a bound,
+                # then close what a lingering holder keeps open.
+                relay.finish(2)
+                for pipe in (process.stdout, process.stderr):
                     if pipe is not None:
                         pipe.close()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            else:
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # A grandchild that escaped its parent's process group may
+                    # still hold a pipe open. It must not hold the Core worker.
+                    for pipe in (process.stdout, process.stderr, process.stdin):
+                        if pipe is not None:
+                            pipe.close()
 
 
 def _deliver_input(stdin: Any, payload: bytes, stop: Event) -> None:
@@ -390,25 +420,62 @@ def _stop_remaining(process: subprocess.Popen[Any]) -> None:
         raise CodingError("session_interrupted", reason_code="session_unstoppable")
 
 
-def _within_output_limit(paths: tuple[Path, ...], limit: int | None) -> None:
-    """Refuse a child whose spooled output exceeded its bound, however it ended.
+class _SpoolRelay:
+    """Copy a child's stdout and stderr to files, counting every byte.
 
-    Checked on every completion path, not only between polls: a session that
-    wrote past the bound and exited before the next poll is still over it.
+    The bound is enforced where the bytes are written: a chunk that would
+    take the combined output past the limit is cut at the limit, the limit is
+    marked reached, and relaying stops. Memory is bounded by one chunk per
+    stream, and the time of the last relayed byte is the output activity.
     """
-    if limit is not None and sum(_spool_sizes(paths)) > limit:
-        raise CodingError("session_interrupted", reason_code="session_output_limit")
 
+    CHUNK_BYTES = 64 * 1024
 
-def _spool_sizes(paths: tuple[Path, ...]) -> tuple[int, ...]:
-    """Current sizes of the files a child's output is spooled to."""
-    sizes: list[int] = []
-    for path in paths:
-        try:
-            sizes.append(path.stat().st_size)
-        except OSError:
-            sizes.append(0)
-    return tuple(sizes)
+    def __init__(self, paths: tuple[Path, ...], limit: int | None) -> None:
+        self._paths = paths
+        self._limit = limit
+        self._written = 0
+        self._lock = Lock()
+        self._threads: list[Thread] = []
+        self.limit_reached = Event()
+        self.last_write = monotonic()
+
+    def start(self, streams: Sequence[Any]) -> None:
+        for stream, path in zip(streams, self._paths):
+            thread = Thread(target=self._pump, args=(stream, path), daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def _pump(self, stream: Any, path: Path) -> None:
+        with open(path, "ab") as spool:
+            while not self.limit_reached.is_set():
+                try:
+                    chunk = stream.read1(self.CHUNK_BYTES)
+                except (OSError, ValueError):
+                    return
+                if not chunk:
+                    return
+                with self._lock:
+                    room = (len(chunk) if self._limit is None
+                            else max(0, self._limit - self._written))
+                    kept = chunk[:room]
+                    self._written += len(kept)
+                    if len(kept) < len(chunk):
+                        self.limit_reached.set()
+                    self.last_write = monotonic()
+                if kept:
+                    spool.write(kept)
+                    spool.flush()
+
+    def finish(self, seconds: float) -> None:
+        """Wait, within a bound, for both relays to reach EOF or stop."""
+        deadline = monotonic() + seconds
+        for thread in self._threads:
+            thread.join(timeout=max(0.0, deadline - monotonic()))
+
+    def require_within_limit(self) -> None:
+        if self.limit_reached.is_set():
+            raise CodingError("session_interrupted", reason_code="session_output_limit")
 
 
 def _activity_snapshot(
