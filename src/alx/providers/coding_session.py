@@ -40,6 +40,7 @@ from pathlib import Path
 from alx.contracts.coding import CodingError, CodingRequest, CodingSessionResult
 from alx.providers.coding_containment import PROFILE_NAME, write_profile
 from alx.providers.coding_subscription_session import (
+    MAX_RETAINED_OUTPUT_CHARACTERS,
     SubscriptionCodingSession,
     classify_failure,
     subscription_cli_present,
@@ -182,6 +183,32 @@ class GrokCodingSession(SubscriptionCodingSession):
             failure_code="" if completed_cleanly else "session_failed",
             diagnostics=diagnostics,
         )
+
+    def retained_output(self, lines) -> str:
+        """Only the events the result is read from: text, end and error.
+
+        The stream also carries every file the agent read; none of that is
+        needed to read the result, and keeping it would put a long session's
+        reading back into memory. Text is bounded; end and error are kept.
+        """
+        kept: list[str] = []
+        text_size = 0
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line.rstrip("\n"))  # left for _events to refuse
+                continue
+            kind = event.get("type") if isinstance(event, Mapping) else None
+            if kind in ("end", "error"):
+                kept.append(line.rstrip("\n"))
+            elif kind == "text":
+                text_size += len(line)
+                if text_size <= MAX_RETAINED_OUTPUT_CHARACTERS:
+                    kept.append(line.rstrip("\n"))
+        return "\n".join(kept)
 
     def failure_output(self, stdout: str) -> str:
         """Only the CLI's own error events, never what the agent read."""

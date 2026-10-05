@@ -95,6 +95,10 @@ class CodingCancellation:
         inactivity_timeout = kwargs.pop("inactivity_timeout", None)
         activity_root = kwargs.pop("activity_root", None)
         activity_blocked_paths = tuple(kwargs.pop("activity_blocked_paths", ()))
+        # Files the child's output is spooled to. Their growth is activity,
+        # and their total size is bounded by `output_limit_bytes`.
+        activity_files = tuple(Path(item) for item in kwargs.pop("activity_files", ()))
+        output_limit = kwargs.pop("output_limit_bytes", None)
         activity_path = Path(activity_root) if activity_root is not None else None
         if runner is not subprocess.run:
             result = runner(argv, **kwargs)
@@ -145,6 +149,7 @@ class CodingCancellation:
                 _activity_snapshot(activity_path, activity_blocked_paths)
                 if activity_path is not None else None
             )
+            observed_spool = _spool_sizes(activity_files)
             next_file_check = started
             while True:
                 now = monotonic()
@@ -165,6 +170,14 @@ class CodingCancellation:
                     # deadline: its only bound is the inactivity check below.
                     _stop(process)
                     raise subprocess.TimeoutExpired(argv, timeout)
+                spool = _spool_sizes(activity_files)
+                if spool != observed_spool:
+                    observed_spool = spool
+                    last_activity = now
+                    self._activity_seen(now)
+                if output_limit is not None and sum(spool) > output_limit:
+                    _stop(process)
+                    raise CodingError("session_interrupted", reason_code="session_output_limit")
                 if observed_files is not None and now >= next_file_check:
                     current_files = _activity_snapshot(activity_path, activity_blocked_paths)
                     if current_files != observed_files:
@@ -346,6 +359,17 @@ def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs:
     if current is None and "inactivity_timeout" not in kwargs:
         return runner(argv, **kwargs)
     return (current or CodingCancellation()).run(runner, argv, **kwargs)
+
+
+def _spool_sizes(paths: tuple[Path, ...]) -> tuple[int, ...]:
+    """Current sizes of the files a child's output is spooled to."""
+    sizes: list[int] = []
+    for path in paths:
+        try:
+            sizes.append(path.stat().st_size)
+        except OSError:
+            sizes.append(0)
+    return tuple(sizes)
 
 
 def _activity_snapshot(

@@ -108,6 +108,55 @@ class StreamedActivityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "session_interrupted")
         self.assertEqual(raised.exception.details["reason_code"], "session_stalled")
 
+    def test_session_output_is_spooled_to_disk_not_held_in_memory(self) -> None:
+        """No deadline, so output must not accumulate in the runtime's memory."""
+        seen: dict = {}
+
+        def record(argv, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(
+                {"type": "end", "stopReason": "end_turn", "num_turns": 1}), "")
+
+        GrokCodingSession("grok-test", stall_seconds=10, runner=record).run_session(
+            self._request(), "briefing")
+        self.assertNotIn("capture_output", seen)
+        self.assertTrue(hasattr(seen["stdout"], "fileno"))
+        self.assertTrue(hasattr(seen["stderr"], "fileno"))
+        self.assertIsNone(seen["timeout"])
+
+    def test_what_the_agent_read_is_not_kept_to_read_the_result(self) -> None:
+        reader = """
+import json, sys
+for _ in range(50):
+    print(json.dumps({"type": "tool_call_update", "content": "x" * 100000}), flush=True)
+print(json.dumps({"type": "text", "data": "done"}), flush=True)
+print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 3}), flush=True)
+"""
+        session = self._session(_fake_cli(Path(self.directory.name), reader))
+        retained: list[str] = []
+        original = session.retained_output
+        session.retained_output = lambda lines: retained.append(original(lines)) or retained[-1]
+        result = session.run_session(self._request(), "briefing")
+        self.assertTrue(result.completed)
+        self.assertEqual(result.report, "done")
+        self.assertLess(len(retained[0]), 1_000)  # 5 MB of reading was not kept
+
+    def test_output_beyond_the_size_bound_stops_the_session_explicitly(self) -> None:
+        """A size bound, not a time bound: activity alone cannot fill the disk."""
+        flood = """
+import json, time
+while True:
+    print(json.dumps({"type": "tool_call_update", "content": "x" * 10000}), flush=True)
+    time.sleep(0.01)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_SESSION_OUTPUT_BYTES", 200_000):
+            with self.assertRaises(CodingError) as raised:
+                self._session(_fake_cli(Path(self.directory.name), flood)) \
+                    .run_session(self._request(), "briefing")
+        self.assertEqual(raised.exception.code, "session_interrupted")
+        self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
+
 
 class StreamedResultTests(unittest.TestCase):
     def setUp(self) -> None:
