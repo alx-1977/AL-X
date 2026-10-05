@@ -982,10 +982,18 @@ class CodingAgent:
                     if (after is None or not after.clean or after.branch != branch
                             or after.head_sha != baseline.head_sha):
                         git_status, git_diff = self._git_evidence(workspace)
+                        # Named durably, so AL/X still knows after a restart
+                        # which paths a check left behind. Deliberately not a
+                        # resumable checkpoint: they are a test's side effects,
+                        # not coding work a later resume should review and commit.
+                        left_behind = self._files_changed(
+                            (), git_status, preexisting_dirty,
+                            self._modified_preexisting(workspace, preexisting_fingerprints),
+                        )
                         return self._outcome(
                             status="failed",
                             summary="a required verification command changed the checkout",
-                            files=(), preexisting_dirty=preexisting_dirty,
+                            files=left_behind, preexisting_dirty=preexisting_dirty,
                             commands=commands, tests_run=tests_run, tests_passed=tests_passed,
                             git_status=git_status, git_diff=git_diff,
                             issues=("checkout_changed_by_verification",), review=False,

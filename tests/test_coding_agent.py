@@ -1537,6 +1537,8 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(values["status"], "failed")
         self.assertIn("checkout_changed_by_verification", values["unresolved_issues"])
         self.assertIn("left_behind.txt", values["git_status"])
+        # Durable: still known after a restart.
+        self.assertIn("left_behind.txt", attempt.result.durable_values["files_changed"])
 
     def test_no_change_report_keeps_the_existing_summary_bound(self) -> None:
         worktree = _worktree(self.root)
