@@ -90,9 +90,18 @@ class VoiceActivityStatus:
     call.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        feed: VoiceDiagnosticFeed | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._value = "reasoning"
-        self._listeners: set[Callable[[str | CodingTelemetry], None]] = set()
+        # Where coding observations are published, live and runtime-wide. A
+        # coding job runs as a background plan step, between person turns, so
+        # a listener that only a person turn installs saw nothing of it.
+        self._feed = feed
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._listeners: set[Callable[[str], None]] = set()
         self._coding: CodingTelemetry | None = None
         self._next_coding_owner_alive: Callable[[], bool] | None = None
         self._coding_owner_alive: Callable[[], bool] | None = None
@@ -110,16 +119,15 @@ class VoiceActivityStatus:
             listener(value)
 
     def publish_coding(self, telemetry: CodingTelemetry) -> None:
-        """Record the coding worker's own lifecycle observation."""
+        """Record the coding worker's own observation and publish it live."""
         with self._lock:
             self._coding = telemetry
             # Capture the task that owned this job when the job reports. A
             # later Core turn may install a different pending task, but it
             # cannot make this telemetry's owner alive again.
             self._coding_owner_alive = self._next_coding_owner_alive
-            listeners = tuple(self._listeners)
-        for listener in listeners:
-            listener(telemetry)
+        if self._feed is not None:
+            self._feed.publish(None, self.coding_snapshot_for(telemetry, self._clock()))
 
     def set_coding_owner_alive(self, owner_alive: Callable[[], bool]) -> None:
         """Attach the existing Core worker task that owns a coding call."""
@@ -176,10 +184,14 @@ class VoiceActivityStatus:
             "owner_alive": owner_running, "unresponsive": unresponsive,
             "stalled": stalled, "transition": telemetry.transition,
             "branch": telemetry.branch,
+            # Absolute times, so a console keeps the clocks running between
+            # observations instead of freezing on the last elapsed count.
+            "started_at": telemetry.started_at.isoformat(timespec="milliseconds"),
+            "last_activity_at": telemetry.last_activity_at.isoformat(timespec="milliseconds"),
         }
 
     def subscribe(
-        self, listener: Callable[[str | CodingTelemetry], None]
+        self, listener: Callable[[str], None]
     ) -> Callable[[], None]:
         with self._lock:
             self._listeners.add(listener)
@@ -517,7 +529,7 @@ class VoiceSession:
                                 if turn_finished is not None:
                                     turn_finished()
 
-                updates: asyncio.Queue[str | CodingTelemetry] = asyncio.Queue()
+                updates: asyncio.Queue[str] = asyncio.Queue()
                 unsubscribe = self._activity.subscribe(
                     lambda value: loop.call_soon_threadsafe(updates.put_nowait, value)
                 )
@@ -535,43 +547,22 @@ class VoiceSession:
                             # what makes a long turn legible as it happens.
                             for event in feed.take():
                                 yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=event)
+                            # Coding progress arrives through the feed above,
+                            # whether or not a person turn is running.
                             if update_task in done:
-                                update = update_task.result()
-                                if isinstance(update, CodingTelemetry):
-                                    yield VoiceEvent(
-                                        VoiceEventKind.DIAGNOSTIC,
-                                        diagnostic=self._activity.coding_snapshot_for(
-                                            update, self._clock()
-                                        ),
-                                    )
-                                else:
-                                    yield VoiceEvent(VoiceEventKind.ACTIVITY, activity=update)
+                                yield VoiceEvent(
+                                    VoiceEventKind.ACTIVITY, activity=update_task.result()
+                                )
                                 continue
                             update_task.cancel()
                             await asyncio.gather(update_task, return_exceptions=True)
-                            if not done:
-                                snapshot = self._activity.coding_snapshot(self._clock())
-                                if snapshot is not None and not snapshot["terminal"]:
-                                    yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=snapshot)
-                        snapshot = self._activity.coding_snapshot(self._clock())
-                        if snapshot is not None and not snapshot["terminal"]:
-                            yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=snapshot)
                         outcome = await core_task
                     finally:
                         # The Core has read and answered; a delivery admitted
                         # from here on is newer than this turn's answer.
                         person_input_settled()
                     while not updates.empty():
-                        update = updates.get_nowait()
-                        if isinstance(update, CodingTelemetry):
-                            yield VoiceEvent(
-                                VoiceEventKind.DIAGNOSTIC,
-                                diagnostic=self._activity.coding_snapshot_for(
-                                    update, self._clock()
-                                ),
-                            )
-                        else:
-                            yield VoiceEvent(VoiceEventKind.ACTIVITY, activity=update)
+                        yield VoiceEvent(VoiceEventKind.ACTIVITY, activity=updates.get_nowait())
                 except Exception:
                     yield VoiceEvent(
                         VoiceEventKind.ERROR, reason="conversation_gateway_error"

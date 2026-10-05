@@ -268,7 +268,7 @@ async def run(repository_root: Path) -> None:
     storage_root.mkdir(parents=True, exist_ok=True)
 
     diagnostics = VoiceDiagnosticFeed()
-    activity = VoiceActivityStatus()
+    activity = VoiceActivityStatus(diagnostics)
     usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
     # The Core names the conversation on every budget check, so a dispatch can
     # arm the ceiling for the task that is actually running. A context

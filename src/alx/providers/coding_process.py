@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import logging
 import io
 import json
 import platform
@@ -42,6 +43,8 @@ from alx.providers.coding_containment import CREDENTIAL_DENY_GLOBS
 from alx.contracts.coding_verification import pytest_failure_signature
 
 
+LOGGER = logging.getLogger(__name__)
+
 _CURRENT: ContextVar["CodingCancellation | None"] = ContextVar(
     "alx_coding_cancellation", default=None
 )
@@ -52,11 +55,33 @@ _CURRENT: ContextVar["CodingCancellation | None"] = ContextVar(
 _MAIN_FAILURE_CACHE: dict[str, tuple[tuple[str, str], ...]] = {}
 
 
+# The least time between two activity reports from one running command. The
+# watchdog sees activity every scan; a console needs it far less often.
+ACTIVITY_REPORT_SECONDS = 5.0
+
+
 class CodingCancellation:
-    def __init__(self) -> None:
+    def __init__(
+        self, on_activity: Callable[[], None] | None = None,
+    ) -> None:
         self.requested = Event()
         self._lock = Lock()
         self._process: subprocess.Popen[Any] | None = None
+        # Told when the running command shows real activity (output, or a
+        # change in the checkout), at most once per ACTIVITY_REPORT_SECONDS.
+        # The same evidence the stall watchdog uses, so "last activity" on a
+        # console means what the watchdog means by it.
+        self.on_activity = on_activity
+        self._reported_at = float("-inf")
+
+    def _activity_seen(self, now: float) -> None:
+        if self.on_activity is None or now - self._reported_at < ACTIVITY_REPORT_SECONDS:
+            return
+        self._reported_at = now
+        try:
+            self.on_activity()
+        except Exception:  # noqa: BLE001 - reporting never alters the command
+            LOGGER.info("Coding activity report failed")
 
     def cancel(self) -> None:
         self.requested.set()
@@ -145,6 +170,7 @@ class CodingCancellation:
                     if current_files != observed_files:
                         last_activity = now
                         observed_files = current_files
+                        self._activity_seen(now)
                     scan_interval = min(1.0, inactivity_timeout / 4) if inactivity_timeout else 1.0
                     next_file_check = now + scan_interval
                 if inactivity_timeout is not None and now - last_activity >= inactivity_timeout:
@@ -171,6 +197,7 @@ class CodingCancellation:
                     if output != observed_output:
                         observed_output = output
                         last_activity = monotonic()
+                        self._activity_seen(last_activity)
         finally:
             stop_input.set()
             with self._lock:

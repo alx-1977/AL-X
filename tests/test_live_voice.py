@@ -285,7 +285,10 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_coding_transitions_are_emitted_in_order(self) -> None:
-        activity = VoiceActivityStatus()
+        # Coding status travels the live feed, the one route it has whether or
+        # not a person turn is running.
+        feed = VoiceDiagnosticFeed()
+        activity = VoiceActivityStatus(feed, clock=lambda: NOW)
         release = threading.Event()
 
         class TransitionGateway(FakeGateway):
@@ -311,6 +314,7 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             FakeTranscriber((transcription("one", TranscriptionState.FINAL, "Hi"),)),
             FakeSynthesizer(), "friedl", 8, 3650,
             clock=lambda: NOW, identifier_factory=lambda: "turn-1", activity=activity,
+            diagnostics=feed,
         )
         iterator = session.exchange("conversation-1", incoming_audio())
         self.assertIs((await iterator.__anext__()).kind, VoiceEventKind.THINKING)
@@ -434,7 +438,8 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_queued_turn_cannot_claim_first_turn_coding_owner(self) -> None:
         """A waiting exchange cannot bind telemetry before it owns Core's lock."""
-        activity = VoiceActivityStatus()
+        feed = VoiceDiagnosticFeed()
+        activity = VoiceActivityStatus(feed, clock=lambda: NOW)
         core_lock = asyncio.Lock()
         a_started = threading.Event()
         a_release = threading.Event()
@@ -466,7 +471,7 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             FakeTranscriber((transcription("a", TranscriptionState.FINAL, "A"),)),
             FakeSynthesizer(), "friedl", 8, 3650,
             clock=lambda: NOW, identifier_factory=lambda: "turn",
-            activity=activity, core_turn_lock=core_lock,
+            activity=activity, core_turn_lock=core_lock, diagnostics=feed,
         )
         first = session.exchange("conversation-a", incoming_audio())
         self.assertIs((await first.__anext__()).kind, VoiceEventKind.THINKING)

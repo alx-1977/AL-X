@@ -218,6 +218,29 @@ def _before_implementation(error: CodingError) -> CodingError:
 _PYTEST_NOTHING_COLLECTED = 5
 
 
+def requested_verification(
+    request: CodingRequest, derived: tuple[VerificationCheck, ...],
+) -> tuple[VerificationCheck, ...]:
+    """AL/X's required commands as checks, beside the derived ones.
+
+    They come only from the structured `requested_checks`, never from the
+    task's prose, and a command the repository's rules already require is not
+    run twice. Each is a required command check like any derived one: refused
+    by the allowlist, failing, or never run, the job has not passed.
+    """
+    seen = {check.argv for check in derived if check.kind == "command"}
+    checks: list[VerificationCheck] = []
+    for number, argv in enumerate(request.requested_checks, start=1):
+        if argv in seen:
+            continue
+        seen.add(argv)
+        checks.append(VerificationCheck(
+            f"requested_{number}", tuple(argv),
+            "AL/X required this command for the job",
+        ))
+    return tuple(checks)
+
+
 def _check_passed(record: CodingCommandRecord, check_name: str = "") -> bool:
     """Whether one verification command's result counts as passing."""
     if record.timed_out:
@@ -379,6 +402,10 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
             lines += [f"- {item}" for item in items]
     if request.test_guidance.strip():
         lines += ["", "# Test guidance", request.test_guidance.strip()]
+    if request.requested_checks:
+        # The session has no terminal; these run after it, and must pass.
+        lines += ["", "# Commands AL/X will run after your session, which must pass"]
+        lines += [f"- {' '.join(argv)}" for argv in request.requested_checks]
     if request.repair_branch.strip():
         # Stated so the agent knows its edits are already on the repair branch
         # and has no reason to try to arrange one. It cannot run git either way.
@@ -521,6 +548,15 @@ class CodingAgent:
         # second's checkout and report its elapsed time.
         # Nothing job-authoritative belongs on the agent itself.
 
+    def _report_progress(self, state: "_JobState") -> None:
+        """Republish the current phase with a fresh activity time, no transition."""
+        current = state.telemetry
+        if current is None or current.terminal:
+            return
+        self._report_telemetry(
+            state, current.phase, in_flight=current.in_flight, waiting=current.waiting,
+        )
+
     def _report_telemetry(
         self, state: "_JobState", phase: str, *, in_flight: bool = False,
         waiting: bool = False, terminal: bool = False, outcome: str = "",
@@ -615,6 +651,9 @@ class CodingAgent:
         # One state object per call, so nothing this run touches is reachable
         # from another run on the same agent.
         state = _JobState(request.job_id)
+        # The session's real activity, as its watchdog observes it, refreshes
+        # the job's last-activity time between lifecycle boundaries.
+        state.cancellation.on_activity = lambda: self._report_progress(state)
         cancellation_token = bind_cancellation(state.cancellation)
         self._report_telemetry(
             state, "plan", in_flight=True, transition="CASE started"
@@ -1563,7 +1602,8 @@ class CodingAgent:
         # policy emits the diff check, the content check, at most the two
         # gates, one targeted pytest, and one unmapped-file report. That is
         # six against a ceiling of eight. Exceeding the ceiling fails closed.
-        checks = policy.checks
+        # AL/X's required commands (at most two) join them.
+        checks = policy.checks + requested_verification(request, policy.checks)
         if len(checks) > MAX_VERIFICATION_COMMANDS:
             return VerificationEvidence(checks), False, None
         for check in checks:
@@ -1625,6 +1665,9 @@ class CodingAgent:
                 continue
             passed = _check_passed(record, check.name)
             baseline = ""
+            # Only the derived pytest checks may be excused as already failing
+            # on main. AL/X's requested commands are named `requested_*`, so a
+            # failure one of them reports stands.
             if not passed and check.name.startswith("pytest"):
                 passed, baseline = same_main_pytest_failure(
                     record, workspace.root,

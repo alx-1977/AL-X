@@ -39,6 +39,7 @@ class VoiceDiagnosticFeed:
     _STATE_KEYS = {
         "task.status": ("task_id",),
         "plan.attention": ("goal_id", "plan_id", "attention_seq"),
+        "coding.status": ("job_id",),
     }
     _SETTLED_TASK_STATES = frozenset({"completed", "failed", "observer_unavailable"})
 
@@ -125,11 +126,12 @@ class VoiceDiagnosticFeed:
         if fields is None:
             return
         key = (event["code"], *(event.get(name) for name in fields))
-        released = (
-            event.get("state") in self._SETTLED_TASK_STATES
-            if event["code"] == "task.status"
-            else event.get("state") != "blocked"
-        )
+        if event["code"] == "task.status":
+            released = event.get("state") in self._SETTLED_TASK_STATES
+        elif event["code"] == "coding.status":
+            released = bool(event.get("terminal"))
+        else:
+            released = event.get("state") != "blocked"
         if released:
             self._states.pop(key, None)
             return
