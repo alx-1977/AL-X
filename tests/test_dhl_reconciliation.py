@@ -1420,6 +1420,19 @@ class DhlImportLifecycleTests(unittest.TestCase):
             ],
         )
 
+    def test_a_failure_after_classification_keeps_the_document_kinds(self) -> None:
+        """An unconfigured supplier still says what each document was read as."""
+        executor = executor_for(self.mail, self.xero, supplier_name="")
+        result = executor({"documents": [
+            source_for(self.mail, "worksheet", "11"),
+            source_for(self.mail, "sad", "12"),
+        ]})
+        self.assertEqual(result.failure["code"], "dhl_supplier_not_configured")
+        self.assertEqual(
+            [item["kind"] for item in result.values["documents"]],
+            ["customs_worksheet", "sad_500"],
+        )
+
     def test_no_evidence_is_reported_before_any_xero_prerequisite(self) -> None:
         """An unconfigured supplier must not stand in for "nothing to post"."""
         self.mail.payloads["awb"] = ("awb.pdf", "application/pdf", airway_bill_pdf())

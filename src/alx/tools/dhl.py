@@ -1243,15 +1243,13 @@ def build_dhl_executors(
             )
             result = _dispatch(read, kinds, references)
         except ValueError:
-            return failed("arguments_unusable")
+            return failed("arguments_unusable", classified)
         except MailAccessError as error:
-            return failed(error.code)
+            return failed(error.code, classified)
         except DhlDocumentError as error:
             return failed(error.code, classified)
         except XeroAccessError as error:
-            return failed(error.code)
-        if result.state is CapabilityResultState.FAILED:
-            return result
+            return failed(error.code, classified)
         return replace(
             result,
             values={**result.values, "documents": classified},
