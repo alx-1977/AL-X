@@ -172,6 +172,76 @@ class StopReasonSurvivesTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "session_interrupted")
         self.assertEqual(raised.exception.details["reason_code"], "session_stalled")
 
+    def test_a_descendant_is_stopped_when_the_group_signal_is_refused(self) -> None:
+        """A tool process the CLI started must not outlive the session."""
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "child.pid"
+            script = (
+                "import subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+                "time.sleep(60)\n"
+            )
+            with mock.patch.object(
+                coding_process.os, "killpg", side_effect=PermissionError(1, "EPERM")
+            ):
+                with self.assertRaises(CodingError) as raised:
+                    coding_process.CodingCancellation().run(
+                        subprocess.run, [sys.executable, "-c", script],
+                        capture_output=True, text=True, timeout=30,
+                        inactivity_timeout=1.0, activity_root=str(Path(directory) / "none"),
+                        stdin=subprocess.DEVNULL, shell=False, check=False,
+                    )
+            self.assertEqual(raised.exception.details["reason_code"], "session_stalled")
+            child = int(pid_file.read_text())
+            self.assertTrue(_gone(child), "the CLI's child survived the stop")
+
+    def test_a_process_that_cannot_be_stopped_is_reported_within_a_bound(self) -> None:
+        """Both signals refused: a declared failure, not an endless wait."""
+        real_kill = os.kill
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "self.pid"
+            script = (
+                "import os, time\n"
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                "time.sleep(60)\n"
+            )
+            try:
+                with mock.patch.object(
+                    coding_process.os, "killpg", side_effect=PermissionError(1, "EPERM")
+                ), mock.patch.object(
+                    coding_process.os, "kill", side_effect=PermissionError(1, "EPERM")
+                ), mock.patch.object(coding_process, "STOP_WAIT_SECONDS", 0.5):
+                    with self.assertRaises(CodingError) as raised:
+                        coding_process.CodingCancellation().run(
+                            subprocess.run, [sys.executable, "-c", script],
+                            capture_output=True, text=True, timeout=30,
+                            inactivity_timeout=0.5, activity_root=str(Path(directory) / "none"),
+                            stdin=subprocess.DEVNULL, shell=False, check=False,
+                        )
+                self.assertEqual(raised.exception.code, "session_interrupted")
+                self.assertEqual(raised.exception.details["reason_code"], "session_unstoppable")
+            finally:
+                if pid_file.exists():
+                    try:
+                        real_kill(int(pid_file.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+
+def _gone(pid: int, seconds: float = 3.0) -> bool:
+    """Whether `pid` no longer exists, allowing a moment for it to exit."""
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
 
 class PlannerScratchDirectoryTests(unittest.TestCase):
     def test_the_planner_is_told_its_empty_directory_is_not_the_checkout(self) -> None:

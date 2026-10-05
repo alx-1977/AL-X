@@ -212,41 +212,75 @@ def _deliver_input(stdin: Any, payload: bytes, stop: Event) -> None:
 
 
 def _stop(process: subprocess.Popen[Any]) -> None:
-    """Stop the session's process group. Never raises past the stop itself.
+    """Stop the session's whole process group, within a bound.
 
-    macOS answers `killpg` with EPERM once a group's members have exited but
-    not been reaped. Letting that PermissionError escape replaced the reason a
+    macOS answers `killpg` with EPERM once some of a group's members have
+    exited unreaped. Letting that PermissionError escape replaced the reason a
     session was being stopped (stalled, at its ceiling, cancelled) with an
-    OSError, which the session reports as the CLI being unavailable. The
-    process itself is signalled directly instead, and the original reason
-    stands.
+    OSError, which the session reports as the CLI being unavailable. When the
+    group signal is refused, each live member of the group is signalled
+    individually, so a tool process the CLI started cannot outlive the session.
+    A process that still cannot be stopped is reported as such rather than
+    waited on for ever.
     """
     if process.poll() is not None:
         return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    if not _signal_group(process, signal.SIGTERM):
         return
-    except PermissionError:
-        _signal_process(process, signal.SIGTERM)
     try:
         process.wait(timeout=2)
+        return
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            _signal_process(process, signal.SIGKILL)
-        process.wait()
-
-
-def _signal_process(process: subprocess.Popen[Any], signum: int) -> None:
-    """Signal the session process itself when its group refuses the signal."""
-    try:
-        process.send_signal(signum)
-    except (ProcessLookupError, PermissionError):
         pass
+    _signal_group(process, signal.SIGKILL)
+    try:
+        process.wait(timeout=STOP_WAIT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise CodingError(
+            "session_interrupted", reason_code="session_unstoppable"
+        ) from error
+
+
+# How long a session process may take to exit after SIGKILL. The kernel
+# delivers SIGKILL unconditionally, so exceeding this means the signal was
+# never delivered, not that the process is slow.
+STOP_WAIT_SECONDS = 5.0
+
+
+def _signal_group(process: subprocess.Popen[Any], signum: int) -> bool:
+    """Signal the session's process group. False if it is already gone."""
+    try:
+        os.killpg(process.pid, signum)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    # The group refused as a whole: signal its members one by one. A member
+    # that has exited (the EPERM cause) or is not ours refuses alone.
+    for pid in _group_members(process.pid) or (process.pid,):
+        try:
+            os.kill(pid, signum)
+        except (ProcessLookupError, PermissionError):
+            continue
+    return True
+
+
+def _group_members(pgid: int) -> tuple[int, ...]:
+    """Process identifiers whose process group is `pgid`, from `ps`."""
+    try:
+        listing = subprocess.run(  # noqa: S603 - fixed argv, no model input
+            ["ps", "-A", "-o", "pid=", "-o", "pgid="],
+            capture_output=True, text=True, timeout=5, check=False, shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    members: list[int] = []
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1] == str(pgid):
+            members.append(int(fields[0]))
+    return tuple(members)
 
 
 def check_cancelled() -> None:
