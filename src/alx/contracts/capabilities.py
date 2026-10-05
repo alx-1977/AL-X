@@ -124,6 +124,12 @@ class CapabilityDefinition:
     # any other a plan never waits. Declared, never inferred from side_effect,
     # and a capability that changes anything never declares it.
     plan_observation: bool = False
+    # Identifier arguments the operator trace may show, such as a pull request
+    # number or an enumerated operation. Declared, empty by default, and never
+    # inferred: an argument is shown only because its capability names it as
+    # an identifier rather than content. The broker still shows a value only
+    # when it is a short identifier token.
+    trace_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -151,3 +157,9 @@ class CapabilityDefinition:
             if set(fields) - set(self.input_schema.properties):
                 raise ValueError("durable input fields must be declared inputs")
             object.__setattr__(self, "durable_input_fields", fields)
+        trace_fields = tuple(self.trace_fields)
+        if len(trace_fields) != len(set(trace_fields)):
+            raise ValueError("trace fields must be unique")
+        if set(trace_fields) - set(self.input_schema.properties):
+            raise ValueError("trace fields must be declared inputs")
+        object.__setattr__(self, "trace_fields", trace_fields)

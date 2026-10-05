@@ -204,7 +204,9 @@ cannot be released later by an answer to some other question. It constrains
 sending only. You may draft, reconsider, abandon a message, or ask anything you
 like in any order, and nothing needs permission except the send itself.
 undelivered_responses names autonomous occasions where you decided to say something
-and no one was there to hear it. The words are not kept, deliberately: decide afresh
+and it was not heard: no one was there to hear it, or the person had already started
+a new turn, which owns the voice until you answer it. A response recorded in the
+conversation is not thereby heard. This record keeps no words, deliberately: decide afresh
 whether anything still matters, say it if so, and resolve the occasion either way
 through the capability. Nothing resolves or expires it for you.
 pending_revisits lists later occasions you asked for with request_future_cognition
@@ -1584,6 +1586,7 @@ class ModelReasoner:
                 context.conversation_id,
                 CACHE_KEY,
                 self._max_output_tokens,
+                purpose="" if context.purpose is None else context.purpose.value,
         )
 
     def _decide(self, context: ReasoningContext) -> AgentDecision:

@@ -40,6 +40,7 @@ from alx.contracts import (
     ModelRequest,
     ModelRole,
     normalise_usage,
+    usage_telemetry,
 )
 from alx.providers.errors import ProviderError, raise_provider_failure
 from alx.providers.coding_session import WITHHELD_TOOLS
@@ -97,12 +98,15 @@ def _json_value(value: Any) -> Any:
 
 
 def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
-    return {
+    values: dict[str, Any] = {
         "kind": request.kind,
         "tier": request.tier,
         "reservation_id": request.reservation_id,
         "reserved_usd": request.reserved_usd,
     }
+    if request.purpose:
+        values["purpose"] = request.purpose
+    return values
 
 
 class _GrokProtocolError(ValueError):
@@ -285,11 +289,7 @@ class GrokSubscriptionReasoningModel:
                     "provider": PROVIDER_NAME,
                     "model": model or self._model,
                     "duration_ms": round(duration * 1000),
-                    **{
-                        key: value
-                        for key, value in usage.items()
-                        if isinstance(value, int)
-                    },
+                    **usage_telemetry(usage),
                     **_request_telemetry(request),
                 },
             )

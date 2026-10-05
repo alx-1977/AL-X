@@ -139,7 +139,8 @@ html, body {
   box-shadow: 0 0 .8rem rgba(110, 231, 255, .85);
 }
 
-#diagnostic-clear {
+#diagnostic-clear,
+#diagnostic-details {
   border: 1px solid rgba(255, 255, 255, .15);
   border-radius: 999px;
   padding: .28rem .62rem;
@@ -157,6 +158,11 @@ html, body {
   color: #c9f5ff;
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
   font-size: .72rem;
+}
+
+#diagnostic-details[aria-pressed="true"] {
+  background: rgba(110, 231, 255, .16);
+  color: #dff9ff;
 }
 
 #diagnostic-elapsed { color: rgba(185, 238, 251, .66); }
@@ -195,12 +201,26 @@ html, body {
 
 .diagnostic-line {
   display: grid;
-  grid-template-columns: 4.8rem 1fr;
+  grid-template-columns: 4.8rem 4.6rem 1fr;
   gap: .55rem;
   color: rgba(230, 247, 252, .72);
 }
 
 .diagnostic-line time { color: rgba(166, 220, 234, .42); }
+/* The subsystem column: which part of AL/X the line is about. */
+.diagnostic-line b {
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: rgba(166, 220, 234, .66);
+}
+/* Low-level telemetry stays available but out of the operator's way: shown
+   only when Details is on, and quieter than the execution trace. */
+.diagnostics__log:not([data-details="shown"]) .diagnostic-line[data-detail="true"] {
+  display: none;
+}
+.diagnostic-line[data-detail="true"] { opacity: .62; }
+/* Work for another thread, such as a mail occasion: real, but not this one. */
+.diagnostic-line[data-background="true"] span { opacity: .72; }
 .diagnostic-line[data-tone="ok"] span { color: #a8f1d0; }
 .diagnostic-line[data-tone="active"] span { color: #aeeeff; }
 .diagnostic-line[data-tone="error"] span { color: #ffb9b9; }

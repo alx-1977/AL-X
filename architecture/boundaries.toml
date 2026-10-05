@@ -167,6 +167,15 @@ forbidden = [
 ]
 
 [[outcomes]]
+id = "console.runtime_telemetry_is_delivered"
+description = "Runtime telemetry and the operator trace reach connected consoles as they happen."
+# One live feed, stamped at publication. It replaced a per-conversation buffer
+# that a voice exchange drained only after the Core turn returned, which held a
+# two-minute turn's progress back and delivered it in one burst at the end.
+entry = "interfaces/diagnostic_feed.py::VoiceDiagnosticFeed.publish"
+forbidden = ["VoiceDiagnosticBuffer", "diagnostics.drain("]
+
+[[outcomes]]
 id = "conversation.person_turn_reaches_core"
 description = "A typed or spoken person turn becomes one authoritative Core turn."
 entry = "conversation/gateway.py::ConversationGateway.receive_conversation_turn"

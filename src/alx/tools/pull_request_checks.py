@@ -135,6 +135,7 @@ DEFINITION = CapabilityDefinition(
     transmits_authored_text=False,
     # Reading again changes nothing, so a plan may wait on it.
     plan_observation=True,
+    trace_fields=("pull_request_number",),
 )
 
 # GitHub's own vocabulary, read the way its required-check rule reads it:

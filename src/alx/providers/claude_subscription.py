@@ -64,6 +64,7 @@ from alx.contracts import (
     ModelRequest,
     ModelRole,
     normalise_usage,
+    usage_telemetry,
 )
 from alx.providers.errors import ProviderError, raise_provider_failure
 
@@ -186,12 +187,39 @@ def _json_value(value: Any) -> Any:
 
 
 def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
-    return {
+    values: dict[str, Any] = {
         "kind": request.kind,
         "tier": request.tier,
         "reservation_id": request.reservation_id,
         "reserved_usd": request.reserved_usd,
     }
+    if request.purpose:
+        values["purpose"] = request.purpose
+    return values
+
+
+# Service tiers Anthropic reports in usage. The value is external text, so it
+# reaches telemetry only when it is one of these; anything else is omitted.
+_SERVICE_TIERS = frozenset({"standard", "priority", "batch"})
+
+
+def _envelope_metrics(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Measurements the CLI itself reported, and nothing it did not.
+
+    `duration_api_ms` is the time the CLI spent waiting on the API, as distinct
+    from the subprocess wall time this adapter measures. The CLI reports no
+    first-event or generation timing, so none is published: a zero there
+    would claim the model answered instantly.
+    """
+    metrics: dict[str, Any] = {}
+    api_ms = envelope.get("duration_api_ms")
+    if isinstance(api_ms, int) and not isinstance(api_ms, bool) and api_ms >= 0:
+        metrics["api_duration_ms"] = api_ms
+    usage = envelope.get("usage")
+    tier = usage.get("service_tier") if isinstance(usage, Mapping) else None
+    if isinstance(tier, str) and tier in _SERVICE_TIERS:
+        metrics["service_tier"] = tier
+    return metrics
 
 
 class _ClaudeProtocolError(ValueError):
@@ -513,7 +541,7 @@ class ClaudeSubscriptionReasoningModel:
                 raise _ClaudeProtocolError(
                     self._failure_code(completed.stderr, completed.stdout)
                 )
-            output, model, usage = self._parse(completed.stdout)
+            output, model, usage, envelope = self._parse(completed.stdout)
             self._require_schema(output, request)
             completion = ModelCompletion(
                 PROVIDER_NAME, model or self._model, output, usage
@@ -528,11 +556,8 @@ class ClaudeSubscriptionReasoningModel:
                     "provider": PROVIDER_NAME,
                     "model": model or self._model,
                     "duration_ms": round(duration * 1000),
-                    **{
-                        key: value
-                        for key, value in usage.items()
-                        if isinstance(value, int)
-                    },
+                    **_envelope_metrics(envelope),
+                    **usage_telemetry(usage, envelope.get("usage")),
                     **_request_telemetry(request),
                 },
             )
@@ -620,7 +645,9 @@ class ClaudeSubscriptionReasoningModel:
         if missing:
             raise _ClaudeProtocolError("decision_schema_unsatisfied")
 
-    def _parse(self, stdout: str) -> tuple[dict[str, Any], str, dict[str, int]]:
+    def _parse(
+        self, stdout: str
+    ) -> tuple[dict[str, Any], str, dict[str, int], Mapping[str, Any]]:
         """Read one `--output-format json` envelope and its decision."""
         try:
             envelope = json.loads(stdout)
@@ -670,6 +697,7 @@ class ClaudeSubscriptionReasoningModel:
             dict(output),
             model if isinstance(model, str) else "",
             self._usage(envelope),
+            envelope,
         )
 
     @staticmethod

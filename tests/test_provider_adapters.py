@@ -614,7 +614,6 @@ class SpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
             [item[1]["code"] for item in telemetry],
             [
                 "tts.request_sent",
-                "tts.text_sent",
                 "tts.stream_connected",
                 "tts.first_audio_byte",
             ],

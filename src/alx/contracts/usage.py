@@ -37,6 +37,30 @@ MEASURED_FIELDS = ("input_tokens", "output_tokens")
 _MISSING = object()
 _INVALID = object()
 
+# Where each breakdown field may appear in a provider's own report. A
+# provider that names none of these did not report the breakdown, which is not
+# the same as reporting zero. The last path of the two cache fields is
+# Anthropic's beside-input layout, read separately below.
+_DETAIL_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "cached_tokens": (
+        ("input_tokens_details", "cached_tokens"),
+        ("prompt_tokens_details", "cached_tokens"),
+        ("cached_tokens",),
+        ("cache_read_input_tokens",),
+    ),
+    "cache_write_tokens": (
+        ("input_tokens_details", "cache_write_tokens"),
+        ("prompt_tokens_details", "cache_write_tokens"),
+        ("cache_write_tokens",),
+        ("cache_creation_input_tokens",),
+    ),
+    "reasoning_tokens": (
+        ("output_tokens_details", "reasoning_tokens"),
+        ("completion_tokens_details", "reasoning_tokens"),
+        ("reasoning_tokens",),
+    ),
+}
+
 
 def _value(values: Mapping[str, Any], *path: str) -> object:
     """Return a nested value while distinguishing absence from bad structure."""
@@ -91,35 +115,36 @@ def normalise_usage(usage: Any) -> dict[str, int]:
     output_tokens = _aliased_count(
         usage, (("output_tokens",), ("completion_tokens",)), required=True
     )
-    cached = _aliased_count(
-        usage,
-        (
-            ("input_tokens_details", "cached_tokens"),
-            ("prompt_tokens_details", "cached_tokens"),
-            ("cached_tokens",),
-        ),
-    )
-    cache_write = _aliased_count(
-        usage,
-        (
-            ("input_tokens_details", "cache_write_tokens"),
-            ("prompt_tokens_details", "cache_write_tokens"),
-            ("cache_write_tokens",),
-        ),
-    )
-    reasoning = _aliased_count(
-        usage,
-        (
-            ("output_tokens_details", "reasoning_tokens"),
-            ("completion_tokens_details", "reasoning_tokens"),
-            ("reasoning_tokens",),
-        ),
-    )
+    cached = _aliased_count(usage, _DETAIL_PATHS["cached_tokens"][:3])
+    cache_write = _aliased_count(usage, _DETAIL_PATHS["cache_write_tokens"][:3])
+    reasoning = _aliased_count(usage, _DETAIL_PATHS["reasoning_tokens"])
     total = _aliased_count(usage, (("total_tokens",),))
-    counts = (input_tokens, output_tokens, cached, cache_write, reasoning, total)
+    # Anthropic's layout, which the Claude CLI reports. Its `input_tokens` is
+    # only the uncached remainder: cache reads and cache writes are counted
+    # beside it, not inside it. Read as the other layouts, a Core call that
+    # carried 40,000 tokens of context was recorded as "input 2, cached 0".
+    cache_read = _aliased_count(usage, (("cache_read_input_tokens",),))
+    cache_creation = _aliased_count(usage, (("cache_creation_input_tokens",),))
+    counts = (
+        input_tokens, output_tokens, cached, cache_write, reasoning, total,
+        cache_read, cache_creation,
+    )
     if any(value is _INVALID for value in counts):
         return _unmeasured()
     assert all(isinstance(value, int) for value in counts)
+    if "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
+        beside = input_tokens + cache_read + cache_creation
+        # A reported total arbitrates which way the provider counted. Only
+        # when it says the cache counts were already inside `input_tokens` is
+        # the beside reading refused; without a total, the documented layout
+        # is the one Anthropic defines.
+        inside = total and total in (
+            input_tokens + output_tokens, input_tokens + output_tokens + reasoning,
+        ) and total not in (beside + output_tokens, beside + output_tokens + reasoning)
+        if not inside:
+            input_tokens = beside
+        cached = cache_read
+        cache_write = cache_creation
     if cached > input_tokens:
         return _unmeasured()
     # Two layouts report reasoning. OpenAI counts reasoning inside
@@ -141,6 +166,11 @@ def normalise_usage(usage: Any) -> dict[str, int]:
         output_tokens += reasoning
     if reasoning > output_tokens:
         return _unmeasured()
+    if not total and (input_tokens or output_tokens):
+        # Not a default: canonical output already includes reasoning in every
+        # layout above, so the total is exactly their sum. Leaving it zero is
+        # how a measured call came to display "total 0".
+        total = input_tokens + output_tokens
     return {
         "input_tokens": input_tokens,
         "cached_tokens": cached,
@@ -148,6 +178,40 @@ def normalise_usage(usage: Any) -> dict[str, int]:
         "output_tokens": output_tokens,
         "reasoning_tokens": reasoning,
         "total_tokens": total,
+    }
+
+
+def usage_telemetry(
+    usage: Mapping[str, Any], reported: Any = None,
+) -> dict[str, Any]:
+    """What a telemetry event may say about a call's usage.
+
+    A measured report carries its canonical counts. An unmeasured one carries
+    only the fact that it was not measured: its zeros are the absence of a
+    measurement, and publishing them as counts is how a console came to show
+    a forty-thousand-token call as "input 0".
+
+    Given the provider's own report as `reported`, a breakdown it never named
+    is left out rather than published as zero: Anthropic reports no reasoning
+    breakdown, and "reasoning 0" claimed one.
+    """
+    if not is_measured(usage):
+        return {"usage_measured": False}
+    omitted = (
+        set() if not isinstance(reported, Mapping)
+        else {
+            name for name, paths in _DETAIL_PATHS.items()
+            if all(_value(reported, *path) is _MISSING for path in paths)
+        }
+    )
+    return {
+        "usage_measured": True,
+        **{
+            name: usage[name]
+            for name in CANONICAL_FIELDS
+            if name not in omitted
+            and isinstance(usage.get(name), int) and not isinstance(usage.get(name), bool)
+        },
     }
 
 

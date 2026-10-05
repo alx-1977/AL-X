@@ -550,7 +550,7 @@ class RegistrationTests(unittest.TestCase):
             parent = parents.get(id(parent))
         start = source.index("checks_runtime = build_pull_request_checks_runtime(")
         window = source[start:start + 700]
-        self.assertIn("registry.register(definition)", window)
+        self.assertIn("register(checks_runtime.definitions, TraceSubsystem.GITHUB)", window)
         self.assertIn("policies.update(checks_runtime.policies)", window)
         self.assertIn("executors.update(checks_runtime.executors)", window)
         self.assertIn("permissions.update(checks_runtime.permissions)", window)

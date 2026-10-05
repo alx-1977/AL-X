@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 from typing import Any
 
-from alx.contracts import ModelCompletion, ModelRequest, ModelRole, normalise_usage
+from alx.contracts import ModelCompletion, ModelRequest, ModelRole, normalise_usage, usage_telemetry
 from alx.providers.errors import raise_provider_failure
 
 
@@ -212,7 +212,9 @@ class CodexSubscriptionReasoningModel:
         try:
             self._telemetry_sink(request.affinity_key, {
                 "code": code, "provider": PROVIDER_NAME, "model": self._model,
-                "duration_ms": round((monotonic() - started_at) * 1000), **usage,
+                "duration_ms": round((monotonic() - started_at) * 1000),
+                **(usage_telemetry(usage) if code == "reasoning.completed" else {}),
+                **({"purpose": request.purpose} if request.purpose else {}),
             })
         except Exception:
             LOGGER.info("Codex subscription telemetry sink failed")

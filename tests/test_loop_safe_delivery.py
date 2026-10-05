@@ -32,8 +32,17 @@ NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 DUE = NOW - timedelta(minutes=5)
 
 
+class _IdleSession:
+    """No person turn is pending, so the voice is free."""
+
+    @staticmethod
+    def admits_unprompted_speech(_conversation_id: str) -> bool:
+        return True
+
+
 def _server() -> LiveVoiceServer:
     server = LiveVoiceServer.__new__(LiveVoiceServer)
+    server._session = _IdleSession()
     server._delivery_queues = {}
     server._typed_queues = {}
     server._delivery_loop = None

@@ -28,6 +28,7 @@ from alx.contracts.records import (
 from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
 from alx.contracts.scope import ScopeReference
 from alx.contracts.provenance import ContentProvenance
+from alx.contracts.trace import ReasoningPurpose
 
 
 class DecisionValidationError(ValueError):
@@ -270,6 +271,9 @@ class ReasoningContext:
     # turn. The same reasoner may compose one answer from the state it already
     # has, but cannot select another action or change durable state.
     response_only_reason: str | None = None
+    # Why the loop is making this call, derived from its own state. Operator
+    # telemetry only: it is never placed in the model's context.
+    purpose: ReasoningPurpose | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))

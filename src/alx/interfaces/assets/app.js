@@ -7,6 +7,7 @@ const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
+const diagnosticDetails = document.querySelector("#diagnostic-details");
 const taskRows = document.querySelector("#task-rows");
 const codingCancel = document.querySelector("#coding-cancel");
 let activeCodingJobId = "";
@@ -41,11 +42,11 @@ let playbackQueue = [];
 let microphone;
 let stageStartedAt = performance.now();
 let firstAudioSent = false;
-let firstAudioReceived = false;
 let heardThisTurn = false;
-let audioByteCount = 0;
-let audioChunkCount = 0;
-let ttsStartedAt;
+// The utterance whose audio is arriving now. Its counts and clock travel with
+// its blob into the playback queue: shared counters were reset by the next
+// utterance's synthesis, so a queued reply reported another reply's timing.
+let arriving;
 let lastCodingTransition = "";
 // Each external task keeps its own clock. A single global row caused one
 // concurrent review to overwrite another and made the display untrue.
@@ -55,34 +56,128 @@ const runningTasks = new Map();
 const blockedPlans = new Map();
 const terminalTaskRetentionMilliseconds = 10_000;
 
-function clockTime() {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-  }).format(new Date());
+const clockFormat = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+
+// The server stamps each event when it happens. Using that, rather than when
+// the browser happened to receive it, is what keeps a line's time true: a
+// late burst used to show one second for two minutes of work.
+function eventDate(at) {
+  const parsed = at ? new Date(at) : undefined;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date();
 }
 
-// A line carries two independent labels. `stream` says where the data came
-// from; `tone` says how it reads. Future SERIAL or BUILD sources are new
-// stream values, not a new renderer — and neither label ever decides where
-// keyboard input goes.
-function diagnostic(message, tone = "info", stream = "SYSTEM") {
+// A line carries independent labels. `stream` says where the data came from;
+// `tone` says how it reads; `subsystem` names the part of AL/X it concerns;
+// `detail` marks low-level telemetry shown only under Details. None of them
+// ever decides where keyboard input goes.
+function diagnostic(message, tone = "info", stream = "SYSTEM", options = {}) {
   const line = document.createElement("div");
   line.className = "diagnostic-line";
   line.dataset.tone = tone;
   line.dataset.stream = stream;
+  if (options.detail) line.dataset.detail = "true";
+  if (options.background) line.dataset.background = "true";
+  const when = eventDate(options.at);
   const timestamp = document.createElement("time");
-  timestamp.textContent = clockTime();
+  timestamp.dateTime = when.toISOString();
+  timestamp.textContent = clockFormat.format(when);
+  const subsystem = document.createElement("b");
+  subsystem.textContent = options.subsystem ?? "";
   const content = document.createElement("span");
   content.textContent = message;
-  line.append(timestamp, content);
+  line.append(timestamp, subsystem, content);
   diagnosticLog.append(line);
-  while (diagnosticLog.childElementCount > 80) diagnosticLog.firstElementChild.remove();
+  while (diagnosticLog.childElementCount > 240) diagnosticLog.firstElementChild.remove();
   diagnosticLog.scrollTop = diagnosticLog.scrollHeight;
 }
 
-function beginDiagnosticStage(label) {
+// Low-level telemetry: kept, but behind Details.
+function detail(message, tone = "info", options = {}) {
+  diagnostic(message, tone, "SYSTEM", { subsystem: "DIAG", ...options, detail: true });
+}
+
+function showDetails(shown) {
+  diagnosticLog.dataset.details = shown ? "shown" : "hidden";
+  diagnosticDetails.setAttribute("aria-pressed", shown ? "true" : "false");
+  diagnosticLog.scrollTop = diagnosticLog.scrollHeight;
+  try {
+    localStorage.setItem("alx.trace_details", shown ? "shown" : "hidden");
+  } catch (error) {
+    // A remembered preference only; the toggle still works without it.
+  }
+}
+
+diagnosticDetails.addEventListener("click", () => {
+  showDetails(diagnosticLog.dataset.details !== "shown");
+});
+
+try {
+  showDetails(localStorage.getItem("alx.trace_details") === "shown");
+} catch (error) {
+  showDetails(false);
+}
+
+// A measured duration, or an honest absence. A provider that does not report
+// a figure is shown as not reporting it, never as zero.
+function seconds(milliseconds) {
+  const value = Number(milliseconds);
+  return milliseconds === undefined || milliseconds === null || !Number.isFinite(value)
+    ? "not reported"
+    : `${(value / 1000).toFixed(2)} s`;
+}
+
+const purposeLabels = {
+  interpreting_request: "Interpreting request",
+  assessing_event: "Assessing external event",
+  reviewing_completed_work: "Reviewing completed work",
+  revisiting_follow_up: "Revisiting requested follow-up",
+  evaluating_plan: "Evaluating plan progress",
+  evaluating_goal_state: "Evaluating goal state",
+  reviewing_result: "Reviewing result",
+  reviewing_memories: "Reviewing retrieved memories",
+  reconsidering_refusal: "Reconsidering after refusal",
+  correcting_decision: "Correcting rejected decision",
+  continuing_work: "Continuing remaining work",
+  preparing_response: "Preparing response",
+  deciding_next_step: "Deciding next step",
+};
+
+function reasoningTokens(message) {
+  if (message.usage_measured !== true) return "Tokens · not reported by provider";
+  const count = (value) => (Number.isFinite(Number(value)) ? Number(value).toLocaleString() : "not reported");
+  return `Tokens · input ${count(message.input_tokens)} · cached ${count(message.cached_tokens)} · cache write ${count(message.cache_write_tokens)} · output ${count(message.output_tokens)} · reasoning ${count(message.reasoning_tokens)} · total ${count(message.total_tokens)}`;
+}
+
+const traceTones = {
+  started: "active", waiting: "active", completed: "ok", info: "info",
+  refused: "error", failed: "error",
+};
+
+// One operator step: which subsystem is active and what it is doing.
+function showTrace(message) {
+  const parts = [message.label];
+  if (message.reference && message.reference !== message.label) parts.push(message.reference);
+  if (message.count !== undefined) parts.push(`${message.count} steps`);
+  if (message.duration_ms !== undefined) parts.push(seconds(message.duration_ms));
+  if (message.reason_code) parts.push(message.reason_code);
+  const subsystem = String(message.subsystem ?? "").toUpperCase();
+  diagnostic(parts.join(" · "), traceTones[message.status] ?? "info", "SYSTEM", {
+    subsystem, at: message.at, background: message.background === true,
+  });
+  // The stage bar names the step now running, with its own clock, so a long
+  // model call reads as the work it is rather than as silence.
+  if (["started", "waiting"].includes(message.status) && message.background !== true) {
+    beginDiagnosticStage(`${subsystem} · ${message.label}`, message.at);
+  }
+}
+
+function beginDiagnosticStage(label, at) {
   diagnosticStage.textContent = label;
-  stageStartedAt = performance.now();
+  // Measured from when the step began on the server, not from arrival.
+  const lag = at ? Math.max(0, Date.now() - eventDate(at).getTime()) : 0;
+  stageStartedAt = performance.now() - lag;
 }
 
 function elapsedText(milliseconds) {
@@ -127,7 +222,7 @@ function showCodingStatus(message) {
   if (transition && key !== lastCodingTransition) {
     diagnostic(`${message.job_id ?? "CASE"} · ${transition}`,
       message.stalled || (message.terminal && !["succeeded", "no_change_required"].includes(message.outcome))
-        ? "error" : "active", "CODING");
+        ? "error" : "active", "CODING", { subsystem: "CODING", at: message.at });
     lastCodingTransition = key;
   }
 }
@@ -143,9 +238,8 @@ codingCancel.addEventListener("click", () => {
   }, 5000);
 });
 
-function ttsElapsed() {
-  if (ttsStartedAt === undefined) return "0.00 s";
-  return `${((performance.now() - ttsStartedAt) / 1000).toFixed(2)} s`;
+function sinceSynthesis(utterance) {
+  return `${((performance.now() - utterance.startedAt) / 1000).toFixed(2)} s after synthesis start`;
 }
 
 setInterval(() => {
@@ -265,7 +359,7 @@ async function acquireMicrophone() {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
-  diagnostic(`Microphone access granted · browser audio ${context.sampleRate} Hz`, "ok");
+  detail(`Microphone access granted · browser audio ${context.sampleRate} Hz`, "ok", { subsystem: "VOICE" });
   return { context, stream };
 }
 
@@ -284,12 +378,12 @@ async function connectMicrophone(targetSampleRate) {
       socket.send(data);
       if (!firstAudioSent) {
         firstAudioSent = true;
-        diagnostic("First microphone frame sent to AL/X", "active");
+        detail("First microphone frame sent to AL/X", "active", { subsystem: "VOICE" });
       }
     }
   };
   source.connect(capture).connect(silent).connect(context.destination);
-  diagnostic(`Audio capture online · PCM ${targetSampleRate} Hz`, "ok");
+  detail(`Audio capture online · PCM ${targetSampleRate} Hz`, "ok", { subsystem: "VOICE" });
 }
 
 async function releaseMicrophone() {
@@ -316,8 +410,14 @@ function enqueueUtterance(mediaType) {
   // Sealed at arrival. Clearing the shared buffer inside playback let a second
   // stream's chunks land in `audioParts` before the first had taken them,
   // merging two utterances into one blob.
+  // Audio is never dropped for want of its bookkeeping: without a record its
+  // timing starts here, which is the earliest moment actually known.
+  const utterance = arriving ?? { startedAt: performance.now(), chunks: audioParts.length, bytes: 0 };
+  arriving = undefined;
   if (!audioParts.length) return;
-  playbackQueue.push(new Blob(audioParts, { type: mediaType }));
+  utterance.blob = new Blob(audioParts, { type: mediaType });
+  utterance.sealedAt = performance.now();
+  playbackQueue.push(utterance);
   audioParts = [];
   void drainPlaybackQueue();
 }
@@ -343,6 +443,7 @@ async function drainPlaybackQueue() {
     sending = true;
     setPhase("listening");
     beginDiagnosticStage("Listening");
+    diagnostic("Waiting for input", "info", "SYSTEM", { subsystem: "IDLE" });
     heardThisTurn = false;
   }
 }
@@ -350,16 +451,16 @@ async function drainPlaybackQueue() {
 // Resolves when this utterance stops being audible, for any reason. It never
 // rejects: a failed utterance must not prevent the queue behind it from
 // playing, so the failure is reported and the drainer continues.
-function playOneUtterance(blob) {
+function playOneUtterance(utterance) {
   return new Promise((resolve) => {
-    const url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(utterance.blob);
     const audio = new Audio();
     let settled = false;
     const finish = (message, tone) => {
       if (settled) return;
       settled = true;
       URL.revokeObjectURL(url);
-      diagnostic(message, tone);
+      diagnostic(message, tone, "SYSTEM", { subsystem: "VOICE" });
       resolve();
     };
     audio.onended = () => finish("Playback completed", "ok");
@@ -368,13 +469,16 @@ function playOneUtterance(blob) {
     audio.addEventListener(
       "canplay",
       () => {
-        diagnostic(`Browser audio buffer ready · ${ttsElapsed()}`, "ok");
+        // Queue wait is reported separately: a reply that waited behind
+        // another was ready long before it could be heard.
+        const queued = ((performance.now() - utterance.sealedAt) / 1000).toFixed(2);
+        detail(`Browser audio buffer ready · ${sinceSynthesis(utterance)} · queued ${queued} s`, "ok", { subsystem: "VOICE" });
         beginDiagnosticStage("Playing synthesized response");
         setPhase("speaking");
         audio.play().then(
           () => diagnostic(
-            `Playback started · ${ttsElapsed()} · ${audioChunkCount} chunks · ${audioByteCount} bytes`,
-            "active",
+            `Playback started · ${sinceSynthesis(utterance)} · ${utterance.chunks} chunks · ${utterance.bytes} bytes`,
+            "active", "SYSTEM", { subsystem: "VOICE" },
           ),
           () => finish("Browser refused synthesized audio; continuing", "error"),
         );
@@ -425,7 +529,7 @@ function handleControl(message) {
     return;
   }
   if (message.type === "alx.text") {
-    diagnostic(`ALX > ${message.content}`, "ok", message.stream || "ALX");
+    diagnostic(`ALX > ${message.content}`, "ok", message.stream || "ALX", { subsystem: "AL/X" });
     return;
   }
   if (message.type === "activity") {
@@ -434,25 +538,33 @@ function handleControl(message) {
     return;
   }
   if (message.type === "diagnostic") {
-    if (message.code === "coding.status") {
+    const at = message.at;
+    const background = message.background === true;
+    if (message.code === "trace") {
+      showTrace(message);
+    } else if (message.code === "coding.status") {
       showCodingStatus(message);
     } else if (message.code === "microphone.audio_received") {
-      diagnostic("AL/X server received microphone audio", "ok");
+      detail("AL/X server received microphone audio", "ok", { at });
     } else if (message.code === "reasoning.completed") {
-      const seconds = (value) => `${(Number(value ?? 0) / 1000).toFixed(2)} s`;
-      const effort = message.reasoning_effort
-        ? ` · ${message.reasoning_effort} reasoning`
-        : "";
-      diagnostic(
-        `Reasoning completed · ${message.model} · ${message.service_tier} tier${effort}`,
-        "ok",
-      );
-      diagnostic(
-        `Timing · first event ${seconds(message.first_event_ms)} · first answer ${seconds(message.first_content_ms)} · generation ${seconds(message.answer_generation_ms)} · total ${seconds(message.duration_ms)}`,
-      );
-      diagnostic(
-        `Tokens · input ${message.input_tokens ?? 0} · cached ${message.cached_tokens ?? 0} · reasoning ${message.reasoning_tokens ?? 0} · output ${message.output_tokens ?? 0} · total ${message.total_tokens ?? 0}`,
-      );
+      // One operator line saying which call finished and how long it took;
+      // model, timing and token figures go under Details. A figure the
+      // provider did not report is shown as not reported, never as zero.
+      const purpose = purposeLabels[message.purpose] ?? `${message.kind ?? "model"} call`;
+      diagnostic(`${purpose} · done · ${seconds(message.duration_ms)}`, "ok", "SYSTEM", {
+        subsystem: message.kind === "core" || !message.kind ? "CORE" : String(message.kind).toUpperCase(),
+        at, background,
+      });
+      const tier = message.service_tier ? ` · ${message.service_tier} tier` : "";
+      const effort = message.reasoning_effort ? ` · ${message.reasoning_effort} reasoning` : "";
+      detail(`Model · ${message.provider ?? "provider"} · ${message.model ?? "model not reported"}${tier}${effort}`, "ok", { at, background });
+      const timings = [`wall ${seconds(message.duration_ms)}`];
+      if (message.api_duration_ms !== undefined) timings.push(`API ${seconds(message.api_duration_ms)}`);
+      if (message.first_event_ms !== undefined) timings.push(`first event ${seconds(message.first_event_ms)}`);
+      if (message.first_content_ms !== undefined) timings.push(`first answer ${seconds(message.first_content_ms)}`);
+      if (message.answer_generation_ms !== undefined) timings.push(`generation ${seconds(message.answer_generation_ms)}`);
+      detail(`Timing · ${timings.join(" · ")}`, "info", { at, background });
+      detail(reasoningTokens(message), "info", { at, background });
     } else if (message.code === "reasoning.failed") {
       // 402/403 from a reasoning provider means credit exhausted or the key
       // refused. Naming the condition is a technical diagnostic, not AL/X
@@ -463,20 +575,20 @@ function handleControl(message) {
           ? " · provider rejected the key: credit or spending limit"
           : "";
       diagnostic(
-        `Reasoning provider failed after ${(Number(message.duration_ms ?? 0) / 1000).toFixed(2)} s · ${message.error_type ?? "unknown"}${cause}`,
-        "error",
+        `Reasoning provider failed after ${seconds(message.duration_ms)} · ${message.error_code ?? message.error_type ?? "unknown"}${cause}`,
+        "error", "SYSTEM", { subsystem: "CORE", at, background },
       );
     } else if (message.code === "autonomous.reasoning_disabled") {
-      diagnostic("External event skipped · autonomous reasoning disabled");
+      diagnostic("External event skipped · autonomous reasoning disabled", "info", "SYSTEM", { subsystem: "CORE", at });
+    } else if (message.code === "core.checkpointed") {
+      diagnostic(`Turn checkpointed · ${message.reason ?? "checkpointed"}`, "info", "SYSTEM", { subsystem: "CORE", at });
     } else if (message.code === "tts.request_sent") {
-      diagnostic(`TTS request sent · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "active");
-    } else if (message.code === "tts.text_sent") {
-      diagnostic(`First text sent · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "active");
+      detail(`TTS request sent · ${seconds(message.elapsed_ms)}`, "active", { subsystem: "VOICE", at });
     } else if (message.code === "tts.stream_connected") {
       const transport = message.transport === "websocket" ? "WebSocket" : "HTTP stream";
-      diagnostic(`TTS ${transport} connected · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "ok");
+      detail(`TTS ${transport} connected · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
     } else if (message.code === "tts.first_audio_byte") {
-      diagnostic(`First audio byte received from ElevenLabs · ${(Number(message.elapsed_ms ?? 0) / 1000).toFixed(2)} s`, "ok");
+      detail(`First audio byte received from ElevenLabs · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
     } else if (message.code === "plan.attention") {
       // A live row, like a task: work that is waiting for AL/X is a state.
       showPlanAttention(message);
@@ -485,12 +597,12 @@ function handleControl(message) {
       // console should show, not an event that scrolls away.
       showTask(message);
     } else {
-      diagnostic(`Server diagnostic · ${message.code ?? "unknown"}`);
+      detail(`Server diagnostic · ${message.code ?? "unknown"}`, "info", { at });
     }
     return;
   }
   if (message.type === "audio.end") {
-    diagnostic(`Speech synthesis stream completed · ${ttsElapsed()}`, "ok");
+    if (arriving) detail(`Speech synthesis stream completed · ${sinceSynthesis(arriving)}`, "ok", { subsystem: "VOICE" });
     enqueueUtterance(message.media_type);
     return;
   }
@@ -498,26 +610,24 @@ function handleControl(message) {
   if (message.value === "hearing" && !heardThisTurn) {
     heardThisTurn = true;
     beginDiagnosticStage("Transcribing speech");
-    diagnostic("Speech detected; transcription in progress", "active");
+    diagnostic("Speech detected · transcribing", "active", "SYSTEM", { subsystem: "VOICE" });
   }
   if (message.value === "thinking") {
-    beginDiagnosticStage("Reasoning");
+    beginDiagnosticStage("CORE · Request received");
     if (message.input_origin === "speech_transcript") {
-      diagnostic("Final transcription received", "ok");
+      diagnostic("Final transcription received", "ok", "SYSTEM", { subsystem: "VOICE" });
     }
-    diagnostic("Authoritative Core reasoning in progress", "active");
+    diagnostic("Request received", "active", "SYSTEM", { subsystem: "CORE" });
   }
   if (message.value === "speaking") {
-    audioByteCount = 0;
-    audioChunkCount = 0;
-    firstAudioReceived = false;
-    ttsStartedAt = performance.now();
+    // A new utterance begins arriving. Its own record, sealed with its blob.
+    arriving = { startedAt: performance.now(), chunks: 0, bytes: 0, firstByte: false };
     beginDiagnosticStage("Synthesizing response");
-    diagnostic("Core response accepted; speech synthesis started", "active");
+    diagnostic("Speech synthesis started", "active", "SYSTEM", { subsystem: "VOICE" });
   }
   if (message.value === "error") {
     beginDiagnosticStage("Voice pipeline stopped");
-    diagnostic(`Pipeline error · ${message.reason ?? "unknown_error"}`, "error");
+    diagnostic(`Pipeline error · ${message.reason ?? "unknown_error"}`, "error", "SYSTEM", { subsystem: "VOICE" });
   }
   if (message.value === "thinking" || message.value === "speaking") sending = false;
   // Not cleared here any more. The buffer is sealed and emptied at
@@ -531,7 +641,7 @@ function handleControl(message) {
     sending = true;
     heardThisTurn = false;
     beginDiagnosticStage("Listening");
-    diagnostic("Pipeline recovered; AL/X is listening", "ok");
+    diagnostic("Waiting for input", "info", "SYSTEM", { subsystem: "IDLE" });
   }
   setPhase(message.value);
 }
@@ -554,15 +664,17 @@ begin.addEventListener("click", async () => {
   diagnostic("Opening local voice connection", "active");
   socket = new WebSocket(`${scheme}://${location.host}/voice?conversation_id=${id}`);
   socket.binaryType = "arraybuffer";
-  socket.onopen = () => diagnostic("Browser WebSocket opened", "ok");
+  socket.onopen = () => detail("Browser WebSocket opened", "ok", { subsystem: "VOICE" });
   socket.onmessage = ({ data }) => {
     if (data instanceof ArrayBuffer) {
       audioParts.push(data);
-      audioChunkCount += 1;
-      audioByteCount += data.byteLength;
-      if (!firstAudioReceived) {
-        firstAudioReceived = true;
-        diagnostic(`First audio byte received by browser · ${ttsElapsed()}`, "ok");
+      if (arriving) {
+        arriving.chunks += 1;
+        arriving.bytes += data.byteLength;
+        if (!arriving.firstByte) {
+          arriving.firstByte = true;
+          detail(`First audio byte received by browser · ${sinceSynthesis(arriving)}`, "ok", { subsystem: "VOICE" });
+        }
       }
       return;
     }
@@ -606,7 +718,7 @@ function submitTypedLine() {
     return;
   }
   socket.send(JSON.stringify({ type: "person.text", content }));
-  diagnostic(`You > ${content}`, "info", "ALX");
+  diagnostic(`You > ${content}`, "info", "ALX", { subsystem: "YOU" });
   typedHistory.push(content);
   historyCursor = typedHistory.length;
   consoleInput.value = "";

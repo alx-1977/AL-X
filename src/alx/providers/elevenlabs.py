@@ -86,15 +86,12 @@ class ElevenLabsSynthesizer:
             f"{quote(self._voice_id, safe='')}/stream"
         )
         try:
+            # One stage, not two: over HTTP the text travels in the request
+            # itself. A separate "text sent" at the same instant described a
+            # step that does not exist on this transport.
             self._emit_telemetry(
                 correlation_id,
                 "tts.request_sent",
-                started_at,
-                transport="http",
-            )
-            self._emit_telemetry(
-                correlation_id,
-                "tts.text_sent",
                 started_at,
                 transport="http",
             )

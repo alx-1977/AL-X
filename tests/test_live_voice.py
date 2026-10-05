@@ -33,7 +33,7 @@ from alx.contracts import (  # noqa: E402
 from alx.contracts.coding import CodingTelemetry  # noqa: E402
 from alx.interfaces import (  # noqa: E402
     VoiceActivityStatus,
-    VoiceDiagnosticBuffer,
+    VoiceDiagnosticFeed,
     VoiceEventKind,
     VoiceSession,
 )
@@ -135,9 +135,9 @@ async def incoming_audio():
     yield AudioChunk("mic", 0, b"pcm", "audio/pcm", 16000)
 
 
-class VoiceDiagnosticBufferTests(unittest.TestCase):
-    def test_task_status_keeps_only_the_latest_event_per_task(self) -> None:
-        diagnostics = VoiceDiagnosticBuffer()
+class VoiceDiagnosticFeedTests(unittest.TestCase):
+    def test_a_reconnecting_console_sees_only_the_latest_state_per_task(self) -> None:
+        diagnostics = VoiceDiagnosticFeed()
         diagnostics.publish(
             "conversation-1",
             {"code": "task.status", "task_id": "review-1", "state": "requested"},
@@ -148,23 +148,35 @@ class VoiceDiagnosticBufferTests(unittest.TestCase):
         )
         diagnostics.publish(
             "conversation-1",
-            {"code": "task.status", "task_id": "review-1", "state": "completed"},
+            {"code": "task.status", "task_id": "review-1", "state": "waiting_for_result"},
         )
 
-        events = diagnostics.drain("conversation-1")
-        self.assertEqual(len(events), 2)
-        self.assertEqual(events[-1]["task_id"], "review-1")
-        self.assertEqual(events[-1]["state"], "completed")
-
-    def test_each_dormant_conversation_has_a_hard_event_limit(self) -> None:
-        diagnostics = VoiceDiagnosticBuffer(max_events_per_conversation=2)
-        diagnostics.publish("conversation-1", {"code": "first"})
-        diagnostics.publish("conversation-1", {"code": "second"})
-        diagnostics.publish("conversation-1", {"code": "third"})
-
+        _unsubscribe, replay = diagnostics.subscribe(lambda _owner, _event: None)
         self.assertEqual(
-            [event["code"] for event in diagnostics.drain("conversation-1")],
-            ["second", "third"],
+            [(event["task_id"], event["state"]) for _owner, event in replay],
+            [("review-2", "requested"), ("review-1", "waiting_for_result")],
+        )
+
+    def test_settled_tasks_and_momentary_events_are_not_replayed(self) -> None:
+        diagnostics = VoiceDiagnosticFeed(max_state_rows=2)
+        diagnostics.publish("conversation-1", {"code": "reasoning.completed"})
+        diagnostics.publish(
+            "conversation-1",
+            {"code": "task.status", "task_id": "review-1", "state": "requested"},
+        )
+        diagnostics.publish(
+            "conversation-1",
+            {"code": "task.status", "task_id": "review-1", "state": "completed"},
+        )
+        for index in range(3):
+            diagnostics.publish(
+                "conversation-1",
+                {"code": "task.status", "task_id": f"open-{index}", "state": "requested"},
+            )
+
+        _unsubscribe, replay = diagnostics.subscribe(lambda _owner, _event: None)
+        self.assertEqual(
+            [event["task_id"] for _owner, event in replay], ["open-1", "open-2"],
         )
 
 
@@ -596,13 +608,12 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tts_transport_diagnostics_arrive_before_audio(self) -> None:
-        diagnostics = VoiceDiagnosticBuffer()
+        diagnostics = VoiceDiagnosticFeed()
 
         class DiagnosticSynthesizer:
             async def synthesize(self, response, correlation_id=None):
                 for code in (
                     "tts.request_sent",
-                    "tts.text_sent",
                     "tts.stream_connected",
                     "tts.first_audio_byte",
                 ):
@@ -636,7 +647,6 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             codes,
             [
                 "tts.request_sent",
-                "tts.text_sent",
                 "tts.stream_connected",
                 "tts.first_audio_byte",
             ],

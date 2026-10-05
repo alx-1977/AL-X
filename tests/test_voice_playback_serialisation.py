@@ -42,7 +42,7 @@ const listeners = {};
 function element() {
   return {
     dataset: {}, textContent: "", className: "",
-    append() {}, replaceChildren() {}, remove() {},
+    append() {}, replaceChildren() {}, remove() {}, setAttribute() {},
     addEventListener(name, fn) { listeners[name] = fn; },
     querySelector() { return element(); },
     get childElementCount() { return 0; },
@@ -154,7 +154,7 @@ class PlaybackSerialisationTests(unittest.TestCase):
             console.log(JSON.stringify({background, speech: messages}));
         """))
         self.assertNotIn("Final transcription received", result["background"])
-        self.assertIn("Authoritative Core reasoning in progress", result["background"])
+        self.assertIn("Request received", result["background"])
         self.assertIn("Final transcription received", result["speech"])
 
     def test_disabled_autonomous_event_has_a_neutral_diagnostic(self) -> None:

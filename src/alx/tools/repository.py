@@ -83,6 +83,7 @@ DEFINITION = CapabilityDefinition(
     # Declared rather than left at the default, so the Core's check on text
     # Friedl has not heard applies here as it does to mail.
     transmits_authored_text=True,
+    trace_fields=("pull_request_number",),
 )
 
 
