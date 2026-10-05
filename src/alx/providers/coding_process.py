@@ -20,7 +20,7 @@ import tempfile
 from importlib import metadata
 from contextvars import ContextVar
 from threading import Event, Lock, Thread
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Callable
 from collections.abc import Sequence
 from collections import Counter
@@ -227,18 +227,27 @@ def _stop(process: subprocess.Popen[Any]) -> None:
         return
     if not _signal_group(process, signal.SIGTERM):
         return
-    try:
-        process.wait(timeout=2)
+    # The CLI exiting proves only that the CLI exited. A descendant that
+    # ignores SIGTERM keeps the group alive, so the group is what is awaited
+    # and, if anything remains, what is killed.
+    if _group_stopped(process, 2.0):
         return
-    except subprocess.TimeoutExpired:
-        pass
     _signal_group(process, signal.SIGKILL)
-    try:
-        process.wait(timeout=STOP_WAIT_SECONDS)
-    except subprocess.TimeoutExpired as error:
+    if not _group_stopped(process, STOP_WAIT_SECONDS):
         raise CodingError(
             "session_interrupted", reason_code="session_unstoppable"
-        ) from error
+        )
+
+
+def _group_stopped(process: subprocess.Popen[Any], seconds: float) -> bool:
+    """Whether the CLI has exited and its process group is empty in time."""
+    deadline = monotonic() + seconds
+    while True:
+        if process.poll() is not None and not _group_members(process.pid):
+            return True
+        if monotonic() >= deadline:
+            return False
+        sleep(0.1)
 
 
 # How long a session process may take to exit after SIGKILL. The kernel
