@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from threading import Lock, RLock
@@ -56,15 +57,21 @@ class VoiceDiagnosticFeed:
         self._lock = Lock()
         # Held from stamping through delivery. Listeners only enqueue, so the
         # time any publisher waits on another is the length of a queue append.
+        # Re-entrant, so a listener that publishes cannot deadlock itself.
         self._dispatch = RLock()
+        # Stamped events not yet delivered, oldest first, and whether a
+        # delivery loop is running. Touched only while holding `_dispatch`.
+        self._undelivered: deque[tuple[str | None, dict[str, Any]]] = deque()
+        self._delivering = False
 
     def publish(self, conversation_id: str | None, values: Mapping[str, Any]) -> None:
         """Stamp one event now and hand it to every live listener.
 
-        Stamping and delivery happen under one dispatch lock, so listeners
-        receive events in sequence order even when the Core worker and a
-        planned step publish at the same moment. Re-entrant, so a listener
-        that publishes cannot deadlock itself.
+        Every listener receives events in sequence order. Publishers on other
+        threads wait on the dispatch lock, so the Core worker and a planned
+        step cannot overtake each other. A listener that publishes during
+        delivery, on the same thread, has its event queued and delivered once
+        the current event has reached every listener, rather than ahead of it.
         """
         event = dict(values)
         owner = conversation_id if conversation_id and conversation_id.strip() else None
@@ -74,12 +81,24 @@ class VoiceDiagnosticFeed:
                 event["seq"] = self._sequence
                 event["at"] = self._clock().isoformat(timespec="milliseconds")
                 self._remember_state(owner, event)
-                listeners = tuple(self._listeners)
-            for listener in listeners:
-                try:
-                    listener(owner, event)
-                except Exception:  # noqa: BLE001 - one console must not stop another
-                    LOGGER.info("Diagnostic listener failed")
+            self._undelivered.append((owner, event))
+            if self._delivering:
+                # A nested publish from a listener: the outer delivery loop
+                # below reaches it after the event now being delivered.
+                return
+            self._delivering = True
+            try:
+                while self._undelivered:
+                    next_owner, next_event = self._undelivered.popleft()
+                    with self._lock:
+                        listeners = tuple(self._listeners)
+                    for listener in listeners:
+                        try:
+                            listener(next_owner, next_event)
+                        except Exception:  # noqa: BLE001 - one console must not stop another
+                            LOGGER.info("Diagnostic listener failed")
+            finally:
+                self._delivering = False
 
     def trace(self, event: TraceEvent) -> None:
         """Publish one operator trace step."""

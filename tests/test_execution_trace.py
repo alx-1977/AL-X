@@ -289,6 +289,20 @@ class TimestampTests(unittest.TestCase):
         second.join(3)
         self.assertEqual(received, [1, 2])
 
+    def test_an_event_published_during_delivery_waits_its_turn(self) -> None:
+        feed = VoiceDiagnosticFeed()
+        later: list[str] = []
+
+        def first_listener(_owner, event) -> None:
+            if event["code"] == "first":
+                feed.publish("c", {"code": "nested"})
+
+        feed.subscribe(first_listener)
+        feed.subscribe(lambda _owner, event: later.append(event["code"]))
+        feed.publish("c", {"code": "first"})
+        # The second listener still sees the first event before the nested one.
+        self.assertEqual(later, ["first", "nested"])
+
     def test_the_console_renders_the_server_time_not_its_arrival(self) -> None:
         script = (ROOT / "src/alx/interfaces/assets/app.js").read_text(encoding="utf-8")
         self.assertIn("eventDate(options.at)", script)
