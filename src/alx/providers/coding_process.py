@@ -162,6 +162,8 @@ class CodingCancellation:
                         pass
                     else:
                         self.check()
+                        if activity_files:
+                            _stop_remaining(process)
                         _within_output_limit(activity_files, output_limit)
                         return subprocess.CompletedProcess(
                             argv, process.returncode, stdout, stderr
@@ -204,6 +206,8 @@ class CodingCancellation:
                         timeout=poll,
                     )
                     self.check()
+                    if activity_files:
+                        _stop_remaining(process)
                     _within_output_limit(activity_files, output_limit)
                     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
                 except subprocess.TimeoutExpired as pending:
@@ -361,6 +365,26 @@ def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs:
     if current is None and "inactivity_timeout" not in kwargs:
         return runner(argv, **kwargs)
     return (current or CodingCancellation()).run(runner, argv, **kwargs)
+
+
+def _stop_remaining(process: subprocess.Popen[Any]) -> None:
+    """Stop what is left of a finished session's process group.
+
+    The CLI has exited, but a descendant may still hold the spool open and
+    keep writing after monitoring and the output bound would otherwise end.
+    It is stopped by the same bounded path as a running session, before the
+    final size check.
+    """
+    members, counted = _group_members(process.pid)
+    if counted and not members:
+        return
+    if _signal_group(process, signal.SIGTERM) is None:
+        return
+    if _group_stopped(process, 2.0, group_killed=False):
+        return
+    killed = _signal_group(process, signal.SIGKILL)
+    if not _group_stopped(process, STOP_WAIT_SECONDS, group_killed=killed is True):
+        raise CodingError("session_interrupted", reason_code="session_unstoppable")
 
 
 def _within_output_limit(paths: tuple[Path, ...], limit: int | None) -> None:

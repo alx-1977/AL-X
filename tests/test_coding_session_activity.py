@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import textwrap
 import unittest
 from pathlib import Path
@@ -197,6 +198,38 @@ print(json.dumps({"type": "end", "stopReason": "end_turn", "padding": "x" * 5000
                 self._session(_fake_cli(Path(self.directory.name), big_end)) \
                     .run_session(self._request(), "briefing")
         self.assertEqual(raised.exception.details["reason_code"], "session_event_oversized")
+
+    def test_a_descendant_still_writing_after_the_cli_exits_is_stopped(self) -> None:
+        """Monitoring ends with the session, so its leftovers end with it too."""
+        pid_file = Path(self.directory.name) / "writer.pid"
+        leaver = f"""
+import json, subprocess, sys
+writer = subprocess.Popen([sys.executable, "-c",
+    "import time\\nwhile True:\\n    print('{{\\"type\\": \\"tool_call_update\\"}}', flush=True); time.sleep(0.05)"])
+open({str(pid_file)!r}, "w").write(str(writer.pid))
+print(json.dumps({{"type": "text", "data": "done"}}), flush=True)
+print(json.dumps({{"type": "end", "stopReason": "end_turn", "num_turns": 1}}), flush=True)
+"""
+        # A roomier stall bound than the shared one: this stand-in starts a
+        # second interpreter before it writes anything.
+        session = GrokCodingSession(
+            "grok-test", executable=str(_fake_cli(Path(self.directory.name), leaver)),
+            stall_seconds=5,
+            environment={"PATH": os.environ.get("PATH", ""), "GROK_HOME": str(self.home)},
+        )
+        result = session.run_session(self._request(), "briefing")
+        self.assertTrue(result.completed)
+        writer = int(pid_file.read_text())
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(writer, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(writer, signal.SIGKILL)
+            self.fail("a descendant kept writing after the session returned")
 
 
 class StreamedResultTests(unittest.TestCase):
