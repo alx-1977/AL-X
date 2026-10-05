@@ -225,26 +225,37 @@ def _stop(process: subprocess.Popen[Any]) -> None:
     """
     if process.poll() is not None:
         return
-    if not _signal_group(process, signal.SIGTERM):
+    if _signal_group(process, signal.SIGTERM) is None:
         return
     # The CLI exiting proves only that the CLI exited. A descendant that
     # ignores SIGTERM keeps the group alive, so the group is what is awaited
     # and, if anything remains, what is killed.
-    if _group_stopped(process, 2.0):
+    if _group_stopped(process, 2.0, group_killed=False):
         return
-    _signal_group(process, signal.SIGKILL)
-    if not _group_stopped(process, STOP_WAIT_SECONDS):
+    killed = _signal_group(process, signal.SIGKILL)
+    if not _group_stopped(process, STOP_WAIT_SECONDS, group_killed=killed is True):
         raise CodingError(
             "session_interrupted", reason_code="session_unstoppable"
         )
 
 
-def _group_stopped(process: subprocess.Popen[Any], seconds: float) -> bool:
-    """Whether the CLI has exited and its process group is empty in time."""
+def _group_stopped(
+    process: subprocess.Popen[Any], seconds: float, *, group_killed: bool
+) -> bool:
+    """Whether the CLI has exited and its process group is empty in time.
+
+    Only a census that succeeded can show the group empty. When `ps` fails,
+    the group is unknown, never empty: before SIGKILL that means escalating;
+    after a group-wide SIGKILL the kernel delivered, the CLI's exit stands.
+    """
     deadline = monotonic() + seconds
     while True:
-        if process.poll() is not None and not _group_members(process.pid):
-            return True
+        if process.poll() is not None:
+            members, counted = _group_members(process.pid)
+            if counted and not members:
+                return True
+            if not counted and group_killed:
+                return True
         if monotonic() >= deadline:
             return False
         sleep(0.1)
@@ -256,40 +267,45 @@ def _group_stopped(process: subprocess.Popen[Any], seconds: float) -> bool:
 STOP_WAIT_SECONDS = 5.0
 
 
-def _signal_group(process: subprocess.Popen[Any], signum: int) -> bool:
-    """Signal the session's process group. False if it is already gone."""
+def _signal_group(process: subprocess.Popen[Any], signum: int) -> bool | None:
+    """Signal the session's process group.
+
+    True when the whole group took the signal, False when only its members
+    could be signalled one by one, None when the group is already gone.
+    """
     try:
         os.killpg(process.pid, signum)
         return True
     except ProcessLookupError:
-        return False
+        return None
     except PermissionError:
         pass
     # The group refused as a whole: signal its members one by one. A member
     # that has exited (the EPERM cause) or is not ours refuses alone.
-    for pid in _group_members(process.pid) or (process.pid,):
+    members, _counted = _group_members(process.pid)
+    for pid in members or (process.pid,):
         try:
             os.kill(pid, signum)
         except (ProcessLookupError, PermissionError):
             continue
-    return True
+    return False
 
 
-def _group_members(pgid: int) -> tuple[int, ...]:
-    """Process identifiers whose process group is `pgid`, from `ps`."""
+def _group_members(pgid: int) -> tuple[tuple[int, ...], bool]:
+    """Members of process group `pgid`, and whether `ps` could count them."""
     try:
         listing = subprocess.run(  # noqa: S603 - fixed argv, no model input
             ["ps", "-A", "-o", "pid=", "-o", "pgid="],
             capture_output=True, text=True, timeout=5, check=False, shell=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return ()
+        return (), False
     members: list[int] = []
     for line in listing.stdout.splitlines():
         fields = line.split()
         if len(fields) == 2 and fields[0].isdigit() and fields[1] == str(pgid):
             members.append(int(fields[0]))
-    return tuple(members)
+    return tuple(members), listing.returncode == 0
 
 
 def check_cancelled() -> None:

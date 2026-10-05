@@ -223,6 +223,36 @@ class StopReasonSurvivesTests(unittest.TestCase):
                 _gone(int(pid_file.read_text())), "a SIGTERM-ignoring child survived"
             )
 
+    def test_a_failed_census_never_counts_as_an_empty_group(self) -> None:
+        """`ps` unavailable: the SIGTERM-ignoring child is still killed."""
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "child.pid"
+            stubborn = (
+                "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(60)"
+            )
+            script = (
+                "import subprocess, sys, time\n"
+                f"child = subprocess.Popen([sys.executable, '-c', {stubborn!r}])\n"
+                "time.sleep(0.3)\n"
+                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+                "time.sleep(60)\n"
+            )
+            with mock.patch.object(
+                coding_process, "_group_members", return_value=((), False)
+            ):
+                with self.assertRaises(CodingError) as raised:
+                    coding_process.CodingCancellation().run(
+                        subprocess.run, [sys.executable, "-c", script],
+                        capture_output=True, text=True, timeout=30,
+                        inactivity_timeout=1.0, activity_root=str(Path(directory) / "none"),
+                        stdin=subprocess.DEVNULL, shell=False, check=False,
+                    )
+            self.assertEqual(raised.exception.details["reason_code"], "session_stalled")
+            self.assertTrue(
+                _gone(int(pid_file.read_text())), "a failed census hid a live child"
+            )
+
     def test_a_process_that_cannot_be_stopped_is_reported_within_a_bound(self) -> None:
         """Both signals refused: a declared failure, not an endless wait."""
         real_kill = os.kill
