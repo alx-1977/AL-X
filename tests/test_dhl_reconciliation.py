@@ -1412,6 +1412,21 @@ class DhlImportLifecycleTests(unittest.TestCase):
         result = self.notification("awb", "worksheet")
         self.assertEqual(result.failure["code"], "customs_evidence_ambiguous")
         self.assertEqual(self.xero.state.get("created", 0), 0)
+        self.assertEqual(
+            [dict(item) for item in result.values["documents"]],
+            [
+                {"attachment_id": "awb", "kind": "unrecognised"},
+                {"attachment_id": "worksheet", "kind": "customs_worksheet"},
+            ],
+        )
+
+    def test_no_evidence_is_reported_before_any_xero_prerequisite(self) -> None:
+        """An unconfigured supplier must not stand in for "nothing to post"."""
+        self.mail.payloads["awb"] = ("awb.pdf", "application/pdf", airway_bill_pdf())
+        executor = executor_for(self.mail, self.xero, supplier_name="")
+        result = executor({"documents": [source_for(self.mail, "awb", "13")]})
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(result.values["returned_for"], "documents_ambiguous")
 
 
 class DeclaredFailureCodeTests(unittest.TestCase):

@@ -186,11 +186,14 @@ def build_dhl_executors(
     """
     now = clock or (lambda: datetime.now(UTC))
 
-    def failed(code: str) -> CapabilityResult:
+    def failed(
+        code: str, documents: Sequence[Mapping[str, str]] = ()
+    ) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
             PROCESS_DHL_IMPORT,
             CapabilityResultState.FAILED,
+            {"documents": tuple(documents)} if documents else {},
             failure={"code": code},
         )
 
@@ -1217,6 +1220,10 @@ def build_dhl_executors(
         )
 
     def process(arguments: StructuredData) -> CapabilityResult:
+        # What each supplied document was read as, so every outcome says which
+        # were used and which were left unused, including a document failure
+        # such as a worksheet without its SAD 500.
+        classified: tuple[dict[str, str], ...] = ()
         try:
             sources = arguments.get("documents")
             if not isinstance(sources, (tuple, list)) or not sources:
@@ -1230,23 +1237,21 @@ def build_dhl_executors(
 
             # The stage follows from what the documents are, never from wording.
             kinds = [analyzer.classify(payload) for _r, _a, payload in read]
+            classified = tuple(
+                {"attachment_id": attachment.attachment_id, "kind": kind}
+                for (_r, attachment, _p), kind in zip(read, kinds)
+            )
             result = _dispatch(read, kinds, references)
         except ValueError:
             return failed("arguments_unusable")
         except MailAccessError as error:
             return failed(error.code)
         except DhlDocumentError as error:
-            return failed(error.code)
+            return failed(error.code, classified)
         except XeroAccessError as error:
             return failed(error.code)
         if result.state is CapabilityResultState.FAILED:
             return result
-        # Every outcome says what each supplied document was read as, so a
-        # document left unused is visible rather than silently dropped.
-        classified = tuple(
-            {"attachment_id": attachment.attachment_id, "kind": kind}
-            for (_r, attachment, _p), kind in zip(read, kinds)
-        )
         return replace(
             result,
             values={**result.values, "documents": classified},
@@ -1288,6 +1293,15 @@ def build_dhl_executors(
                 "dhl_freight_invoice",
                 "freight_not_authorised",
                 "the documents describe DHL freight, whose accounting treatment is not approved",
+                references=references,
+            )
+        # Nothing to post is a document outcome, decided before any Xero
+        # prerequisite so it is never reported as a configuration failure.
+        if not (invoices or duty_tax or structured_customs or customs):
+            return returned(
+                "",
+                "documents_ambiguous",
+                "no DHL customs evidence or invoice was supplied",
                 references=references,
             )
         # Only branches that can reach Xero require Xero configuration.
@@ -1349,13 +1363,6 @@ def build_dhl_executors(
             )
         if invoices:
             return invoice_stage(contact_id, invoices[0], references)
-        if customs:
-            return customs_stage(contact_id, customs, references)
-        return returned(
-            "",
-            "documents_ambiguous",
-            "no DHL customs evidence or invoice was supplied",
-            references=references,
-        )
+        return customs_stage(contact_id, customs, references)
 
     return {PROCESS_DHL_IMPORT: process}
