@@ -277,7 +277,7 @@ class GrokSubscriptionReasoningModel:
                     stderr_characters=len(completed.stderr or ""),
                     stdout_characters=len(completed.stdout or ""),
                 )
-            output, model, usage = self._parse(completed.stdout)
+            output, model, usage, reported = self._parse(completed.stdout)
             completion = ModelCompletion(
                 PROVIDER_NAME, model or self._model, output, usage
             )
@@ -289,7 +289,7 @@ class GrokSubscriptionReasoningModel:
                     "provider": PROVIDER_NAME,
                     "model": model or self._model,
                     "duration_ms": round(duration * 1000),
-                    **usage_telemetry(usage),
+                    **usage_telemetry(usage, reported),
                     **_request_telemetry(request),
                 },
             )
@@ -371,6 +371,8 @@ class GrokSubscriptionReasoningModel:
             dict(output),
             model if isinstance(model, str) else "",
             normalise_usage(envelope.get("usage")),
+            # The raw report, so telemetry leaves out breakdowns it never named.
+            envelope.get("usage"),
         )
 
     @classmethod

@@ -39,25 +39,29 @@ _INVALID = object()
 
 # Where each breakdown field may appear in a provider's own report. A
 # provider that names none of these did not report the breakdown, which is not
-# the same as reporting zero. The last path of the two cache fields is
-# Anthropic's beside-input layout, read separately below.
+# the same as reporting zero. The last path of each cache field is Anthropic's
+# beside-input layout, read separately below.
 _DETAIL_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
     "cached_tokens": (
         ("input_tokens_details", "cached_tokens"),
         ("prompt_tokens_details", "cached_tokens"),
         ("cached_tokens",),
+        # Codex names it this way, already counted inside input_tokens.
+        ("cached_input_tokens",),
         ("cache_read_input_tokens",),
     ),
     "cache_write_tokens": (
         ("input_tokens_details", "cache_write_tokens"),
         ("prompt_tokens_details", "cache_write_tokens"),
         ("cache_write_tokens",),
+        ("cache_write_input_tokens",),
         ("cache_creation_input_tokens",),
     ),
     "reasoning_tokens": (
         ("output_tokens_details", "reasoning_tokens"),
         ("completion_tokens_details", "reasoning_tokens"),
         ("reasoning_tokens",),
+        ("reasoning_output_tokens",),
     ),
 }
 
@@ -115,8 +119,10 @@ def normalise_usage(usage: Any) -> dict[str, int]:
     output_tokens = _aliased_count(
         usage, (("output_tokens",), ("completion_tokens",)), required=True
     )
-    cached = _aliased_count(usage, _DETAIL_PATHS["cached_tokens"][:3])
-    cache_write = _aliased_count(usage, _DETAIL_PATHS["cache_write_tokens"][:3])
+    # Every path but the last: that one is Anthropic's beside-input layout,
+    # which is folded into the input count separately below.
+    cached = _aliased_count(usage, _DETAIL_PATHS["cached_tokens"][:-1])
+    cache_write = _aliased_count(usage, _DETAIL_PATHS["cache_write_tokens"][:-1])
     reasoning = _aliased_count(usage, _DETAIL_PATHS["reasoning_tokens"])
     total = _aliased_count(usage, (("total_tokens",),))
     # Anthropic's layout, which the Claude CLI reports. Its `input_tokens` is

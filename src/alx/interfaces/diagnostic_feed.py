@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any
 
 from alx.contracts.trace import TraceEvent
@@ -54,22 +54,32 @@ class VoiceDiagnosticFeed:
         self._states: dict[tuple[Any, ...], tuple[str | None, dict[str, Any]]] = {}
         self._listeners: set[Callable[[str | None, dict[str, Any]], None]] = set()
         self._lock = Lock()
+        # Held from stamping through delivery. Listeners only enqueue, so the
+        # time any publisher waits on another is the length of a queue append.
+        self._dispatch = RLock()
 
     def publish(self, conversation_id: str | None, values: Mapping[str, Any]) -> None:
-        """Stamp one event now and hand it to every live listener."""
+        """Stamp one event now and hand it to every live listener.
+
+        Stamping and delivery happen under one dispatch lock, so listeners
+        receive events in sequence order even when the Core worker and a
+        planned step publish at the same moment. Re-entrant, so a listener
+        that publishes cannot deadlock itself.
+        """
         event = dict(values)
         owner = conversation_id if conversation_id and conversation_id.strip() else None
-        with self._lock:
-            self._sequence += 1
-            event["seq"] = self._sequence
-            event["at"] = self._clock().isoformat(timespec="milliseconds")
-            self._remember_state(owner, event)
-            listeners = tuple(self._listeners)
-        for listener in listeners:
-            try:
-                listener(owner, event)
-            except Exception:  # noqa: BLE001 - one console must not stop another
-                LOGGER.info("Diagnostic listener failed")
+        with self._dispatch:
+            with self._lock:
+                self._sequence += 1
+                event["seq"] = self._sequence
+                event["at"] = self._clock().isoformat(timespec="milliseconds")
+                self._remember_state(owner, event)
+                listeners = tuple(self._listeners)
+            for listener in listeners:
+                try:
+                    listener(owner, event)
+                except Exception:  # noqa: BLE001 - one console must not stop another
+                    LOGGER.info("Diagnostic listener failed")
 
     def trace(self, event: TraceEvent) -> None:
         """Publish one operator trace step."""

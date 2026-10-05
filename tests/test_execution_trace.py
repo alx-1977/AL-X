@@ -50,6 +50,7 @@ from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.interfaces import VoiceDiagnosticFeed, VoiceEventKind, VoiceSession  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel  # noqa: E402
+from alx.providers.codex_subscription import CodexSubscriptionReasoningModel  # noqa: E402
 from alx.safety.gate import AuthorityContext, AuthorityPolicy, SafetyGate  # noqa: E402
 
 NOW = datetime(2026, 10, 5, 8, 14, 38, tzinfo=UTC)
@@ -265,6 +266,29 @@ class TimestampTests(unittest.TestCase):
              for offset in (0, 11, 23)],
         )
 
+    def test_concurrent_publishers_reach_listeners_in_sequence_order(self) -> None:
+        feed = VoiceDiagnosticFeed()
+        received: list[int] = []
+        first_in_listener = threading.Event()
+
+        def listener(_owner, event) -> None:
+            if event["code"] == "first":
+                first_in_listener.set()
+                # A second publisher acts while the first is still delivering.
+                # It must wait rather than overtake.
+                threading.Event().wait(0.3)
+            received.append(event["seq"])
+
+        feed.subscribe(listener)
+        first = threading.Thread(target=feed.publish, args=("c", {"code": "first"}))
+        first.start()
+        self.assertTrue(first_in_listener.wait(3))
+        second = threading.Thread(target=feed.publish, args=("c", {"code": "second"}))
+        second.start()
+        first.join(3)
+        second.join(3)
+        self.assertEqual(received, [1, 2])
+
     def test_the_console_renders_the_server_time_not_its_arrival(self) -> None:
         script = (ROOT / "src/alx/interfaces/assets/app.js").read_text(encoding="utf-8")
         self.assertIn("eventDate(options.at)", script)
@@ -446,6 +470,39 @@ class MissingTelemetryTests(unittest.TestCase):
                   "output_tokens_details": {"reasoning_tokens": 0}}
         self.assertEqual(
             usage_telemetry(normalise_usage(openai), openai)["reasoning_tokens"], 0)
+
+    def test_codex_breakdowns_are_recognised_without_double_counting(self) -> None:
+        usage = normalise_usage({"input_tokens": 1_000, "cached_input_tokens": 800,
+                                 "output_tokens": 120, "reasoning_output_tokens": 64})
+        # Codex counts cached input inside input_tokens already.
+        self.assertEqual(usage["input_tokens"], 1_000)
+        self.assertEqual(usage["cached_tokens"], 800)
+        self.assertEqual(usage["reasoning_tokens"], 64)
+        self.assertEqual(usage["total_tokens"], 1_120)
+
+    def test_a_cli_adapter_does_not_publish_an_unreported_breakdown(self) -> None:
+        telemetry: list = []
+        stdout = "\n".join((
+            json.dumps({"type": "item.completed",
+                        "item": {"type": "agent_message", "text": '{"findings": []}'}}),
+            json.dumps({"type": "turn.completed",
+                        "usage": {"input_tokens": 900, "output_tokens": 40}}),
+        ))
+        model = CodexSubscriptionReasoningModel(
+            "gpt-5.6-luna", 30, environment={"PATH": "/bin"},
+            runner=lambda command, **_: subprocess.CompletedProcess(command, 0, stdout, ""),
+            telemetry_sink=lambda _key, values: telemetry.append(values),
+        )
+        model.complete(ModelRequest(
+            (ModelMessage(ModelRole.USER, "review"),), "review",
+            {"type": "object", "properties": {"findings": {"type": "array"}},
+             "required": ["findings"]},
+            affinity_key="conversation-1", kind="coding",
+        ))
+        (values,) = telemetry
+        self.assertEqual(values["input_tokens"], 900)
+        for absent in ("reasoning_tokens", "cached_tokens", "cache_write_tokens"):
+            self.assertNotIn(absent, values)
 
     def test_an_unmeasured_call_publishes_no_counts(self) -> None:
         self.assertEqual(usage_telemetry(normalise_usage(None)), {"usage_measured": False})
