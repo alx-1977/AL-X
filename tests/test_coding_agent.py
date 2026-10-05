@@ -1782,7 +1782,10 @@ class SessionLaunchTests(unittest.TestCase):
         def truncated(*_args, **_kwargs):
             return subprocess.CompletedProcess(
                 [], 0,
-                json.dumps({"text": "partial", "stopReason": "max_turns"}), "",
+                "\n".join(json.dumps(event) for event in (
+                    {"type": "text", "data": "partial"},
+                    {"type": "end", "stopReason": "max_turns", "num_turns": 60},
+                )), "",
             )
 
         session = self._session(runner=truncated)
@@ -1796,7 +1799,10 @@ class SessionLaunchTests(unittest.TestCase):
         def completed(*_args, **_kwargs):
             return subprocess.CompletedProcess(
                 [], 0,
-                json.dumps({"text": "done", "stopReason": "EndTurn"}), "",
+                "\n".join(json.dumps(event) for event in (
+                    {"type": "text", "data": "done"},
+                    {"type": "end", "stopReason": "EndTurn", "num_turns": 3},
+                )), "",
             )
 
         session = self._session(runner=completed)

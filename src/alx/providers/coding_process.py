@@ -212,12 +212,23 @@ def _deliver_input(stdin: Any, payload: bytes, stop: Event) -> None:
 
 
 def _stop(process: subprocess.Popen[Any]) -> None:
+    """Stop the session's process group. Never raises past the stop itself.
+
+    macOS answers `killpg` with EPERM once a group's members have exited but
+    not been reaped. Letting that PermissionError escape replaced the reason a
+    session was being stopped (stalled, at its ceiling, cancelled) with an
+    OSError, which the session reports as the CLI being unavailable. The
+    process itself is signalled directly instead, and the original reason
+    stands.
+    """
     if process.poll() is not None:
         return
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    except PermissionError:
+        _signal_process(process, signal.SIGTERM)
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
@@ -225,7 +236,17 @@ def _stop(process: subprocess.Popen[Any]) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            _signal_process(process, signal.SIGKILL)
         process.wait()
+
+
+def _signal_process(process: subprocess.Popen[Any], signum: int) -> None:
+    """Signal the session process itself when its group refuses the signal."""
+    try:
+        process.send_signal(signum)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def check_cancelled() -> None:

@@ -32,6 +32,7 @@ Two things are deliberately withheld in this iteration:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -128,7 +129,12 @@ class GrokCodingSession(SubscriptionCodingSession):
         command = [
             self._executable,
             "--prompt-file", str(prompt_path),
-            "--output-format", "json",
+            # Streamed, one line per agent update. The single end-of-session
+            # envelope of `json` left the stall watchdog nothing to observe
+            # but file writes, so a session that was reading and reasoning
+            # through a large repair looked silent and was stopped as stalled
+            # after ten minutes, twice, on 2026-10-05.
+            "--output-format", "streaming-json",
             "--model", self._model,
             "--cwd", str(worktree),
             "--sandbox", PROFILE_NAME,
@@ -144,14 +150,25 @@ class GrokCodingSession(SubscriptionCodingSession):
         return command
 
     def read_result(self, stdout: str) -> CodingSessionResult:
-        """Read the session envelope. Its report is an account, not evidence."""
-        envelope = self.envelope_object(stdout)
-        if envelope.get("is_error"):
-            code, reason = classify_failure(str(envelope.get("result", "")), "")
+        """Read the streamed session. Its report is an account, not evidence.
+
+        The stream carries the agent's text as deltas and ends with one `end`
+        event holding the stop reason and turn count. A stream without one did
+        not finish, whatever its exit status said.
+        """
+        events = self._events(stdout)
+        errors = [event for event in events if event.get("type") == "error"]
+        if errors:
+            code, reason = classify_failure(self._error_text(errors), "")
             raise CodingError(code, reason_code=reason)
-        report = envelope.get("text")
-        if not isinstance(report, str):
-            report = str(envelope.get("result") or "")
+        ends = [event for event in events if event.get("type") == "end"]
+        if not ends:
+            raise CodingError("session_failed", reason_code="session_end_missing")
+        envelope = ends[-1]
+        report = "".join(
+            str(event.get("data") or "") for event in events
+            if event.get("type") == "text"
+        )
         stop_reason = str(envelope.get("stopReason") or "")
         turns = envelope.get("num_turns")
         diagnostics: dict[str, object] = {
@@ -168,6 +185,39 @@ class GrokCodingSession(SubscriptionCodingSession):
             failure_code="" if completed_cleanly else "session_failed",
             diagnostics=diagnostics,
         )
+
+    def failure_output(self, stdout: str) -> str:
+        """Only the CLI's own error events, never what the agent read."""
+        try:
+            events = self._events(stdout)
+        except CodingError:
+            return ""
+        return self._error_text([e for e in events if e.get("type") == "error"])
+
+    @staticmethod
+    def _events(stdout: str) -> list[Mapping[str, object]]:
+        """Each NDJSON line of the stream, or a declared refusal."""
+        events: list[Mapping[str, object]] = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise CodingError(
+                    "session_failed", reason_code="response_json_invalid"
+                ) from error
+            if not isinstance(event, Mapping):
+                raise CodingError(
+                    "session_failed", reason_code="response_envelope_not_object"
+                )
+            events.append(event)
+        return events
+
+    @staticmethod
+    def _error_text(errors: list[Mapping[str, object]]) -> str:
+        """Error events as text, read only to choose a declared failure code."""
+        return "\n".join(json.dumps(event, sort_keys=True) for event in errors)
 
     # Retained because the behaviour probe and existing tests name it. It is
     # the shared classification, not a Grok-specific second implementation.
