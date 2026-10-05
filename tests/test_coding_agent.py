@@ -573,6 +573,17 @@ class NativeExecutionTests(unittest.TestCase):
                 path.as_posix(),
             )
 
+    def test_the_summary_is_described_as_the_sessions_pre_check_report(self) -> None:
+        """A session's "could not run checks" sat beside passed checks unexplained.
+
+        The session has no terminal, so its report is written before
+        verification runs. AL/X must be told whose account summary is.
+        """
+        from alx.tools.coding import DEFINITION
+
+        self.assertIn("summary is the coding session's own report", DEFINITION.purpose)
+        self.assertIn("before any check ran", DEFINITION.purpose)
+
     def test_local_reviewer_catches_an_adjacent_unfixed_path_and_rechecks(self) -> None:
         """A plausible one-line repair is not accepted while its twin is wrong."""
         worktree = _worktree(self.root)
@@ -612,7 +623,16 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.assertIn("Local reviewer findings", session.calls[1][1])
         first_review = json.loads(reviewer.requests[0].messages[-1].content)
-        self.assertIn("parallel.py", first_review["changed_file_context"])
+        self.assertIn("parallel.py", first_review["file_context"])
+        # parallel.py was only read before the correction; it is offered as
+        # context, never as a file this diff changed.
+        self.assertEqual(first_review["changed_files"], ["app.py"])
+        self.assertEqual(first_review["inspected_files"], ["parallel.py"])
+        second_review = json.loads(reviewer.requests[1].messages[-1].content)
+        self.assertEqual(
+            sorted(second_review["changed_files"]), ["app.py", "parallel.py"]
+        )
+        self.assertEqual(second_review["inspected_files"], [])
         self.assertIn("parallel.py", attempt.result.values["files_changed"])
         self.assertIn(
             "parallel.py", attempt.result.values["commit"]["committed_files"]
@@ -925,7 +945,8 @@ class NativeExecutionTests(unittest.TestCase):
                 )
                 parsed = agent._review(
                     CodingRequest(task="fix add", job_id="job-1"),
-                    CodingWorkspace(str(worktree)), {}, ("app.py",), "candidate diff",
+                    CodingWorkspace(str(worktree)), {}, ("app.py",), (),
+                    "candidate diff",
                 )
                 self.assertEqual(len(parsed), 1)
                 self.assertEqual(parsed[0].title, "real concern")
