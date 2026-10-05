@@ -26,7 +26,6 @@ allowing more than one CLI behind it.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
@@ -190,6 +189,15 @@ class SubscriptionCodingSession:
         """Read the CLI's envelope. Adapter-specific key spellings."""
         raise NotImplementedError
 
+    def failure_output(self, stdout: str) -> str:
+        """The part of stdout that may explain a failed exit.
+
+        The whole of it by default. An adapter whose stdout streams what the
+        agent read returns only the CLI's own error reports: file contents
+        that happen to mention a usage limit must not classify the failure.
+        """
+        return stdout
+
     # --- neutral orchestration ---------------------------------------------
 
     def child_environment(self, home: Path) -> dict[str, str]:
@@ -283,7 +291,7 @@ class SubscriptionCodingSession:
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
         if completed.returncode != 0:
-            code, reason = classify_failure(stderr, stdout)
+            code, reason = classify_failure(stderr, self.failure_output(stdout))
             raise CodingError(
                 code,
                 reason_code=reason,
@@ -332,20 +340,6 @@ class SubscriptionCodingSession:
         files changed: a session cut off mid-repair has not done the job.
         """
         return stop_reason.strip().lower() in ("", "end_turn", "endturn")
-
-    def envelope_object(self, stdout: str) -> Mapping[str, object]:
-        """Parse the CLI's JSON envelope, or refuse with a declared code."""
-        try:
-            envelope = json.loads(stdout)
-        except json.JSONDecodeError as error:
-            raise CodingError(
-                "session_failed", reason_code="response_json_invalid"
-            ) from error
-        if not isinstance(envelope, Mapping):
-            raise CodingError(
-                "session_failed", reason_code="response_envelope_not_object"
-            )
-        return envelope
 
 
 def subscription_cli_present(executable: str) -> bool:

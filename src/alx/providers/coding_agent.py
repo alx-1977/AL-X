@@ -110,6 +110,14 @@ PLAN_INSTRUCTION = (
     "commands. Verification is not yours to choose: AL/X derives the required "
     "checks from the files the job actually changes and runs them herself. "
     "Every inspection_targets entry must be a repository-relative path. "
+    # The planning call runs in a deliberately empty scratch directory; the
+    # repository reaches it as the material below. On 2026-10-05 a plan
+    # reported "the session workspace was empty", which sent the search for
+    # two stalled sessions to the checkout instead of the watchdog.
+    "This planning step runs in a deliberately empty scratch directory; the "
+    "repository is given to you as the material below, and the later coding "
+    "session runs in the real checkout. Never describe the empty planning "
+    "directory as evidence about that checkout. "
     "You are in PLAN mode."
 )
 
