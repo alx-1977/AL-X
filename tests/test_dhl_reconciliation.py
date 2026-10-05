@@ -1433,6 +1433,28 @@ class DhlImportLifecycleTests(unittest.TestCase):
             ["customs_worksheet", "sad_500"],
         )
 
+    def test_an_oversized_document_keeps_every_document_record(self) -> None:
+        """The size refusal stands; the other documents are still reported."""
+        from alx.providers.dhl import _DOCUMENT_BYTES
+
+        self.mail.payloads["huge"] = (
+            "huge.pdf", "application/pdf", b"%PDF-" + b"x" * _DOCUMENT_BYTES
+        )
+        result = self.executor({"documents": [
+            source_for(self.mail, "huge", "14"),
+            source_for(self.mail, "worksheet", "11"),
+        ]})
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertIn(result.failure["code"], DHL_DEFINITION.possible_failure_codes)
+        self.assertEqual(
+            [dict(item) for item in result.values["documents"]],
+            [
+                {"attachment_id": "huge", "kind": "unreadable"},
+                {"attachment_id": "worksheet", "kind": "customs_worksheet"},
+            ],
+        )
+        self.assertEqual(self.xero.state.get("created", 0), 0)
+
     def test_no_evidence_is_reported_before_any_xero_prerequisite(self) -> None:
         """An unconfigured supplier must not stand in for "nothing to post"."""
         self.mail.payloads["awb"] = ("awb.pdf", "application/pdf", airway_bill_pdf())

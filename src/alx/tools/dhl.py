@@ -1236,11 +1236,23 @@ def build_dhl_executors(
             references = [reference for reference, _a, _p in read]
 
             # The stage follows from what the documents are, never from wording.
-            kinds = [analyzer.classify(payload) for _r, _a, payload in read]
-            classified = tuple(
-                {"attachment_id": attachment.attachment_id, "kind": kind}
-                for (_r, attachment, _p), kind in zip(read, kinds)
-            )
+            # A document that cannot be classified, such as one over the size
+            # bound, is recorded as unreadable while the rest are still read;
+            # its failure is then returned with every document's record.
+            kinds: list[str] = []
+            refused: DhlDocumentError | None = None
+            for _reference, attachment, payload in read:
+                try:
+                    kind = analyzer.classify(payload)
+                except DhlDocumentError as error:
+                    kind = "unreadable"
+                    refused = refused or error
+                kinds.append(kind)
+                classified += (
+                    {"attachment_id": attachment.attachment_id, "kind": kind},
+                )
+            if refused is not None:
+                raise refused
             result = _dispatch(read, kinds, references)
         except ValueError:
             return failed("arguments_unusable", classified)
