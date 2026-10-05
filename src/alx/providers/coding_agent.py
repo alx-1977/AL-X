@@ -973,6 +973,27 @@ class CodingAgent:
                             diagnostics={"phase": "test", "checkout_clean": True,
                                          "branch": branch, "head_sha": current.head_sha},
                         )
+                    # A permitted test may itself write into the checkout, so
+                    # cleanliness is proven again after the commands ran.
+                    try:
+                        after = read_workspace_state(workspace.root)
+                    except CodingError:
+                        after = None
+                    if (after is None or not after.clean or after.branch != branch
+                            or after.head_sha != baseline.head_sha):
+                        git_status, git_diff = self._git_evidence(workspace)
+                        return self._outcome(
+                            status="failed",
+                            summary="a required verification command changed the checkout",
+                            files=(), preexisting_dirty=preexisting_dirty,
+                            commands=commands, tests_run=tests_run, tests_passed=tests_passed,
+                            git_status=git_status, git_diff=git_diff,
+                            issues=("checkout_changed_by_verification",), review=False,
+                            verification=verification, plan_summary=plan_summary,
+                            baseline=baseline,
+                            diagnostics={"phase": "test", "checkout_clean": False,
+                                         "branch": branch},
+                        )
                     unchanged_verification = verification
                     unchanged_tests_run, unchanged_tests_passed = tests_run, tests_passed
                 if no_change_proven:

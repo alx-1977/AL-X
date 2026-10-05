@@ -1516,6 +1516,28 @@ class NativeExecutionTests(unittest.TestCase):
         check = next(c for c in values["verification"]["checks"] if c["name"] == "requested_1")
         self.assertTrue(check["ran"] and check["passed"])
 
+    def test_a_requested_test_that_writes_into_the_checkout_is_not_no_change(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "app.py").write_text(_FIXED, encoding="utf-8")
+        (worktree / "test_writes.py").write_text(
+            "from pathlib import Path\n\n\n"
+            "def test_writes():\n"
+            "    Path(__file__).with_name('left_behind.txt').write_text('x')\n",
+            encoding="utf-8",
+        )
+        _git(worktree, "add", ".")
+        _git(worktree, "commit", "-qm", "fix add and add a writing test on main")
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={}, report="add already works"),
+            task="Confirm add works", worktree=str(worktree),
+            verification_commands=[["python", "-m", "pytest", "test_writes.py", "-q",
+                                    "-p", "no:cacheprovider"]],
+        )
+        values = attempt.result.values
+        self.assertEqual(values["status"], "failed")
+        self.assertIn("checkout_changed_by_verification", values["unresolved_issues"])
+        self.assertIn("left_behind.txt", values["git_status"])
+
     def test_no_change_report_keeps_the_existing_summary_bound(self) -> None:
         worktree = _worktree(self.root)
         attempt = self._run(
