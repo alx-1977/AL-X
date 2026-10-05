@@ -23,8 +23,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts.coding import CodingRequest  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from alx.providers import coding_agent  # noqa: E402
 from alx.providers.coding_agent import (  # noqa: E402
-    CodingAgent, build_briefing, requested_verification,
+    CodingAgent, build_briefing, recorded_verification_proves, requested_verification,
 )
 from alx.providers.coding_workspace import CodingWorkspace  # noqa: E402
 from alx.contracts.coding_verification import required_verification  # noqa: E402
@@ -140,6 +143,36 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
         self.assertFalse(evidence.all_required_passed)
         self.assertTrue((self.root / "tests").exists())
         self.assertEqual(commands[-1].stderr, "command_not_permitted")
+
+    def test_a_requested_command_is_never_excused_as_failing_on_main(self) -> None:
+        """Deduplicated under a derived pytest name, it is still AL/X's requirement."""
+        changed = ("tests/test_bad.py",)
+        derived = required_verification(changed, self.root).checks
+        pytest_check = next(c for c in derived if c.name.startswith("pytest"))
+
+        def verify(requested):
+            request = CodingRequest(task="t", job_id="j", worktree=str(self.root),
+                                    requested_checks=requested)
+            with mock.patch.object(coding_agent, "same_main_pytest_failure",
+                                   return_value=(True, "same failure on main")):
+                evidence, _run, _passed = self.agent._verify(
+                    request, CodingWorkspace(str(self.root), ()), changed, [])
+            return next(c for c in evidence.checks if c.argv == pytest_check.argv), evidence
+
+        excused, _evidence = verify(())
+        self.assertTrue(excused.passed)  # a derived check may be excused
+        required, evidence = verify((pytest_check.argv,))
+        self.assertFalse(required.passed)
+        self.assertFalse(evidence.all_required_passed)
+
+    def test_resume_accepts_evidence_that_passed_a_requested_command(self) -> None:
+        request = CodingRequest(task="t", job_id="j", worktree=str(self.root),
+                                requested_checks=(self._pytest("tests/test_ok.py"),))
+        evidence, _run, _commands = self._verify(self._pytest("tests/test_ok.py"))
+        self.assertTrue(recorded_verification_proves(evidence, request, ("notes.md",), self.root))
+        # Evidence that never ran the requested command does not prove it.
+        derived_only, _r, _c = self._verify()
+        self.assertFalse(recorded_verification_proves(derived_only, request, ("notes.md",), self.root))
 
 
 if __name__ == "__main__":

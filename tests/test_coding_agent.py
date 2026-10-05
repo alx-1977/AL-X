@@ -1483,6 +1483,39 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(second.result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(second.result.values["status"], "succeeded")
 
+    def test_an_unchanged_checkout_still_runs_the_requested_commands(self) -> None:
+        """No change is not verified: a failing required command fails the job."""
+        worktree = _worktree(self.root)  # its test_app.py fails until add() is fixed
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={}, report="nothing to change"),
+            task="Confirm add works", worktree=str(worktree),
+            verification_commands=[["python", "-m", "pytest", "test_app.py", "-q",
+                                    "-p", "no:cacheprovider"]],
+        )
+        values = attempt.result.values
+        self.assertEqual(values["status"], "failed")
+        self.assertIn("required_verification_failed", values["unresolved_issues"])
+        check = next(c for c in values["verification"]["checks"] if c["name"] == "requested_1")
+        self.assertTrue(check["ran"])
+        self.assertFalse(check["passed"])
+
+    def test_an_unchanged_checkout_whose_requested_commands_pass_records_them(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "app.py").write_text(_FIXED, encoding="utf-8")
+        _git(worktree, "add", "app.py")
+        _git(worktree, "commit", "-qm", "fix add on main")
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={}, report="add already works"),
+            task="Confirm add works", worktree=str(worktree),
+            verification_commands=[["python", "-m", "pytest", "test_app.py", "-q",
+                                    "-p", "no:cacheprovider"]],
+        )
+        values = attempt.result.values
+        self.assertEqual(values["status"], "no_change_required")
+        self.assertTrue(values["tests_run"])
+        check = next(c for c in values["verification"]["checks"] if c["name"] == "requested_1")
+        self.assertTrue(check["ran"] and check["passed"])
+
     def test_no_change_report_keeps_the_existing_summary_bound(self) -> None:
         worktree = _worktree(self.root)
         attempt = self._run(

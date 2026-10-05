@@ -218,6 +218,26 @@ def _before_implementation(error: CodingError) -> CodingError:
 _PYTEST_NOTHING_COLLECTED = 5
 
 
+def recorded_verification_proves(
+    verification: VerificationEvidence, request: CodingRequest,
+    reviewed_files: tuple[str, ...], repository: Path,
+) -> bool:
+    """Whether recorded evidence passed exactly the checks this job requires.
+
+    The same combined set `_verify` runs: the checks derived from the reviewed
+    files and AL/X's requested commands. Comparing against the derived checks
+    alone rejected a job that had passed a requested command.
+    """
+    derived = required_verification(reviewed_files, repository).checks
+    expected = derived + requested_verification(request, derived)
+    return verification.all_required_passed and (
+        tuple((check.name, check.argv, check.kind, check.reason)
+              for check in verification.checks)
+        == tuple((check.name, check.argv, check.kind, check.reason)
+                 for check in expected)
+    )
+
+
 def requested_verification(
     request: CodingRequest, derived: tuple[VerificationCheck, ...],
 ) -> tuple[VerificationCheck, ...]:
@@ -926,15 +946,44 @@ class CodingAgent:
                     current = read_workspace_state(workspace.root)
                 except CodingError:
                     current = None
-                if (current is not None and current.clean and
-                        current.branch == branch and
-                        current.head_sha == baseline.head_sha):
+                no_change_proven = (
+                    current is not None and current.clean
+                    and current.branch == branch
+                    and current.head_sha == baseline.head_sha
+                )
+                unchanged_verification: VerificationEvidence | None = None
+                unchanged_tests_run, unchanged_tests_passed = False, None
+                if no_change_proven and request.requested_checks:
+                    # Unchanged is not verified. Commands AL/X required run on
+                    # this checkout too, and "nothing to do" stands only if
+                    # they pass.
+                    verification, tests_run, tests_passed = self._verify(
+                        request, workspace, (), commands
+                    )
+                    if not verification.all_required_passed:
+                        return self._outcome(
+                            status="failed",
+                            summary="the checkout was left unchanged, but a required verification command did not pass",
+                            files=(), preexisting_dirty=preexisting_dirty,
+                            commands=commands, tests_run=tests_run, tests_passed=tests_passed,
+                            git_status="", git_diff="",
+                            issues=("required_verification_failed",), review=False,
+                            verification=verification, plan_summary=plan_summary,
+                            baseline=baseline,
+                            diagnostics={"phase": "test", "checkout_clean": True,
+                                         "branch": branch, "head_sha": current.head_sha},
+                        )
+                    unchanged_verification = verification
+                    unchanged_tests_run, unchanged_tests_passed = tests_run, tests_passed
+                if no_change_proven:
                     return self._outcome(
                         status="no_change_required",
                         summary=(session.report.strip() or "the coding session made no file changes")[:8_000],
                         files=(), preexisting_dirty=preexisting_dirty,
-                        commands=commands, tests_run=False, tests_passed=None,
+                        commands=commands, tests_run=unchanged_tests_run,
+                        tests_passed=unchanged_tests_passed,
                         git_status="", git_diff="", issues=(), review=False,
+                        verification=unchanged_verification,
                         plan_summary=plan_summary, baseline=baseline,
                         diagnostics={
                             "phase": "execution", "session_turns": session.turns,
@@ -1050,11 +1099,8 @@ class CodingAgent:
                 ))
             except (KeyError, TypeError, ValueError):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_invalid"))
-            if not verification.all_required_passed or (
-                tuple((check.name, check.argv, check.kind, check.reason)
-                      for check in verification.checks)
-                != tuple((check.name, check.argv, check.kind, check.reason)
-                         for check in required_verification(reviewed_files, self._repository).checks)
+            if not recorded_verification_proves(
+                verification, request, reviewed_files, self._repository,
             ):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_unproven"))
             tests_run = any(check.ran and check.name.startswith("pytest") for check in verification.checks)
@@ -1666,9 +1712,11 @@ class CodingAgent:
             passed = _check_passed(record, check.name)
             baseline = ""
             # Only the derived pytest checks may be excused as already failing
-            # on main. AL/X's requested commands are named `requested_*`, so a
-            # failure one of them reports stands.
-            if not passed and check.name.startswith("pytest"):
+            # on main, and only when AL/X did not require that same command:
+            # deduplication runs a requested argv once under its derived name,
+            # and must not turn her requirement into an excusable check.
+            if (not passed and check.name.startswith("pytest")
+                    and check.argv not in request.requested_checks):
                 passed, baseline = same_main_pytest_failure(
                     record, workspace.root,
                     FULL_SUITE_COMMAND_SECONDS if check.name == "pytest_full"
