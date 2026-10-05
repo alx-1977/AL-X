@@ -36,6 +36,9 @@ from alx.contracts.coding import (
     MAX_BLOCKED_PATH_CHARACTERS,
     MAX_CONTEXT_CHARACTERS,
     MAX_CRITERIA,
+    MAX_REQUESTED_CHECKS,
+    MAX_REQUESTED_CHECK_ARGUMENT_CHARACTERS,
+    MAX_REQUESTED_CHECK_ARGUMENTS,
     MAX_CRITERION_CHARACTERS,
     MAX_BRANCH_NAME_CHARACTERS,
     MAX_COMMIT_MESSAGE_CHARACTERS,
@@ -203,7 +206,12 @@ DEFINITION = CapabilityDefinition(
     f"required check passes. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}. "
     "Required verification may or "
     "may not include tests, and includes the law gates when the change touches "
-    "the paths they govern, "
+    "the paths they govern. "
+    f"verification_commands takes up to {MAX_REQUESTED_CHECKS} exact argv arrays "
+    "you require to run after the session, beside those derived checks; each "
+    "must pass the command allowlist, and one that is refused, fails or never "
+    "runs fails verification. test_guidance is prose for the session and runs "
+    "nothing. A passed job is committed, "
     "returning branch and commit_sha. Only files this job changed are "
     "committed: the commit is refused rather than widened if the index or the "
     "resulting tree holds any path outside that authorised set. It still does "
@@ -239,6 +247,9 @@ DEFINITION = CapabilityDefinition(
             "acceptance_criteria": _STRING_ARRAY,
             "context": _STRING,
             "test_guidance": _STRING,
+            "verification_commands": StructuredSchema(
+                ValueKind.ARRAY, items=_STRING_ARRAY
+            ),
             "step_budget": _INTEGER,
             "blocked_paths": _STRING_ARRAY,
             "repair_branch": _STRING,
@@ -311,6 +322,7 @@ DEFINITION = CapabilityDefinition(
     CODING_FAILURES,
     durable_input_fields=(
         "task", "context", "acceptance_criteria", "test_guidance",
+        "verification_commands",
         "step_budget", "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
         "resume_job_id", "corrective_action",
@@ -467,6 +479,12 @@ def build_coding_executors(
                 if field in arguments and getattr(request, field) != getattr(original_request, field):
                     return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
                                    implementation_reached=False)
+            # Required checks are part of what the job is verified by, so a
+            # resume may not change them either.
+            if ("verification_commands" in arguments
+                    and request.requested_checks != original_request.requested_checks):
+                return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
+                               implementation_reached=False)
             if request.repair_branch.strip() not in {requested_branch, checkpoint["branch"]}:
                 return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
                                implementation_reached=False)
@@ -624,6 +642,9 @@ def parse_coding_arguments(
     criteria, error = _optional_criteria(arguments)
     if error is not None:
         return None, error
+    requested_checks, error = _optional_verification_commands(arguments)
+    if error is not None:
+        return None, error
     budget, error = _optional_step_budget(arguments)
     if error is not None:
         return None, error
@@ -674,6 +695,7 @@ def parse_coding_arguments(
             acceptance_criteria=criteria,
             context=context,
             test_guidance=guidance,
+            requested_checks=requested_checks,
             step_budget=budget,
             blocked_paths=blocked,
             repair_branch=branch,
@@ -722,6 +744,44 @@ def _optional_string(
             received_length=len(value),
         )
     return value, None
+
+
+def _optional_verification_commands(
+    arguments: Mapping[str, Any],
+) -> tuple[tuple[tuple[str, ...], ...], dict[str, object] | None]:
+    """AL/X's required verification commands, as bounded argv lists."""
+    raw = arguments.get("verification_commands")
+    if raw is None:
+        return (), None
+    if not isinstance(raw, (list, tuple)):
+        return (), _argument_failure(
+            "verification_commands", "not_command_array",
+            "verification_commands must be an array of argv arrays",
+        )
+    if len(raw) > MAX_REQUESTED_CHECKS:
+        return (), _argument_failure(
+            "verification_commands", "too_many",
+            f"verification_commands must have at most {MAX_REQUESTED_CHECKS} commands",
+            received_count=len(raw),
+        )
+    commands: list[tuple[str, ...]] = []
+    for argv in raw:
+        if (
+            not isinstance(argv, (list, tuple)) or not argv
+            or len(argv) > MAX_REQUESTED_CHECK_ARGUMENTS
+            or any(
+                not isinstance(item, str) or not item.strip()
+                or len(item) > MAX_REQUESTED_CHECK_ARGUMENT_CHARACTERS
+                for item in argv
+            )
+        ):
+            return (), _argument_failure(
+                "verification_commands", "argv_invalid",
+                "each verification command must be a non-empty argv array of "
+                "bounded non-blank strings",
+            )
+        commands.append(tuple(argv))
+    return tuple(commands), None
 
 
 def _optional_criteria(

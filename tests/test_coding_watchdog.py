@@ -21,7 +21,7 @@ class CodingWatchdogTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
 
-    def run_child(self, script: str, *, stall: float, ceiling: float,
+    def run_child(self, script: str, *, stall: float, ceiling: float | None = None,
                   blocked: tuple[str, ...] = ()):
         return CodingCancellation().run(
             subprocess.run, [sys.executable, "-c", script, str(self.root)],
@@ -77,14 +77,20 @@ class CodingWatchdogTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.details["reason_code"], "session_stalled")
 
-    def test_emergency_ceiling_interrupts_even_active_child(self) -> None:
-        with self.assertRaises(CodingError) as raised:
-            self.run_child(
-                "import time; [(print('alive', flush=True), time.sleep(.09)) for _ in range(30)]",
-                stall=.3, ceiling=.8,
-            )
-        self.assertEqual(raised.exception.code, "session_interrupted")
-        self.assertEqual(raised.exception.details["reason_code"], "session_emergency_ceiling")
+    def test_an_active_session_has_no_age_limit(self) -> None:
+        """A session runs as long as it keeps showing activity.
+
+        The emergency ceiling this replaced stopped an active child at a fixed
+        age. A session now passes no deadline, so only silence can stop it:
+        2.7 s of steady output survives a 0.3 s stall bound with nothing else
+        bounding it.
+        """
+        result = self.run_child(
+            "import time; [(print('alive', flush=True), time.sleep(.09)) for _ in range(30)]",
+            stall=.3,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count("alive"), 30)
 
 
 if __name__ == "__main__":

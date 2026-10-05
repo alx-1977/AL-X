@@ -28,6 +28,13 @@ MAX_PLANNING_ATTEMPTS = 3
 # The native agent runs its own tool loop, so AL/X no longer counts model
 # turns. What remains bounded is the verification AL/X performs afterwards.
 MAX_VERIFICATION_COMMANDS = 8
+# Verification commands AL/X may require for one job, beyond the checks the
+# repository's rules derive from the changed paths. The derived policy emits at
+# most six checks, so two requested commands keep every job within
+# MAX_VERIFICATION_COMMANDS, which fails closed when exceeded.
+MAX_REQUESTED_CHECKS = 2
+MAX_REQUESTED_CHECK_ARGUMENTS = 32
+MAX_REQUESTED_CHECK_ARGUMENT_CHARACTERS = 512
 DEFAULT_COMMAND_SECONDS = 60
 # Verification keeps its own bound rather than inheriting the short default
 # meant for git inspection.
@@ -304,6 +311,11 @@ class CodingRequest:
     acceptance_criteria: tuple[str, ...] = ()
     context: str = ""
     test_guidance: str = ""
+    # Exact commands AL/X requires to run after the session, as argv lists she
+    # chose. Structured, never read out of `test_guidance` or the criteria:
+    # prose is guidance for the session, while these are checks the job is
+    # verified by. Each still passes the command allowlist when it runs.
+    requested_checks: tuple[tuple[str, ...], ...] = ()
     step_budget: int = DEFAULT_STEP_BUDGET
     blocked_paths: tuple[str, ...] = ()
     # Core decides whether a job's result should be handed back as a branch and
@@ -332,6 +344,17 @@ class CodingRequest:
             raise ValueError("context exceeds the permitted size")
         if len(self.test_guidance) > MAX_CONTEXT_CHARACTERS:
             raise ValueError("test_guidance exceeds the permitted size")
+        checks = tuple(tuple(argv) for argv in self.requested_checks)
+        object.__setattr__(self, "requested_checks", checks)
+        if len(checks) > MAX_REQUESTED_CHECKS:
+            raise ValueError("too many requested checks")
+        for argv in checks:
+            if not argv or len(argv) > MAX_REQUESTED_CHECK_ARGUMENTS or any(
+                not isinstance(item, str) or not item.strip()
+                or len(item) > MAX_REQUESTED_CHECK_ARGUMENT_CHARACTERS
+                for item in argv
+            ):
+                raise ValueError("a requested check must be a bounded argv of non-blank strings")
         if len(self.corrective_action) > MAX_CONTEXT_CHARACTERS:
             raise ValueError("corrective_action exceeds the permitted size")
         criteria = tuple(self.acceptance_criteria)

@@ -150,7 +150,7 @@ class MeteredCredentialsNeverReachASession(unittest.TestCase):
 
     def test_no_metered_key_survives_the_allowlist(self) -> None:
         session = GrokCodingSession(
-            "grok-4.6", 60,
+            "grok-4.6", stall_seconds=30,
             environment={key: "secret" for key in METERED_ENVIRONMENT_KEYS}
             | {"PATH": "/bin", "HOME": "/h"},
         )
@@ -183,7 +183,7 @@ class MeteredCredentialsNeverReachASession(unittest.TestCase):
                 return Path("/tmp")
 
         session = LeakyAdapter(
-            "m", 60, executable="x", environment={"PATH": "/bin"}
+            "m", executable="x", stall_seconds=30, environment={"PATH": "/bin"}
         )
         with self.assertRaises(CodingError) as caught:
             session.child_environment(Path("/tmp/home"))
@@ -219,7 +219,7 @@ class MeteredCredentialsNeverReachASession(unittest.TestCase):
                     return Path("/tmp")
 
             session = Variant(
-                "m", 60, executable="x", environment={"PATH": "/bin"}
+                "m", executable="x", stall_seconds=30, environment={"PATH": "/bin"}
             )
             with self.assertRaises(CodingError, msg=spelling) as caught:
                 session.child_environment(Path("/tmp/home"))
@@ -241,7 +241,7 @@ class MeteredCredentialsNeverReachASession(unittest.TestCase):
                 return Path("/tmp")
 
         session = HonestAdapter(
-            "m", 60, executable="x", environment={"PATH": "/bin"}
+            "m", executable="x", stall_seconds=30, environment={"PATH": "/bin"}
         )
         environment = session.child_environment(Path("/tmp/home"))
         self.assertEqual(environment["MY_HOME"], "/tmp/home")

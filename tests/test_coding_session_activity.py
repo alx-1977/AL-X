@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import textwrap
 import unittest
 from pathlib import Path
@@ -82,7 +83,7 @@ class StreamedActivityTests(unittest.TestCase):
 
     def _session(self, cli: Path) -> GrokCodingSession:
         return GrokCodingSession(
-            "grok-test", 30, executable=str(cli), stall_seconds=1,
+            "grok-test", executable=str(cli), stall_seconds=1,
             environment={"PATH": os.environ.get("PATH", ""), "GROK_HOME": str(self.home)},
         )
 
@@ -108,10 +109,174 @@ class StreamedActivityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "session_interrupted")
         self.assertEqual(raised.exception.details["reason_code"], "session_stalled")
 
+    def test_session_output_is_spooled_to_disk_not_held_in_memory(self) -> None:
+        """No deadline, so output must not accumulate in the runtime's memory."""
+        seen: dict = {}
+        real = coding_process.run_coding_subprocess
+
+        def record(runner, argv, **kwargs):
+            seen.update(kwargs)
+            return real(runner, argv, **kwargs)
+
+        cli = _fake_cli(Path(self.directory.name), STREAMING_READER)
+        with mock.patch.object(coding_process, "run_coding_subprocess", record):
+            self._session(cli).run_session(self._request(), "briefing")
+        self.assertEqual(len(seen["spool_to"]), 2)
+        self.assertGreater(seen["output_limit_bytes"], 0)
+        self.assertIsNone(seen["timeout"])
+        for held in ("capture_output", "stdout", "stderr"):
+            self.assertNotIn(held, seen)
+
+    def test_relayed_output_never_exceeds_the_bound_on_disk(self) -> None:
+        """Enforced where bytes are written: one burst past it is cut at it."""
+        out = Path(self.directory.name) / "out"
+        err = Path(self.directory.name) / "err"
+        burst = "import sys; sys.stdout.buffer.write(b'x' * 2_000_000); sys.stdout.flush()"
+        with self.assertRaises(CodingError) as raised:
+            coding_process.CodingCancellation().run(
+                subprocess.run, [sys.executable, "-c", burst],
+                timeout=None, inactivity_timeout=10, activity_root=str(self.root),
+                spool_to=(out, err), output_limit_bytes=1_000_000,
+                stdin=subprocess.DEVNULL, shell=False, check=False,
+            )
+        self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
+        self.assertLessEqual(out.stat().st_size + err.stat().st_size, 1_000_000)
+
+    def test_relayed_output_reaches_the_spool_and_not_memory(self) -> None:
+        out = Path(self.directory.name) / "out"
+        err = Path(self.directory.name) / "err"
+        result = coding_process.CodingCancellation().run(
+            subprocess.run,
+            [sys.executable, "-c", "import sys; print('hello'); print('oops', file=sys.stderr)"],
+            timeout=None, inactivity_timeout=10, activity_root=str(self.root),
+            spool_to=(out, err), output_limit_bytes=1_000_000,
+            stdin=subprocess.DEVNULL, shell=False, check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNone(result.stdout)
+        self.assertEqual(out.read_text(), "hello\n")
+        self.assertEqual(err.read_text(), "oops\n")
+
+    def test_what_the_agent_read_is_not_kept_to_read_the_result(self) -> None:
+        reader = """
+import json, sys
+for _ in range(50):
+    print(json.dumps({"type": "tool_call_update", "content": "x" * 100000}), flush=True)
+print(json.dumps({"type": "text", "data": "done"}), flush=True)
+print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 3}), flush=True)
+"""
+        session = self._session(_fake_cli(Path(self.directory.name), reader))
+        retained: list[str] = []
+        original = session.retained_output
+        session.retained_output = lambda lines: retained.append(original(lines)) or retained[-1]
+        result = session.run_session(self._request(), "briefing")
+        self.assertTrue(result.completed)
+        self.assertEqual(result.report, "done")
+        self.assertLess(len(retained[0]), 1_000)  # 5 MB of reading was not kept
+
+    def test_output_beyond_the_size_bound_stops_the_session_explicitly(self) -> None:
+        """A size bound, not a time bound: activity alone cannot fill the disk."""
+        flood = """
+import json, time
+while True:
+    print(json.dumps({"type": "tool_call_update", "content": "x" * 10000}), flush=True)
+    time.sleep(0.01)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_SESSION_OUTPUT_BYTES", 200_000):
+            with self.assertRaises(CodingError) as raised:
+                self._session(_fake_cli(Path(self.directory.name), flood)) \
+                    .run_session(self._request(), "briefing")
+        self.assertEqual(raised.exception.code, "session_interrupted")
+        self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
+
+    def test_output_past_the_bound_fails_even_when_the_session_exits_at_once(self) -> None:
+        """Checked on completion too, not only between polls."""
+        burst = """
+import json, sys
+sys.stdout.write(json.dumps({"type": "tool_call_update", "content": "x" * 300000}) + "\\n")
+print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 1}), flush=True)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_SESSION_OUTPUT_BYTES", 100_000):
+            with self.assertRaises(CodingError) as raised:
+                self._session(_fake_cli(Path(self.directory.name), burst)) \
+                    .run_session(self._request(), "briefing")
+        self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
+
+    def test_an_oversized_reading_line_is_skipped_without_being_read_whole(self) -> None:
+        big = """
+import json
+print(json.dumps({"type": "tool_call_update", "content": "x" * 50000}), flush=True)
+print(json.dumps({"type": "text", "data": "done"}), flush=True)
+print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 2}), flush=True)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_EVENT_LINE_CHARACTERS", 10_000):
+            result = self._session(_fake_cli(Path(self.directory.name), big)) \
+                .run_session(self._request(), "briefing")
+        self.assertTrue(result.completed)
+        self.assertEqual(result.report, "done")
+
+    def test_an_oversized_result_line_is_refused_not_truncated(self) -> None:
+        big_end = """
+import json
+print(json.dumps({"type": "text", "data": "done"}), flush=True)
+print(json.dumps({"type": "end", "stopReason": "end_turn", "padding": "x" * 50000}), flush=True)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_EVENT_LINE_CHARACTERS", 10_000):
+            with self.assertRaises(CodingError) as raised:
+                self._session(_fake_cli(Path(self.directory.name), big_end)) \
+                    .run_session(self._request(), "briefing")
+        self.assertEqual(raised.exception.details["reason_code"], "session_event_oversized")
+
+    def test_a_descendant_still_writing_after_the_cli_exits_is_stopped(self) -> None:
+        """Monitoring ends with the session, so its leftovers end with it too."""
+        pid_file = Path(self.directory.name) / "writer.pid"
+        leaver = f"""
+import json, subprocess, sys
+writer = subprocess.Popen([sys.executable, "-c",
+    "import time\\nwhile True:\\n    print('{{\\"type\\": \\"tool_call_update\\"}}', flush=True); time.sleep(0.05)"])
+open({str(pid_file)!r}, "w").write(str(writer.pid))
+print(json.dumps({{"type": "text", "data": "done"}}), flush=True)
+print(json.dumps({{"type": "end", "stopReason": "end_turn", "num_turns": 1}}), flush=True)
+"""
+        # A roomier stall bound than the shared one: this stand-in starts a
+        # second interpreter before it writes anything.
+        session = GrokCodingSession(
+            "grok-test", executable=str(_fake_cli(Path(self.directory.name), leaver)),
+            stall_seconds=5,
+            environment={"PATH": os.environ.get("PATH", ""), "GROK_HOME": str(self.home)},
+        )
+        result = session.run_session(self._request(), "briefing")
+        self.assertTrue(result.completed)
+        writer = int(pid_file.read_text())
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(writer, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(writer, signal.SIGKILL)
+            self.fail("a descendant kept writing after the session returned")
+
+
+class GroupCensusTests(unittest.TestCase):
+    def test_zombies_are_not_counted_as_live_members(self) -> None:
+        listing = "  101   100 S\n  102   100 Z\n  103   100 Z+\n  104   999 S\n"
+        with mock.patch.object(coding_process.subprocess, "run", return_value=subprocess.CompletedProcess(
+                ["ps"], 0, listing, "")):
+            members, counted = coding_process._group_members(100)
+        self.assertTrue(counted)
+        self.assertEqual(members, (101,))
+
 
 class StreamedResultTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.session = GrokCodingSession("grok-test", 30)
+        self.session = GrokCodingSession("grok-test", stall_seconds=10)
 
     @staticmethod
     def _stream(*events) -> str:

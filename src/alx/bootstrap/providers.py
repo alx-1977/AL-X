@@ -146,11 +146,11 @@ def _build_coding_session(
             coding.reasoning.provider,
         )
         return None
-    # Deliberately not `reasoning.timeout_seconds`: that bounds one planning
-    # call, and a native session working a real defect needs far longer.
+    # Bounded by inactivity only. Deliberately not `reasoning.timeout_seconds`:
+    # that bounds one planning call, and a native session working a real
+    # defect may need far longer.
     return GrokCodingSession(
         coding.reasoning.model,
-        coding.session_emergency_seconds,
         stall_seconds=coding.session_stall_seconds,
         effort=coding.reasoning.effort,
     )

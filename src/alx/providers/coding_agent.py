@@ -218,6 +218,49 @@ def _before_implementation(error: CodingError) -> CodingError:
 _PYTEST_NOTHING_COLLECTED = 5
 
 
+def recorded_verification_proves(
+    verification: VerificationEvidence, request: CodingRequest,
+    reviewed_files: tuple[str, ...], repository: Path,
+) -> bool:
+    """Whether recorded evidence passed exactly the checks this job requires.
+
+    The same combined set `_verify` runs: the checks derived from the reviewed
+    files and AL/X's requested commands. Comparing against the derived checks
+    alone rejected a job that had passed a requested command.
+    """
+    derived = required_verification(reviewed_files, repository).checks
+    expected = derived + requested_verification(request, derived)
+    return verification.all_required_passed and (
+        tuple((check.name, check.argv, check.kind, check.reason)
+              for check in verification.checks)
+        == tuple((check.name, check.argv, check.kind, check.reason)
+                 for check in expected)
+    )
+
+
+def requested_verification(
+    request: CodingRequest, derived: tuple[VerificationCheck, ...],
+) -> tuple[VerificationCheck, ...]:
+    """AL/X's required commands as checks, beside the derived ones.
+
+    They come only from the structured `requested_checks`, never from the
+    task's prose, and a command the repository's rules already require is not
+    run twice. Each is a required command check like any derived one: refused
+    by the allowlist, failing, or never run, the job has not passed.
+    """
+    seen = {check.argv for check in derived if check.kind == "command"}
+    checks: list[VerificationCheck] = []
+    for number, argv in enumerate(request.requested_checks, start=1):
+        if argv in seen:
+            continue
+        seen.add(argv)
+        checks.append(VerificationCheck(
+            f"requested_{number}", tuple(argv),
+            "AL/X required this command for the job",
+        ))
+    return tuple(checks)
+
+
 def _check_passed(record: CodingCommandRecord, check_name: str = "") -> bool:
     """Whether one verification command's result counts as passing."""
     if record.timed_out:
@@ -379,6 +422,10 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
             lines += [f"- {item}" for item in items]
     if request.test_guidance.strip():
         lines += ["", "# Test guidance", request.test_guidance.strip()]
+    if request.requested_checks:
+        # The session has no terminal; these run after it, and must pass.
+        lines += ["", "# Commands AL/X will run after your session, which must pass"]
+        lines += [f"- {' '.join(argv)}" for argv in request.requested_checks]
     if request.repair_branch.strip():
         # Stated so the agent knows its edits are already on the repair branch
         # and has no reason to try to arrange one. It cannot run git either way.
@@ -521,6 +568,15 @@ class CodingAgent:
         # second's checkout and report its elapsed time.
         # Nothing job-authoritative belongs on the agent itself.
 
+    def _report_progress(self, state: "_JobState") -> None:
+        """Republish the current phase with a fresh activity time, no transition."""
+        current = state.telemetry
+        if current is None or current.terminal:
+            return
+        self._report_telemetry(
+            state, current.phase, in_flight=current.in_flight, waiting=current.waiting,
+        )
+
     def _report_telemetry(
         self, state: "_JobState", phase: str, *, in_flight: bool = False,
         waiting: bool = False, terminal: bool = False, outcome: str = "",
@@ -615,6 +671,9 @@ class CodingAgent:
         # One state object per call, so nothing this run touches is reachable
         # from another run on the same agent.
         state = _JobState(request.job_id)
+        # The session's real activity, as its watchdog observes it, refreshes
+        # the job's last-activity time between lifecycle boundaries.
+        state.cancellation.on_activity = lambda: self._report_progress(state)
         cancellation_token = bind_cancellation(state.cancellation)
         self._report_telemetry(
             state, "plan", in_flight=True, transition="CASE started"
@@ -847,10 +906,7 @@ class CodingAgent:
                     state.files, git_status, preexisting_dirty,
                     self._modified_preexisting(workspace, preexisting_fingerprints),
                 )
-                interrupted = error.code == "session_interrupted" or (
-                    error.code == "session_failed"
-                    and error.details.get("reason_code") == "session_timeout"
-                )
+                interrupted = error.code == "session_interrupted"
                 return self._outcome(
                     status="interrupted" if interrupted else "failed",
                     summary="coding session interrupted" if interrupted else
@@ -860,9 +916,8 @@ class CodingAgent:
                     git_diff=git_diff, issues=(error.code,), review=False,
                     failure_status=not interrupted, plan_summary=plan_summary,
                     diagnostics={"phase": "execution", **error.details,
-                                 "reason_code": "session_emergency_ceiling"
-                                 if error.details.get("reason_code") == "session_timeout"
-                                 else error.details.get("reason_code", "")}, baseline=baseline,
+                                 "reason_code": error.details.get("reason_code", "")},
+                    baseline=baseline,
                     checkpoint=self._checkpoint(state),
                     diff_preserved=bool(state.files),
                     preserved_branch=branch if state.files else "",
@@ -887,15 +942,73 @@ class CodingAgent:
                     current = read_workspace_state(workspace.root)
                 except CodingError:
                     current = None
-                if (current is not None and current.clean and
-                        current.branch == branch and
-                        current.head_sha == baseline.head_sha):
+                no_change_proven = (
+                    current is not None and current.clean
+                    and current.branch == branch
+                    and current.head_sha == baseline.head_sha
+                )
+                unchanged_verification: VerificationEvidence | None = None
+                unchanged_tests_run, unchanged_tests_passed = False, None
+                if no_change_proven and request.requested_checks:
+                    # Unchanged is not verified. Commands AL/X required run on
+                    # this checkout too, and "nothing to do" stands only if
+                    # they pass.
+                    verification, tests_run, tests_passed = self._verify(
+                        request, workspace, (), commands
+                    )
+                    if not verification.all_required_passed:
+                        return self._outcome(
+                            status="failed",
+                            summary="the checkout was left unchanged, but a required verification command did not pass",
+                            files=(), preexisting_dirty=preexisting_dirty,
+                            commands=commands, tests_run=tests_run, tests_passed=tests_passed,
+                            git_status="", git_diff="",
+                            issues=("required_verification_failed",), review=False,
+                            verification=verification, plan_summary=plan_summary,
+                            baseline=baseline,
+                            diagnostics={"phase": "test", "checkout_clean": True,
+                                         "branch": branch, "head_sha": current.head_sha},
+                        )
+                    # A permitted test may itself write into the checkout, so
+                    # cleanliness is proven again after the commands ran.
+                    try:
+                        after = read_workspace_state(workspace.root)
+                    except CodingError:
+                        after = None
+                    if (after is None or not after.clean or after.branch != branch
+                            or after.head_sha != baseline.head_sha):
+                        git_status, git_diff = self._git_evidence(workspace)
+                        # Named durably, so AL/X still knows after a restart
+                        # which paths a check left behind. Deliberately not a
+                        # resumable checkpoint: they are a test's side effects,
+                        # not coding work a later resume should review and commit.
+                        left_behind = self._files_changed(
+                            (), git_status, preexisting_dirty,
+                            self._modified_preexisting(workspace, preexisting_fingerprints),
+                        )
+                        return self._outcome(
+                            status="failed",
+                            summary="a required verification command changed the checkout",
+                            files=left_behind, preexisting_dirty=preexisting_dirty,
+                            commands=commands, tests_run=tests_run, tests_passed=tests_passed,
+                            git_status=git_status, git_diff=git_diff,
+                            issues=("checkout_changed_by_verification",), review=False,
+                            verification=verification, plan_summary=plan_summary,
+                            baseline=baseline,
+                            diagnostics={"phase": "test", "checkout_clean": False,
+                                         "branch": branch},
+                        )
+                    unchanged_verification = verification
+                    unchanged_tests_run, unchanged_tests_passed = tests_run, tests_passed
+                if no_change_proven:
                     return self._outcome(
                         status="no_change_required",
                         summary=(session.report.strip() or "the coding session made no file changes")[:8_000],
                         files=(), preexisting_dirty=preexisting_dirty,
-                        commands=commands, tests_run=False, tests_passed=None,
+                        commands=commands, tests_run=unchanged_tests_run,
+                        tests_passed=unchanged_tests_passed,
                         git_status="", git_diff="", issues=(), review=False,
+                        verification=unchanged_verification,
                         plan_summary=plan_summary, baseline=baseline,
                         diagnostics={
                             "phase": "execution", "session_turns": session.turns,
@@ -1011,11 +1124,8 @@ class CodingAgent:
                 ))
             except (KeyError, TypeError, ValueError):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_invalid"))
-            if not verification.all_required_passed or (
-                tuple((check.name, check.argv, check.kind, check.reason)
-                      for check in verification.checks)
-                != tuple((check.name, check.argv, check.kind, check.reason)
-                         for check in required_verification(reviewed_files, self._repository).checks)
+            if not recorded_verification_proves(
+                verification, request, reviewed_files, self._repository,
             ):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_unproven"))
             tests_run = any(check.ran and check.name.startswith("pytest") for check in verification.checks)
@@ -1563,7 +1673,8 @@ class CodingAgent:
         # policy emits the diff check, the content check, at most the two
         # gates, one targeted pytest, and one unmapped-file report. That is
         # six against a ceiling of eight. Exceeding the ceiling fails closed.
-        checks = policy.checks
+        # AL/X's required commands (at most two) join them.
+        checks = policy.checks + requested_verification(request, policy.checks)
         if len(checks) > MAX_VERIFICATION_COMMANDS:
             return VerificationEvidence(checks), False, None
         for check in checks:
@@ -1625,7 +1736,12 @@ class CodingAgent:
                 continue
             passed = _check_passed(record, check.name)
             baseline = ""
-            if not passed and check.name.startswith("pytest"):
+            # Only the derived pytest checks may be excused as already failing
+            # on main, and only when AL/X did not require that same command:
+            # deduplication runs a requested argv once under its derived name,
+            # and must not turn her requirement into an excusable check.
+            if (not passed and check.name.startswith("pytest")
+                    and check.argv not in request.requested_checks):
                 passed, baseline = same_main_pytest_failure(
                     record, workspace.root,
                     FULL_SUITE_COMMAND_SECONDS if check.name == "pytest_full"

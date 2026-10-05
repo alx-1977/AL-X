@@ -30,7 +30,7 @@ import logging
 import os
 import shutil
 import subprocess  # noqa: S404 - the coding-session launch site
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -42,6 +42,54 @@ from alx.contracts.coding import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+# The most session output spooled to disk before the session is stopped as
+# session_output_limit. A size bound, not a time bound: a session may run as
+# long as it stays active, but it may not fill the disk.
+MAX_SESSION_OUTPUT_BYTES = 512 * 1024 * 1024
+# How much of that output is read back into memory to form the result.
+MAX_RETAINED_OUTPUT_CHARACTERS = 1_000_000
+MAX_RETAINED_STDERR_CHARACTERS = 64_000
+
+
+# The longest spooled line read back whole. Anything longer is never decoded:
+# only a short prefix is kept, so the adapter can tell what kind it was.
+MAX_EVENT_LINE_CHARACTERS = 1_000_000
+OVERSIZED_PREFIX_CHARACTERS = 256
+
+
+class OversizedLine(str):
+    """The prefix of a spooled line too long to read back whole."""
+
+
+def bounded_lines(handle) -> Iterator[str]:
+    """Each line of a spooled file, none read whole past the bound."""
+    while True:
+        line = handle.readline(MAX_EVENT_LINE_CHARACTERS + 1)
+        if not line:
+            return
+        if len(line) > MAX_EVENT_LINE_CHARACTERS and not line.endswith("\n"):
+            prefix = line[:OVERSIZED_PREFIX_CHARACTERS]
+            # Skip the rest of the line without keeping it.
+            while True:
+                rest = handle.readline(MAX_EVENT_LINE_CHARACTERS)
+                if not rest or rest.endswith("\n"):
+                    break
+            yield OversizedLine(prefix)
+            continue
+        yield line
+
+
+def _tail(path: Path, characters: int) -> str:
+    """The last `characters` of a spooled file, read without loading all of it."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - characters * 4))
+            return handle.read().decode("utf-8", errors="replace")[-characters:]
+    except OSError:
+        return ""
 
 # Process basics only. Anything not named here does not reach the child, so a
 # credential the host happens to export cannot be inherited by accident.
@@ -127,24 +175,18 @@ class SubscriptionCodingSession:
     def __init__(
         self,
         model: str,
-        timeout_seconds: int,
         *,
         executable: str,
-        stall_seconds: int | float | None = None,
+        stall_seconds: int | float,
         max_turns: int = 60,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
         effort: str = "",
     ) -> None:
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        if stall_seconds is None:
-            # Direct adapter users with a short emergency bound (including
-            # containment tests) retain a valid watchdog without production
-            # configuration. Production passes its explicit 600-second bound.
-            stall_seconds = min(600, timeout_seconds / 2)
-        if stall_seconds <= 0 or stall_seconds >= timeout_seconds:
-            raise ValueError("stall_seconds must be positive and below the emergency ceiling")
+        # The only bound on a session: silence. There is no absolute ceiling;
+        # a session may run as long as it keeps showing real activity.
+        if isinstance(stall_seconds, bool) or not stall_seconds > 0:
+            raise ValueError("stall_seconds must be positive")
         if max_turns <= 1:
             # One turn is what broke the previous execution model: an agent
             # that cannot take a second turn cannot act on what it just read.
@@ -152,7 +194,6 @@ class SubscriptionCodingSession:
         if not model.strip():
             raise ValueError("model must not be blank")
         self._model = model
-        self._timeout_seconds = timeout_seconds
         self._stall_seconds = stall_seconds
         self._executable = executable
         self._max_turns = max_turns
@@ -188,6 +229,26 @@ class SubscriptionCodingSession:
     def read_result(self, stdout: str) -> CodingSessionResult:
         """Read the CLI's envelope. Adapter-specific key spellings."""
         raise NotImplementedError
+
+    def retained_output(self, lines: Iterable[str]) -> str:
+        """What of the spooled stdout is kept to read the session's result.
+
+        All of it by default, within MAX_RETAINED_OUTPUT_CHARACTERS. An adapter
+        whose stream also carries what the agent read keeps only the events its
+        result is read from.
+        """
+        kept: list[str] = []
+        size = 0
+        for line in lines:
+            if isinstance(line, OversizedLine):
+                # Unknown content that cannot be read back: refused rather
+                # than silently left out of the result.
+                raise CodingError("session_failed", reason_code="session_event_oversized")
+            size += len(line)
+            if size > MAX_RETAINED_OUTPUT_CHARACTERS:
+                break
+            kept.append(line.rstrip("\n"))
+        return "\n".join(kept)
 
     def failure_output(self, stdout: str) -> str:
         """The part of stdout that may explain a failed exit.
@@ -259,26 +320,32 @@ class SubscriptionCodingSession:
             prompt_path = Path(working_directory) / "briefing.txt"
             prompt_path.write_text(briefing, encoding="utf-8")
             command = self.command(prompt_path, worktree)
+            # Output is spooled to this job's own directory, never held in
+            # memory: with no deadline, a long and talkative session would
+            # otherwise grow the runtime's memory for as long as it ran.
+            stdout_path = Path(working_directory) / "session.stdout"
+            stderr_path = Path(working_directory) / "session.stderr"
+            stdout_path.touch()
+            stderr_path.touch()
             try:
                 from alx.providers.coding_process import run_coding_subprocess
                 completed = run_coding_subprocess(self._runner,
                     command,
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout_seconds,
+                    # No deadline: inactivity is the session's only bound.
+                    # Relayed output is activity, and its size is bounded
+                    # where it is written instead of its duration.
+                    timeout=None,
                     inactivity_timeout=self._stall_seconds,
                     activity_root=worktree,
                     activity_blocked_paths=request.blocked_paths,
+                    spool_to=(stdout_path, stderr_path),
+                    output_limit_bytes=MAX_SESSION_OUTPUT_BYTES,
                     env=self.child_environment(home),
                     cwd=str(worktree),
                     stdin=subprocess.DEVNULL,
                     shell=False,
                     check=False,
                 )
-            except subprocess.TimeoutExpired as error:
-                raise CodingError(
-                    "session_interrupted", reason_code="session_emergency_ceiling"
-                ) from error
             except FileNotFoundError as error:
                 raise CodingError(
                     "coding_unavailable", reason_code="cli_not_installed"
@@ -287,9 +354,15 @@ class SubscriptionCodingSession:
                 raise CodingError(
                     "coding_unavailable", reason_code="cli_unavailable"
                 ) from error
+            # A substituted runner may still answer with text directly.
+            if isinstance(completed.stdout, str):
+                stdout = self.retained_output(completed.stdout.splitlines())
+                stderr = (completed.stderr or "")[-MAX_RETAINED_STDERR_CHARACTERS:]
+            else:
+                with open(stdout_path, encoding="utf-8", errors="replace") as spooled:
+                    stdout = self.retained_output(bounded_lines(spooled))
+                stderr = _tail(stderr_path, MAX_RETAINED_STDERR_CHARACTERS)
 
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
         if completed.returncode != 0:
             code, reason = classify_failure(stderr, self.failure_output(stdout))
             raise CodingError(

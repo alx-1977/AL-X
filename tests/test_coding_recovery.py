@@ -137,7 +137,7 @@ class CodingRecoveryTests(unittest.TestCase):
                     (Path(request.worktree) / "app.py").write_text(
                         _FIXED + "# partial correction\n", encoding="utf-8"
                     )
-                    raise CodingError("session_interrupted", reason_code="session_emergency_ceiling")
+                    raise CodingError("session_interrupted", reason_code="session_stalled")
                 return super().run_session(request, briefing)
 
         findings = {"findings": [{

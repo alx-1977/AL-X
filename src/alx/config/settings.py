@@ -849,10 +849,11 @@ def _research_settings(
     )
 
 
-# Native coding sessions are bounded by inactivity, with a separate emergency
-# ceiling. Neither is the shorter planning-model deadline.
+# Native coding sessions are bounded by inactivity only: a session may run as
+# long as it keeps showing real activity. There is deliberately no absolute
+# ceiling; one killed sessions that were still working. Not the shorter
+# planning-model deadline either.
 DEFAULT_CODING_SESSION_STALL_SECONDS = 600
-DEFAULT_CODING_SESSION_EMERGENCY_SECONDS = 7200
 
 
 @dataclass(frozen=True, slots=True)
@@ -873,7 +874,6 @@ class CodingSettings:
     # one model call. Sizing it from `reasoning.timeout_seconds` killed a
     # working session after two minutes, so it carries its own bound.
     session_stall_seconds: int = DEFAULT_CODING_SESSION_STALL_SECONDS
-    session_emergency_seconds: int = DEFAULT_CODING_SESSION_EMERGENCY_SECONDS
 
     @property
     def is_usable(self) -> bool:
@@ -1013,15 +1013,15 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
         "ALX_CODING_SESSION_STALL_SECONDS",
         DEFAULT_CODING_SESSION_STALL_SECONDS,
     )
-    session_emergency_seconds = _positive_integer(
-        environment,
-        "ALX_CODING_SESSION_EMERGENCY_SECONDS",
-        DEFAULT_CODING_SESSION_EMERGENCY_SECONDS,
-    )
-    if session_emergency_seconds <= session_stall_seconds:
-        raise ConfigurationError("coding session emergency ceiling must exceed stall interval")
+    if environment.get("ALX_CODING_SESSION_EMERGENCY_SECONDS", "").strip():
+        # Refused rather than ignored, so nobody believes a removed limit is
+        # still in force.
+        raise ConfigurationError(
+            "ALX_CODING_SESSION_EMERGENCY_SECONDS is no longer supported: coding "
+            "sessions have no absolute ceiling, only ALX_CODING_SESSION_STALL_SECONDS"
+        )
     if not enabled:
-        return CodingSettings(False, absent, absent, session_stall_seconds, session_emergency_seconds)
+        return CodingSettings(False, absent, absent, session_stall_seconds)
     provider = (
         environment.get("ALX_CODING_PROVIDER", GROK_SUBSCRIPTION_PROVIDER)
         .strip()
@@ -1029,7 +1029,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
         or GROK_SUBSCRIPTION_PROVIDER
     )
     if provider == NO_PROVIDER:
-        return CodingSettings(True, absent, absent, session_stall_seconds, session_emergency_seconds)
+        return CodingSettings(True, absent, absent, session_stall_seconds)
     if provider not in (GROK_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER, "openai"):
         raise ConfigurationError(
             f"coding provider adapter is not installed: {provider}"
@@ -1045,7 +1045,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
             api_key="", base_url="",
             timeout_seconds=_positive_integer(environment, "ALX_CODING_TIMEOUT_SECONDS", 120),
             streaming=False, service_tier="default", effort="medium",
-        ), _coding_reviewer_settings(environment), session_stall_seconds, session_emergency_seconds)
+        ), _coding_reviewer_settings(environment), session_stall_seconds)
     if provider == "openai":
         return CodingSettings(True, ReasoningSettings(
             provider=provider,
@@ -1056,7 +1056,7 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
             streaming=False,
             service_tier=environment.get("ALX_CODING_SERVICE_TIER", "default").strip().lower(),
             effort=_coding_effort(environment),
-        ), _coding_reviewer_settings(environment), session_stall_seconds, session_emergency_seconds)
+        ), _coding_reviewer_settings(environment), session_stall_seconds)
     return CodingSettings(
         True,
         ReasoningSettings(
@@ -1074,7 +1074,6 @@ def _coding_settings(environment: Mapping[str, str]) -> "CodingSettings":
         ),
         _coding_reviewer_settings(environment),
         session_stall_seconds,
-        session_emergency_seconds,
     )
 
 

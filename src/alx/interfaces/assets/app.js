@@ -173,11 +173,63 @@ function showTrace(message) {
   }
 }
 
+// The foreground stage: what the conversation itself is doing. It is shown
+// only when no background task is running; see renderStage.
+let foregroundStage = "Interface ready";
+
 function beginDiagnosticStage(label, at) {
-  diagnosticStage.textContent = label;
+  foregroundStage = label;
   // Measured from when the step began on the server, not from arrival.
   const lag = at ? Math.max(0, Date.now() - eventDate(at).getTime()) : 0;
   stageStartedAt = performance.now() - lag;
+  renderStage();
+}
+
+// The background coding job, from its own telemetry. Its clocks are the
+// server's timestamps, so they keep running between observations.
+let backgroundJob;
+
+const codingStageLabels = {
+  plan: "Planning",
+  execution: "Coding",
+  correction: "Correcting",
+  review: "Local review",
+  verify: "Verifying",
+  test: "Testing",
+  commit: "Committing",
+};
+
+function backgroundStatus() {
+  if (backgroundJob) return backgroundJob;
+  // A running external task, in the order the rows were added.
+  for (const task of runningTasks.values()) {
+    if (task.settled) continue;
+    const runtime = (task.seconds * 1000) + (performance.now() - task.at);
+    return {
+      label: task.service ? `${task.service} review` : "External task",
+      startedAt: Date.now() - runtime,
+      lastActivityAt: task.lastActivityAt,
+    };
+  }
+  return undefined;
+}
+
+// One place decides the bar. While background work exists it holds the bar:
+// speaking, listening and console events change the foreground stage
+// underneath it but never replace it. Only actual task activity moves the
+// "last activity" clock.
+function renderStage() {
+  const background = backgroundStatus();
+  if (background) {
+    const now = Date.now();
+    diagnosticStage.textContent =
+      `${background.label} · ${taskClock((now - background.startedAt) / 1000)}` +
+      ` · last activity ${taskClock((now - background.lastActivityAt) / 1000)}`;
+    diagnosticElapsed.textContent = "";
+    return;
+  }
+  diagnosticStage.textContent = foregroundStage;
+  diagnosticElapsed.textContent = elapsedText(performance.now() - stageStartedAt);
 }
 
 function elapsedText(milliseconds) {
@@ -186,12 +238,6 @@ function elapsedText(milliseconds) {
   const seconds = (totalSeconds % 60).toFixed(1).padStart(4, "0");
   return `${minutes}:${seconds}`;
 }
-
-function codingSeconds(value) {
-  const seconds = Math.max(0, Number(value ?? 0));
-  return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
-}
-
 
 function showCodingStatus(message) {
   const nextCodingJobId = message.terminal || message.phase === "commit"
@@ -203,20 +249,20 @@ function showCodingStatus(message) {
   activeCodingJobId = nextCodingJobId;
   codingCancel.hidden = !activeCodingJobId;
   if (message.transition === "CASE started" || message.terminal) codingCancel.disabled = false;
-  const phase = String(message.phase ?? "").toUpperCase();
-  const provider = String(message.provider ?? "");
-  const model = String(message.model ?? "");
-  const mode = message.terminal
-    ? (String(message.outcome ?? "").toUpperCase() || "COMPLETE")
-    : message.stalled ? "STALLED?"
-      : message.in_flight ? "ACTIVE"
-        : message.waiting ? "WAITING" : "WORKING";
-  const details = ["CODING", phase, [provider, model].filter(Boolean).join(" / "), mode,
-    `${codingSeconds(message.elapsed_seconds)} elapsed`,
-    `last activity ${codingSeconds(message.last_activity_seconds)} ago`]
-    .filter(Boolean).join(" · ");
-  diagnosticStage.textContent = details;
-  stageStartedAt = performance.now() - Number(message.phase_elapsed_seconds ?? 0) * 1000;
+  // The bar shows the job's stage, its runtime and the time since its last
+  // real activity, and nothing else; a finished job gives the bar back.
+  if (message.terminal) {
+    if (!backgroundJob || backgroundJob.jobId === message.job_id) backgroundJob = undefined;
+  } else {
+    const phase = String(message.phase ?? "");
+    backgroundJob = {
+      jobId: message.job_id,
+      label: codingStageLabels[phase] ?? (phase ? phase[0].toUpperCase() + phase.slice(1) : "Coding"),
+      startedAt: eventDate(message.started_at).getTime(),
+      lastActivityAt: eventDate(message.last_activity_at).getTime(),
+    };
+  }
+  renderStage();
   const transition = String(message.transition ?? "");
   const key = `${message.job_id ?? ""}:${transition}`;
   if (transition && key !== lastCodingTransition) {
@@ -243,8 +289,8 @@ function sinceSynthesis(utterance) {
 }
 
 setInterval(() => {
-  diagnosticElapsed.textContent = elapsedText(performance.now() - stageStartedAt);
   paintTasks();
+  renderStage();
 }, 100);
 
 function taskClock(seconds) {
@@ -319,6 +365,11 @@ function showTask(message) {
   }
   const now = performance.now();
   const settled = ["completed", "failed", "observer_unavailable"].includes(state);
+  // A changed state is task activity; a repeated report of the same state
+  // is not.
+  if (task.state !== state || task.lastActivityAt === undefined) {
+    task.lastActivityAt = eventDate(message.at).getTime();
+  }
   Object.assign(task, {
     state,
     service: String(message.service ?? ""),

@@ -441,7 +441,7 @@ class NativeExecutionTests(unittest.TestCase):
         reviewer = PlanningModel()
         self._run(
             planner,
-            RecordingSession(raises=CodingError("session_failed", reason_code="session_timeout")),
+            RecordingSession(raises=CodingError("session_interrupted", reason_code="session_stalled")),
             reviewer=reviewer, activity_sink=activities.append,
             task="fix add", worktree=str(worktree),
         )
@@ -1483,6 +1483,63 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(second.result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(second.result.values["status"], "succeeded")
 
+    def test_an_unchanged_checkout_still_runs_the_requested_commands(self) -> None:
+        """No change is not verified: a failing required command fails the job."""
+        worktree = _worktree(self.root)  # its test_app.py fails until add() is fixed
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={}, report="nothing to change"),
+            task="Confirm add works", worktree=str(worktree),
+            verification_commands=[["python", "-m", "pytest", "test_app.py", "-q",
+                                    "-p", "no:cacheprovider"]],
+        )
+        values = attempt.result.values
+        self.assertEqual(values["status"], "failed")
+        self.assertIn("required_verification_failed", values["unresolved_issues"])
+        check = next(c for c in values["verification"]["checks"] if c["name"] == "requested_1")
+        self.assertTrue(check["ran"])
+        self.assertFalse(check["passed"])
+
+    def test_an_unchanged_checkout_whose_requested_commands_pass_records_them(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "app.py").write_text(_FIXED, encoding="utf-8")
+        _git(worktree, "add", "app.py")
+        _git(worktree, "commit", "-qm", "fix add on main")
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={}, report="add already works"),
+            task="Confirm add works", worktree=str(worktree),
+            verification_commands=[["python", "-m", "pytest", "test_app.py", "-q",
+                                    "-p", "no:cacheprovider"]],
+        )
+        values = attempt.result.values
+        self.assertEqual(values["status"], "no_change_required")
+        self.assertTrue(values["tests_run"])
+        check = next(c for c in values["verification"]["checks"] if c["name"] == "requested_1")
+        self.assertTrue(check["ran"] and check["passed"])
+
+    def test_a_requested_test_that_writes_into_the_checkout_is_not_no_change(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "app.py").write_text(_FIXED, encoding="utf-8")
+        (worktree / "test_writes.py").write_text(
+            "from pathlib import Path\n\n\n"
+            "def test_writes():\n"
+            "    Path(__file__).with_name('left_behind.txt').write_text('x')\n",
+            encoding="utf-8",
+        )
+        _git(worktree, "add", ".")
+        _git(worktree, "commit", "-qm", "fix add and add a writing test on main")
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={}, report="add already works"),
+            task="Confirm add works", worktree=str(worktree),
+            verification_commands=[["python", "-m", "pytest", "test_writes.py", "-q",
+                                    "-p", "no:cacheprovider"]],
+        )
+        values = attempt.result.values
+        self.assertEqual(values["status"], "failed")
+        self.assertIn("checkout_changed_by_verification", values["unresolved_issues"])
+        self.assertIn("left_behind.txt", values["git_status"])
+        # Durable: still known after a restart.
+        self.assertIn("left_behind.txt", attempt.result.durable_values["files_changed"])
+
     def test_no_change_report_keeps_the_existing_summary_bound(self) -> None:
         worktree = _worktree(self.root)
         attempt = self._run(
@@ -1689,7 +1746,7 @@ class SessionLaunchTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
 
     def _session(self, **kwargs) -> GrokCodingSession:
-        return GrokCodingSession("grok-4.6", 900, **kwargs)
+        return GrokCodingSession("grok-4.6", stall_seconds=450, **kwargs)
 
     def test_native_file_tools_are_not_withheld(self) -> None:
         """3. Reading, searching and editing stay native."""
@@ -1727,7 +1784,7 @@ class SessionLaunchTests(unittest.TestCase):
         turns = int(command[command.index("--max-turns") + 1])
         self.assertGreater(turns, 1)
         with self.assertRaises(ValueError):
-            GrokCodingSession("grok-4.6", 900, max_turns=1)
+            GrokCodingSession("grok-4.6", stall_seconds=450, max_turns=1)
 
     def test_the_generated_sandbox_profile_is_named_and_used(self) -> None:
         """6. Every job runs under its own generated custom profile."""
@@ -1825,7 +1882,6 @@ class SessionTimeoutTests(unittest.TestCase):
         """A planning call answers in seconds; a session needs far longer."""
         from alx.config.settings import (
             DEFAULT_CODING_SESSION_STALL_SECONDS,
-            DEFAULT_CODING_SESSION_EMERGENCY_SECONDS,
             _coding_settings,
         )
 
@@ -1841,7 +1897,7 @@ class SessionTimeoutTests(unittest.TestCase):
             settings.session_stall_seconds,
             DEFAULT_CODING_SESSION_STALL_SECONDS,
         )
-        self.assertEqual(settings.session_emergency_seconds, DEFAULT_CODING_SESSION_EMERGENCY_SECONDS)
+        self.assertFalse(hasattr(settings, "session_emergency_seconds"))
         self.assertGreater(
             settings.session_stall_seconds, settings.reasoning.timeout_seconds
         )
@@ -1858,12 +1914,10 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
                 "ALX_CODING_SESSION_STALL_SECONDS": "300",
-                "ALX_CODING_SESSION_EMERGENCY_SECONDS": "1800",
             }
         )
         self.assertEqual(settings.reasoning.timeout_seconds, 45)
         self.assertEqual(settings.session_stall_seconds, 300)
-        self.assertEqual(settings.session_emergency_seconds, 1800)
         # Changing one must not move the other.
         planning_only = _coding_settings(
             {
@@ -1875,7 +1929,6 @@ class SessionTimeoutTests(unittest.TestCase):
         )
         self.assertEqual(planning_only.reasoning.timeout_seconds, 45)
         self.assertEqual(planning_only.session_stall_seconds, 600)
-        self.assertEqual(planning_only.session_emergency_seconds, 7200)
         obsolete = _coding_settings({
             "ALX_CODING_ENABLED": "true",
             "ALX_CODING_PROVIDER": "grok_subscription",
@@ -1884,7 +1937,18 @@ class SessionTimeoutTests(unittest.TestCase):
             "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
             "ALX_CODING_SESSION_TIMEOUT_SECONDS": "1200",
         })
-        self.assertEqual(obsolete.session_emergency_seconds, 7200)
+        self.assertEqual(obsolete.session_stall_seconds, 600)
+
+    def test_a_removed_session_ceiling_setting_is_refused_not_ignored(self) -> None:
+        from alx.config.settings import ConfigurationError, _coding_settings
+
+        with self.assertRaises(ConfigurationError):
+            _coding_settings({
+                "ALX_CODING_ENABLED": "true",
+                "ALX_CODING_PROVIDER": "grok_subscription",
+                "ALX_CODING_MODEL": "grok-4.6",
+                "ALX_CODING_SESSION_EMERGENCY_SECONDS": "7200",
+            })
 
     def test_the_native_session_is_built_with_the_session_timeout(self) -> None:
         """The regression that killed a working session after two minutes."""
@@ -1904,38 +1968,35 @@ class SessionTimeoutTests(unittest.TestCase):
                 "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
                 "ALX_CODING_TIMEOUT_SECONDS": "45",
                 "ALX_CODING_SESSION_STALL_SECONDS": "300",
-                "ALX_CODING_SESSION_EMERGENCY_SECONDS": "1500",
             }
         )
         session = _build_coding_session(_Settings(settings))
         self.assertIsNotNone(session)
-        self.assertEqual(session._timeout_seconds, 1500)
+        self.assertFalse(hasattr(session, "_timeout_seconds"))
         self.assertEqual(session._stall_seconds, 300)
         self.assertNotEqual(
             session._stall_seconds, settings.reasoning.timeout_seconds
         )
 
-    def test_emergency_ceiling_is_a_named_interruption(self) -> None:
-        def expire(*_args, **kwargs):
-            raise subprocess.TimeoutExpired(
-                cmd="grok", timeout=kwargs.get("timeout", 1200)
-            )
+    def test_a_session_is_launched_without_any_deadline(self) -> None:
+        """Only inactivity bounds a session; no absolute ceiling is passed."""
+        seen: dict = {}
 
-        session = GrokCodingSession("grok-4.6", 1200, runner=expire)
-        with self.assertRaises(CodingError) as raised:
-            session.run_session(
-                CodingRequest(task="t", job_id="job-1", worktree=str(self.root)), "briefing"
-            )
-        self.assertEqual(raised.exception.code, "session_interrupted")
-        self.assertEqual(
-            raised.exception.details["reason_code"], "session_emergency_ceiling"
+        def record(argv, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(
+                {"type": "end", "stopReason": "end_turn", "num_turns": 1}), "")
+
+        GrokCodingSession("grok-4.6", stall_seconds=600, runner=record).run_session(
+            CodingRequest(task="t", job_id="job-1", worktree=str(self.root)), "briefing"
         )
+        self.assertIsNone(seen["timeout"])
 
     def test_a_timeout_preserves_plan_and_dirty_state_evidence(self) -> None:
         """Evidence accumulated before the timeout still reaches Core."""
         worktree = _worktree(self.root)
         session = RecordingSession(
-            raises=CodingError("session_failed", reason_code="session_timeout")
+            raises=CodingError("session_interrupted", reason_code="session_stalled")
         )
         runtime = build_coding_runtime(
             True, PlanningModel(), lambda: "call-1", session=session,
@@ -1959,7 +2020,7 @@ class SessionTimeoutTests(unittest.TestCase):
         self.assertEqual(attempt.result.state, CapabilityResultState.PARTIAL)
         self.assertIsNone(attempt.result.failure)
         self.assertEqual(
-            attempt.result.durable_values["interruption_reason"], "session_emergency_ceiling"
+            attempt.result.durable_values["interruption_reason"], "session_stalled"
         )
         values = attempt.result.values
         self.assertTrue(values["plan_summary"])
@@ -1974,7 +2035,7 @@ class SessionTimeoutTests(unittest.TestCase):
     def test_a_timeout_is_not_retried(self) -> None:
         worktree = _worktree(self.root)
         session = RecordingSession(
-            raises=CodingError("session_failed", reason_code="session_timeout")
+            raises=CodingError("session_interrupted", reason_code="session_stalled")
         )
         runtime = build_coding_runtime(
             True, PlanningModel(), lambda: "call-1", session=session,

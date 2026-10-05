@@ -40,6 +40,8 @@ from pathlib import Path
 from alx.contracts.coding import CodingError, CodingRequest, CodingSessionResult
 from alx.providers.coding_containment import PROFILE_NAME, write_profile
 from alx.providers.coding_subscription_session import (
+    MAX_RETAINED_OUTPUT_CHARACTERS,
+    OversizedLine,
     SubscriptionCodingSession,
     classify_failure,
     subscription_cli_present,
@@ -81,6 +83,29 @@ NATIVE_TOOLS: tuple[str, ...] = (
 )
 
 
+# Stream events that carry what the agent read or thought, never the result.
+# Only these may be dropped when a line is too long to decode.
+_BULK_EVENTS = frozenset({
+    "tool_call", "tool_call_update", "thought", "usage", "available_commands",
+})
+
+
+def _event_kind(prefix: str) -> str:
+    """The `type` an NDJSON event's prefix declares, read structurally.
+
+    The CLI writes `type` as each event's first key; whitespace between the
+    tokens is tolerated. Anything else declares no kind and is not dropped.
+    """
+    rest = prefix.lstrip()
+    for token in ("{", '"type"', ":", '"'):
+        rest = rest.lstrip()
+        if not rest.startswith(token):
+            return ""
+        rest = rest[len(token):]
+    end = rest.find('"')
+    return rest[:end] if end > 0 else ""
+
+
 class GrokCodingSession(SubscriptionCodingSession):
     """One native coding-agent session per job, contained by the kernel."""
 
@@ -92,14 +117,11 @@ class GrokCodingSession(SubscriptionCodingSession):
     def __init__(
         self,
         model: str,
-        timeout_seconds: int,
         *,
         executable: str = EXECUTABLE,
         **keywords: object,
     ) -> None:
-        super().__init__(
-            model, timeout_seconds, executable=executable, **keywords
-        )
+        super().__init__(model, executable=executable, **keywords)
 
     def default_auth_home(self) -> Path:
         return Path.home() / ".grok"
@@ -185,6 +207,43 @@ class GrokCodingSession(SubscriptionCodingSession):
             failure_code="" if completed_cleanly else "session_failed",
             diagnostics=diagnostics,
         )
+
+    def retained_output(self, lines) -> str:
+        """Only the events the result is read from: text, end and error.
+
+        The stream also carries every file the agent read; none of that is
+        needed to read the result, and keeping it would put a long session's
+        reading back into memory. Text is bounded; end and error are kept.
+        """
+        kept: list[str] = []
+        text_size = 0
+        control_size = 0
+        for line in lines:
+            if isinstance(line, OversizedLine):
+                # Too long to decode. Bulk reading events are dropped by the
+                # kind their prefix names; anything that could carry the result
+                # is refused rather than accepted truncated.
+                if _event_kind(line) not in _BULK_EVENTS:
+                    raise CodingError("session_failed", reason_code="session_event_oversized")
+                continue
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line.rstrip("\n"))  # left for _events to refuse
+                continue
+            kind = event.get("type") if isinstance(event, Mapping) else None
+            if kind in ("end", "error"):
+                control_size += len(line)
+                if control_size > MAX_RETAINED_OUTPUT_CHARACTERS:
+                    raise CodingError("session_failed", reason_code="session_event_oversized")
+                kept.append(line.rstrip("\n"))
+            elif kind == "text":
+                text_size += len(line)
+                if text_size <= MAX_RETAINED_OUTPUT_CHARACTERS:
+                    kept.append(line.rstrip("\n"))
+        return "\n".join(kept)
 
     def failure_output(self, stdout: str) -> str:
         """Only the CLI's own error events, never what the agent read."""
