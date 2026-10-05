@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from alx.contracts.records import StructuredData, freeze_data
+from alx.contracts.trace import ReasoningPurpose
 
 
 def _required(value: str, field_name: str) -> None:
@@ -28,6 +29,9 @@ class ModelMessage:
 
     def __post_init__(self) -> None:
         _required(self.content, "content")
+
+
+_PURPOSES = frozenset(item.value for item in ReasoningPurpose)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,9 +59,15 @@ class ModelRequest:
     tier: str = ""
     reservation_id: str = ""
     reserved_usd: float = 0.0
+    # Why the Core made this call, from the fixed operator vocabulary. Rides
+    # into telemetry so a console can say what each call was for; never sent
+    # to the model and never part of what it reasons over.
+    purpose: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
+        if self.purpose and self.purpose not in _PURPOSES:
+            raise ValueError("purpose must be a ReasoningPurpose value")
         if not self.messages:
             raise ValueError("a model request requires at least one message")
         _required(self.output_schema_name, "output_schema_name")

@@ -77,6 +77,7 @@ DEFINITION = CapabilityDefinition(
     ),
     SideEffect.EFFECTFUL,
     REVIEW_FAILURES,
+    trace_fields=("pull_request_number",),
 )
 
 

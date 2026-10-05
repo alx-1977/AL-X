@@ -93,6 +93,15 @@ from alx.contracts.usage import (
     CANONICAL_FIELDS,
     is_measured,
     normalise_usage,
+    usage_telemetry,
+)
+from alx.contracts.trace import (
+    ReasoningPurpose,
+    TraceEvent,
+    TraceSink,
+    TraceStatus,
+    TraceSubsystem,
+    emit_trace,
 )
 from alx.contracts.notebook import (
     DeletionRecord,
@@ -294,6 +303,9 @@ __all__ = [
     "FutureCognitionNotFound", "DuplicateFutureCognition", "FutureCognitionTooSoon",
     "is_measured",
     "normalise_usage",
+    "usage_telemetry",
+    "ReasoningPurpose", "TraceEvent", "TraceSink", "TraceStatus", "TraceSubsystem",
+    "emit_trace",
     "DeletionRecord",
     "EntryKind",
     "EntryProposal",

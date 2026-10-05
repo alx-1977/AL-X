@@ -27,7 +27,8 @@ from alx.contracts import (
     MemoryProposal, MemoryQuery, MemorySnapshot, Objective, ReasoningContext,
     ReasoningProvider, SideEffect,
     ContentOrigin, ContentProvenance, RetentionPolicy,
-    history_evidence_ids,
+    ReasoningPurpose, TraceSink, TraceStatus, TraceSubsystem,
+    emit_trace, history_evidence_ids,
 )
 
 from alx.core.plan_results import (
@@ -191,6 +192,78 @@ def _referenced_turn_ids(state: GoalState | None) -> frozenset[str]:
     return frozenset(references)
 
 
+@dataclass(frozen=True, slots=True)
+class _StepMarks:
+    """What the loop has accumulated before a reasoning step, by count.
+
+    Compared with the previous step's marks to say why the next call is being
+    made. Counts and identifiers only: nothing here reads what was decided.
+    """
+
+    dispatches: int
+    last_capability: str | None
+    refused: int
+    last_refusal: str | None
+    goal_refusals: int
+    memories: int
+    notices: int
+    goal_id: str | None
+    answering_plan: str | None
+
+
+def reasoning_purpose(
+    step_index: int, origin: CognitionOrigin, resumes_plan: bool,
+    marks: _StepMarks, previous: _StepMarks | None,
+) -> tuple[ReasoningPurpose, str | None]:
+    """Why the loop is about to call the reasoner, with an optional reference.
+
+    A step's occasion is mechanical: the turn's origin for the first call, and
+    whatever the previous step added for every later one. Ordered so the most
+    specific change wins: a refusal explains a step better than the result that
+    preceded it.
+    """
+    if step_index == 0 or previous is None:
+        if resumes_plan:
+            return ReasoningPurpose.EVALUATING_PLAN, None
+        return {
+            CognitionOrigin.PERSON_TURN: ReasoningPurpose.INTERPRETING_REQUEST,
+            CognitionOrigin.EXTERNAL_EVENT: ReasoningPurpose.ASSESSING_EVENT,
+            CognitionOrigin.WORK_COMPLETED: ReasoningPurpose.REVIEWING_COMPLETED_WORK,
+            CognitionOrigin.SELF_REQUESTED: ReasoningPurpose.REVISITING_FOLLOW_UP,
+        }[origin], None
+    if marks.refused > previous.refused:
+        if marks.last_refusal == "decision_rejected":
+            return ReasoningPurpose.CORRECTING_DECISION, None
+        return ReasoningPurpose.RECONSIDERING_REFUSAL, marks.last_refusal
+    if marks.goal_refusals > previous.goal_refusals:
+        return ReasoningPurpose.RECONSIDERING_REFUSAL, "goal_selection_unknown"
+    if marks.answering_plan != previous.answering_plan:
+        return ReasoningPurpose.EVALUATING_PLAN, None
+    if marks.dispatches > previous.dispatches:
+        return ReasoningPurpose.REVIEWING_RESULT, marks.last_capability
+    if marks.goal_id != previous.goal_id:
+        return ReasoningPurpose.EVALUATING_GOAL_STATE, None
+    if marks.memories > previous.memories:
+        return ReasoningPurpose.REVIEWING_MEMORIES, None
+    if marks.notices:
+        return ReasoningPurpose.CONTINUING_WORK, None
+    return ReasoningPurpose.DECIDING_NEXT_STEP, None
+
+
+_PLAN_LABELS = {
+    PlanOperation.INSTALL: "Plan installed",
+    PlanOperation.RESUME: "Plan resumed",
+    PlanOperation.ACCEPT: "Plan step accepted",
+    PlanOperation.FINISH: "Plan finished",
+    PlanOperation.CANCEL: "Plan cancelled",
+}
+
+
+def _short_reference(identifier: str) -> str:
+    """A goal or plan identifier, shortened for a console column."""
+    return identifier[:8]
+
+
 class CoreAgent:
     def __init__(self, store: DurableGoalStore, reasoner: ReasoningProvider,
                  dispatch: CapabilityDispatch,
@@ -208,8 +281,12 @@ class CoreAgent:
                  undelivered_responses: Callable[[], tuple] | None = None,
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None,
                  plan_continuation: bool = False,
-                 bind_dispatch: Callable[[str], None] | None = None) -> None:
+                 bind_dispatch: Callable[[str], None] | None = None,
+                 trace: TraceSink | None = None) -> None:
         self._store = store
+        # The operator's execution trace. Purpose, plan and goal transitions
+        # and refusals, as they happen; content-free, and never consulted.
+        self._trace = trace
         # Whether the runtime can return a plan to her: completion, failure,
         # changed preconditions and judgment reach the Core only through a
         # plan attention occasion. Without one no plan is installed and no
@@ -288,6 +365,42 @@ class CoreAgent:
         # opportunity ledger; the Core is shown that it happened and nothing
         # deterministic decides whether it still matters.
         self._undelivered_responses = undelivered_responses or (lambda: ())
+
+    def _emit(self, subsystem: TraceSubsystem, status: TraceStatus, label: str,
+              conversation_id: str | None = None, **values: Any) -> None:
+        emit_trace(self._trace, subsystem, status, label,
+                   conversation_id=conversation_id, **values)
+
+    def _emit_refusal(self, reason_code: str, conversation_id: str | None) -> None:
+        self._emit(TraceSubsystem.CORE, TraceStatus.REFUSED, "Step refused",
+                   conversation_id, reason_code=reason_code)
+
+    def _emit_reasoning(self, purpose: ReasoningPurpose, reference: str | None,
+                        conversation_id: str | None) -> None:
+        # The label already says why; a reference is added only when it says
+        # something more, such as which capability's result is under review.
+        self._emit(TraceSubsystem.CORE, TraceStatus.STARTED, purpose.label,
+                   conversation_id, reference=reference)
+
+    @staticmethod
+    def _step_marks(snapshot: GoalSnapshot | None,
+                    dispatched: list[str],
+                    refused_calls: tuple[Mapping[str, Any], ...],
+                    refused_goal_selections: tuple[Mapping[str, Any], ...],
+                    retrieved_memories: tuple[MemorySnapshot, ...],
+                    continuation_notices: tuple[Mapping[str, Any], ...],
+                    answering_plan: str | None) -> _StepMarks:
+        return _StepMarks(
+            dispatches=len(dispatched),
+            last_capability=dispatched[-1] if dispatched else None,
+            refused=len(refused_calls),
+            last_refusal=(str(refused_calls[-1].get("reason") or "") or None
+                          if refused_calls else None),
+            goal_refusals=len(refused_goal_selections),
+            memories=len(retrieved_memories), notices=len(continuation_notices),
+            goal_id=None if snapshot is None else snapshot.state.goal_id,
+            answering_plan=answering_plan,
+        )
 
     def process(self, conversation: ConversationSnapshot, retention_until: datetime,
                 step_budget: int, trigger_event_id: str | None = None,
@@ -383,6 +496,10 @@ class CoreAgent:
         # The goal whose plan attention this turn is answering: the one its
         # occasion names, or one whose decided work finished within it.
         answering_plan = resume_plan_goal_id
+        previous_marks: _StepMarks | None = None
+        # Capabilities this turn dispatched, in order. Counted where the loop
+        # dispatches, so a goal it merely loaded never reads as a new result.
+        dispatched: list[str] = []
         for step_index in range(step_budget):
             try:
                 now = self._clock()
@@ -408,6 +525,14 @@ class CoreAgent:
                 return CoreOutcome(
                     CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
                 )
+            marks = self._step_marks(
+                snapshot, dispatched, refused_calls, refused_goal_selections,
+                retrieved_memories, continuation_notices, answering_plan,
+            )
+            purpose, purpose_reference = reasoning_purpose(
+                step_index, origin, resume_plan_goal_id is not None, marks, previous_marks,
+            )
+            previous_marks = marks
             try:
                 reasoning_context = ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,
@@ -431,8 +556,10 @@ class CoreAgent:
                     refused_calls=refused_calls,
                     continuation_notices=continuation_notices,
                     refused_goal_selections=refused_goal_selections,
+                    purpose=purpose,
                 )
                 rendered_plan = self._rendered_plan(reasoning_context.active_goal)
+                self._emit_reasoning(purpose, purpose_reference, conversation_id)
                 decision = self._reasoner.decide(reasoning_context)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
@@ -456,6 +583,7 @@ class CoreAgent:
                 # exact reason is new evidence, so she may correct it once;
                 # the correction is validated exactly as the first was.
                 LOGGER.info("Core decision rejected by validation: %s", error.reason)
+                self._emit_refusal("decision_rejected", conversation_id)
                 if not decision_corrected and step_index + 1 < step_budget:
                     decision_corrected = True
                     refused_calls = (*refused_calls, {
@@ -476,6 +604,8 @@ class CoreAgent:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="decision_rejected")
             except Exception as error:
                 LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
+                self._emit(TraceSubsystem.CORE, TraceStatus.FAILED, "Reasoning failed",
+                           conversation_id, reason_code="reasoner_error")
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
             if mechanical_blocker is not None and (
                 decision.call is not None or decision.memory_query is not None
@@ -599,6 +729,7 @@ class CoreAgent:
             )
             if memory_error is not None:
                 LOGGER.info("Memory proposal rejected: %s", memory_error)
+                self._emit_refusal("memory_proposal_invalid", conversation_id)
                 # Nothing is stored for a rejected proposal, and this fires
                 # before the goal is persisted, so the decision leaves no trace
                 # to undo. The specific grounding fault is named so she can
@@ -641,6 +772,7 @@ class CoreAgent:
                 continue
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
+                self._emit_refusal(proposal_error, conversation_id)
                 self._record_rejection(
                     conversation, decision, proposal_error, now, decision_provenance,
                 )
@@ -754,6 +886,7 @@ class CoreAgent:
                         blocked,
                         decision.call.capability_id,
                     )
+                    self._emit_refusal(blocked, conversation_id)
                     # One explanation per reason and capability, not one per
                     # turn. A Core cycling through different impossible
                     # capabilities would spend the whole step budget, which is
@@ -925,6 +1058,9 @@ class CoreAgent:
                         # change, so they are not delivered; she reasons again
                         # with the refusal, once.
                         LOGGER.info("Plan update refused: %s", plan_refusal)
+                        self._emit(TraceSubsystem.PLAN, TraceStatus.REFUSED,
+                                   "Plan update refused", conversation_id,
+                                   reason_code=plan_refusal)
                         subject = f"{decision.plan_update.operation.value}:{plan_refusal}"
                         if self._already_refused(refused_calls, plan_refusal, subject):
                             if origin is CognitionOrigin.PERSON_TURN and snapshot is not None:
@@ -1076,6 +1212,7 @@ class CoreAgent:
                 memory_conflicts = ()
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                dispatched.append(decision.call.capability_id)
                 try:
                     attempt = self._dispatch(decision.call, None)
                 except Exception:
@@ -1225,6 +1362,7 @@ class CoreAgent:
                 # begins, preventing a restart from dispatching it twice. The safety
                 # gate must evaluate the immutable pre-claim authority snapshot,
                 # where the exact approval is still GRANTED.
+                dispatched.append(decision.call.capability_id)
                 attempt = self._dispatch(decision.call, authority_state)
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_error")
@@ -1315,12 +1453,14 @@ class CoreAgent:
             transient_attempts=transient_attempts,
             response_only_reason=reason,
             refused_calls=refused_calls or context.refused_calls,
+            purpose=ReasoningPurpose.PREPARING_RESPONSE,
         )
         try:
             self._budget_check(conversation_id)
         except Exception as error:
             LOGGER.warning("Terminal checkpoint response stopped by execution budget: %s", error)
             return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
+        self._emit_reasoning(ReasoningPurpose.PREPARING_RESPONSE, reason, conversation_id)
         try:
             decision = self._reasoner.decide(terminal_context)
         except Exception as error:
@@ -1531,12 +1671,22 @@ class CoreAgent:
                       provenance: ContentProvenance) -> GoalSnapshot:
         """Write the reduced goal: a new record, or a revision of the attached one."""
         if previous is None or candidate.goal_id != previous.state.goal_id:
-            return self._store.create(
+            created = self._store.create(
                 candidate, conversation.conversation_id, retention_until, provenance,
             )
-        return self._store.replace(
+            self._emit(TraceSubsystem.GOALS, TraceStatus.COMPLETED, "Goal created",
+                       conversation.conversation_id,
+                       reference=_short_reference(candidate.goal_id))
+            return created
+        written = self._store.replace(
             candidate, previous.retention_until, previous.revision, provenance,
         )
+        if candidate.status is not previous.state.status:
+            self._emit(TraceSubsystem.GOALS, TraceStatus.COMPLETED,
+                       f"Goal {candidate.status.value.replace('_', ' ')}",
+                       conversation.conversation_id,
+                       reference=_short_reference(candidate.goal_id))
+        return written
 
     def _selectable_goals(self, conversation_id: str,
                           snapshot: GoalSnapshot | None) -> tuple[GoalSummary, ...]:
@@ -2400,6 +2550,9 @@ class CoreAgent:
         self._live_plan_dispatches.add(call.call_id)
         LOGGER.info("Execution plan %s step=%d %s checkpointed",
                     plan.plan_id, plan.cursor, call.capability_id)
+        self._emit(TraceSubsystem.PLAN, TraceStatus.STARTED,
+                   f"Step {plan.cursor + 1} of {len(plan.steps)} running",
+                   checkpoint.conversation_id, reference=call.capability_id)
         return PlannedDispatch(
             checkpoint.state.goal_id, checkpoint.conversation_id, plan.plan_id, call,
             # Replaced at the dispatch boundary by the state current then.
@@ -2483,6 +2636,14 @@ class CoreAgent:
         LOGGER.info("Execution plan %s step=%d goal %s %s -> %s",
                     plan.plan_id, plan.cursor, mutation.goal_id, mutation.kind.value,
                     ",".join(facts) or "applied")
+        self._emit(
+            TraceSubsystem.GOALS,
+            TraceStatus.REFUSED if facts else TraceStatus.COMPLETED,
+            f"Planned goal {mutation.kind.value.replace('_', ' ')}"
+            + (" stopped" if facts else " applied"),
+            snapshot.conversation_id, reference=_short_reference(mutation.goal_id),
+            reason_code=facts[0] if facts else None,
+        )
         return self._write_plan(snapshot, reduce_plan(plan, PlanResultClassification(
             PlanResultKind.WAKE_CORE if facts else PlanResultKind.ADVANCE, facts), now))
 
@@ -2532,7 +2693,18 @@ class CoreAgent:
         LOGGER.info("Execution plan %s step=%d %s -> %s %s",
                     plan.plan_id, plan.inflight.step_index, step.call.capability_id,
                     reduced.status.value, ",".join(classification.facts))
-        return self._write_plan(snapshot, reduced)
+        written = self._write_plan(snapshot, reduced)
+        self._emit(
+            TraceSubsystem.PLAN,
+            TraceStatus.WAITING if reduced.status is PlanStatus.NEEDS_CORE
+            else TraceStatus.COMPLETED,
+            f"Step {plan.inflight.step_index + 1} of {len(plan.steps)} "
+            + ("needs AL/X" if reduced.status is PlanStatus.NEEDS_CORE
+               else reduced.status.value.replace("_", " ")),
+            snapshot.conversation_id, reference=step.call.capability_id,
+            reason_code=classification.facts[0] if classification.facts else None,
+        )
+        return written
 
     def _plan_dispatch_refusal(self, snapshot: GoalSnapshot, step,
                                now: datetime) -> str | None:
@@ -2806,6 +2978,9 @@ class CoreAgent:
             replace(snapshot.state, execution_plan=plan),
             snapshot.retention_until, snapshot.revision, provenance,
         )
+        self._emit(TraceSubsystem.PLAN, TraceStatus.INFO, _PLAN_LABELS[update.operation],
+                   snapshot.conversation_id, count=len(plan.steps),
+                   reference=_short_reference(snapshot.state.goal_id))
         return snapshot, reply_turn
 
     def pending_plan_announcements(self) -> tuple[GoalSnapshot, ...]:

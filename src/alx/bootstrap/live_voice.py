@@ -30,6 +30,7 @@ from alx.bootstrap.tasks import build_task_runtime
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
 from alx.contracts.task import ExternalTask, TaskState
+from alx.contracts.trace import TraceSubsystem
 from alx.providers.review_status import subject_reference
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
@@ -89,7 +90,7 @@ from alx.goals import SQLiteGoalStore
 from alx.interfaces import (
     LiveVoiceServer,
     VoiceActivityStatus,
-    VoiceDiagnosticBuffer,
+    VoiceDiagnosticFeed,
     VoiceSession,
 )
 from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
@@ -266,7 +267,7 @@ async def run(repository_root: Path) -> None:
         storage_root = repository_root / storage_root
     storage_root.mkdir(parents=True, exist_ok=True)
 
-    diagnostics = VoiceDiagnosticBuffer()
+    diagnostics = VoiceDiagnosticFeed()
     activity = VoiceActivityStatus()
     usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
     # The Core names the conversation on every budget check, so a dispatch can
@@ -335,6 +336,15 @@ async def run(repository_root: Path) -> None:
     migrate_legacy_conversations(goal_store, conversation_store)
     memory_store = SQLiteMemoryStore(storage_root / "memories.sqlite3")
     registry = CapabilityRegistry()
+    # Which subsystem each capability belongs to, for the operator trace,
+    # recorded as each runtime registers its own. Composition is the one place
+    # that knows which runtime contributed a capability; nothing infers it.
+    capability_subsystems: dict[str, TraceSubsystem] = {}
+
+    def register(definitions: Any, subsystem: TraceSubsystem) -> None:
+        for definition in definitions:
+            registry.register(definition)
+            capability_subsystems[definition.capability_id] = subsystem
     current_call_id: ContextVar[str] = ContextVar("alx_current_call_id", default="")
     # Set only on a planned step's background worker. Such a step belongs to
     # no occasion: whatever occasion is running on the Core thread meanwhile
@@ -358,8 +368,7 @@ async def run(repository_root: Path) -> None:
         storage_root,
         current_call_id.get,
     )
-    for definition in mail_runtime.definitions:
-        registry.register(definition)
+    register(mail_runtime.definitions, TraceSubsystem.MAIL)
     policies = dict(mail_runtime.policies)
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
@@ -396,8 +405,7 @@ async def run(repository_root: Path) -> None:
         current_call_id.get,
         provenance_of=notebook_provenance,
     )
-    for definition in notebook_runtime.definitions:
-        registry.register(definition)
+    register(notebook_runtime.definitions, TraceSubsystem.NOTEBOOK)
     policies.update(notebook_runtime.policies)
     executors.update(notebook_runtime.executors)
     permissions.update(notebook_runtime.permissions)
@@ -425,8 +433,7 @@ async def run(repository_root: Path) -> None:
         # occasion will arise from it in this runtime.
         autonomous_available=providers.autonomous is not None,
     )
-    for definition in continuity_runtime.definitions:
-        registry.register(definition)
+    register(continuity_runtime.definitions, TraceSubsystem.THOUGHTS)
     policies.update(continuity_runtime.policies)
     executors.update(continuity_runtime.executors)
     permissions.update(continuity_runtime.permissions)
@@ -485,8 +492,7 @@ async def run(repository_root: Path) -> None:
     if research_runtime is None:
         LOGGER.info("Research is not enabled: no paid research capability")
     else:
-        for definition in research_runtime.definitions:
-            registry.register(definition)
+        register(research_runtime.definitions, TraceSubsystem.RESEARCH)
         policies.update(research_runtime.policies)
         executors.update(research_runtime.executors)
         permissions.update(research_runtime.permissions)
@@ -501,8 +507,7 @@ async def run(repository_root: Path) -> None:
         storage_root,
     )
     if web_runtime is not None:
-        for definition in web_runtime.definitions:
-            registry.register(definition)
+        register(web_runtime.definitions, TraceSubsystem.WEB)
         policies.update(web_runtime.policies)
         executors.update(web_runtime.executors)
         permissions.update(web_runtime.permissions)
@@ -540,8 +545,7 @@ async def run(repository_root: Path) -> None:
         ),
     )
     if sandbox_runtime is not None:
-        for definition in sandbox_runtime.definitions:
-            registry.register(definition)
+        register(sandbox_runtime.definitions, TraceSubsystem.SANDBOX)
         policies.update(sandbox_runtime.policies)
         executors.update(sandbox_runtime.executors)
         permissions.update(sandbox_runtime.permissions)
@@ -612,8 +616,7 @@ async def run(repository_root: Path) -> None:
         # Do not spend review credits when completion cannot be watched.
         review_runtime = None
     if review_runtime is not None:
-        for definition in review_runtime.definitions:
-            registry.register(definition)
+        register(review_runtime.definitions, TraceSubsystem.REVIEW)
         policies.update(review_runtime.policies)
         executors.update(review_runtime.executors)
         permissions.update(review_runtime.permissions)
@@ -638,8 +641,7 @@ async def run(repository_root: Path) -> None:
         merge_configuration.token,
     )
     if repository_runtime is not None:
-        for definition in repository_runtime.definitions:
-            registry.register(definition)
+        register(repository_runtime.definitions, TraceSubsystem.GIT)
         policies.update(repository_runtime.policies)
         executors.update(repository_runtime.executors)
         permissions.update(repository_runtime.permissions)
@@ -655,8 +657,7 @@ async def run(repository_root: Path) -> None:
         repository_runtime=repository_runtime,
     )
     if merge_runtime is not None:
-        for definition in merge_runtime.definitions:
-            registry.register(definition)
+        register(merge_runtime.definitions, TraceSubsystem.GITHUB)
         policies.update(merge_runtime.policies)
         executors.update(merge_runtime.executors)
         permissions.update(merge_runtime.permissions)
@@ -671,8 +672,7 @@ async def run(repository_root: Path) -> None:
         current_call_id.get,
     )
     if checks_runtime is not None:
-        for definition in checks_runtime.definitions:
-            registry.register(definition)
+        register(checks_runtime.definitions, TraceSubsystem.GITHUB)
         policies.update(checks_runtime.policies)
         executors.update(checks_runtime.executors)
         permissions.update(checks_runtime.permissions)
@@ -705,8 +705,7 @@ async def run(repository_root: Path) -> None:
         goal_state_source=current_goal_state.get,
     )
     if coding_runtime is not None:
-        for definition in coding_runtime.definitions:
-            registry.register(definition)
+        register(coding_runtime.definitions, TraceSubsystem.CODING)
         policies.update(coding_runtime.policies)
         executors.update(coding_runtime.executors)
         permissions.update(coding_runtime.permissions)
@@ -737,8 +736,7 @@ async def run(repository_root: Path) -> None:
             current_call_id.get,
             extractor,
         )
-        for definition in xero_runtime.definitions:
-            registry.register(definition)
+        register(xero_runtime.definitions, TraceSubsystem.XERO)
         policies.update(xero_runtime.policies)
         executors.update(xero_runtime.executors)
         permissions.update(xero_runtime.permissions)
@@ -756,8 +754,7 @@ async def run(repository_root: Path) -> None:
             xero_settings.dhl_supplier_name,
             xero_settings.unattended_bill_writes,
         )
-        for definition in dhl_runtime.definitions:
-            registry.register(definition)
+        register(dhl_runtime.definitions, TraceSubsystem.DHL)
         policies.update(dhl_runtime.policies)
         executors.update(dhl_runtime.executors)
         permissions.update(dhl_runtime.permissions)
@@ -776,13 +773,15 @@ async def run(repository_root: Path) -> None:
                 send_settings, mail_runtime.source, current_call_id.get
             )
         )
-        for definition in send_definitions:
-            registry.register(definition)
+        register(send_definitions, TraceSubsystem.MAIL)
         policies.update(send_policies)
         executors.update(send_executors)
         permissions.update(send_permissions)
 
-    broker = CapabilityBroker(registry, SafetyGate(policies), executors)
+    broker = CapabilityBroker(
+        registry, SafetyGate(policies), executors,
+        trace=diagnostics.trace, subsystems=capability_subsystems,
+    )
 
     def dispatch(call, state):
         current_call_id.set(call.call_id)
@@ -884,6 +883,9 @@ async def run(repository_root: Path) -> None:
         # A planned step on a background worker names its goal's conversation
         # for the executors, exactly as a reasoning step's budget check does.
         bind_dispatch=bind_planned_dispatch,
+        # The operator's live execution trace: each reasoning call's purpose,
+        # plan and goal transitions, refusals.
+        trace=diagnostics.trace,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
         # Read from the policies themselves, so a capability that requires an
@@ -1072,6 +1074,7 @@ async def run(repository_root: Path) -> None:
         spend_observer=occasion_spend,
         commissioning_limit=autonomous_commissioning_limit(environment),
         holds=autonomous_holds,
+        trace=diagnostics.trace,
     )
     due_cognition = DueCognitionSource(
         occasion_source,

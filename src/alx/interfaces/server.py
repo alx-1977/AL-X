@@ -128,8 +128,9 @@ class LiveVoiceServer:
 
         DELIVERED therefore means one live listener actually received it.
         Everything else — no listener, a listener that vanished between lookup
-        and enqueue, a closing loop, a queue that refused — is UNDELIVERABLE,
-        and the occasion records the fact.
+        and enqueue, a closing loop, a queue that refused, or a person turn on
+        the conversation already waiting for the voice — is UNDELIVERABLE, and
+        the occasion records the fact.
 
         There is deliberately no second speech implementation here. The audio
         is produced by the same synthesizer the person-turn path uses, and the
@@ -150,6 +151,16 @@ class LiveVoiceServer:
         def enqueue_on_loop() -> None:
             """Runs on the loop thread, where touching the queue is safe."""
             accepted = False
+            try:
+                admitted = self._session.admits_unprompted_speech(conversation_id)
+            except Exception:  # noqa: BLE001 - refused and recorded, never hung
+                admitted = False
+            if not admitted:
+                # A person turn on this conversation owns the voice. Its Core
+                # is shown the undelivered fact and answers once; queuing this
+                # would speak it after that answer.
+                acknowledged.put(accepted)
+                return
             current = self._delivery_queues.get(conversation_id) or []
             for waiting in listeners:
                 if waiting not in current:

@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 from typing import Any
 
-from alx.contracts import ModelCompletion, ModelRequest, ModelRole, normalise_usage
+from alx.contracts import ModelCompletion, ModelRequest, ModelRole, normalise_usage, usage_telemetry
 from alx.providers.errors import raise_provider_failure
 
 
@@ -143,7 +143,7 @@ class CodexSubscriptionReasoningModel:
                     stderr_characters=len(completed.stderr or ""),
                 )
             try:
-                output, usage = self._parse(completed.stdout)
+                output, usage, reported = self._parse(completed.stdout)
             except _CodexProtocolError as error:
                 error.details.setdefault("stdout_characters", len(completed.stdout or ""))
                 error.details.setdefault("stderr_characters", len(completed.stderr or ""))
@@ -155,7 +155,7 @@ class CodexSubscriptionReasoningModel:
                     stderr_characters=len(completed.stderr or ""),
                 ) from error
             completion = ModelCompletion(PROVIDER_NAME, self._model, output, usage)
-            self._emit(request, "reasoning.completed", started_at, usage)
+            self._emit(request, "reasoning.completed", started_at, usage, reported)
             return completion
         except subprocess.TimeoutExpired:
             details = {"reason_code": "reasoning_timeout"}
@@ -171,7 +171,7 @@ class CodexSubscriptionReasoningModel:
         raise_provider_failure(PROVIDER_NAME, error_code, **details)
 
     @staticmethod
-    def _parse(stdout: str) -> tuple[dict[str, Any], dict[str, int]]:
+    def _parse(stdout: str) -> tuple[dict[str, Any], dict[str, int], Any]:
         message: str | None = None
         usage: Mapping[str, Any] | None = None
         for line in stdout.splitlines():
@@ -193,7 +193,9 @@ class CodexSubscriptionReasoningModel:
         value = json.loads(message)
         if not isinstance(value, Mapping):
             raise _CodexProtocolError("structured_output_not_object")
-        return dict(value), normalise_usage(usage)
+        # The raw report travels too, so telemetry can tell a breakdown the
+        # CLI never reported from one it reported as zero.
+        return dict(value), normalise_usage(usage), usage
 
     @staticmethod
     def _failure_code(stderr: str, stdout: str) -> str:
@@ -205,14 +207,17 @@ class CodexSubscriptionReasoningModel:
         return "cli_failed"
 
     def _emit(
-        self, request: ModelRequest, code: str, started_at: float, usage: Mapping[str, int]
+        self, request: ModelRequest, code: str, started_at: float,
+        usage: Mapping[str, int], reported: Any = None,
     ) -> None:
         if self._telemetry_sink is None or request.affinity_key is None:
             return
         try:
             self._telemetry_sink(request.affinity_key, {
                 "code": code, "provider": PROVIDER_NAME, "model": self._model,
-                "duration_ms": round((monotonic() - started_at) * 1000), **usage,
+                "duration_ms": round((monotonic() - started_at) * 1000),
+                **(usage_telemetry(usage, reported) if code == "reasoning.completed" else {}),
+                **({"purpose": request.purpose} if request.purpose else {}),
             })
         except Exception:
             LOGGER.info("Codex subscription telemetry sink failed")

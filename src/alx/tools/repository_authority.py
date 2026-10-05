@@ -89,6 +89,9 @@ DEFINITION = CapabilityDefinition(
     SideEffect.EFFECTFUL,
     REPOSITORY_FAILURES,
     transmits_authored_text=True,
+    # The enumerated operation is an identifier, so the operator trace may say
+    # which one is running. Its arguments may carry wording and are not shown.
+    trace_fields=("operation",),
 )
 
 DEFINITIONS = (DEFINITION,)

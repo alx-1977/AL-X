@@ -103,6 +103,7 @@ DEFINITION = CapabilityDefinition(
     # Reading a review again changes nothing on GitHub or at the reviewer, so
     # a plan may wait on it.
     plan_observation=True,
+    trace_fields=("pull_request_number",),
 )
 
 

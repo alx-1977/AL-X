@@ -26,7 +26,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from alx.contracts import CognitionOpportunity, ResponseDelivery
+from alx.contracts import (
+    CognitionOpportunity, CognitionOrigin, ResponseDelivery, TraceSink, TraceStatus,
+    TraceSubsystem, emit_trace,
+)
 from alx.core.loop import INPUT_BOUND_EXCEEDED
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +42,17 @@ DEFERRED_INPUT_BOUND = "deferred_input_bound"
 # permanent; an hour costs one local rebuild per held occasion per hour, where
 # releasing it at once rebuilt every one of them every thirty seconds.
 INPUT_BOUND_RETRY_SECONDS = 3600.0
+
+
+# What an occasion's start is called on the operator trace. From its origin,
+# which is provenance only: it names where the occasion came from, never what
+# it is about.
+_OCCASION_LABELS = {
+    CognitionOrigin.PERSON_TURN: "Person turn received",
+    CognitionOrigin.EXTERNAL_EVENT: "External event received",
+    CognitionOrigin.WORK_COMPLETED: "Completed work received",
+    CognitionOrigin.SELF_REQUESTED: "Requested follow-up due",
+}
 
 
 class AutonomousCognitionRunner:
@@ -59,6 +73,8 @@ class AutonomousCognitionRunner:
         # Where an occasion too large for the input bound is held. None holds
         # nothing, and such an occasion is released like any other refusal.
         holds: "InputBoundHolds | None" = None,
+        # The operator trace: which occasion began and how it ended.
+        trace: TraceSink | None = None,
     ) -> None:
         # Deliberately no budget, provider, model or token bounds. Those belong
         # to the reasoning boundary, which is the only place the exact request
@@ -87,6 +103,7 @@ class AutonomousCognitionRunner:
         # broken turn rather than as the wrong time.
         self._clock = clock or (lambda: datetime.now(UTC))
         self._holds = holds
+        self._trace = trace
 
     def run_one(self, opportunity: CognitionOpportunity) -> bool:
         """Run one occasion the producer has already found.
@@ -155,6 +172,12 @@ class AutonomousCognitionRunner:
         undelivered = False
         if self._spend_observer is not None:
             self._spend_observer.watch(spend, opportunity.opportunity_id)
+        emit_trace(
+            self._trace, TraceSubsystem.CORE, TraceStatus.STARTED,
+            _OCCASION_LABELS[opportunity.origin],
+            conversation_id=opportunity.conversation_id,
+            reference=opportunity.origin.value,
+        )
         try:
             # The thread the thought arose in, so a matured occasion continues
             # that history rather than starting a private one. Falls back to
@@ -230,6 +253,7 @@ class AutonomousCognitionRunner:
                 # treated as one that did not complete. Startup recovery will
                 # reconcile the row from durable state if it survived.
                 outcome_state = "error"
+        self._trace_outcome(opportunity, outcome_state, outcome_reason, undelivered)
         # The request is closed only once the turn actually happened, so a
         # refused or crashed occasion is not silently marked as taken.
         try:
@@ -275,6 +299,28 @@ class AutonomousCognitionRunner:
                 error,
             )
         return True
+
+    def _trace_outcome(
+        self, opportunity: CognitionOpportunity, state: str,
+        reason: str | None, undelivered: bool,
+    ) -> None:
+        """How the occasion ended, as a mechanical fact for the console."""
+        if state == "responded":
+            status, label = (
+                (TraceStatus.INFO, "Response recorded as undelivered") if undelivered
+                else (TraceStatus.COMPLETED, "Background response delivered")
+            )
+        elif state == "finished_silently":
+            status, label = TraceStatus.COMPLETED, "No action taken"
+        elif state == "checkpointed":
+            status, label = TraceStatus.INFO, "Background turn checkpointed"
+        else:
+            status, label = TraceStatus.FAILED, "Background turn failed"
+        emit_trace(
+            self._trace, TraceSubsystem.CORE, status, label,
+            conversation_id=opportunity.conversation_id,
+            reason_code=reason or None,
+        )
 
 
 class InputBoundHolds:

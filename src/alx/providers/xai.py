@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from alx.contracts import ModelCompletion, ModelRequest, normalise_usage
+from alx.contracts import ModelCompletion, ModelRequest, normalise_usage, usage_telemetry
 from alx.providers.errors import (
     ProviderError,
     raise_provider_failure,
@@ -30,12 +30,15 @@ def _json_value(value: Any) -> Any:
 
 
 def _request_telemetry(request: ModelRequest) -> dict[str, Any]:
-    return {
+    values: dict[str, Any] = {
         "kind": request.kind,
         "tier": request.tier,
         "reservation_id": request.reservation_id,
         "reserved_usd": request.reserved_usd,
     }
+    if request.purpose:
+        values["purpose"] = request.purpose
+    return values
 
 
 class XAIReasoningModel:
@@ -115,14 +118,14 @@ class XAIReasoningModel:
             output = json.loads(content)
             if not isinstance(output, dict):
                 raise ValueError("structured output is not an object")
-            usage = normalise_usage(usage)
+            reported, usage = usage, normalise_usage(usage)
             completion = ModelCompletion("xai", model, output, usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
                 {
                     **self._completion_telemetry(
-                        model, service_tier, usage, duration, timings
+                        model, service_tier, usage, duration, timings, reported
                     ),
                     **_request_telemetry(request),
                 },
@@ -218,29 +221,16 @@ class XAIReasoningModel:
                         first_content_at = now
                     parts.append(content)
         finished_at = monotonic()
-        timings = {
-            "first_event_seconds": (
-                finished_at if first_event_at is None else first_event_at
-            )
-            - started_at,
-            "first_content_seconds": (
-                finished_at if first_content_at is None else first_content_at
-            )
-            - started_at,
-            "answer_generation_seconds": (
-                0.0 if first_content_at is None else finished_at - first_content_at
-            ),
-        }
+        # A moment that never happened is not timed. Substituting the finish
+        # time or zero reported an event the stream never produced.
+        timings: dict[str, float] = {}
+        if first_event_at is not None:
+            timings["first_event_seconds"] = first_event_at - started_at
+        if first_content_at is not None:
+            timings["first_content_seconds"] = first_content_at - started_at
+            timings["answer_generation_seconds"] = finished_at - first_content_at
         return "".join(parts), model, usage, service_tier, timings
 
-    @staticmethod
-    def _nested_integer(data: Mapping[str, Any], *path: str) -> int:
-        current: Any = data
-        for key in path:
-            if not isinstance(current, Mapping):
-                return 0
-            current = current.get(key)
-        return current if isinstance(current, int) and not isinstance(current, bool) else 0
 
     def _completion_telemetry(
         self,
@@ -249,6 +239,7 @@ class XAIReasoningModel:
         usage: Mapping[str, Any],
         duration: float,
         timings: Mapping[str, float],
+        reported: Any = None,
     ) -> dict[str, Any]:
         return {
             "code": "reasoning.completed",
@@ -256,18 +247,20 @@ class XAIReasoningModel:
             "model": model,
             "service_tier": service_tier,
             "duration_ms": round(duration * 1000),
-            "first_event_ms": round(timings.get("first_event_seconds", 0.0) * 1000),
-            "first_content_ms": round(timings.get("first_content_seconds", 0.0) * 1000),
-            "answer_generation_ms": round(
-                timings.get("answer_generation_seconds", 0.0) * 1000
-            ),
+            # Only the timings this call actually measured. A non-streaming
+            # call has no first event; publishing zero for it claimed the
+            # model answered instantly.
+            **{
+                name: round(timings[source] * 1000)
+                for name, source in (
+                    ("first_event_ms", "first_event_seconds"),
+                    ("first_content_ms", "first_content_seconds"),
+                    ("answer_generation_ms", "answer_generation_seconds"),
+                )
+                if source in timings
+            },
             # Canonical names: the adapter normalised the response already.
-            "input_tokens": self._nested_integer(usage, "input_tokens"),
-            "cached_tokens": self._nested_integer(usage, "cached_tokens"),
-            "cache_write_tokens": self._nested_integer(usage, "cache_write_tokens"),
-            "reasoning_tokens": self._nested_integer(usage, "reasoning_tokens"),
-            "output_tokens": self._nested_integer(usage, "output_tokens"),
-            "total_tokens": self._nested_integer(usage, "total_tokens"),
+            **usage_telemetry(usage, reported),
         }
 
     def _emit_telemetry(
