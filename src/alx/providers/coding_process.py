@@ -153,7 +153,7 @@ class CodingCancellation:
                         stdout, stderr = process.communicate(timeout=0)
                     except subprocess.TimeoutExpired:
                         # A detached descendant may still hold a pipe. The
-                        # normal emergency/stall bounds still apply.
+                        # normal deadline/stall bounds still apply.
                         pass
                     else:
                         self.check()
@@ -161,9 +161,9 @@ class CodingCancellation:
                             argv, process.returncode, stdout, stderr
                         )
                 if deadline is not None and now >= deadline:
+                    # A bounded individual command. A coding session passes no
+                    # deadline: its only bound is the inactivity check below.
                     _stop(process)
-                    if inactivity_timeout is not None:
-                        raise CodingError("session_interrupted", reason_code="session_emergency_ceiling")
                     raise subprocess.TimeoutExpired(argv, timeout)
                 if observed_files is not None and now >= next_file_check:
                     current_files = _activity_snapshot(activity_path, activity_blocked_paths)

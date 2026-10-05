@@ -82,7 +82,7 @@ class StreamedActivityTests(unittest.TestCase):
 
     def _session(self, cli: Path) -> GrokCodingSession:
         return GrokCodingSession(
-            "grok-test", 30, executable=str(cli), stall_seconds=1,
+            "grok-test", executable=str(cli), stall_seconds=1,
             environment={"PATH": os.environ.get("PATH", ""), "GROK_HOME": str(self.home)},
         )
 
@@ -111,7 +111,7 @@ class StreamedActivityTests(unittest.TestCase):
 
 class StreamedResultTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.session = GrokCodingSession("grok-test", 30)
+        self.session = GrokCodingSession("grok-test", stall_seconds=10)
 
     @staticmethod
     def _stream(*events) -> str:

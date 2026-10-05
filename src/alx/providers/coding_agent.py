@@ -906,10 +906,7 @@ class CodingAgent:
                     state.files, git_status, preexisting_dirty,
                     self._modified_preexisting(workspace, preexisting_fingerprints),
                 )
-                interrupted = error.code == "session_interrupted" or (
-                    error.code == "session_failed"
-                    and error.details.get("reason_code") == "session_timeout"
-                )
+                interrupted = error.code == "session_interrupted"
                 return self._outcome(
                     status="interrupted" if interrupted else "failed",
                     summary="coding session interrupted" if interrupted else
@@ -919,9 +916,8 @@ class CodingAgent:
                     git_diff=git_diff, issues=(error.code,), review=False,
                     failure_status=not interrupted, plan_summary=plan_summary,
                     diagnostics={"phase": "execution", **error.details,
-                                 "reason_code": "session_emergency_ceiling"
-                                 if error.details.get("reason_code") == "session_timeout"
-                                 else error.details.get("reason_code", "")}, baseline=baseline,
+                                 "reason_code": error.details.get("reason_code", "")},
+                    baseline=baseline,
                     checkpoint=self._checkpoint(state),
                     diff_preserved=bool(state.files),
                     preserved_branch=branch if state.files else "",

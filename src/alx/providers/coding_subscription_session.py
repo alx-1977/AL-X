@@ -127,24 +127,18 @@ class SubscriptionCodingSession:
     def __init__(
         self,
         model: str,
-        timeout_seconds: int,
         *,
         executable: str,
-        stall_seconds: int | float | None = None,
+        stall_seconds: int | float,
         max_turns: int = 60,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
         effort: str = "",
     ) -> None:
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        if stall_seconds is None:
-            # Direct adapter users with a short emergency bound (including
-            # containment tests) retain a valid watchdog without production
-            # configuration. Production passes its explicit 600-second bound.
-            stall_seconds = min(600, timeout_seconds / 2)
-        if stall_seconds <= 0 or stall_seconds >= timeout_seconds:
-            raise ValueError("stall_seconds must be positive and below the emergency ceiling")
+        # The only bound on a session: silence. There is no absolute ceiling;
+        # a session may run as long as it keeps showing real activity.
+        if isinstance(stall_seconds, bool) or not stall_seconds > 0:
+            raise ValueError("stall_seconds must be positive")
         if max_turns <= 1:
             # One turn is what broke the previous execution model: an agent
             # that cannot take a second turn cannot act on what it just read.
@@ -152,7 +146,6 @@ class SubscriptionCodingSession:
         if not model.strip():
             raise ValueError("model must not be blank")
         self._model = model
-        self._timeout_seconds = timeout_seconds
         self._stall_seconds = stall_seconds
         self._executable = executable
         self._max_turns = max_turns
@@ -265,7 +258,8 @@ class SubscriptionCodingSession:
                     command,
                     capture_output=True,
                     text=True,
-                    timeout=self._timeout_seconds,
+                    # No deadline: inactivity is the session's only bound.
+                    timeout=None,
                     inactivity_timeout=self._stall_seconds,
                     activity_root=worktree,
                     activity_blocked_paths=request.blocked_paths,
@@ -275,10 +269,6 @@ class SubscriptionCodingSession:
                     shell=False,
                     check=False,
                 )
-            except subprocess.TimeoutExpired as error:
-                raise CodingError(
-                    "session_interrupted", reason_code="session_emergency_ceiling"
-                ) from error
             except FileNotFoundError as error:
                 raise CodingError(
                     "coding_unavailable", reason_code="cli_not_installed"

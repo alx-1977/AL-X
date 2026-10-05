@@ -92,14 +92,11 @@ class GrokCodingSession(SubscriptionCodingSession):
     def __init__(
         self,
         model: str,
-        timeout_seconds: int,
         *,
         executable: str = EXECUTABLE,
         **keywords: object,
     ) -> None:
-        super().__init__(
-            model, timeout_seconds, executable=executable, **keywords
-        )
+        super().__init__(model, executable=executable, **keywords)
 
     def default_auth_home(self) -> Path:
         return Path.home() / ".grok"
