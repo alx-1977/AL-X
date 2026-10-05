@@ -232,6 +232,16 @@ print(json.dumps({{"type": "end", "stopReason": "end_turn", "num_turns": 1}}), f
             self.fail("a descendant kept writing after the session returned")
 
 
+class GroupCensusTests(unittest.TestCase):
+    def test_zombies_are_not_counted_as_live_members(self) -> None:
+        listing = "  101   100 S\n  102   100 Z\n  103   100 Z+\n  104   999 S\n"
+        with mock.patch.object(coding_process.subprocess, "run", return_value=subprocess.CompletedProcess(
+                ["ps"], 0, listing, "")):
+            members, counted = coding_process._group_members(100)
+        self.assertTrue(counted)
+        self.assertEqual(members, (101,))
+
+
 class StreamedResultTests(unittest.TestCase):
     def setUp(self) -> None:
         self.session = GrokCodingSession("grok-test", stall_seconds=10)

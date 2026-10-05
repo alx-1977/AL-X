@@ -338,10 +338,10 @@ def _signal_group(process: subprocess.Popen[Any], signum: int) -> bool | None:
 
 
 def _group_members(pgid: int) -> tuple[tuple[int, ...], bool]:
-    """Members of process group `pgid`, and whether `ps` could count them."""
+    """Live members of process group `pgid`, and whether `ps` could count them."""
     try:
         listing = subprocess.run(  # noqa: S603 - fixed argv, no model input
-            ["ps", "-A", "-o", "pid=", "-o", "pgid="],
+            ["ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "stat="],
             capture_output=True, text=True, timeout=5, check=False, shell=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -349,7 +349,10 @@ def _group_members(pgid: int) -> tuple[tuple[int, ...], bool]:
     members: list[int] = []
     for line in listing.stdout.splitlines():
         fields = line.split()
-        if len(fields) == 2 and fields[0].isdigit() and fields[1] == str(pgid):
+        # A zombie has exited and cannot write; it only awaits its parent.
+        # Counting it made a finished session look unstoppable.
+        if (len(fields) == 3 and fields[0].isdigit() and fields[1] == str(pgid)
+                and not fields[2].startswith("Z")):
             members.append(int(fields[0]))
     return tuple(members), listing.returncode == 0
 
