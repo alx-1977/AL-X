@@ -157,6 +157,47 @@ while True:
         self.assertEqual(raised.exception.code, "session_interrupted")
         self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
 
+    def test_output_past_the_bound_fails_even_when_the_session_exits_at_once(self) -> None:
+        """Checked on completion too, not only between polls."""
+        burst = """
+import json, sys
+sys.stdout.write(json.dumps({"type": "tool_call_update", "content": "x" * 300000}) + "\\n")
+print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 1}), flush=True)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_SESSION_OUTPUT_BYTES", 100_000):
+            with self.assertRaises(CodingError) as raised:
+                self._session(_fake_cli(Path(self.directory.name), burst)) \
+                    .run_session(self._request(), "briefing")
+        self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
+
+    def test_an_oversized_reading_line_is_skipped_without_being_read_whole(self) -> None:
+        big = """
+import json
+print(json.dumps({"type": "tool_call_update", "content": "x" * 50000}), flush=True)
+print(json.dumps({"type": "text", "data": "done"}), flush=True)
+print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 2}), flush=True)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_EVENT_LINE_CHARACTERS", 10_000):
+            result = self._session(_fake_cli(Path(self.directory.name), big)) \
+                .run_session(self._request(), "briefing")
+        self.assertTrue(result.completed)
+        self.assertEqual(result.report, "done")
+
+    def test_an_oversized_result_line_is_refused_not_truncated(self) -> None:
+        big_end = """
+import json
+print(json.dumps({"type": "text", "data": "done"}), flush=True)
+print(json.dumps({"type": "end", "stopReason": "end_turn", "padding": "x" * 50000}), flush=True)
+"""
+        from alx.providers import coding_subscription_session as base
+        with mock.patch.object(base, "MAX_EVENT_LINE_CHARACTERS", 10_000):
+            with self.assertRaises(CodingError) as raised:
+                self._session(_fake_cli(Path(self.directory.name), big_end)) \
+                    .run_session(self._request(), "briefing")
+        self.assertEqual(raised.exception.details["reason_code"], "session_event_oversized")
+
 
 class StreamedResultTests(unittest.TestCase):
     def setUp(self) -> None:

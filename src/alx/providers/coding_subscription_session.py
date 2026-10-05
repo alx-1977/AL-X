@@ -30,7 +30,7 @@ import logging
 import os
 import shutil
 import subprocess  # noqa: S404 - the coding-session launch site
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -50,6 +50,34 @@ MAX_SESSION_OUTPUT_BYTES = 512 * 1024 * 1024
 # How much of that output is read back into memory to form the result.
 MAX_RETAINED_OUTPUT_CHARACTERS = 1_000_000
 MAX_RETAINED_STDERR_CHARACTERS = 64_000
+
+
+# The longest spooled line read back whole. Anything longer is never decoded:
+# only a short prefix is kept, so the adapter can tell what kind it was.
+MAX_EVENT_LINE_CHARACTERS = 1_000_000
+OVERSIZED_PREFIX_CHARACTERS = 256
+
+
+class OversizedLine(str):
+    """The prefix of a spooled line too long to read back whole."""
+
+
+def bounded_lines(handle) -> Iterator[str]:
+    """Each line of a spooled file, none read whole past the bound."""
+    while True:
+        line = handle.readline(MAX_EVENT_LINE_CHARACTERS + 1)
+        if not line:
+            return
+        if len(line) > MAX_EVENT_LINE_CHARACTERS and not line.endswith("\n"):
+            prefix = line[:OVERSIZED_PREFIX_CHARACTERS]
+            # Skip the rest of the line without keeping it.
+            while True:
+                rest = handle.readline(MAX_EVENT_LINE_CHARACTERS)
+                if not rest or rest.endswith("\n"):
+                    break
+            yield OversizedLine(prefix)
+            continue
+        yield line
 
 
 def _tail(path: Path, characters: int) -> str:
@@ -212,6 +240,10 @@ class SubscriptionCodingSession:
         kept: list[str] = []
         size = 0
         for line in lines:
+            if isinstance(line, OversizedLine):
+                # Unknown content that cannot be read back: refused rather
+                # than silently left out of the result.
+                raise CodingError("session_failed", reason_code="session_event_oversized")
             size += len(line)
             if size > MAX_RETAINED_OUTPUT_CHARACTERS:
                 break
@@ -330,7 +362,7 @@ class SubscriptionCodingSession:
                 stderr = (completed.stderr or "")[-MAX_RETAINED_STDERR_CHARACTERS:]
             else:
                 with open(stdout_path, encoding="utf-8", errors="replace") as spooled:
-                    stdout = self.retained_output(spooled)
+                    stdout = self.retained_output(bounded_lines(spooled))
                 stderr = _tail(stderr_path, MAX_RETAINED_STDERR_CHARACTERS)
 
         if completed.returncode != 0:

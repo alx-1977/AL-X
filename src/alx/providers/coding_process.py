@@ -162,6 +162,7 @@ class CodingCancellation:
                         pass
                     else:
                         self.check()
+                        _within_output_limit(activity_files, output_limit)
                         return subprocess.CompletedProcess(
                             argv, process.returncode, stdout, stderr
                         )
@@ -177,7 +178,7 @@ class CodingCancellation:
                     self._activity_seen(now)
                 if output_limit is not None and sum(spool) > output_limit:
                     _stop(process)
-                    raise CodingError("session_interrupted", reason_code="session_output_limit")
+                    _within_output_limit(activity_files, output_limit)
                 if observed_files is not None and now >= next_file_check:
                     current_files = _activity_snapshot(activity_path, activity_blocked_paths)
                     if current_files != observed_files:
@@ -203,6 +204,7 @@ class CodingCancellation:
                         timeout=poll,
                     )
                     self.check()
+                    _within_output_limit(activity_files, output_limit)
                     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
                 except subprocess.TimeoutExpired as pending:
                     self.check()
@@ -359,6 +361,16 @@ def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs:
     if current is None and "inactivity_timeout" not in kwargs:
         return runner(argv, **kwargs)
     return (current or CodingCancellation()).run(runner, argv, **kwargs)
+
+
+def _within_output_limit(paths: tuple[Path, ...], limit: int | None) -> None:
+    """Refuse a child whose spooled output exceeded its bound, however it ended.
+
+    Checked on every completion path, not only between polls: a session that
+    wrote past the bound and exited before the next poll is still over it.
+    """
+    if limit is not None and sum(_spool_sizes(paths)) > limit:
+        raise CodingError("session_interrupted", reason_code="session_output_limit")
 
 
 def _spool_sizes(paths: tuple[Path, ...]) -> tuple[int, ...]:
