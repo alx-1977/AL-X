@@ -230,7 +230,7 @@ from alx.contracts.xero import (
     XeroAccessError,
     XeroAccountingAccount,
 )
-from alx.contracts.dhl import DhlDocumentError, DhlImportAnalyzer
+from alx.contracts.dhl import DHL_DOCUMENT_FAILURES, DhlDocumentError, DhlImportAnalyzer
 
 __all__ = [
     "ArtifactMetadata",
@@ -355,5 +355,5 @@ __all__ = [
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
     "xero_date",
     "XeroAccessError", "XeroAccountingAccount", "CONTACT_CREATION_UNCONFIRMED",
-    "DhlDocumentError", "DhlImportAnalyzer",
+    "DHL_DOCUMENT_FAILURES", "DhlDocumentError", "DhlImportAnalyzer",
 ]

@@ -17,6 +17,7 @@ from pypdf import PdfWriter  # noqa: E402
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject  # noqa: E402
 
 from alx.contracts import (  # noqa: E402
+    DHL_DOCUMENT_FAILURES,
     CapabilityResultState,
     DhlDocumentError,
     MailAttachment,
@@ -28,6 +29,7 @@ from alx.tools import (  # noqa: E402
     PROCESS_DHL_IMPORT,
     build_dhl_executors,
 )
+from alx.tools.dhl import DEFINITION as DHL_DEFINITION  # noqa: E402
 
 
 def worksheet_pdf(
@@ -349,6 +351,35 @@ class DhlAnalyzerTests(unittest.TestCase):
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "dhl"
+
+
+def airway_bill_pdf() -> bytes:
+    """A shipment document that arrives beside the customs evidence.
+
+    Waybill 2233969113's notification carried the air waybill, the shipper's
+    commercial invoice and a SARS release notification next to the worksheet
+    and SAD 500. None of them is evidence this capability reads.
+    """
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    stream = DecodedStreamObject()
+    stream.set_data(
+        b"BT /F1 10 Tf 1 0 0 1 100 760 Tm (AIR WAYBILL 1234567890 SHIPPER CONSIGNEE) Tj ET"
+    )
+    page[NameObject("/Contents")] = stream
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
 def invoice_pdf(
@@ -1309,6 +1340,116 @@ class DhlImportLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(result.state, CapabilityResultState.FAILED)
         self.assertEqual(self.xero.state.get("created", 0), 0)
+
+    def test_a_worksheet_alone_fails_with_a_code_the_broker_accepts(self) -> None:
+        """On waybill 2233969113 this reached the broker undeclared.
+
+        The broker rewrote it to result_failure_invalid, so AL/X saw a broken
+        capability rather than what was missing: the SAD 500.
+        """
+        result = self.executor(
+            {"documents": [source_for(self.mail, "worksheet", "11")]}
+        )
+        self.assertEqual(result.failure["code"], "customs_evidence_ambiguous")
+        self.assertIn(result.failure["code"], DHL_DEFINITION.possible_failure_codes)
+
+    def notification(self, *attachment_ids: str):
+        """Supply documents the way a DHL notification email carries them."""
+        self.mail.payloads["awb"] = ("awb.pdf", "application/pdf", airway_bill_pdf())
+        return self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, attachment_id, "13")
+                    for attachment_id in attachment_ids
+                ]
+            }
+        )
+
+    def test_a_whole_notification_drafts_from_its_customs_evidence(self) -> None:
+        """Waybill 2233969113 arrived as five attachments, two of them evidence.
+
+        V1 read the worksheet and SAD 500 out of the notification and ignored
+        the rest. Refusing the set instead left AL/X retrying combinations.
+        """
+        result = self.notification("awb", "worksheet", "sad")
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(result.values["stage"], "customs_documents")
+        self.assertEqual(self.xero.state.get("created", 0), 1)
+        self.assertTrue(DHL_DEFINITION.output_schema.accepts(result.values))
+
+    def test_documents_that_are_not_evidence_are_never_attached(self) -> None:
+        result = self.notification("awb", "worksheet", "sad")
+        self.assertEqual(
+            set(result.values["attached"]), {"worksheet.pdf", "sad500.pdf"}
+        )
+        stored = {record["FileName"] for record, _ in self.xero.attachments["bill-1"]}
+        self.assertEqual(stored, {"worksheet.pdf", "sad500.pdf"})
+
+    def test_every_result_says_what_each_document_was_read_as(self) -> None:
+        result = self.notification("awb", "worksheet", "sad")
+        self.assertEqual(
+            [dict(item) for item in result.values["documents"]],
+            [
+                {"attachment_id": "awb", "kind": "unrecognised"},
+                {"attachment_id": "worksheet", "kind": "customs_worksheet"},
+                {"attachment_id": "sad", "kind": "sad_500"},
+            ],
+        )
+
+    def test_a_notification_without_evidence_returns_to_alx(self) -> None:
+        result = self.notification("awb")
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "documents_ambiguous")
+        self.assertEqual(
+            [dict(item) for item in result.values["documents"]],
+            [{"attachment_id": "awb", "kind": "unrecognised"}],
+        )
+        self.assertTrue(DHL_DEFINITION.output_schema.accepts(result.values))
+        self.assertEqual(self.xero.state.get("created", 0), 0)
+
+    def test_extra_documents_do_not_hide_missing_evidence(self) -> None:
+        """Leaving the air waybill unused must not let a worksheet stand alone."""
+        result = self.notification("awb", "worksheet")
+        self.assertEqual(result.failure["code"], "customs_evidence_ambiguous")
+        self.assertEqual(self.xero.state.get("created", 0), 0)
+
+
+class DeclaredFailureCodeTests(unittest.TestCase):
+    """Every DHL document failure is one process_dhl_import declares."""
+
+    def test_every_document_failure_is_a_declared_capability_failure(self) -> None:
+        for code in DHL_DOCUMENT_FAILURES:
+            with self.subTest(code=code):
+                self.assertIn(code, DHL_DEFINITION.possible_failure_codes)
+
+    def test_an_undeclared_document_failure_cannot_be_raised(self) -> None:
+        # LookupError, not ValueError: the executor reads ValueError as
+        # unusable arguments, which would disguise the undeclared code.
+        with self.assertRaises(LookupError):
+            DhlDocumentError("not_a_declared_code")
+
+    def test_every_literal_code_in_the_dhl_path_is_declared(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parents[1] / "src" / "alx"
+        raisers = {"DhlDocumentError", "_BoundExceeded"}
+        for path in (root / "providers" / "dhl.py", root / "tools" / "dhl.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in raisers
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                ):
+                    with self.subTest(path=path.name, code=node.args[0].value):
+                        self.assertIn(node.args[0].value, DHL_DOCUMENT_FAILURES)
+
+    def test_the_size_bounds_name_declared_codes(self) -> None:
+        for name in ("worksheet", "invoice"):
+            for suffix in ("invalid", "too_large"):
+                with self.subTest(code=f"{name}_{suffix}"):
+                    self.assertIn(f"{name}_{suffix}", DHL_DOCUMENT_FAILURES)
 
 
 class ConfiguredSupplierAndAccountsTests(unittest.TestCase):
