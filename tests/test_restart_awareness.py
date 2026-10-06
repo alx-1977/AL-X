@@ -86,6 +86,21 @@ class RuntimeFactsTests(unittest.TestCase):
                 self.assertIn(stated, text)
 
 
+class RunningCommitTests(unittest.TestCase):
+    def test_a_snapshot_names_its_own_commit(self) -> None:
+        from alx.bootstrap.live_voice import running_commit_of
+
+        class Checkout:
+            def head_commit(self) -> str:
+                return "f" * 40
+
+        sha = "b914786be172cf32dbc7c96b460ad4f5ca1ca4ba"
+        snapshot = Path("/repo/.git/alx-runtime") / sha
+        self.assertEqual(running_commit_of(snapshot, Checkout()), sha)
+        self.assertEqual(running_commit_of(Path("/repo"), Checkout()), "f" * 40)
+        self.assertEqual(running_commit_of(Path("/repo"), None), "")
+
+
 class CoreRuntimeFactsTests(unittest.TestCase):
     def test_facts_are_read_each_turn_and_a_failed_read_does_not_end_it(self) -> None:
         from alx.contracts import AgentDecision

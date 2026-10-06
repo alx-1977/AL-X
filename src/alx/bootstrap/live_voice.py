@@ -77,6 +77,7 @@ from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.continuity.runtime_source import RuntimeStartedSource
+from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
     DueCognitionSource,
     FutureCognitionSource,
@@ -254,6 +255,19 @@ def _watch_review(
 # so the laws, identity and frontend AL/X runs under are the ones merged with
 # her code, never whatever a feature branch in the checkout currently holds.
 CODE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def running_commit_of(code_root: Path, repository_reader: Any) -> str:
+    """The commit this process is running.
+
+    scripts/alx runs committed main from a snapshot directory named by its
+    commit, so the code root's own name is the answer. The checkout's HEAD
+    can be a feature branch by then, so it is only used when the runtime
+    runs straight from the checkout.
+    """
+    if valid_sha(code_root.name):
+        return code_root.name
+    return "" if repository_reader is None else repository_reader.head_commit()
 
 
 async def run(repository_root: Path) -> None:
@@ -871,9 +885,7 @@ async def run(repository_root: Path) -> None:
     repository_reader = (
         None if repository_runtime is None else repository_runtime.authority
     )
-    running_commit = (
-        "" if repository_reader is None else repository_reader.head_commit()
-    )
+    running_commit = running_commit_of(CODE_ROOT, repository_reader)
 
     def runtime_facts() -> dict[str, str]:
         return {
