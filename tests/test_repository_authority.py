@@ -130,6 +130,19 @@ class RealRepositoryHarness(unittest.TestCase):
         return self.commit(f"{name.replace('/', '-')}.txt")
 
 
+class RunningCommitTests(RealRepositoryHarness):
+    """What is checked out, and what main is, without changing anything."""
+
+    def test_head_and_main_are_read_without_moving_either(self) -> None:
+        main = git(self.local, "rev-parse", "HEAD")
+        self.assertEqual(self.authority.head_commit(), main)
+        self.assertEqual(self.authority.main_commit(), main)
+        branch_head = self.branch("fix/thing")
+        self.assertEqual(self.authority.head_commit(), branch_head)
+        self.assertEqual(self.authority.main_commit(), main)
+        self.assertEqual(git(self.local, "branch", "--show-current"), "fix/thing")
+
+
 class SelfPreservationTests(RealRepositoryHarness):
     """The one rule: AL/X may not end her own ability to exist.
 

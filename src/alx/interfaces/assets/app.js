@@ -166,8 +166,14 @@ function showTrace(message) {
   });
   // The stage bar names the step now running, with its own clock, so a long
   // model call reads as the work it is rather than as silence.
-  if (["started", "waiting"].includes(message.status) && message.background !== true) {
-    beginDiagnosticStage(`${subsystem} · ${message.label}`, message.at);
+  if (message.background === true) return;
+  const step = `${subsystem} · ${message.label}`;
+  if (["started", "waiting"].includes(message.status)) {
+    beginDiagnosticStage(step, message.at);
+  } else if (foregroundStage === step) {
+    // The step the bar names has ended. Without this the bar kept naming it
+    // long after AL/X finished; it returns to her current state instead.
+    beginDiagnosticStage(phaseLabels[document.body.dataset.phase] ?? "Ready", message.at);
   }
 }
 

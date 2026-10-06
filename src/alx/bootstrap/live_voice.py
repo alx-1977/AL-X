@@ -76,6 +76,8 @@ from alx.continuity.completed_work_source import CompletedWorkSource
 from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
+from alx.continuity.runtime_source import RuntimeStartedSource
+from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
     DueCognitionSource,
     FutureCognitionSource,
@@ -253,6 +255,19 @@ def _watch_review(
 # so the laws, identity and frontend AL/X runs under are the ones merged with
 # her code, never whatever a feature branch in the checkout currently holds.
 CODE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def running_commit_of(code_root: Path, repository_reader: Any) -> str:
+    """The commit this process is running.
+
+    scripts/alx runs committed main from a snapshot directory named by its
+    commit, so the code root's own name is the answer. The checkout's HEAD
+    can be a feature branch by then, so it is only used when the runtime
+    runs straight from the checkout.
+    """
+    if valid_sha(code_root.name):
+        return code_root.name
+    return "" if repository_reader is None else repository_reader.head_commit()
 
 
 async def run(repository_root: Path) -> None:
@@ -866,6 +881,21 @@ async def run(repository_root: Path) -> None:
     # One condition for both halves of D-036's continuation: the Core may
     # install a plan, and a plan may return to her, only together.
     plan_continuation = providers.autonomous is not None
+    process_started_at = datetime.now(UTC)
+    repository_reader = (
+        None if repository_runtime is None else repository_runtime.authority
+    )
+    running_commit = running_commit_of(CODE_ROOT, repository_reader)
+
+    def runtime_facts() -> dict[str, str]:
+        return {
+            "started_at": process_started_at.isoformat(timespec="seconds"),
+            "running_commit": running_commit,
+            "main_commit": (
+                "" if repository_reader is None else repository_reader.main_commit()
+            ),
+        }
+
     core = CoreAgent(
         goal_store,
         reasoner,
@@ -882,6 +912,7 @@ async def run(repository_root: Path) -> None:
         # A background occasion has no person turn; its response reaches the
         # principal, whose relationship memories she is shown on every turn.
         principal_person_id=voice_settings.primary_person_id,
+        runtime_facts=runtime_facts,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
         # Read from the policies themselves, so a capability that requires an
@@ -1040,6 +1071,14 @@ async def run(repository_root: Path) -> None:
                 len(reclaimed_work),
             )
         occasion_sources.append(completed_work_source)
+    # One occasion for this process starting, so work held "until a restart"
+    # resumes without Friedl having to prompt it.
+    runtime_started_source = RuntimeStartedSource(
+        opportunity_ledger, process_started_at,
+        enabled=providers.autonomous is not None,
+    )
+    runtime_started_source.recover(autonomous_budget)
+    occasion_sources.append(runtime_started_source)
     occasion_source: Any = (
         occasion_sources[0]
         if len(occasion_sources) == 1

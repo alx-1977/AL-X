@@ -202,6 +202,18 @@ class RepositoryAuthority:
             raise RepositoryAuthorityError(failure)
         return (completed.stdout or "").strip()
 
+    def head_commit(self) -> str:
+        """The commit the checkout has checked out, or "" if unreadable."""
+        return self._sha_of("HEAD")
+
+    def main_commit(self) -> str:
+        """The commit local main points at, or "" if unreadable.
+
+        Read so AL/X can see that code merged since her process started is not
+        the code she is running. It reads a ref and changes nothing.
+        """
+        return self._sha_of("refs/heads/main")
+
     def _sha_of(self, revision: str) -> str:
         """What this revision points at now, or "" when it names nothing."""
         completed = self._run(("git", "rev-parse", "--verify", f"{revision}^{{commit}}"))

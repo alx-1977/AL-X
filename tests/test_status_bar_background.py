@@ -125,6 +125,23 @@ class ConsoleTidyTests(unittest.TestCase):
         self.assertNotIn("b", result["tags"])
         self.assertEqual(result["tags"], ["div", "time", "span"])
 
+    def test_the_bar_lets_go_of_a_step_once_it_ends(self) -> None:
+        """On 2026-10-06 it showed a finished step for four minutes."""
+        result = run_js(textwrap.dedent("""
+            setPhase("listening");
+            const step = (status) => handleControl({
+              type: "diagnostic", code: "trace", subsystem: "thoughts",
+              label: "Withdraw carried thought", status, at: new Date().toISOString(),
+            });
+            step("started");
+            const during = diagnosticStage.textContent;
+            step("completed");
+            const after = diagnosticStage.textContent;
+            console.log(JSON.stringify({ during, after }));
+        """))
+        self.assertEqual(result["during"], "THOUGHTS · Withdraw carried thought")
+        self.assertEqual(result["after"], "Listening")
+
     def test_the_console_has_no_stop_coding_control(self) -> None:
         """Stopping a job is AL/X's stop_coding_job, not a console button."""
         assets = Path(__file__).resolve().parents[1] / "src/alx/interfaces/assets"
