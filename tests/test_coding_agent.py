@@ -573,6 +573,53 @@ class NativeExecutionTests(unittest.TestCase):
                 path.as_posix(),
             )
 
+    def test_the_summary_is_described_as_the_sessions_pre_check_report(self) -> None:
+        """A session's "could not run checks" sat beside passed checks unexplained.
+
+        The session has no terminal, so its report is written before
+        verification runs. AL/X must be told whose account summary is.
+        """
+        from alx.tools.coding import DEFINITION
+
+        self.assertIn("summary is the coding session's own report", DEFINITION.purpose)
+        self.assertIn("before any check ran", DEFINITION.purpose)
+
+    def test_a_file_a_correction_restored_is_not_reviewed_as_changed(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "parallel.py").write_text(
+            "def add(a, b):\n    return a - b\n", encoding="utf-8"
+        )
+        _git(worktree, "add", "parallel.py")
+        _git(worktree, "commit", "-m", "add parallel helper")
+        original_app = (worktree / "app.py").read_text(encoding="utf-8")
+
+        class RestoringSession(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                if len(self.calls) == 1:
+                    (root / "app.py").write_text(_FIXED, encoding="utf-8")
+                else:
+                    (root / "app.py").write_text(original_app, encoding="utf-8")
+                    (root / "parallel.py").write_text(_FIXED, encoding="utf-8")
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "wrong helper",
+                "evidence": "parallel.py is the one that subtracts",
+                "correction": "fix parallel.py and leave app.py",
+            }]},
+            {"findings": []},
+        ])
+        self._run(
+            PlanningModel(plan=_plan(inspection_targets=["app.py", "parallel.py"])),
+            RestoringSession(), reviewer=reviewer, task="fix the add helper",
+            worktree=str(worktree),
+        )
+        second_review = json.loads(reviewer.requests[1].messages[-1].content)
+        self.assertEqual(second_review["changed_files"], ["parallel.py"])
+
     def test_local_reviewer_catches_an_adjacent_unfixed_path_and_rechecks(self) -> None:
         """A plausible one-line repair is not accepted while its twin is wrong."""
         worktree = _worktree(self.root)
@@ -612,7 +659,16 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.assertIn("Local reviewer findings", session.calls[1][1])
         first_review = json.loads(reviewer.requests[0].messages[-1].content)
-        self.assertIn("parallel.py", first_review["changed_file_context"])
+        self.assertIn("parallel.py", first_review["file_context"])
+        # parallel.py was only read before the correction; it is offered as
+        # context, never as a file this diff changed.
+        self.assertEqual(first_review["changed_files"], ["app.py"])
+        self.assertEqual(first_review["inspected_files"], ["parallel.py"])
+        second_review = json.loads(reviewer.requests[1].messages[-1].content)
+        self.assertEqual(
+            sorted(second_review["changed_files"]), ["app.py", "parallel.py"]
+        )
+        self.assertEqual(second_review["inspected_files"], [])
         self.assertIn("parallel.py", attempt.result.values["files_changed"])
         self.assertIn(
             "parallel.py", attempt.result.values["commit"]["committed_files"]
@@ -925,7 +981,8 @@ class NativeExecutionTests(unittest.TestCase):
                 )
                 parsed = agent._review(
                     CodingRequest(task="fix add", job_id="job-1"),
-                    CodingWorkspace(str(worktree)), {}, ("app.py",), "candidate diff",
+                    CodingWorkspace(str(worktree)), {}, ("app.py",), (),
+                    "candidate diff",
                 )
                 self.assertEqual(len(parsed), 1)
                 self.assertEqual(parsed[0].title, "real concern")

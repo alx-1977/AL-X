@@ -144,7 +144,9 @@ LOCAL_REVIEW_INSTRUCTION = (
     "You are an advisory local code reviewer for one bounded coding job. "
     "You cannot edit files, run commands, commit, push, merge, deploy, or "
     "request an external review. Inspect only the supplied task, diff, bounded "
-    "file context, and test evidence. Return findings only when the candidate "
+    "file context, and test evidence. changed_files are the files this diff "
+    "changes; inspected_files were only read for context and are unchanged. "
+    "Return findings only when the candidate "
     "misses the stated cause, leaves an adjacent path violating the same "
     "invariant, or lacks meaningful regression coverage. Do not make style-only "
     "findings."
@@ -1415,14 +1417,14 @@ class CodingAgent:
                 self._modified_preexisting(workspace, preexisting_fingerprints),
             )
             reviewed_files = tuple(dict.fromkeys((*reviewed_files, *changed_files)))
-            inspection_targets = tuple(
+            # Files the plan read for context. They go to the reviewer apart
+            # from the changed files: labelled as changed, an unchanged
+            # README.md drew a finding that the job had edited it.
+            inspected_files = tuple(dict.fromkeys(
                 name
                 for name in _strings(plan.get("inspection_targets"))
-                if name not in preexisting_dirty or name in changed_files
-            )
-            files = tuple(dict.fromkeys((
-                *reviewed_files, *inspection_targets,
-            )))
+                if name not in changed_files and name not in preexisting_dirty
+            ))
             self._report_activity(state, "reviewing")
             self._report_telemetry(state, "review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
             # Same diff, same files. A schema, timeout, or provider failure
@@ -1432,7 +1434,13 @@ class CodingAgent:
             last_error: CodingError | None = None
             for _attempt in range(1, MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS + 1):
                 try:
-                    findings = self._review(request, workspace, plan, files, git_diff)
+                    # changed_files is what the diff changes now. reviewed_files
+                    # keeps every path ever touched, so a file a correction
+                    # restored would otherwise still be labelled changed.
+                    findings = self._review(
+                        request, workspace, plan, changed_files,
+                        inspected_files, git_diff,
+                    )
                 except CodingError as error:
                     if error.code == "coding_cancelled":
                         raise
@@ -1590,12 +1598,13 @@ class CodingAgent:
 
     def _review(
         self, request: CodingRequest, workspace: CodingWorkspace,
-        plan: Mapping[str, Any], files: tuple[str, ...], git_diff: str,
+        plan: Mapping[str, Any], changed_files: tuple[str, ...],
+        inspected_files: tuple[str, ...], git_diff: str,
     ) -> tuple[LocalReviewFinding, ...]:
         """Ask the configured coding model for bounded advisory findings only."""
         remaining = MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS
         context: dict[str, str] = {}
-        for name in files:
+        for name in (*changed_files, *inspected_files):
             if remaining <= 0:
                 break
             try:
@@ -1609,7 +1618,8 @@ class CodingAgent:
             "task": request.task, "root_cause_context": request.context,
             "acceptance_criteria": list(request.acceptance_criteria),
             "plan": dict(plan), "git_diff": git_diff,
-            "changed_files": list(files), "changed_file_context": context,
+            "changed_files": list(changed_files),
+            "inspected_files": list(inspected_files), "file_context": context,
             "test_guidance": request.test_guidance,
         }, "alx_coding_local_review", LOCAL_REVIEW_SCHEMA, model=self._reviewer)
         raw = values.get("findings")
