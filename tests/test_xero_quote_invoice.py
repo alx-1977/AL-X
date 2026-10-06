@@ -163,6 +163,16 @@ class QuoteToInvoiceTests(unittest.TestCase):
         ))
         self.assertEqual(xero.quote["QuoteNumber"], "QU-0042")
 
+    def test_the_quote_s_line_amount_type_is_spelled_as_an_invoice_needs(self) -> None:
+        """Xero reports quotes as EXCLUSIVE but refuses that on an invoice."""
+        for quoted, invoiced in (("EXCLUSIVE", "Exclusive"), ("INCLUSIVE", "Inclusive"),
+                                 ("NOTAX", "NoTax"), ("Exclusive", "Exclusive")):
+            with self.subTest(quoted=quoted):
+                xero = QuotingXero()
+                xero.quote["LineAmountTypes"] = quoted
+                self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+                self.assertEqual(xero.created[0]["LineAmountTypes"], invoiced)
+
     def test_it_never_approves_or_sends(self) -> None:
         xero = QuotingXero()
         self.executors(xero)[INVOICE_XERO_QUOTE](arguments())

@@ -940,6 +940,24 @@ def _quote_line(line: Any) -> dict[str, Any]:
     }
 
 
+# Xero reports a quote's line-amount type in capitals ("EXCLUSIVE") but
+# accepts only the mixed-case form on an invoice: on 2026-10-06 it refused
+# BlueNova's draft with "EXCLUSIVE is not a valid value for LineAmountTypes".
+_INVOICE_LINE_AMOUNT_TYPES = {
+    "exclusive": "Exclusive",
+    "inclusive": "Inclusive",
+    "notax": "NoTax",
+}
+
+
+def _invoice_line_amount_type(value: Any) -> str:
+    """The invoice spelling of a quote's line-amount type."""
+    found = _INVOICE_LINE_AMOUNT_TYPES.get(str(value or "").strip().lower())
+    if found is None:
+        raise XeroAccessError("response_invalid")
+    return found
+
+
 def _money_value(value: Any) -> Decimal:
     try:
         return Decimal(str(value)).quantize(Decimal("0.01"))
@@ -1857,8 +1875,8 @@ def build_xero_executors(
                     "Contact": {"ContactID": contact_id},
                     "Date": today().isoformat(),
                     "CurrencyCode": str(quote_record.get("CurrencyCode") or ""),
-                    "LineAmountTypes": str(
-                        quote_record.get("LineAmountTypes") or "Exclusive"
+                    "LineAmountTypes": _invoice_line_amount_type(
+                        quote_record.get("LineAmountTypes")
                     ),
                     "Reference": po_number,
                     "Status": "DRAFT",
