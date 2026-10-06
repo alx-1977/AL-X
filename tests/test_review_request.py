@@ -1,10 +1,10 @@
-"""Requesting an external review: one instruction, one request.
+"""Requesting an external review: AL/X's decision under plain permission.
 
-Requesting a review spends real credits, so the authority is deliberately not
-plain permission. The gate requires an approval grounded in Friedl's latest
-turn, and an approval is single-use. That is what stops one instruction from
-becoming several requests when a review finds something, a fix lands, the head
-moves, or a request fails.
+Until 2026-10-06 each request needed an approval grounded in Friedl's latest
+turn. He then delegated when to ask for a review to AL/X (D-026, "Requesting
+the review"), as he had delegated merging, so the permission alone authorises
+a request. A request on a head whose review is already running or done
+attaches to that round rather than asking again.
 
 Nothing here reads a review or decides anything about one. These tests prove
 the request is made once, refused before contact when it should not be made at
@@ -45,7 +45,7 @@ from alx.providers.review_status import (  # noqa: E402
 )
 from alx.contracts.task import TaskState  # noqa: E402
 from alx.providers.github_review import GitHubReviewProvider  # noqa: E402
-from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
+from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.review import REQUEST_EXTERNAL_REVIEW  # noqa: E402
 from tests.review_transcript import (  # noqa: E402
     ended_round,
@@ -199,30 +199,15 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertEqual(attempt.reason_code, "permission_missing")
         self.assertEqual(provider.requests, [])
 
-    def test_without_friedls_approval_no_review_is_requested(self) -> None:
-        """The authority is his instruction, not a standing licence to spend."""
+    def test_a_request_needs_no_approval_from_friedl(self) -> None:
+        """The permission is the authority; no turn has to grant each one."""
         provider = RecordingReviewer()
         attempt = self._broker(self._runtime(provider)).dispatch(
             self._call(approval=None),
             self._authority(frozenset({REVIEW_REQUEST_PERMISSION})),
         )
-        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
-        self.assertFalse(attempt.implementation_invoked)
-        self.assertEqual(attempt.reason_code, "approval_required")
-        self.assertEqual(provider.requests, [])
-
-    def test_an_approval_for_one_pull_request_does_not_cover_another(self) -> None:
-        """One instruction buys a review of the pull request he named."""
-        provider = RecordingReviewer()
-        attempt = self._broker(self._runtime(provider)).dispatch(
-            self._call(number=99),
-            self._authority(
-                frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(number=21),)
-            ),
-        )
-        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
-        self.assertEqual(attempt.reason_code, "approval_invalid")
-        self.assertEqual(provider.requests, [])
+        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
+        self.assertEqual(len(provider.requests), 1)
 
     def test_the_revision_reviewed_is_read_and_reported_back(self) -> None:
         """Friedl names a pull request; AL/X reports which commit was sent.
@@ -254,29 +239,6 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertEqual(attempt.result.failure["code"], "review_unavailable")
         # One attempt. A failed request does not become a second request.
         self.assertEqual(len(provider.requests), 1)
-
-    def test_a_spent_approval_cannot_buy_a_second_review(self) -> None:
-        """The property that stops fix-and-re-review loops.
-
-        The gate matches an approval by id and exact scope. Once the Core has
-        recorded that approval it cannot be proposed again, so a second request
-        needs Friedl to ask a second time.
-        """
-        runtime = self._runtime(RecordingReviewer())
-        gate = SafetyGate(runtime.policies)
-        authority = self._authority(
-            frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(),)
-        )
-        first = gate.evaluate(self._call(), authority)
-        self.assertIs(first.state, SafetyState.ALLOWED)
-
-        # The same instruction cannot authorise a different call: a new head,
-        # or a different pull request, does not match the approved scope.
-        for call in (self._call(number=99), self._call(number=7)):
-            with self.subTest(call=call.arguments):
-                self.assertIs(
-                    gate.evaluate(call, authority).state, SafetyState.DENIED
-                )
 
     def test_requesting_a_review_invokes_no_merge(self) -> None:
         """A review request must not become a merge by any path."""
@@ -335,14 +297,13 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertEqual(attempt.result.failure["code"], "arguments_unusable")
         self.assertEqual(provider.requests, [])
 
-    def test_the_policy_requires_friedls_approval_and_no_standing_scope(self) -> None:
+    def test_the_policy_is_plain_permission(self) -> None:
         runtime = self._runtime(RecordingReviewer())
         policy = runtime.policies[REQUEST_EXTERNAL_REVIEW]
         self.assertEqual(
             policy.permission_references, frozenset({REVIEW_REQUEST_PERMISSION})
         )
-        self.assertTrue(policy.approval_required)
-        # Not a standing scope: that would be durable autonomous spending.
+        self.assertFalse(policy.approval_required)
         self.assertFalse(policy.standing_scope_allowed)
 
     def test_the_capability_is_effectful_and_carries_no_authored_text(self) -> None:

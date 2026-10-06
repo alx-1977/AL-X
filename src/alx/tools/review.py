@@ -4,18 +4,14 @@ Reached the way every capability is: AL/X proposes a structured call, the
 broker validates it, the safety gate authorises it under `review.request`, and
 the executor performs it.
 
-Requesting a review is effectful and may consume review credits, so the gate
-requires an approval grounded in Friedl's latest turn. That is the existing
-mechanism for "the person asked for this", and it gives the property this
-capability needs without inventing anything: an approval is single-use and tied
-to one turn, so one instruction produces one request. A review that found
-issues, a fix, a changed head or a failed request cannot cause another; each
-needs Friedl to ask again.
+Requesting a review is effectful. Since 2026-10-06 it is AL/X's to decide
+under plain permission (D-026, "Requesting the review"): Friedl delegated when
+to ask, as he delegated merging, and she paces requests against the reviewer's
+rate limit. A request on a head whose review is already running or done
+attaches to that round instead of asking again.
 
-The approval authorises one paid review of one pull request. It does not name a
-revision, because Friedl asks for a pull request to be reviewed rather than for
-a particular commit; which commit that is now is read when the request is made
-and reported back with the outcome.
+A request names one pull request, not a revision; which commit that is now is
+read when the request is made and reported back with the outcome.
 
 The existing task runtime waits boundedly for publication. Nothing here reads
 a review, judges findings, or decides whether anything may merge.

@@ -626,7 +626,8 @@ class BackgroundReadTests(unittest.TestCase):
 class PolicyDerivationTests(unittest.TestCase):
     """The bound set is read from the policies, not written down twice."""
 
-    def test_requesting_a_review_is_turn_bound_by_its_own_policy(self) -> None:
+    def test_requesting_a_review_is_no_longer_turn_bound(self) -> None:
+        """Delegated to AL/X on 2026-10-06, so no approval marks it turn-bound."""
         from alx.bootstrap.review import build_review_runtime
 
         class Provider:
@@ -644,7 +645,7 @@ class PolicyDerivationTests(unittest.TestCase):
             for capability_id, policy in runtime.policies.items()
             if policy.approval_required
         )
-        self.assertEqual(derived, {REQUEST_EXTERNAL_REVIEW})
+        self.assertEqual(derived, frozenset())
 
 
 if __name__ == "__main__":
