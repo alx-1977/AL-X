@@ -725,6 +725,9 @@ class MemoryFaultDoesNotEndTheConversationTests(Fixture):
         def retrieve(self, query, as_of):
             return ()
 
+        def current_relationship_memories(self, person_id, as_of, limit):
+            return (), 0
+
     def failing_agent(self, reasoner) -> CoreAgent:
         return CoreAgent(
             self.store, reasoner, self.broker, (REMOVE, STUDY),
@@ -1031,6 +1034,72 @@ class RunawayScenarioTests(unittest.TestCase):
             self.assertEqual(len(reopened.load("goal-b").state.attempts), 1)
         finally:
             reopened.close()
+
+
+class RelationshipMemoryContextTests(Fixture):
+    """What she knows about the person she answers to is shown every turn.
+
+    Friedl asked for short replies ten times. Each request became a
+    relationship memory, retrievable only on request, and none was read
+    before a reply. Now the current ones are part of every turn.
+    """
+
+    def remember(self, memory_id: str, person_id: str) -> None:
+        memories = SQLiteMemoryStore(self.root / "memories.sqlite3")
+        memories.create(
+            MemoryProposal(
+                memory_id, MemoryKind.RELATIONSHIP, f"A preference of {person_id}.",
+                ("turn:turn-1",), NOW - timedelta(days=1), person_id,
+            ),
+            RETENTION,
+        )
+        memories.close()
+
+    def agent_for(self, reasoner) -> CoreAgent:
+        return CoreAgent(
+            self.store, reasoner, self.broker, (REMOVE, STUDY),
+            memory_store=SQLiteMemoryStore(self.root / "memories.sqlite3"),
+            clock=lambda: NOW, identifier_factory=lambda: "goal-b",
+            principal_person_id="friedl",
+        )
+
+    def test_the_speakers_memories_are_shown_without_retrieval(self) -> None:
+        self.remember("friedl-short-replies", "friedl")
+        reasoner = Queued(AgentDecision(response="Noted."))
+        self.agent_for(reasoner).process(conversation(), RETENTION, 25)
+        context = reasoner.contexts[0]
+        self.assertEqual(
+            [item.memory_id for item in context.relationship_memories],
+            ["friedl-short-replies"],
+        )
+        self.assertEqual(context.memories, (), "nothing was retrieved")
+
+    def test_another_persons_memories_never_reach_this_turn(self) -> None:
+        self.remember("friedl-short-replies", "friedl")
+        self.remember("visitor-preference", "visitor")
+        turn = ConversationTurn(
+            "conversation-1", "turn-9", ConversationOrigin.TYPED,
+            "Hello there.", NOW, "visitor",
+        )
+        reasoner = Queued(AgentDecision(response="Hello."))
+        self.agent_for(reasoner).process(conversation(turn), RETENTION, 25)
+        self.assertEqual(
+            [item.memory_id for item in reasoner.contexts[0].relationship_memories],
+            ["visitor-preference"],
+        )
+
+    def test_a_turn_with_no_person_answers_to_the_principal(self) -> None:
+        self.remember("friedl-short-replies", "friedl")
+        turn = ConversationTurn(
+            "conversation-1", "turn-9", ConversationOrigin.ALX_RESPONSE,
+            "A message arrived.", NOW - timedelta(minutes=1),
+        )
+        reasoner = Queued(AgentDecision(response="Noted."))
+        self.agent_for(reasoner).process(conversation(turn), RETENTION, 25)
+        self.assertEqual(
+            [item.memory_id for item in reasoner.contexts[0].relationship_memories],
+            ["friedl-short-replies"],
+        )
 
 
 if __name__ == "__main__":

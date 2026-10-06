@@ -886,6 +886,9 @@ async def run(repository_root: Path) -> None:
         # The operator's live execution trace: each reasoning call's purpose,
         # plan and goal transitions, refusals.
         trace=diagnostics.trace,
+        # A background occasion has no person turn; its response reaches the
+        # principal, whose relationship memories she is shown on every turn.
+        principal_person_id=voice_settings.primary_person_id,
         approval_ttl_seconds=min(approval_windows) if approval_windows else None,
         budget_check=budget_check,
         # Read from the policies themselves, so a capability that requires an

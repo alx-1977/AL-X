@@ -951,5 +951,57 @@ def _schema_accepts(schema, value) -> bool:
     return True
 
 
+class RelationshipMemoryPayloadTests(unittest.TestCase):
+    """Her relationship memories reach the words she reasons from."""
+
+    def test_relationship_memories_are_in_every_payload(self) -> None:
+        import tempfile
+        from datetime import timedelta
+
+        from alx.contracts import MemoryKind, MemoryProposal, ReasoningContext
+        from alx.core.model_reasoner import _context_payload
+        from alx.memories import SQLiteMemoryStore
+
+        now = datetime(2026, 10, 6, 9, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMemoryStore(Path(directory) / "memories.sqlite3")
+            store.create(
+                MemoryProposal(
+                    "friedl-short-replies", MemoryKind.RELATIONSHIP,
+                    "Friedl wants short, high-level replies.",
+                    ("turn:turn-1",), now, "friedl",
+                ),
+                now + timedelta(days=30),
+            )
+            memories, omitted = store.current_relationship_memories(
+                "friedl", now, 40
+            )
+            store.close()
+        payload = json.loads(_context_payload(ReasoningContext(
+            active_goal=None, turns=(), capabilities=(CAPABILITY,),
+            conversation_id="conversation-1",
+            relationship_memories=memories,
+            relationship_memories_omitted=omitted,
+        )))
+        self.assertEqual(
+            [item["content"] for item in payload["relationship_memories"]],
+            ["Friedl wants short, high-level replies."],
+        )
+        self.assertEqual(payload["relationship_memories_omitted"], 0)
+
+    def test_the_conversation_policy_asks_for_high_level_plain_replies(self) -> None:
+        from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
+
+        self.assertNotIn("not an extreme-brevity rule", PROTOCOL_INSTRUCTIONS)
+        for stated in (
+            "relationship_memories holds your current relationship memories",
+            "not a software developer",
+            "what was done and whether it worked",
+            "Technical, implementation and workflow choices are yours",
+        ):
+            with self.subTest(stated=stated):
+                self.assertIn(stated, " ".join(PROTOCOL_INSTRUCTIONS.split()))
+
+
 if __name__ == "__main__":
     unittest.main()

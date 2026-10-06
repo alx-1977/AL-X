@@ -82,6 +82,12 @@ _CODING_CORRECTION_REFUSALS = frozenset({
 })
 
 
+# How many current relationship memories about one person every turn shows.
+# Friedl had 27 on 2026-10-06; past this many the oldest are left out and
+# the count left out is shown, so she can consolidate rather than lose them.
+RELATIONSHIP_CONTEXT_LIMIT = 40
+
+
 class CoreState(str, Enum):
     RESPONDED = "responded"
     FINISHED_SILENTLY = "finished_silently"
@@ -282,8 +288,13 @@ class CoreAgent:
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None,
                  plan_continuation: bool = False,
                  bind_dispatch: Callable[[str], None] | None = None,
-                 trace: TraceSink | None = None) -> None:
+                 trace: TraceSink | None = None,
+                 principal_person_id: str | None = None) -> None:
         self._store = store
+        # Whom an occasion with no person turn answers to: a background
+        # event's response reaches the principal, so her relationship
+        # memories about the principal are the ones that apply.
+        self._principal_person_id = principal_person_id
         # The operator's execution trace. Purpose, plan and goal transitions
         # and refusals, as they happen; content-free, and never consulted.
         self._trace = trace
@@ -533,6 +544,9 @@ class CoreAgent:
                 step_index, origin, resume_plan_goal_id is not None, marks, previous_marks,
             )
             previous_marks = marks
+            relationship_memories, relationship_omitted = (
+                self._relationship_context(conversation)
+            )
             try:
                 reasoning_context = ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,
@@ -549,6 +563,8 @@ class CoreAgent:
                     unfinished_goals=summaries,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
+                    relationship_memories=relationship_memories,
+                    relationship_memories_omitted=relationship_omitted,
                     pending_revisits=self._pending_revisits(),
                     open_notebook_threads=self._open_notebook_threads(),
                     undelivered_responses=self._undelivered_responses(),
@@ -3222,6 +3238,28 @@ class CoreAgent:
                 if not people or any(person_id != proposal.person_id for person_id in people):
                     return "relationship_person_mismatch"
         return None
+
+    def _relationship_context(
+        self, conversation: ConversationSnapshot
+    ) -> tuple[tuple[MemorySnapshot, ...], int]:
+        """Her current relationship memories about the person she answers to.
+
+        That is the person of the latest person turn, the same person a
+        relationship retrieval is authorised for; with no person turn, the
+        principal. One person's memories never reach another's turn.
+        """
+        if self._memory_store is None:
+            return (), 0
+        user_turns = [item for item in conversation.turns
+                      if item.origin.value != "alx_response"]
+        person_id = (
+            user_turns[-1].person_id if user_turns else self._principal_person_id
+        )
+        if not person_id:
+            return (), 0
+        return self._memory_store.current_relationship_memories(
+            person_id, self._clock(), RELATIONSHIP_CONTEXT_LIMIT
+        )
 
     @staticmethod
     def _memory_query_is_authorized(conversation: ConversationSnapshot,

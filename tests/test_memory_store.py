@@ -339,5 +339,71 @@ class SQLiteMemoryStoreTests(unittest.TestCase):
             self.store.load("expired")
 
 
+class RelationshipContextTests(unittest.TestCase):
+    """Every turn shows her current relationship memories about one person."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = SQLiteMemoryStore(Path(self.directory.name) / "memories.sqlite3")
+        self.retention = NOW + timedelta(days=90)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.directory.cleanup()
+
+    def remember(
+        self, memory_id: str, minutes: int, *, person_id: str = "friedl",
+        supersedes: str | None = None,
+    ) -> None:
+        self.store.create(
+            replace(
+                proposal(
+                    memory_id, MemoryKind.RELATIONSHIP,
+                    person_id=person_id, supersedes=supersedes,
+                ),
+                formed_at=NOW + timedelta(minutes=minutes),
+            ),
+            self.retention,
+        )
+
+    def test_current_memories_come_newest_first(self) -> None:
+        self.remember("older", 1)
+        self.remember("newer", 2)
+        found, omitted = self.store.current_relationship_memories(
+            "friedl", NOW + timedelta(hours=1), 40
+        )
+        self.assertEqual([item.memory_id for item in found], ["newer", "older"])
+        self.assertEqual(omitted, 0)
+
+    def test_another_persons_memories_never_appear(self) -> None:
+        self.remember("about-friedl", 1)
+        self.remember("about-someone-else", 2, person_id="someone-else")
+        found, _ = self.store.current_relationship_memories(
+            "friedl", NOW + timedelta(hours=1), 40
+        )
+        self.assertEqual([item.memory_id for item in found], ["about-friedl"])
+
+    def test_superseded_and_other_kinds_are_left_out(self) -> None:
+        self.remember("first", 1)
+        self.remember("consolidated", 2, supersedes="first")
+        self.store.create(proposal("autobiographical"), self.retention)
+        found, _ = self.store.current_relationship_memories(
+            "friedl", NOW + timedelta(hours=1), 40
+        )
+        self.assertEqual([item.memory_id for item in found], ["consolidated"])
+
+    def test_a_cut_reports_how_many_were_left_out(self) -> None:
+        for minute in range(5):
+            self.remember(f"memory-{minute}", minute)
+        found, omitted = self.store.current_relationship_memories(
+            "friedl", NOW + timedelta(hours=1), 3
+        )
+        self.assertEqual(
+            [item.memory_id for item in found],
+            ["memory-4", "memory-3", "memory-2"],
+        )
+        self.assertEqual(omitted, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

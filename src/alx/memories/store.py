@@ -447,6 +447,53 @@ class SQLiteMemoryStore:
         right. It marks each result as current or superseded and returns them
         both when asked; the judgement is the Core's.
         """
+        selected, superseded_ids = self._eligible(query, as_of)
+
+        if query.topic is not None:
+            ranked = self._topic_matches(query.topic)
+            if ranked is None:
+                # Neither quiet answer is true: an empty result would claim
+                # nothing matched, and the unranked eligible set would claim
+                # these are what she asked about. Say what is actually wrong.
+                raise TopicRetrievalUnavailable(
+                    "topic retrieval requires the derived index, which this "
+                    "SQLite cannot provide"
+                )
+            else:
+                position = {
+                    memory_id: index for index, memory_id in enumerate(ranked)
+                }
+                selected = [
+                    item for item in selected if item.memory_id in position
+                ]
+                selected.sort(key=lambda item: position[item.memory_id])
+                reason = MemoryMatchReason.TOPIC
+        elif query.memory_ids or query.source_references:
+            reason = MemoryMatchReason.EXACT
+        else:
+            reason = MemoryMatchReason.SCOPE
+
+        return tuple(
+            replace(
+                item,
+                match_reason=reason,
+                supersession=(
+                    MemorySupersession.SUPERSEDED
+                    if item.memory_id in superseded_ids
+                    else MemorySupersession.CURRENT
+                ),
+            )
+            for item in selected[: query.limit]
+        )
+
+    def _eligible(
+        self, query: MemoryQuery, as_of: datetime
+    ) -> tuple[list[MemorySnapshot], set[str | None]]:
+        """Every memory the query's deterministic constraints admit.
+
+        Shared by retrieval and the relationship context, so both apply one
+        definition of live, current and in scope.
+        """
         _aware(as_of, "as_of")
         snapshots = tuple(
             self.load(row[0])
@@ -492,43 +539,42 @@ class SQLiteMemoryStore:
             if not query.include_superseded and item.memory_id in superseded_ids:
                 continue
             selected.append(item)
+        return selected, superseded_ids
 
-        if query.topic is not None:
-            ranked = self._topic_matches(query.topic)
-            if ranked is None:
-                # Neither quiet answer is true: an empty result would claim
-                # nothing matched, and the unranked eligible set would claim
-                # these are what she asked about. Say what is actually wrong.
-                raise TopicRetrievalUnavailable(
-                    "topic retrieval requires the derived index, which this "
-                    "SQLite cannot provide"
-                )
-            else:
-                position = {
-                    memory_id: index for index, memory_id in enumerate(ranked)
-                }
-                selected = [
-                    item for item in selected if item.memory_id in position
-                ]
-                selected.sort(key=lambda item: position[item.memory_id])
-                reason = MemoryMatchReason.TOPIC
-        elif query.memory_ids or query.source_references:
-            reason = MemoryMatchReason.EXACT
-        else:
-            reason = MemoryMatchReason.SCOPE
+    def current_relationship_memories(
+        self, person_id: str, as_of: datetime, limit: int
+    ) -> tuple[tuple[MemorySnapshot, ...], int]:
+        """Her current relationship memories about one person, newest first.
 
-        return tuple(
+        Every turn shows her these for the person she answers to. They were
+        retrievable only on request, and she did not request them before
+        replying: ten separate memories that Friedl wants short replies sat
+        unread while every reply stayed long. Nothing here ranks or judges
+        them; recency is the only order and the count is reported so a cut is
+        never silent.
+        """
+        if not isinstance(person_id, str) or not person_id.strip():
+            raise ValueError("person_id must not be blank")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        selected, _superseded = self._eligible(
+            MemoryQuery(
+                query_id="relationship-context",
+                kinds=(MemoryKind.RELATIONSHIP,),
+                person_id=person_id,
+            ),
+            as_of,
+        )
+        selected.sort(key=lambda item: item.current.recorded_at, reverse=True)
+        current = tuple(
             replace(
                 item,
-                match_reason=reason,
-                supersession=(
-                    MemorySupersession.SUPERSEDED
-                    if item.memory_id in superseded_ids
-                    else MemorySupersession.CURRENT
-                ),
+                match_reason=MemoryMatchReason.SCOPE,
+                supersession=MemorySupersession.CURRENT,
             )
-            for item in selected[: query.limit]
+            for item in selected[:limit]
         )
+        return current, max(0, len(selected) - limit)
 
     def correct(self, memory_id: str, correction: MemoryCorrection, expected_revision: int) -> MemorySnapshot:
         current = self.load(memory_id)
