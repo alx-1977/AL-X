@@ -2099,12 +2099,20 @@ class CodingAgent:
         # the diff it is handing back, including a truncation banner. A
         # committed job fingerprints the patch from its baseline commit to
         # its own commit: the worktree diff has already been committed and
-        # is empty. An unreadable committed patch leaves the commit standing.
+        # is empty. The hash runs only for a patch that was actually read
+        # and is non-empty. A read that was attempted and raised, or that
+        # came back empty, leaves a blank digest and
+        # committed-diff-unreadable. A commit with no baseline, or a
+        # preserved commit resumed when the baseline is already that
+        # commit, never attempts the read: blank digest and
+        # committed-diff-not-attempted. The commit still stands.
         if commit is None:
             diff_digest = _digest(git_diff)
         else:
             patch = ""
+            attempted = False
             if baseline is not None and baseline.head_sha != commit.commit_sha:
+                attempted = True
                 try:
                     patch = committed_diff(
                         self._repository, baseline.head_sha, commit.commit_sha,
@@ -2115,7 +2123,12 @@ class CodingAgent:
                 diff_digest = _digest(patch)
             else:
                 diff_digest = ""
-                issues = (*issues, "committed-diff-unreadable")
+                issues = (
+                    *issues,
+                    "committed-diff-unreadable"
+                    if attempted
+                    else "committed-diff-not-attempted",
+                )
         return CodingOutcome(
             status,
             summary,

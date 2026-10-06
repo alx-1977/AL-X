@@ -52,9 +52,11 @@ from alx.contracts.coding import (  # noqa: E402
     MAX_STEP_BUDGET,
     MAX_TASK_CHARACTERS,
     CodingCommandRecord,
+    CodingCommit,
     CodingError,
     CodingRequest,
     CodingSessionResult,
+    GitWorkspaceState,
 )
 from alx.contracts.coding_verification import (  # noqa: E402
     required_verification,
@@ -859,6 +861,7 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(values["diff_digest"], digest)
         self.assertEqual(attempt.result.durable_values["diff_digest"], digest)
         self.assertNotIn("committed-diff-unreadable", values["unresolved_issues"])
+        self.assertNotIn("committed-diff-not-attempted", values["unresolved_issues"])
 
     def test_unreadable_committed_diff_keeps_the_commit_and_a_blank_digest(self) -> None:
         worktree = _worktree(self.root, "unreadable-committed-diff")
@@ -877,9 +880,81 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertTrue(values["commit_sha"])
         self.assertEqual(values["diff_digest"], "")
         self.assertIn("committed-diff-unreadable", values["unresolved_issues"])
+        self.assertNotIn("committed-diff-not-attempted", values["unresolved_issues"])
         self.assertNotEqual(
             values["diff_digest"],
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+
+    def test_an_empty_committed_diff_is_unreadable_with_a_blank_digest(self) -> None:
+        """An attempted read that returns no patch is a failed read, not a skip."""
+        worktree = _worktree(self.root, "empty-committed-diff")
+        with patch.object(coding_agent_module, "committed_diff", return_value=""):
+            attempt = self._run(
+                PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+                task="fix add", worktree=str(worktree),
+            )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(attempt.result.failure)
+        values = attempt.result.values
+        self.assertEqual(values["status"], "succeeded")
+        self.assertTrue(values["commit_sha"])
+        self.assertEqual(values["diff_digest"], "")
+        self.assertEqual(attempt.result.durable_values["diff_digest"], "")
+        self.assertIn("committed-diff-unreadable", values["unresolved_issues"])
+        self.assertNotIn("committed-diff-not-attempted", values["unresolved_issues"])
+
+    def test_a_committed_job_with_no_baseline_does_not_attempt_the_diff(self) -> None:
+        """No baseline means the committed patch was never read."""
+        worktree = _worktree(self.root, "missing-baseline-digest")
+        commit = CodingCommit("fix/call-1", "a" * 40, ("app.py",), True)
+        with patch.object(coding_agent_module, "committed_diff") as committed:
+            outcome = self._outcome_for_commit(worktree, baseline=None, commit=commit)
+        committed.assert_not_called()
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.diff_digest, "")
+        self.assertEqual(outcome.durable_values()["diff_digest"], "")
+        self.assertIn("committed-diff-not-attempted", outcome.unresolved_issues)
+        self.assertNotIn("committed-diff-unreadable", outcome.unresolved_issues)
+        self.assertEqual(outcome.commit, commit)
+
+    def test_a_preserved_commit_already_at_baseline_does_not_attempt_the_diff(self) -> None:
+        """Resuming a preserved commit leaves baseline.head_sha equal to the commit."""
+        worktree = _worktree(self.root, "preserved-commit-digest")
+        sha = "b" * 40
+        baseline = GitWorkspaceState(branch="fix/call-1", head_sha=sha)
+        commit = CodingCommit("fix/call-1", sha, ("app.py",), True)
+        with patch.object(coding_agent_module, "committed_diff") as committed:
+            outcome = self._outcome_for_commit(
+                worktree, baseline=baseline, commit=commit,
+            )
+        committed.assert_not_called()
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.diff_digest, "")
+        self.assertEqual(outcome.durable_values()["diff_digest"], "")
+        self.assertEqual(outcome.as_values()["status"], "succeeded")
+        self.assertIn("committed-diff-not-attempted", outcome.unresolved_issues)
+        self.assertNotIn("committed-diff-unreadable", outcome.unresolved_issues)
+        self.assertEqual(outcome.baseline.head_sha, outcome.commit.commit_sha)
+
+    def _outcome_for_commit(self, worktree, *, baseline, commit):
+        agent = coding_agent_module.CodingAgent(
+            PlanningModel(), RecordingSession(), PlanningModel(),
+            repository=worktree,
+        )
+        return agent._outcome(
+            status="succeeded",
+            summary="complete coding job",
+            files=("app.py",),
+            commands=[],
+            tests_run=True,
+            tests_passed=True,
+            git_status="",
+            git_diff="",
+            issues=(),
+            review=False,
+            baseline=baseline,
+            commit=commit,
         )
 
     def test_review_schema_invalid_preserves_diff_when_retries_are_exhausted(self) -> None:
