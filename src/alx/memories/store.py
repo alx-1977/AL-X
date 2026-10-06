@@ -487,18 +487,28 @@ class SQLiteMemoryStore:
         )
 
     def _eligible(
-        self, query: MemoryQuery, as_of: datetime
+        self, query: MemoryQuery, as_of: datetime, *, one_person: bool = False,
     ) -> tuple[list[MemorySnapshot], set[str | None]]:
         """Every memory the query's deterministic constraints admit.
 
         Shared by retrieval and the relationship context, so both apply one
-        definition of live, current and in scope.
+        definition of live, current and in scope. `one_person` reads only that
+        person's relationship memories from storage first. It is exact, not an
+        approximation: a memory supersedes only one of its own kind and person,
+        so nothing outside that set can retire anything inside it.
         """
         _aware(as_of, "as_of")
-        snapshots = tuple(
-            self.load(row[0])
-            for row in self._connection.execute("SELECT memory_id FROM memories ORDER BY memory_id")
-        )
+        if one_person:
+            rows = self._connection.execute(
+                "SELECT memory_id FROM memories WHERE kind = ? AND person_id = ? "
+                "ORDER BY memory_id",
+                (MemoryKind.RELATIONSHIP.value, query.person_id),
+            )
+        else:
+            rows = self._connection.execute(
+                "SELECT memory_id FROM memories ORDER BY memory_id"
+            )
+        snapshots = tuple(self.load(row[0]) for row in rows)
         live_snapshots = tuple(item for item in snapshots if item.retention_until > as_of)
         superseded_ids = {
             item.supersedes_memory_id
@@ -564,6 +574,7 @@ class SQLiteMemoryStore:
                 person_id=person_id,
             ),
             as_of,
+            one_person=True,
         )
         # Mail-derived content past its D-013 deadline is not shown, even
         # while the memory record itself is retained.

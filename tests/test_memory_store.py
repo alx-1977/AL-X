@@ -413,6 +413,21 @@ class RelationshipContextTests(unittest.TestCase):
         self.assertEqual([item.memory_id for item in after], ["ordinary"])
         self.assertEqual(omitted, 0)
 
+    def test_only_that_persons_memories_are_read_from_storage(self) -> None:
+        """Every reasoning step does this lookup; it must not read the store."""
+        self.remember("about-friedl", 1)
+        self.remember("about-someone-else", 2, person_id="someone-else")
+        for index in range(5):
+            self.store.create(proposal(f"autobiographical-{index}"), self.retention)
+        loaded: list[str] = []
+        original = self.store.load
+        self.store.load = lambda memory_id: loaded.append(memory_id) or original(memory_id)
+        found, _ = self.store.current_relationship_memories(
+            "friedl", NOW + timedelta(hours=1), 40
+        )
+        self.assertEqual([item.memory_id for item in found], ["about-friedl"])
+        self.assertEqual(loaded, ["about-friedl"])
+
     def test_a_cut_reports_how_many_were_left_out(self) -> None:
         for minute in range(5):
             self.remember(f"memory-{minute}", minute)
