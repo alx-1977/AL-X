@@ -355,10 +355,6 @@ async def run(repository_root: Path) -> None:
         """The whole ambient context a background planned step runs under."""
         current_conversation_id.set(conversation_id)
         planned_dispatch.set(True)
-    # Coding jobs running now, by call, with the conversation each belongs
-    # to. What the console's cancel control checks, since a job may be a
-    # planned step on a background worker as well as a turn's own call.
-    running_coding_jobs: dict[str, str] = {}
     current_goal_state: ContextVar[Any] = ContextVar(
         "alx_current_goal_state", default=None
     )
@@ -785,8 +781,6 @@ async def run(repository_root: Path) -> None:
 
     def dispatch(call, state):
         current_call_id.set(call.call_id)
-        if call.capability_id == "run_coding_task":
-            running_coding_jobs[call.call_id] = current_conversation_id.get()
         goal_state_token = current_goal_state.set(state)
         # Reaching for any bill capability declares the task routine, so the
         # ceiling applies from the first one rather than from the commit.
@@ -819,7 +813,6 @@ async def run(repository_root: Path) -> None:
             )
         finally:
             current_goal_state.reset(goal_state_token)
-            running_coding_jobs.pop(call.call_id, None)
         # A finished bill closes its ceiling window, so the next invoice gets
         # its own. Only a completed capture counts: settling after a refusal
         # or a returned ambiguity would hand the same bill a fresh ceiling and
@@ -971,13 +964,6 @@ async def run(repository_root: Path) -> None:
         voice_settings.port,
         provider_settings.speech_to_text.sample_rate_hz,
         CODE_ROOT / "src/alx/interfaces/assets",
-        cancel_coding=(
-            lambda job_id, conversation_id: (
-                running_coding_jobs.get(job_id) == conversation_id
-                and coding_runtime.agent.cancel(job_id)
-            )
-            if coding_runtime is not None else None
-        ),
     )
     # Every kind of occasion reaches the Core through one producer, one
     # runner and one tick. A finished external task joins the matured requests

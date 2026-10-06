@@ -1146,5 +1146,55 @@ class RelationshipMemoryContextTests(Fixture):
         )
 
 
+class StoppingTheRunningCodingJobTests(Fixture):
+    """The goal running a coding plan step admits no other call while it runs.
+
+    Stopping that job is therefore permitted with no goal selected; any other
+    effectful call still needs one.
+    """
+
+    def test_a_stop_with_no_goal_reaches_dispatch(self) -> None:
+        from alx.tools.coding import STOP_DEFINITION
+
+        calls = []
+
+        def dispatch(call, state):
+            calls.append((call.capability_id, state))
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(
+                    call.call_id, call.capability_id,
+                    CapabilityResultState.SUCCEEDED, {"stopped": True},
+                ),
+            )
+
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-stop", "stop_coding_job", {})),
+            AgentDecision(response="Stopped."),
+        )
+        outcome = CoreAgent(
+            self.store, reasoner, dispatch, (STOP_DEFINITION, REMOVE),
+            clock=lambda: NOW, identifier_factory=lambda: "goal-b",
+        ).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(calls, [("stop_coding_job", None)])
+        self.assertEqual(reasoner.contexts[1].transient_attempts[0].result.values,
+                         {"stopped": True})
+
+    def test_another_effectful_call_with_no_goal_is_still_refused(self) -> None:
+        calls = []
+        reasoner = Queued(
+            AgentDecision(call=removal()),
+            AgentDecision(response="I need a goal for that."),
+        )
+        CoreAgent(
+            self.store, reasoner, lambda call, state: calls.append(call),
+            (REMOVE,), clock=lambda: NOW, identifier_factory=lambda: "goal-b",
+        ).process(conversation(), RETENTION, 25)
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            reasoner.contexts[1].refused_calls[0]["reason"], "active_goal_required"
+        )
+
 if __name__ == "__main__":
     unittest.main()

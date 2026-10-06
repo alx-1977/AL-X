@@ -59,6 +59,11 @@ PLAN_BUDGET_RETRY_SECONDS = 300
 INPUT_BOUND_EXCEEDED = "input_bound_exceeded"
 
 _RUN_CODING_TASK = "run_coding_task"
+# Stops the running coding job. A job runs as a plan step, so the goal that
+# owns it has a dispatch in flight and admits no other call; stopping it is
+# therefore permitted with no goal at all. The job's own result still returns
+# to its plan.
+_STOP_CODING_JOB = "stop_coding_job"
 # Repeated failures within one open failure episode. An episode closes when a
 # coding job succeeds or when AL/X dispatches a correction of a recorded
 # failure; it is not a goal-wide allowance.
@@ -1205,8 +1210,9 @@ class CoreAgent:
                 )
 
             if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
-                # Only a side-effect-free call reaches here; an effectful one
-                # without an active goal was stopped above.
+                # Only a side-effect-free call, or stopping the running coding
+                # job, reaches here; any other effectful call without an
+                # active goal was stopped above.
                 if any(item.call is not None and item.call.call_id == decision.call.call_id
                        for item in transient_attempts):
                     if self._already_refused(
@@ -1892,6 +1898,8 @@ class CoreAgent:
             SideEffect.NONE,
             SideEffect.ATTENTION_STATE,
         ):
+            return None
+        if state is None and call.capability_id == _STOP_CODING_JOB:
             return None
         if state is None or state.status is not GoalStatus.ACTIVE:
             return "active_goal_required"

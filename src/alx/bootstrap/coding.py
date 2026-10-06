@@ -27,6 +27,8 @@ from alx.safety import AuthorityPolicy
 from alx.tools.coding import (
     DEFINITION as CODING_DEFINITION,
     RUN_CODING_TASK,
+    STOP_CODING_JOB,
+    STOP_DEFINITION,
     build_coding_executors,
 )
 
@@ -100,18 +102,25 @@ def build_coding_runtime(
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)
 
-    executors = dict(build_coding_executors(run_job, call_id_source, goal_state_source))
+    executors = dict(build_coding_executors(
+        run_job, call_id_source, goal_state_source,
+        stop_job=lambda job_id: selected.cancel(job_id),
+    ))
 
     LOGGER.info(
         "Coding agent enabled: %s", RUN_CODING_TASK
     )
     return CodingRuntime(
         agent=selected,
-        definitions=(CODING_DEFINITION,),
+        definitions=(CODING_DEFINITION, STOP_DEFINITION),
         policies={
             RUN_CODING_TASK: AuthorityPolicy(
                 frozenset({CODING_EXECUTE_PERMISSION}),
                 approval_required=False,
+            ),
+            # Stopping the job she started is part of running it.
+            STOP_CODING_JOB: AuthorityPolicy(
+                frozenset({CODING_EXECUTE_PERMISSION}),
             ),
         },
         executors=executors,

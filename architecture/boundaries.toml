@@ -245,3 +245,12 @@ description = "A durable project scope is created and given its lifecycle."
 # memory system with none of memory's supersession or isolation guarantees.
 entry = "projects/store.py::SQLiteProjectStore.create"
 forbidden = []
+
+[[outcomes]]
+id = "coding.running_job_is_stopped"
+description = "The running coding job is stopped, keeping its branch and diff."
+# AL/X stops a job through stop_coding_job when Friedl asks or she judges it
+# right. It replaced the console's "Stop coding job" button and its socket
+# frame, which stopped jobs without her and was the only way to do so.
+entry = "tools/coding.py::build_coding_executors.<locals>.stop"
+forbidden = ["CODING_CANCEL_FRAME", "cancel_coding", "coding.cancel.ack"]

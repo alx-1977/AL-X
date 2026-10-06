@@ -83,6 +83,57 @@ class BackgroundStatusBarTests(unittest.TestCase):
             self.assertNotIn(word, result["text"].upper())
 
 
+@unittest.skipIf(NODE is None, "node is required to execute the client logic")
+class ConsoleTidyTests(unittest.TestCase):
+    """Friedl's 2026-10-06 console notes, run against the real app.js."""
+
+    def test_red_means_a_failed_job_and_nothing_else(self) -> None:
+        result = run_js(textwrap.dedent("""
+            console.log(JSON.stringify({
+              working: codingTone({ terminal: false }),
+              quiet: codingTone({ terminal: false, stalled: true }),
+              interrupted: codingTone({ terminal: true, outcome: "interrupted" }),
+              cancelled: codingTone({ terminal: true, outcome: "cancelled" }),
+              succeeded: codingTone({ terminal: true, outcome: "succeeded" }),
+              failed: codingTone({ terminal: true, outcome: "failed" }),
+            }));
+        """))
+        self.assertEqual(result, {
+            "working": "active", "quiet": "warn", "interrupted": "warn",
+            "cancelled": "warn", "succeeded": "active", "failed": "error",
+        })
+
+    def test_an_external_review_is_named_as_such_on_the_bar(self) -> None:
+        result = run_js(textwrap.dedent("""
+            handleControl({
+              type: "diagnostic", code: "task.status", task_id: "task-1",
+              state: "waiting_for_result", service: "coderabbit", subject: "PR 109",
+              elapsed_seconds: 5, at: new Date().toISOString(),
+            });
+            renderStage();
+            console.log(JSON.stringify({ text: diagnosticStage.textContent }));
+        """))
+        self.assertTrue(result["text"].startswith("External review · "), result["text"])
+
+    def test_a_log_line_has_no_subsystem_column(self) -> None:
+        result = run_js(textwrap.dedent("""
+            const tags = [];
+            document.createElement = (tag) => { tags.push(tag); return element(); };
+            diagnostic("Reasoning started", "info", "SYSTEM", { subsystem: "CORE" });
+            console.log(JSON.stringify({ tags }));
+        """))
+        self.assertNotIn("b", result["tags"])
+        self.assertEqual(result["tags"], ["div", "time", "span"])
+
+    def test_the_console_has_no_stop_coding_control(self) -> None:
+        """Stopping a job is AL/X's stop_coding_job, not a console button."""
+        assets = Path(__file__).resolve().parents[1] / "src/alx/interfaces/assets"
+        for name in ("index.html", "app.js", "app.css"):
+            with self.subTest(asset=name):
+                text = (assets / name).read_text()
+                self.assertNotIn("coding-cancel", text)
+                self.assertNotIn("coding.cancel", text)
+
 class LiveCodingStatusTests(unittest.TestCase):
     """The server side: background coding reaches every console, live."""
 
