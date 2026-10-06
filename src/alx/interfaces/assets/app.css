@@ -57,17 +57,6 @@ html, body {
 }
 
 #begin[hidden] { display: none; }
-#coding-cancel {
-  position: relative;
-  margin: .5rem 1rem;
-  border: 1px solid rgba(255, 150, 150, .6);
-  border-radius: .6rem;
-  padding: .35rem .7rem;
-  background: rgba(50, 12, 16, .75);
-  color: #fff;
-  cursor: pointer;
-}
-#coding-cancel[hidden] { display: none; }
 .activation[hidden] { display: none; }
 
 .diagnostics {
@@ -75,7 +64,7 @@ html, body {
   z-index: 3;
   left: 1.25rem;
   bottom: 1.25rem;
-  width: min(34rem, calc(100vw - 2.5rem));
+  width: min(29rem, calc(100vw - 2.5rem));
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, .24);
   border-radius: 1.45rem;
@@ -201,18 +190,12 @@ html, body {
 
 .diagnostic-line {
   display: grid;
-  grid-template-columns: 4.8rem 4.6rem 1fr;
+  grid-template-columns: 4.8rem 1fr;
   gap: .55rem;
   color: rgba(230, 247, 252, .72);
 }
 
 .diagnostic-line time { color: rgba(166, 220, 234, .42); }
-/* The subsystem column: which part of AL/X the line is about. */
-.diagnostic-line b {
-  font-weight: 600;
-  letter-spacing: .04em;
-  color: rgba(166, 220, 234, .66);
-}
 /* Low-level telemetry stays available but out of the operator's way: shown
    only when Details is on, and quieter than the execution trace. */
 .diagnostics__log:not([data-details="shown"]) .diagnostic-line[data-detail="true"] {
@@ -223,6 +206,8 @@ html, body {
 .diagnostic-line[data-background="true"] span { opacity: .72; }
 .diagnostic-line[data-tone="ok"] span { color: #a8f1d0; }
 .diagnostic-line[data-tone="active"] span { color: #aeeeff; }
+/* Red means failure and nothing else. */
+.diagnostic-line[data-tone="warn"] span { color: #ffe0b3; }
 .diagnostic-line[data-tone="error"] span { color: #ffb9b9; }
 
 .diagnostics footer {

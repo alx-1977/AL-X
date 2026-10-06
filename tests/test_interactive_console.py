@@ -375,13 +375,9 @@ class ServerToSessionWiringTests(unittest.TestCase):
         seen: dict = {}
 
         class Session:
-            async def exchange(self, conversation_id, audio, deliveries=None, typed=None,
-                               turn_started=None, turn_finished=None):
+            async def exchange(self, conversation_id, audio, deliveries=None, typed=None):
                 seen["typed"] = typed
                 seen["deliveries"] = deliveries
-                turn_started()
-                seen["owner"] = server._active_turn_connection
-                turn_finished()
                 if False:
                     yield None
 
@@ -397,8 +393,6 @@ class ServerToSessionWiringTests(unittest.TestCase):
             seen["typed"], registered,
             "the session must drain the queue the transport registered",
         )
-        self.assertIs(seen["owner"], connection)
-        self.assertIsNone(server._active_turn_connection)
 
     def test_a_typed_frame_reaches_the_queue_the_session_drains(self) -> None:
         """End to end across the seam: frame in, same queue out."""

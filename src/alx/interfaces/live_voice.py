@@ -364,8 +364,6 @@ class VoiceSession:
         audio: AsyncIterable[AudioChunk],
         deliveries: "asyncio.Queue[str] | None" = None,
         typed: "asyncio.Queue[str] | None" = None,
-        turn_started: Callable[[], None] | None = None,
-        turn_finished: Callable[[], None] | None = None,
     ) -> AsyncIterator[VoiceEvent]:
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
@@ -491,8 +489,6 @@ class VoiceSession:
                             lambda task=core_task: not task.done()
                         )
                         self._turn_origin_sink(True)
-                        if turn_started is not None:
-                            turn_started()
                         try:
                             # Spoken and typed converge here, before the
                             # gateway. They differ only in provenance and in
@@ -523,11 +519,7 @@ class VoiceSession:
                                 now + timedelta(days=self._retention_days),
                             )
                         finally:
-                            try:
-                                self._turn_origin_sink(False)
-                            finally:
-                                if turn_finished is not None:
-                                    turn_finished()
+                            self._turn_origin_sink(False)
 
                 updates: asyncio.Queue[str] = asyncio.Queue()
                 unsubscribe = self._activity.subscribe(

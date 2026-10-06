@@ -96,6 +96,8 @@ from alx.tools.repository import (
 from alx.tools.coding import (
     DEFINITION as CODING_DEFINITION,
     RUN_CODING_TASK,
+    STOP_CODING_JOB,
+    STOP_DEFINITION as STOP_CODING_DEFINITION,
     build_coding_executors,
 )
 
@@ -118,6 +120,8 @@ __all__ = [
     "build_repository_executors",
     "CODING_DEFINITION",
     "RUN_CODING_TASK",
+    "STOP_CODING_JOB",
+    "STOP_CODING_DEFINITION",
     "build_coding_executors",
     "ASK_WEB_PAGE",
     "ASK_WEB_SEARCH",

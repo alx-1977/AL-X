@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import asyncio
 import subprocess
 import sys
 import tempfile
@@ -29,7 +28,6 @@ from alx.contracts import (
 )
 from alx.safety import AuthorityContext, SafetyGate
 from tests.test_coding_agent import NOW
-from alx.interfaces.server import LiveVoiceServer
 from alx.goals import SQLiteGoalStore
 from alx.providers.coding_agent import CodingAgent
 from alx.providers.coding_process import run_coding_subprocess
@@ -444,42 +442,36 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertIn("COMMIT completed", transitions)
         self.assertNotIn("FAILED", transitions)
 
-    def test_structured_browser_cancel_reaches_only_named_job(self):
-        called = []
-        server = LiveVoiceServer(None, "127.0.0.1", 0, 16000, self.root,
-                                 cancel_coding=lambda job_id, conversation_id: (
-                                     called.append((job_id, conversation_id))
-                                     or job_id == "job-1" and conversation_id == "owner"
-                                 ))
+    def test_stop_coding_job_stops_only_the_named_running_job(self):
+        """AL/X stops a job herself; it replaced the console's Stop button."""
+        from alx.tools.coding import STOP_CODING_JOB, build_coding_executors
 
-        class Connection:
-            def __init__(self):
-                self.sent = []
+        asked = []
+        executors = build_coding_executors(
+            lambda request: None, lambda: "call-stop",
+            stop_job=lambda job_id: asked.append(job_id) or job_id in (None, "job-1"),
+        )
+        stop = executors[STOP_CODING_JOB]
+        self.assertTrue(stop({"job_id": "job-1"}).values["stopped"])
+        self.assertFalse(stop({"job_id": "job-2"}).values["stopped"])
+        self.assertTrue(stop({}).values["stopped"])
+        self.assertEqual(asked, ["job-1", "job-2", None])
+        refused = stop({"job_id": "../etc"})
+        self.assertEqual(refused.failure["code"], "arguments_unusable")
+        self.assertEqual(asked, ["job-1", "job-2", None])
 
-            def __aiter__(self):
-                async def frames():
-                    yield json.dumps({"type": "coding.cancel", "job_id": "job-1"})
-                    yield json.dumps({"type": "coding.cancel", "job_id": "job-2"})
-                return frames()
+    def test_stopping_is_registered_under_the_coding_permission(self):
+        from alx.bootstrap.coding import CODING_EXECUTE_PERMISSION
+        from alx.tools.coding import STOP_CODING_JOB
 
-            async def send(self, payload):
-                self.sent.append(json.loads(payload))
-
-        async def consume():
-            return [item async for item in server._audio(connection, "owner")]
-
-        connection = Connection()
-        server._active_turn_connection = connection
-        self.assertEqual(asyncio.run(consume()), [])
-        self.assertEqual(called, [("job-1", "owner"), ("job-2", "owner")])
-        self.assertEqual(connection.sent, [
-            {"type": "coding.cancel.ack", "job_id": "job-1", "accepted": True},
-            {"type": "coding.cancel.ack", "job_id": "job-2", "accepted": False},
-        ])
-
-        other = Connection()
-        async def consume_other():
-            return [item async for item in server._audio(other, "owner")]
-        self.assertEqual(asyncio.run(consume_other()), [])
-        self.assertEqual(called, [("job-1", "owner"), ("job-2", "owner")])
-        self.assertEqual(other.sent[0]["accepted"], False)
+        runtime = build_coding_runtime(
+            True, None, lambda: "call-1", agent=self._agent(),
+            repository=self.root,
+        )
+        self.assertIn(STOP_CODING_JOB, runtime.executors)
+        self.assertIn(STOP_CODING_JOB, {item.capability_id for item in runtime.definitions})
+        policy = runtime.policies[STOP_CODING_JOB]
+        self.assertEqual(policy.permission_references, frozenset({CODING_EXECUTE_PERMISSION}))
+        self.assertFalse(policy.approval_required)
+        # Nothing is running, so there is nothing to stop.
+        self.assertFalse(runtime.executors[STOP_CODING_JOB]({}).values["stopped"])

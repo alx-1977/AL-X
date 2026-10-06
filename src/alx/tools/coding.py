@@ -55,6 +55,7 @@ from alx.contracts.coding import (
 LOGGER = logging.getLogger(__name__)
 
 RUN_CODING_TASK = "run_coding_task"
+STOP_CODING_JOB = "stop_coding_job"
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
@@ -240,9 +241,9 @@ DEFINITION = CapabilityDefinition(
     "reproduced check output, and her corrective_action, and continues through "
     "review, verification, and commit unchanged. Repeating an attempt without "
     "a new diagnosis is bounded per failure episode, and each recorded failure "
-    "admits a bounded number of distinct corrections. The user can "
-    "stop an active job through the structured coding cancellation control; "
-    "cancellation preserves its branch and diff and returns a checkpoint.",
+    "admits a bounded number of distinct corrections. stop_coding_job stops "
+    "the running job; cancellation preserves its branch and diff and returns "
+    "a checkpoint.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
@@ -332,6 +333,35 @@ DEFINITION = CapabilityDefinition(
     ),
 )
 
+# Stopping is its own capability, not a control beside the conversation: when
+# Friedl wants a job stopped he says so, and AL/X decides and calls this. It
+# replaced the console's "Stop coding job" button, which was the only way to
+# stop a job and bypassed her entirely.
+STOP_DEFINITION = CapabilityDefinition(
+    STOP_CODING_JOB,
+    "Stop the coding job that is running now. job_id, when given, must name "
+    "that job: the call_id of its run_coding_task step. The stopped job keeps "
+    "its branch and diff and its own result returns a checkpoint. stopped is "
+    "false when no job is running, the named job is not the running one, or "
+    "the job is already committing.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"job_id": _STRING},
+        (),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"stopped": _BOOLEAN},
+        ("stopped",),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
+    ("arguments_unusable",),
+)
+
+DEFINITIONS = (DEFINITION, STOP_DEFINITION)
+
 # First match wins. Not CODING_FAILURES: sandbox_unusable / session_failed
 # sit late there and would invert this order. task_failed is the fallback
 # for undeclared issues such as no_files_changed, not an entry.
@@ -390,8 +420,9 @@ def build_coding_executors(
     run_job: Callable[[CodingRequest], Any],
     call_id_source: Callable[[], str],
     goal_state_source: Callable[[], GoalState | None] = lambda: None,
+    stop_job: Callable[[str | None], bool] | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
-    """Wire the one coding outcome to its structured capability result."""
+    """Wire the coding outcomes to their structured capability results."""
 
     def run(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
@@ -580,7 +611,29 @@ def build_coding_executors(
             ),
         )
 
-    return {RUN_CODING_TASK: run}
+    def stop(arguments: Mapping[str, Any]) -> CapabilityResult:
+        call_id = call_id_source()
+        job_id = arguments.get("job_id") if isinstance(arguments, Mapping) else None
+        if not isinstance(arguments, Mapping) or (
+            job_id is not None
+            and (not isinstance(job_id, str) or not job_id_permitted(job_id))
+        ):
+            return _failed(
+                call_id, "arguments_unusable", capability=STOP_CODING_JOB,
+                **_argument_failure("job_id", "unsafe", "job_id is invalid"),
+            )
+        stopped = bool(stop_job(job_id)) if stop_job is not None else False
+        return CapabilityResult(
+            call_id, STOP_CODING_JOB, CapabilityResultState.SUCCEEDED,
+            {"stopped": stopped},
+        )
+
+    executors: dict[str, Callable[[Mapping[str, Any]], CapabilityResult]] = {
+        RUN_CODING_TASK: run,
+    }
+    if stop_job is not None:
+        executors[STOP_CODING_JOB] = stop
+    return executors
 
 
 def parse_coding_arguments(

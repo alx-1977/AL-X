@@ -9,9 +9,6 @@ const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
 const diagnosticDetails = document.querySelector("#diagnostic-details");
 const taskRows = document.querySelector("#task-rows");
-const codingCancel = document.querySelector("#coding-cancel");
-let activeCodingJobId = "";
-let codingCancelTimeout;
 // Law 1: these name a system state and nothing more. First-person or
 // user-directed wording here reads as AL/X speaking when she has not reasoned,
 // so the gate whitelists exactly these labels.
@@ -83,11 +80,12 @@ function diagnostic(message, tone = "info", stream = "SYSTEM", options = {}) {
   const timestamp = document.createElement("time");
   timestamp.dateTime = when.toISOString();
   timestamp.textContent = clockFormat.format(when);
-  const subsystem = document.createElement("b");
-  subsystem.textContent = options.subsystem ?? "";
+  // Which part of AL/X the line is about stays on the element for inspection;
+  // it is not a column, because the bar and the line already say what it is.
+  if (options.subsystem) line.dataset.subsystem = options.subsystem;
   const content = document.createElement("span");
   content.textContent = message;
-  line.append(timestamp, subsystem, content);
+  line.append(timestamp, content);
   diagnosticLog.append(line);
   while (diagnosticLog.childElementCount > 240) diagnosticLog.firstElementChild.remove();
   diagnosticLog.scrollTop = diagnosticLog.scrollHeight;
@@ -206,7 +204,7 @@ function backgroundStatus() {
     if (task.settled) continue;
     const runtime = (task.seconds * 1000) + (performance.now() - task.at);
     return {
-      label: task.service ? `${task.service} review` : "External task",
+      label: "External review",
       startedAt: Date.now() - runtime,
       lastActivityAt: task.lastActivityAt,
     };
@@ -239,16 +237,18 @@ function elapsedText(milliseconds) {
   return `${minutes}:${seconds}`;
 }
 
-function showCodingStatus(message) {
-  const nextCodingJobId = message.terminal || message.phase === "commit"
-    ? "" : String(message.job_id ?? "");
-  if (nextCodingJobId !== activeCodingJobId || message.terminal) {
-    clearTimeout(codingCancelTimeout);
-    codingCancel.disabled = false;
+// Red is for failure only. A job gone quiet, interrupted or stopped is a
+// warning; one still working is active.
+function codingTone(message) {
+  if (message.terminal && message.outcome === "failed") return "error";
+  if (message.stalled) return "warn";
+  if (message.terminal && !["succeeded", "no_change_required"].includes(message.outcome)) {
+    return "warn";
   }
-  activeCodingJobId = nextCodingJobId;
-  codingCancel.hidden = !activeCodingJobId;
-  if (message.transition === "CASE started" || message.terminal) codingCancel.disabled = false;
+  return "active";
+}
+
+function showCodingStatus(message) {
   // The bar shows the job's stage, its runtime and the time since its last
   // real activity, and nothing else; a finished job gives the bar back.
   if (message.terminal) {
@@ -267,22 +267,10 @@ function showCodingStatus(message) {
   const key = `${message.job_id ?? ""}:${transition}`;
   if (transition && key !== lastCodingTransition) {
     diagnostic(`${message.job_id ?? "CASE"} · ${transition}`,
-      message.stalled || (message.terminal && !["succeeded", "no_change_required"].includes(message.outcome))
-        ? "error" : "active", "CODING", { subsystem: "CODING", at: message.at });
+      codingTone(message), "CODING", { subsystem: "CODING", at: message.at });
     lastCodingTransition = key;
   }
 }
-
-codingCancel.addEventListener("click", () => {
-  if (!activeCodingJobId || !socket || socket.readyState !== WebSocket.OPEN) return;
-  const requestedJobId = activeCodingJobId;
-  socket.send(JSON.stringify({ type: "coding.cancel", job_id: requestedJobId }));
-  codingCancel.disabled = true;
-  clearTimeout(codingCancelTimeout);
-  codingCancelTimeout = setTimeout(() => {
-    if (activeCodingJobId === requestedJobId) codingCancel.disabled = false;
-  }, 5000);
-});
 
 function sinceSynthesis(utterance) {
   return `${((performance.now() - utterance.startedAt) / 1000).toFixed(2)} s after synthesis start`;
@@ -551,13 +539,6 @@ function playOneUtterance(utterance) {
 }
 
 function handleControl(message) {
-  if (message.type === "coding.cancel.ack") {
-    if (message.job_id === activeCodingJobId && !message.accepted) {
-      clearTimeout(codingCancelTimeout);
-      codingCancel.disabled = false;
-    }
-    return;
-  }
   if (message.type === "session.ready") {
     diagnostic("Voice transport connected; session accepted", "ok");
     try {
@@ -738,10 +719,6 @@ begin.addEventListener("click", async () => {
   };
   socket.onclose = () => {
     sending = false;
-    clearTimeout(codingCancelTimeout);
-    activeCodingJobId = "";
-    codingCancel.hidden = true;
-    codingCancel.disabled = false;
     releaseMicrophone().catch(() => {});
     setPhase("disconnected");
     activation.hidden = false;
