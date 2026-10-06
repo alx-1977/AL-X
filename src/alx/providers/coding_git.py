@@ -119,6 +119,9 @@ def coding_checkpoint(root: Path) -> dict[str, str]:
 # "paths"  - a `--` separator followed by one or more worktree-relative paths,
 #            none of which may be spelled as a ref
 # "sha"    - exactly one full commit SHA, never a ref or revision expression
+# "shas"   - exactly two full lowercase commit SHAs, never refs or a range.
+#            The only shape is `diff --no-color`, so a job can fingerprint
+#            the patch from its baseline commit to its own commit.
 # "pair"   - exactly two values: the feature branch and the already verified
 #            main commit used by `switch -c`.
 _WRITE_SHAPES: dict[tuple[str, ...], str] = {
@@ -133,6 +136,9 @@ _WRITE_SHAPES: dict[tuple[str, ...], str] = {
     ("check-ignore", "-q", "--"): "paths",
     ("ls-files", "--stage", "-z"): "none",
     ("diff", "--cached", "--name-status", "-z"): "none",
+    # Read-only patch between two commits. It exists to fingerprint
+    # baseline..commit: exactly two SHAs, with no ref, range, or pathspec.
+    ("diff", "--no-color"): "shas",
     ("add", "--"): "paths",
     ("reset", "--quiet", "--"): "paths",
     ("commit", "--quiet", "-m"): "value",
@@ -178,6 +184,11 @@ def git_write_permitted(argv: list[str] | tuple[str, ...]) -> bool:
             return len(tail) == 1 and not tail[0].startswith("-")
         if remainder == "sha":
             return len(tail) == 1 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tail[0]) is not None
+        if remainder == "shas":
+            return len(tail) == 2 and all(
+                re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item) is not None
+                for item in tail
+            )
         if remainder == "paths":
             return bool(tail) and all(_pathspec_permitted(item) for item in tail)
         if remainder == "pair":
@@ -373,6 +384,21 @@ def _require(
             exit_status=result.exit_status,
         )
     return result.stdout
+
+
+def committed_diff(worktree: Path, baseline_sha: str, commit_sha: str) -> str:
+    """The patch from the job's baseline commit to its own commit.
+
+    This returns the whole `git diff --no-color` text and does not hash it.
+    A clip would fingerprint a prefix, so the read is unbounded. A nonzero
+    status, a timeout, or a git refusal raises CodingError.
+    """
+    return _require(
+        worktree,
+        ["git", "diff", "--no-color", baseline_sha, commit_sha],
+        "committed_diff_unreadable",
+        bounded=False,
+    )
 
 
 def _nul_paths(text: str) -> tuple[str, ...]:
@@ -1285,6 +1311,7 @@ __all__ = [
     "coding_checkpoint",
     "coding_job_lock",
     "commit_job_changes",
+    "committed_diff",
     "continue_feature_branch",
     "deleted_paths",
     "git_write_permitted",

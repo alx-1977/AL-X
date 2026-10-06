@@ -834,6 +834,54 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertEqual(log.stdout.strip(), "complete coding job")
 
+    def test_a_committed_job_diff_digest_fingerprints_the_committed_change(self) -> None:
+        """The digest is the baseline..commit patch, not the empty post-commit diff."""
+        worktree = _worktree(self.root, "committed-digest")
+        attempt = self._run(
+            PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            task="fix add", worktree=str(worktree),
+        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(attempt.result.failure)
+        values = attempt.result.values
+        self.assertEqual(values["status"], "succeeded")
+        baseline = values["baseline"]["head_sha"]
+        commit_sha = values["commit_sha"]
+        self.assertNotEqual(baseline, commit_sha)
+        committed_patch = subprocess.run(
+            ["git", "diff", "--no-color", baseline, commit_sha],
+            cwd=worktree, check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertTrue(committed_patch)
+        digest = hashlib.sha256(committed_patch.encode("utf-8")).hexdigest()
+        empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        self.assertNotEqual(values["diff_digest"], empty)
+        self.assertEqual(values["diff_digest"], digest)
+        self.assertEqual(attempt.result.durable_values["diff_digest"], digest)
+        self.assertNotIn("committed-diff-unreadable", values["unresolved_issues"])
+
+    def test_unreadable_committed_diff_keeps_the_commit_and_a_blank_digest(self) -> None:
+        worktree = _worktree(self.root, "unreadable-committed-diff")
+        with patch.object(
+            coding_agent_module, "committed_diff",
+            side_effect=CodingError("git_unavailable", reason_code="committed_diff_unreadable"),
+        ):
+            attempt = self._run(
+                PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+                task="fix add", worktree=str(worktree),
+            )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(attempt.result.failure)
+        values = attempt.result.values
+        self.assertEqual(values["status"], "succeeded")
+        self.assertTrue(values["commit_sha"])
+        self.assertEqual(values["diff_digest"], "")
+        self.assertIn("committed-diff-unreadable", values["unresolved_issues"])
+        self.assertNotEqual(
+            values["diff_digest"],
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+
     def test_review_schema_invalid_preserves_diff_when_retries_are_exhausted(self) -> None:
         """Three schema failures leave the branch and the uncommitted diff."""
         worktree = _worktree(self.root, "schema-exhausted")
@@ -918,6 +966,10 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("fix/call-1", branches)
         self.assertIn("app.py", status)
         self.assertIn("app.py", values["git_diff"])
+        self.assertEqual(
+            values["diff_digest"],
+            hashlib.sha256(values["git_diff"].encode("utf-8")).hexdigest(),
+        )
 
     def test_reviewer_timeout_preserves_diff_after_bounded_retries(self) -> None:
         """A reviewer timeout is the same infrastructure outcome, not a finding."""

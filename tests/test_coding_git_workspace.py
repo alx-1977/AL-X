@@ -1094,6 +1094,8 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         The shapes, and why each exists:
         three reads of where the worktree is (`rev-parse` x2, `symbolic-ref`);
         two reads of what is changed (`status`, `diff --cached`);
+        one read-only `diff --no-color` between exactly two SHAs, which exists
+        to fingerprint baseline..commit;
         one read of what a commit contains (`show`), added 2026-09-12 to verify
         the committed tree against the authorised set rather than trusting the
         index snapshot; one read of which attribute filter applies to a path
@@ -1118,7 +1120,7 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         """
         from alx.providers.coding_git import _WRITE_SHAPES
 
-        self.assertEqual(len(_WRITE_SHAPES), 15)
+        self.assertEqual(len(_WRITE_SHAPES), 16)
         subcommands = {prefix[0] for prefix in _WRITE_SHAPES}
         self.assertEqual(
             subcommands,
@@ -1134,10 +1136,34 @@ class ForbiddenOperationsCannotBeExpressed(unittest.TestCase):
         # paths because it is asked about specific paths, but it only reports;
         # the remaining reads cannot be pointed at another repository.
         for prefix, remainder in _WRITE_SHAPES.items():
-            if prefix[0] in ("rev-parse", "symbolic-ref", "status", "diff"):
+            if prefix[0] in ("rev-parse", "symbolic-ref", "status"):
                 self.assertEqual(remainder, "none", " ".join(prefix))
+            elif prefix[0] == "diff":
+                expected = "shas" if prefix == ("diff", "--no-color") else "none"
+                self.assertEqual(remainder, expected, " ".join(prefix))
         self.assertEqual(_WRITE_SHAPES[("show", "--name-status", "--pretty=format:", "-z")], "sha")
+        self.assertEqual(_WRITE_SHAPES[("diff", "--no-color")], "shas")
         self.assertFalse(git_write_permitted(("git", "show", "--name-status", "--pretty=format:", "-z", "HEAD")))
+        sha_a = "a" * 40
+        sha_b = "b" * 40
+        self.assertTrue(git_write_permitted(("git", "diff", "--no-color", sha_a, sha_b)))
+        self.assertTrue(git_write_permitted(("git", "diff", "--no-color", "c" * 64, "d" * 64)))
+        for argv in (
+            ["git", "diff"],
+            ["git", "diff", "--no-color"],
+            ["git", "diff", "--no-color", sha_a],
+            ["git", "diff", "--no-color", sha_a, sha_b, "c" * 64],
+            ["git", "diff", "--no-color", "HEAD", sha_b],
+            ["git", "diff", "--no-color", sha_a.upper(), sha_b],
+            ["git", "diff", sha_a, sha_b],
+            ["git", "diff", "--stat", "--no-color", sha_a, sha_b],
+            ["git", "diff", "--no-color", "--", "app.py"],
+            ["git", "diff", "--cached", "--name-only", "-z", sha_a],
+            ["git", "diff", "--no-color", f"{sha_a}..{sha_b}"],
+            ["git", "diff", "--color", sha_a, sha_b],
+            ["git", "diff", "--no-color", sha_a, "refs/heads/main"],
+        ):
+            self.assertFalse(git_write_permitted(argv), " ".join(argv))
 
 
 class OperatingOutsideTheAssignedWorktree(Worktree):

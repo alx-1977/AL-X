@@ -83,6 +83,7 @@ from alx.providers.coding_git import (
     canonical_repository_root,
     coding_job_lock,
     commit_job_changes,
+    committed_diff,
     verify_preserved_job_commit,
     deleted_paths,
     prepare_feature_branch,
@@ -2094,6 +2095,27 @@ class CodingAgent:
             status = "failed"
         if failure_status:
             status = "failed"
+        # The digest is computed only here. An uncommitted job fingerprints
+        # the diff it is handing back, including a truncation banner. A
+        # committed job fingerprints the patch from its baseline commit to
+        # its own commit: the worktree diff has already been committed and
+        # is empty. An unreadable committed patch leaves the commit standing.
+        if commit is None:
+            diff_digest = _digest(git_diff)
+        else:
+            patch = ""
+            if baseline is not None and baseline.head_sha != commit.commit_sha:
+                try:
+                    patch = committed_diff(
+                        self._repository, baseline.head_sha, commit.commit_sha,
+                    )
+                except Exception:  # noqa: BLE001 - the commit already passed its checks
+                    patch = ""
+            if patch:
+                diff_digest = _digest(patch)
+            else:
+                diff_digest = ""
+                issues = (*issues, "committed-diff-unreadable")
         return CodingOutcome(
             status,
             summary,
@@ -2106,7 +2128,7 @@ class CodingAgent:
             issues,
             review,
             datetime.now(UTC),
-            _digest(git_diff),
+            diff_digest,
             preexisting_dirty,
             diagnostics,
             plan_summary,
