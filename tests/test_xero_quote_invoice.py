@@ -155,11 +155,13 @@ class QuoteToInvoiceTests(unittest.TestCase):
             "AccountCode": "200", "TaxType": "OUTPUT2",
         }])
         self.assertEqual(values["attached"], ("BlueNova-PO-7781.pdf",))
+        # The quote is touched only after its invoice exists and reads back.
         self.assertEqual(values["steps"], (
-            "read_po_document", "read_quote", "accepted_quote",
-            "created_draft_invoice", "attached_and_verified_po", "read_back",
+            "read_po_document", "read_quote", "created_draft_invoice",
+            "attached_and_verified_po", "read_back", "accepted_quote",
             "marked_quote_invoiced",
         ))
+        self.assertEqual(xero.quote["QuoteNumber"], "QU-0042")
 
     def test_it_never_approves_or_sends(self) -> None:
         xero = QuotingXero()
@@ -238,6 +240,38 @@ class QuoteToInvoiceTests(unittest.TestCase):
         self.assertEqual(result.values["returned_for"], "read_back_mismatch")
         self.assertNotIn("INVOICED", xero.status_changes)
 
+    def test_a_refused_invoice_leaves_the_quote_untouched(self) -> None:
+        """On 2026-10-06 the quote was accepted first and Xero then refused."""
+        from alx.contracts import XeroAccessError
+
+        xero = QuotingXero()
+
+        def refuse(_invoice):
+            raise XeroAccessError("request_rejected")
+
+        xero.create_draft_sales_invoice = refuse
+        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        self.assertEqual(result.failure["code"], "request_rejected")
+        self.assertEqual(xero.status_changes, [])
+        self.assertEqual(xero.quote["Status"], "SENT")
+
+    def test_a_status_change_that_alters_the_quote_is_reported(self) -> None:
+        """A renumbered quote is not a quote marked accepted."""
+        xero = QuotingXero()
+        original = xero.set_quote_status
+
+        def renumbering(quote_record, status):
+            original(quote_record, status)
+            xero.quote = {**xero.quote, "QuoteNumber": "QU-0140", "Reference": ""}
+            return dict(xero.quote)
+
+        xero.set_quote_status = renumbering
+        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "quote_status_not_updated")
+        self.assertIn("QU-0140", result.values["detail"])
+        self.assertEqual(xero.status_changes, ["ACCEPTED"], "it stops at the first")
+
     def test_an_unknown_quote_is_a_declared_failure(self) -> None:
         result = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](
             arguments(quote_id="quote-404")
@@ -282,10 +316,30 @@ class QuoteAdapterTests(unittest.TestCase):
             adapter.set_quote_status(QuotingXero().quote, "ACCEPTED")
         args, kwargs = request.call_args
         self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Quotes"))
-        self.assertEqual(kwargs["json"], {"Quotes": [{
-            "QuoteID": "quote-1", "Status": "ACCEPTED",
-            "Contact": {"ContactID": "bluenova"}, "Date": "2026-10-01",
-        }]})
+        # The whole quote goes back: Xero's update is not partial, and a
+        # status-only payload renumbered QU-0136 and blanked its reference.
+        sent = kwargs["json"]["Quotes"][0]
+        self.assertEqual(sent["Status"], "ACCEPTED")
+        self.assertEqual(sent["Contact"], {"ContactID": "bluenova"})
+        self.assertEqual(sent["Date"], "2026-10-01")
+        self.assertEqual(sent["QuoteNumber"], "QU-0042")
+        self.assertEqual(sent["Title"], "Sensor boards")
+        self.assertEqual(sent["LineItems"], LINES)
+        self.assertEqual(sent["CurrencyCode"], "ZAR")
+
+    def test_xero_s_reason_for_a_refusal_is_logged(self) -> None:
+        from alx.contracts import XeroAccessError
+
+        adapter = XeroAccountingAdapter(self.ConnectedOAuth(), timeout_seconds=17)
+        response = Mock(status_code=400)
+        response.json.return_value = {"Elements": [{"ValidationErrors": [
+            {"Message": "Due Date is required."}]}]}
+        with patch("httpx.request", return_value=response), \
+                self.assertLogs("alx.providers.xero", level="WARNING") as logged:
+            with self.assertRaises(XeroAccessError) as raised:
+                adapter.create_draft_sales_invoice({"Type": "ACCREC", "Status": "DRAFT"})
+        self.assertEqual(raised.exception.code, "request_rejected")
+        self.assertIn("Due Date is required.", logged.output[0])
 
 
     def test_an_invoice_on_a_later_page_is_still_found(self) -> None:
