@@ -245,17 +245,6 @@ def _parse_worksheet(payload: bytes) -> Worksheet:
     return _worksheet_from_pages(pages)
 
 
-def _parse_sad500(payload: bytes) -> str:
-    pages = _runs_by_page(payload)
-    joined = " ".join(run.text for page in pages for run in page)
-    upper = joined.upper()
-    if "SAD 500" not in upper and "CUSTOMS DECLARATION" not in upper:
-        raise DhlDocumentError("not_sad500")
-    return _one_identifier(
-        r"\b([A-Z]{3}\d{15,})\b", joined, "sad500_identity_ambiguous"
-    )
-
-
 _MYBILL_MARKERS = ("Invoice Number", "Line Type", "Shipment Number")
 
 

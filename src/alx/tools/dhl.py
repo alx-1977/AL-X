@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -29,6 +30,7 @@ from alx.contracts import (
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
+    DHL_DOCUMENT_FAILURES,
     DhlDocumentError,
     DhlImportAnalyzer,
     MailAccessError,
@@ -67,9 +69,19 @@ _SOURCE = StructuredSchema(
     extra_properties=False,
 )
 
+# What each supplied document was read as, by its attachment ID. Every result
+# that read the documents carries it, so AL/X sees which were used and which
+# were left unused, rather than retrying combinations blind.
+_CLASSIFIED = StructuredSchema(
+    ValueKind.OBJECT,
+    {"attachment_id": _STRING, "kind": _STRING},
+    ("attachment_id", "kind"),
+    extra_properties=False,
+)
+
 DEFINITION = CapabilityDefinition(
     PROCESS_DHL_IMPORT,
-    "Process the exact DHL documents supplied: customs evidence and its invoice form one two-stage import; a reconciled duty-tax-paid invoice posts directly; freight returns unposted. The branch follows from document evidence.",
+    "Process the exact DHL documents supplied: customs evidence and its invoice form one two-stage import; a reconciled duty-tax-paid invoice posts directly; freight returns unposted. The branch follows from document evidence. A whole DHL notification may be supplied: documents that are not DHL evidence, such as the air waybill, the shipper's commercial invoice or a release notice, are left unused, and documents lists what each was read as.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"documents": StructuredSchema(ValueKind.ARRAY, items=_SOURCE)},
@@ -87,6 +99,7 @@ DEFINITION = CapabilityDefinition(
             "bill": _ANY_OBJECT,
             "attached": StructuredSchema(ValueKind.ARRAY, items=_STRING),
             "steps": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "documents": StructuredSchema(ValueKind.ARRAY, items=_CLASSIFIED),
         },
         (
             "completed",
@@ -104,7 +117,6 @@ DEFINITION = CapabilityDefinition(
     (
         "arguments_unusable",
         "attachment_unavailable",
-        "source_mismatch",
         "connection_failed",
         "not_connected",
         "permission_denied",
@@ -116,27 +128,11 @@ DEFINITION = CapabilityDefinition(
         "duplicate_found",
         "account_mapping_invalid",
         "supporting_document_missing",
-        "supporting_document_mismatch",
         "not_a_dhl_document",
         "documents_ambiguous",
-        "invoice_number_missing",
-        "waybill_missing",
-        "invoice_total_missing",
-        "invoice_currency_missing",
-        "invoice_date_missing",
-        "invoice_date_invalid",
-        "invoice_date_ambiguous",
-        "invoice_amount_invalid",
-        "invoice_format_invalid",
-        "invoice_too_many_rows",
-        "worksheet_identity_ambiguous",
-        "worksheet_total_missing",
-        "not_customs_worksheet",
-        "sad500_identity_ambiguous",
-        "worksheet_pdf_invalid",
-        "worksheet_too_large",
         "dhl_supplier_not_configured",
         "contact_not_found",
+        *DHL_DOCUMENT_FAILURES,
     ),
 )
 
@@ -190,11 +186,14 @@ def build_dhl_executors(
     """
     now = clock or (lambda: datetime.now(UTC))
 
-    def failed(code: str) -> CapabilityResult:
+    def failed(
+        code: str, documents: Sequence[Mapping[str, str]] = ()
+    ) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
             PROCESS_DHL_IMPORT,
             CapabilityResultState.FAILED,
+            {"documents": tuple(documents)} if documents else {},
             failure={"code": code},
         )
 
@@ -1221,6 +1220,10 @@ def build_dhl_executors(
         )
 
     def process(arguments: StructuredData) -> CapabilityResult:
+        # What each supplied document was read as, so every outcome says which
+        # were used and which were left unused, including a document failure
+        # such as a worksheet without its SAD 500.
+        classified: tuple[dict[str, str], ...] = ()
         try:
             sources = arguments.get("documents")
             if not isinstance(sources, (tuple, list)) or not sources:
@@ -1233,117 +1236,143 @@ def build_dhl_executors(
             references = [reference for reference, _a, _p in read]
 
             # The stage follows from what the documents are, never from wording.
-            kinds = [analyzer.classify(payload) for _r, _a, payload in read]
-            invoices = [
-                item for item, kind in zip(read, kinds) if kind == "dhl_invoice"
-            ]
-            duty_tax = [
-                item
-                for item, kind in zip(read, kinds)
-                if kind == "dhl_duty_tax_invoice"
-            ]
-            freight = [
-                item for item, kind in zip(read, kinds) if kind == "dhl_freight_invoice"
-            ]
-            structured_customs = [
-                item
-                for item, kind in zip(read, kinds)
-                if kind == "dhl_customs_invoice"
-            ]
-            customs = [
-                item
-                for item, kind in zip(read, kinds)
-                if kind in ("customs_worksheet", "sad_500")
-            ]
-            unknown = [kind for kind in kinds if kind in ("unrecognised", "unreadable")]
-            if unknown:
-                return returned(
-                    "",
-                    "documents_ambiguous",
-                    f"a document is not recognised DHL evidence: {unknown[0]}",
-                    references=references,
+            # A document that cannot be classified, such as one over the size
+            # bound, is recorded as unreadable while the rest are still read;
+            # its failure is then returned with every document's record.
+            kinds: list[str] = []
+            refused: DhlDocumentError | None = None
+            for _reference, attachment, payload in read:
+                try:
+                    kind = analyzer.classify(payload)
+                except DhlDocumentError as error:
+                    kind = "unreadable"
+                    refused = refused or error
+                kinds.append(kind)
+                classified += (
+                    {"attachment_id": attachment.attachment_id, "kind": kind},
                 )
-            if freight:
-                return returned(
-                    "dhl_freight_invoice",
-                    "freight_not_authorised",
-                    "the documents describe DHL freight, whose accounting treatment is not approved",
-                    references=references,
-                )
-            # Only branches that can reach Xero require Xero configuration.
-            # Freight is deliberately returned unposted and must not depend on
-            # an accounting connection merely to be recognised.
-            if not supplier_name:
-                return failed("dhl_supplier_not_configured")
-            unusable = _validate_configuration()
-            if unusable:
-                return failed(unusable)
-            contact_id, unresolved = _resolve_contact()
-            if unresolved:
-                return failed(unresolved)
-            if duty_tax:
-                if len(duty_tax) != 1 or len(invoices) != 1 or customs or structured_customs:
-                    return returned(
-                        "dhl_duty_tax_invoice",
-                        "documents_ambiguous",
-                        "duty-tax-paid processing requires exactly one MyBill CSV and one PDF invoice",
-                        references=references,
-                    )
-                return duty_tax_stage(contact_id, duty_tax[0], invoices[0], references)
-            if structured_customs:
-                if len(structured_customs) != 1 or len(invoices) != 1 or customs:
-                    return returned(
-                        "dhl_customs_invoice",
-                        "documents_ambiguous",
-                        "customs invoice processing requires one MyBill CSV and one PDF invoice",
-                        references=references,
-                    )
-                evidence = analyzer.invoice_evidence(structured_customs[0][2])
-                fields = analyzer.invoice_fields(invoices[0][2])
-                if (
-                    str(evidence.get("invoice_number") or "") != str(fields.get("invoice_number") or "")
-                    or str(evidence.get("waybill") or "") != str(fields.get("waybill") or "")
-                    or not _agrees(_money(evidence.get("total")), _money(fields.get("total")))
-                ):
-                    return returned(
-                        "dhl_customs_invoice",
-                        "supporting_document_mismatch",
-                        "the MyBill CSV and PDF do not identify the same invoice",
-                        references=references,
-                    )
-                return invoice_stage(contact_id, invoices[0], references)
-            if invoices and customs:
-                return returned(
-                    "",
-                    "documents_ambiguous",
-                    "customs evidence and an invoice were supplied together; "
-                    "each stage takes its own documents",
-                    references=references,
-                )
-            if len(invoices) > 1:
-                return returned(
-                    "",
-                    "documents_ambiguous",
-                    "more than one DHL invoice was supplied",
-                    references=references,
-                )
-            if invoices:
-                return invoice_stage(contact_id, invoices[0], references)
-            if customs:
-                return customs_stage(contact_id, customs, references)
+            if refused is not None:
+                raise refused
+            result = _dispatch(read, kinds, references)
+        except ValueError:
+            return failed("arguments_unusable", classified)
+        except MailAccessError as error:
+            return failed(error.code, classified)
+        except DhlDocumentError as error:
+            return failed(error.code, classified)
+        except XeroAccessError as error:
+            return failed(error.code, classified)
+        return replace(
+            result,
+            values={**result.values, "documents": classified},
+            durable_values=None,
+        )
+
+    def _dispatch(
+        read: Sequence[tuple[MailReference, Any, bytes]],
+        kinds: Sequence[str],
+        references: Sequence[MailReference],
+    ) -> CapabilityResult:
+        # A DHL notification carries more than the evidence: the air waybill,
+        # the shipper's commercial invoice, a SARS release notice. As in V1,
+        # those are neither read nor attached. They are left unused and
+        # reported, and whether what remains is enough is decided below.
+        invoices = [
+            item for item, kind in zip(read, kinds) if kind == "dhl_invoice"
+        ]
+        duty_tax = [
+            item
+            for item, kind in zip(read, kinds)
+            if kind == "dhl_duty_tax_invoice"
+        ]
+        freight = [
+            item for item, kind in zip(read, kinds) if kind == "dhl_freight_invoice"
+        ]
+        structured_customs = [
+            item
+            for item, kind in zip(read, kinds)
+            if kind == "dhl_customs_invoice"
+        ]
+        customs = [
+            item
+            for item, kind in zip(read, kinds)
+            if kind in ("customs_worksheet", "sad_500")
+        ]
+        if freight:
+            return returned(
+                "dhl_freight_invoice",
+                "freight_not_authorised",
+                "the documents describe DHL freight, whose accounting treatment is not approved",
+                references=references,
+            )
+        # Nothing to post is a document outcome, decided before any Xero
+        # prerequisite so it is never reported as a configuration failure.
+        if not (invoices or duty_tax or structured_customs or customs):
             return returned(
                 "",
                 "documents_ambiguous",
                 "no DHL customs evidence or invoice was supplied",
                 references=references,
             )
-        except ValueError:
-            return failed("arguments_unusable")
-        except MailAccessError as error:
-            return failed(error.code)
-        except DhlDocumentError as error:
-            return failed(error.code)
-        except XeroAccessError as error:
-            return failed(error.code)
+        # Only branches that can reach Xero require Xero configuration.
+        # Freight is deliberately returned unposted and must not depend on
+        # an accounting connection merely to be recognised.
+        if not supplier_name:
+            return failed("dhl_supplier_not_configured")
+        unusable = _validate_configuration()
+        if unusable:
+            return failed(unusable)
+        contact_id, unresolved = _resolve_contact()
+        if unresolved:
+            return failed(unresolved)
+        if duty_tax:
+            if len(duty_tax) != 1 or len(invoices) != 1 or customs or structured_customs:
+                return returned(
+                    "dhl_duty_tax_invoice",
+                    "documents_ambiguous",
+                    "duty-tax-paid processing requires exactly one MyBill CSV and one PDF invoice",
+                    references=references,
+                )
+            return duty_tax_stage(contact_id, duty_tax[0], invoices[0], references)
+        if structured_customs:
+            if len(structured_customs) != 1 or len(invoices) != 1 or customs:
+                return returned(
+                    "dhl_customs_invoice",
+                    "documents_ambiguous",
+                    "customs invoice processing requires one MyBill CSV and one PDF invoice",
+                    references=references,
+                )
+            evidence = analyzer.invoice_evidence(structured_customs[0][2])
+            fields = analyzer.invoice_fields(invoices[0][2])
+            if (
+                str(evidence.get("invoice_number") or "") != str(fields.get("invoice_number") or "")
+                or str(evidence.get("waybill") or "") != str(fields.get("waybill") or "")
+                or not _agrees(_money(evidence.get("total")), _money(fields.get("total")))
+            ):
+                return returned(
+                    "dhl_customs_invoice",
+                    "supporting_document_mismatch",
+                    "the MyBill CSV and PDF do not identify the same invoice",
+                    references=references,
+                )
+            return invoice_stage(contact_id, invoices[0], references)
+        if invoices and customs:
+            return returned(
+                "",
+                "documents_ambiguous",
+                "customs evidence and an invoice were supplied together; "
+                "each stage takes its own documents",
+                references=references,
+            )
+        if len(invoices) > 1:
+            return returned(
+                "",
+                "documents_ambiguous",
+                "more than one DHL invoice was supplied",
+                references=references,
+            )
+        if invoices:
+            return invoice_stage(contact_id, invoices[0], references)
+        return customs_stage(contact_id, customs, references)
 
     return {PROCESS_DHL_IMPORT: process}
