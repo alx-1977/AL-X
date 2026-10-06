@@ -339,8 +339,10 @@ DEFINITION = CapabilityDefinition(
 # stop a job and bypassed her entirely.
 STOP_DEFINITION = CapabilityDefinition(
     STOP_CODING_JOB,
-    "Stop the coding job that is running now. job_id, when given, must name "
-    "that job: the call_id of its run_coding_task step. The stopped job keeps "
+    "Stop the coding job that is running now. Call it with no goal "
+    "selected: the goal whose plan runs the job admits no other call while "
+    "the job runs. job_id, when given, must name that job: the call_id of "
+    "its run_coding_task step. The stopped job keeps "
     "its branch and diff and its own result returns a checkpoint. stopped is "
     "false when no job is running, the named job is not the running one, or "
     "the job is already committing.",
