@@ -437,9 +437,12 @@ class CoreTests(unittest.TestCase):
         )
         outcome = self.agent(Queued(
             AgentDecision(finish_silently=True, goal_proposal=proposal),
+            AgentDecision(response="I could not close that."),
             selects="goal-1",
         )).process(conversation(), RETENTION, 1)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        # Silence cannot hide the failure: a response-only step says it.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "I could not close that.")
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
 
     def test_history_record_cannot_cite_an_unoffered_evidence_identifier(self) -> None:
@@ -454,10 +457,12 @@ class CoreTests(unittest.TestCase):
         outcome = self.agent(Queued(
             AgentDecision(response="Deletion completed.", goal_proposal=proposal,
                           response_requires_goal_commit=True),
+            AgentDecision(response="I could not record that."),
             selects="goal-1",
         )).process(conversation(), RETENTION, 1)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
-        self.assertIsNone(outcome.response)
+        # The claim that depended on the refused commit is never delivered.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "I could not record that.")
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
 
     def test_history_record_accepts_an_existing_offered_evidence_identifier(self) -> None:
@@ -655,9 +660,10 @@ class CoreTests(unittest.TestCase):
         rejected = self.agent(Queued(AgentDecision(
             response="The inspection is recorded.", goal_proposal=premature,
             response_requires_goal_commit=True,
-        ), selects="goal-1")).process(conversation(), RETENTION, 1)
+        ), AgentDecision(response="It is not finished yet."),
+            selects="goal-1")).process(conversation(), RETENTION, 1)
 
-        self.assertEqual(rejected.state, CoreState.CHECKPOINTED)
+        self.assertEqual(rejected.state, CoreState.RESPONDED)
         self.assertEqual(rejected.reason, "goal_proposal_invalid")
         self.assertEqual(rejected.snapshot.state.evidence, (recorded,))
         self.assertEqual(self.store.load("goal-1").state.evidence, (recorded,))
@@ -766,6 +772,7 @@ class CoreTests(unittest.TestCase):
             AgentDecision(call=call, goal_proposal=proposal),
             AgentDecision(call=CapabilityCall("call-2", "inspect", {}),
                           goal_proposal=proposal),
+            AgentDecision(response="It is not complete yet."),
             selects="goal-1",
         )
         attempt = CapabilityAttempt(
@@ -777,9 +784,11 @@ class CoreTests(unittest.TestCase):
             conversation(), RETENTION, 3,
         )
 
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(len(reasoner.contexts), 2)
+        # Two reasoning steps, then one response-only step: no third attempt.
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "goal_proposal_invalid")
 
     def test_false_success_claim_citing_failed_attempt_cannot_complete(self) -> None:
         """A completed failure is durable history, never criterion support."""
@@ -938,6 +947,7 @@ class CoreTests(unittest.TestCase):
                 ),
                 response_requires_goal_commit=True,
             ),
+            AgentDecision(response="The first attempt failed."),
             selects="goal-1",
         ), lambda proposed, state: failed_attempt).process(conversation(), RETENTION, 2)
         self.assertEqual(first.reason, "goal_proposal_invalid")
@@ -1185,12 +1195,13 @@ class CoreTests(unittest.TestCase):
                 finish_silently=True,
                 goal_proposal=completion,
             ),
+            AgentDecision(response="The write failed, so it is not done."),
             selects="goal-1",
         )
         outcome = self.agent(
             reasoner, lambda proposed, state: attempt
         ).process(conversation(), RETENTION, 2)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         recovered = self.store.load("goal-1").state
         self.assertEqual(recovered.status, GoalStatus.ACTIVE)

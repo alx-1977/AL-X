@@ -867,6 +867,21 @@ class CoreAgent:
                                               "mutation_kind": kind}),
                             park=False,
                         )
+                    if origin is CognitionOrigin.PERSON_TURN:
+                        # Friedl asked something and is waiting. Ending here
+                        # left him with silence on 2026-10-06, after two
+                        # refused completions of an already-deleted email. The
+                        # goal is unchanged, so nothing is parked: one
+                        # response-only step, which knows the refusal, says
+                        # what actually happened.
+                        kind = decision.goal_proposal.kind.value
+                        return self._respond_to_terminal_blocker(
+                            conversation_id, conversation, snapshot, reasoning_context,
+                            transient_attempts, "goal_proposal_invalid", decision_provenance,
+                            (*refused_calls, {"reason": proposal_error, "subject": kind,
+                                              "mutation_kind": kind}),
+                            park=False,
+                        )
                     return CoreOutcome(
                         CoreState.CHECKPOINTED, snapshot, reason="goal_proposal_invalid",
                     )
