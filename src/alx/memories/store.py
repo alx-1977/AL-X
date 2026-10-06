@@ -565,6 +565,13 @@ class SQLiteMemoryStore:
             ),
             as_of,
         )
+        # Mail-derived content past its D-013 deadline is not shown, even
+        # while the memory record itself is retained.
+        selected = [
+            item for item in selected
+            if item.current.provenance is None
+            or not item.current.provenance.is_expired(as_of)
+        ]
         selected.sort(key=lambda item: item.current.recorded_at, reverse=True)
         current = tuple(
             replace(

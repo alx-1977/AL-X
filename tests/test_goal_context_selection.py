@@ -28,7 +28,7 @@ from alx.contracts import (  # noqa: E402
     CapabilityDefinition, CapabilityResult, CapabilityResultState,
     ConversationOrigin, ConversationSnapshot, ConversationTurn,
     GoalMutationKind, GoalProposal, GoalState, GoalStatus, GoalStopReason,
-    ContentOrigin, MemoryKind, MemoryProposal,
+    ContentOrigin, ContentProvenance, MailReference, MemoryKind, MemoryProposal,
     Objective, RetentionPolicy, SideEffect, StructuredSchema, SuccessCriterion,
     ValueKind, WorkItem,
 )
@@ -1087,6 +1087,50 @@ class RelationshipMemoryContextTests(Fixture):
             [item.memory_id for item in reasoner.contexts[0].relationship_memories],
             ["visitor-preference"],
         )
+
+    def test_a_mail_derived_memory_carries_its_deadline_into_the_reply(self) -> None:
+        """What she is shown is a reasoning input, with its D-013 deadline."""
+        memories = SQLiteMemoryStore(self.root / "memories.sqlite3")
+        recorded = NOW - timedelta(days=1)
+        memories.create(
+            MemoryProposal(
+                "from-mail", MemoryKind.RELATIONSHIP, "Learned from a mail thread.",
+                ("turn:turn-1",), recorded, "friedl",
+                provenance=ContentProvenance(
+                    origins=frozenset({ContentOrigin.ALX, ContentOrigin.MAIL_MESSAGE}),
+                    recorded_at=recorded,
+                    mail_references=(MailReference("INBOX", "777", "42"),),
+                    content_expires_at=recorded + timedelta(days=30),
+                ),
+            ),
+            RETENTION,
+        )
+        memories.close()
+        reasoner = Queued(AgentDecision(response="Noted."))
+        outcome = self.agent_for(reasoner).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertIn(ContentOrigin.MAIL_MESSAGE, outcome.response_provenance.origins)
+        self.assertEqual(
+            outcome.response_provenance.content_expires_at,
+            recorded + timedelta(days=30),
+        )
+
+    def test_an_unreadable_store_leaves_the_turn_without_them(self) -> None:
+        class Unreadable:
+            def retrieve(self, query, as_of):
+                return ()
+
+            def current_relationship_memories(self, person_id, as_of, limit):
+                raise OSError("disk I/O error")
+
+        reasoner = Queued(AgentDecision(response="Noted."))
+        outcome = CoreAgent(
+            self.store, reasoner, self.broker, (REMOVE, STUDY),
+            memory_store=Unreadable(), clock=lambda: NOW,
+            identifier_factory=lambda: "goal-b", principal_person_id="friedl",
+        ).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[0].relationship_memories, ())
 
     def test_a_turn_with_no_person_answers_to_the_principal(self) -> None:
         self.remember("friedl-short-replies", "friedl")

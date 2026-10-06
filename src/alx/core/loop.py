@@ -461,6 +461,7 @@ class CoreAgent:
                                    reason="plan_attention_resolved")
             snapshot, plan_evidence = self._plan_evidence(snapshot)
         retrieved_memories: tuple[MemorySnapshot, ...] = ()
+        relationship_memories: tuple[MemorySnapshot, ...] = ()
         # Identifier clashes seen this turn, handed to the next reasoning call
         # so she can resolve them. Cleared once she stops proposing the
         # conflicting write, so a resolved turn carries nothing forward.
@@ -522,11 +523,17 @@ class CoreAgent:
                 # A newly created goal is already known in full this turn.
                 selected_goals.add(snapshot.state.goal_id)
             summaries = self._selectable_goals(conversation_id, snapshot)
+            # Read before provenance is derived: what she is shown is a
+            # reasoning input, so a mail-derived memory's deadline must carry
+            # into whatever she writes from it.
+            relationship_memories, relationship_omitted = (
+                self._relationship_context(conversation, now)
+            )
             decision_provenance = self._derived_provenance(
                 now,
                 conversation,
                 snapshot,
-                retrieved_memories,
+                (*retrieved_memories, *relationship_memories),
                 transient_attempts, prior_goal_provenance,
             )
             try:
@@ -544,9 +551,6 @@ class CoreAgent:
                 step_index, origin, resume_plan_goal_id is not None, marks, previous_marks,
             )
             previous_marks = marks
-            relationship_memories, relationship_omitted = (
-                self._relationship_context(conversation)
-            )
             try:
                 reasoning_context = ReasoningContext(
                     active_goal=None if snapshot is None else snapshot.state,
@@ -707,7 +711,8 @@ class CoreAgent:
                     # provenance of everything this step persists must include
                     # it. It was computed before the goal was known.
                     decision_provenance = self._derived_provenance(
-                        now, conversation, snapshot, retrieved_memories,
+                        now, conversation, snapshot,
+                        (*retrieved_memories, *relationship_memories),
                         transient_attempts, prior_goal_provenance,
                     )
                 if decision.selects_only:
@@ -1419,7 +1424,8 @@ class CoreAgent:
                 snapshot = self._park_unfinished_goal(
                     snapshot,
                     self._derived_provenance(
-                        now, conversation, snapshot, retrieved_memories,
+                        now, conversation, snapshot,
+                        (*retrieved_memories, *relationship_memories),
                         transient_attempts, prior_goal_provenance,
                     ),
                 )
@@ -3240,13 +3246,16 @@ class CoreAgent:
         return None
 
     def _relationship_context(
-        self, conversation: ConversationSnapshot
+        self, conversation: ConversationSnapshot, now: datetime
     ) -> tuple[tuple[MemorySnapshot, ...], int]:
         """Her current relationship memories about the person she answers to.
 
         That is the person of the latest person turn, the same person a
         relationship retrieval is authorised for; with no person turn, the
-        principal. One person's memories never reach another's turn.
+        principal. One person's memories never reach another's turn. A store
+        that cannot be read leaves the turn without them rather than ending
+        it: nothing was asked of memory, so a memory fault must not cost the
+        answer.
         """
         if self._memory_store is None:
             return (), 0
@@ -3257,9 +3266,13 @@ class CoreAgent:
         )
         if not person_id:
             return (), 0
-        return self._memory_store.current_relationship_memories(
-            person_id, self._clock(), RELATIONSHIP_CONTEXT_LIMIT
-        )
+        try:
+            return self._memory_store.current_relationship_memories(
+                person_id, now, RELATIONSHIP_CONTEXT_LIMIT
+            )
+        except Exception:
+            LOGGER.warning("Relationship memories could not be read; the turn continues without them")
+            return (), 0
 
     @staticmethod
     def _memory_query_is_authorized(conversation: ConversationSnapshot,

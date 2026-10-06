@@ -392,6 +392,27 @@ class RelationshipContextTests(unittest.TestCase):
         )
         self.assertEqual([item.memory_id for item in found], ["consolidated"])
 
+    def test_mail_derived_content_past_its_deadline_is_not_shown(self) -> None:
+        recorded = NOW + timedelta(minutes=1)
+        self.store.create(
+            replace(
+                proposal("from-mail", MemoryKind.RELATIONSHIP, person_id="friedl"),
+                formed_at=recorded,
+                provenance=_provenance(recorded, ("42",)),
+            ),
+            self.retention,
+        )
+        self.remember("ordinary", 2)
+        before, _ = self.store.current_relationship_memories(
+            "friedl", NOW + timedelta(days=1), 40
+        )
+        after, omitted = self.store.current_relationship_memories(
+            "friedl", NOW + timedelta(days=31), 40
+        )
+        self.assertEqual({item.memory_id for item in before}, {"from-mail", "ordinary"})
+        self.assertEqual([item.memory_id for item in after], ["ordinary"])
+        self.assertEqual(omitted, 0)
+
     def test_a_cut_reports_how_many_were_left_out(self) -> None:
         for minute in range(5):
             self.remember(f"memory-{minute}", minute)
