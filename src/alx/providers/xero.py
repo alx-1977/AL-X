@@ -31,6 +31,9 @@ ACCOUNTING_URL = "https://api.xero.com/api.xro/2.0"
 # is not an existing bill, so it must not block re-creating the same supplier
 # invoice number.
 _DISCARDED_STATUSES = frozenset({"DELETED", "VOIDED"})
+# Xero returns invoices 100 to a page when `page` is given.
+_INVOICE_PAGE_SIZE = 100
+_MAX_INVOICE_PAGES = 50
 
 # External protocol identifiers. D-016 deliberately excludes payments, bank
 # transactions, journals, reports, payroll, and sales work. Contact writes are
@@ -785,21 +788,36 @@ class XeroAccountingAdapter:
     def sales_invoices_for_contact(
         self, contact_id: str
     ) -> tuple[Mapping[str, Any], ...]:
-        """One customer's live sales invoices, newest first."""
-        body = self._request(
-            "GET",
-            "/Invoices?"
-            + urlencode(
-                {
-                    "ContactIDs": contact_id,
-                    "where": 'Type=="ACCREC"',
-                    "order": "UpdatedDateUTC DESC",
-                }
-            ),
-        )
+        """Every live sales invoice of one customer, newest first.
+
+        Every page is read: the PO-reference check runs over this, and an
+        invoice on a later page would otherwise be missed and duplicated.
+        """
+        found: list[Mapping[str, Any]] = []
+        for page in range(1, _MAX_INVOICE_PAGES + 1):
+            body = self._request(
+                "GET",
+                "/Invoices?"
+                + urlencode(
+                    {
+                        "ContactIDs": contact_id,
+                        "where": 'Type=="ACCREC"',
+                        "order": "UpdatedDateUTC DESC",
+                        "page": str(page),
+                    }
+                ),
+            )
+            items = self._items(body, "Invoices")
+            found.extend(items)
+            if len(items) < _INVOICE_PAGE_SIZE:
+                break
+        else:
+            # More pages than a single customer should ever have: refuse
+            # rather than check a partial list.
+            _raise_clean("response_invalid")
         return tuple(
             item
-            for item in self._items(body, "Invoices")
+            for item in found
             if item.get("Type") == "ACCREC"
             and str(item.get("Status") or "") not in _DISCARDED_STATUSES
         )

@@ -1720,6 +1720,9 @@ def build_xero_executors(
                     "attached": tuple(attached),
                     "steps": tuple(steps),
                 },
+                # An unposted return is evidence awaiting her judgement, not a
+                # finished invoice: an execution plan must stop here.
+                outcome=None if completed else ExecutionOutcome.AMBIGUOUS,
             )
 
         try:

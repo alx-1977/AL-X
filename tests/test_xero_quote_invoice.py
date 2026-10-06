@@ -176,6 +176,15 @@ class QuoteToInvoiceTests(unittest.TestCase):
                 self.assertEqual(xero.created, [])
                 self.assertEqual(xero.status_changes, [])
 
+    def test_an_unposted_return_stops_a_plan(self) -> None:
+        """A return awaits her judgement; a plan must not run on as if done."""
+        from alx.contracts import ExecutionOutcome
+
+        result = self.executors(QuotingXero("DRAFT"))[INVOICE_XERO_QUOTE](arguments())
+        self.assertIs(result.outcome, ExecutionOutcome.AMBIGUOUS)
+        done = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](arguments())
+        self.assertIsNone(done.outcome)
+
     def test_a_po_that_does_not_match_its_digest_writes_nothing(self) -> None:
         xero = QuotingXero()
         result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments(po_document={
@@ -262,6 +271,26 @@ class QuoteAdapterTests(unittest.TestCase):
             "Contact": {"ContactID": "bluenova"}, "Date": "2026-10-01",
         }]})
 
+
+    def test_an_invoice_on_a_later_page_is_still_found(self) -> None:
+        """Only the first 100 were read, so a PO invoiced long ago was missed."""
+        adapter = XeroAccountingAdapter(self.ConnectedOAuth(), timeout_seconds=17)
+
+        def page(number, count):
+            response = Mock(status_code=200)
+            response.json.return_value = {"Invoices": [
+                {"InvoiceID": f"p{number}-{index}", "Type": "ACCREC", "Status": "PAID",
+                 "Reference": "PO-7781" if number == 2 and index == 0 else ""}
+                for index in range(count)
+            ]}
+            return response
+
+        with patch("httpx.request", side_effect=[page(1, 100), page(2, 3)]) as request:
+            found = adapter.sales_invoices_for_contact("bluenova")
+        self.assertEqual(len(found), 103)
+        self.assertIn("PO-7781", {item["Reference"] for item in found})
+        self.assertEqual(request.call_count, 2)
+        self.assertIn("page=2", request.call_args_list[1].args[1])
 
     def test_the_sales_invoice_call_cannot_create_a_bill(self) -> None:
         """Bills keep their one path; this call makes only DRAFT sales invoices."""
