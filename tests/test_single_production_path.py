@@ -143,8 +143,8 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
         }
         # Capture posts an ordinary bill, process_dhl_import posts a DHL
         # import, and delete discards a draft. The D-034 contact rename and
-        # D-035 contact creation write a contact, never a bill. Nothing else
-        # writes.
+        # D-035 contact creation write a contact, and the D-037 quote invoice
+        # writes a DRAFT sales invoice, never a bill. Nothing else writes.
         self.assertEqual(
             effectful,
             {
@@ -153,6 +153,7 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
                 DELETE_XERO_DRAFT_BILL,
                 UPDATE_XERO_CONTACT,
                 CREATE_XERO_CONTACT,
+                "invoice_xero_quote",
             },
         )
 

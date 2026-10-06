@@ -24,6 +24,8 @@ from alx.tools import (
     SEARCH_XERO_CONTACTS,
     UPDATE_XERO_CONTACT,
     CREATE_XERO_CONTACT,
+    FIND_XERO_QUOTES,
+    INVOICE_XERO_QUOTE,
     XERO_DEFINITIONS,
     build_xero_executors,
 )
@@ -34,6 +36,7 @@ XERO_BILL_WRITE_PERMISSION = "xero.bill.write"
 XERO_BILL_DELETE_PERMISSION = "xero.bill.delete"
 XERO_CONTACT_RENAME_PERMISSION = "xero.contact.rename"
 XERO_CONTACT_CREATE_PERMISSION = "xero.contact.create"
+XERO_QUOTE_INVOICE_PERMISSION = "xero.quote.invoice"
 
 # Law 0: one production path per outcome. An ordinary supplier bill is posted
 # by capture_supplier_invoice and a DHL import by process_dhl_import. The steps
@@ -145,6 +148,13 @@ def build_xero_runtime(
     # D-035. Standing authority to create one supplier contact. Creating is a
     # different act from renaming, so neither permission carries the other.
     create_policy = AuthorityPolicy(frozenset({XERO_CONTACT_CREATE_PERMISSION}))
+    # D-037. Standing authority to turn one sent or accepted quote into a
+    # DRAFT sales invoice for the PO that accepts it. A draft is not sent,
+    # approved or paid, so no setting makes it attended. Its own permission:
+    # a sales document is a different record from a supplier bill.
+    quote_invoice_policy = AuthorityPolicy(
+        frozenset({XERO_QUOTE_INVOICE_PERMISSION})
+    )
     policies = {
         SEARCH_XERO_CONTACTS: read_policy,
         LIST_XERO_ACCOUNTS: read_policy,
@@ -154,6 +164,8 @@ def build_xero_runtime(
         DELETE_XERO_DRAFT_BILL: delete_policy,
         UPDATE_XERO_CONTACT: rename_policy,
         CREATE_XERO_CONTACT: create_policy,
+        FIND_XERO_QUOTES: read_policy,
+        INVOICE_XERO_QUOTE: quote_invoice_policy,
     }
     definitions = tuple(
         definition
@@ -193,6 +205,7 @@ def build_xero_runtime(
                 XERO_BILL_DELETE_PERMISSION,
                 XERO_CONTACT_RENAME_PERMISSION,
                 XERO_CONTACT_CREATE_PERMISSION,
+                XERO_QUOTE_INVOICE_PERMISSION,
             }
         ),
     )

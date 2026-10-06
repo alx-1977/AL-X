@@ -39,6 +39,8 @@ CAPTURE_SUPPLIER_INVOICE = "capture_supplier_invoice"
 DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
 UPDATE_XERO_CONTACT = "update_xero_contact"
 CREATE_XERO_CONTACT = "create_xero_contact"
+FIND_XERO_QUOTES = "find_xero_quotes"
+INVOICE_XERO_QUOTE = "invoice_xero_quote"
 
 # Xero's documented maximum length for a contact name.
 _CONTACT_NAME_LIMIT = 255
@@ -311,6 +313,74 @@ CREATE_CONTACT_DEFINITION = CapabilityDefinition(
     _FAILURES + ("contact_name_conflict", CONTACT_CREATION_UNCONFIRMED),
 )
 
+_QUOTE_SUMMARY = _object(
+    {
+        "quote_id": _STRING,
+        "quote_number": _STRING,
+        "status": _STRING,
+        "date": _STRING,
+        "currency": _STRING,
+        "total": _STRING,
+        "reference": _STRING,
+        "title": _STRING,
+    },
+    ("quote_id", "quote_number", "status", "date", "currency", "total",
+     "reference", "title"),
+)
+
+FIND_QUOTES_DEFINITION = CapabilityDefinition(
+    FIND_XERO_QUOTES,
+    "List one customer's live Xero sales quotes by exact ContactID, newest first, with number, status, date, currency, total, reference and title. Reads only.",
+    _object({"contact_id": _STRING}, ("contact_id",)),
+    _object(
+        {"quotes": StructuredSchema(ValueKind.ARRAY, items=_QUOTE_SUMMARY)},
+        ("quotes",),
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+# D-037. The one production path from a customer's quote and purchase order
+# to a sales invoice. Which quote the PO accepts, and what its PO number is,
+# are AL/X's judgement from the PO; this performs only the decided steps.
+INVOICE_QUOTE_DEFINITION = CapabilityDefinition(
+    INVOICE_XERO_QUOTE,
+    "Invoice one Xero sales quote as a DRAFT sales invoice for the purchase order that accepts it: marks a SENT quote ACCEPTED, creates the draft invoice with the quote's customer, currency and lines and the PO number as its reference, attaches the PO document from mail verified byte for byte, checks the invoice reads back with the quote's totals, then marks the quote INVOICED. Never approves or sends the invoice. A quote in DRAFT or DECLINED, an existing invoice for that PO that differs, or totals that disagree return to you unposted. Rerunning resumes a matching draft rather than creating another.",
+    _object(
+        {
+            "quote_id": _STRING,
+            "po_number": _STRING,
+            "po_document": _object(
+                {
+                    "mailbox_id": _STRING,
+                    "uid_validity": _STRING,
+                    "uid": _STRING,
+                    "attachment_id": _STRING,
+                    "expected_sha256": _STRING,
+                },
+                ("mailbox_id", "uid_validity", "uid", "attachment_id",
+                 "expected_sha256"),
+            ),
+        },
+        ("quote_id", "po_number", "po_document"),
+    ),
+    _object(
+        {
+            "completed": _BOOLEAN,
+            "returned_for": _STRING,
+            "detail": _STRING,
+            "quote": _ANY_OBJECT,
+            "invoice": _ANY_OBJECT,
+            "attached": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+            "steps": StructuredSchema(ValueKind.ARRAY, items=_STRING),
+        },
+        ("completed", "returned_for", "detail", "quote", "invoice", "attached",
+         "steps"),
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES + ("quote_not_found",),
+)
+
 DEFINITIONS = (
     SEARCH_CONTACTS_DEFINITION,
     LIST_ACCOUNTS_DEFINITION,
@@ -321,6 +391,8 @@ DEFINITIONS = (
     DELETE_DRAFT_DEFINITION,
     UPDATE_CONTACT_DEFINITION,
     CREATE_CONTACT_DEFINITION,
+    FIND_QUOTES_DEFINITION,
+    INVOICE_QUOTE_DEFINITION,
 )
 
 
@@ -850,6 +922,93 @@ def _require_attachment_bytes(
         raise XeroAccessError("supporting_document_mismatch")
 
 
+# A quote line becomes an invoice line field for field. Identity and the
+# amounts Xero derives (LineItemID, LineAmount, TaxAmount) are not copied.
+_QUOTE_LINE_FIELDS = (
+    "Description", "Quantity", "UnitAmount", "ItemCode", "AccountCode",
+    "TaxType", "DiscountRate", "DiscountAmount", "Tracking",
+)
+
+
+def _quote_line(line: Any) -> dict[str, Any]:
+    if not isinstance(line, Mapping):
+        raise XeroAccessError("response_invalid")
+    return {
+        name: line[name]
+        for name in _QUOTE_LINE_FIELDS
+        if line.get(name) not in (None, "", [])
+    }
+
+
+def _money_value(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        raise XeroAccessError("response_invalid") from None
+
+
+def _invoice_disagrees_with_quote(
+    invoice: Mapping[str, Any],
+    quote_record: Mapping[str, Any],
+    contact_id: str,
+    po_number: str,
+) -> str:
+    """The first way the read-back invoice differs from its quote, or ""."""
+    contact = invoice.get("Contact")
+    if not isinstance(contact, Mapping) or contact.get("ContactID") != contact_id:
+        return "the invoice is for a different customer"
+    if str(invoice.get("Status") or "") != "DRAFT":
+        return f"the invoice is {invoice.get('Status')}, not DRAFT"
+    if str(invoice.get("Reference") or "") != po_number:
+        return f"the invoice reference is {invoice.get('Reference')!r}, not {po_number!r}"
+    if invoice.get("CurrencyCode") != quote_record.get("CurrencyCode"):
+        return "the invoice currency differs from the quote"
+    for field in ("SubTotal", "TotalTax", "Total"):
+        if _money_value(invoice.get(field)) != _money_value(quote_record.get(field)):
+            return (
+                f"the invoice {field} is {invoice.get(field)}, the quote's is "
+                f"{quote_record.get(field)}"
+            )
+    # Equal totals are not equal lines: a resumed draft whose lines were
+    # edited must not be accepted as the quote's invoice.
+    invoice_lines = invoice.get("LineItems")
+    quote_lines = quote_record.get("LineItems")
+    if not isinstance(invoice_lines, (list, tuple)) or not isinstance(
+        quote_lines, (list, tuple)
+    ):
+        return "the invoice lines could not be read back"
+    if len(invoice_lines) != len(quote_lines):
+        return (
+            f"the invoice has {len(invoice_lines)} lines, the quote has "
+            f"{len(quote_lines)}"
+        )
+    for index, (wanted, got) in enumerate(zip(quote_lines, invoice_lines), 1):
+        if _comparable_line(wanted) != _comparable_line(got):
+            return f"invoice line {index} differs from the quote"
+    return ""
+
+
+def _comparable_line(line: Any) -> tuple[Any, ...]:
+    """A line's quote-derived fields, normalised the way Xero reports them."""
+    if not isinstance(line, Mapping):
+        return ("unreadable",)
+    values: list[Any] = []
+    for name in _QUOTE_LINE_FIELDS:
+        value = line.get(name)
+        if name == "Tracking":
+            value = tuple(
+                (str(item.get("Name") or ""), str(item.get("Option") or ""))
+                for item in (value or ())
+                if isinstance(item, Mapping)
+            )
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = Decimal(str(value)).normalize()
+        elif value in (None, "", []):
+            value = None
+        values.append(value)
+    return tuple(values)
+
+
 def build_xero_executors(
     account: XeroAccountingAccount,
     mail: MailAccount,
@@ -858,6 +1017,7 @@ def build_xero_executors(
     default_account_code: str = "",
     default_tax_type: str = "",
     dhl_classifier: Callable[[bytes], str] | None = None,
+    today: Callable[[], date] = date.today,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     def failed(capability_id: str, code: str) -> CapabilityResult:
         return CapabilityResult(
@@ -1546,6 +1706,202 @@ def build_xero_executors(
             failure={"code": CONTACT_CREATION_UNCONFIRMED},
         )
 
+    def quote_summary(item: Mapping[str, Any]) -> dict[str, str]:
+        return {
+            "quote_id": str(item.get("QuoteID") or ""),
+            "quote_number": str(item.get("QuoteNumber") or ""),
+            "status": str(item.get("Status") or ""),
+            "date": xero_date(str(item.get("DateString") or item.get("Date") or "")) or "",
+            "currency": str(item.get("CurrencyCode") or ""),
+            "total": str(item.get("Total") if item.get("Total") is not None else ""),
+            "reference": str(item.get("Reference") or ""),
+            "title": str(item.get("Title") or ""),
+        }
+
+    def find_quotes(arguments: StructuredData) -> CapabilityResult:
+        return invoke(
+            FIND_XERO_QUOTES,
+            lambda: {
+                "quotes": tuple(
+                    quote_summary(item)
+                    for item in account.quotes_for_contact(
+                        _required(arguments, "contact_id")
+                    )
+                )
+            },
+        )
+
+    def invoice_quote(arguments: StructuredData) -> CapabilityResult:
+        """D-037: a quote and the PO that accepts it become a DRAFT invoice.
+
+        The quote and the PO number are AL/X's decision. This only performs
+        the steps that follow from it, refuses whatever does not match, and
+        reads back everything it writes.
+        """
+        steps: list[str] = []
+        attached: list[str] = []
+        quote_record: Mapping[str, Any] = {}
+        invoice_record: Mapping[str, Any] = {}
+
+        def result(completed: bool, reason: str = "", detail: str = "") -> CapabilityResult:
+            return CapabilityResult(
+                call_id_source(),
+                INVOICE_XERO_QUOTE,
+                CapabilityResultState.SUCCEEDED,
+                {
+                    "completed": completed,
+                    "returned_for": reason,
+                    "detail": detail,
+                    "quote": quote_summary(quote_record) if quote_record else {},
+                    "invoice": dict(invoice_record),
+                    "attached": tuple(attached),
+                    "steps": tuple(steps),
+                },
+                # An unposted return is evidence awaiting her judgement, not a
+                # finished invoice: an execution plan must stop here.
+                outcome=None if completed else ExecutionOutcome.AMBIGUOUS,
+            )
+
+        try:
+            quote_id = _required(arguments, "quote_id")
+            po_number = _required(arguments, "po_number")
+            document = arguments.get("po_document")
+            if not isinstance(document, Mapping):
+                raise ValueError("po_document")
+            reference = MailReference(
+                _required(document, "mailbox_id"),
+                _required(document, "uid_validity"),
+                _required(document, "uid"),
+            )
+            digest = _sha256(document.get("expected_sha256"), "expected_sha256")
+            attachment, content = mail.read_attachment(
+                reference, _required(document, "attachment_id")
+            )
+            if attachment.sha256 != digest:
+                raise XeroAccessError("source_mismatch")
+            steps.append("read_po_document")
+
+            found = account.read_quote(quote_id)
+            if found is None:
+                raise XeroAccessError("quote_not_found")
+            quote_record = found
+            contact = quote_record.get("Contact")
+            contact_id = (
+                str(contact.get("ContactID") or "")
+                if isinstance(contact, Mapping) else ""
+            )
+            lines = quote_record.get("LineItems")
+            if not contact_id or not isinstance(lines, (list, tuple)) or not lines:
+                raise XeroAccessError("response_invalid")
+            quote_total = _money_value(quote_record.get("Total"))
+            steps.append("read_quote")
+
+            existing = [
+                item for item in account.sales_invoices_for_contact(contact_id)
+                if str(item.get("Reference") or "") == po_number
+            ]
+            status = str(quote_record.get("Status") or "")
+            if status in ("DRAFT", "DECLINED"):
+                return result(
+                    False, f"quote_{status.lower()}",
+                    f"quote {quote_record.get('QuoteNumber')} is {status}; only a "
+                    "sent or accepted quote can be invoiced",
+                )
+            if status == "INVOICED" and not existing:
+                return result(
+                    False, "quote_already_invoiced",
+                    f"quote {quote_record.get('QuoteNumber')} is already invoiced "
+                    f"and no invoice references {po_number}",
+                )
+            if len(existing) > 1:
+                return result(
+                    False, "invoice_reference_ambiguous",
+                    f"{len(existing)} sales invoices already reference {po_number}",
+                )
+
+            if status == "SENT":
+                account.set_quote_status(quote_record, "ACCEPTED")
+                accepted = account.read_quote(quote_id)
+                if accepted is None or accepted.get("Status") != "ACCEPTED":
+                    raise XeroAccessError("response_invalid")
+                quote_record = accepted
+                steps.append("accepted_quote")
+
+            if existing:
+                invoice_record = existing[0]
+                if str(invoice_record.get("Status") or "") != "DRAFT":
+                    return result(
+                        False, "invoice_already_exists",
+                        f"invoice {invoice_record.get('InvoiceNumber')} already "
+                        f"references {po_number} and is "
+                        f"{invoice_record.get('Status')}",
+                    )
+                invoice_id = str(invoice_record.get("InvoiceID") or "")
+                steps.append("resumed_existing_draft")
+            else:
+                created = account.create_draft_sales_invoice({
+                    "Type": "ACCREC",
+                    "Contact": {"ContactID": contact_id},
+                    "Date": today().isoformat(),
+                    "CurrencyCode": str(quote_record.get("CurrencyCode") or ""),
+                    "LineAmountTypes": str(
+                        quote_record.get("LineAmountTypes") or "Exclusive"
+                    ),
+                    "Reference": po_number,
+                    "Status": "DRAFT",
+                    "LineItems": [_quote_line(line) for line in lines],
+                })
+                invoice_id = str(created.get("InvoiceID") or "")
+                steps.append("created_draft_invoice")
+            if not invoice_id:
+                raise XeroAccessError("response_invalid")
+
+            stored = {
+                str(item.get("FileName"))
+                for item in _listed_attachments(account, invoice_id)
+            }
+            if attachment.filename not in stored:
+                account.attach_bill_document(
+                    invoice_id, attachment.filename, attachment.media_type, content
+                )
+            _verified_attachment(account, invoice_id, attachment.filename, digest)
+            attached.append(attachment.filename)
+            steps.append("attached_and_verified_po")
+
+            final = account.read_sales_invoice(invoice_id)
+            if final is None:
+                raise XeroAccessError("response_invalid")
+            invoice_record = final
+            disagreement = _invoice_disagrees_with_quote(
+                final, quote_record, contact_id, po_number
+            )
+            if disagreement:
+                return result(False, "read_back_mismatch", disagreement)
+            steps.append("read_back")
+
+            if str(quote_record.get("Status") or "") != "INVOICED":
+                account.set_quote_status(quote_record, "INVOICED")
+                invoiced = account.read_quote(quote_id)
+                if invoiced is None or invoiced.get("Status") != "INVOICED":
+                    return result(
+                        False, "quote_status_not_updated",
+                        f"draft invoice {final.get('InvoiceNumber')} is ready, but "
+                        "the quote did not read back as INVOICED",
+                    )
+                quote_record = invoiced
+                steps.append("marked_quote_invoiced")
+            return result(
+                True, "",
+                f"draft invoice {final.get('InvoiceNumber')} for "
+                f"{quote_total} {final.get('CurrencyCode')} references {po_number}",
+            )
+        except ValueError:
+            return failed(INVOICE_XERO_QUOTE, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(INVOICE_XERO_QUOTE, error.code)
+        except XeroAccessError as error:
+            return failed(INVOICE_XERO_QUOTE, error.code)
+
     return {
         SEARCH_XERO_CONTACTS: search_contacts,
         LIST_XERO_ACCOUNTS: list_accounts,
@@ -1556,4 +1912,6 @@ def build_xero_executors(
         DELETE_XERO_DRAFT_BILL: delete_draft,
         UPDATE_XERO_CONTACT: update_contact,
         CREATE_XERO_CONTACT: create_contact,
+        FIND_XERO_QUOTES: find_quotes,
+        INVOICE_XERO_QUOTE: invoice_quote,
     }

@@ -1369,8 +1369,9 @@ class NoFallbackTests(unittest.TestCase):
             if item.side_effect is SideEffect.EFFECTFUL
         }
         # Capture commits a bill; delete discards one. The D-034 contact
-        # rename and D-035 contact creation write a contact, never a bill.
-        # Nothing else writes.
+        # rename and D-035 contact creation write a contact, and the D-037
+        # quote invoice writes a DRAFT sales invoice, never a bill. Nothing
+        # else writes.
         self.assertEqual(
             effectful,
             {
@@ -1378,6 +1379,7 @@ class NoFallbackTests(unittest.TestCase):
                 "delete_xero_draft_bill",
                 "update_xero_contact",
                 "create_xero_contact",
+                "invoice_xero_quote",
             },
         )
 

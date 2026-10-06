@@ -2300,3 +2300,37 @@ prohibition on unverified commits are unchanged.
 A plan step may be one exact mutation of another goal she was offered, instead of a capability call: cancel it or request its completion, with her reason and any evidence. AL/X alone decides which goals and which mutation. The runtime binds each step to the goal's revision when the plan is installed, and the runner applies it through the same goal reducer and revision-checked write as a mutation she proposes in a turn, at most once. A changed revision, changed plan precondition, refusal or failed write leaves the goal untouched and returns the plan to her. A plan never mutates the goal it belongs to.
 
 This grants no authority a single goal update lacks: completion still requires sourced evidence for every criterion, and nothing here touches capabilities, approvals or production writes. The boundary above is otherwise unchanged.
+
+## D-037 — Xero sales quote to draft invoice
+
+- **Date:** 2026-10-06
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-06.** BlueNova sent a purchase order matching a Xero quote. AL/X could not accept the quote, turn it into an invoice, or attach the PO, because she could only work with supplier bills. In the Claude Code session that day Friedl approved this decision ("you have my approval") and chose that invoices start as DRAFT.
+- **Authority.** AL/X may turn one Xero sales quote into a DRAFT sales invoice for the customer's purchase order that accepts it. Standing authority applies; Friedl does not approve each invoice individually.
+- **What AL/X decides.** Which quote the purchase order accepts, from the PO's customer, amount and content, and what the PO number is. Anything she cannot match objectively stays with her or goes to Friedl.
+- **Permitted.**
+  - Read a customer's quotes.
+  - Mark a SENT quote ACCEPTED.
+  - Create one DRAFT sales invoice copying the quote's customer, currency, line-amount type and lines, with the PO number as its reference and today's date.
+  - Attach the PO document from mail, verified byte for byte.
+  - Read the invoice back.
+  - Mark the quote INVOICED.
+- **Not permitted.**
+  - Approving, sending, emailing or paying an invoice.
+  - Changing the quote's lines, prices or customer.
+  - Invoicing a DRAFT or DECLINED quote.
+  - Creating a second invoice for a PO already invoiced.
+  - Voiding or deleting anything.
+- **Deterministic sequence under Law 2.** `invoice_xero_quote` does the following:
+  1. Reads the PO attachment and checks it against the expected digest.
+  2. Reads the quote, and returns unposted if it is DRAFT or DECLINED, or INVOICED with no invoice for this PO.
+  3. Marks a SENT quote ACCEPTED and reads it back.
+  4. Resumes a DRAFT invoice that already references the PO, or creates one. Any non-draft or ambiguous match returns.
+  5. Attaches and verifies the PO.
+  6. Reads the invoice back and returns unposted unless its customer, status, reference, currency, subtotal, tax and total match the quote.
+  7. Marks the quote INVOICED and reads it back.
+
+  `find_xero_quotes` only reads. The invoice carries its own permission, `xero.quote.invoice`; no supplier-bill or contact permission grants it, and it grants none of them.
+- **Scope.** The existing `accounting.invoices` and `accounting.attachments` OAuth scopes cover quotes, sales invoices and their attachments. No scope changes.
+- **Boundary.** No sales invoice is approved or sent, and no other sales document, payment, credit note or bank action is authorised. No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+- **Review condition.** Revisit before allowing APPROVED invoices; if an invoice is created against the wrong quote or customer; or if a quote's status is changed without its invoice existing.
