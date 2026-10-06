@@ -233,6 +233,12 @@ class ReasoningContext:
     # differently for an unprompted turn would be a second builder deciding
     # what she is like when nobody is watching.
     carried_thoughts: tuple[CarriedThought, ...] = ()
+    # Her current relationship memories about the person she answers to,
+    # newest first, on every turn by the same rule. Retrievable only on
+    # request before, they went unread: preferences Friedl had stated ten
+    # times never reached a reply. The count left out is stated, never hidden.
+    relationship_memories: tuple[MemorySnapshot, ...] = ()
+    relationship_memories_omitted: int = 0
     # Later occasions she has asked for and not yet had, soonest first and
     # bounded by count. The same list on every turn, so she can see what she
     # has already asked to come back to, and withdraw what is no longer needed.
@@ -279,6 +285,9 @@ class ReasoningContext:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
+        object.__setattr__(
+            self, "relationship_memories", tuple(self.relationship_memories)
+        )
         object.__setattr__(self, "pending_revisits", tuple(self.pending_revisits))
         object.__setattr__(self, "memory_conflicts", tuple(self.memory_conflicts))
         object.__setattr__(self, "refused_calls", tuple(self.refused_calls))
@@ -508,6 +517,13 @@ class DurableMemoryStore(Protocol):
     ) -> tuple[MemorySnapshot, ...]: ...
 
     def load(self, memory_id: str) -> MemorySnapshot: ...
+
+    def current_relationship_memories(
+        self,
+        person_id: str,
+        as_of: datetime,
+        limit: int,
+    ) -> tuple[tuple[MemorySnapshot, ...], int]: ...
 
 
 class CapabilityDispatch(Protocol):

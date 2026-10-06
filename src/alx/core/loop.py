@@ -82,6 +82,12 @@ _CODING_CORRECTION_REFUSALS = frozenset({
 })
 
 
+# How many current relationship memories about one person every turn shows.
+# Friedl had 27 on 2026-10-06; past this many the oldest are left out and
+# the count left out is shown, so she can consolidate rather than lose them.
+RELATIONSHIP_CONTEXT_LIMIT = 40
+
+
 class CoreState(str, Enum):
     RESPONDED = "responded"
     FINISHED_SILENTLY = "finished_silently"
@@ -282,8 +288,13 @@ class CoreAgent:
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None,
                  plan_continuation: bool = False,
                  bind_dispatch: Callable[[str], None] | None = None,
-                 trace: TraceSink | None = None) -> None:
+                 trace: TraceSink | None = None,
+                 principal_person_id: str | None = None) -> None:
         self._store = store
+        # Whom an occasion with no person turn answers to: a background
+        # event's response reaches the principal, so her relationship
+        # memories about the principal are the ones that apply.
+        self._principal_person_id = principal_person_id
         # The operator's execution trace. Purpose, plan and goal transitions
         # and refusals, as they happen; content-free, and never consulted.
         self._trace = trace
@@ -450,6 +461,7 @@ class CoreAgent:
                                    reason="plan_attention_resolved")
             snapshot, plan_evidence = self._plan_evidence(snapshot)
         retrieved_memories: tuple[MemorySnapshot, ...] = ()
+        relationship_memories: tuple[MemorySnapshot, ...] = ()
         # Identifier clashes seen this turn, handed to the next reasoning call
         # so she can resolve them. Cleared once she stops proposing the
         # conflicting write, so a resolved turn carries nothing forward.
@@ -511,11 +523,17 @@ class CoreAgent:
                 # A newly created goal is already known in full this turn.
                 selected_goals.add(snapshot.state.goal_id)
             summaries = self._selectable_goals(conversation_id, snapshot)
+            # Read before provenance is derived: what she is shown is a
+            # reasoning input, so a mail-derived memory's deadline must carry
+            # into whatever she writes from it.
+            relationship_memories, relationship_omitted = (
+                self._relationship_context(conversation, now)
+            )
             decision_provenance = self._derived_provenance(
                 now,
                 conversation,
                 snapshot,
-                retrieved_memories,
+                (*retrieved_memories, *relationship_memories),
                 transient_attempts, prior_goal_provenance,
             )
             try:
@@ -549,6 +567,8 @@ class CoreAgent:
                     unfinished_goals=summaries,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
+                    relationship_memories=relationship_memories,
+                    relationship_memories_omitted=relationship_omitted,
                     pending_revisits=self._pending_revisits(),
                     open_notebook_threads=self._open_notebook_threads(),
                     undelivered_responses=self._undelivered_responses(),
@@ -691,7 +711,8 @@ class CoreAgent:
                     # provenance of everything this step persists must include
                     # it. It was computed before the goal was known.
                     decision_provenance = self._derived_provenance(
-                        now, conversation, snapshot, retrieved_memories,
+                        now, conversation, snapshot,
+                        (*retrieved_memories, *relationship_memories),
                         transient_attempts, prior_goal_provenance,
                     )
                 if decision.selects_only:
@@ -1403,7 +1424,8 @@ class CoreAgent:
                 snapshot = self._park_unfinished_goal(
                     snapshot,
                     self._derived_provenance(
-                        now, conversation, snapshot, retrieved_memories,
+                        now, conversation, snapshot,
+                        (*retrieved_memories, *relationship_memories),
                         transient_attempts, prior_goal_provenance,
                     ),
                 )
@@ -3222,6 +3244,35 @@ class CoreAgent:
                 if not people or any(person_id != proposal.person_id for person_id in people):
                     return "relationship_person_mismatch"
         return None
+
+    def _relationship_context(
+        self, conversation: ConversationSnapshot, now: datetime
+    ) -> tuple[tuple[MemorySnapshot, ...], int]:
+        """Her current relationship memories about the person she answers to.
+
+        That is the person of the latest person turn, the same person a
+        relationship retrieval is authorised for; with no person turn, the
+        principal. One person's memories never reach another's turn. A store
+        that cannot be read leaves the turn without them rather than ending
+        it: nothing was asked of memory, so a memory fault must not cost the
+        answer.
+        """
+        if self._memory_store is None:
+            return (), 0
+        user_turns = [item for item in conversation.turns
+                      if item.origin.value != "alx_response"]
+        person_id = (
+            user_turns[-1].person_id if user_turns else self._principal_person_id
+        )
+        if not person_id:
+            return (), 0
+        try:
+            return self._memory_store.current_relationship_memories(
+                person_id, now, RELATIONSHIP_CONTEXT_LIMIT
+            )
+        except Exception:
+            LOGGER.warning("Relationship memories could not be read; the turn continues without them")
+            return (), 0
 
     @staticmethod
     def _memory_query_is_authorized(conversation: ConversationSnapshot,

@@ -271,6 +271,9 @@ class MemoryIdentityConflictTest(unittest.TestCase):
             def retrieve(self, query, now):
                 return ()
 
+            def current_relationship_memories(self, person_id, as_of, limit):
+                return (), 0
+
         agent = CoreAgent(
             self.store, Queued(AgentDecision(
                 response="Sleep well.",
