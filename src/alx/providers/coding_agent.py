@@ -1423,7 +1423,7 @@ class CodingAgent:
             inspected_files = tuple(dict.fromkeys(
                 name
                 for name in _strings(plan.get("inspection_targets"))
-                if name not in reviewed_files and name not in preexisting_dirty
+                if name not in changed_files and name not in preexisting_dirty
             ))
             self._report_activity(state, "reviewing")
             self._report_telemetry(state, "review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
@@ -1434,8 +1434,11 @@ class CodingAgent:
             last_error: CodingError | None = None
             for _attempt in range(1, MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS + 1):
                 try:
+                    # changed_files is what the diff changes now. reviewed_files
+                    # keeps every path ever touched, so a file a correction
+                    # restored would otherwise still be labelled changed.
                     findings = self._review(
-                        request, workspace, plan, reviewed_files,
+                        request, workspace, plan, changed_files,
                         inspected_files, git_diff,
                     )
                 except CodingError as error:

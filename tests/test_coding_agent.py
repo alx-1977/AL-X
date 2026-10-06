@@ -584,6 +584,42 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("summary is the coding session's own report", DEFINITION.purpose)
         self.assertIn("before any check ran", DEFINITION.purpose)
 
+    def test_a_file_a_correction_restored_is_not_reviewed_as_changed(self) -> None:
+        worktree = _worktree(self.root)
+        (worktree / "parallel.py").write_text(
+            "def add(a, b):\n    return a - b\n", encoding="utf-8"
+        )
+        _git(worktree, "add", "parallel.py")
+        _git(worktree, "commit", "-m", "add parallel helper")
+        original_app = (worktree / "app.py").read_text(encoding="utf-8")
+
+        class RestoringSession(RecordingSession):
+            def run_session(self, request, briefing):
+                self.calls.append((request, briefing))
+                root = Path(request.worktree)
+                if len(self.calls) == 1:
+                    (root / "app.py").write_text(_FIXED, encoding="utf-8")
+                else:
+                    (root / "app.py").write_text(original_app, encoding="utf-8")
+                    (root / "parallel.py").write_text(_FIXED, encoding="utf-8")
+                return CodingSessionResult(True, "corrected", turns=2)
+
+        reviewer = PlanningModel(reviews=[
+            {"findings": [{
+                "severity": "high", "title": "wrong helper",
+                "evidence": "parallel.py is the one that subtracts",
+                "correction": "fix parallel.py and leave app.py",
+            }]},
+            {"findings": []},
+        ])
+        self._run(
+            PlanningModel(plan=_plan(inspection_targets=["app.py", "parallel.py"])),
+            RestoringSession(), reviewer=reviewer, task="fix the add helper",
+            worktree=str(worktree),
+        )
+        second_review = json.loads(reviewer.requests[1].messages[-1].content)
+        self.assertEqual(second_review["changed_files"], ["parallel.py"])
+
     def test_local_reviewer_catches_an_adjacent_unfixed_path_and_rechecks(self) -> None:
         """A plausible one-line repair is not accepted while its twin is wrong."""
         worktree = _worktree(self.root)
