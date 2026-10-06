@@ -13,6 +13,7 @@ import hashlib
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -94,14 +95,26 @@ class FakeXero:
     def read_bill(self, invoice_id):
         return self.bills.get(invoice_id)
 
+    def _read_back_total(self, bill) -> str:
+        """The total Xero would store, so a 6.90 bill is not read back as 180."""
+        total = Decimal("0")
+        exclusive = bill.get("LineAmountTypes") == "Exclusive"
+        for line in bill.get("LineItems") or ():
+            amount = Decimal(str(line["Quantity"])) * Decimal(str(line["UnitAmount"]))
+            if exclusive:
+                amount += Decimal(str(line.get("TaxAmount") or 0))
+            total += amount
+        return format(total.quantize(Decimal("0.01")), "f")
+
     def create_draft_bill(self, bill):
         self.created += 1
         invoice_id = f"bill-{self.created}"
+        total = self._read_back_total(bill)
         stored = {
             **bill,
             "InvoiceID": invoice_id,
-            "Total": "180.00",
-            "AmountDue": "180.00",
+            "Total": total,
+            "AmountDue": total,
             "Contact": {**bill["Contact"], "Name": "SAMTEC"},
             "HasAttachments": False,
         }
@@ -464,6 +477,99 @@ class DefaultAccountTests(unittest.TestCase):
         result = capture(arguments())
         self.assertFalse(result.values["completed"])
         self.assertEqual(result.values["returned_for"], "coding_unresolved")
+
+
+class InvoiceTaxTreatmentTests(unittest.TestCase):
+    """ElevenLabs: USD 6.00 + 0.90 VAT = 6.90, after a run of no-tax bills.
+
+    The ZAR VAT printed on that invoice for reference is not the bill's tax.
+    These cases supply only the USD tax_amount.
+    """
+
+    HISTORY = (
+        {
+            "LineAmountTypes": "NoTax",
+            "LineItems": [{"AccountCode": "310", "TaxType": "NONE"}],
+        },
+        {
+            "LineAmountTypes": "NoTax",
+            "LineItems": [{"AccountCode": "310", "TaxType": "NONE"}],
+        },
+    )
+
+    def capture(self, **invoice):
+        self.xero = FakeXero()
+        self.xero.history = self.HISTORY
+        self.xero.contacts = (
+            {"Name": "ElevenLabs", "ContactID": "c-1", "ContactStatus": "ACTIVE"},
+        )
+        self.xero.accounts = (
+            {"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},
+        )
+        self.xero.tax_rates = ({"TaxType": "INPUT3", "Status": "ACTIVE"},)
+        fields = extracted(
+            supplier_name="ElevenLabs",
+            invoice_number="EL-690",
+            description="Creator subscription",
+            currency="USD",
+            subtotal="6.00",
+            tax_amount="0.90",
+            total="6.90",
+        )
+        fields.update(invoice)
+        return build_xero_executors(
+            self.xero,
+            FakeMail(),
+            lambda: "call-1",
+            lambda *_: fields,
+            "999",
+            "INPUT3",
+        )[CAPTURE_SUPPLIER_INVOICE](arguments())
+
+    def assert_bill(self, result, *, tax_type, line_amount_types, unit_amount, tax_amount):
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertIsNone(result.failure)
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(result.values["bill"]["total"], "6.90")
+        self.assertEqual(result.values["bill"]["currency"], "USD")
+        posted = self.xero.bills[result.values["bill"]["invoice_id"]]
+        self.assertEqual(posted["Total"], "6.90")
+        self.assertEqual(posted["LineAmountTypes"], line_amount_types)
+        line = posted["LineItems"][0]
+        self.assertEqual(line["AccountCode"], "310")
+        self.assertEqual(line["TaxType"], tax_type)
+        self.assertEqual(Decimal(str(line["UnitAmount"])), Decimal(unit_amount))
+        self.assertEqual(Decimal(str(line["TaxAmount"])), Decimal(tax_amount))
+
+    def test_vat_with_a_subtotal_keeps_the_account_and_uses_the_vat_rate(self) -> None:
+        result = self.capture()
+        self.assert_bill(
+            result,
+            tax_type="INPUT3",
+            line_amount_types="Exclusive",
+            unit_amount="6.00",
+            tax_amount="0.90",
+        )
+
+    def test_vat_without_a_subtotal_is_total_minus_vat(self) -> None:
+        result = self.capture(subtotal="")
+        self.assert_bill(
+            result,
+            tax_type="INPUT3",
+            line_amount_types="Exclusive",
+            unit_amount="6.00",
+            tax_amount="0.90",
+        )
+
+    def test_an_invoice_with_no_tax_stays_no_tax(self) -> None:
+        result = self.capture(subtotal="6.90", tax_amount="0.00", total="6.90")
+        self.assert_bill(
+            result,
+            tax_type="NONE",
+            line_amount_types="NoTax",
+            unit_amount="6.90",
+            tax_amount="0.00",
+        )
 
 
 class StaleDraftTests(unittest.TestCase):

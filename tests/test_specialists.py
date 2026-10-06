@@ -363,6 +363,32 @@ class PriorCodingTests(unittest.TestCase):
         result = prior_coding([self.bill("310", "NONE"), self.bill("310", "INPUT3")])
         self.assertFalse(result["resolved"])
 
+    def test_a_consistent_account_takes_tax_from_the_invoice(self) -> None:
+        """ElevenLabs history was no-tax; this invoice shows USD 0.90 VAT."""
+        history = [self.bill("310", "NONE", "NoTax"), self.bill("310")]
+        with_vat = prior_coding(history, "999", True, "INPUT3")
+        self.assertTrue(with_vat["resolved"])
+        self.assertFalse(with_vat["from_default"])
+        self.assertEqual(with_vat["account_code"], "310")
+        self.assertEqual(with_vat["tax_type"], "INPUT3")
+        self.assertEqual(with_vat["line_amount_types"], "Exclusive")
+
+        without = prior_coding(history, "999", False, "INPUT3")
+        self.assertEqual(without["account_code"], "310")
+        self.assertEqual(without["tax_type"], "NONE")
+        self.assertEqual(without["line_amount_types"], "NoTax")
+        self.assertFalse(without["from_default"])
+
+        omitted = prior_coding(history)
+        self.assertEqual(omitted["tax_type"], "NONE")
+        self.assertEqual(omitted["line_amount_types"], "NoTax")
+
+    def test_tax_on_the_invoice_without_a_configured_rate_stays_unresolved(self) -> None:
+        result = prior_coding([self.bill("310")], "310", True, "")
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["tax_type"], "")
+        self.assertEqual(result["account_code"], "")
+
 
 class DefaultCodingTests(unittest.TestCase):
     """A supplier whose work varies has no single answer to derive.
