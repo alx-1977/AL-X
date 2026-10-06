@@ -568,11 +568,12 @@ class AuthorityTests(unittest.TestCase):
         runtime = self._runtime()
         self.assertFalse(runtime.policies[READ_EXTERNAL_REVIEW].approval_required)
 
-    def test_requesting_still_requires_his_word(self) -> None:
+    def test_requesting_is_plain_permission_too(self) -> None:
+        """Delegated to AL/X on 2026-10-06 (D-026, "Requesting the review")."""
         from alx.tools.review import REQUEST_EXTERNAL_REVIEW
 
         runtime = self._runtime()
-        self.assertTrue(
+        self.assertFalse(
             runtime.policies[REQUEST_EXTERNAL_REVIEW].approval_required
         )
 

@@ -622,6 +622,31 @@ not, the result says the revision is unknown rather than naming a commit the
 reviewer may not have examined, and AL/X decides what to do with that. A merge
 still requires her judgement that a review covers the revision being merged.
 
+### Amendment — Requesting a review is delegated (2026-10-06)
+
+- **Date:** 2026-10-06
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-06.** In the Claude Code session that
+  reviewed the Coding Agent, Friedl said AL/X should be able to request a
+  CodeRabbit review on her own, and that external reviewers should not be
+  treated differently: "Let ALX be able to get CR review on her own." He pays
+  a CodeRabbit subscription with no per-review charge (usage-based
+  continuation is disabled for the organisation), and uses Greptile, whose
+  free plan allows about fifty reviews a month, from VS Code himself.
+
+This replaces the per-request approval described above. AL/X may request an
+external review of a pull request under the `review.request` permission alone,
+whenever she judges a review useful, as she already decides merges. Each
+request no longer needs an approval grounded in Friedl's turn, so it is no
+longer bound to one per turn by that approval.
+
+She paces requests herself against the reviewer's rate limit. A request on a
+head whose review is already running or done attaches to that round instead of
+asking again; the provider enforces that mechanically. `review.request` still
+grants no merge authority, and merge authority still grants no review request.
+Nothing here enables usage-based billing or a new reviewer: a reviewer that
+charges per review would be a spending change and needs Friedl's decision.
+
 ### Two earlier obligations, and what became of them
 
 EX-002 and EX-003 recorded two merges that went ahead without the Greptile

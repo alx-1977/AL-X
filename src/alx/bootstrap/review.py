@@ -168,16 +168,13 @@ def build_review_runtime(
         provider=selected,
         definitions=(REVIEW_DEFINITION, REVIEW_CONTENT_DEFINITION),
         policies={
-            # Approval required, and deliberately not a standing scope. The
-            # approval must be grounded in Friedl's latest turn, which is
-            # exactly "he asked for this review". It is single-use, so one
-            # instruction buys one request: a review that found issues, a fix,
-            # a moved head or a failed request cannot produce another without
-            # him asking again. That is the whole reason this is not plain
-            # permission like merging is.
+            # Plain permission since 2026-10-06 (D-026, "Requesting the
+            # review"): Friedl delegated when to ask for a review to AL/X, as
+            # he had delegated merging. A request on a head whose review is
+            # already running or done attaches to that round rather than
+            # asking again, which the provider enforces.
             REQUEST_EXTERNAL_REVIEW: AuthorityPolicy(
                 frozenset({REVIEW_REQUEST_PERMISSION}),
-                approval_required=True,
             ),
             # Plain permission, deliberately. Reading spends nothing and
             # changes nothing outside, so requiring Friedl's word each time
