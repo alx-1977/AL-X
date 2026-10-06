@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -22,6 +23,9 @@ from cryptography.fernet import Fernet, InvalidToken
 from alx.contracts import CONTACT_CREATION_UNCONFIRMED, XeroAccessError, xero_date
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
 TOKEN_URL = "https://identity.xero.com/connect/token"
 CONNECTIONS_URL = "https://api.xero.com/connections"
@@ -33,6 +37,11 @@ ACCOUNTING_URL = "https://api.xero.com/api.xro/2.0"
 _DISCARDED_STATUSES = frozenset({"DELETED", "VOIDED"})
 # Xero returns invoices 100 to a page when `page` is given.
 _INVOICE_PAGE_SIZE = 100
+# Everything a quote carries that a status update must send back unchanged.
+_QUOTE_PRESERVED_FIELDS = (
+    "QuoteNumber", "Reference", "Title", "Summary", "Terms", "CurrencyCode",
+    "CurrencyRate", "LineAmountTypes", "BrandingThemeID", "LineItems",
+)
 _MAX_INVOICE_PAGES = 50
 
 # External protocol identifiers. D-016 deliberately excludes payments, bank
@@ -49,6 +58,26 @@ XERO_SCOPES = (
     "accounting.settings.read",
     "accounting.attachments",
 )
+
+
+def _validation_messages(response: Any) -> tuple[str, ...]:
+    """Xero's own reasons for refusing a request, or nothing if unreadable."""
+    try:
+        body = response.json()
+    except Exception:
+        return ()
+    if not isinstance(body, Mapping):
+        return ()
+    found: list[str] = []
+    for element in body.get("Elements") or ():
+        if not isinstance(element, Mapping):
+            continue
+        for error in element.get("ValidationErrors") or ():
+            if isinstance(error, Mapping) and error.get("Message"):
+                found.append(str(error["Message"]))
+    if not found and body.get("Message"):
+        found.append(str(body["Message"]))
+    return tuple(dict.fromkeys(found))
 
 
 def _raise_clean(code: str) -> None:
@@ -473,6 +502,15 @@ class XeroAccountingAdapter:
         if unconfirmed_code and response.status_code >= 500:
             _raise_clean(unconfirmed_code)
         if response.status_code >= 400:
+            # Xero says why it refused in its validation messages. They go to
+            # the operator log only, bounded, so a refusal can be diagnosed;
+            # the error itself stays free of request and document content.
+            messages = _validation_messages(response)
+            if messages:
+                LOGGER.warning(
+                    "Xero refused %s %s: %s", method, path.split("?", 1)[0],
+                    "; ".join(messages)[:500],
+                )
             _raise_clean("request_rejected")
         if binary:
             content_type = response.headers.get("content-type", "")
@@ -744,7 +782,13 @@ class XeroAccountingAdapter:
     def set_quote_status(
         self, quote_record: Mapping[str, Any], status: str
     ) -> Mapping[str, Any]:
-        """Move one quote to a new status. Xero requires its contact and date."""
+        """Move one quote to a new status, sending the whole quote back.
+
+        Xero's quote update is not partial: on 2026-10-06 a status change that
+        sent only ID, status, contact and date gave the quote a new number
+        (QU-0136 became QU-0140) and blanked its reference. Every field the
+        quote carries is therefore sent unchanged, with the new status.
+        """
         contact = quote_record.get("Contact")
         quote_id = str(quote_record.get("QuoteID") or "")
         date = xero_date(
@@ -752,20 +796,22 @@ class XeroAccountingAdapter:
         ) or ""
         if not isinstance(contact, Mapping) or not quote_id or not date:
             _raise_clean("response_invalid")
-        body = self._request(
-            "POST",
-            "/Quotes",
-            json_body={
-                "Quotes": [
-                    {
-                        "QuoteID": quote_id,
-                        "Status": status,
-                        "Contact": {"ContactID": str(contact.get("ContactID") or "")},
-                        "Date": date,
-                    }
-                ]
-            },
+        payload: dict[str, Any] = {
+            "QuoteID": quote_id,
+            "Status": status,
+            "Contact": {"ContactID": str(contact.get("ContactID") or "")},
+            "Date": date,
+        }
+        expiry = xero_date(
+            str(quote_record.get("ExpiryDateString") or quote_record.get("ExpiryDate") or "")
         )
+        if expiry:
+            payload["ExpiryDate"] = expiry
+        for name in _QUOTE_PRESERVED_FIELDS:
+            value = quote_record.get(name)
+            if value not in (None, ""):
+                payload[name] = value
+        body = self._request("POST", "/Quotes", json_body={"Quotes": [payload]})
         items = self._items(body, "Quotes")
         if not items:
             _raise_clean("response_invalid")

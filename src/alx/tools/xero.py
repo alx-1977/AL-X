@@ -988,6 +988,23 @@ def _invoice_disagrees_with_quote(
     return ""
 
 
+def _quote_altered(
+    before: Mapping[str, Any], after: Mapping[str, Any] | None, status: str
+) -> str:
+    """How a status change did more than change the status, or ""."""
+    if after is None:
+        return "left the quote unreadable"
+    if after.get("Status") != status:
+        return f"left it {after.get('Status')}"
+    for field in ("QuoteNumber", "Reference", "Total"):
+        if str(after.get(field) or "") != str(before.get(field) or ""):
+            return (
+                f"changed its {field} from {before.get(field)!r} to "
+                f"{after.get(field)!r}"
+            )
+    return ""
+
+
 def _comparable_line(line: Any) -> tuple[Any, ...]:
     """A line's quote-derived fields, normalised the way Xero reports them."""
     if not isinstance(line, Mapping):
@@ -1819,14 +1836,10 @@ def build_xero_executors(
                     f"{len(existing)} sales invoices already reference {po_number}",
                 )
 
-            if status == "SENT":
-                account.set_quote_status(quote_record, "ACCEPTED")
-                accepted = account.read_quote(quote_id)
-                if accepted is None or accepted.get("Status") != "ACCEPTED":
-                    raise XeroAccessError("response_invalid")
-                quote_record = accepted
-                steps.append("accepted_quote")
-
+            # The quote is not touched until its invoice exists, carries the
+            # PO and reads back right. On 2026-10-06 the quote was accepted
+            # first, Xero then refused the invoice, and the quote was left
+            # changed with nothing to show for it.
             if existing:
                 invoice_record = existing[0]
                 if str(invoice_record.get("Status") or "") != "DRAFT":
@@ -1879,17 +1892,25 @@ def build_xero_executors(
                 return result(False, "read_back_mismatch", disagreement)
             steps.append("read_back")
 
-            if str(quote_record.get("Status") or "") != "INVOICED":
-                account.set_quote_status(quote_record, "INVOICED")
-                invoiced = account.read_quote(quote_id)
-                if invoiced is None or invoiced.get("Status") != "INVOICED":
+            for wanted, step in (("ACCEPTED", "accepted_quote"),
+                                 ("INVOICED", "marked_quote_invoiced")):
+                current = str(quote_record.get("Status") or "")
+                if current == "INVOICED" or (wanted == "ACCEPTED" and current == "ACCEPTED"):
+                    continue
+                before = quote_record
+                account.set_quote_status(quote_record, wanted)
+                after = account.read_quote(quote_id)
+                altered = _quote_altered(before, after, wanted)
+                if altered:
+                    if after is not None:
+                        quote_record = after
                     return result(
                         False, "quote_status_not_updated",
                         f"draft invoice {final.get('InvoiceNumber')} is ready, but "
-                        "the quote did not read back as INVOICED",
+                        f"marking the quote {wanted} {altered}",
                     )
-                quote_record = invoiced
-                steps.append("marked_quote_invoiced")
+                quote_record = after
+                steps.append(step)
             return result(
                 True, "",
                 f"draft invoice {final.get('InvoiceNumber')} for "
