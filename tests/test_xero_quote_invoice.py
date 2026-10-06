@@ -222,6 +222,22 @@ class QuoteToInvoiceTests(unittest.TestCase):
         self.assertEqual(result.values["returned_for"], "read_back_mismatch")
         self.assertNotIn("INVOICED", xero.status_changes)
 
+    def test_a_resumed_draft_with_edited_lines_is_not_accepted(self) -> None:
+        """Equal totals are not equal lines."""
+        xero = QuotingXero("ACCEPTED")
+        xero.invoices["invoice-7"] = {
+            "InvoiceID": "invoice-7", "InvoiceNumber": "INV-0107", "Type": "ACCREC",
+            "Contact": {"ContactID": "bluenova"}, "Reference": "PO-7781",
+            "Status": "DRAFT", "CurrencyCode": "ZAR",
+            "SubTotal": 1000.0, "TotalTax": 150.0, "Total": 1150.0,
+            "LineItems": [{"Description": "Something else", "Quantity": 1.0,
+                           "UnitAmount": 1000.0, "AccountCode": "200",
+                           "TaxType": "OUTPUT2"}],
+        }
+        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        self.assertEqual(result.values["returned_for"], "read_back_mismatch")
+        self.assertNotIn("INVOICED", xero.status_changes)
+
     def test_an_unknown_quote_is_a_declared_failure(self) -> None:
         result = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](
             arguments(quote_id="quote-404")

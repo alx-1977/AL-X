@@ -969,7 +969,44 @@ def _invoice_disagrees_with_quote(
                 f"the invoice {field} is {invoice.get(field)}, the quote's is "
                 f"{quote_record.get(field)}"
             )
+    # Equal totals are not equal lines: a resumed draft whose lines were
+    # edited must not be accepted as the quote's invoice.
+    invoice_lines = invoice.get("LineItems")
+    quote_lines = quote_record.get("LineItems")
+    if not isinstance(invoice_lines, (list, tuple)) or not isinstance(
+        quote_lines, (list, tuple)
+    ):
+        return "the invoice lines could not be read back"
+    if len(invoice_lines) != len(quote_lines):
+        return (
+            f"the invoice has {len(invoice_lines)} lines, the quote has "
+            f"{len(quote_lines)}"
+        )
+    for index, (wanted, got) in enumerate(zip(quote_lines, invoice_lines), 1):
+        if _comparable_line(wanted) != _comparable_line(got):
+            return f"invoice line {index} differs from the quote"
     return ""
+
+
+def _comparable_line(line: Any) -> tuple[Any, ...]:
+    """A line's quote-derived fields, normalised the way Xero reports them."""
+    if not isinstance(line, Mapping):
+        return ("unreadable",)
+    values: list[Any] = []
+    for name in _QUOTE_LINE_FIELDS:
+        value = line.get(name)
+        if name == "Tracking":
+            value = tuple(
+                (str(item.get("Name") or ""), str(item.get("Option") or ""))
+                for item in (value or ())
+                if isinstance(item, Mapping)
+            )
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = Decimal(str(value)).normalize()
+        elif value in (None, "", []):
+            value = None
+        values.append(value)
+    return tuple(values)
 
 
 def build_xero_executors(
