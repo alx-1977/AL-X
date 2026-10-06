@@ -19,7 +19,7 @@ from urllib.parse import quote, urlencode
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
-from alx.contracts import CONTACT_CREATION_UNCONFIRMED, XeroAccessError
+from alx.contracts import CONTACT_CREATION_UNCONFIRMED, XeroAccessError, xero_date
 
 
 AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
@@ -710,3 +710,109 @@ class XeroAccountingAdapter:
         if not items:
             _raise_clean("response_invalid")
         return items[0]
+
+    # ---- D-037: sales quotes and the draft invoice made from one ----------
+
+    def read_quote(self, quote_id: str) -> Mapping[str, Any] | None:
+        body = self._request(
+            "GET", f"/Quotes/{quote(quote_id, safe='')}", allow_not_found=True
+        )
+        items = self._items(body, "Quotes") if body is not None else ()
+        return (
+            items[0]
+            if items and str(items[0].get("QuoteID") or "") == quote_id
+            else None
+        )
+
+    def quotes_for_contact(self, contact_id: str) -> tuple[Mapping[str, Any], ...]:
+        """One customer's live quotes, newest first."""
+        body = self._request(
+            "GET",
+            "/Quotes?" + urlencode({"ContactID": contact_id, "order": "Date DESC"}),
+        )
+        return tuple(
+            item
+            for item in self._items(body, "Quotes")
+            if str(item.get("Status") or "") != "DELETED"
+            and isinstance(item.get("Contact"), Mapping)
+            and str(item["Contact"].get("ContactID") or "") == contact_id
+        )
+
+    def set_quote_status(
+        self, quote_record: Mapping[str, Any], status: str
+    ) -> Mapping[str, Any]:
+        """Move one quote to a new status. Xero requires its contact and date."""
+        contact = quote_record.get("Contact")
+        quote_id = str(quote_record.get("QuoteID") or "")
+        date = xero_date(
+            str(quote_record.get("DateString") or quote_record.get("Date") or "")
+        ) or ""
+        if not isinstance(contact, Mapping) or not quote_id or not date:
+            _raise_clean("response_invalid")
+        body = self._request(
+            "POST",
+            "/Quotes",
+            json_body={
+                "Quotes": [
+                    {
+                        "QuoteID": quote_id,
+                        "Status": status,
+                        "Contact": {"ContactID": str(contact.get("ContactID") or "")},
+                        "Date": date,
+                    }
+                ]
+            },
+        )
+        items = self._items(body, "Quotes")
+        if not items:
+            _raise_clean("response_invalid")
+        return items[0]
+
+    def create_draft_sales_invoice(
+        self, invoice: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Create one DRAFT sales invoice. Bills are never created here."""
+        if invoice.get("Type") != "ACCREC" or invoice.get("Status") != "DRAFT":
+            _raise_clean("request_rejected")
+        body = self._request(
+            "POST", "/Invoices", json_body={"Invoices": [dict(invoice)]}
+        )
+        items = self._items(body, "Invoices")
+        if not items:
+            _raise_clean("response_invalid")
+        return items[0]
+
+    def sales_invoices_for_contact(
+        self, contact_id: str
+    ) -> tuple[Mapping[str, Any], ...]:
+        """One customer's live sales invoices, newest first."""
+        body = self._request(
+            "GET",
+            "/Invoices?"
+            + urlencode(
+                {
+                    "ContactIDs": contact_id,
+                    "where": 'Type=="ACCREC"',
+                    "order": "UpdatedDateUTC DESC",
+                }
+            ),
+        )
+        return tuple(
+            item
+            for item in self._items(body, "Invoices")
+            if item.get("Type") == "ACCREC"
+            and str(item.get("Status") or "") not in _DISCARDED_STATUSES
+        )
+
+    def read_sales_invoice(self, invoice_id: str) -> Mapping[str, Any] | None:
+        body = self._request(
+            "GET", f"/Invoices/{quote(invoice_id, safe='')}", allow_not_found=True
+        )
+        items = self._items(body, "Invoices") if body is not None else ()
+        return (
+            items[0]
+            if items
+            and items[0].get("Type") == "ACCREC"
+            and str(items[0].get("InvoiceID") or "") == invoice_id
+            else None
+        )

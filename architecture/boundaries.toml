@@ -254,3 +254,11 @@ description = "The running coding job is stopped, keeping its branch and diff."
 # frame, which stopped jobs without her and was the only way to do so.
 entry = "tools/coding.py::build_coding_executors.<locals>.stop"
 forbidden = ["CODING_CANCEL_FRAME", "cancel_coding", "coding.cancel.ack"]
+
+[[outcomes]]
+id = "xero.quote_is_invoiced"
+description = "One sent or accepted Xero sales quote becomes a DRAFT sales invoice for the PO that accepts it."
+# D-037. Nothing was superseded: before it, Friedl converted quotes in Xero
+# by hand.
+entry = "tools/xero.py::build_xero_executors.<locals>.invoice_quote"
+forbidden = []

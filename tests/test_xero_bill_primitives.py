@@ -358,6 +358,9 @@ class XeroPrimitiveTests(unittest.TestCase):
                     XERO_BILL_DELETE_PERMISSION,
                     XERO_CONTACT_RENAME_PERMISSION,
                     XERO_CONTACT_CREATE_PERMISSION,
+                    # D-037: its own standing permission, for a DRAFT sales
+                    # invoice only. It writes no bill.
+                    "xero.quote.invoice",
                 }
             ),
         )
