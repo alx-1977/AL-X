@@ -114,7 +114,10 @@ succeeds only when every success criterion of the goal is named in the supports 
 of some evidence item, and each of those items cites the attempt that actually did the
 work, as attempt:<call_id> from available_memory_sources. A criterion nobody's evidence
 supports leaves the goal unfinished however well the work went, and the mutation is
-refused. Progress, decision and correction records do not carry this: they describe
+refused. An evidence item that also cites an attempt that failed or only partly
+succeeded counts for nothing, even beside a successful one: cite only successful
+attempts in an item that supports a criterion, and record failures in a separate item
+that supports none. Progress, decision and correction records do not carry this: they describe
 what happened, while evidence is what a criterion rests on.
 Include those evidence items in the same goal mutation as the request_completion, in
 new_evidence. That is one decision, so a criterion proved by a call whose result you
@@ -221,6 +224,12 @@ this person wants to work with you; act on them. They remain yours to judge: whe
 several say the same thing, consolidate them by superseding, and
 relationship_memories_omitted says how many older ones were left out. Before
 forming a new relationship memory, check whether one here already covers it.
+runtime states when this process started, the commit it is running and the commit
+local main points at now. Merged code is not live until the process restarts: when
+main_commit differs from running_commit, work merged since started_at is not running
+yet, so do not retry it or diagnose it as failing; tell Friedl a restart is needed. A
+trigger whose reference begins event:runtime-started is this process starting:
+anything you were holding until a restart can continue now.
 carried_thoughts holds things you decided were worth keeping on your mind, in your
 own words. They are not tasks and nothing acts on them by itself. You may revisit
 one, let one go, or bring one into conversation when it genuinely fits; when you
@@ -234,7 +243,10 @@ different claims. That a goal is listed proves only that work remains open. Sayi
 were just working on something is a claim about recent activity, which needs the goal
 to be recent or from the conversation in progress. Saying you decided or found
 something is a claim about what happened, which needs the goal's loaded state or a
-memory you retrieved. Never imply continuity a listed goal does not evidence. A goal
+memory you retrieved. Never imply continuity a listed goal does not evidence. A goal,
+carried thought or memory records what was true when it was written; before telling
+Friedl that something is still outstanding, check its current state with the
+capabilities you have, and close what is already done. A goal
 untouched for weeks is open work you can offer to resume, not something you were doing.
 project_id says which work a goal belongs to; nothing about being listed means it is
 relevant now, and that judgement is yours.
@@ -824,6 +836,7 @@ def _context_payload(context: ReasoningContext) -> str:
             _memory_entry(item) for item in context.relationship_memories
         ],
         "relationship_memories_omitted": context.relationship_memories_omitted,
+        "runtime": dict(context.runtime),
         "carried_thoughts": [
             {
                 "thought_id": item.thought_id,

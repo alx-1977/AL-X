@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping, Protocol
@@ -239,6 +239,10 @@ class ReasoningContext:
     # times never reached a reply. The count left out is stated, never hidden.
     relationship_memories: tuple[MemorySnapshot, ...] = ()
     relationship_memories_omitted: int = 0
+    # Facts about the running process: when it started, the commit it is
+    # running and the commit local main points at now. She merged a fix on
+    # 2026-10-06 and retried it on the code that was already loaded.
+    runtime: Mapping[str, str] = field(default_factory=dict)
     # Later occasions she has asked for and not yet had, soonest first and
     # bounded by count. The same list on every turn, so she can see what she
     # has already asked to come back to, and withdraw what is no longer needed.

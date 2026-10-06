@@ -294,12 +294,16 @@ class CoreAgent:
                  plan_continuation: bool = False,
                  bind_dispatch: Callable[[str], None] | None = None,
                  trace: TraceSink | None = None,
-                 principal_person_id: str | None = None) -> None:
+                 principal_person_id: str | None = None,
+                 runtime_facts: Callable[[], Mapping[str, str]] | None = None) -> None:
         self._store = store
         # Whom an occasion with no person turn answers to: a background
         # event's response reaches the principal, so her relationship
         # memories about the principal are the ones that apply.
         self._principal_person_id = principal_person_id
+        # Started-at, running commit and local main, read each turn. A read
+        # that fails leaves the facts empty rather than ending the turn.
+        self._runtime_facts = runtime_facts or (lambda: {})
         # The operator's execution trace. Purpose, plan and goal transitions
         # and refusals, as they happen; content-free, and never consulted.
         self._trace = trace
@@ -574,6 +578,7 @@ class CoreAgent:
                     carried_thoughts=self._open_thoughts(),
                     relationship_memories=relationship_memories,
                     relationship_memories_omitted=relationship_omitted,
+                    runtime=self._read_runtime_facts(),
                     pending_revisits=self._pending_revisits(),
                     open_notebook_threads=self._open_notebook_threads(),
                     undelivered_responses=self._undelivered_responses(),
@@ -3267,6 +3272,13 @@ class CoreAgent:
                 if not people or any(person_id != proposal.person_id for person_id in people):
                     return "relationship_person_mismatch"
         return None
+
+    def _read_runtime_facts(self) -> Mapping[str, str]:
+        try:
+            return dict(self._runtime_facts())
+        except Exception:
+            LOGGER.warning("Runtime facts could not be read; the turn continues without them")
+            return {}
 
     def _relationship_context(
         self, conversation: ConversationSnapshot, now: datetime
