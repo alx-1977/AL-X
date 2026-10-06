@@ -1356,6 +1356,22 @@ def build_xero_executors(
 
         # Everything is unambiguous, so the same commit path runs directly
         # rather than returning to AL/X to be told to do what is already known.
+        line_amount_types = coding["line_amount_types"] or "NoTax"
+        # A stated subtotal is already the pre-VAT amount. When extraction left
+        # it blank and VAT is exclusive, the line is the bill-currency total
+        # minus that VAT, not the inclusive total with VAT added again.
+        if invoice["subtotal"]:
+            unit_amount = invoice["subtotal"]
+        elif line_amount_types == "Exclusive":
+            unit_amount = format(
+                (
+                    _decimal_or_zero(invoice["total"])
+                    - _decimal_or_zero(invoice["tax_amount"])
+                ).quantize(Decimal("0.01")),
+                "f",
+            )
+        else:
+            unit_amount = invoice["total"]
         outcome = _commit_decided_bill(
             {
                 "contact_id": contact["contact_id"],
@@ -1369,13 +1385,13 @@ def build_xero_executors(
                 "currency": invoice["currency"],
                 "reference": _bill_reference(context_line, invoice, attachment.filename),
                 "reference_supplied": bool(context_line.strip()),
-                "line_amount_types": coding["line_amount_types"] or "NoTax",
+                "line_amount_types": line_amount_types,
                 "expected_total": invoice["total"],
                 "line_items": [
                     {
                         "description": invoice["description"] or "Supplier invoice",
                         "quantity": "1",
-                        "unit_amount": invoice["subtotal"] or invoice["total"],
+                        "unit_amount": unit_amount,
                         "account_code": coding["account_code"],
                         "tax_type": coding["tax_type"],
                         "tax_amount": invoice["tax_amount"] or "0",

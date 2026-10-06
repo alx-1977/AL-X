@@ -1,8 +1,10 @@
 """Resolve accounting treatment from this organisation's own history.
 
-Where a supplier's earlier bills were all coded the same way, that is a known
-answer and code may use it. Where there is no precedent, or the precedent
-disagrees with itself, choosing the treatment is judgment and returns to AL/X.
+Where a supplier's earlier bills all used the same account, that account is a
+known answer and code may use it. Tax is not copied from those bills when the
+invoice itself shows whether VAT was charged. Where there is no precedent, or
+the precedent disagrees with itself, choosing the account is judgment and
+returns to AL/X.
 
 This never asks a model. Prior coding is a fact about the organisation, not an
 opinion, and V1's habit of asking a model to pick an account every time is what
@@ -26,13 +28,19 @@ def prior_coding(
     Discarded bills are excluded by the caller: a deleted bill is not evidence
     of how this supplier is treated.
 
-    Where a supplier codes consistently, that settled treatment is a fact and
-    is used. Where its bills disagree, choosing between them is a policy
-    decision no document contains: a supplier whose work spans consulting,
-    travel and equipment has no single correct answer to derive. Rather than
-    interrogate Friedl on every such invoice, or let a model guess an account
-    and present the guess as knowledge, the configured default account is used
-    and the tax type follows what the document itself shows.
+    Where a supplier's bills all use one account, that account is used. Tax
+    follows the invoice when the caller says whether it shows tax: the
+    configured rate and Exclusive amounts when it does, no tax when it does
+    not. Omitting that fact keeps the historical tax treatment. A taxed
+    invoice with no configured rate stays unresolved rather than posting no
+    tax or inventing a rate.
+
+    Where its bills disagree, choosing between them is a policy decision no
+    document contains: a supplier whose work spans consulting, travel and
+    equipment has no single correct answer to derive. Rather than interrogate
+    Friedl on every such invoice, or let a model guess an account and present
+    the guess as knowledge, the configured default account is used and the
+    tax type follows what the document itself shows.
     """
     treatments: list[tuple[str, str, str]] = []
     for bill in bills:
@@ -76,6 +84,29 @@ def prior_coding(
         )
 
     code, tax_type, line_amount_types = treatments[0]
+    # The account is the supplier's settled coding. The tax treatment is the
+    # invoice's: earlier no-tax bills must not suppress VAT this document shows.
+    if invoice_shows_tax is True:
+        if not default_tax_type:
+            return _unresolved(
+                "the invoice shows tax but no tax rate is configured"
+            )
+        tax_type = default_tax_type
+        line_amount_types = "Exclusive"
+    elif invoice_shows_tax is False:
+        tax_type = "NONE"
+        line_amount_types = "NoTax"
+    if invoice_shows_tax is None:
+        reason = (
+            f"every earlier bill for this supplier used account {code}"
+            f" with tax type {tax_type}"
+        )
+    else:
+        shown = "shows tax" if invoice_shows_tax else "shows no tax"
+        reason = (
+            f"every earlier bill for this supplier used account {code}; "
+            f"this invoice {shown}, so the line uses tax type {tax_type}"
+        )
     return {
         "resolved": True,
         "from_default": False,
@@ -83,10 +114,7 @@ def prior_coding(
         "tax_type": tax_type,
         "line_amount_types": line_amount_types,
         "based_on_bills": len(bills),
-        "reason": (
-            f"every earlier bill for this supplier used account {code}"
-            f" with tax type {tax_type}"
-        ),
+        "reason": reason,
     }
 
 
