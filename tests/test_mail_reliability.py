@@ -235,7 +235,7 @@ class BlockedDispatchTest(unittest.TestCase):
                 goal_proposal=goal_proposal(MAIL_EVENT_ID),
                 call=CapabilityCall("call-2", "move_mail_message_to_trash", {}),
             ),
-            AgentDecision(response="unreachable"),
+            AgentDecision(response="I could not do that."),
             budget=6,
         )
         # Repeating the identical proposal is now caught one step earlier, by
@@ -243,9 +243,10 @@ class BlockedDispatchTest(unittest.TestCase):
         # told the evidence source was unknown and offered the same proposal
         # unchanged. The property under test is the same -- the turn stops
         # rather than buying further paid calls from an unchanged state.
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        # One response-only step then tells Friedl; it can act on nothing.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(len(self.reasoner.contexts), 2)
+        self.assertEqual(len(self.reasoner.contexts), 3)
         self.assertEqual(self.dispatched, [])
 
     def test_a_grounded_goal_still_dispatches_normally(self) -> None:
@@ -337,17 +338,21 @@ class RejectedProposalObservabilityTest(unittest.TestCase):
 
     def test_dependent_rejected_response_is_captured_without_delivery_or_logging(self) -> None:
         records: list = []
-        reasoner = Queued(AgentDecision(
-            goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Claimed completion.",
-            response_requires_goal_commit=True,
-        ))
+        reasoner = Queued(
+            AgentDecision(
+                goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Claimed completion.",
+                response_requires_goal_commit=True,
+            ),
+            AgentDecision(response="That is not done yet."),
+        )
         core = CoreAgent(
             self.store, reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW, record_goal_rejection=records.append,
         )
         outcome = core.process(conversation(), RETENTION, 1)
-        self.assertIsNone(outcome.response)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        # The claim that depended on the refused commit is never delivered.
+        self.assertEqual(outcome.response, "That is not done yet.")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(core.last_goal_rejection["proposed_response"], "Claimed completion.")
         self.assertNotIn("proposed_response", records[0])

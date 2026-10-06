@@ -221,10 +221,13 @@ class TheLiveComplaintTrace(Harness):
                 call=call(),
                 goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
             ),
+            AgentDecision(response="I could not start that."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        # The retrying stops; Friedl is told rather than left with silence.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.dispatched, [])
 
 
