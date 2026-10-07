@@ -2362,3 +2362,21 @@ This grants no authority a single goal update lacks: completion still requires s
 ### Amendment to D-037 — the PO's total decides
 
 `invoice_xero_quote` requires `po_total`: the total the purchase order states, read from the PO with `read_mail_document`. A quote whose total differs returns `po_total_mismatch` before anything is written. If AL/X cannot read the PO, she asks Friedl instead of invoicing.
+
+## D-039 — BHL room readers: one calendar of every reader's schedule
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-07.** Friedl's words that day:
+  - "The most important thing is ALX should know and confirm which event is running on each reader at any point."
+  - "I think the first building block is to get ALX to get the device schedules and combine it into a single calendar."
+  - On what AL/X may do to the readers: "Whatever she needs to be able to get the devices running the correct events including forcing restarts."
+- **Authority now (read only).**
+  - AL/X may list the devices in the configured Particle products (`ALX_READER_PRODUCT_IDS`; today 44781 and 45984) with their online state.
+  - She may read each reader's schedule from BehaviorLive (`/api/attendance/<reader>/config`). The reader UID is the last eight characters of the Particle device ID.
+  - She keeps one calendar of every reader's sessions, replaced as one consistent snapshot on each refresh.
+  - Its own permission is `readers.read`.
+- **What AL/X decides.** Which schedule is right, whether a problem matters, and what to do about it. The checks report mechanical facts only (malformed or missing fields, events ending before they start or overlapping, duplicates, empty or unreadable schedules, readers in one room disagreeing) and correct nothing.
+- **Retention.** Sessions carry presenters' names, the client's data. A session is removed 30 days after it ends.
+- **Not yet authorised: device actions.** Restarting readers, pushing schedules AL/X constructs, or any other Particle function call or write. Friedl approved them in principle above. Each will be recorded here when built, with its exact scope.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
