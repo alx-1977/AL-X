@@ -1808,12 +1808,9 @@ def build_xero_executors(
         try:
             quote_id = _required(arguments, "quote_id")
             po_number = _required(arguments, "po_number")
-            try:
-                po_total = Decimal(_required(arguments, "po_total")).quantize(
-                    Decimal("0.01")
-                )
-            except InvalidOperation:
-                raise ValueError("po_total") from None
+            po_total = _decimal(arguments.get("po_total"), "po_total").quantize(
+                Decimal("0.01")
+            )
             document = arguments.get("po_document")
             if not isinstance(document, Mapping):
                 raise ValueError("po_document")

@@ -314,7 +314,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
         self.assertEqual((xero.created, xero.status_changes), ([], []))
 
     def test_an_unreadable_po_total_is_refused(self) -> None:
-        for value in ("", "about R1150", "1,150.00"):
+        for value in ("", "about R1150", "1,150.00", "NaN", "Infinity", "sNaN"):
             with self.subTest(value=value):
                 result = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](
                     arguments(po_total=value)
