@@ -283,6 +283,10 @@ def _session(item: ReaderSession) -> dict[str, Any]:
     }
 
 
+def _seconds(start: datetime, end: datetime) -> float:
+    return round((end - start).total_seconds(), 1)
+
+
 def _message(fields: Mapping[str, Any]) -> str:
     return json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
 
@@ -490,9 +494,11 @@ def build_reader_executors(
                 # schedule. A commit that was sent but went unanswered may
                 # have taken: only the reader's status can say which.
                 unconfirmed = final and error.code == "device_timeout"
-                calendar.log(at, reader_uid, "schedule_send_failed",
+                done = now()
+                calendar.log(done, reader_uid, "schedule_send_failed",
                              {"code": error.code, "version": version, "message": position,
-                              "commit_unconfirmed": unconfirmed})
+                              "commit_unconfirmed": unconfirmed,
+                              "started_at": at.isoformat(), "seconds": _seconds(at, done)})
                 return CapabilityResult(
                     call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
                     failure={"code": error.code, "version": version,
@@ -500,9 +506,11 @@ def build_reader_executors(
                     outcome=ExecutionOutcome.AMBIGUOUS if unconfirmed else None,
                 )
             if answer != 0:
-                calendar.log(at, reader_uid, "schedule_send_failed",
+                done = now()
+                calendar.log(done, reader_uid, "schedule_send_failed",
                              {"code": "reader_refused", "version": version,
-                              "message": position, "return_value": answer})
+                              "message": position, "return_value": answer,
+                              "started_at": at.isoformat(), "seconds": _seconds(at, done)})
                 return CapabilityResult(
                     call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
                     failure={"code": "reader_refused", "version": version,
@@ -511,9 +519,13 @@ def build_reader_executors(
         calendar.record_sent(reader_uid, version, at, event_ids, tuple(
             {"fp": session_fingerprint(item, window), "until": window[1]}
             for item, window in chosen))
-        calendar.log(at, reader_uid, "schedule_sent",
+        # Stamped when the reader confirmed the last message, with how long
+        # the whole send took: each message is a cellular round trip.
+        done = now()
+        calendar.log(done, reader_uid, "schedule_sent",
                      {"version": version, "event_ids": list(event_ids),
-                      "left_out": list(leave_out)})
+                      "left_out": list(leave_out), "messages": len(messages),
+                      "started_at": at.isoformat(), "seconds": _seconds(at, done)})
         return CapabilityResult(
             call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.SUCCEEDED,
             {"reader_uid": reader_uid, "version": version, "sent_at": at.isoformat(),

@@ -130,6 +130,24 @@ class MonitorTests(unittest.TestCase):
                          ["schedule_requested", "schedule_delivery", "schedule_sent"])
         self.assertTrue(self.calendar.sent(UID)["held"])
 
+    def test_a_sent_schedule_is_stamped_when_it_finished_with_its_duration(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        original = particle.call_function
+
+        def slow(*arguments):
+            self.now[0] += timedelta(seconds=1.2)  # one cellular round trip
+            return original(*arguments)
+
+        particle.call_function = slow
+        monitor.on_event("roomreader/schedule_request", DEVICE, '{"v":""}', "t")
+        sent = [s for s in self.calendar.log_between(at(0), at(23))[0]
+                if s["kind"] == "schedule_sent"][0]
+        self.assertEqual(sent["detail"]["seconds"], 6.0)
+        self.assertEqual(sent["detail"]["messages"], 5)
+        self.assertEqual(sent["at"], (at(14, 10) + timedelta(seconds=6)).isoformat())
+        self.assertEqual(sent["detail"]["started_at"], at(14, 10).isoformat())
+
     def test_a_repeated_request_within_a_minute_is_not_answered_twice(self) -> None:
         particle = Particle()
         monitor = self.build(particle)
