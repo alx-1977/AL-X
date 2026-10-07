@@ -75,6 +75,11 @@ class StatusTileAssetTests(unittest.TestCase):
         self.assertEqual(_fixture("fault").count("icon:"), 3)
         self.assertIn("width: 25em;", _read("tile.css"))
 
+    def test_every_chip_has_a_spoken_name(self) -> None:
+        self.assertIn("item.setAttribute('aria-label'", _read("tile.js"))
+        text = _read("tile-fixtures.js")
+        self.assertEqual(text.count("icon: '"), text.count("label: '"))
+
     def test_tile_offers_no_navigation_or_drill_down_control(self) -> None:
         for name in ("tiles.html", "tile.js", "tile-fixtures.js"):
             text = _read(name).lower()

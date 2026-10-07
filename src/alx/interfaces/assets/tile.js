@@ -15,7 +15,7 @@
 //     context: '5 events today · Majestic',          // optional
 //     state:   { title: '…', detail: '…' },          // detail optional
 //     alx:     { text: 'not monitoring yet', idle: true },
-//     chips:   [{ icon: 'reader', value: '0/2', tone: 'warn' }]
+//     chips:   [{ icon: 'reader', value: '0/2', tone: 'warn', label: 'Room readers online' }]
 //   }
 
 const svg = (body) =>
@@ -41,6 +41,8 @@ function buildChip(chip) {
   const icon = el('span', 'alx-tile__chip-icon');
   icon.innerHTML = ICONS[chip.icon] || '';
   item.append(icon, el('span', null, chip.value), el('span', 'alx-tile__dot'));
+  // The icon and the dot are only seen; say what they show, from the data.
+  item.setAttribute('aria-label', `${chip.label || chip.icon}: ${chip.value} (${item.dataset.tone})`);
   if (chip.label) item.title = chip.label;
   return item;
 }

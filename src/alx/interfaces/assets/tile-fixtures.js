@@ -6,7 +6,7 @@
 
 import { surfaceTile } from '/tile.js';
 
-const LINK_OK = { icon: 'link', value: 'BHL link', tone: 'ok' };
+const LINK_OK = { icon: 'link', value: 'BHL link', tone: 'ok', label: 'Schedules read from BehaviorLive' };
 
 const FIXTURES = {
   healthy: {
@@ -15,7 +15,7 @@ const FIXTURES = {
     context: '5 events today · Majestic',
     state: { title: 'All systems normal', detail: 'Event under way until 17:05' },
     alx: { text: 'monitoring' },
-    chips: [{ icon: 'reader', value: '2/2', tone: 'ok' }, LINK_OK],
+    chips: [{ icon: 'reader', value: '2/2', tone: 'ok', label: 'Room readers online' }, LINK_OK],
   },
   warning: {
     tone: 'warn',
@@ -23,7 +23,7 @@ const FIXTURES = {
     context: '5 events today · Majestic',
     state: { title: '2 room readers offline', detail: 'First event at 16:05 · schedules not confirmed' },
     alx: { text: 'not monitoring yet', idle: true },
-    chips: [{ icon: 'reader', value: '0/2', tone: 'warn' }, LINK_OK],
+    chips: [{ icon: 'reader', value: '0/2', tone: 'warn', label: 'Room readers online' }, LINK_OK],
   },
   fault: {
     tone: 'bad',
@@ -32,9 +32,9 @@ const FIXTURES = {
     state: { title: '3 room readers offline', detail: '9 rooms in session · next starts 15:30 (6 rooms)' },
     alx: { text: 'restarted 1 · client alerted 15:12' },
     chips: [
-      { icon: 'reader', value: '27/30', tone: 'bad' },
-      { icon: 'scanner', value: '10/10', tone: 'ok' },
-      { icon: 'plug', value: '5/5', tone: 'ok' },
+      { icon: 'reader', value: '27/30', tone: 'bad', label: 'Room readers online' },
+      { icon: 'scanner', value: '10/10', tone: 'ok', label: 'Registration scanners online' },
+      { icon: 'plug', value: '5/5', tone: 'ok', label: 'PSUs online' },
       LINK_OK,
     ],
   },
