@@ -76,6 +76,7 @@ from alx.continuity.completed_work_source import CompletedWorkSource
 from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
+from alx.bootstrap.documents import build_document_runtime
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
@@ -723,6 +724,23 @@ async def run(repository_root: Path) -> None:
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.
+    # D-038. Reading what a mailed document states needs only mail and
+    # LlamaParse, so it is composed apart from Xero.
+    try:
+        document_runtime = build_document_runtime(
+            LlamaParseSettings.from_environment(environment),
+            mail_runtime.source,
+            current_call_id.get,
+        )
+    except ConfigurationError as error:
+        LOGGER.info("Mail document reading unavailable: %s", error)
+        document_runtime = None
+    if document_runtime is not None:
+        register(document_runtime.definitions, TraceSubsystem.MAIL)
+        policies.update(document_runtime.policies)
+        executors.update(document_runtime.executors)
+        permissions.update(document_runtime.permissions)
+
     xero_approval_ttl_seconds: int | None = None
     try:
         xero_settings = XeroSettings.from_environment(environment)
