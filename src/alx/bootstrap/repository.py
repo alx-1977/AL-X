@@ -18,6 +18,7 @@ from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.contracts.repository import MergeRequest, MergeError
+from alx.contracts.review_content import ReviewContentRequest, ReviewReadError
 from alx.contracts.repository_authority import Operation, RepositoryRequest, RepositoryAuthorityError
 from alx.contracts.coding import CodingError
 from alx.providers.coding_git import coding_job_lock
@@ -48,6 +49,30 @@ class RepositoryRuntime:
     permissions: frozenset[str]
 
 
+def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
+    """Refuse a merge unless this exact head has a finished review with no findings.
+
+    D-042, Friedl 2026-10-07: AL/X may never merge without a clean external
+    review unless he says so. Whether the reviewer's findings matter is
+    otherwise her judgement; here it is not. Resolving a review thread does
+    not make a review clean: the findings are the reviewer's, published in
+    its review of this head, and only a new head with a new review replaces
+    them.
+    """
+    if review_reader is None:
+        raise MergeError("review_missing", github_message="No external reviewer is configured")
+    try:
+        content = review_reader.read(ReviewContentRequest(request.pull_request_number,
+                                                          request.head_sha))
+    except ReviewReadError:
+        raise MergeError("review_missing", github_message="The review could not be read") from None
+    if not content.available:
+        raise MergeError("review_missing", github_message=content.unavailable_reason
+                         or "No finished review of this head")
+    if content.comments:
+        raise MergeError("review_has_findings", findings=len(content.comments))
+
+
 def build_repository_runtime(
     enabled: bool,
     repository: str,
@@ -55,6 +80,9 @@ def build_repository_runtime(
     call_id_source: Callable[[], str],
     provider: Any = None,
     repository_runtime: Any = None,
+    # D-042: reads what the configured reviewer published about one exact
+    # head. Without one, nothing can show a clean review, so nothing merges.
+    review_reader: Any = None,
 ) -> RepositoryRuntime | None:
     """Compose merge authority, or leave it unregistered."""
     if repository_runtime is None and provider is None:
@@ -151,6 +179,7 @@ def build_repository_runtime(
         return None
 
     def merge(request: MergeRequest) -> Any:
+        require_clean_review(review_reader, request)
         return selected.merge(request)
 
     LOGGER.info("Merge authority enabled: %s", MERGE_PULL_REQUEST)

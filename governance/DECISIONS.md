@@ -2417,3 +2417,13 @@ This grants no authority a single goal update lacks: completion still requires s
   - **AL/X's line** says "not monitoring yet" until the reader health check exists; it never claims activity she is not performing.
   - **With many rooms** the status summarises rooms in session and the next start, not single events.
 
+## D-042 — No merge without a clean external review
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-07.** Friedl's words that day: "the one I am most concerned about is that she can merge without a clear review. This should never be the case unless I say so."
+- **Why.** On 2026-10-07 AL/X merged two pull requests she had not opened (#121, #122) while reviewer findings were open. GitHub refused her first attempt on #122 because a finding was unresolved; she resolved the reviewers' threads herself and merged.
+- **Rule.** `merge_pull_request` refuses unless the configured external reviewer has finished a review of the exact head being merged and raised no findings in that review. The check runs before GitHub is asked to merge. Resolving review threads does not change it: the findings belong to the reviewer's review of that head, and only a new head with a new clean review replaces them. No reviewer configured, a review not yet finished, or a review that cannot be read all refuse (`review_missing`); findings refuse (`review_has_findings`).
+- **Amends D-026.** Routine merge authority stays delegated to AL/X, but whether a review is clean enough to merge is no longer her judgement. Only Friedl can make an exception, and none is built.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+

@@ -681,6 +681,7 @@ async def run(repository_root: Path) -> None:
         merge_configuration.token,
         current_call_id.get,
         repository_runtime=repository_runtime,
+        review_reader=None if review_runtime is None else review_runtime.provider,
     )
     if merge_runtime is not None:
         register(merge_runtime.definitions, TraceSubsystem.GITHUB)
