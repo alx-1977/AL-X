@@ -56,6 +56,11 @@ MERGE_FAILURES = (
     "merge_refused",
     "checks_failed", "checks_timed_out", "branch_behind", "review_required",
     "merge_conflict", "local_sync_failed",
+    # D-042. The configured reviewer has not finished a review of this exact
+    # head, or no reviewer is configured; or its review of this head raised
+    # findings. Fixed by a new head and a new clean review, never by resolving
+    # threads.
+    "review_missing", "review_has_findings",
 )
 
 

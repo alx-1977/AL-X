@@ -94,6 +94,7 @@ class PostCodingTests(unittest.TestCase):
         self.git('push', str(self.remote), 'fix/completed')
         self.now = datetime.now(UTC)
         self.request_count = self.review_reads = self.check_reads = self.merge_count = 0
+        self.already_reviewed = True
         self.review_pending, self.ci_pending = 3, 3
         self.behind = 0
         self.live_head = self.head
@@ -129,7 +130,7 @@ class PostCodingTests(unittest.TestCase):
         )
         self.merge = build_repository_runtime(
             True, 'owner/repo', 'token', lambda: self.call_id[0],
-            repository_runtime=self.repo,
+            repository_runtime=self.repo, review_reader=reader,
         )
         self.merge.provider._sleep = lambda seconds: None
         self.merge.provider._max_polls = 5
@@ -209,19 +210,24 @@ class PostCodingTests(unittest.TestCase):
             # out, pending for the first `review_pending` looks at it, then
             # completed. The round advances as the waiter polls its status,
             # because the reader fetches no content until the round ends.
-            if not self.request_count or 'page=1' not in path:
+            # D-042: a merge reads the review of its exact head first. Tests
+            # about what happens at merge time start from a head that was
+            # already reviewed clean; tests that request a review say so.
+            if (not self.request_count and not self.already_reviewed) or 'page=1' not in path:
                 return Response([])
             self.review_reads += 1
-            state = 'pending' if self.review_reads <= self.review_pending else 'success'
+            prior = self.already_reviewed and not self.request_count
+            state = 'pending' if self.review_reads <= self.review_pending and not prior else 'success'
             return Response([{'context': 'CodeRabbit', 'state': state,
                               'creator': {'login': 'coderabbitai[bot]'},
                               'created_at': self.now.isoformat()}])
         if path.startswith('/issues/72/comments'):
-            if self.review_reads <= self.review_pending:
+            prior = self.already_reviewed and not self.request_count
+            if self.review_reads <= self.review_pending and not prior:
                 return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
                                   'body': 'Review in progress', 'created_at': self.now.isoformat()}])
             return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
-                              'body': f'No actionable findings. Reviewed {self.head}',
+                              'body': f'No actionable comments were generated in the recent review. Reviewed {self.head}',
                               'created_at': self.now.isoformat()}])
         if path.startswith('/pulls/72/comments') or path.startswith('/pulls/72/reviews'):
             return Response([])
@@ -267,6 +273,7 @@ class PostCodingTests(unittest.TestCase):
             identifier, 'merge_pull_request', {'pull_request_number': 72, 'head_sha': self.head}))
 
     def test_real_post_coding_path_waits_merges_syncs_and_finishes(self):
+        self.already_reviewed = False
         request = CapabilityCall('request', 'request_external_review', {'pull_request_number': 72}, approval_id='approval')
         outcome, reasoner = self.run_core([
             AgentDecision(goal_id='goal', call=request,
@@ -378,6 +385,7 @@ class PostCodingTests(unittest.TestCase):
         self.assertEqual((self.checkout / 'file.txt').read_text(), 'completed implementation\n')
 
     def test_review_timeout_returns_once_without_another_paid_request(self):
+        self.already_reviewed = False
         self.review_pending = 10000
         self.tasks.poller._maximum_wait = 0.02
         request = CapabilityCall('request', 'request_external_review', {'pull_request_number': 72}, approval_id='approval')
@@ -393,6 +401,7 @@ class PostCodingTests(unittest.TestCase):
         self.assertEqual(self.tasks.store.completed_unhandled(), ())
 
     def test_unpublished_read_is_not_a_core_polling_capability(self):
+        self.already_reviewed = False
         read = AgentDecision(goal_id='goal', call=CapabilityCall(
             'read', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head}))
         retry = AgentDecision(goal_id='goal', call=CapabilityCall(

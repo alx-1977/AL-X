@@ -35,6 +35,11 @@ from alx.contracts import (  # noqa: E402
     MergeRequest,
     SideEffect,
 )
+from alx.contracts.review_content import (  # noqa: E402
+    ReviewComment,
+    ReviewContent,
+    ReviewReadError,
+)
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.repository import MERGE_PULL_REQUEST  # noqa: E402
 
@@ -63,10 +68,35 @@ class RecordingProvider:
         )
 
 
+class Reviews:
+    """Stands in for the configured reviewer's account of one head."""
+
+    CLEAN = "No actionable comments were generated in the recent review. 🎉"
+
+    def __init__(self, available=True, findings=0, error=False, reason="",
+                 summary=CLEAN, reviewer="coderabbit") -> None:
+        self.available, self.findings, self.error, self.reason = available, findings, error, reason
+        self.summary, self.reviewer = summary, reviewer
+        self.read_for: list[tuple[int, str]] = []
+
+    def read(self, request):
+        self.read_for.append((request.pull_request_number, request.head_sha))
+        if self.error:
+            raise ReviewReadError("review_unavailable")
+        return ReviewContent(
+            request.pull_request_number, request.head_sha, self.reviewer, self.available,
+            summary=self.summary if self.available else "",
+            comments=tuple(ReviewComment(f"finding {n}") for n in range(self.findings)),
+            unavailable_reason=self.reason,
+            submitted_at=datetime(2026, 10, 7, tzinfo=UTC) if self.available else None,
+        )
+
+
 class MergeAuthorityTest(unittest.TestCase):
-    def _runtime(self, provider):
+    def _runtime(self, provider, reviews=None):
         return build_repository_runtime(
-            True, "owner/repo", "token", lambda: "call-1", provider=provider
+            True, "owner/repo", "token", lambda: "call-1", provider=provider,
+            review_reader=reviews if reviews is not None else Reviews(),
         )
 
     def _broker(self, runtime):
@@ -229,6 +259,62 @@ class MergeAuthorityTest(unittest.TestCase):
         )
         self.assertIsNone(build_repository_runtime(True, "", "t", lambda: "c"))
         self.assertIsNone(build_repository_runtime(True, "owner/repo", "", lambda: "c"))
+
+
+class CleanReviewRequiredTest(unittest.TestCase):
+    """D-042: no merge without a finished review of the exact head that found nothing."""
+
+    def _merge(self, reviews):
+        provider = RecordingProvider()
+        runtime = build_repository_runtime(
+            True, "owner/repo", "token", lambda: "call-1", provider=provider,
+            review_reader=reviews)
+        result = runtime.executors[MERGE_PULL_REQUEST](
+            {"pull_request_number": 7, "head_sha": HEAD})
+        return result, provider
+
+    def test_a_clean_review_of_the_exact_head_merges(self) -> None:
+        reviews = Reviews()
+        result, provider = self._merge(reviews)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(reviews.read_for, [(7, HEAD)])
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_refusals_never_reach_github(self) -> None:
+        for reviews, code in (
+            (None, "review_missing"),
+            (Reviews(available=False, reason="no_review_for_revision"), "review_missing"),
+            (Reviews(error=True), "review_missing"),
+            (Reviews(findings=1), "review_has_findings"),
+        ):
+            with self.subTest(code=code, reviews=reviews and vars(reviews)):
+                result, provider = self._merge(reviews)
+                self.assertEqual(result.state, CapabilityResultState.FAILED)
+                self.assertEqual(result.failure["code"], code)
+                self.assertEqual(provider.requests, [])
+
+    def test_only_the_reviewer_s_own_no_findings_statement_is_clean(self) -> None:
+        for summary in (
+            # A round refused by CodeRabbit's limit still reports itself done.
+            "Review rate limited. Reviewed between abc and def.",
+            "**Actionable comments posted: 1**",
+            "No actionable comments were generated. ⚠️ Outside diff range comments (1)",
+            "Reviewed.",
+            "",
+        ):
+            with self.subTest(summary=summary):
+                result, provider = self._merge(Reviews(summary=summary or "x"))
+                self.assertEqual(result.failure["code"], "review_has_findings")
+                self.assertEqual(provider.requests, [])
+
+    def test_a_reviewer_without_a_verified_format_is_never_clean(self) -> None:
+        result, provider = self._merge(Reviews(reviewer="greptile"))
+        self.assertEqual(result.failure["code"], "review_has_findings")
+        self.assertEqual(provider.requests, [])
+
+    def test_the_findings_are_counted_for_al_x(self) -> None:
+        result, _ = self._merge(Reviews(findings=2))
+        self.assertEqual(result.failure["findings"], 2)
 
 
 class MergeProviderTest(unittest.TestCase):
