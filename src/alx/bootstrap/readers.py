@@ -300,12 +300,19 @@ class ReaderMonitor:
 
     def _deliver(self, uid: str, trigger: str, at: datetime) -> None:
         """Send a reader its schedule. The caller has reserved it (_reserve)."""
+        started = False
         try:
             self._calendar.log(at, uid, "schedule_delivery", {"trigger": trigger})
+            started = True
             result = self._with_call_id(lambda: self._send({"reader_uid": uid}))
         finally:
             with self._lock:
                 self._sending.discard(uid)
+                # Nothing reached the reader, so nothing should hold back the
+                # next attempt. Once a send has begun, its time stands, so a
+                # partly delivered schedule is not immediately repeated.
+                if not started and self._last_delivery.get(uid) == at:
+                    del self._last_delivery[uid]
         if result.failure is None:
             with self._lock:
                 self._last_action = (at, "schedule sent")

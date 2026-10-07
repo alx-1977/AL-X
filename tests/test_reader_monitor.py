@@ -176,6 +176,34 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sum(c["op"] == "begin" for c in particle.calls), 1)
         self.assertEqual(self.steps().count("schedule_delivery"), 1)
 
+    def test_a_send_that_never_started_does_not_hold_back_the_next(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        original = self.calendar.log
+        failed = []
+
+        def log(at, uid, kind, detail=None):
+            if kind == "schedule_delivery" and not failed:
+                failed.append(True)
+                raise RuntimeError("database locked")
+            return original(at, uid, kind, detail)
+
+        self.calendar.log = log
+        with self.assertRaises(RuntimeError):
+            monitor.cycle()
+        self.assertEqual(particle.calls, [])
+        self.now[0] += timedelta(minutes=5)  # within the ten-minute gap
+        monitor.cycle()
+        self.assertEqual(sum(c["op"] == "commit" for c in particle.calls), 1)
+
+    def test_a_send_that_began_keeps_its_time(self) -> None:
+        particle = Particle(refuse="device_timeout")
+        monitor = self.build(particle)
+        monitor.cycle()
+        self.now[0] += timedelta(minutes=5)
+        monitor.cycle()
+        self.assertEqual(self.steps().count("schedule_delivery"), 1)
+
     def test_other_events_are_ignored(self) -> None:
         particle = Particle()
         monitor = self.build(particle)
