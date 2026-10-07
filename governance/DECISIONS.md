@@ -2427,3 +2427,18 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Amends D-026.** Routine merge authority stays delegated to AL/X, but whether a review is clean enough to merge is no longer her judgement. Only Friedl can make an exception, and none is built.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 
+## D-043 — AL/X keeps every reader on its schedule, and records each step
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-07.** Friedl's words that day:
+  - "So we use Particle Subscribe for ALX? Then whenever a reader wants a schedule, it posts and ALX sees the request. She then sends its info." (confirmed as the design)
+  - "Tomorrow I want to run a full event and ask ALX to compile a report of every step taken during the event."
+  - Standing authority from D-039/D-040: "Whatever she needs to be able to get the devices running the correct events including forcing restarts."
+- **Requests answered.** AL/X listens to Particle's event stream (an outgoing connection) for `roomreader/schedule_request` from the configured products, and answers each through the one send path (D-040), at most once a minute per reader.
+- **Readers checked.** After every calendar refresh (five minutes), for each online reader with events still to run today, AL/X reads its `status`, records it, records when the event it reports differs from the one its window says is current, and delivers its schedule when it is not holding exactly what it should (at most every ten minutes per reader unasked). A reader whose firmware has no `schedule` function is not pushed to again until it asks.
+- **Which event is current.** Decided in AL/X and sent as each event's window (V1's rule: IN moves on halfway through the current event; OUT halfway through the next, and holds the last until 30 minutes after it ends). Protocol: `docs/READER_SCHEDULE_PROTOCOL.md`.
+- **Every step recorded.** Requests, deliveries and their triggers, schedules sent or refused and why, each status report, wrong events, and online/offline changes go to the reader log, kept 30 days. AL/X reads it back through `read_reader_log` (permission `readers.read`) to account for an event.
+- **Mechanical, not cognition.** The monitor makes no Core call and makes no judgement: anything needing one (overlapping events) is refused by the send path and recorded; what to do is AL/X's. The BHL tile shows "monitoring" and turns red when a reader reports the wrong event.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+

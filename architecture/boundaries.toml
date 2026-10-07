@@ -292,3 +292,17 @@ description = "On a day with BHL events, the BHL tile shows what the calendar sa
 # D-041. Nothing superseded: the tile existed only as a design preview.
 entry = "interfaces/reader_tile.py::compose_tile"
 forbidden = []
+
+[[outcomes]]
+id = "readers.request_is_answered"
+description = "A reader asking for its schedule is sent it."
+# D-043. Nothing superseded: readers could not ask before.
+entry = "bootstrap/readers.py::ReaderMonitor.on_event"
+forbidden = []
+
+[[outcomes]]
+id = "readers.are_kept_on_schedule"
+description = "Every reader in use is checked and sent the schedule it is not holding."
+# D-043. Nothing superseded.
+entry = "bootstrap/readers.py::ReaderMonitor.cycle"
+forbidden = []

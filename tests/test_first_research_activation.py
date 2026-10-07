@@ -689,10 +689,11 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "create_task"
         ]
-        # Exactly six: the voice server, the due-cognition tick, the
+        # Exactly seven: the voice server, the due-cognition tick, the
         # mechanical mail poll, the external-task watcher, the sandbox
-        # retention sweep, and the reader-calendar refresh. Each is named, so a
-        # seventh scheduled activity fails here rather than passing on a count.
+        # retention sweep, the reader-calendar refresh, and the reader request
+        # listener. Each is named, so an eighth scheduled activity fails here
+        # rather than passing on a count.
         #
         # The watcher belongs on this list for the same reason the mail poll
         # does: it observes something outside the process and decides nothing.
@@ -708,9 +709,11 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         #
         # The reader-calendar refresh (D-041) is the mail poll's kind: it reads
         # the readers' schedules into the calendar so the BHL tile shows today,
-        # makes no Core call and decides nothing.
+        # makes no Core call and decides nothing. The request listener (D-043)
+        # is the same kind: it hears readers ask and hands the request to the
+        # same mechanical delivery the refresh uses; it reaches no Core turn.
         rendered = [ast.dump(call) for call in scheduled]
-        self.assertEqual(len(scheduled), 6, rendered)
+        self.assertEqual(len(scheduled), 7, rendered)
         self.assertEqual(
             sorted(
                 name
@@ -721,12 +724,14 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
                     "sandbox_runtime",
                     "task_runtime",
                     "reader_poller",
+                    "reader_listener",
                 )
                 if any(name in item for item in rendered)
             ),
             [
                 "due_cognition",
                 "mail_poller",
+                "reader_listener",
                 "reader_poller",
                 "sandbox_runtime",
                 "serve_forever",

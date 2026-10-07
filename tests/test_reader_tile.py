@@ -24,7 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.bootstrap.readers import ReaderCalendarPoller  # noqa: E402
 from alx.config import ReaderSettings  # noqa: E402
 from alx.contracts import CapabilityResult, CapabilityResultState  # noqa: E402
-from alx.contracts.readers import ReaderSession, session_fingerprint  # noqa: E402
+from alx.contracts.readers import (  # noqa: E402
+    ReaderSession,
+    active_windows,
+    session_fingerprint,
+)
 from alx.interfaces.reader_tile import compose_tile, tile_source  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.providers.reader_calendar import SQLiteReaderCalendar  # noqa: E402
@@ -52,9 +56,11 @@ READERS = (
     {"reader_uid": "c471cf5a", "online": False},
 )
 ONLINE = tuple({**item, "online": True} for item in READERS)
-def held(*sessions):
-    return {"held": tuple({"fp": session_fingerprint(item), "en": int(item.ends_at.timestamp())}
-                          for item in sessions)}
+def held(*sessions, mode=0):
+    """The record of a reader that accepted exactly these sessions as its day."""
+    windows = active_windows(sessions, mode)
+    return {"held": tuple({"fp": session_fingerprint(item, windows[item.event_id]),
+                           "until": windows[item.event_id][1]} for item in sessions)}
 
 
 HOLDING = {uid: held(*(item for item in DAY if item.reader_uid == uid))
@@ -96,7 +102,7 @@ class ComposeTileTests(unittest.TestCase):
     def test_offline_between_distant_events_is_yellow(self) -> None:
         sessions = (session("c471cf5a", 1, at(9), at(10)), session("c471cf5a", 2, at(16), at(17)))
         data = tile(at(12), sessions=sessions,
-                    sent={"c471cf5a": held(sessions[1])})
+                    sent={"c471cf5a": held(*sessions)})
         self.assertEqual((data["tone"], data["chips"][0]["tone"]), ("warn", "warn"))
         self.assertEqual(data["state"]["detail"], "Next event at 16:00")
 
@@ -205,10 +211,26 @@ class SentRecordTests(unittest.TestCase):
             calendar = SQLiteReaderCalendar(path)
             record = calendar.sent("ab2d5218")
             calendar.close()
-        self.assertEqual(record["held"], ())
+        self.assertIsNone(record["held"])
         self.assertEqual(tile(at(14, 10), readers=ONLINE, sent={"ab2d5218": record,
                                                                 "c471cf5a": HOLDING["c471cf5a"]})
                          ["state"]["title"], "Schedules not confirmed")
+
+    def test_a_legacy_record_is_not_confirmed_after_the_last_event(self) -> None:
+        # CodeRabbit on #124: an empty legacy record and an empty remainder
+        # must not confirm each other.
+        legacy = {"ab2d5218": {"version": "v0", "held": None},
+                  "c471cf5a": {"version": "v0", "held": None}}
+        data = tile(at(20), readers=ONLINE, sent=legacy,
+                    refreshed="2026-10-07T20:00:00+00:00")
+        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
+
+    def test_a_genuinely_empty_day_sent_is_confirmed_after_the_last_event(self) -> None:
+        empty = {"ab2d5218": {"version": "v1", "held": ()},
+                 "c471cf5a": {"version": "v1", "held": ()}}
+        data = tile(at(20), readers=ONLINE, sent=empty,
+                    refreshed="2026-10-07T20:00:00+00:00")
+        self.assertEqual(data["tone"], "ok")
 
 
 class ServingTests(unittest.TestCase):
