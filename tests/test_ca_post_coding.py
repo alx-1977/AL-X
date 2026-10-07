@@ -227,7 +227,7 @@ class PostCodingTests(unittest.TestCase):
                 return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
                                   'body': 'Review in progress', 'created_at': self.now.isoformat()}])
             return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
-                              'body': f'No actionable findings. Reviewed {self.head}',
+                              'body': f'No actionable comments were generated in the recent review. Reviewed {self.head}',
                               'created_at': self.now.isoformat()}])
         if path.startswith('/pulls/72/comments') or path.startswith('/pulls/72/reviews'):
             return Response([])

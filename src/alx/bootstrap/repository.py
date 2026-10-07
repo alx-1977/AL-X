@@ -19,6 +19,7 @@ from typing import Any
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.contracts.repository import MergeRequest, MergeError
 from alx.contracts.review_content import ReviewContentRequest, ReviewReadError
+from alx.contracts.review_provider import ReviewProvider, profile_for
 from alx.contracts.repository_authority import Operation, RepositoryRequest, RepositoryAuthorityError
 from alx.contracts.coding import CodingError
 from alx.providers.coding_git import coding_job_lock
@@ -53,7 +54,9 @@ def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
     """Refuse a merge unless this exact head has a finished review with no findings.
 
     D-042, Friedl 2026-10-07: AL/X may never merge without a clean external
-    review unless he says so. Whether the reviewer's findings matter is
+    review unless he says so. Clean means: a finished review of this head,
+    no findings on its lines, and the reviewer's own statement that it raised
+    nothing (which a rate-limited round never carries). Whether the reviewer's findings matter is
     otherwise her judgement; here it is not. Resolving a review thread does
     not make a review clean: the findings are the reviewer's, published in
     its review of this head, and only a new head with a new review replaces
@@ -71,6 +74,16 @@ def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
                          or "No finished review of this head")
     if content.comments:
         raise MergeError("review_has_findings", findings=len(content.comments))
+    # Findings can sit in the summary rather than on lines, and a round the
+    # reviewer refused still reports itself complete. So clean needs the
+    # reviewer's own statement that it raised nothing about this head.
+    try:
+        profile = profile_for(ReviewProvider(content.reviewer))
+    except ValueError:
+        profile = None
+    if profile is None or not profile.states_no_findings(content.summary):
+        raise MergeError("review_has_findings",
+                         github_message="The review does not state that it raised nothing")
 
 
 def build_repository_runtime(

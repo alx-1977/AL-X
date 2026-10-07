@@ -71,8 +71,12 @@ class RecordingProvider:
 class Reviews:
     """Stands in for the configured reviewer's account of one head."""
 
-    def __init__(self, available=True, findings=0, error=False, reason="") -> None:
+    CLEAN = "No actionable comments were generated in the recent review. 🎉"
+
+    def __init__(self, available=True, findings=0, error=False, reason="",
+                 summary=CLEAN, reviewer="coderabbit") -> None:
         self.available, self.findings, self.error, self.reason = available, findings, error, reason
+        self.summary, self.reviewer = summary, reviewer
         self.read_for: list[tuple[int, str]] = []
 
     def read(self, request):
@@ -80,8 +84,8 @@ class Reviews:
         if self.error:
             raise ReviewReadError("review_unavailable")
         return ReviewContent(
-            request.pull_request_number, request.head_sha, "coderabbit", self.available,
-            summary="Reviewed" if self.available else "",
+            request.pull_request_number, request.head_sha, self.reviewer, self.available,
+            summary=self.summary if self.available else "",
             comments=tuple(ReviewComment(f"finding {n}") for n in range(self.findings)),
             unavailable_reason=self.reason,
             submitted_at=datetime(2026, 10, 7, tzinfo=UTC) if self.available else None,
@@ -288,6 +292,25 @@ class CleanReviewRequiredTest(unittest.TestCase):
                 self.assertEqual(result.state, CapabilityResultState.FAILED)
                 self.assertEqual(result.failure["code"], code)
                 self.assertEqual(provider.requests, [])
+
+    def test_only_the_reviewer_s_own_no_findings_statement_is_clean(self) -> None:
+        for summary in (
+            # A round refused by CodeRabbit's limit still reports itself done.
+            "Review rate limited. Reviewed between abc and def.",
+            "**Actionable comments posted: 1**",
+            "No actionable comments were generated. ⚠️ Outside diff range comments (1)",
+            "Reviewed.",
+            "",
+        ):
+            with self.subTest(summary=summary):
+                result, provider = self._merge(Reviews(summary=summary or "x"))
+                self.assertEqual(result.failure["code"], "review_has_findings")
+                self.assertEqual(provider.requests, [])
+
+    def test_a_reviewer_without_a_verified_format_is_never_clean(self) -> None:
+        result, provider = self._merge(Reviews(reviewer="greptile"))
+        self.assertEqual(result.failure["code"], "review_has_findings")
+        self.assertEqual(provider.requests, [])
 
     def test_the_findings_are_counted_for_al_x(self) -> None:
         result, _ = self._merge(Reviews(findings=2))

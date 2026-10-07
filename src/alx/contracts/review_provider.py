@@ -29,6 +29,8 @@ without changing what AL/X asks for.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from enum import Enum
 
@@ -76,6 +78,26 @@ class ReviewProviderProfile:
     # in place afterwards, so its existence says a review began, not that one
     # finished. Empty where no status has been verified for this reviewer.
     status_context: str = ""
+    # D-042: how this reviewer states, in its own fixed format, that a review
+    # raised nothing, and the statements that contradict that. A merge needs
+    # one of the first and none of the second in the review of its exact head.
+    # Empty where no such format has been verified, and then no review by this
+    # reviewer can show itself clean: the merge is refused rather than assumed.
+    no_findings_statements: tuple[str, ...] = ()
+    finding_statements: tuple[str, ...] = ()
+
+    def states_no_findings(self, summary: str) -> bool:
+        """Whether this summary is the reviewer saying it raised nothing.
+
+        A protocol check on the reviewer's own fixed wording, never a reading
+        of what a finding means. Fails closed: no verified format, no clean
+        statement, or any contradicting statement is not clean.
+        """
+        if not isinstance(summary, str) or not self.no_findings_statements:
+            return False
+        if any(re.search(pattern, summary) for pattern in self.finding_statements):
+            return False
+        return any(re.search(pattern, summary) for pattern in self.no_findings_statements)
 
     def authored_by_reviewer(self, login: object) -> bool:
         """Whether this GitHub account is the configured reviewer.
@@ -107,6 +129,22 @@ PROFILES: dict[ReviewProvider, ReviewProviderProfile] = {
         # published, each on the exact commit reviewed and created by the
         # account above.
         status_context="CodeRabbit",
+        # Verified on PRs #119-#123: a round with findings publishes a review
+        # headed "Actionable comments posted: N"; a round without edits the
+        # summary to "No actionable comments were generated in the recent
+        # review"; a round refused by the review limit still marks the commit
+        # status `success` ("Review rate limited") and says "rate limited" in
+        # the summary, which is not a review. Findings outside the changed
+        # lines are listed under "Outside diff range comments (N)".
+        no_findings_statements=(
+            r"No actionable comments were generated",
+            r"Actionable comments posted: 0\b",
+        ),
+        finding_statements=(
+            r"Actionable comments posted: [1-9]",
+            r"Outside diff range comments \([1-9]",
+            r"(?i)rate limited",
+        ),
     ),
     # Greptile's documented trigger. It has published no review here yet, so
     # both accounts it is known to publish under are listed rather than one
