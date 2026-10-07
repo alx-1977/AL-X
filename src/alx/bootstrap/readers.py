@@ -172,6 +172,8 @@ class ReaderMonitor:
         # Readers whose firmware has no schedule function (V1). Not pushed to
         # again until one of them asks, which only schedule firmware does.
         self._cannot_receive: set[str] = set()
+        # Readers with a send under way; never two at once to one reader.
+        self._sending: set[str] = set()
         self._last_action: tuple[datetime, str] | None = None
 
     # ---- what the tile reads ---------------------------------------------
@@ -208,6 +210,8 @@ class ReaderMonitor:
             last = self._last_delivery.get(uid)
             if last is not None and at - last < REQUEST_ANSWER_GAP:
                 return
+            if not self._reserve(uid, at):
+                return
         self._deliver(uid, "requested", at)
 
     # ---- the regular check -------------------------------------------------
@@ -242,8 +246,10 @@ class ReaderMonitor:
             if stale:
                 with self._lock:
                     last = self._last_delivery.get(uid)
-                    unable = uid in self._cannot_receive
-                if not unable and (last is None or at - last >= AUTOMATIC_DELIVERY_GAP):
+                    due = (uid not in self._cannot_receive
+                           and (last is None or at - last >= AUTOMATIC_DELIVERY_GAP)
+                           and self._reserve(uid, at))
+                if due:
                     self._deliver(uid, "not_holding_current_schedule", at)
         with self._lock:
             self._last_cycle = at
@@ -278,11 +284,28 @@ class ReaderMonitor:
             self._last_outcome[uid] = key
         self._calendar.log(at, uid, kind, detail)
 
+    def _reserve(self, uid: str, at: datetime) -> bool:
+        """Claim the next send to this reader. Call with the lock held.
+
+        The listener threads and the regular check run at once, so deciding to
+        send and recording that a send is under way must be one step: two
+        sends interleaving their begin/event/commit messages would each wipe
+        the other's half-received schedule on the reader.
+        """
+        if uid in self._sending:
+            return False
+        self._sending.add(uid)
+        self._last_delivery[uid] = at
+        return True
+
     def _deliver(self, uid: str, trigger: str, at: datetime) -> None:
-        with self._lock:
-            self._last_delivery[uid] = at
-        self._calendar.log(at, uid, "schedule_delivery", {"trigger": trigger})
-        result = self._with_call_id(lambda: self._send({"reader_uid": uid}))
+        """Send a reader its schedule. The caller has reserved it (_reserve)."""
+        try:
+            self._calendar.log(at, uid, "schedule_delivery", {"trigger": trigger})
+            result = self._with_call_id(lambda: self._send({"reader_uid": uid}))
+        finally:
+            with self._lock:
+                self._sending.discard(uid)
         if result.failure is None:
             with self._lock:
                 self._last_action = (at, "schedule sent")

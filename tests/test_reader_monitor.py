@@ -155,6 +155,27 @@ class MonitorTests(unittest.TestCase):
         monitor.on_event("roomreader/schedule_request", DEVICE, '{"v":""}', "t")
         self.assertEqual(sum(call["op"] == "commit" for call in particle.calls), 1)
 
+    def test_a_request_during_a_send_does_not_start_a_second_one(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        original = particle.call_function
+        nested = []
+
+        def call(*arguments):
+            # Mid-send, the same reader asks again (another stream) and the
+            # regular check runs: neither may start a second send.
+            if not nested:
+                nested.append(True)
+                self.now[0] += timedelta(minutes=15)
+                monitor.on_event("roomreader/schedule_request", DEVICE, "{}", "t")
+                monitor.cycle()
+            return original(*arguments)
+
+        particle.call_function = call
+        monitor.on_event("roomreader/schedule_request", DEVICE, "{}", "t")
+        self.assertEqual(sum(c["op"] == "begin" for c in particle.calls), 1)
+        self.assertEqual(self.steps().count("schedule_delivery"), 1)
+
     def test_other_events_are_ignored(self) -> None:
         particle = Particle()
         monitor = self.build(particle)
