@@ -471,8 +471,9 @@ def build_reader_executors(
                              "message": position, "return_value": answer},
                 )
         event_ids = tuple(item.event_id for item in chosen)
-        calendar.record_sent(reader_uid, version, at, event_ids,
-                             tuple(session_fingerprint(item) for item in chosen))
+        calendar.record_sent(reader_uid, version, at, event_ids, tuple(
+            {"fp": session_fingerprint(item), "en": int(item.ends_at.timestamp())}
+            for item in chosen))
         return CapabilityResult(
             call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.SUCCEEDED,
             {"reader_uid": reader_uid, "version": version, "sent_at": at.isoformat(),

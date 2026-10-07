@@ -52,8 +52,12 @@ READERS = (
     {"reader_uid": "c471cf5a", "online": False},
 )
 ONLINE = tuple({**item, "online": True} for item in READERS)
-HOLDING = {uid: {"fingerprints": tuple(session_fingerprint(item) for item in DAY
-                                        if item.reader_uid == uid)}
+def held(*sessions):
+    return {"held": tuple({"fp": session_fingerprint(item), "en": int(item.ends_at.timestamp())}
+                          for item in sessions)}
+
+
+HOLDING = {uid: held(*(item for item in DAY if item.reader_uid == uid))
            for uid in ("ab2d5218", "c471cf5a")}
 
 
@@ -92,7 +96,7 @@ class ComposeTileTests(unittest.TestCase):
     def test_offline_between_distant_events_is_yellow(self) -> None:
         sessions = (session("c471cf5a", 1, at(9), at(10)), session("c471cf5a", 2, at(16), at(17)))
         data = tile(at(12), sessions=sessions,
-                    sent={"c471cf5a": {"fingerprints": (session_fingerprint(sessions[1]),)}})
+                    sent={"c471cf5a": held(sessions[1])})
         self.assertEqual((data["tone"], data["chips"][0]["tone"]), ("warn", "warn"))
         self.assertEqual(data["state"]["detail"], "Next event at 16:00")
 
@@ -103,11 +107,32 @@ class ComposeTileTests(unittest.TestCase):
         self.assertEqual((data["tone"], data["state"]["title"]),
                          ("warn", "Schedules not confirmed"))
 
+    def test_an_event_moved_earlier_still_runs_on_the_reader(self) -> None:
+        accepted = session("ab2d5218", 1, at(14), at(15))
+        later = session("ab2d5218", 2, at(16), at(17))
+        moved = (session("ab2d5218", 1, at(12), at(13)), later)
+        data = tile(at(14, 10), sessions=moved, readers=ONLINE[:1],
+                    sent={"ab2d5218": held(accepted, later)})
+        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
+
+    def test_an_event_deleted_from_the_calendar_still_runs_on_the_reader(self) -> None:
+        kept = session("ab2d5218", 2, at(16), at(17))
+        data = tile(at(14, 10), sessions=(kept,), readers=ONLINE[:1],
+                    sent={"ab2d5218": held(session("ab2d5218", 1, at(14), at(15)), kept)})
+        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
+
+    def test_events_that_ended_on_both_sides_do_not_count(self) -> None:
+        done = session("ab2d5218", 1, at(9), at(10))
+        kept = session("ab2d5218", 2, at(16), at(17))
+        data = tile(at(14, 10), sessions=(done, kept), readers=ONLINE[:1],
+                    sent={"ab2d5218": held(done, kept)})
+        self.assertEqual(data["tone"], "ok")
+
     def test_a_change_the_reader_would_never_see_stays_confirmed(self) -> None:
         long_title = "T" * 64
         sent = (session("ab2d5218", 1, at(14, 5), at(15, 5), title=long_title + " (draft)"),)
         now = (session("ab2d5218", 1, at(14, 5), at(15, 5), title=long_title + " (final)"),)
-        record = {"ab2d5218": {"fingerprints": (session_fingerprint(sent[0]),)}}
+        record = {"ab2d5218": held(sent[0])}
         data = tile(at(14, 10), sessions=now, readers=ONLINE, sent=record)
         self.assertEqual(data["tone"], "ok")
 
@@ -160,14 +185,14 @@ class ComposeTileTests(unittest.TestCase):
             calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
             calendar.replace(at(14), list(ONLINE), list(DAY), ())
             for uid in ("ab2d5218", "c471cf5a"):
-                calendar.record_sent(uid, "v1", at(13), (1, 2), HOLDING[uid]["fingerprints"])
+                calendar.record_sent(uid, "v1", at(13), (1, 2), HOLDING[uid]["held"])
             data = tile_source(calendar, lambda: at(14, 10), UTC)()
             calendar.close()
         self.assertEqual(data["tone"], "ok")
 
 
 class SentRecordTests(unittest.TestCase):
-    def test_a_record_from_before_fingerprints_confirms_nothing(self) -> None:
+    def test_a_record_from_before_this_check_confirms_nothing(self) -> None:
         import sqlite3
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "calendar.sqlite3"
@@ -180,7 +205,7 @@ class SentRecordTests(unittest.TestCase):
             calendar = SQLiteReaderCalendar(path)
             record = calendar.sent("ab2d5218")
             calendar.close()
-        self.assertEqual(record["fingerprints"], ())
+        self.assertEqual(record["held"], ())
         self.assertEqual(tile(at(14, 10), readers=ONLINE, sent={"ab2d5218": record,
                                                                 "c471cf5a": HOLDING["c471cf5a"]})
                          ["state"]["title"], "Schedules not confirmed")
