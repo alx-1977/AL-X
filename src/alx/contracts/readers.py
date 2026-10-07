@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Protocol
@@ -50,6 +52,18 @@ class ReaderSession:
     last_name: str
     hbd: int
     offset_hours: int
+
+
+def session_fingerprint(session: ReaderSession) -> str:
+    """Everything a reader is told about one session, as one comparable value.
+
+    A sent schedule is confirmed against the calendar by these, so an event
+    whose time, room or text changed under the same ID no longer matches.
+    """
+    fields = [session.reader_uid, session.event_id, session.room, session.mode,
+              session.starts_at.isoformat(), session.ends_at.isoformat(), session.title,
+              session.first_name, session.last_name, session.hbd, session.offset_hours]
+    return hashlib.sha256(json.dumps(fields, ensure_ascii=False).encode()).hexdigest()[:16]
 
 
 class ReaderFleet(Protocol):

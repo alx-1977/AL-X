@@ -8,7 +8,8 @@ tile is a view of facts AL/X already holds, coloured by rules Friedl set
 - red: a reader whose event is running, or starts within 30 minutes, is
   offline;
 - yellow: anything else not confirmed: a reader offline with no event close,
-  a reader that has not accepted today's remaining schedule from AL/X, or
+  a reader that has not accepted today's remaining events from AL/X exactly
+  as the calendar now has them, or
   schedules that could not be read from BehaviorLive for 15 minutes;
 - green: every reader in use today is online and holds today's schedule, and
   the schedules are current.
@@ -24,7 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
-from alx.contracts.readers import ReaderSession
+from alx.contracts.readers import ReaderSession, session_fingerprint
 
 
 # Friedl's rules, 2026-10-07.
@@ -46,9 +47,13 @@ def _count(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
-def _holds_today(record: Mapping[str, Any], remaining: set[int]) -> bool:
-    """The reader accepted a schedule from AL/X carrying every event it has left."""
-    return remaining <= set(record.get("event_ids") or ())
+def _holds_today(record: Mapping[str, Any], remaining: Sequence[ReaderSession]) -> bool:
+    """The reader accepted from AL/X every event it has left, exactly as the calendar has it.
+
+    Compared by content, not ID: an event moved or renamed under the same ID
+    since it was sent is not confirmed.
+    """
+    return {session_fingerprint(item) for item in remaining} <= set(record.get("fingerprints") or ())
 
 
 def compose_tile(
@@ -84,8 +89,8 @@ def compose_tile(
     ]
     unconfirmed = [
         uid for uid in in_use
-        if not _holds_today(sent.get(uid) or {}, {
-            item.event_id for item in today if item.reader_uid == uid and item.ends_at > now})
+        if not _holds_today(sent.get(uid) or {}, [
+            item for item in today if item.reader_uid == uid and item.ends_at > now])
     ]
     read_times = [datetime.fromisoformat(summary.get(uid, {}).get("schedule_as_of") or refreshed_at)
                   for uid in in_use]
