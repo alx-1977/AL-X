@@ -42,7 +42,9 @@ from alx.contracts.readers import (
     ReaderControl,
     ReaderDevice,
     ReaderFleet,
+    TITLE_CHARACTERS,
     ReaderSession,
+    reader_event,
     session_fingerprint,
 )
 
@@ -57,8 +59,6 @@ SEND_READER_SCHEDULE = "send_reader_schedule"
 SCHEDULE_FUNCTION = "schedule"
 MAX_MESSAGE_BYTES = 600
 MAX_SCHEDULE_EVENTS = 32
-TITLE_CHARACTERS = 64
-NAME_CHARACTERS = 32
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _OBJECT = StructuredSchema(ValueKind.OBJECT)
@@ -273,13 +273,7 @@ def schedule_messages(
     The version is a digest of exactly what the reader will hold, so the same
     schedule always has the same version and any change gives a new one.
     """
-    events = [
-        {"id": item.event_id, "st": int(item.starts_at.timestamp()),
-         "en": int(item.ends_at.timestamp()), "t": item.title[:TITLE_CHARACTERS],
-         "fn": item.first_name[:NAME_CHARACTERS], "ln": item.last_name[:NAME_CHARACTERS],
-         "hbd": item.hbd}
-        for item in sessions
-    ]
+    events = [reader_event(item) for item in sessions]
     header = {"n": len(events), "m": mode, "r": room[:TITLE_CHARACTERS], "o": offset_hours}
     version = hashlib.sha256(_message({**header, "events": events}).encode()).hexdigest()[:8]
     messages = [_message({"op": "begin", "v": version, **header})]

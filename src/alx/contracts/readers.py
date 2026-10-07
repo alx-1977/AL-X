@@ -54,16 +54,32 @@ class ReaderSession:
     offset_hours: int
 
 
+# What a reader stores of an event's text (docs/READER_SCHEDULE_PROTOCOL.md).
+TITLE_CHARACTERS = 64
+NAME_CHARACTERS = 32
+
+
+def reader_event(session: ReaderSession) -> dict[str, Any]:
+    """One session exactly as a reader is sent it: whole seconds, text cut to fit."""
+    return {
+        "id": session.event_id, "st": int(session.starts_at.timestamp()),
+        "en": int(session.ends_at.timestamp()), "t": session.title[:TITLE_CHARACTERS],
+        "fn": session.first_name[:NAME_CHARACTERS], "ln": session.last_name[:NAME_CHARACTERS],
+        "hbd": session.hbd,
+    }
+
+
 def session_fingerprint(session: ReaderSession) -> str:
     """Everything a reader is told about one session, as one comparable value.
 
-    A sent schedule is confirmed against the calendar by these, so an event
-    whose time, room or text changed under the same ID no longer matches.
+    Built from what is sent, not from the calendar's full values, so a sent
+    schedule is confirmed exactly when a resend would deliver the same thing,
+    and an event whose time, room or text changed under the same ID is not.
     """
-    fields = [session.reader_uid, session.event_id, session.room, session.mode,
-              session.starts_at.isoformat(), session.ends_at.isoformat(), session.title,
-              session.first_name, session.last_name, session.hbd, session.offset_hours]
-    return hashlib.sha256(json.dumps(fields, ensure_ascii=False).encode()).hexdigest()[:16]
+    fields = [session.reader_uid, session.room[:TITLE_CHARACTERS], session.mode,
+              session.offset_hours, reader_event(session)]
+    return hashlib.sha256(
+        json.dumps(fields, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
 
 
 class ReaderFleet(Protocol):

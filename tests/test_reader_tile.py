@@ -103,6 +103,14 @@ class ComposeTileTests(unittest.TestCase):
         self.assertEqual((data["tone"], data["state"]["title"]),
                          ("warn", "Schedules not confirmed"))
 
+    def test_a_change_the_reader_would_never_see_stays_confirmed(self) -> None:
+        long_title = "T" * 64
+        sent = (session("ab2d5218", 1, at(14, 5), at(15, 5), title=long_title + " (draft)"),)
+        now = (session("ab2d5218", 1, at(14, 5), at(15, 5), title=long_title + " (final)"),)
+        record = {"ab2d5218": {"fingerprints": (session_fingerprint(sent[0]),)}}
+        data = tile(at(14, 10), sessions=now, readers=ONLINE, sent=record)
+        self.assertEqual(data["tone"], "ok")
+
     def test_a_stale_bhl_link_is_yellow(self) -> None:
         data = tile(at(14, 16), readers=ONLINE, sent=HOLDING)
         self.assertEqual(data["tone"], "warn")
