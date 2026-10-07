@@ -345,11 +345,12 @@ FIND_QUOTES_DEFINITION = CapabilityDefinition(
 # are AL/X's judgement from the PO; this performs only the decided steps.
 INVOICE_QUOTE_DEFINITION = CapabilityDefinition(
     INVOICE_XERO_QUOTE,
-    "Invoice one Xero sales quote as a DRAFT sales invoice for the purchase order that accepts it: marks a SENT quote ACCEPTED, creates the draft invoice with the quote's customer, currency and lines and the PO number as its reference, attaches the PO document from mail verified byte for byte, checks the invoice reads back with the quote's totals, then marks the quote INVOICED. Never approves or sends the invoice. A quote in DRAFT or DECLINED, an existing invoice for that PO that differs, or totals that disagree return to you unposted. Rerunning resumes a matching draft rather than creating another.",
+    "Invoice one Xero sales quote as a DRAFT sales invoice for the purchase order that accepts it. po_total is the total the PO itself states, read from the PO document with read_mail_document, never taken from a filename or the quote; if you cannot read the PO, ask Friedl instead of calling this. A quote whose total differs from po_total returns unposted before anything is written. Otherwise it marks a SENT quote ACCEPTED, creates the draft invoice with the quote's customer, currency and lines and the PO number as its reference, attaches the PO document from mail verified byte for byte, checks the invoice reads back with the quote's totals, then marks the quote INVOICED. Never approves or sends the invoice. A quote in DRAFT or DECLINED, an existing invoice for that PO that differs, or totals that disagree return to you unposted. Rerunning resumes a matching draft rather than creating another.",
     _object(
         {
             "quote_id": _STRING,
             "po_number": _STRING,
+            "po_total": _STRING,
             "po_document": _object(
                 {
                     "mailbox_id": _STRING,
@@ -362,7 +363,7 @@ INVOICE_QUOTE_DEFINITION = CapabilityDefinition(
                  "expected_sha256"),
             ),
         },
-        ("quote_id", "po_number", "po_document"),
+        ("quote_id", "po_number", "po_total", "po_document"),
     ),
     _object(
         {
@@ -1001,8 +1002,11 @@ def _invoice_disagrees_with_quote(
             f"{len(quote_lines)}"
         )
     for index, (wanted, got) in enumerate(zip(quote_lines, invoice_lines), 1):
-        if _comparable_line(wanted) != _comparable_line(got):
-            return f"invoice line {index} differs from the quote"
+        for field, expected, found in zip(
+            _QUOTE_LINE_FIELDS, _comparable_line(wanted), _comparable_line(got)
+        ):
+            if expected != found:
+                return f"invoice line {index} {field} differs from the quote"
     return ""
 
 
@@ -1026,7 +1030,7 @@ def _quote_altered(
 def _comparable_line(line: Any) -> tuple[Any, ...]:
     """A line's quote-derived fields, normalised the way Xero reports them."""
     if not isinstance(line, Mapping):
-        return ("unreadable",)
+        return ("unreadable",) * len(_QUOTE_LINE_FIELDS)
     values: list[Any] = []
     for name in _QUOTE_LINE_FIELDS:
         value = line.get(name)
@@ -1038,7 +1042,11 @@ def _comparable_line(line: Any) -> tuple[Any, ...]:
             )
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
             value = Decimal(str(value)).normalize()
-        elif value in (None, "", []):
+        elif isinstance(value, str):
+            # Xero trims surrounding whitespace on an invoice: BlueNova's
+            # quote line ended "Conformal coating " and INV-0590's did not.
+            value = value.strip() or None
+        elif value in (None, []):
             value = None
         values.append(value)
     return tuple(values)
@@ -1800,6 +1808,12 @@ def build_xero_executors(
         try:
             quote_id = _required(arguments, "quote_id")
             po_number = _required(arguments, "po_number")
+            try:
+                po_total = Decimal(_required(arguments, "po_total")).quantize(
+                    Decimal("0.01")
+                )
+            except InvalidOperation:
+                raise ValueError("po_total") from None
             document = arguments.get("po_document")
             if not isinstance(document, Mapping):
                 raise ValueError("po_document")
@@ -1830,6 +1844,14 @@ def build_xero_executors(
                 raise XeroAccessError("response_invalid")
             quote_total = _money_value(quote_record.get("Total"))
             steps.append("read_quote")
+            # On 2026-10-06 a PO for R16,707.20 was matched by attachment
+            # filename to a quote of R8,964.25. The PO's own total decides.
+            if quote_total != po_total:
+                return result(
+                    False, "po_total_mismatch",
+                    f"the PO states {po_total} but quote "
+                    f"{quote_record.get('QuoteNumber')} totals {quote_total}",
+                )
 
             existing = [
                 item for item in account.sales_invoices_for_contact(contact_id)

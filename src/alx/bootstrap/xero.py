@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from alx.config import LlamaParseSettings, XeroSettings
 from alx.contracts import CapabilityDefinition, CapabilityResult, MailAccount, StructuredData
-from alx.providers import LlamaParseInvoiceExtractor, SQLiteXeroOAuth, XeroAccountingAdapter
+from alx.providers import LlamaParseExtractor, SQLiteXeroOAuth, XeroAccountingAdapter
 from alx.providers.dhl import classify_dhl_document
 from alx.safety import AuthorityPolicy
 from alx.specialists import ANSWER_SCHEMA, INSTRUCTION, checked_invoice
@@ -76,7 +76,7 @@ def build_supplier_invoice_extractor(
     """
     if not settings.is_usable:
         return None
-    adapter = LlamaParseInvoiceExtractor(
+    adapter = LlamaParseExtractor(
         settings.api_key,
         settings.base_url,
         settings.timeout_seconds,

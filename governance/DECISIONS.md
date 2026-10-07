@@ -2334,3 +2334,31 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Scope.** The existing `accounting.invoices` and `accounting.attachments` OAuth scopes cover quotes, sales invoices and their attachments. No scope changes.
 - **Boundary.** No sales invoice is approved or sent, and no other sales document, payment, credit note or bank action is authorised. No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 - **Review condition.** Revisit before allowing APPROVED invoices; if an invoice is created against the wrong quote or customer; or if a quote's status is changed without its invoice existing.
+
+## D-038 — Reading mailed commercial documents
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-06/07.**
+  - On 2026-10-06 AL/X could not read BlueNova's purchase order. Mail extraction found no text in it, and LlamaParse was wired only into supplier-bill capture. She matched the PO to a quote by the attachment's filename, and a R16,707.20 PO was invoiced against a R8,964.25 quote.
+  - Friedl: "we use Lamaparse for parsing PDFs. There should be no reason for ALX not to be able to read those PDFs … Then this should be implemented", and on 2026-10-07 asked for it to be built.
+- **Authority.** AL/X may have one exact mail attachment (a PDF or image, identified by mailbox, message, attachment and SHA-256) read by LlamaCloud. The value returned is what the document states, in a fixed schema:
+  - type, number, issuer and recipient;
+  - date and currency;
+  - the document numbers it cites;
+  - subtotal, tax and total;
+  - every line.
+- **What AL/X decides.** What the document is for, what it matches and what follows from it. The reader decides nothing.
+- **Deterministic sequence under Law 2.** `read_mail_document`:
+  1. Reads the attachment.
+  2. Refuses it unless its digest matches.
+  3. Has LlamaCloud extract it against `DOCUMENT_SCHEMA` (upload, extract, poll, as supplier capture already does).
+  4. Returns only the schema's fields, bounded, as mail content under D-013.
+
+  Its own permission is `document.read`. No mail or Xero permission grants it.
+- **Scope.** The document leaves for LlamaCloud on the same terms as supplier-bill capture's documents. No other provider receives it.
+- **Boundary.** Read only. Nothing is written, sent or filed. No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+### Amendment to D-037 — the PO's total decides
+
+`invoice_xero_quote` requires `po_total`: the total the purchase order states, read from the PO with `read_mail_document`. A quote whose total differs returns `po_total_mismatch` before anything is written. If AL/X cannot read the PO, she asks Friedl instead of invoicing.

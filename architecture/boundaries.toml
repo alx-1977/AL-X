@@ -262,3 +262,11 @@ description = "One sent or accepted Xero sales quote becomes a DRAFT sales invoi
 # by hand.
 entry = "tools/xero.py::build_xero_executors.<locals>.invoice_quote"
 forbidden = []
+
+[[outcomes]]
+id = "mail.document_is_read"
+description = "What one mailed commercial document states is read into a fixed schema."
+# D-038. Nothing was superseded: before it AL/X could read only supplier
+# invoices, inside capture_supplier_invoice.
+entry = "tools/documents.py::build_document_executors.<locals>.read_document"
+forbidden = []

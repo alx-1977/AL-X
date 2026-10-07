@@ -120,6 +120,7 @@ def arguments(**changes) -> dict:
     values = {
         "quote_id": "quote-1",
         "po_number": "PO-7781",
+        "po_total": "1150.00",
         "po_document": {
             "mailbox_id": "INBOX", "uid_validity": "777", "uid": "60500",
             "attachment_id": "2", "expected_sha256": PO_DIGEST,
@@ -234,6 +235,26 @@ class QuoteToInvoiceTests(unittest.TestCase):
         self.assertEqual(result.values["returned_for"], "read_back_mismatch")
         self.assertNotIn("INVOICED", xero.status_changes)
 
+    def test_whitespace_xero_trims_is_not_a_difference(self) -> None:
+        """INV-0590 matched its quote except a trailing space Xero removed."""
+        xero = QuotingXero()
+        xero.quote["LineItems"] = [{**LINES[0], "Description": "Sensor boards\n- Including DHL "}]
+        original = xero.create_draft_sales_invoice
+
+        def trimming(invoice):
+            created = original(invoice)
+            stored = xero.invoices[created["InvoiceID"]]
+            stored["LineItems"] = [
+                {**line, "Description": line["Description"].strip()}
+                for line in invoice["LineItems"]
+            ]
+            return created
+
+        xero.create_draft_sales_invoice = trimming
+        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(xero.status_changes, ["ACCEPTED", "INVOICED"])
+
     def test_a_resumed_draft_with_edited_lines_is_not_accepted(self) -> None:
         """Equal totals are not equal lines."""
         xero = QuotingXero("ACCEPTED")
@@ -248,6 +269,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
         }
         result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
         self.assertEqual(result.values["returned_for"], "read_back_mismatch")
+        self.assertIn("Description", result.values["detail"])
         self.assertNotIn("INVOICED", xero.status_changes)
 
     def test_a_refused_invoice_leaves_the_quote_untouched(self) -> None:
@@ -281,6 +303,23 @@ class QuoteToInvoiceTests(unittest.TestCase):
         self.assertEqual(result.values["returned_for"], "quote_status_not_updated")
         self.assertIn("QU-0140", result.values["detail"])
         self.assertEqual(xero.status_changes, ["ACCEPTED"], "it stops at the first")
+
+    def test_a_po_whose_total_differs_from_the_quote_writes_nothing(self) -> None:
+        """BlueNova's R16,707.20 PO was matched to a R8,964.25 quote."""
+        xero = QuotingXero()
+        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments(po_total="16707.20"))
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "po_total_mismatch")
+        self.assertIn("16707.20", result.values["detail"])
+        self.assertEqual((xero.created, xero.status_changes), ([], []))
+
+    def test_an_unreadable_po_total_is_refused(self) -> None:
+        for value in ("", "about R1150", "1,150.00"):
+            with self.subTest(value=value):
+                result = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](
+                    arguments(po_total=value)
+                )
+                self.assertEqual(result.failure["code"], "arguments_unusable")
 
     def test_an_unknown_quote_is_a_declared_failure(self) -> None:
         result = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](

@@ -42,7 +42,7 @@ from alx.providers.llamaparse import (  # noqa: E402
     EXTRACT_TIER,
     EXTRACT_VERSION,
     FILES_PATH,
-    LlamaParseInvoiceExtractor,
+    LlamaParseExtractor,
     MAX_DOCUMENT_BYTES,
 )
 from alx.specialists import ANSWER_SCHEMA, INSTRUCTION, checked_invoice  # noqa: E402
@@ -148,10 +148,10 @@ def _request_timeout(request: httpx.Request) -> float:
     raise AssertionError(f"request carried no timeout: {value!r}")
 
 
-def extractor(cloud: LlamaCloud, **changes) -> LlamaParseInvoiceExtractor:
+def extractor(cloud: LlamaCloud, **changes) -> LlamaParseExtractor:
     clock = changes.pop("clock", Clock())
     sleeper = changes.pop("sleeper", lambda seconds: clock.advance(seconds))
-    return LlamaParseInvoiceExtractor(
+    return LlamaParseExtractor(
         API_KEY,
         "https://api.cloud.llamaindex.ai",
         changes.pop("timeout_seconds", 60),
@@ -431,7 +431,7 @@ class LlamaParseAdapterTests(unittest.TestCase):
                 clock.advance(10)
             return response
 
-        adapter = LlamaParseInvoiceExtractor(
+        adapter = LlamaParseExtractor(
             API_KEY,
             "https://api.cloud.llamaindex.ai",
             10,
@@ -459,7 +459,7 @@ class LlamaParseAdapterTests(unittest.TestCase):
                 clock.advance(8)
             return response
 
-        adapter = LlamaParseInvoiceExtractor(
+        adapter = LlamaParseExtractor(
             API_KEY,
             "https://api.cloud.llamaindex.ai",
             10,
@@ -508,7 +508,7 @@ class LlamaParseAdapterTests(unittest.TestCase):
             def request(self, *_args, **_kwargs):
                 raise httpx.InvalidURL("malformed")
 
-        adapter = LlamaParseInvoiceExtractor(
+        adapter = LlamaParseExtractor(
             API_KEY,
             "https://api.cloud.llamaindex.ai",
             60,
@@ -545,7 +545,7 @@ class LlamaParseAdapterTests(unittest.TestCase):
         def fail(_request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError(f"connecting with {API_KEY} for {INVOICE_TEXT}")
 
-        adapter = LlamaParseInvoiceExtractor(
+        adapter = LlamaParseExtractor(
             API_KEY,
             "https://api.cloud.llamaindex.ai",
             60,

@@ -1,6 +1,8 @@
-"""LlamaCloud structured invoice extraction behind a thin HTTP adapter.
+"""LlamaCloud structured document extraction behind a thin HTTP adapter.
 
-This reads one document into AL/X's existing invoice field mapping and stops.
+This reads one document against a caller-supplied schema and stops. For a
+supplier invoice it maps the answer into AL/X's invoice fields; for any other
+commercial document it returns the schema's values as read.
 It does not choose a supplier, an account, a tax treatment, or whether a bill
 should exist. Those remain Core judgment or deterministic capture code.
 
@@ -69,8 +71,8 @@ _IMAGE_SUFFIXES = frozenset(
 )
 
 
-class LlamaParseInvoiceExtractor:
-    """Extract one supplier invoice through LlamaCloud, then return fields."""
+class LlamaParseExtractor:
+    """Extract one document through LlamaCloud against one fixed schema."""
 
     def __init__(
         self,
@@ -119,6 +121,12 @@ class LlamaParseInvoiceExtractor:
         context_line: str = "",
     ) -> dict[str, str]:
         """Return AL/X invoice fields from one document. Decide nothing."""
+        return _invoice_fields(self.read(payload, media_type, filename))
+
+    def read(
+        self, payload: bytes, media_type: str, filename: str
+    ) -> Mapping[str, Any]:
+        """Return the schema's values exactly as extracted. Decide nothing."""
         if not isinstance(payload, (bytes, bytearray)) or not payload:
             raise SpecialistError("document_has_no_text")
         if len(payload) > MAX_DOCUMENT_BYTES:
@@ -138,8 +146,7 @@ class LlamaParseInvoiceExtractor:
             bytes(payload), media_type, safe_name, deadline
         )
         job_id = self._start_extract(file_id, project_id, deadline)
-        result = self._poll_extract(job_id, project_id, deadline)
-        return _invoice_fields(result)
+        return self._poll_extract(job_id, project_id, deadline)
 
     def _headers(self) -> dict[str, str]:
         return {
