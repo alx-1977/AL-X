@@ -1,10 +1,10 @@
-"""The AL/X status tile is a static UI shell served beside the voice page.
+"""The AL/X status tile is one compact card served beside the voice page.
 
-One reusable card renders every state from data. These tests pin what the
-shell may be: its files are served from the one explicit asset table, the BHL
-healthy and issue fixtures exist, PSUs are shown as in development rather
-than monitored, the card offers no navigation or drill-down control, and both
-states go through the same renderer rather than per-state markup.
+One reusable card renders every state from data. These tests pin what it may
+be: its files are served from the one explicit asset table, the three states
+Friedl approved (green, yellow, red) exist as fixtures, device types are small
+chips rather than blocks, the card offers no navigation or drill-down
+control, and every state goes through the same renderer.
 """
 
 from pathlib import Path
@@ -26,7 +26,6 @@ TILE_ROUTES = {
     "/tile.css": "text/css",
     "/tile.js": "javascript",
     "/tile-fixtures.js": "javascript",
-    "/tile-bhl-venue.jpg": "image/jpeg",
 }
 
 
@@ -58,29 +57,28 @@ class StatusTileAssetTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(media, response.headers["Content-Type"])
 
-    def test_healthy_and_issue_fixtures_exist(self) -> None:
-        healthy = _fixture("healthy")
-        issue = _fixture("issue")
+    def test_the_three_approved_states_exist(self) -> None:
+        healthy, warning, fault = _fixture("healthy"), _fixture("warning"), _fixture("fault")
+        self.assertIn("tone: 'ok'", healthy)
         self.assertIn("'All systems normal'", healthy)
-        self.assertIn("'25/25'", healthy)
-        self.assertIn("'1 issue detected'", issue)
-        self.assertIn("'Room reader R07 offline'", issue)
-        self.assertIn("'24/25'", issue)
-        self.assertIn("tone: 'attention'", issue)
+        self.assertIn("tone: 'warn'", warning)
+        self.assertIn("'not monitoring yet', idle: true", warning)
+        self.assertIn("tone: 'bad'", fault)
+        self.assertIn("'27/30'", fault)
 
-    def test_psus_are_in_development_and_not_monitored(self) -> None:
-        text = _read("tile-fixtures.js")
-        self.assertIn(
-            "{ icon: 'plug', label: 'PSUs', tone: 'disabled', note: 'In development' }",
-            text,
-        )
-        for state in ("healthy", "issue"):
-            with self.subTest(state=state):
-                self.assertIn("PSUS", _fixture(state))
-        # A disabled fact renders no value and no status dot.
+    def test_device_types_are_chips_not_blocks(self) -> None:
         renderer = _read("tile.js")
-        self.assertIn("const monitored = fact.tone !== 'disabled';", renderer)
-        self.assertIn("if (monitored) item.append(el('span', 'alx-tile__dot'));", renderer)
+        self.assertIn("data.chips.map(buildChip)", renderer)
+        self.assertNotIn("facts", renderer)
+        self.assertNotIn("visual", renderer)
+        # Four device chips fit the same card that two do.
+        self.assertEqual(_fixture("fault").count("icon:"), 3)
+        self.assertIn("width: 25em;", _read("tile.css"))
+
+    def test_every_chip_has_a_spoken_name(self) -> None:
+        self.assertIn("item.setAttribute('aria-label'", _read("tile.js"))
+        text = _read("tile-fixtures.js")
+        self.assertEqual(text.count("icon: '"), text.count("label: '"))
 
     def test_tile_offers_no_navigation_or_drill_down_control(self) -> None:
         for name in ("tiles.html", "tile.js", "tile-fixtures.js"):
@@ -97,7 +95,7 @@ class StatusTileAssetTests(unittest.TestCase):
         renderer = _read("tile.js")
         fixtures = _read("tile-fixtures.js")
         # The renderer knows no state or domain; it only reads data.
-        for word in ("healthy", "issue", "BHL", "normal", "R07"):
+        for word in ("healthy", "warning", "fault", "BHL", "normal", "offline"):
             self.assertNotIn(word, renderer.split("const svg")[1])
         # The page has one entry into it, and no markup of its own per state.
         self.assertEqual(fixtures.count("surfaceTile("), 1)

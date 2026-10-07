@@ -1,43 +1,41 @@
 // Static fixtures for the AL/X status tile, and the page that shows them.
 //
-// UI shell only: nothing here reads Particle, the BHL APIs or a live device.
-// Both BHL states are plain data for the one renderer in tile.js; `?state=`
-// picks one, and there is no on-screen control. The visual is a placeholder
-// cropped from the design reference in docs/Tile example.
+// Sample data only: nothing here reads Particle, BehaviorLive or a device.
+// The three states Friedl approved on 2026-10-07 are plain data for the one
+// renderer in tile.js; `?state=` picks one, and there is no on-screen control.
 
 import { surfaceTile } from '/tile.js';
 
-const BHL = {
-  visual: { src: '/tile-bhl-venue.jpg', alt: '' },
-  icon: 'device',
-  title: 'BHL Event Hardware',
-  subtitle: 'Hardware operations',
-  place: 'Cape Town, South Africa',
-};
-
-const PSUS = { icon: 'plug', label: 'PSUs', tone: 'disabled', note: 'In development' };
+const LINK_OK = { icon: 'link', value: 'BHL link', tone: 'ok', label: 'Schedules read from BehaviorLive' };
 
 const FIXTURES = {
   healthy: {
-    ...BHL,
     tone: 'ok',
-    activity: 'Monitoring',
-    state: { title: 'All systems normal' },
-    facts: [
-      { icon: 'scanner', value: '10/10', label: 'Registration Scanners', tone: 'ok' },
-      { icon: 'reader', value: '25/25', label: 'Room Readers', tone: 'ok' },
-      PSUS,
-    ],
+    name: 'BHL',
+    context: '5 events today · Majestic',
+    state: { title: 'All systems normal', detail: 'Event under way until 17:05' },
+    alx: { text: 'monitoring' },
+    chips: [{ icon: 'reader', value: '2/2', tone: 'ok', label: 'Room readers online' }, LINK_OK],
   },
-  issue: {
-    ...BHL,
-    tone: 'attention',
-    activity: 'AL/X is attempting recovery',
-    state: { title: '1 issue detected', detail: 'Room reader R07 offline' },
-    facts: [
-      { icon: 'scanner', value: '10/10', label: 'Registration Scanners', tone: 'ok' },
-      { icon: 'reader', value: '24/25', label: 'Room Readers', tone: 'attention' },
-      PSUS,
+  warning: {
+    tone: 'warn',
+    name: 'BHL',
+    context: '5 events today · Majestic',
+    state: { title: '2 room readers offline', detail: 'First event at 16:05 · schedules not confirmed' },
+    alx: { text: 'not monitoring yet', idle: true },
+    chips: [{ icon: 'reader', value: '0/2', tone: 'warn', label: 'Room readers online' }, LINK_OK],
+  },
+  fault: {
+    tone: 'bad',
+    name: 'BHL',
+    context: '42 events today · 15 rooms',
+    state: { title: '3 room readers offline', detail: '9 rooms in session · next starts 15:30 (6 rooms)' },
+    alx: { text: 'restarted 1 · client alerted 15:12' },
+    chips: [
+      { icon: 'reader', value: '27/30', tone: 'bad', label: 'Room readers online' },
+      { icon: 'scanner', value: '10/10', tone: 'ok', label: 'Registration scanners online' },
+      { icon: 'plug', value: '5/5', tone: 'ok', label: 'PSUs online' },
+      LINK_OK,
     ],
   },
 };
