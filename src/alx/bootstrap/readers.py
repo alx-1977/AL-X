@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -140,6 +141,17 @@ AUTOMATIC_DELIVERY_GAP = timedelta(minutes=10)
 # A reader's own report older than this no longer says what it is doing now.
 CHECK_FRESH_FOR = timedelta(minutes=15)
 REQUEST_EVENT = "roomreader/schedule_request"
+# Every event a reader publishes starts with this. Hearing any of them (a
+# scan, a battery report, a request) shows the reader is connected; listening
+# costs no data operations.
+READER_EVENTS = "roomreader"
+# Each reader in use is pinged this often. A ping is free of data operations
+# and costs about 122 bytes; Particle gives up on an unanswered one after about
+# 30 seconds, so a reader that loses power shows offline within ~90 seconds.
+PING_INTERVAL_SECONDS = 60
+# Heard from or answered a ping within this long: online, whatever Particle's
+# device list says (it can lag a lost connection by most of an hour).
+PRESENCE_FRESH_FOR = timedelta(minutes=3)
 STATUS_VARIABLE = "status"
 
 
@@ -167,6 +179,10 @@ class ReaderMonitor:
         self._last_delivery: dict[str, datetime] = {}
         self._checks: dict[str, dict[str, Any]] = {}
         self._online: dict[str, bool] = {}
+        # When each reader was last heard from (any event, a ping answered, a
+        # status read), and the last ping's answer.
+        self._seen: dict[str, datetime] = {}
+        self._pinged: dict[str, tuple[bool, datetime]] = {}
         self._last_outcome: dict[str, str] = {}
         self._last_cycle: datetime | None = None
         # Readers whose firmware has no schedule function (V1). Not pushed to
@@ -180,8 +196,81 @@ class ReaderMonitor:
 
     def checks(self, at: datetime) -> dict[str, dict[str, Any]]:
         with self._lock:
-            return {uid: {**check, "fresh": at - check["at"] <= CHECK_FRESH_FOR}
-                    for uid, check in self._checks.items()}
+            known = set(self._checks) | set(self._seen) | set(self._pinged)
+            result: dict[str, dict[str, Any]] = {}
+            for uid in known:
+                check = dict(self._checks.get(uid, {}))
+                if "at" in check:
+                    check["fresh"] = at - check["at"] <= CHECK_FRESH_FOR
+                presence = self._presence(uid, at)
+                if presence is not None:
+                    check["online"] = presence
+                result[uid] = check
+            return result
+
+    def _presence(self, uid: str, at: datetime) -> bool | None:
+        """Online from what AL/X observed herself, or None when she has nothing recent."""
+        seen = self._seen.get(uid)
+        if seen is not None and at - seen <= PRESENCE_FRESH_FOR:
+            return True
+        pinged = self._pinged.get(uid)
+        if pinged is not None and at - pinged[1] <= PRESENCE_FRESH_FOR:
+            return pinged[0]
+        return None
+
+    def _set_online(self, uid: str, online: bool, at: datetime, via: str) -> None:
+        with self._lock:
+            changed = self._online.get(uid) != online
+            self._online[uid] = online
+        if changed:
+            self._calendar.log(at, uid, "online" if online else "offline", {"via": via})
+
+    def _heard(self, uid: str, at: datetime, via: str) -> None:
+        with self._lock:
+            self._seen[uid] = at
+        self._set_online(uid, True, at, via)
+
+    # ---- presence ----------------------------------------------------------
+
+    def ping_cycle(self) -> None:
+        """Ping every reader with events in the calendar, in parallel.
+
+        All of the day's readers, not only those with events still to run: the
+        BHL tile counts every reader in use today, and its count must be what
+        AL/X observed, never Particle's lagging list. Pings are free of data
+        operations.
+        """
+        at = self._now()
+        refreshed_at, _, readers, sessions = self._calendar.snapshot(at)
+        if not refreshed_at:
+            return
+        targets = []
+        for reader in readers:
+            uid = reader.get("reader_uid", "")
+            own = [item for item in sessions if item.reader_uid == uid]
+            if uid and own and reader.get("device_id"):
+                targets.append((uid, reader))
+        if not targets:
+            return
+
+        def ping(target):
+            uid, reader = target
+            try:
+                return uid, self._particle.ping(int(reader["product_id"]), reader["device_id"])
+            except ReaderAccessError:
+                return uid, None  # the ping itself failed: nothing learned
+
+        with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
+            answers = list(pool.map(ping, targets))
+        done = self._now()
+        for uid, online in answers:
+            if online is None:
+                continue
+            with self._lock:
+                self._pinged[uid] = (online, done)
+                if online:
+                    self._seen[uid] = done
+            self._set_online(uid, online, done, "ping")
 
     def activity(self, at: datetime, local: Any = None) -> dict[str, Any] | None:
         with self._lock:
@@ -195,10 +284,13 @@ class ReaderMonitor:
     # ---- a reader asking ---------------------------------------------------
 
     def on_event(self, name: str, device_id: str, data: str, published_at: str) -> None:
-        if name != REQUEST_EVENT or len(device_id) < READER_UID_LENGTH:
+        if len(device_id) < READER_UID_LENGTH:
             return
         uid = device_id[-READER_UID_LENGTH:]
         at = self._now()
+        self._heard(uid, at, "event")
+        if name != REQUEST_EVENT:
+            return
         try:
             holding = json.loads(data).get("v", "") if data else ""
         except (ValueError, AttributeError):
@@ -229,10 +321,10 @@ class ReaderMonitor:
             mode = reader["mode"]
             if not still_to_run(own, mode, at):
                 continue  # nothing left today for this reader
-            online = reader.get("online") is True
-            if self._online.get(uid) != online:
-                self._online[uid] = online
-                self._calendar.log(at, uid, "online" if online else "offline", {})
+            with self._lock:
+                observed = self._presence(uid, at)
+            online = observed if observed is not None else reader.get("online") is True
+            self._set_online(uid, online, at, "observed" if observed is not None else "particle")
             if not online:
                 continue
             report = self._read_status(uid, reader, at)
@@ -269,6 +361,7 @@ class ReaderMonitor:
             self._note(uid, at, "status_unavailable", {"code": "status_unreadable"})
             return None
         self._calendar.log(at, uid, "status", report)
+        self._heard(uid, at, "status")
         with self._lock:
             self._checks[uid] = {"event": report.get("e"), "version": report.get("v"),
                                  "at": at}
@@ -323,7 +416,12 @@ class ReaderMonitor:
 
 
 class ReaderRequestListener:
-    """Hears readers asking for their schedule, for as long as the process runs.
+    """Hears the readers, and pings them, for as long as the process runs.
+
+    Every event the readers publish arrives here; any of them shows a reader is
+    connected, and a request for a schedule is answered. Each reader in use is
+    also pinged every minute, so one that loses power is noticed in about 90
+    seconds rather than when Particle's device list catches up.
 
     One Particle event stream per product, each on its own daemon thread, so a
     stalled stream never holds anything else up and the process can stop at
@@ -343,7 +441,7 @@ class ReaderRequestListener:
         while rounds is None or done < rounds:
             done += 1
             try:
-                self._particle.stream_events(product_id, REQUEST_EVENT, self._monitor.on_event)
+                self._particle.stream_events(product_id, READER_EVENTS, self._monitor.on_event)
                 delay = 5.0  # a stream that ran and ended is not a failure
             except ReaderAccessError as error:
                 LOGGER.info("Reader request stream for %s ended: %s", product_id, error.code)
@@ -353,10 +451,25 @@ class ReaderRequestListener:
                 delay = min(delay * 2, 120.0)
             self._sleep(delay)
 
+    def ping_forever(self, rounds: int | None = None) -> None:
+        done = 0
+        while rounds is None or done < rounds:
+            done += 1
+            started = time.monotonic()
+            try:
+                self._monitor.ping_cycle()
+            except Exception as error:  # noqa: BLE001 - keep pinging
+                LOGGER.warning("Reader ping round failed: %s", error)
+            self._sleep(max(1.0, PING_INTERVAL_SECONDS - (time.monotonic() - started)))
+
     async def run(self) -> None:
+        # The event streams and the presence pings, each on its own daemon
+        # thread: hearing readers and pinging them are the same job, knowing
+        # which readers are connected right now.
         for product_id in self._products:
             threading.Thread(target=self.listen, args=(product_id,), daemon=True,
-                             name=f"reader-requests-{product_id}").start()
+                             name=f"reader-events-{product_id}").start()
+        threading.Thread(target=self.ping_forever, daemon=True, name="reader-pings").start()
         await asyncio.Event().wait()
 
 

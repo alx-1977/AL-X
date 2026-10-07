@@ -90,6 +90,14 @@ class Particle:
         self.calls.append(json.loads(argument))
         return 0
 
+    online = True
+
+    def ping(self, product_id, device_id):
+        self.pings = getattr(self, "pings", 0) + 1
+        if isinstance(self.online, Exception):
+            raise self.online
+        return self.online
+
     def read_variable(self, product_id, device_id, name):
         self.reads += 1
         if isinstance(self.status, Exception):
@@ -127,7 +135,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual([call["op"] for call in particle.calls],
                          ["begin", "event", "event", "event", "commit"])
         self.assertEqual(self.steps(),
-                         ["schedule_requested", "schedule_delivery", "schedule_sent"])
+                         ["online", "schedule_requested", "schedule_delivery", "schedule_sent"])
         self.assertTrue(self.calendar.sent(UID)["held"])
 
     def test_a_sent_schedule_is_stamped_when_it_finished_with_its_duration(self) -> None:
@@ -204,11 +212,59 @@ class MonitorTests(unittest.TestCase):
         monitor.cycle()
         self.assertEqual(self.steps().count("schedule_delivery"), 1)
 
-    def test_other_events_are_ignored(self) -> None:
+    def test_any_other_event_only_shows_the_reader_is_connected(self) -> None:
         particle = Particle()
-        monitor = self.build(particle)
+        monitor = self.build(particle, online=False)
         monitor.on_event("roomreader/scan", DEVICE, "{}", "t")
-        self.assertEqual((particle.calls, self.steps()), ([], []))
+        self.assertEqual(particle.calls, [])
+        self.assertEqual(self.steps(), ["online"])
+        self.assertTrue(monitor.checks(self.now[0])[UID]["online"])
+
+    def test_a_ping_unanswered_shows_offline_whatever_particle_lists(self) -> None:
+        particle = Particle()
+        particle.online = False
+        monitor = self.build(particle, online=True)  # Particle's list still says online
+        monitor.ping_cycle()
+        self.assertEqual(self.steps(), ["offline"])
+        data = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)()
+        self.assertEqual(data["chips"][0]["value"], "0/1")
+        self.assertEqual(data["tone"], "bad")  # its event is running
+        # The regular check believes the ping, so it does not read or send.
+        monitor.cycle()
+        self.assertEqual((particle.reads, particle.calls), (0, []))
+
+    def test_a_ping_answered_brings_a_reader_back_online(self) -> None:
+        particle = Particle()
+        particle.online = False
+        monitor = self.build(particle, online=False)
+        monitor.ping_cycle()
+        particle.online = True
+        self.now[0] += timedelta(minutes=1)
+        monitor.ping_cycle()
+        self.assertEqual(self.steps(), ["offline", "online"])
+
+    def test_a_failed_ping_learns_nothing(self) -> None:
+        particle = Particle()
+        particle.online = ReaderAccessError("connection_failed")
+        monitor = self.build(particle, online=True)
+        monitor.ping_cycle()
+        self.assertEqual(self.steps(), [])
+        self.assertNotIn(UID, monitor.checks(self.now[0]))
+
+    def test_a_reader_done_for_the_day_is_still_pinged_for_the_tile(self) -> None:
+        particle = Particle()
+        particle.online = False
+        monitor = self.build(particle, online=True)
+        self.now[0] = at(20)
+        monitor.ping_cycle()
+        self.assertEqual(particle.pings, 1)
+        self.assertFalse(monitor.checks(self.now[0])[UID]["online"])
+
+    def test_a_reader_without_events_is_not_pinged(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle, sessions=())
+        monitor.ping_cycle()
+        self.assertEqual(getattr(particle, "pings", 0), 0)
 
     def test_the_check_delivers_to_a_reader_not_holding_its_schedule(self) -> None:
         particle = Particle()
@@ -281,7 +337,7 @@ class MonitorTests(unittest.TestCase):
                                                   "to": at(23).isoformat()})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual([step["kind"] for step in result.values["steps"]],
-                         ["schedule_requested", "schedule_delivery", "schedule_sent"])
+                         ["online", "schedule_requested", "schedule_delivery", "schedule_sent"])
         self.assertEqual(self.executors[READ_READER_LOG]({"reader_uid": "other"})
                          .values["steps"], ())
         self.assertEqual(self.executors[READ_READER_LOG]({"from": "soon"}).failure["code"],
@@ -312,6 +368,15 @@ class StreamTests(unittest.TestCase):
         ReaderRequestListener(particle, (45984,), Mock(), sleep=waits.append).listen(45984, 3)
         self.assertEqual(particle.stream_events.call_count, 3)
         self.assertEqual(waits, [10.0, 20.0, 40.0])
+
+    def test_a_ping_reports_whether_the_device_answered(self) -> None:
+        for body, expected in (({"online": True, "ok": True}, True),
+                               ({"online": False, "ok": True}, False)):
+            response = Mock(status_code=200)
+            response.json.return_value = body
+            with patch("httpx.put", return_value=response) as put:
+                self.assertIs(ParticleCloud("token").ping(45984, DEVICE), expected)
+            self.assertTrue(put.call_args.args[0].endswith(f"/devices/{DEVICE}/ping"))
 
     def test_a_variable_is_read(self) -> None:
         response = Mock(status_code=200)

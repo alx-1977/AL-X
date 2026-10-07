@@ -76,7 +76,18 @@ def compose_tile(
 
     in_use = sorted({item.reader_uid for item in today})
     summary = {item.get("reader_uid"): item for item in readers}
-    offline = [uid for uid in in_use if summary.get(uid, {}).get("online") is not True]
+    # D-043: what AL/X observed herself (any event heard, a ping answered)
+    # outranks Particle's device list, which can lag a lost connection by
+    # most of an hour.
+    observed = checks or {}
+
+    def is_online(uid: str) -> bool:
+        seen = observed.get(uid, {}).get("online") if isinstance(observed.get(uid), Mapping) else None
+        if isinstance(seen, bool):
+            return seen
+        return summary.get(uid, {}).get("online") is True
+
+    offline = [uid for uid in in_use if not is_online(uid)]
     critical = [
         uid for uid in offline
         if any(item.reader_uid == uid and item.starts_at - WARNING_BEFORE_EVENT <= now < item.ends_at

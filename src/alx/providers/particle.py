@@ -87,6 +87,36 @@ class ParticleCloud:
             raise ReaderAccessError("response_invalid")
         return body["result"]
 
+    def ping(self, product_id: int, device_id: str, timeout_seconds: float = 45) -> bool:
+        """Whether the device answers the cloud now (D-043).
+
+        A cloud API call answered with a keep-alive: no data operation, about
+        122 bytes of cellular data. Particle waits about 30 seconds for an
+        answer before reporting it offline. Unlike the device list's "online",
+        which can lag a lost connection by most of an hour, this asks now.
+        """
+        if not _DEVICE_ID.fullmatch(device_id or ""):
+            raise ReaderAccessError("arguments_unusable")
+        try:
+            response = httpx.put(
+                f"{self._base_url}/v1/products/{int(product_id)}/devices/{device_id}/ping",
+                timeout=timeout_seconds,
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+        except Exception:
+            raise ReaderAccessError("connection_failed") from None
+        if response.status_code in (401, 403):
+            raise ReaderAccessError("permission_denied")
+        if response.status_code >= 400:
+            raise ReaderAccessError("request_rejected")
+        try:
+            body = response.json()
+        except Exception:
+            raise ReaderAccessError("response_invalid") from None
+        if not isinstance(body, dict) or not isinstance(body.get("online"), bool):
+            raise ReaderAccessError("response_invalid")
+        return body["online"]
+
     def stream_events(
         self, product_id: int, prefix: str,
         on_event: Callable[[str, str, str, str], None],
