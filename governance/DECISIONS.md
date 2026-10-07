@@ -2409,4 +2409,11 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Mechanical, not cognition.** The tile is a view of the calendar. No Core call decides whether it shows or what it says, and it makes no judgement about health; that remains AL/X's.
 - **Background refresh.** The calendar is refreshed every five minutes (`ALX_READER_REFRESH_SECONDS`) through the one refresh path, like the mail scan: read only, no Core call. A failed refresh leaves the previous calendar, and the tile's "Updated" time shows its age.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+- **Amended 2026-10-07: compact tile and its colours.** After seeing the first tile, Friedl found the green tick misleading with every reader offline, wanted red for serious faults, and wanted it smaller without losing room for future device types ("You need to think about solving underlying issues please, not treating symptoms"). He approved the green, yellow and red concepts from a preview.
+  - **Layout.** One small card of fixed size: what today is; one status line with its colour; what AL/X is doing; one small chip per monitored device type plus the BehaviorLive link. A new device type adds a chip, never a block. Unmonitored types have no chip. The venue picture is removed.
+  - **Red.** A reader whose event is running, or starts within 30 minutes, is offline.
+  - **Yellow.** Anything else not confirmed: a reader offline with no event close; a reader that has not accepted from AL/X a schedule carrying all its remaining events today; or schedules not read from BehaviorLive for 15 minutes.
+  - **Green.** Every reader in use today is online and holds today's schedule, and the schedules are current.
+  - **AL/X's line** says "not monitoring yet" until the reader health check exists; it never claims activity she is not performing.
+  - **With many rooms** the status summarises rooms in session and the next start, not single events.
 

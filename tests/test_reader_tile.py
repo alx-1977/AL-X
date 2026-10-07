@@ -51,10 +51,12 @@ READERS = (
     {"reader_uid": "ab2d5218", "online": True},
     {"reader_uid": "c471cf5a", "online": False},
 )
+ONLINE = tuple({**item, "online": True} for item in READERS)
+HOLDING = {"ab2d5218": {"event_ids": (1, 2)}, "c471cf5a": {"event_ids": (1, 2)}}
 
 
-def tile(now, sessions=DAY, readers=READERS, refreshed=REFRESHED):
-    return compose_tile((refreshed, (), readers, sessions), now, UTC)
+def tile(now, sessions=DAY, readers=READERS, refreshed=REFRESHED, sent=None):
+    return compose_tile((refreshed, (), readers, sessions), now, UTC, sent)
 
 
 class ComposeTileTests(unittest.TestCase):
@@ -63,24 +65,55 @@ class ComposeTileTests(unittest.TestCase):
         self.assertIsNone(tile(at(14, 30), sessions=()))
         self.assertIsNone(tile(at(14, 30, day=8)))
 
-    def test_a_running_event_is_named_with_its_room_and_end(self) -> None:
-        data = tile(at(14, 30))
-        self.assertEqual(data["state"], {"title": "Event under way",
-                                         "detail": "Ethics · Majestic · until 15:05"})
-        self.assertEqual(data["subtitle"], "2 events today")
-        self.assertEqual(data["place"], "Majestic")
-        self.assertEqual(data["activity"], "Updated 14:00")
+    def test_green_only_when_everything_is_confirmed(self) -> None:
+        data = tile(at(14, 10), readers=ONLINE, sent=HOLDING)
+        self.assertEqual(data["tone"], "ok")
+        self.assertEqual(data["state"], {"title": "All systems normal",
+                                         "detail": "Event under way until 15:05 · next starts 15:30"})
+        self.assertEqual([chip["tone"] for chip in data["chips"]], ["ok", "ok"])
 
-    def test_between_events_the_next_one_is_named(self) -> None:
-        self.assertEqual(tile(at(15, 15))["state"],
-                         {"title": "Next event at 15:30", "detail": "Supervision · Majestic"})
+    def test_online_but_never_sent_a_schedule_is_yellow(self) -> None:
+        data = tile(at(14, 10), readers=ONLINE)
+        self.assertEqual(data["tone"], "warn")
+        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
 
-    def test_before_the_first_event_the_tile_is_already_there(self) -> None:
-        self.assertEqual(tile(at(9))["state"]["title"], "Next event at 14:05")
+    def test_a_reader_offline_in_session_is_red(self) -> None:
+        data = tile(at(14, 30), sent=HOLDING)
+        self.assertEqual(data["tone"], "bad")
+        self.assertEqual(data["state"]["title"], "1 room reader offline")
+        self.assertEqual((data["chips"][0]["value"], data["chips"][0]["tone"]), ("1/2", "bad"))
+
+    def test_offline_turns_red_30_minutes_before_its_event(self) -> None:
+        self.assertEqual(tile(at(13, 34), sent=HOLDING)["tone"], "warn")
+        self.assertEqual(tile(at(13, 35), sent=HOLDING)["tone"], "bad")
+
+    def test_offline_between_distant_events_is_yellow(self) -> None:
+        sessions = (session("c471cf5a", 1, at(9), at(10)), session("c471cf5a", 2, at(16), at(17)))
+        data = tile(at(12), sessions=sessions, sent={"c471cf5a": {"event_ids": (2,)}})
+        self.assertEqual((data["tone"], data["chips"][0]["tone"]), ("warn", "warn"))
+        self.assertEqual(data["state"]["detail"], "Next event at 16:00")
+
+    def test_a_stale_bhl_link_is_yellow(self) -> None:
+        data = tile(at(14, 16), readers=ONLINE, sent=HOLDING)
+        self.assertEqual(data["tone"], "warn")
+        self.assertEqual(data["state"]["title"], "BHL link not answering")
+        self.assertEqual(data["chips"][1]["tone"], "warn")
+        self.assertEqual(data["chips"][1]["label"],
+                         "Schedules last read from BehaviorLive at 14:00")
+
+    def test_a_kept_schedule_counts_from_when_it_was_read(self) -> None:
+        readers = ({**ONLINE[0], "schedule_as_of": "2026-10-07T13:40:00+00:00"}, ONLINE[1])
+        self.assertEqual(tile(at(14, 10), readers=readers, sent=HOLDING)["state"]["title"],
+                         "BHL link not answering")
+
+    def test_before_the_first_event(self) -> None:
+        data = tile(at(9), readers=ONLINE, sent=HOLDING, refreshed="2026-10-07T09:00:00+00:00")
+        self.assertEqual(data["state"]["detail"], "First event at 14:05")
 
     def test_after_the_last_event_the_day_is_finished(self) -> None:
-        self.assertEqual(tile(at(20))["state"],
-                         {"title": "Today's events have finished", "detail": "Last ended at 17:10"})
+        data = tile(at(20), readers=ONLINE, sent=HOLDING, refreshed="2026-10-07T20:00:00+00:00")
+        self.assertEqual(data["state"]["detail"], "Today's events have finished")
+        self.assertEqual(data["tone"], "ok")
 
     def test_today_is_the_event_s_own_day(self) -> None:
         # 01:00 UTC on the 8th is still the evening of the 7th at -4 hours.
@@ -88,34 +121,31 @@ class ComposeTileTests(unittest.TestCase):
         self.assertIsNotNone(tile(at(23, day=7), sessions=evening))
         self.assertIsNone(tile(at(23, day=8), sessions=evening))
 
-    def test_today_s_readers_online_are_counted(self) -> None:
-        reader_fact = tile(at(14, 30))["facts"][0]
-        self.assertEqual((reader_fact["value"], reader_fact["tone"]), ("1/2", "attention"))
-        everyone = tuple({**item, "online": True} for item in READERS)
-        self.assertEqual(tile(at(14, 30), readers=everyone)["facts"][0]["tone"], "ok")
+    def test_a_full_day_summarises_rooms_not_events(self) -> None:
+        sessions = []
+        for room in range(9):
+            uid = f"{room:08x}"
+            sessions.append(session(uid, 100 + room, at(14), at(15), room=f"R{room}"))
+            if room < 6:
+                sessions.append(session(uid, 200 + room, at(15, 30), at(16), room=f"R{room}"))
+        data = tile(at(14, 30), sessions=tuple(sessions), readers=())
+        self.assertEqual(data["context"], "15 events today · 9 rooms")
+        self.assertEqual(data["state"]["detail"],
+                         "9 rooms in session · next starts 15:30 (6 rooms) · schedules not confirmed")
+        self.assertEqual(data["chips"][0]["value"], "0/9")
 
-    def test_updated_is_the_oldest_schedule_shown(self) -> None:
-        readers = ({**READERS[0], "schedule_as_of": "2026-10-07T13:00:00+00:00"},
-                   {**READERS[1], "schedule_as_of": "2026-10-07T14:00:00+00:00"})
-        self.assertEqual(tile(at(14, 30), readers=readers)["activity"], "Updated 13:00")
+    def test_al_x_says_she_is_not_monitoring_yet(self) -> None:
+        self.assertEqual(tile(at(14, 30))["alx"], {"text": "not monitoring yet", "idle": True})
 
-    def test_unmonitored_hardware_is_shown_as_such(self) -> None:
-        facts = tile(at(14, 30))["facts"]
-        self.assertEqual([(item["label"], item["tone"]) for item in facts[1:]],
-                         [("Registration Scanners", "disabled"), ("PSUs", "disabled")])
-
-    def test_two_rooms_running_at_once(self) -> None:
-        other = (session("deadbeef", 5, at(14), at(16), title="Law", room="Royal"),)
-        self.assertEqual(tile(at(14, 30), sessions=DAY + other)["state"]["title"],
-                         "2 events under way")
-
-    def test_the_tile_reads_the_stored_calendar(self) -> None:
+    def test_the_tile_reads_the_stored_calendar_and_what_was_sent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
-            calendar.replace(at(14), list(READERS), list(DAY), ())
-            data = tile_source(calendar, lambda: at(14, 30), UTC)()
+            calendar.replace(at(14), list(ONLINE), list(DAY), ())
+            for uid in ("ab2d5218", "c471cf5a"):
+                calendar.record_sent(uid, "v1", at(13), (1, 2))
+            data = tile_source(calendar, lambda: at(14, 10), UTC)()
             calendar.close()
-        self.assertEqual(data["state"]["title"], "Event under way")
+        self.assertEqual(data["tone"], "ok")
 
 
 class ServingTests(unittest.TestCase):
