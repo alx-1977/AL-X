@@ -51,7 +51,7 @@ class SQLiteReaderCalendar:
             columns = {row[1] for row in self._connection.execute(
                 "PRAGMA table_info(sent_schedules)")}
             if "fingerprints_json" not in columns:
-                # A record from before fingerprints confirms nothing.
+                # A record from before this column confirms nothing.
                 self._connection.execute(
                     "ALTER TABLE sent_schedules ADD COLUMN "
                     "fingerprints_json TEXT NOT NULL DEFAULT '[]'"
@@ -119,15 +119,16 @@ class SQLiteReaderCalendar:
 
     def record_sent(
         self, reader_uid: str, version: str, sent_at: datetime, event_ids: Sequence[int],
-        fingerprints: Sequence[str] = (),
+        held: Sequence[Mapping[str, Any]] = (),
     ) -> None:
+        """Record what the reader accepted: per event, its fingerprint and sent end."""
         with self._lock, self._connection:
             self._connection.execute(
                 "INSERT OR REPLACE INTO sent_schedules "
                 "(reader_uid, version, sent_at, event_ids_json, fingerprints_json) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (reader_uid, version, sent_at.isoformat(), json.dumps(list(event_ids)),
-                 json.dumps(list(fingerprints))),
+                 json.dumps([dict(item) for item in held])),
             )
 
     def sent(self, reader_uid: str) -> Mapping[str, Any]:
@@ -140,7 +141,7 @@ class SQLiteReaderCalendar:
         if row is None:
             return {}
         return {"version": row[0], "sent_at": row[1], "event_ids": tuple(json.loads(row[2])),
-                "fingerprints": tuple(json.loads(row[3]))}
+                "held": tuple(json.loads(row[3]))}
 
     def close(self) -> None:
         self._connection.close()

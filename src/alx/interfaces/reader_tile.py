@@ -8,8 +8,8 @@ tile is a view of facts AL/X already holds, coloured by rules Friedl set
 - red: a reader whose event is running, or starts within 30 minutes, is
   offline;
 - yellow: anything else not confirmed: a reader offline with no event close,
-  a reader that has not accepted today's remaining events from AL/X exactly
-  as the calendar now has them, or
+  a reader whose schedule from AL/X, as it can still run it, is not exactly
+  what the calendar has left, or
   schedules that could not be read from BehaviorLive for 15 minutes;
 - green: every reader in use today is online and holds today's schedule, and
   the schedules are current.
@@ -47,13 +47,22 @@ def _count(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
-def _holds_today(record: Mapping[str, Any], remaining: Sequence[ReaderSession]) -> bool:
-    """The reader accepted from AL/X every event it has left, exactly as the calendar has it.
+def _holds_current(record: Mapping[str, Any], remaining: Sequence[ReaderSession],
+                   now: datetime) -> bool:
+    """What the reader holds and can still run is exactly what the calendar has left.
 
-    Compared by content, not ID: an event moved or renamed under the same ID
-    since it was sent is not confirmed.
+    Both sides, not one: an event moved earlier or deleted in the calendar is
+    still running on a reader that accepted its old times, and an event the
+    calendar added or changed is not yet on the reader. Compared by what is
+    sent, so a change a resend would not deliver does not count.
     """
-    return {session_fingerprint(item) for item in remaining} <= set(record.get("fingerprints") or ())
+    held = record.get("held")
+    if not isinstance(held, (list, tuple)) or any(
+            not isinstance(item, Mapping) or not isinstance(item.get("fp"), str)
+            or not isinstance(item.get("en"), int) for item in held):
+        return False
+    still_running = {item["fp"] for item in held if item["en"] > now.timestamp()}
+    return still_running == {session_fingerprint(item) for item in remaining}
 
 
 def compose_tile(
@@ -89,8 +98,8 @@ def compose_tile(
     ]
     unconfirmed = [
         uid for uid in in_use
-        if not _holds_today(sent.get(uid) or {}, [
-            item for item in today if item.reader_uid == uid and item.ends_at > now])
+        if not _holds_current(sent.get(uid) or {}, [
+            item for item in sessions if item.reader_uid == uid and item.ends_at > now], now)
     ]
     read_times = [datetime.fromisoformat(summary.get(uid, {}).get("schedule_as_of") or refreshed_at)
                   for uid in in_use]

@@ -12,6 +12,7 @@ is the decision, recorded in governance, and each merge is AL/X exercising it.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -82,8 +83,11 @@ def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
     except ValueError:
         profile = None
     if profile is None or not profile.states_no_findings(content.summary):
+        stated = re.search(r"Actionable comments posted: (\d+)", content.summary or "")
+        details = {"findings": int(stated.group(1))} if stated else {}
         raise MergeError("review_has_findings",
-                         github_message="The review does not state that it raised nothing")
+                         github_message="The review does not state that it raised nothing",
+                         **details)
 
 
 def build_repository_runtime(

@@ -307,6 +307,11 @@ class CleanReviewRequiredTest(unittest.TestCase):
                 self.assertEqual(result.failure["code"], "review_has_findings")
                 self.assertEqual(provider.requests, [])
 
+    def test_findings_stated_only_in_the_summary_are_counted(self) -> None:
+        result, _ = self._merge(Reviews(summary="**Actionable comments posted: 2**"))
+        self.assertEqual((result.failure["code"], result.failure["findings"]),
+                         ("review_has_findings", 2))
+
     def test_a_reviewer_without_a_verified_format_is_never_clean(self) -> None:
         result, provider = self._merge(Reviews(reviewer="greptile"))
         self.assertEqual(result.failure["code"], "review_has_findings")
