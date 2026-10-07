@@ -58,3 +58,9 @@ class ReaderFleet(Protocol):
 
 class ReaderConfigSource(Protocol):
     def config(self, reader_uid: str) -> Mapping[str, Any]: ...
+
+
+class ReaderControl(Protocol):
+    def call_function(
+        self, product_id: int, device_id: str, function: str, argument: str
+    ) -> int: ...

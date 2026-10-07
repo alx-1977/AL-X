@@ -2378,5 +2378,21 @@ This grants no authority a single goal update lacks: completion still requires s
   - Its own permission is `readers.read`.
 - **What AL/X decides.** Which schedule is right, whether a problem matters, and what to do about it. The checks report mechanical facts only (malformed or missing fields, events ending before they start or overlapping, duplicates, empty or unreadable schedules, readers in one room disagreeing) and correct nothing.
 - **Retention.** Sessions carry presenters' names, the client's data. A session is removed 30 days after it ends.
-- **Not yet authorised: device actions.** Restarting readers, pushing schedules AL/X constructs, or any other Particle function call or write. Friedl approved them in principle above. Each will be recorded here when built, with its exact scope.
+- **Not yet authorised: device actions.** Restarting readers, pushing schedules AL/X constructs, or any other Particle function call or write. Friedl approved them in principle above. Each will be recorded here when built, with its exact scope. Sending schedules is now authorised by D-040.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-040 — AL/X sends each V2 reader its schedule
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-07.** Friedl's words that day:
+  - "Devices should get their schedules from ALX, NOT from the BHL endpoint."
+  - "ALX needs to get all schedules, combine them into a single calendar and then push each device's data to that device."
+  - "I suggest building #2 before we review?"
+  - Standing authority from D-039: "Whatever she needs to be able to get the devices running the correct events including forcing restarts."
+- **Why.** Small client errors in a schedule stopped V1 readers reading it. AL/X settles them before anything reaches a reader, so a reader only ever receives a clean day.
+- **Authority.** AL/X may send any reader in the configured Particle products its sessions from the calendar, through the Particle function `schedule`, without per-send approval. Its own permission is `readers.send`. She decides when to send and which events to leave out; the capability refuses overlapping events until she has chosen.
+- **Protocol.** `docs/READER_SCHEDULE_PROTOCOL.md`: `begin`, one message per event, `commit`, each at most 600 bytes and answered by the reader. The reader switches only after a complete schedule is committed to flash, so a dropped send leaves it on its previous schedule. An unanswered `commit` is reported as ambiguous, to be settled from the reader's status.
+- **Record.** The calendar keeps the last schedule each reader accepted (version, time, event IDs), for comparing with what the reader reports.
+- **Still not authorised.** Restarting readers or any other device function. Each will be recorded when built.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

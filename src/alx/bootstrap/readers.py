@@ -13,12 +13,14 @@ from alx.providers.behaviorlive import BehaviorLiveConfig
 from alx.providers.particle import ParticleCloud
 from alx.providers.reader_calendar import SQLiteReaderCalendar
 from alx.safety import AuthorityPolicy
-from alx.tools.readers import DEFINITIONS, build_reader_executors
+from alx.tools.readers import DEFINITIONS, SEND_READER_SCHEDULE, build_reader_executors
 
 
-# D-039. Reading readers and their schedules is its own permission; device
-# actions, when they come, will be another.
+# D-039. Reading readers and their schedules is its own permission.
 READER_READ_PERMISSION = "readers.read"
+# D-040. Sending a reader its schedule is another, without per-send approval:
+# Friedl authorised whatever AL/X needs to keep the readers on the right events.
+READER_SEND_PERMISSION = "readers.send"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,17 +40,23 @@ def build_reader_runtime(
     if not settings.is_usable:
         return None
     calendar = SQLiteReaderCalendar(storage_root / "reader-calendar.sqlite3")
-    policy = AuthorityPolicy(frozenset({READER_READ_PERMISSION}))
+    read = AuthorityPolicy(frozenset({READER_READ_PERMISSION}))
+    send = AuthorityPolicy(frozenset({READER_SEND_PERMISSION}))
+    particle = ParticleCloud(settings.access_token, settings.timeout_seconds)
     return ReaderRuntime(
         calendar=calendar,
         definitions=DEFINITIONS,
-        policies={definition.capability_id: policy for definition in DEFINITIONS},
+        policies={
+            definition.capability_id: send if definition.capability_id == SEND_READER_SCHEDULE else read
+            for definition in DEFINITIONS
+        },
         executors=build_reader_executors(
-            ParticleCloud(settings.access_token, settings.timeout_seconds),
+            particle,
             BehaviorLiveConfig(settings.config_url, settings.timeout_seconds),
             calendar,
             settings.product_ids,
             call_id_source,
+            control=particle,
         ),
-        permissions=frozenset({READER_READ_PERMISSION}),
+        permissions=frozenset({READER_READ_PERMISSION, READER_SEND_PERMISSION}),
     )

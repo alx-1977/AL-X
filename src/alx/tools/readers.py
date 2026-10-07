@@ -5,6 +5,11 @@ products, reads each one's schedule from BehaviorLive, checks it, and replaces
 the calendar with that one consistent snapshot. `read_reader_calendar` reads
 it back by room, reader or time, with what each reader should be running now.
 
+`send_reader_schedule` (D-040) sends one reader its sessions from that
+calendar through a Particle function, one short message at a time, and the
+reader only switches to the new schedule once every message has arrived; the
+protocol is `docs/READER_SCHEDULE_PROTOCOL.md`.
+
 The checks state mechanical facts only: a field missing or malformed, an event
 ending before it starts, two events overlapping in one reader's schedule, a
 duplicated event, an empty schedule, or readers in one room disagreeing. Which
@@ -14,6 +19,8 @@ schedule is right, and what to do about a problem, is AL/X's judgement.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,6 +29,7 @@ from alx.contracts import (
     CapabilityResult,
     CapabilityResultState,
     ContentOrigin,
+    ExecutionOutcome,
     SideEffect,
     StructuredData,
     StructuredSchema,
@@ -31,6 +39,7 @@ from alx.contracts.provenance import RetentionPolicy
 from alx.contracts.readers import (
     ReaderAccessError,
     ReaderConfigSource,
+    ReaderControl,
     ReaderDevice,
     ReaderFleet,
     ReaderSession,
@@ -39,6 +48,16 @@ from alx.contracts.readers import (
 
 REFRESH_READER_CALENDAR = "refresh_reader_calendar"
 READ_READER_CALENDAR = "read_reader_calendar"
+SEND_READER_SCHEDULE = "send_reader_schedule"
+
+# The reader-side contract, docs/READER_SCHEDULE_PROTOCOL.md. Messages stay
+# under every Device OS's function-argument limit (622 bytes before 6.3), and
+# display text is cut to what the reader stores.
+SCHEDULE_FUNCTION = "schedule"
+MAX_MESSAGE_BYTES = 600
+MAX_SCHEDULE_EVENTS = 32
+TITLE_CHARACTERS = 64
+NAME_CHARACTERS = 32
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _OBJECT = StructuredSchema(ValueKind.OBJECT)
@@ -94,7 +113,40 @@ READ_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
-DEFINITIONS = (REFRESH_DEFINITION, READ_DEFINITION)
+SEND_DEFINITION = CapabilityDefinition(
+    SEND_READER_SCHEDULE,
+    "Send one reader its schedule from the calendar as last refreshed: every session for that reader_uid not yet ended, less any event IDs in leave_out, with its room, mode and offset. The reader keeps its previous schedule unless the whole new one arrives, and confirms each message. Refuses overlapping events (choose which to leave out), more than 32 events, or a reader without room and mode. A reader that cannot be reached keeps its previous schedule; if it stopped answering on the final message it may hold either.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reader_uid": _STRING,
+         "leave_out": StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.INTEGER))},
+        ("reader_uid",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reader_uid": _STRING, "version": _STRING, "sent_at": _STRING,
+         "calendar_refreshed_at": _STRING,
+         "event_ids": StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.INTEGER)),
+         "left_out": StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.INTEGER))},
+        ("reader_uid", "version", "sent_at", "calendar_refreshed_at", "event_ids", "left_out"),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES + (
+        "reader_unknown",
+        "reader_schedule_unusable",
+        "events_overlap",
+        "schedule_too_long",
+        "event_too_large",
+        "device_offline",
+        "device_timeout",
+        "function_not_exposed",
+        "reader_refused",
+    ),
+)
+
+DEFINITIONS = (REFRESH_DEFINITION, READ_DEFINITION, SEND_DEFINITION)
 
 
 def _time(value: Any) -> datetime | None:
@@ -204,6 +256,36 @@ def _session(item: ReaderSession) -> dict[str, Any]:
     }
 
 
+def _message(fields: Mapping[str, Any]) -> str:
+    return json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
+
+
+def schedule_messages(
+    room: str, mode: int, offset_hours: int, sessions: Sequence[ReaderSession]
+) -> tuple[str, tuple[str, ...]]:
+    """(version, messages) for one reader: begin, one per event, commit.
+
+    The version is a digest of exactly what the reader will hold, so the same
+    schedule always has the same version and any change gives a new one.
+    """
+    events = [
+        {"id": item.event_id, "st": int(item.starts_at.timestamp()),
+         "en": int(item.ends_at.timestamp()), "t": item.title[:TITLE_CHARACTERS],
+         "fn": item.first_name[:NAME_CHARACTERS], "ln": item.last_name[:NAME_CHARACTERS],
+         "hbd": item.hbd}
+        for item in sessions
+    ]
+    header = {"n": len(events), "m": mode, "r": room[:TITLE_CHARACTERS], "o": offset_hours}
+    version = hashlib.sha256(_message({**header, "events": events}).encode()).hexdigest()[:8]
+    messages = [_message({"op": "begin", "v": version, **header})]
+    messages.extend(
+        _message({"op": "event", "v": version, "i": index, **event})
+        for index, event in enumerate(events)
+    )
+    messages.append(_message({"op": "commit", "v": version}))
+    return version, tuple(messages)
+
+
 def build_reader_executors(
     fleet: ReaderFleet,
     configs: ReaderConfigSource,
@@ -211,6 +293,7 @@ def build_reader_executors(
     product_ids: Sequence[int],
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
+    control: ReaderControl | None = None,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
@@ -234,10 +317,11 @@ def build_reader_executors(
         sessions: list[ReaderSession] = []
         for device in sorted(devices, key=lambda item: item.reader_uid):
             summary: dict[str, Any] = {
-                "reader_uid": device.reader_uid, "device_name": device.name,
+                "reader_uid": device.reader_uid, "device_id": device.device_id,
+                "device_name": device.name,
                 "product_id": device.product_id, "online": device.online,
                 "last_heard": device.last_heard, "room": "", "mode": -1,
-                "event_count": 0, "problems": (),
+                "offset_hours": 0, "event_count": 0, "problems": (),
             }
             try:
                 raw = configs.config(device.reader_uid)
@@ -249,6 +333,7 @@ def build_reader_executors(
             headers[device.reader_uid] = header
             sessions.extend(parsed)
             summary.update(room=header["room"], mode=header["mode"],
+                           offset_hours=header["offset_hours"],
                            event_count=len(parsed), problems=problems)
             summaries.append(summary)
         across = room_problems(headers, sessions)
@@ -295,6 +380,7 @@ def build_reader_executors(
                 "mode": reader.get("mode", -1),
                 "current": _session(current) if current else {},
                 "next": _session(upcoming) if upcoming else {},
+                "last_sent": calendar.sent(reader["reader_uid"]),
             })
         window = [item for item in mine if item.starts_at < end and item.ends_at > start]
         return CapabilityResult(
@@ -306,4 +392,76 @@ def build_reader_executors(
             provenance=provenance(at),
         )
 
-    return {REFRESH_READER_CALENDAR: refresh, READ_READER_CALENDAR: read}
+    def send(arguments: StructuredData) -> CapabilityResult:
+        at = now()
+        reader_uid = arguments.get("reader_uid")
+        leave_out = arguments.get("leave_out") or ()
+        if (not isinstance(reader_uid, str) or not reader_uid
+                or not isinstance(leave_out, (list, tuple))
+                or any(not isinstance(item, int) or isinstance(item, bool) for item in leave_out)):
+            return failed(SEND_READER_SCHEDULE, "arguments_unusable")
+        refreshed_at, _, readers, sessions = calendar.snapshot(at)
+        if not refreshed_at:
+            return failed(SEND_READER_SCHEDULE, "calendar_empty")
+        reader = next((item for item in readers if item.get("reader_uid") == reader_uid), None)
+        if reader is None or not reader.get("device_id"):
+            return failed(SEND_READER_SCHEDULE, "reader_unknown")
+        if reader.get("mode") not in (0, 1) or not reader.get("room"):
+            return failed(SEND_READER_SCHEDULE, "reader_schedule_unusable")
+        own = [item for item in sessions if item.reader_uid == reader_uid and item.ends_at > at]
+        unknown = set(leave_out) - {item.event_id for item in own}
+        if unknown:
+            return failed(SEND_READER_SCHEDULE, "arguments_unusable")
+        chosen = sorted((item for item in own if item.event_id not in set(leave_out)),
+                        key=lambda item: item.starts_at)
+        overlapping = [
+            f"{before.event_id},{after.event_id}"
+            for before, after in zip(chosen, chosen[1:]) if after.starts_at < before.ends_at
+        ]
+        if overlapping:
+            return CapabilityResult(
+                call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
+                failure={"code": "events_overlap", "events": tuple(overlapping)},
+            )
+        if len(chosen) > MAX_SCHEDULE_EVENTS:
+            return failed(SEND_READER_SCHEDULE, "schedule_too_long")
+        version, messages = schedule_messages(
+            reader["room"], reader["mode"], int(reader.get("offset_hours") or 0), chosen)
+        if any(len(message.encode()) > MAX_MESSAGE_BYTES for message in messages):
+            return failed(SEND_READER_SCHEDULE, "event_too_large")
+        if control is None:
+            return failed(SEND_READER_SCHEDULE, "permission_denied")
+        for position, message in enumerate(messages):
+            final = position == len(messages) - 1
+            try:
+                answer = control.call_function(
+                    int(reader["product_id"]), reader["device_id"], SCHEDULE_FUNCTION, message)
+            except ReaderAccessError as error:
+                # Before the commit the reader still holds its previous
+                # schedule. A commit that was sent but went unanswered may
+                # have taken: only the reader's status can say which.
+                return CapabilityResult(
+                    call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
+                    failure={"code": error.code, "version": version,
+                             "commit_unconfirmed": final and error.code == "device_timeout"},
+                    outcome=(ExecutionOutcome.AMBIGUOUS
+                             if final and error.code == "device_timeout" else None),
+                )
+            if answer != 0:
+                return CapabilityResult(
+                    call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
+                    failure={"code": "reader_refused", "version": version,
+                             "message": position, "return_value": answer},
+                )
+        event_ids = tuple(item.event_id for item in chosen)
+        calendar.record_sent(reader_uid, version, at, event_ids)
+        return CapabilityResult(
+            call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.SUCCEEDED,
+            {"reader_uid": reader_uid, "version": version, "sent_at": at.isoformat(),
+             "calendar_refreshed_at": refreshed_at, "event_ids": event_ids,
+             "left_out": tuple(leave_out)},
+            provenance=provenance(at),
+        )
+
+    return {REFRESH_READER_CALENDAR: refresh, READ_READER_CALENDAR: read,
+            SEND_READER_SCHEDULE: send}

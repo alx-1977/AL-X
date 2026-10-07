@@ -41,6 +41,12 @@ class SQLiteReaderCalendar:
                 "first_name TEXT NOT NULL, last_name TEXT NOT NULL, hbd INTEGER NOT NULL, "
                 "offset_hours INTEGER NOT NULL, PRIMARY KEY (reader_uid, event_id))"
             )
+            # D-040: the last schedule each reader accepted, kept apart from
+            # the calendar so a refresh never forgets what a reader holds.
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS sent_schedules (reader_uid TEXT PRIMARY KEY, "
+                "version TEXT NOT NULL, sent_at TEXT NOT NULL, event_ids_json TEXT NOT NULL)"
+            )
 
     def replace(
         self,
@@ -101,6 +107,26 @@ class SQLiteReaderCalendar:
         if row is None:
             return "", (), readers, sessions
         return row[0], tuple(json.loads(row[1])), readers, sessions
+
+    def record_sent(
+        self, reader_uid: str, version: str, sent_at: datetime, event_ids: Sequence[int]
+    ) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO sent_schedules VALUES (?, ?, ?, ?)",
+                (reader_uid, version, sent_at.isoformat(), json.dumps(list(event_ids))),
+            )
+
+    def sent(self, reader_uid: str) -> Mapping[str, Any]:
+        """The last schedule the reader accepted, or empty."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT version, sent_at, event_ids_json FROM sent_schedules "
+                "WHERE reader_uid = ?", (reader_uid,),
+            ).fetchone()
+        if row is None:
+            return {}
+        return {"version": row[0], "sent_at": row[1], "event_ids": tuple(json.loads(row[2]))}
 
     def close(self) -> None:
         self._connection.close()
