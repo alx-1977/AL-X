@@ -2396,3 +2396,17 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Record.** The calendar keeps the last schedule each reader accepted (version, time, event IDs), for comparing with what the reader reports.
 - **Still not authorised.** Restarting readers or any other device function. Each will be recorded when built.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-041 — The BHL tile is present on every BHL event day
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-07.** Friedl's words that day:
+  - "When there is an event scheduled for the same date as today, the tile should be present. We can change it afterwards if I find it annoying."
+  - "I need some verification reminder that there is a BHL event under way, I do not want to have to remember this."
+  - "I do not want to ask ALX to show me the tile."
+- **What.** The status tile (#100) appears on AL/X's main page whenever the reader calendar holds an event on today's date, taken in the event's own offset, and disappears when it does not. It shows facts the calendar holds: today's event count and rooms, the event under way with its end, or the next one, or that the day has finished; today's readers online as Particle reports them; and when the calendar was last refreshed. Registration scanners and PSUs are shown as not monitored.
+- **Mechanical, not cognition.** The tile is a view of the calendar. No Core call decides whether it shows or what it says, and it makes no judgement about health; that remains AL/X's.
+- **Background refresh.** The calendar is refreshed every five minutes (`ALX_READER_REFRESH_SECONDS`) through the one refresh path, like the mail scan: read only, no Core call. A failed refresh leaves the previous calendar, and the tile's "Updated" time shows its age.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+

@@ -78,7 +78,8 @@ from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.bootstrap.documents import build_document_runtime
-from alx.bootstrap.readers import build_reader_runtime
+from alx.bootstrap.readers import build_reader_runtime, reader_poller
+from alx.interfaces.reader_tile import tile_source
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
@@ -258,6 +259,17 @@ def _watch_review(
 # so the laws, identity and frontend AL/X runs under are the ones merged with
 # her code, never whatever a feature branch in the checkout currently holds.
 CODE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _with_call_id(variable: Any, prefix: str):
+    """Run mechanical work under its own call ID, as a capability result needs one."""
+    def run_with(work):
+        token = variable.set(f"{prefix}-{uuid4()}")
+        try:
+            return work()
+        finally:
+            variable.reset(token)
+    return run_with
 
 
 def running_commit_of(code_root: Path, repository_reader: Any) -> str:
@@ -1030,6 +1042,8 @@ async def run(repository_root: Path) -> None:
         voice_settings.port,
         provider_settings.speech_to_text.sample_rate_hz,
         CODE_ROOT / "src/alx/interfaces/assets",
+        reader_tile=None if reader_runtime is None else tile_source(
+            reader_runtime.calendar, lambda: datetime.now(UTC)),
     )
     # Every kind of occasion reaches the Core through one producer, one
     # runner and one tick. A finished external task joins the matured requests
@@ -1165,6 +1179,10 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(server.serve_forever())
             runtime_tasks.create_task(due_cognition.run())
             runtime_tasks.create_task(mail_poller.run())
+            if reader_runtime is not None:
+                # D-041: today's calendar, kept current for the BHL tile.
+                runtime_tasks.create_task(
+                    reader_poller(reader_runtime, _with_call_id(current_call_id, "reader-refresh")).run())
             if task_runtime is not None:
                 runtime_tasks.create_task(task_runtime.poller.run())
             if sandbox_runtime is not None:
