@@ -183,7 +183,9 @@ class SQLiteReaderCalendar:
         if reader_uid:
             query += " AND reader_uid = ?"
             params.append(reader_uid)
-        query += " ORDER BY at, rowid LIMIT ?"
+        # Written order, which is the order things happened: `at` is when a
+        # step was observed and can trail a step logged before it.
+        query += " ORDER BY rowid LIMIT ?"
         params.append(limit + 1)
         with self._lock:
             rows = self._connection.execute(query, params).fetchall()

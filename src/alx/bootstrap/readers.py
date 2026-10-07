@@ -219,10 +219,13 @@ class ReaderMonitor:
         return None
 
     def _set_online(self, uid: str, online: bool, at: datetime, via: str) -> None:
+        # The change and its log line are one step: pings, events and the
+        # regular check run on different threads, and the log must show the
+        # transitions in the order they happened.
         with self._lock:
-            changed = self._online.get(uid) != online
+            if self._online.get(uid) == online:
+                return
             self._online[uid] = online
-        if changed:
             self._calendar.log(at, uid, "online" if online else "offline", {"via": via})
 
     def _heard(self, uid: str, at: datetime, via: str) -> None:

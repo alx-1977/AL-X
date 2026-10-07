@@ -243,6 +243,12 @@ class MonitorTests(unittest.TestCase):
         monitor.ping_cycle()
         self.assertEqual(self.steps(), ["offline", "online"])
 
+    def test_the_log_reads_back_in_the_order_it_was_written(self) -> None:
+        # A ping that finished later can carry an earlier observation time.
+        self.calendar.log(at(14, 11), UID, "offline", {"via": "ping"})
+        self.calendar.log(at(14, 10, ), UID, "online", {"via": "event"})
+        self.assertEqual(self.steps(), ["offline", "online"])
+
     def test_a_failed_ping_learns_nothing(self) -> None:
         particle = Particle()
         particle.online = ReaderAccessError("connection_failed")
