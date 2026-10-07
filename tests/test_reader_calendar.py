@@ -290,7 +290,9 @@ class SendScheduleTests(unittest.TestCase):
                          {(45984, device("ab2d5218").device_id, "schedule")})
         record = self.calendar.sent("ab2d5218")
         self.assertEqual(record["version"], result.values["version"])
-        self.assertEqual(len(record["fingerprints"]), 2)
+        self.assertEqual([item["en"] for item in record["held"]],
+                         [int(datetime(2026, 10, 7, 15, 5, tzinfo=UTC).timestamp()),
+                          int(datetime(2026, 10, 7, 17, 10, tzinfo=UTC).timestamp())])
 
     def test_the_same_schedule_always_has_the_same_version(self) -> None:
         first, second = self.send(Reader()), self.send(Reader())
