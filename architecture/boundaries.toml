@@ -285,3 +285,10 @@ description = "One reader receives its schedule from the calendar and confirms i
 # BehaviorLive, which lived in firmware and never in AL/X.
 entry = "tools/readers.py::build_reader_executors.<locals>.send"
 forbidden = []
+
+[[outcomes]]
+id = "readers.event_day_tile_is_shown"
+description = "On a day with BHL events, the BHL tile shows what the calendar says."
+# D-041. Nothing superseded: the tile existed only as a design preview.
+entry = "interfaces/reader_tile.py::compose_tile"
+forbidden = []

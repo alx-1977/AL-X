@@ -349,6 +349,9 @@ class ReaderSettings:
     product_ids: tuple[int, ...]
     config_url: str
     timeout_seconds: int
+    # D-041: how often the calendar is refreshed in the background, so the BHL
+    # tile reflects today without anyone asking.
+    refresh_seconds: int = 300
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "ReaderSettings":
@@ -366,6 +369,7 @@ class ReaderSettings:
                 "https://behaviorlive.com/api/attendance/{reader}/config",
             ).strip(),
             timeout_seconds=_positive_integer(environment, "ALX_READER_TIMEOUT_SECONDS", 20),
+            refresh_seconds=_positive_integer(environment, "ALX_READER_REFRESH_SECONDS", 300),
         )
 
     @property

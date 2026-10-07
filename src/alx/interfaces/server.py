@@ -7,7 +7,7 @@ import json
 import queue
 import logging
 import mimetypes
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
@@ -89,8 +89,11 @@ class LiveVoiceServer:
         port: int,
         sample_rate_hz: int,
         asset_root: Path,
+        reader_tile: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self._session = session
+        # D-041: the BHL tile's current data, or None on a day without events.
+        self._reader_tile = reader_tile
         self._host = host
         self._port = port
         self._sample_rate_hz = sample_rate_hz
@@ -463,6 +466,8 @@ class LiveVoiceServer:
         parsed = urlsplit(request.path)
         if parsed.path == "/voice":
             return None
+        if parsed.path == "/reader-tile.json":
+            return self._reader_tile_response()
         relative = {
             "/": "index.html",
             "/app.css": "app.css",
@@ -473,6 +478,7 @@ class LiveVoiceServer:
             "/tile.css": "tile.css",
             "/tile.js": "tile.js",
             "/tile-fixtures.js": "tile-fixtures.js",
+            "/reader-tile.js": "reader-tile.js",
             "/tile-bhl-venue.jpg": "tile-bhl-venue.jpg",
         }.get(parsed.path)
         if relative is None:
@@ -484,6 +490,16 @@ class LiveVoiceServer:
         if media_type.startswith("text/") or media_type == "application/javascript":
             media_type += "; charset=utf-8"
         return self._response(200, path.read_bytes(), media_type)
+
+    def _reader_tile_response(self) -> Response:
+        tile = None
+        if self._reader_tile is not None:
+            try:
+                tile = self._reader_tile()
+            except Exception as error:  # noqa: BLE001 - the page keeps polling
+                LOGGER.warning("BHL tile unavailable: %s", error)
+        body = json.dumps({"tile": tile}).encode()
+        return self._response(200, body, "application/json; charset=utf-8")
 
     @staticmethod
     def _conversation_id(query: dict[str, list[str]]) -> str:
