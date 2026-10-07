@@ -497,7 +497,10 @@ class LiveVoiceServer:
             try:
                 tile = self._reader_tile()
             except Exception as error:  # noqa: BLE001 - the page keeps polling
+                # Not "no events today": an error status, so the page keeps
+                # the tile it has rather than removing the reminder.
                 LOGGER.warning("BHL tile unavailable: %s", error)
+                return self._response(503, b'{"tile": null}', "application/json; charset=utf-8")
         body = json.dumps({"tile": tile}).encode()
         return self._response(200, body, "application/json; charset=utf-8")
 
@@ -511,7 +514,7 @@ class LiveVoiceServer:
 
     @staticmethod
     def _response(status: int, body: bytes, media_type: str) -> Response:
-        reason = "OK" if status == 200 else "Not Found"
+        reason = {200: "OK", 503: "Service Unavailable"}.get(status, "Not Found")
         return Response(
             status,
             reason,

@@ -94,6 +94,11 @@ class ComposeTileTests(unittest.TestCase):
         everyone = tuple({**item, "online": True} for item in READERS)
         self.assertEqual(tile(at(14, 30), readers=everyone)["facts"][0]["tone"], "ok")
 
+    def test_updated_is_the_oldest_schedule_shown(self) -> None:
+        readers = ({**READERS[0], "schedule_as_of": "2026-10-07T13:00:00+00:00"},
+                   {**READERS[1], "schedule_as_of": "2026-10-07T14:00:00+00:00"})
+        self.assertEqual(tile(at(14, 30), readers=readers)["activity"], "Updated 13:00")
+
     def test_unmonitored_hardware_is_shown_as_such(self) -> None:
         facts = tile(at(14, 30))["facts"]
         self.assertEqual([(item["label"], item["tone"]) for item in facts[1:]],
@@ -128,11 +133,13 @@ class ServingTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(json.loads(response.body), {"tile": expected})
 
-    def test_a_failing_tile_source_does_not_break_the_page(self) -> None:
+    def test_a_failing_tile_source_is_an_error_not_an_empty_day(self) -> None:
         def broken():
             raise RuntimeError("calendar unavailable")
         response = self.get(self.server(broken), "/reader-tile.json")
-        self.assertEqual(json.loads(response.body), {"tile": None})
+        # The page keeps its tile on a non-OK answer (reader-tile.js).
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("if (!response.ok) return;", (ASSETS / "reader-tile.js").read_text())
 
     def test_the_main_page_carries_the_tile(self) -> None:
         page = (ASSETS / "index.html").read_text()

@@ -160,6 +160,31 @@ class RefreshAndReadTests(unittest.TestCase):
         self.assertEqual(readers[0]["problems"], ("schedule_unavailable:connection_failed",))
         self.assertEqual(readers[1]["event_count"], 2)
 
+    def test_an_outage_keeps_each_reader_s_last_schedule(self) -> None:
+        good = Configs({"c471cf5a": config("c471cf5a"), "ab2d5218": config("ab2d5218", mode=0)})
+        self.executors(Fleet({45984: [device("c471cf5a"), device("ab2d5218")]}), good)[
+            REFRESH_READER_CALENDAR]({})
+        later = NOW + timedelta(minutes=5)
+        outage = Configs({"c471cf5a": ReaderAccessError("connection_failed"),
+                          "ab2d5218": ReaderAccessError("schedule_unreadable")})
+        result = self.executors(Fleet({45984: [device("c471cf5a"), device("ab2d5218")]}),
+                                outage, at=later)[REFRESH_READER_CALENDAR]({})
+        self.assertEqual(result.values["session_count"], 4)
+        for reader in result.values["readers"]:
+            self.assertEqual(reader["event_count"], 2)
+            self.assertEqual(reader["room"], "Majestic")
+            self.assertEqual(reader["schedule_as_of"], NOW.isoformat())
+            self.assertIn("previous_schedule_kept", reader["problems"])
+        self.assertEqual(result.values["problems"], ())
+
+    def test_a_reader_behaviorlive_no_longer_configures_loses_its_schedule(self) -> None:
+        fleet = Fleet({45984: [device("c471cf5a")]})
+        self.executors(fleet, Configs({"c471cf5a": config("c471cf5a")}))[REFRESH_READER_CALENDAR]({})
+        result = self.executors(fleet, Configs({}))[REFRESH_READER_CALENDAR]({})
+        self.assertEqual(result.values["session_count"], 0)
+        self.assertEqual(result.values["readers"][0]["problems"],
+                         ("schedule_unavailable:reader_not_configured",))
+
     def test_what_each_reader_should_be_running_now(self) -> None:
         execute = self.executors(Fleet({45984: [device("c471cf5a")]}),
                                  Configs({"c471cf5a": config("c471cf5a")}))

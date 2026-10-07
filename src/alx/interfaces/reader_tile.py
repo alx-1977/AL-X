@@ -4,7 +4,7 @@ Friedl asked for a standing reminder that a BHL event day is under way, so
 he does not have to remember it. The tile is a view of the calendar and
 nothing more. It states facts the calendar already holds (which events are
 today, which is running, which is next, how many of today's readers Particle
-reports online, when the calendar was last refreshed) and makes no judgement
+reports online, when today's schedules were last read) and makes no judgement
 about whether anything is wrong; that remains AL/X's.
 
 "Today" is the event's own day: each session's date is taken in its
@@ -82,6 +82,11 @@ def compose_tile(
     in_use = {item.reader_uid for item in today}
     online = sum(1 for item in readers
                  if item.get("reader_uid") in in_use and item.get("online") is True)
+    # The oldest schedule shown, so a schedule kept through an outage never
+    # looks fresher than it is.
+    updated = min((item.get("schedule_as_of") or refreshed_at for item in readers
+                   if item.get("reader_uid") in in_use), default=refreshed_at,
+                  key=lambda value: datetime.fromisoformat(value))
     rooms = sorted({item.room for item in events.values() if item.room})
     return {
         "visual": VISUAL,
@@ -90,7 +95,7 @@ def compose_tile(
         "subtitle": f"{_plural(len(events), 'event')} today",
         "place": ", ".join(rooms),
         "tone": "ok",
-        "activity": f"Updated {_clock(refreshed_at, local)}",
+        "activity": f"Updated {_clock(updated, local)}",
         "state": state,
         "facts": [
             {"icon": "reader", "value": f"{online}/{len(in_use)}", "label": "Room Readers",

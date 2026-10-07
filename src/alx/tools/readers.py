@@ -66,6 +66,10 @@ _STRINGS = StructuredSchema(ValueKind.ARRAY, items=_STRING)
 _MAX_SESSIONS_RETURNED = 500
 _DEFAULT_WINDOW = timedelta(hours=24)
 
+# BehaviorLive answering that a reader has no schedule is a fact about the
+# reader, not an outage, so its previous schedule is not kept.
+_SCHEDULE_ABSENT = frozenset({"reader_not_configured", "reader_uid_invalid"})
+
 _FAILURES = (
     "arguments_unusable",
     "connection_failed",
@@ -79,7 +83,7 @@ _FAILURES = (
 
 REFRESH_DEFINITION = CapabilityDefinition(
     REFRESH_READER_CALENDAR,
-    "Rebuild the one calendar of BHL room-reader sessions: list every reader in the configured Particle products (online state, last heard), read each reader's schedule from BehaviorLive, check it, and replace the calendar with that snapshot. Returns each reader's room, mode (0 IN, 1 OUT), event count and problems, plus problems across readers. Problems are facts (malformed or missing fields, events ending before they start or overlapping, duplicates, an empty or unreadable schedule, readers in one room disagreeing); nothing is corrected.",
+    "Rebuild the one calendar of BHL room-reader sessions: list every reader in the configured Particle products (online state, last heard), read each reader's schedule from BehaviorLive, check it, and replace the calendar with that snapshot. Returns each reader's room, mode (0 IN, 1 OUT), event count, schedule_as_of and problems, plus problems across readers. A schedule that cannot be fetched keeps the one last read (problem previous_schedule_kept) unless BehaviorLive says the reader has none. Problems are facts (malformed or missing fields, events ending before they start or overlapping, duplicates, an empty or unreadable schedule, readers in one room disagreeing); nothing is corrected.",
     StructuredSchema(ValueKind.OBJECT, {}, (), extra_properties=False),
     StructuredSchema(
         ValueKind.OBJECT,
@@ -312,6 +316,11 @@ def build_reader_executors(
                 devices.extend(fleet.devices(product_id))
         except ReaderAccessError as error:
             return failed(REFRESH_READER_CALENDAR, error.code)
+        # A schedule that cannot be fetched now keeps the one last read, so a
+        # BehaviorLive outage never empties a reader's day. Only BehaviorLive
+        # saying the reader has no schedule removes it.
+        previous_at, _, previous_readers, previous_sessions = calendar.snapshot(at)
+        previous = {item.get("reader_uid"): item for item in previous_readers}
         summaries: list[dict[str, Any]] = []
         headers: dict[str, Mapping[str, Any]] = {}
         sessions: list[ReaderSession] = []
@@ -322,11 +331,24 @@ def build_reader_executors(
                 "product_id": device.product_id, "online": device.online,
                 "last_heard": device.last_heard, "room": "", "mode": -1,
                 "offset_hours": 0, "event_count": 0, "problems": (),
+                "schedule_as_of": at.isoformat(),
             }
             try:
                 raw = configs.config(device.reader_uid)
             except ReaderAccessError as error:
                 summary["problems"] = (f"schedule_unavailable:{error.code}",)
+                kept = previous.get(device.reader_uid)
+                if kept is not None and error.code not in _SCHEDULE_ABSENT:
+                    carried = [item for item in previous_sessions
+                               if item.reader_uid == device.reader_uid]
+                    sessions.extend(carried)
+                    headers[device.reader_uid] = {"room": kept.get("room", "")}
+                    summary.update(
+                        room=kept.get("room", ""), mode=kept.get("mode", -1),
+                        offset_hours=kept.get("offset_hours", 0), event_count=len(carried),
+                        schedule_as_of=kept.get("schedule_as_of") or previous_at,
+                        problems=(f"schedule_unavailable:{error.code}", "previous_schedule_kept"),
+                    )
                 summaries.append(summary)
                 continue
             header, parsed, problems = parse_schedule(device.reader_uid, raw)
