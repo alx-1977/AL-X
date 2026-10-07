@@ -288,7 +288,9 @@ class SendScheduleTests(unittest.TestCase):
         self.assertEqual({item["v"] for item in ops}, {result.values["version"]})
         self.assertEqual({message[:3] for message in reader.messages},
                          {(45984, device("ab2d5218").device_id, "schedule")})
-        self.assertEqual(self.calendar.sent("ab2d5218")["version"], result.values["version"])
+        record = self.calendar.sent("ab2d5218")
+        self.assertEqual(record["version"], result.values["version"])
+        self.assertEqual(len(record["fingerprints"]), 2)
 
     def test_the_same_schedule_always_has_the_same_version(self) -> None:
         first, second = self.send(Reader()), self.send(Reader())

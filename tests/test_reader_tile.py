@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.bootstrap.readers import ReaderCalendarPoller  # noqa: E402
 from alx.config import ReaderSettings  # noqa: E402
 from alx.contracts import CapabilityResult, CapabilityResultState  # noqa: E402
-from alx.contracts.readers import ReaderSession  # noqa: E402
+from alx.contracts.readers import ReaderSession, session_fingerprint  # noqa: E402
 from alx.interfaces.reader_tile import compose_tile, tile_source  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.providers.reader_calendar import SQLiteReaderCalendar  # noqa: E402
@@ -52,7 +52,9 @@ READERS = (
     {"reader_uid": "c471cf5a", "online": False},
 )
 ONLINE = tuple({**item, "online": True} for item in READERS)
-HOLDING = {"ab2d5218": {"event_ids": (1, 2)}, "c471cf5a": {"event_ids": (1, 2)}}
+HOLDING = {uid: {"fingerprints": tuple(session_fingerprint(item) for item in DAY
+                                        if item.reader_uid == uid)}
+           for uid in ("ab2d5218", "c471cf5a")}
 
 
 def tile(now, sessions=DAY, readers=READERS, refreshed=REFRESHED, sent=None):
@@ -89,9 +91,25 @@ class ComposeTileTests(unittest.TestCase):
 
     def test_offline_between_distant_events_is_yellow(self) -> None:
         sessions = (session("c471cf5a", 1, at(9), at(10)), session("c471cf5a", 2, at(16), at(17)))
-        data = tile(at(12), sessions=sessions, sent={"c471cf5a": {"event_ids": (2,)}})
+        data = tile(at(12), sessions=sessions,
+                    sent={"c471cf5a": {"fingerprints": (session_fingerprint(sessions[1]),)}})
         self.assertEqual((data["tone"], data["chips"][0]["tone"]), ("warn", "warn"))
         self.assertEqual(data["state"]["detail"], "Next event at 16:00")
+
+    def test_an_event_moved_since_it_was_sent_is_not_confirmed(self) -> None:
+        moved = (DAY[0], DAY[1],
+                 session("ab2d5218", 2, at(15, 45), at(17, 10), title="Supervision"), DAY[3])
+        data = tile(at(14, 10), sessions=moved, readers=ONLINE, sent=HOLDING)
+        self.assertEqual((data["tone"], data["state"]["title"]),
+                         ("warn", "Schedules not confirmed"))
+
+    def test_a_change_the_reader_would_never_see_stays_confirmed(self) -> None:
+        long_title = "T" * 64
+        sent = (session("ab2d5218", 1, at(14, 5), at(15, 5), title=long_title + " (draft)"),)
+        now = (session("ab2d5218", 1, at(14, 5), at(15, 5), title=long_title + " (final)"),)
+        record = {"ab2d5218": {"fingerprints": (session_fingerprint(sent[0]),)}}
+        data = tile(at(14, 10), sessions=now, readers=ONLINE, sent=record)
+        self.assertEqual(data["tone"], "ok")
 
     def test_a_stale_bhl_link_is_yellow(self) -> None:
         data = tile(at(14, 16), readers=ONLINE, sent=HOLDING)
@@ -142,10 +160,30 @@ class ComposeTileTests(unittest.TestCase):
             calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
             calendar.replace(at(14), list(ONLINE), list(DAY), ())
             for uid in ("ab2d5218", "c471cf5a"):
-                calendar.record_sent(uid, "v1", at(13), (1, 2))
+                calendar.record_sent(uid, "v1", at(13), (1, 2), HOLDING[uid]["fingerprints"])
             data = tile_source(calendar, lambda: at(14, 10), UTC)()
             calendar.close()
         self.assertEqual(data["tone"], "ok")
+
+
+class SentRecordTests(unittest.TestCase):
+    def test_a_record_from_before_fingerprints_confirms_nothing(self) -> None:
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calendar.sqlite3"
+            with sqlite3.connect(path) as old:
+                old.execute("CREATE TABLE sent_schedules (reader_uid TEXT PRIMARY KEY, "
+                            "version TEXT NOT NULL, sent_at TEXT NOT NULL, "
+                            "event_ids_json TEXT NOT NULL)")
+                old.execute("INSERT INTO sent_schedules VALUES ('ab2d5218', 'v0', 't', '[1, 2]')")
+            old.close()
+            calendar = SQLiteReaderCalendar(path)
+            record = calendar.sent("ab2d5218")
+            calendar.close()
+        self.assertEqual(record["fingerprints"], ())
+        self.assertEqual(tile(at(14, 10), readers=ONLINE, sent={"ab2d5218": record,
+                                                                "c471cf5a": HOLDING["c471cf5a"]})
+                         ["state"]["title"], "Schedules not confirmed")
 
 
 class ServingTests(unittest.TestCase):

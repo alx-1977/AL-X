@@ -45,8 +45,17 @@ class SQLiteReaderCalendar:
             # the calendar so a refresh never forgets what a reader holds.
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS sent_schedules (reader_uid TEXT PRIMARY KEY, "
-                "version TEXT NOT NULL, sent_at TEXT NOT NULL, event_ids_json TEXT NOT NULL)"
+                "version TEXT NOT NULL, sent_at TEXT NOT NULL, event_ids_json TEXT NOT NULL, "
+                "fingerprints_json TEXT NOT NULL DEFAULT '[]')"
             )
+            columns = {row[1] for row in self._connection.execute(
+                "PRAGMA table_info(sent_schedules)")}
+            if "fingerprints_json" not in columns:
+                # A record from before fingerprints confirms nothing.
+                self._connection.execute(
+                    "ALTER TABLE sent_schedules ADD COLUMN "
+                    "fingerprints_json TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def replace(
         self,
@@ -109,24 +118,29 @@ class SQLiteReaderCalendar:
         return row[0], tuple(json.loads(row[1])), readers, sessions
 
     def record_sent(
-        self, reader_uid: str, version: str, sent_at: datetime, event_ids: Sequence[int]
+        self, reader_uid: str, version: str, sent_at: datetime, event_ids: Sequence[int],
+        fingerprints: Sequence[str] = (),
     ) -> None:
         with self._lock, self._connection:
             self._connection.execute(
-                "INSERT OR REPLACE INTO sent_schedules VALUES (?, ?, ?, ?)",
-                (reader_uid, version, sent_at.isoformat(), json.dumps(list(event_ids))),
+                "INSERT OR REPLACE INTO sent_schedules "
+                "(reader_uid, version, sent_at, event_ids_json, fingerprints_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (reader_uid, version, sent_at.isoformat(), json.dumps(list(event_ids)),
+                 json.dumps(list(fingerprints))),
             )
 
     def sent(self, reader_uid: str) -> Mapping[str, Any]:
         """The last schedule the reader accepted, or empty."""
         with self._lock:
             row = self._connection.execute(
-                "SELECT version, sent_at, event_ids_json FROM sent_schedules "
+                "SELECT version, sent_at, event_ids_json, fingerprints_json FROM sent_schedules "
                 "WHERE reader_uid = ?", (reader_uid,),
             ).fetchone()
         if row is None:
             return {}
-        return {"version": row[0], "sent_at": row[1], "event_ids": tuple(json.loads(row[2]))}
+        return {"version": row[0], "sent_at": row[1], "event_ids": tuple(json.loads(row[2])),
+                "fingerprints": tuple(json.loads(row[3]))}
 
     def close(self) -> None:
         self._connection.close()
