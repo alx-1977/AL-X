@@ -339,6 +339,48 @@ def _absolute_http_url(value: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ReaderSettings:
+    """D-039: which Particle products hold BHL room readers, and their schedules.
+
+    Absent token or products leave the reader calendar unbuilt.
+    """
+
+    access_token: str
+    product_ids: tuple[int, ...]
+    config_url: str
+    timeout_seconds: int
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> "ReaderSettings":
+        products = []
+        for part in environment.get("ALX_READER_PRODUCT_IDS", "").split(","):
+            if part.strip():
+                if not part.strip().isdigit():
+                    raise ConfigurationError("ALX_READER_PRODUCT_IDS must list product numbers")
+                products.append(int(part.strip()))
+        return cls(
+            access_token=environment.get("PARTICLE_ACCESS_TOKEN", "").strip(),
+            product_ids=tuple(dict.fromkeys(products)),
+            config_url=environment.get(
+                "ALX_BHL_READER_CONFIG_URL",
+                "https://behaviorlive.com/api/attendance/{reader}/config",
+            ).strip(),
+            timeout_seconds=_positive_integer(environment, "ALX_READER_TIMEOUT_SECONDS", 20),
+        )
+
+    @property
+    def is_usable(self) -> bool:
+        return (
+            bool(self.access_token) and bool(self.product_ids)
+            and "{reader}" in self.config_url and _absolute_http_url(
+                self.config_url.replace("{reader}", "x"))
+        )
+
+    def __repr__(self) -> str:
+        return f"ReaderSettings(products={self.product_ids}, token=<redacted>)"
+
+
+@dataclass(frozen=True, slots=True)
 class LlamaParseSettings:
     """LlamaCloud structured extraction for supplier invoices, not Core cognition.
 

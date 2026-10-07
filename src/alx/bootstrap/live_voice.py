@@ -67,6 +67,7 @@ from alx.config import (
     ConfigurationError,
     LiveVoiceSettings,
     LlamaParseSettings,
+    ReaderSettings,
     MailSendSettings,
     MailSettings,
     RuntimeSettings,
@@ -77,6 +78,7 @@ from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.bootstrap.documents import build_document_runtime
+from alx.bootstrap.readers import build_reader_runtime
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
@@ -740,6 +742,21 @@ async def run(repository_root: Path) -> None:
         policies.update(document_runtime.policies)
         executors.update(document_runtime.executors)
         permissions.update(document_runtime.permissions)
+
+    # D-039. The one calendar of BHL room-reader sessions.
+    try:
+        reader_runtime = build_reader_runtime(
+            ReaderSettings.from_environment(environment), storage_root,
+            current_call_id.get,
+        )
+    except ConfigurationError as error:
+        LOGGER.info("Reader calendar unavailable: %s", error)
+        reader_runtime = None
+    if reader_runtime is not None:
+        register(reader_runtime.definitions, TraceSubsystem.READERS)
+        policies.update(reader_runtime.policies)
+        executors.update(reader_runtime.executors)
+        permissions.update(reader_runtime.permissions)
 
     xero_approval_ttl_seconds: int | None = None
     try:

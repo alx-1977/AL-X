@@ -270,3 +270,18 @@ description = "What one mailed commercial document states is read into a fixed s
 # invoices, inside capture_supplier_invoice.
 entry = "tools/documents.py::build_document_executors.<locals>.read_document"
 forbidden = []
+
+[[outcomes]]
+id = "readers.calendar_is_refreshed"
+description = "Every BHL reader's schedule is read and combined into one calendar."
+# D-039. Nothing was superseded: AL/X had no view of the readers before.
+entry = "tools/readers.py::build_reader_executors.<locals>.refresh"
+forbidden = []
+
+[[outcomes]]
+id = "readers.schedule_is_sent"
+description = "One reader receives its schedule from the calendar and confirms it."
+# D-040. Superseded on V2 readers: the reader fetching its own schedule from
+# BehaviorLive, which lived in firmware and never in AL/X.
+entry = "tools/readers.py::build_reader_executors.<locals>.send"
+forbidden = []

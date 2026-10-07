@@ -2362,3 +2362,37 @@ This grants no authority a single goal update lacks: completion still requires s
 ### Amendment to D-037 — the PO's total decides
 
 `invoice_xero_quote` requires `po_total`: the total the purchase order states, read from the PO with `read_mail_document`. A quote whose total differs returns `po_total_mismatch` before anything is written. If AL/X cannot read the PO, she asks Friedl instead of invoicing.
+
+## D-039 — BHL room readers: one calendar of every reader's schedule
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-07.** Friedl's words that day:
+  - "The most important thing is ALX should know and confirm which event is running on each reader at any point."
+  - "I think the first building block is to get ALX to get the device schedules and combine it into a single calendar."
+  - On what AL/X may do to the readers: "Whatever she needs to be able to get the devices running the correct events including forcing restarts."
+- **Authority now (read only).**
+  - AL/X may list the devices in the configured Particle products (`ALX_READER_PRODUCT_IDS`; today 44781 and 45984) with their online state.
+  - She may read each reader's schedule from BehaviorLive (`/api/attendance/<reader>/config`). The reader UID is the last eight characters of the Particle device ID.
+  - She keeps one calendar of every reader's sessions, replaced as one consistent snapshot on each refresh.
+  - Its own permission is `readers.read`.
+- **What AL/X decides.** Which schedule is right, whether a problem matters, and what to do about it. The checks report mechanical facts only (malformed or missing fields, events ending before they start or overlapping, duplicates, empty or unreadable schedules, readers in one room disagreeing) and correct nothing.
+- **Retention.** Sessions carry presenters' names, the client's data. A session is removed 30 days after it ends.
+- **Not yet authorised: device actions.** Restarting readers, pushing schedules AL/X constructs, or any other Particle function call or write. Friedl approved them in principle above. Each will be recorded here when built, with its exact scope. Sending schedules is now authorised by D-040.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-040 — AL/X sends each V2 reader its schedule
+
+- **Date:** 2026-10-07
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-07.** Friedl's words that day:
+  - "Devices should get their schedules from ALX, NOT from the BHL endpoint."
+  - "ALX needs to get all schedules, combine them into a single calendar and then push each device's data to that device."
+  - "I suggest building #2 before we review?"
+  - Standing authority from D-039: "Whatever she needs to be able to get the devices running the correct events including forcing restarts."
+- **Why.** Small client errors in a schedule stopped V1 readers reading it. AL/X settles them before anything reaches a reader, so a reader only ever receives a clean day.
+- **Authority.** AL/X may send any reader in the configured Particle products its sessions from the calendar, through the Particle function `schedule`, without per-send approval. Its own permission is `readers.send`. She decides when to send and which events to leave out; the capability refuses overlapping events until she has chosen.
+- **Protocol.** `docs/READER_SCHEDULE_PROTOCOL.md`: `begin`, one message per event, `commit`, each at most 600 bytes and answered by the reader. The reader switches only after a complete schedule is committed to flash, so a dropped send leaves it on its previous schedule. An unanswered `commit` is reported as ambiguous, to be settled from the reader's status.
+- **Record.** The calendar keeps the last schedule each reader accepted (version, time, event IDs), for comparing with what the reader reports.
+- **Still not authorised.** Restarting readers or any other device function. Each will be recorded when built.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
