@@ -80,7 +80,7 @@ class Particle:
 
     def __init__(self, status=None, refuse=None):
         self.calls = []
-        self.status = status if status is not None else {"v": "", "e": 0, "n": 0}
+        self.status = status if status is not None else {"v": "", "e": 0, "n": 0, "clk": 1}
         self.refuse = refuse
         self.reads = 0
 
@@ -284,7 +284,7 @@ class MonitorTests(unittest.TestCase):
         monitor = self.build(particle)
         monitor.on_event("roomreader/schedule_request", DEVICE, "{}", "t")
         version = self.calendar.sent(UID)["version"]
-        particle.status = {"v": version, "e": 2, "n": 3}  # 14:30: halfway, IN moves on
+        particle.status = {"v": version, "e": 2, "n": 3, "clk": 1}  # 14:30: halfway, IN moves on
         particle.calls.clear()
         self.now[0] += timedelta(minutes=20)
         monitor.cycle()
@@ -292,13 +292,119 @@ class MonitorTests(unittest.TestCase):
         self.assertNotIn("wrong_event", self.steps())
 
     def test_a_reader_on_the_wrong_event_is_recorded(self) -> None:
-        particle = Particle(status={"v": "x", "e": 3, "n": 3})
+        particle = Particle(status={"v": "x", "e": 3, "n": 3, "clk": 1})
         monitor = self.build(particle)
         monitor.cycle()
         wrong = [s for s in self.calendar.log_between(at(0), at(23))[0]
                  if s["kind"] == "wrong_event"]
         self.assertEqual(wrong[0]["detail"], {"expected": 1, "reported": 3})
         self.assertEqual(monitor.checks(self.now[0])[UID]["event"], 3)
+
+    def card(self, monitor, **fields):
+        report = {"v": "x", "e": 1, "n": 3, "bat": 80, "pwr": "bat", "sig": 60, "sq": 60,
+                  "clk": 1, "fw": "5.00", **fields}
+        monitor.on_event("roomreader/status", DEVICE, json.dumps(report), "t")
+
+    def test_a_card_is_recorded_as_the_readers_status(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        self.card(monitor, e=1)
+        statuses = [s for s in self.calendar.log_between(at(0), at(23))[0] if s["kind"] == "status"]
+        self.assertEqual(statuses[0]["detail"]["via"], "card")
+        self.assertEqual(monitor.checks(self.now[0])[UID]["event"], 1)
+        self.assertFalse(monitor.checks(self.now[0])[UID]["wrong"])
+
+    def test_with_a_recent_card_no_status_read_is_spent(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        self.card(monitor, e=1)
+        self.now[0] += timedelta(minutes=20)
+        monitor.cycle()
+        self.assertEqual(particle.reads, 0)
+
+    def test_an_old_card_is_refreshed_by_a_read(self) -> None:
+        particle = Particle(status={"v": "x", "e": 2, "n": 3, "clk": 1})
+        monitor = self.build(particle)
+        self.card(monitor, e=1)
+        self.now[0] += timedelta(minutes=31)
+        monitor.cycle()
+        self.assertEqual(particle.reads, 1)
+
+    def test_a_card_on_the_wrong_event_is_recorded_once(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        self.card(monitor, e=3)
+        monitor.cycle()
+        self.now[0] += timedelta(minutes=5)
+        monitor.cycle()
+        self.assertEqual(self.steps().count("wrong_event"), 1)
+        self.assertTrue(monitor.checks(self.now[0])[UID]["wrong"])
+
+    def test_a_reader_is_allowed_a_moment_at_each_changeover(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        self.now[0] = at(14, 31)  # IN reader: event 2 began at 14:30
+        self.card(monitor, e=1)
+        self.assertNotIn("wrong_event", self.steps())
+        self.now[0] = at(14, 33)
+        self.card(monitor, e=1)
+        self.assertIn("wrong_event", self.steps())
+
+    def test_an_older_report_never_overrides_a_newer_card(self) -> None:
+        monitor = self.build(Particle())
+        self.card(monitor, e=3)  # wrong at 14:10
+        old_report, old_at = monitor._cards[UID]
+        self.now[0] += timedelta(seconds=30)
+        self.card(monitor, e=1)  # corrected
+        # A judgement of the replaced card arriving late changes nothing.
+        monitor._judge_event(UID, old_report, old_at, list(DAY), 0, self.now[0])
+        self.assertFalse(monitor.checks(self.now[0])[UID]["wrong"])
+
+    def test_a_reader_stuck_on_its_last_event_is_flagged(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        self.now[0] = at(17, 20)  # IN: event 3's window runs to 17:30
+        self.card(monitor, e=3)
+        self.assertFalse(monitor.checks(self.now[0])[UID]["wrong"])
+        self.now[0] = at(17, 40)  # window closed; the reader never moved on
+        monitor.cycle()
+        self.assertTrue(monitor.checks(self.now[0])[UID]["wrong"])
+        self.assertEqual((particle.reads, particle.calls), (0, []))
+
+    def test_a_fallback_read_does_not_stand_in_for_a_card(self) -> None:
+        particle = Particle(status={"v": "x", "e": 1, "n": 3, "clk": 1})
+        monitor = self.build(particle)
+        monitor.cycle()  # no card yet: read
+        self.now[0] += timedelta(minutes=5)
+        monitor.cycle()  # still no card: read again
+        self.assertEqual(particle.reads, 2)
+
+    def test_an_offline_reader_is_not_flagged_after_its_last_event(self) -> None:
+        particle = Particle()
+        particle.online = False
+        monitor = self.build(particle, online=True)
+        self.now[0] = at(17, 20)
+        self.card(monitor, e=3)
+        monitor.ping_cycle()  # the reader stops answering
+        self.now[0] = at(17, 40)
+        monitor.ping_cycle()
+        monitor.cycle()
+        self.assertFalse(monitor.checks(self.now[0])[UID].get("wrong"))
+        self.assertNotIn("wrong_event", self.steps())
+
+    def test_an_incomplete_card_is_not_trusted(self) -> None:
+        particle = Particle(status={"v": "x", "e": 1, "n": 3, "clk": 1})
+        monitor = self.build(particle)
+        monitor.on_event("roomreader/status", DEVICE, "{}", "t")
+        self.assertIn("status_unavailable", self.steps())
+        self.assertNotIn(UID, monitor._cards)
+        monitor.cycle()  # the status read is still used
+        self.assertEqual(particle.reads, 1)
+
+    def test_an_unreadable_card_is_noted(self) -> None:
+        monitor = self.build(Particle())
+        monitor.on_event("roomreader/status", DEVICE, "not json", "t")
+        self.assertIn("status_unavailable", self.steps())
 
     def test_unasked_deliveries_are_spaced_out(self) -> None:
         particle = Particle(refuse="device_timeout")
@@ -327,7 +433,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual((self.steps(), particle.reads), (["offline"], 0))
 
     def test_the_tile_says_al_x_is_monitoring_and_turns_red_on_a_wrong_event(self) -> None:
-        particle = Particle(status={"v": "x", "e": 3, "n": 3})
+        particle = Particle(status={"v": "x", "e": 3, "n": 3, "clk": 1})
         monitor = self.build(particle)
         monitor.cycle()
         data = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)()

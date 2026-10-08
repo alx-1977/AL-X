@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
-from alx.contracts.readers import MODE_IN, ReaderSession, expected_event, holds_current
+from alx.contracts.readers import MODE_IN, ReaderSession, holds_current
 
 
 # Friedl's rules, 2026-10-07.
@@ -106,12 +106,12 @@ def compose_tile(
     # window says is current is on the wrong event: red, like offline in
     # session.
     checks = checks or {}
+    # The monitor's own judgement, which allows a reader a moment at each
+    # changeover, on a report recent enough to stand.
     wrong_event = [
         uid for uid in in_use
         if uid not in offline and isinstance(checks.get(uid), Mapping)
-        and checks[uid].get("fresh") is True
-        and checks[uid].get("event") != expected_event(
-            [item for item in sessions if item.reader_uid == uid], mode_of(uid), now)
+        and checks[uid].get("fresh") is True and checks[uid].get("wrong") is True
     ]
     read_times = [datetime.fromisoformat(summary.get(uid, {}).get("schedule_as_of") or refreshed_at)
                   for uid in in_use]
