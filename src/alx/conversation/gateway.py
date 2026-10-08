@@ -75,6 +75,44 @@ class ConversationGateway:
             retention_until, current.revision,
         )
 
+    def relay_response(self, source_conversation_id: str, target_conversation_id: str,
+                       text: str) -> bool:
+        """Put a reply AL/X made in one thread into the thread Friedl is in (D-044).
+
+        She thinks about each mail thread in its own conversation, but tells
+        Friedl in his. Copying her stored reply there, with its own provenance
+        and so its own expiry, means that when he answers it, his thread holds
+        what he is answering. Stored once per source turn. False when the reply
+        is not found in the source thread.
+        """
+        if source_conversation_id == target_conversation_id:
+            return True
+        try:
+            source = self._conversation_store.load(source_conversation_id)
+        except ConversationNotFound:
+            return False
+        original = next(
+            (item for item in reversed(source.turns)
+             if item.origin is ConversationOrigin.ALX_RESPONSE and item.content == text),
+            None,
+        )
+        if original is None:
+            return False
+        try:
+            target = self._conversation_store.load(target_conversation_id)
+        except ConversationNotFound:
+            target = self._conversation_store.create(
+                target_conversation_id, source.retention_until)
+        turn_id = f"relayed:{original.turn_id}"
+        if any(item.turn_id == turn_id for item in target.turns):
+            return True
+        self._conversation_store.append(
+            ConversationTurn(target_conversation_id, turn_id, ConversationOrigin.ALX_RESPONSE,
+                             text, self._clock(), provenance=original.provenance),
+            max(target.retention_until, source.retention_until), target.revision,
+        )
+        return True
+
     def _acknowledge(self, goal_id: str, turn_id: str) -> None:
         try:
             self._core.plan_announcement_stored(goal_id, turn_id)

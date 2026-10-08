@@ -8,6 +8,7 @@ import queue
 import logging
 import mimetypes
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
@@ -90,8 +91,20 @@ class LiveVoiceServer:
         sample_rate_hz: int,
         asset_root: Path,
         reader_tile: Callable[[], dict[str, Any] | None] | None = None,
+        # D-044: copies a reply from the thread it was made in into the thread
+        # Friedl is in, and keeps replies for when nobody is connected.
+        relay: Callable[[str, str, str], bool] | None = None,
+        pending: Any = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session = session
+        self._relay = relay
+        self._pending = pending
+        self._now = clock or (lambda: datetime.now(UTC))
+        # Conversations with a live listener, oldest connection first. Friedl
+        # is the one person AL/X speaks to, so a reply made in a thread nobody
+        # is listening on (a mail thread) goes to the session he has open.
+        self._live_conversations: list[str] = []
         # D-041: the BHL tile's current data, or None on a day without events.
         self._reader_tile = reader_tile
         self._host = host
@@ -133,9 +146,26 @@ class LiveVoiceServer:
         is produced by the same synthesizer the person-turn path uses, and the
         wording is the Core's own, unaltered.
         """
+        source_conversation_id = conversation_id
         registered = self._delivery_queues.get(conversation_id) or []
         if not registered:
-            return ResponseDelivery.UNDELIVERABLE
+            # D-044: she made this reply in a thread nobody listens on (each
+            # mail thread is its own conversation). Friedl hears it in the
+            # session he has open; with none open, it waits for his next one.
+            live = [item for item in getattr(self, "_live_conversations", [])
+                    if self._delivery_queues.get(item)]
+            if not live:
+                pending = getattr(self, "_pending", None)
+                if pending is None:
+                    return ResponseDelivery.UNDELIVERABLE
+                try:
+                    pending.add(source_conversation_id, response, self._clock_now())
+                except Exception as error:  # noqa: BLE001 - recorded as unheard
+                    LOGGER.warning("Could not keep a reply for later: %s", type(error).__name__)
+                    return ResponseDelivery.UNDELIVERABLE
+                return ResponseDelivery.QUEUED
+            conversation_id = live[-1]
+            registered = self._delivery_queues.get(conversation_id) or []
         # Snapshot: the listener may go away while this runs, which the loop
         # side re-checks rather than assuming.
         listeners = list(registered)
@@ -183,10 +213,45 @@ class LiveVoiceServer:
             accepted = acknowledged.get(timeout=self.DELIVERY_ACK_SECONDS)
         except queue.Empty:
             return ResponseDelivery.UNDELIVERABLE
+        if accepted and conversation_id != source_conversation_id:
+            # Heard in his thread, so it is recorded in his thread: his answer
+            # to it is then an answer to something his conversation holds.
+            self._relay_into(source_conversation_id, conversation_id, response)
         return (
             ResponseDelivery.DELIVERED if accepted
             else ResponseDelivery.UNDELIVERABLE
         )
+
+    def _clock_now(self) -> datetime:
+        return getattr(self, "_now", lambda: datetime.now(UTC))()
+
+    def _relay_into(self, source: str, target: str, text: str) -> None:
+        relay = getattr(self, "_relay", None)
+        if relay is None:
+            return
+        try:
+            if not relay(source, target, text):
+                LOGGER.info("A relayed reply was not found in its source thread")
+        except Exception as error:  # noqa: BLE001 - heard; only the copy failed
+            LOGGER.warning("Could not record a relayed reply: %s", type(error).__name__)
+
+    async def _hand_over_pending(self, conversation_id: str,
+                                 deliveries: "asyncio.Queue[str]") -> None:
+        """Give a newly opened session every reply that waited for it, in order."""
+        pending = getattr(self, "_pending", None)
+        if pending is None:
+            return
+        try:
+            waiting = await asyncio.to_thread(pending.take_all, self._clock_now())
+        except Exception as error:  # noqa: BLE001 - nothing taken, nothing lost
+            LOGGER.warning("Could not read waiting replies: %s", type(error).__name__)
+            return
+        for source, text in waiting:
+            if source != conversation_id:
+                await asyncio.to_thread(self._relay_into, source, conversation_id, text)
+            deliveries.put_nowait(text)
+        if waiting:
+            LOGGER.info("Handed %d waiting replies to the new session", len(waiting))
 
     # A typed line is at most this long. Not a judgement about what is worth
     # saying: a bound so one frame cannot exhaust memory or the input ceiling.
@@ -272,7 +337,9 @@ class LiveVoiceServer:
         typed: asyncio.Queue[str] = asyncio.Queue()
         self._typed_queues.setdefault(conversation_id, []).append(typed)
         self._delivery_loop = asyncio.get_running_loop()
+        self._live_conversations.append(conversation_id)
         LOGGER.info("Voice session connected")
+        await self._hand_over_pending(conversation_id, deliveries)
 
         await connection.send(
             json.dumps(
@@ -291,6 +358,8 @@ class LiveVoiceServer:
                 LOGGER.info("Resuming voice session on the same conversation")
 
         finally:
+            if conversation_id in self._live_conversations:
+                self._live_conversations.remove(conversation_id)
             queues = self._delivery_queues.get(conversation_id, [])
             if deliveries in queues:
                 queues.remove(deliveries)
