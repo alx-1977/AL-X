@@ -85,6 +85,7 @@ from alx.bootstrap.readers import (
     reader_poller,
 )
 from alx.interfaces.reader_tile import tile_source
+from alx.continuity.pending_messages import SQLitePendingMessages
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
@@ -1053,6 +1054,11 @@ async def run(repository_root: Path) -> None:
         CODE_ROOT / "src/alx/interfaces/assets",
         reader_tile=None if reader_runtime is None else tile_source(
             reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch),
+        # D-044: replies made in a thread nobody listens on reach Friedl's
+        # session, and wait for his next one when none is open.
+        relay=gateway.relay_response,
+        locate=gateway.locate_reply,
+        pending=SQLitePendingMessages(storage_root / "pending-messages.sqlite3"),
     )
     # Every kind of occasion reaches the Core through one producer, one
     # runner and one tick. A finished external task joins the matured requests

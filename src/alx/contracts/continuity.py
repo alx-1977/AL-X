@@ -274,6 +274,9 @@ class ResponseDelivery(str, Enum):
 
     DELIVERED = "delivered"
     UNDELIVERABLE = "undeliverable"
+    # D-044: nobody was connected, so it is kept and delivered, in order, the
+    # next time Friedl opens AL/X. Not lost, so not undelivered.
+    QUEUED = "queued"
 
 
 class AutonomousResponseTransport(Protocol):

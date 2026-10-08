@@ -210,7 +210,10 @@ class AutonomousCognitionRunner:
                         LOGGER.warning(
                             "Autonomous response delivery failed: %s", error
                         )
-                undelivered = delivered is not ResponseDelivery.DELIVERED
+                # Queued for Friedl's next session is not lost (D-044): it
+                # will be shown to him, so she is not told it went unheard.
+                undelivered = delivered not in (
+                    ResponseDelivery.DELIVERED, ResponseDelivery.QUEUED)
         except Exception as error:
             LOGGER.warning("Autonomous cognition turn failed: %s", error)
         finally:

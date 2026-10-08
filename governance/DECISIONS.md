@@ -2443,3 +2443,16 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Mechanical, not cognition.** The monitor makes no Core call and makes no judgement: anything needing one (overlapping events) is refused by the send path and recorded; what to do is AL/X's. The BHL tile shows "monitoring" and turns red when a reader reports the wrong event.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 
+## D-044 — What AL/X wants to tell Friedl reaches him
+
+- **Date:** 2026-10-08
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-08** ("yes please"), after: "the session was open until 5 mins ago. I know of all those emails. ALX did not mention one of them to me."
+- **The fault.** AL/X thinks about each mail thread in its own conversation (`mail-thread:<…>`, deliberately, so one correspondent's work never leaks into another's). Her reply was offered only to a listener on that same conversation, which no browser ever is: every reply about the morning's mail on 2026-10-08, including a JLCPCB question needing Friedl's decision, was recorded as undelivered while his session was open.
+- **Routing.** A reply made in a conversation nobody listens on goes to the session Friedl has open (the most recently connected), through the same admission rule (his pending turn owns the voice) and the same speech path. Friedl is the one person AL/X speaks to.
+- **Recorded in his thread.** The delivered reply is copied into his conversation, once, with the source turn's provenance and so its expiry, so that when he answers it his thread holds what he is answering.
+- **Waiting.** With no session open, the reply is kept (`pending-messages.sqlite3`) and handed to his next session in order, ahead of anything newer, then removed. It expires at the earlier of 30 days and the deadline of the reply it came from (D-013). A reply a closing session never spoke goes back to waiting. Kept is not lost: the occasion is not recorded as undelivered, so she does not say it twice.
+- **Carried by identity.** A reply is identified by its thread and turn when it is delivered, and copied by that identity, never matched by text again. A copy into his thread that fails is kept and made later.
+- **Unchanged.** Mail threads stay separate for reasoning. A person turn waiting on his conversation still refuses an unprompted reply, which is recorded as undelivered as before.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
