@@ -176,6 +176,18 @@ PRESENCE_FRESH_FOR = timedelta(minutes=3)
 STATUS_VARIABLE = "status"
 
 
+def _usable_report(report: Any) -> bool:
+    """A status report with the fields every judgement relies on, correctly typed."""
+    if not isinstance(report, dict):
+        return False
+
+    def whole(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    return (isinstance(report.get("v"), str) and whole(report.get("e"))
+            and whole(report.get("n")) and whole(report.get("clk")))
+
+
 class ReaderMonitor:
     """Keeps every reader in use on its schedule, and records each step (D-043).
 
@@ -351,7 +363,14 @@ class ReaderMonitor:
                 continue
             mode = reader["mode"]
             if not still_to_run(own, mode, at):
-                continue  # nothing left today for this reader
+                # Nothing left to run or send, but a reader still showing its
+                # last event after that window closed is stuck: judged again
+                # on what it last reported, without reading or sending.
+                with self._lock:
+                    held = self._cards.get(uid)
+                if held is not None:
+                    self._judge_event(uid, held[0], held[1], own, mode, at)
+                continue
             with self._lock:
                 observed = self._presence(uid, at)
             online = observed if observed is not None else reader.get("online") is True
@@ -361,12 +380,12 @@ class ReaderMonitor:
             with self._lock:
                 card = self._cards.get(uid)
             if card is not None and at - card[1] <= CARD_FRESH_FOR:
-                report = card[0]  # the reader's own recent card: no read needed
+                report, received_at = card  # the reader's own recent card: no read
             else:
-                report = self._read_status(uid, reader, at)
+                report, received_at = self._read_status(uid, reader, at), at
             record = self._calendar.sent(uid)
             if report is not None:
-                self._judge_event(uid, report, own, mode, at)
+                self._judge_event(uid, report, received_at, own, mode, at)
             stale = not holds_current(record, own, mode, at) or (
                 report is not None and record and report.get("v") != record.get("version"))
             if stale:
@@ -394,12 +413,12 @@ class ReaderMonitor:
         except (ValueError, KeyError, TypeError):
             self._note(uid, at, "status_unavailable", {"code": "status_unreadable"})
             return None
+        if not _usable_report(report):
+            self._note(uid, at, "status_unavailable", {"code": "status_unreadable"})
+            return None
         self._calendar.log(at, uid, "status", report)
         self._heard(uid, at, "status")
-        with self._lock:
-            self._checks[uid] = {"event": report.get("e"), "version": report.get("v"),
-                                 "at": at}
-            self._last_outcome.pop(uid, None)
+        self._keep_report(uid, report, at)
         return report
 
     def _card(self, uid: str, data: str, at: datetime) -> None:
@@ -408,29 +427,44 @@ class ReaderMonitor:
             report = json.loads(data) if data else None
         except ValueError:
             report = None
-        if not isinstance(report, dict):
+        if not _usable_report(report):
+            # Not trusted, not kept: the status read stays available.
             self._note(uid, at, "status_unavailable", {"code": "card_unreadable"})
             return
         self._calendar.log(at, uid, "status", {**report, "via": "card"})
-        with self._lock:
-            self._cards[uid] = (report, at)
-            self._checks[uid] = {**self._checks.get(uid, {}), "event": report.get("e"),
-                                 "version": report.get("v"), "at": at}
-            self._last_outcome.pop(uid, None)
+        self._keep_report(uid, report, at)
         _, _, readers, sessions = self._calendar.snapshot(at)
         reader = next((item for item in readers if item.get("reader_uid") == uid), None)
         own = [item for item in sessions if item.reader_uid == uid]
         if reader is not None and own and reader.get("mode") in (0, 1):
-            self._judge_event(uid, report, own, reader["mode"], at)
+            self._judge_event(uid, report, at, own, reader["mode"], at)
 
-    def _judge_event(self, uid: str, report: Mapping[str, Any], own: list,
-                     mode: int, at: datetime) -> None:
-        """Whether the reader runs the event its window says, recorded once per change."""
+    def _keep_report(self, uid: str, report: Mapping[str, Any], received_at: datetime) -> None:
+        """The reader's latest report, whether its own card or a read, and when."""
+        with self._lock:
+            current = self._cards.get(uid)
+            if current is not None and current[1] > received_at:
+                return  # a newer one is already held
+            self._cards[uid] = (dict(report), received_at)
+            self._checks[uid] = {**self._checks.get(uid, {}), "event": report.get("e"),
+                                 "version": report.get("v"), "at": received_at}
+            self._last_outcome.pop(uid, None)
+
+    def _judge_event(self, uid: str, report: Mapping[str, Any], received_at: datetime,
+                     own: list, mode: int, at: datetime) -> None:
+        """Whether the reader runs the event its window says, recorded once per change.
+
+        Only the report still held is judged: a newer card that arrived while
+        an older one was being judged has the last word.
+        """
         reported = report.get("e")
         expected = expected_event(own, mode, at)
         wrong = reported != expected and reported != expected_event(
             own, mode, at - CHANGEOVER_GRACE)
         with self._lock:
+            held = self._cards.get(uid)
+            if held is not None and held[1] != received_at:
+                return
             check = self._checks.setdefault(uid, {"at": at})
             check["wrong"] = wrong
             check["expected"] = expected

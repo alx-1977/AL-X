@@ -80,7 +80,7 @@ class Particle:
 
     def __init__(self, status=None, refuse=None):
         self.calls = []
-        self.status = status if status is not None else {"v": "", "e": 0, "n": 0}
+        self.status = status if status is not None else {"v": "", "e": 0, "n": 0, "clk": 1}
         self.refuse = refuse
         self.reads = 0
 
@@ -284,7 +284,7 @@ class MonitorTests(unittest.TestCase):
         monitor = self.build(particle)
         monitor.on_event("roomreader/schedule_request", DEVICE, "{}", "t")
         version = self.calendar.sent(UID)["version"]
-        particle.status = {"v": version, "e": 2, "n": 3}  # 14:30: halfway, IN moves on
+        particle.status = {"v": version, "e": 2, "n": 3, "clk": 1}  # 14:30: halfway, IN moves on
         particle.calls.clear()
         self.now[0] += timedelta(minutes=20)
         monitor.cycle()
@@ -292,7 +292,7 @@ class MonitorTests(unittest.TestCase):
         self.assertNotIn("wrong_event", self.steps())
 
     def test_a_reader_on_the_wrong_event_is_recorded(self) -> None:
-        particle = Particle(status={"v": "x", "e": 3, "n": 3})
+        particle = Particle(status={"v": "x", "e": 3, "n": 3, "clk": 1})
         monitor = self.build(particle)
         monitor.cycle()
         wrong = [s for s in self.calendar.log_between(at(0), at(23))[0]
@@ -323,7 +323,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(particle.reads, 0)
 
     def test_an_old_card_is_refreshed_by_a_read(self) -> None:
-        particle = Particle(status={"v": "x", "e": 2, "n": 3})
+        particle = Particle(status={"v": "x", "e": 2, "n": 3, "clk": 1})
         monitor = self.build(particle)
         self.card(monitor, e=1)
         self.now[0] += timedelta(minutes=31)
@@ -349,6 +349,36 @@ class MonitorTests(unittest.TestCase):
         self.now[0] = at(14, 33)
         self.card(monitor, e=1)
         self.assertIn("wrong_event", self.steps())
+
+    def test_an_older_report_never_overrides_a_newer_card(self) -> None:
+        monitor = self.build(Particle())
+        self.card(monitor, e=3)  # wrong at 14:10
+        old_report, old_at = monitor._cards[UID]
+        self.now[0] += timedelta(seconds=30)
+        self.card(monitor, e=1)  # corrected
+        # A judgement of the replaced card arriving late changes nothing.
+        monitor._judge_event(UID, old_report, old_at, list(DAY), 0, self.now[0])
+        self.assertFalse(monitor.checks(self.now[0])[UID]["wrong"])
+
+    def test_a_reader_stuck_on_its_last_event_is_flagged(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        self.now[0] = at(17, 20)  # IN: event 3's window runs to 17:30
+        self.card(monitor, e=3)
+        self.assertFalse(monitor.checks(self.now[0])[UID]["wrong"])
+        self.now[0] = at(17, 40)  # window closed; the reader never moved on
+        monitor.cycle()
+        self.assertTrue(monitor.checks(self.now[0])[UID]["wrong"])
+        self.assertEqual((particle.reads, particle.calls), (0, []))
+
+    def test_an_incomplete_card_is_not_trusted(self) -> None:
+        particle = Particle(status={"v": "x", "e": 1, "n": 3, "clk": 1})
+        monitor = self.build(particle)
+        monitor.on_event("roomreader/status", DEVICE, "{}", "t")
+        self.assertIn("status_unavailable", self.steps())
+        self.assertNotIn(UID, monitor._cards)
+        monitor.cycle()  # the status read is still used
+        self.assertEqual(particle.reads, 1)
 
     def test_an_unreadable_card_is_noted(self) -> None:
         monitor = self.build(Particle())
@@ -382,7 +412,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual((self.steps(), particle.reads), (["offline"], 0))
 
     def test_the_tile_says_al_x_is_monitoring_and_turns_red_on_a_wrong_event(self) -> None:
-        particle = Particle(status={"v": "x", "e": 3, "n": 3})
+        particle = Particle(status={"v": "x", "e": 3, "n": 3, "clk": 1})
         monitor = self.build(particle)
         monitor.cycle()
         data = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)()
