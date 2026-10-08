@@ -150,9 +150,18 @@ REQUEST_ANSWER_GAP = timedelta(seconds=60)
 # Unasked deliveries to one reader are spaced at least this far apart, so a
 # reader that keeps refusing is not called every cycle.
 AUTOMATIC_DELIVERY_GAP = timedelta(minutes=10)
-# A reader's own report older than this no longer says what it is doing now.
-CHECK_FRESH_FOR = timedelta(minutes=15)
+# A reader's report older than this no longer says what it is doing now. A
+# card stands for up to CARD_FRESH_FOR, then a read refreshes it each cycle.
+CHECK_FRESH_FOR = timedelta(minutes=40)
 REQUEST_EVENT = "roomreader/schedule_request"
+# The reader's status card, published by the reader whenever it changes.
+STATUS_EVENT = "roomreader/status"
+# While a card this recent is held, AL/X does not read the status herself;
+# the reader sends a new one whenever something on it changes.
+CARD_FRESH_FOR = timedelta(minutes=30)
+# Just after a reader moves to its next event, its new card can arrive after
+# AL/X's own clock has moved on; the event before stays acceptable this long.
+CHANGEOVER_GRACE = timedelta(minutes=2)
 # Every event a reader publishes starts with this. Hearing any of them (a
 # scan, a battery report, a request) shows the reader is connected; listening
 # costs no data operations.
@@ -202,6 +211,10 @@ class ReaderMonitor:
         self._cannot_receive: set[str] = set()
         # Readers with a send under way; never two at once to one reader.
         self._sending: set[str] = set()
+        # Each reader's latest card and when it arrived, and the wrong event
+        # last recorded for it (so a persisting one is logged once).
+        self._cards: dict[str, tuple[dict[str, Any], datetime]] = {}
+        self._wrong: dict[str, tuple[Any, Any] | None] = {}
         self._last_action: tuple[datetime, str] | None = None
 
     # ---- what the tile reads ---------------------------------------------
@@ -304,6 +317,9 @@ class ReaderMonitor:
         uid = device_id[-READER_UID_LENGTH:]
         at = self._now()
         self._heard(uid, at, "event")
+        if name == STATUS_EVENT:
+            self._card(uid, data, at)
+            return
         if name != REQUEST_EVENT:
             return
         try:
@@ -342,12 +358,15 @@ class ReaderMonitor:
             self._set_online(uid, online, at, "observed" if observed is not None else "particle")
             if not online:
                 continue
-            report = self._read_status(uid, reader, at)
-            expected = expected_event(own, mode, at)
+            with self._lock:
+                card = self._cards.get(uid)
+            if card is not None and at - card[1] <= CARD_FRESH_FOR:
+                report = card[0]  # the reader's own recent card: no read needed
+            else:
+                report = self._read_status(uid, reader, at)
             record = self._calendar.sent(uid)
-            if report is not None and report.get("e") != expected:
-                self._calendar.log(at, uid, "wrong_event",
-                                   {"expected": expected, "reported": report.get("e")})
+            if report is not None:
+                self._judge_event(uid, report, own, mode, at)
             stale = not holds_current(record, own, mode, at) or (
                 report is not None and record and report.get("v") != record.get("version"))
             if stale:
@@ -382,6 +401,44 @@ class ReaderMonitor:
                                  "at": at}
             self._last_outcome.pop(uid, None)
         return report
+
+    def _card(self, uid: str, data: str, at: datetime) -> None:
+        """A status card the reader published itself: recorded and judged."""
+        try:
+            report = json.loads(data) if data else None
+        except ValueError:
+            report = None
+        if not isinstance(report, dict):
+            self._note(uid, at, "status_unavailable", {"code": "card_unreadable"})
+            return
+        self._calendar.log(at, uid, "status", {**report, "via": "card"})
+        with self._lock:
+            self._cards[uid] = (report, at)
+            self._checks[uid] = {**self._checks.get(uid, {}), "event": report.get("e"),
+                                 "version": report.get("v"), "at": at}
+            self._last_outcome.pop(uid, None)
+        _, _, readers, sessions = self._calendar.snapshot(at)
+        reader = next((item for item in readers if item.get("reader_uid") == uid), None)
+        own = [item for item in sessions if item.reader_uid == uid]
+        if reader is not None and own and reader.get("mode") in (0, 1):
+            self._judge_event(uid, report, own, reader["mode"], at)
+
+    def _judge_event(self, uid: str, report: Mapping[str, Any], own: list,
+                     mode: int, at: datetime) -> None:
+        """Whether the reader runs the event its window says, recorded once per change."""
+        reported = report.get("e")
+        expected = expected_event(own, mode, at)
+        wrong = reported != expected and reported != expected_event(
+            own, mode, at - CHANGEOVER_GRACE)
+        with self._lock:
+            check = self._checks.setdefault(uid, {"at": at})
+            check["wrong"] = wrong
+            check["expected"] = expected
+            previous = self._wrong.get(uid)
+            self._wrong[uid] = (reported, expected) if wrong else None
+        if wrong and previous != (reported, expected):
+            self._calendar.log(at, uid, "wrong_event",
+                               {"expected": expected, "reported": reported})
 
     def _note(self, uid: str, at: datetime, kind: str, detail: Mapping[str, Any]) -> None:
         """Log a repeated failure once, not on every cycle."""
