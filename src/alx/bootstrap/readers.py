@@ -27,6 +27,8 @@ from alx.providers.behaviorlive import BehaviorLiveConfig
 from alx.providers.particle import ParticleCloud
 from alx.providers.reader_calendar import SQLiteReaderCalendar
 from alx.safety import AuthorityPolicy
+from alx.tools.particle import DEFINITIONS as PARTICLE_DEFINITIONS
+from alx.tools.particle import build_particle_executors
 from alx.tools.readers import (
     DEFINITIONS,
     REFRESH_READER_CALENDAR,
@@ -42,6 +44,10 @@ READER_READ_PERMISSION = "readers.read"
 # D-040. Sending a reader its schedule is another, without per-send approval:
 # Friedl authorised whatever AL/X needs to keep the readers on the right events.
 READER_SEND_PERMISSION = "readers.send"
+# D-045. Full access to Friedl's Particle account, without per-call approval:
+# "I want ALX to have FULL access to my Particle account. No need to restrict
+# anything please. She will be managing it anyway."
+PARTICLE_FULL_PERMISSION = "particle.full"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,22 +73,28 @@ def build_reader_runtime(
     read = AuthorityPolicy(frozenset({READER_READ_PERMISSION}))
     send = AuthorityPolicy(frozenset({READER_SEND_PERMISSION}))
     particle = ParticleCloud(settings.access_token, settings.timeout_seconds)
+    full = AuthorityPolicy(frozenset({PARTICLE_FULL_PERMISSION}))
+    policies = {
+        definition.capability_id: send if definition.capability_id == SEND_READER_SCHEDULE else read
+        for definition in DEFINITIONS
+    }
+    policies.update({definition.capability_id: full for definition in PARTICLE_DEFINITIONS})
+    executors = dict(build_reader_executors(
+        particle,
+        BehaviorLiveConfig(settings.config_url, settings.timeout_seconds),
+        calendar,
+        settings.product_ids,
+        call_id_source,
+        control=particle,
+    ))
+    executors.update(build_particle_executors(particle, calendar.log, call_id_source))
     return ReaderRuntime(
         calendar=calendar,
-        definitions=DEFINITIONS,
-        policies={
-            definition.capability_id: send if definition.capability_id == SEND_READER_SCHEDULE else read
-            for definition in DEFINITIONS
-        },
-        executors=build_reader_executors(
-            particle,
-            BehaviorLiveConfig(settings.config_url, settings.timeout_seconds),
-            calendar,
-            settings.product_ids,
-            call_id_source,
-            control=particle,
-        ),
-        permissions=frozenset({READER_READ_PERMISSION, READER_SEND_PERMISSION}),
+        definitions=DEFINITIONS + PARTICLE_DEFINITIONS,
+        policies=policies,
+        executors=executors,
+        permissions=frozenset({READER_READ_PERMISSION, READER_SEND_PERMISSION,
+                               PARTICLE_FULL_PERMISSION}),
         refresh_seconds=settings.refresh_seconds,
         particle=particle,
         product_ids=tuple(settings.product_ids),

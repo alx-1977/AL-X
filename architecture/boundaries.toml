@@ -306,3 +306,18 @@ description = "Every reader in use is checked and sent the schedule it is not ho
 # D-043. Nothing superseded.
 entry = "bootstrap/readers.py::ReaderMonitor.cycle"
 forbidden = []
+
+[[outcomes]]
+id = "particle.account_call_is_made"
+description = "AL/X makes a Particle Cloud API call on Friedl's account."
+# D-045. Nothing superseded: AL/X had no general Particle access before.
+entry = "tools/particle.py::build_particle_executors.<locals>.api_request"
+forbidden = []
+
+[[outcomes]]
+id = "particle.usage_is_read"
+description = "Particle data operations per device per day are read from the usage report."
+# D-045. Nothing superseded.
+entry = "tools/particle.py::build_particle_executors.<locals>.read_usage"
+forbidden = []
+
