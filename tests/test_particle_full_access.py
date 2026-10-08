@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -41,17 +41,27 @@ Date,Device ID,Device Name,Product ID,Product Name,Connectivity,SIM ICCID,Data O
 """
 
 
-def reply(status=200, body=None, content=None):
-    response = Mock(status_code=status)
-    response.content = content if content is not None else (
+def reply(status=200, body=None, content=None, chunk=65536, read=None):
+    """A streamed Particle reply; `read` counts the chunks actually taken."""
+    data = content if content is not None else (
         b"" if body is None else __import__("json").dumps(body).encode())
-    response.text = response.content.decode()
-    return response
+    response = Mock(status_code=status)
+
+    def chunks():
+        for index in range(0, len(data), chunk):
+            if read is not None:
+                read.append(1)
+            yield data[index:index + chunk]
+
+    response.iter_bytes.side_effect = lambda: chunks()
+    stream = MagicMock()
+    stream.__enter__.return_value = response
+    return stream
 
 
 class ApiTests(unittest.TestCase):
     def test_any_call_returns_particles_status_and_reply(self) -> None:
-        with patch("httpx.request", return_value=reply(200, {"ok": True})) as sent:
+        with patch("httpx.stream", return_value=reply(200, {"ok": True})) as sent:
             status, body = ParticleCloud("token").api(
                 "POST", "/v1/products/45984/devices/abc/restart", {"x": "1"}, {"a": 1})
         self.assertEqual((status, body), (200, {"ok": True}))
@@ -62,7 +72,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(sent.call_args.kwargs["headers"], {"Authorization": "Bearer token"})
 
     def test_a_refusal_comes_back_rather_than_hidden(self) -> None:
-        with patch("httpx.request", return_value=reply(404, {"error": "Not Found"})):
+        with patch("httpx.stream", return_value=reply(404, {"error": "Not Found"})):
             self.assertEqual(ParticleCloud("token").api("DELETE", "/v1/products/1/devices/x"),
                              (404, {"error": "Not Found"}))
 
@@ -70,13 +80,13 @@ class ApiTests(unittest.TestCase):
         for path in ("https://evil.example/v1/x", "/v2/devices", "v1/devices",
                      "/v1/../admin", "/v1/devices?access_token=x", "//evil/v1/"):
             with self.subTest(path=path):
-                with patch("httpx.request") as sent:
+                with patch("httpx.stream") as sent:
                     with self.assertRaises(ReaderAccessError):
                         ParticleCloud("token").api("GET", path)
                 sent.assert_not_called()
 
     def test_unknown_methods_and_event_streams_are_refused(self) -> None:
-        with patch("httpx.request") as sent:
+        with patch("httpx.stream") as sent:
             for method, path in (("TRACE", "/v1/devices"), ("GET", "/v1/products/1/events"),
                                  ("GET", "/v1/events/roomreader")):
                 with self.subTest(method=method, path=path):
@@ -84,11 +94,14 @@ class ApiTests(unittest.TestCase):
                         ParticleCloud("token").api(method, path)
         sent.assert_not_called()
 
-    def test_a_huge_reply_is_capped(self) -> None:
-        with patch("httpx.request", return_value=reply(200, content=b"x" * 2_000_000)):
+    def test_a_huge_reply_is_capped_while_it_is_read(self) -> None:
+        read = []
+        with patch("httpx.stream", return_value=reply(200, content=b"x" * 10_000_000, read=read)):
             _status, body = ParticleCloud("token").api("GET", "/v1/devices")
         self.assertTrue(body["truncated"])
         self.assertEqual(len(body["partial"]), 1_000_000)
+        # Stopped just past the cap, not after all 10 MB.
+        self.assertLess(len(read), 20)
 
 
 class UsageTests(unittest.TestCase):
@@ -99,9 +112,11 @@ class UsageTests(unittest.TestCase):
         ready = {"data": {"attributes": {"state": "available",
                                           "download_url": "https://storage.example/r.csv"}}}
         calls = []
+        requested_seen = []
 
         def api(method, url, **kwargs):
             calls.append((method, url))
+            requested_seen.append(kwargs.get("timeout"))
             if url.endswith("/v1/user/service_agreements"):
                 return reply(200, agreements)
             if url.endswith("/usage_reports") and method == "POST":
@@ -112,17 +127,47 @@ class UsageTests(unittest.TestCase):
             return reply(200, pending if len(calls) < 4 else ready)
 
         download = Mock(status_code=200, text=CSV)
-        with patch("httpx.request", side_effect=api), \
+        reported = []
+        with patch("httpx.stream", side_effect=api), \
                 patch("httpx.get", return_value=download) as fetched:
-            rows = ParticleCloud("token").usage("2026-10-07", "2026-10-07", sleep=lambda s: None)
+            rows = ParticleCloud("token").usage("2026-10-07", "2026-10-07", sleep=lambda s: None,
+                                                on_requested=reported.append)
+        self.assertEqual(reported, ["49890"])
         self.assertEqual([(r["device_name"], r["data_operations"]) for r in rows],
                          [("ALX_1", 125), ("ALX_2", 3)])
         self.assertIn(("POST", "https://api.particle.io/v1/user/service_agreements/293802/usage_reports"), calls)
         # The pre-signed download carries no token.
         self.assertNotIn("headers", fetched.call_args.kwargs)
 
+    def test_the_deadline_counts_time_spent_waiting_on_particle(self) -> None:
+        pending = {"data": {"id": "1", "attributes": {"state": "pending"}}}
+        clock = [0.0]
+
+        def slow(method, url, **kwargs):
+            clock[0] += 10  # every request takes 10 s
+            if url.endswith("/v1/user/service_agreements"):
+                return reply(200, {"data": [{"id": "9", "attributes": {"state": "active"}}]})
+            return reply(201 if method == "POST" else 200, pending)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with patch("httpx.stream", side_effect=slow), \
+                patch("alx.providers.particle.time.monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(ReaderAccessError) as raised:
+                ParticleCloud("token").usage("2026-10-07", "2026-10-07", wait_seconds=120,
+                                             sleep=sleep)
+        self.assertEqual(raised.exception.code, "usage_not_ready")
+        self.assertLessEqual(clock[0], 140)
+
+    def test_a_gateway_error_page_is_unavailable_not_a_fault(self) -> None:
+        with patch("httpx.stream", return_value=reply(502, content=b"<html>Bad gateway</html>")):
+            with self.assertRaises(ReaderAccessError) as raised:
+                ParticleCloud("token").usage("2026-10-07", "2026-10-07")
+        self.assertEqual(raised.exception.code, "usage_unavailable")
+
     def test_bad_dates_are_refused_before_any_call(self) -> None:
-        with patch("httpx.request") as sent:
+        with patch("httpx.stream") as sent:
             for start, end in (("yesterday", "2026-10-07"), ("2026-10-08", "2026-10-07")):
                 with self.assertRaises(ReaderAccessError):
                     ParticleCloud("token").usage(start, end)
@@ -148,8 +193,28 @@ class ExecutorTests(unittest.TestCase):
         result = self.execute[PARTICLE_API_REQUEST](
             {"method": "PUT", "path": "/v1/products/45984/devices/x", "body": {"name": "R1"}})
         self.assertEqual(result.values, {"status": 200, "body": {"ok": True}})
-        self.assertEqual(self.logged, [("particle_api", {
-            "method": "PUT", "path": "/v1/products/45984/devices/x", "status": 200})])
+        self.assertEqual(self.logged, [
+            ("particle_api_attempt", {"method": "PUT", "path": "/v1/products/45984/devices/x"}),
+            ("particle_api", {"method": "PUT", "path": "/v1/products/45984/devices/x",
+                              "status": 200})])
+
+    def test_a_change_whose_reply_is_lost_is_still_recorded(self) -> None:
+        self.particle.api.side_effect = ReaderAccessError("device_timeout")
+        self.execute[PARTICLE_API_REQUEST]({"method": "DELETE", "path": "/v1/sims/123"})
+        self.assertEqual([kind for kind, _ in self.logged],
+                         ["particle_api_attempt", "particle_api"])
+        self.assertTrue(self.logged[1][1]["outcome_unknown"])
+
+    def test_a_report_requested_but_not_downloaded_is_recorded(self) -> None:
+        def usage(start, end, devices, on_requested=None):
+            on_requested("49890")
+            raise ReaderAccessError("connection_failed")
+
+        self.particle.usage.side_effect = usage
+        result = self.execute[READ_PARTICLE_USAGE]({"start": "2026-10-07", "end": "2026-10-07"})
+        self.assertEqual(result.failure["code"], "connection_failed")
+        self.assertEqual([kind for kind, _ in self.logged],
+                         ["particle_usage_requested", "particle_usage_report"])
 
     def test_usage_is_returned_with_its_total_and_recorded(self) -> None:
         self.particle.usage.return_value = parse_usage_csv(CSV)

@@ -111,14 +111,22 @@ def build_particle_executors(
         query = arguments.get("query")
         if query is not None and not isinstance(query, Mapping):
             return failed(PARTICLE_API_REQUEST, "arguments_unusable")
+        changing = method != "GET"
+        if changing:
+            # Recorded before it is sent: a change Particle makes whose reply
+            # is lost is still accounted for. The log keeps the call, not its
+            # body, which can be large.
+            log(now(), "particle", "particle_api_attempt", {"method": method, "path": path})
         try:
             status, body = particle.api(method, path, dict(query or {}), arguments.get("body"))
         except ReaderAccessError as error:
+            if changing:
+                log(now(), "particle", "particle_api",
+                    {"method": method, "path": path, "failure": error.code,
+                     "outcome_unknown": error.code in ("device_timeout", "connection_failed")})
             return failed(PARTICLE_API_REQUEST, error.code)
         at = now()
-        if method != "GET":
-            # Whose device a change concerns is in the path; the log keeps
-            # the call itself, not its body, which can be large.
+        if changing:
             log(at, "particle", "particle_api",
                 {"method": method, "path": path, "status": status})
         return CapabilityResult(
@@ -132,9 +140,22 @@ def build_particle_executors(
         if not isinstance(devices, (list, tuple)) or any(not isinstance(d, str) for d in devices):
             return failed(READ_PARTICLE_USAGE, "arguments_unusable")
         start, end = arguments.get("start"), arguments.get("end")
+        requested: list[str] = []
+
+        def on_requested(report_id: str) -> None:
+            # Particle has the request and will email Friedl: recorded now,
+            # whatever happens to the wait or the download.
+            requested.append(report_id)
+            log(now(), "particle", "particle_usage_requested",
+                {"start": start, "end": end, "report_id": report_id})
+
         try:
-            rows = particle.usage(start, end, tuple(devices))
+            rows = particle.usage(start, end, tuple(devices), on_requested=on_requested)
         except ReaderAccessError as error:
+            if requested:
+                log(now(), "particle", "particle_usage_report",
+                    {"start": start, "end": end, "report_id": requested[0],
+                     "failure": error.code})
             return failed(READ_PARTICLE_USAGE, error.code)
         at = now()
         total = sum(row["data_operations"] for row in rows)
