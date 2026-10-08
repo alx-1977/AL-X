@@ -451,7 +451,9 @@ class RuntimeTests(unittest.TestCase):
             REFRESH_READER_CALENDAR: frozenset({READER_READ_PERMISSION}),
             READ_READER_CALENDAR: frozenset({READER_READ_PERMISSION}),
             SEND_READER_SCHEDULE: frozenset({READER_SEND_PERMISSION}),
-            READ_READER_LOG: frozenset({READER_READ_PERMISSION})})
+            READ_READER_LOG: frozenset({READER_READ_PERMISSION}),
+            "particle_api_request": frozenset({"particle.full"}),
+            "read_particle_usage": frozenset({"particle.full"})})
         self.assertFalse(runtime.policies[SEND_READER_SCHEDULE].approval_required)
 
 

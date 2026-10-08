@@ -2456,3 +2456,14 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Unchanged.** Mail threads stay separate for reasoning. A person turn waiting on his conversation still refuses an unprompted reply, which is recorded as undelivered as before.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 
+## D-045 — AL/X has full access to Friedl's Particle account
+
+- **Date:** 2026-10-08
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-08.** Friedl's words: "I want ALX to have FULL access to my Particle account. No need to restrict anything please. She will be managing it anyway."
+- **Authority.** `particle_api_request` makes any Particle Cloud API call (GET, POST, PUT, PATCH, DELETE) on the account: devices, products, firmware and over-the-air updates, webhooks, SIMs, usage and the rest. Which call, and whether it is wise, is AL/X's judgement. Its own permission is `particle.full`, with no per-call approval. This includes calls that cannot be undone (removing devices, deactivating SIMs, releasing firmware to a fleet).
+- **Usage.** `read_particle_usage` reads data operations per device per day from Particle's usage report (request, wait, download, read). Particle emails Friedl a copy of each report.
+- **Technical limits, not authority limits.** The token is only ever sent to Particle's API address (`/v1/` paths, never a full URL); the usage CSV is downloaded from Particle's pre-signed storage link without it. Event streams are not available through this tool (AL/X listens to them separately, D-043). Replies are capped at 1 MB.
+- **Recorded.** Every change (any call but GET) and every usage report goes to the reader log, so it can be accounted for in a report.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
