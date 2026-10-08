@@ -52,8 +52,11 @@ class SQLitePendingMessages:
                  _deadline(at, source_expires_at).isoformat()),
             )
 
-    def take_all(self, now: datetime) -> tuple[tuple[str, str, str], ...]:
-        """Every unexpired message, oldest first, as (conversation, turn, text).
+    def take_all(self, now: datetime) -> tuple[tuple[str, str, str, datetime], ...]:
+        """Every unexpired message, oldest first, as (conversation, turn, text, expires).
+
+        Its deadline travels with it, so a message handed back to waiting keeps
+        the deadline it already had rather than starting a new one.
 
         Removed in the same step. The caller hands them to a delivery queue
         without yielding in between, so nothing is taken without being given.
@@ -62,13 +65,13 @@ class SQLitePendingMessages:
             self._connection.execute(
                 "DELETE FROM pending_messages WHERE expires_at < ?", (now.isoformat(),))
             rows = self._connection.execute(
-                "SELECT id, source_conversation_id, source_turn_id, text "
+                "SELECT id, source_conversation_id, source_turn_id, text, expires_at "
                 "FROM pending_messages ORDER BY id"
             ).fetchall()
             if rows:
                 self._connection.execute(
                     "DELETE FROM pending_messages WHERE id <= ?", (rows[-1][0],))
-        return tuple((row[1], row[2], row[3]) for row in rows)
+        return tuple((row[1], row[2], row[3], datetime.fromisoformat(row[4])) for row in rows)
 
     def add_relay(self, source_conversation_id: str, source_turn_id: str,
                   target_conversation_id: str, at: datetime,

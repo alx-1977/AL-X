@@ -297,7 +297,7 @@ class LiveVoiceServer:
         except Exception as error:  # noqa: BLE001 - nothing taken, nothing lost
             LOGGER.warning("Could not read waiting replies: %s", type(error).__name__)
             return ()
-        for _source, _turn, text in waiting:
+        for _source, _turn, text, _expires in waiting:
             deliveries.put_nowait(text)
         if waiting:
             LOGGER.info("Handed %d waiting replies to the new session", len(waiting))
@@ -309,21 +309,22 @@ class LiveVoiceServer:
         pending = getattr(self, "_pending", None)
         if pending is None:
             return
-        origins = {text: (source, turn) for source, turn, text in handed}
+        origins = {text: (source, turn, expires) for source, turn, text, expires in handed}
         while not deliveries.empty():
             text = deliveries.get_nowait()
-            source, turn = origins.get(text, (conversation_id, ""))
+            source, turn, expires = origins.get(text, (conversation_id, "", None))
             try:
-                pending.add(source, turn, text, self._clock_now())
+                # Back to waiting with the deadline it already had.
+                pending.add(source, turn, text, self._clock_now(), expires)
             except Exception as error:  # noqa: BLE001
                 LOGGER.warning("Could not keep an unspoken reply: %s", type(error).__name__)
 
     async def _record_waiting(self, waiting: tuple, conversation_id: str) -> None:
         """Copy the replies just handed over into his thread, then any kept copies."""
         def work() -> None:
-            for source, turn_id, _text in waiting:
+            for source, turn_id, _text, expires in waiting:
                 if source != conversation_id:
-                    self._relay_into(source, (turn_id, None), conversation_id)
+                    self._relay_into(source, (turn_id, expires), conversation_id)
             self._retry_relays()
         await asyncio.to_thread(work)
 

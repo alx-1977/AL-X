@@ -168,7 +168,20 @@ class WaitingTests(unittest.TestCase):
         listener: asyncio.Queue[str] = asyncio.Queue()
         handed = server._take_waiting(listener)
         server._keep_unspoken(listener, FRIEDL, handed)
-        self.assertEqual(self.pending.take_all(NOW), ((MAIL, "turn-first", "first"),))
+        self.assertEqual(self.pending.take_all(NOW),
+                         ((MAIL, "turn-first", "first", NOW + timedelta(days=30)),))
+
+    def test_a_reply_handed_back_keeps_its_original_deadline(self) -> None:
+        deadline = NOW + timedelta(hours=2)
+        server = _server(pending=self.pending, expires=deadline)
+        server.deliver(MAIL, "first")
+        later = NOW + timedelta(hours=1)
+        server._now = lambda: later
+        for _ in range(3):  # sessions keep closing before it is spoken
+            listener: asyncio.Queue[str] = asyncio.Queue()
+            server._keep_unspoken(listener, FRIEDL, server._take_waiting(listener))
+        self.assertEqual(self.pending.take_all(later)[0][3], deadline)
+        self.assertEqual(self.pending.take_all(deadline + timedelta(minutes=1)), ())
 
     def test_a_failed_copy_is_kept_and_made_later(self) -> None:
         attempts = []
