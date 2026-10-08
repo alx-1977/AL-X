@@ -171,6 +171,15 @@ class WaitingTests(unittest.TestCase):
         self.assertEqual(self.pending.take_all(NOW),
                          ((MAIL, "turn-first", "first", NOW + timedelta(days=30)),))
 
+    def test_identical_unspoken_replies_keep_their_own_origins(self) -> None:
+        self.pending.add(MAIL, "t1", "Same words", NOW)
+        self.pending.add("mail-thread:<other>", "t2", "Same words", NOW)
+        server = _server(pending=self.pending)
+        listener: asyncio.Queue[str] = asyncio.Queue()
+        server._keep_unspoken(listener, FRIEDL, server._take_waiting(listener))
+        self.assertEqual([(source, turn) for source, turn, _t, _e in self.pending.take_all(NOW)],
+                         [(MAIL, "t1"), ("mail-thread:<other>", "t2")])
+
     def test_a_reply_handed_back_keeps_its_original_deadline(self) -> None:
         deadline = NOW + timedelta(hours=2)
         server = _server(pending=self.pending, expires=deadline)

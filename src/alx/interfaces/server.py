@@ -309,10 +309,16 @@ class LiveVoiceServer:
         pending = getattr(self, "_pending", None)
         if pending is None:
             return
-        origins = {text: (source, turn, expires) for source, turn, text, expires in handed}
+        # Several waiting replies can share a text, so each text keeps its own
+        # origins in the order they were handed over, and each unspoken reply
+        # takes the first one left.
+        origins: dict[str, list[tuple[str, str, Any]]] = {}
+        for source, turn, text, expires in handed:
+            origins.setdefault(text, []).append((source, turn, expires))
         while not deliveries.empty():
             text = deliveries.get_nowait()
-            source, turn, expires = origins.get(text, (conversation_id, "", None))
+            matches = origins.get(text) or []
+            source, turn, expires = matches.pop(0) if matches else (conversation_id, "", None)
             try:
                 # Back to waiting with the deadline it already had.
                 pending.add(source, turn, text, self._clock_now(), expires)
