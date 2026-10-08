@@ -75,15 +75,33 @@ class ConversationGateway:
             retention_until, current.revision,
         )
 
-    def relay_response(self, source_conversation_id: str, target_conversation_id: str,
-                       text: str) -> bool:
+    def locate_reply(self, conversation_id: str,
+                     text: str) -> tuple[str, datetime | None] | None:
+        """The reply just stored in a thread with this text: (turn id, expiry).
+
+        Called when the reply is delivered, right after it was stored, so the
+        newest matching turn is that reply. From then on it is carried by its
+        turn id, never found by its text again.
+        """
+        try:
+            source = self._conversation_store.load(conversation_id)
+        except ConversationNotFound:
+            return None
+        for item in reversed(source.turns):
+            if item.origin is ConversationOrigin.ALX_RESPONSE and item.content == text:
+                expires = item.provenance.content_expires_at if item.provenance else None
+                return item.turn_id, expires
+        return None
+
+    def relay_response(self, source_conversation_id: str, source_turn_id: str,
+                       target_conversation_id: str) -> bool:
         """Put a reply AL/X made in one thread into the thread Friedl is in (D-044).
 
         She thinks about each mail thread in its own conversation, but tells
         Friedl in his. Copying her stored reply there, with its own provenance
         and so its own expiry, means that when he answers it, his thread holds
-        what he is answering. Stored once per source turn. False when the reply
-        is not found in the source thread.
+        what he is answering. Stored once per source thread and turn. False
+        when that reply no longer exists (for example, it has expired).
         """
         if source_conversation_id == target_conversation_id:
             return True
@@ -91,11 +109,8 @@ class ConversationGateway:
             source = self._conversation_store.load(source_conversation_id)
         except ConversationNotFound:
             return False
-        original = next(
-            (item for item in reversed(source.turns)
-             if item.origin is ConversationOrigin.ALX_RESPONSE and item.content == text),
-            None,
-        )
+        original = next((item for item in source.turns if item.turn_id == source_turn_id
+                         and item.origin is ConversationOrigin.ALX_RESPONSE), None)
         if original is None:
             return False
         try:
@@ -103,12 +118,14 @@ class ConversationGateway:
         except ConversationNotFound:
             target = self._conversation_store.create(
                 target_conversation_id, source.retention_until)
-        turn_id = f"relayed:{original.turn_id}"
+        # Turn ids are unique within a conversation only, so the copy is named
+        # by both the thread and the turn it came from.
+        turn_id = f"relayed:{source_conversation_id}#{source_turn_id}"
         if any(item.turn_id == turn_id for item in target.turns):
             return True
         self._conversation_store.append(
             ConversationTurn(target_conversation_id, turn_id, ConversationOrigin.ALX_RESPONSE,
-                             text, self._clock(), provenance=original.provenance),
+                             original.content, self._clock(), provenance=original.provenance),
             max(target.retention_until, source.retention_until), target.revision,
         )
         return True

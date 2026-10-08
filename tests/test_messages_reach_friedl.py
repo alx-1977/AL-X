@@ -42,10 +42,16 @@ class _Session:
         return conversation_id not in self.busy
 
 
-def _server(session=None, pending=None, relayed=None):
+def _server(session=None, pending=None, relayed=None, relay=None,
+            expires=None):
+    def default_relay(source, turn, target):
+        if relayed is not None:
+            relayed.append((source, turn, target))
+        return True
+
     server = LiveVoiceServer(session or _Session(), "127.0.0.1", 0, 16000, ROOT,
-                             relay=lambda s, t, x: (relayed.append((s, t, x)) or True)
-                             if relayed is not None else True,
+                             relay=relay or default_relay,
+                             locate=lambda conversation, text: (f"turn-{text}", expires),
                              pending=pending, clock=lambda: NOW)
     return server
 
@@ -78,7 +84,7 @@ class RoutingTests(unittest.TestCase):
         result, heard = asyncio.run(scenario())
         self.assertIs(result, ResponseDelivery.DELIVERED)
         self.assertEqual(heard, ["JLCPCB needs a choice"])
-        self.assertEqual(relayed, [(MAIL, FRIEDL, "JLCPCB needs a choice")])
+        self.assertEqual(relayed, [(MAIL, "turn-JLCPCB needs a choice", FRIEDL)])
 
     def test_a_reply_in_his_own_thread_is_not_copied(self) -> None:
         relayed = []
@@ -138,17 +144,84 @@ class WaitingTests(unittest.TestCase):
 
         async def scenario():
             listener: asyncio.Queue[str] = asyncio.Queue()
-            await server._hand_over_pending(FRIEDL, listener)
+            waiting = server._take_waiting(listener)
+            await server._record_waiting(waiting, FRIEDL)
             return _drain(listener)
 
         self.assertEqual(asyncio.run(scenario()), ["first", "second"])
-        self.assertEqual([item[:2] for item in relayed],
-                         [(MAIL, FRIEDL), ("mail-thread:<other>", FRIEDL)])
+        self.assertEqual(relayed, [(MAIL, "turn-first", FRIEDL),
+                                   ("mail-thread:<other>", "turn-second", FRIEDL)])
         self.assertEqual(self.pending.count(), 0)
 
     def test_a_waiting_message_expires_with_mail_content(self) -> None:
-        self.pending.add(MAIL, "old", NOW - timedelta(days=31))
+        self.pending.add(MAIL, "t", "old", NOW - timedelta(days=31))
         self.assertEqual(self.pending.take_all(NOW), ())
+
+    def test_it_never_outlives_the_reply_it_came_from(self) -> None:
+        server = _server(pending=self.pending, expires=NOW + timedelta(hours=2))
+        server.deliver(MAIL, "soon gone")
+        self.assertEqual(self.pending.take_all(NOW + timedelta(hours=3)), ())
+
+    def test_unspoken_replies_go_back_to_waiting_when_the_session_closes(self) -> None:
+        server = _server(pending=self.pending)
+        server.deliver(MAIL, "first")
+        listener: asyncio.Queue[str] = asyncio.Queue()
+        handed = server._take_waiting(listener)
+        server._keep_unspoken(listener, FRIEDL, handed)
+        self.assertEqual(self.pending.take_all(NOW), ((MAIL, "turn-first", "first"),))
+
+    def test_a_failed_copy_is_kept_and_made_later(self) -> None:
+        attempts = []
+
+        def flaky(source, turn, target):
+            attempts.append(turn)
+            if len(attempts) == 1:
+                raise RuntimeError("database locked")
+            return True
+
+        server = _server(pending=self.pending, relay=flaky)
+        server._relay_into(MAIL, ("t1", None), FRIEDL)
+        self.assertEqual(len(self.pending.relays(NOW)), 1)
+        server._retry_relays()
+        self.assertEqual((attempts, self.pending.relays(NOW)), (["t1", "t1"], ()))
+
+    def test_waiting_replies_are_queued_before_the_session_takes_live_ones(self) -> None:
+        async def scenario():
+            server = _server(pending=self.pending, relayed=[])
+            server.deliver(MAIL, "older")
+            listener: asyncio.Queue[str] = asyncio.Queue()
+            server._take_waiting(listener)
+            server._delivery_queues[FRIEDL] = [listener]
+            server._live_conversations.append(FRIEDL)
+            server._delivery_loop = asyncio.get_running_loop()
+            await asyncio.to_thread(server.deliver, MAIL, "newer")
+            return _drain(listener)
+
+        self.assertEqual(asyncio.run(scenario()), ["older", "newer"])
+
+
+class SetupFailureTests(unittest.TestCase):
+    def test_a_connection_lost_during_setup_leaves_no_listener(self) -> None:
+        from types import SimpleNamespace
+
+        class Broken:
+            request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+            async def send(self, _message):
+                raise ConnectionError("gone")
+
+            async def close(self, **_kwargs):
+                return None
+
+        server = _server()
+
+        async def scenario():
+            with self.assertRaises(ConnectionError):
+                await server._handle_voice(Broken())
+
+        asyncio.run(scenario())
+        self.assertEqual((server._live_conversations, server._delivery_queues), ([], {}))
+        self.assertIs(server.deliver(MAIL, "later"), ResponseDelivery.UNDELIVERABLE)
 
 
 class RelayTests(unittest.TestCase):
@@ -165,22 +238,36 @@ class RelayTests(unittest.TestCase):
                           keep, mail.revision)
 
     def test_the_reply_is_recorded_in_his_thread_with_its_provenance(self) -> None:
-        self.assertTrue(self.gateway.relay_response(MAIL, FRIEDL, "JLCPCB needs a choice"))
+        turn_id, _ = self.gateway.locate_reply(MAIL, "JLCPCB needs a choice")
+        self.assertTrue(self.gateway.relay_response(MAIL, turn_id, FRIEDL))
         mine = self.store.load(FRIEDL)
         self.assertEqual([(t.turn_id, t.origin, t.content) for t in mine.turns],
-                         [("relayed:t1", ConversationOrigin.ALX_RESPONSE,
+                         [(f"relayed:{MAIL}#t1", ConversationOrigin.ALX_RESPONSE,
                            "JLCPCB needs a choice")])
         source = self.store.load(MAIL).turns[0]
         self.assertEqual(mine.turns[0].provenance, source.provenance)
 
     def test_it_is_recorded_once(self) -> None:
-        self.gateway.relay_response(MAIL, FRIEDL, "JLCPCB needs a choice")
-        self.gateway.relay_response(MAIL, FRIEDL, "JLCPCB needs a choice")
+        self.gateway.relay_response(MAIL, "t1", FRIEDL)
+        self.gateway.relay_response(MAIL, "t1", FRIEDL)
         self.assertEqual(len(self.store.load(FRIEDL).turns), 1)
 
+    def test_identical_replies_keep_their_own_identity(self) -> None:
+        keep = NOW + timedelta(days=30)
+        snapshot = self.store.load(MAIL)
+        provenance = RetentionPolicy().non_mail(ContentOrigin.ALX, NOW)
+        self.store.append(ConversationTurn(MAIL, "t2", ConversationOrigin.ALX_RESPONSE,
+                                           "JLCPCB needs a choice", NOW, provenance=provenance),
+                          keep, snapshot.revision)
+        self.gateway.relay_response(MAIL, "t1", FRIEDL)
+        self.gateway.relay_response(MAIL, "t2", FRIEDL)
+        self.assertEqual([t.turn_id for t in self.store.load(FRIEDL).turns],
+                         [f"relayed:{MAIL}#t1", f"relayed:{MAIL}#t2"])
+
     def test_a_reply_not_in_its_thread_is_not_invented(self) -> None:
-        self.assertFalse(self.gateway.relay_response(MAIL, FRIEDL, "something else"))
-        self.assertFalse(self.gateway.relay_response("mail-thread:<none>", FRIEDL, "x"))
+        self.assertFalse(self.gateway.relay_response(MAIL, "t9", FRIEDL))
+        self.assertFalse(self.gateway.relay_response("mail-thread:<none>", "t1", FRIEDL))
+        self.assertIsNone(self.gateway.locate_reply(MAIL, "something else"))
 
 
 if __name__ == "__main__":

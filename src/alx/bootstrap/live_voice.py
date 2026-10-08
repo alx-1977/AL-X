@@ -1057,6 +1057,7 @@ async def run(repository_root: Path) -> None:
         # D-044: replies made in a thread nobody listens on reach Friedl's
         # session, and wait for his next one when none is open.
         relay=gateway.relay_response,
+        locate=gateway.locate_reply,
         pending=SQLitePendingMessages(storage_root / "pending-messages.sqlite3"),
     )
     # Every kind of occasion reaches the Core through one producer, one

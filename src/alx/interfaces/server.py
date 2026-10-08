@@ -94,11 +94,13 @@ class LiveVoiceServer:
         # D-044: copies a reply from the thread it was made in into the thread
         # Friedl is in, and keeps replies for when nobody is connected.
         relay: Callable[[str, str, str], bool] | None = None,
+        locate: Callable[[str, str], tuple[str, Any] | None] | None = None,
         pending: Any = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session = session
         self._relay = relay
+        self._locate = locate
         self._pending = pending
         self._now = clock or (lambda: datetime.now(UTC))
         # Conversations with a live listener, oldest connection first. Friedl
@@ -148,6 +150,7 @@ class LiveVoiceServer:
         """
         source_conversation_id = conversation_id
         registered = self._delivery_queues.get(conversation_id) or []
+        identity = None if registered else self._identify(conversation_id, response)
         if not registered:
             # D-044: she made this reply in a thread nobody listens on (each
             # mail thread is its own conversation). Friedl hears it in the
@@ -158,8 +161,10 @@ class LiveVoiceServer:
                 pending = getattr(self, "_pending", None)
                 if pending is None:
                     return ResponseDelivery.UNDELIVERABLE
+                turn_id, expires = identity or ("", None)
                 try:
-                    pending.add(source_conversation_id, response, self._clock_now())
+                    pending.add(source_conversation_id, turn_id, response,
+                                self._clock_now(), expires)
                 except Exception as error:  # noqa: BLE001 - recorded as unheard
                     LOGGER.warning("Could not keep a reply for later: %s", type(error).__name__)
                     return ResponseDelivery.UNDELIVERABLE
@@ -216,7 +221,7 @@ class LiveVoiceServer:
         if accepted and conversation_id != source_conversation_id:
             # Heard in his thread, so it is recorded in his thread: his answer
             # to it is then an answer to something his conversation holds.
-            self._relay_into(source_conversation_id, conversation_id, response)
+            self._relay_into(source_conversation_id, identity, conversation_id)
         return (
             ResponseDelivery.DELIVERED if accepted
             else ResponseDelivery.UNDELIVERABLE
@@ -225,33 +230,102 @@ class LiveVoiceServer:
     def _clock_now(self) -> datetime:
         return getattr(self, "_now", lambda: datetime.now(UTC))()
 
-    def _relay_into(self, source: str, target: str, text: str) -> None:
+    def _identify(self, conversation_id: str, text: str):
+        """The stored reply being delivered, as (turn id, expiry), or None."""
+        locate = getattr(self, "_locate", None)
+        if locate is None:
+            return None
+        try:
+            return locate(conversation_id, text)
+        except Exception as error:  # noqa: BLE001 - delivered all the same
+            LOGGER.warning("Could not identify a reply: %s", type(error).__name__)
+            return None
+
+    def _relay_into(self, source: str, identity, target: str) -> None:
+        """Copy a heard reply into his thread, or keep the copy to make later."""
         relay = getattr(self, "_relay", None)
-        if relay is None:
+        if relay is None or identity is None or not identity[0]:
+            return
+        turn_id, expires = identity
+        try:
+            if relay(source, turn_id, target):
+                self._retry_relays()
+                return
+            LOGGER.info("A relayed reply no longer exists in its thread")
+            return
+        except Exception as error:  # noqa: BLE001 - heard; the copy is kept for later
+            LOGGER.warning("Could not record a relayed reply: %s", type(error).__name__)
+        pending = getattr(self, "_pending", None)
+        if pending is not None:
+            try:
+                pending.add_relay(source, turn_id, target, self._clock_now(), expires)
+            except Exception as error:  # noqa: BLE001
+                LOGGER.warning("Could not keep a relay for later: %s", type(error).__name__)
+
+    def _retry_relays(self) -> None:
+        """Make any copy into Friedl's thread that failed before."""
+        relay = getattr(self, "_relay", None)
+        pending = getattr(self, "_pending", None)
+        if relay is None or pending is None:
             return
         try:
-            if not relay(source, target, text):
-                LOGGER.info("A relayed reply was not found in its source thread")
-        except Exception as error:  # noqa: BLE001 - heard; only the copy failed
-            LOGGER.warning("Could not record a relayed reply: %s", type(error).__name__)
+            due = pending.relays(self._clock_now())
+        except Exception:  # noqa: BLE001
+            return
+        for relay_id, source, turn_id, target in due:
+            try:
+                done = relay(source, turn_id, target)
+            except Exception:  # noqa: BLE001 - tried again next time
+                continue
+            # Made, or the reply no longer exists to copy: nothing left to do.
+            pending.relay_done(relay_id)
+            if not done:
+                LOGGER.info("A kept relay's reply no longer exists")
 
-    async def _hand_over_pending(self, conversation_id: str,
-                                 deliveries: "asyncio.Queue[str]") -> None:
-        """Give a newly opened session every reply that waited for it, in order."""
+    def _take_waiting(self, deliveries: "asyncio.Queue[str]") -> tuple:
+        """Move every waiting reply onto a session's queue, oldest first.
+
+        Runs on the event loop with no await, immediately before the session
+        is registered for live delivery, so nothing newer can arrive between
+        the waiting replies and it, and nothing is taken without being given.
+        """
         pending = getattr(self, "_pending", None)
         if pending is None:
-            return
+            return ()
         try:
-            waiting = await asyncio.to_thread(pending.take_all, self._clock_now())
+            waiting = pending.take_all(self._clock_now())
         except Exception as error:  # noqa: BLE001 - nothing taken, nothing lost
             LOGGER.warning("Could not read waiting replies: %s", type(error).__name__)
-            return
-        for source, text in waiting:
-            if source != conversation_id:
-                await asyncio.to_thread(self._relay_into, source, conversation_id, text)
+            return ()
+        for _source, _turn, text in waiting:
             deliveries.put_nowait(text)
         if waiting:
             LOGGER.info("Handed %d waiting replies to the new session", len(waiting))
+        return waiting
+
+    def _keep_unspoken(self, deliveries: "asyncio.Queue[str]", conversation_id: str,
+                       handed: tuple) -> None:
+        """Return replies a closing session never spoke to the waiting store."""
+        pending = getattr(self, "_pending", None)
+        if pending is None:
+            return
+        origins = {text: (source, turn) for source, turn, text in handed}
+        while not deliveries.empty():
+            text = deliveries.get_nowait()
+            source, turn = origins.get(text, (conversation_id, ""))
+            try:
+                pending.add(source, turn, text, self._clock_now())
+            except Exception as error:  # noqa: BLE001
+                LOGGER.warning("Could not keep an unspoken reply: %s", type(error).__name__)
+
+    async def _record_waiting(self, waiting: tuple, conversation_id: str) -> None:
+        """Copy the replies just handed over into his thread, then any kept copies."""
+        def work() -> None:
+            for source, turn_id, _text in waiting:
+                if source != conversation_id:
+                    self._relay_into(source, (turn_id, None), conversation_id)
+            self._retry_relays()
+        await asyncio.to_thread(work)
 
     # A typed line is at most this long. Not a judgement about what is worth
     # saying: a bound so one frame cannot exhaust memory or the input ceiling.
@@ -333,27 +407,34 @@ class LiveVoiceServer:
         # autonomous response is offered to a live listener rather than to a
         # socket count that cannot say whether anyone took it.
         deliveries: asyncio.Queue[str] = asyncio.Queue()
+        # D-044: replies that waited for this session go first, and are put on
+        # its queue in the same step as it is registered, so a reply arriving
+        # now cannot overtake them.
+        waiting = self._take_waiting(deliveries)
         self._delivery_queues.setdefault(conversation_id, []).append(deliveries)
         typed: asyncio.Queue[str] = asyncio.Queue()
         self._typed_queues.setdefault(conversation_id, []).append(typed)
         self._delivery_loop = asyncio.get_running_loop()
         self._live_conversations.append(conversation_id)
         LOGGER.info("Voice session connected")
-        await self._hand_over_pending(conversation_id, deliveries)
 
-        await connection.send(
-            json.dumps(
-                {
-                    "type": "session.ready",
-                    "conversation_id": conversation_id,
-                    "sample_rate_hz": self._sample_rate_hz,
-                }
-            )
-        )
-        # A transcription transport can drop while the person is simply silent.
-        # That ends one exchange but not the conversation, so it is re-entered on
-        # the same durable conversation while the browser socket stays open.
+        # Everything after registration is inside the cleanup scope, so a
+        # connection lost during setup cannot leave a dead listener that
+        # later replies would be "delivered" to.
         try:
+            await self._record_waiting(waiting, conversation_id)
+            await connection.send(
+                json.dumps(
+                    {
+                        "type": "session.ready",
+                        "conversation_id": conversation_id,
+                        "sample_rate_hz": self._sample_rate_hz,
+                    }
+                )
+            )
+            # A transcription transport can drop while the person is simply silent.
+            # That ends one exchange but not the conversation, so it is re-entered on
+            # the same durable conversation while the browser socket stays open.
             while await self._exchange_once(connection, conversation_id):
                 LOGGER.info("Resuming voice session on the same conversation")
 
@@ -365,10 +446,13 @@ class LiveVoiceServer:
                 queues.remove(deliveries)
             if not queues:
                 self._delivery_queues.pop(conversation_id, None)
-            waiting = self._typed_queues.get(conversation_id, [])
-            if typed in waiting:
-                waiting.remove(typed)
-            if not waiting:
+            # Anything still on the queue was never spoken: it waits for his
+            # next session rather than ending with this one.
+            self._keep_unspoken(deliveries, conversation_id, waiting)
+            typed_waiting = self._typed_queues.get(conversation_id, [])
+            if typed in typed_waiting:
+                typed_waiting.remove(typed)
+            if not typed_waiting:
                 self._typed_queues.pop(conversation_id, None)
 
     async def _exchange_once(
