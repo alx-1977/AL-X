@@ -34,6 +34,7 @@ from alx.tools.readers import (  # noqa: E402
     DEFINITIONS,
     MAX_MESSAGE_BYTES,
     READ_READER_CALENDAR,
+    READ_READER_LOG,
     REFRESH_READER_CALENDAR,
     SEND_READER_SCHEDULE,
     build_reader_executors,
@@ -239,7 +240,7 @@ class RefreshAndReadTests(unittest.TestCase):
     def test_only_sending_changes_the_world(self) -> None:
         self.assertEqual({item.capability_id: item.side_effect for item in DEFINITIONS}, {
             REFRESH_READER_CALENDAR: SideEffect.NONE, READ_READER_CALENDAR: SideEffect.NONE,
-            SEND_READER_SCHEDULE: SideEffect.EFFECTFUL})
+            SEND_READER_SCHEDULE: SideEffect.EFFECTFUL, READ_READER_LOG: SideEffect.NONE})
 
 
 class Reader:
@@ -290,9 +291,14 @@ class SendScheduleTests(unittest.TestCase):
                          {(45984, device("ab2d5218").device_id, "schedule")})
         record = self.calendar.sent("ab2d5218")
         self.assertEqual(record["version"], result.values["version"])
-        self.assertEqual([item["en"] for item in record["held"]],
-                         [int(datetime(2026, 10, 7, 15, 5, tzinfo=UTC).timestamp()),
-                          int(datetime(2026, 10, 7, 17, 10, tzinfo=UTC).timestamp())])
+        # IN reader: each window closes halfway through its event.
+        self.assertEqual([item["until"] for item in record["held"]],
+                         [int(datetime(2026, 10, 7, 14, 35, tzinfo=UTC).timestamp()),
+                          int(datetime(2026, 10, 7, 16, 20, tzinfo=UTC).timestamp())])
+        self.assertEqual((ops[1]["a"], ops[1]["u"]),
+                         (int(datetime(2026, 10, 7, 4, tzinfo=UTC).timestamp()),
+                          int(datetime(2026, 10, 7, 14, 35, tzinfo=UTC).timestamp())))
+        self.assertEqual(ops[2]["a"], ops[1]["u"])
 
     def test_the_same_schedule_always_has_the_same_version(self) -> None:
         first, second = self.send(Reader()), self.send(Reader())
@@ -315,7 +321,8 @@ class SendScheduleTests(unittest.TestCase):
         self.assertEqual(refused.failure["code"], "events_overlap")
         self.assertEqual(refused.failure["events"], ("1,2",))
         self.assertEqual(reader.messages, [])
-        sent = self.send(reader, {"leave_out": [2]}, events=overlapping)
+        sent = self.send(reader, {"leave_out": [2]}, events=overlapping,
+                         at=datetime(2026, 10, 7, 14, 10, tzinfo=UTC))
         self.assertEqual(sent.values["event_ids"], (1,))
         self.assertEqual(sent.values["left_out"], (2,))
 
@@ -443,7 +450,8 @@ class RuntimeTests(unittest.TestCase):
                           for key, policy in runtime.policies.items()}, {
             REFRESH_READER_CALENDAR: frozenset({READER_READ_PERMISSION}),
             READ_READER_CALENDAR: frozenset({READER_READ_PERMISSION}),
-            SEND_READER_SCHEDULE: frozenset({READER_SEND_PERMISSION})})
+            SEND_READER_SCHEDULE: frozenset({READER_SEND_PERMISSION}),
+            READ_READER_LOG: frozenset({READER_READ_PERMISSION})})
         self.assertFalse(runtime.policies[SEND_READER_SCHEDULE].approval_required)
 
 

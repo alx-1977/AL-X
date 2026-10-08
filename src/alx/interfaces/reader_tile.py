@@ -25,13 +25,13 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
-from alx.contracts.readers import ReaderSession, session_fingerprint
+from alx.contracts.readers import MODE_IN, ReaderSession, expected_event, holds_current
 
 
 # Friedl's rules, 2026-10-07.
 WARNING_BEFORE_EVENT = timedelta(minutes=30)
 LINK_STALE_AFTER = timedelta(minutes=15)
-# Until AL/X watches the readers herself (the health check), the tile says so.
+# When the reader monitor is not running, the tile says so.
 ALX_ACTIVITY = {"text": "not monitoring yet", "idle": True}
 
 
@@ -47,29 +47,15 @@ def _count(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
-def _holds_current(record: Mapping[str, Any], remaining: Sequence[ReaderSession],
-                   now: datetime) -> bool:
-    """What the reader holds and can still run is exactly what the calendar has left.
-
-    Both sides, not one: an event moved earlier or deleted in the calendar is
-    still running on a reader that accepted its old times, and an event the
-    calendar added or changed is not yet on the reader. Compared by what is
-    sent, so a change a resend would not deliver does not count.
-    """
-    held = record.get("held")
-    if not isinstance(held, (list, tuple)) or any(
-            not isinstance(item, Mapping) or not isinstance(item.get("fp"), str)
-            or not isinstance(item.get("en"), int) for item in held):
-        return False
-    still_running = {item["fp"] for item in held if item["en"] > now.timestamp()}
-    return still_running == {session_fingerprint(item) for item in remaining}
-
-
 def compose_tile(
     snapshot: tuple[str, Sequence[str], Sequence[Mapping[str, Any]], Sequence[ReaderSession]],
     now: datetime,
     local: tzinfo | None = None,
     sent: Mapping[str, Mapping[str, Any]] | None = None,
+    # D-043: what the readers themselves last reported, and what AL/X is doing
+    # about them, from the reader monitor. Absent when it is not running.
+    checks: Mapping[str, Mapping[str, Any]] | None = None,
+    activity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The tile's data, or None when the calendar has no event today."""
     refreshed_at, _problems, readers, sessions = snapshot
@@ -90,30 +76,58 @@ def compose_tile(
 
     in_use = sorted({item.reader_uid for item in today})
     summary = {item.get("reader_uid"): item for item in readers}
-    offline = [uid for uid in in_use if summary.get(uid, {}).get("online") is not True]
+    # D-043: what AL/X observed herself (any event heard, a ping answered)
+    # outranks Particle's device list, which can lag a lost connection by
+    # most of an hour.
+    observed = checks or {}
+
+    def is_online(uid: str) -> bool:
+        seen = observed.get(uid, {}).get("online") if isinstance(observed.get(uid), Mapping) else None
+        if isinstance(seen, bool):
+            return seen
+        return summary.get(uid, {}).get("online") is True
+
+    offline = [uid for uid in in_use if not is_online(uid)]
     critical = [
         uid for uid in offline
         if any(item.reader_uid == uid and item.starts_at - WARNING_BEFORE_EVENT <= now < item.ends_at
                for item in today)
     ]
+    def mode_of(uid: str) -> int:
+        return summary.get(uid, {}).get("mode", MODE_IN)
+
     unconfirmed = [
         uid for uid in in_use
-        if not _holds_current(sent.get(uid) or {}, [
-            item for item in sessions if item.reader_uid == uid and item.ends_at > now], now)
+        if not holds_current(sent.get(uid) or {},
+                             [item for item in sessions if item.reader_uid == uid],
+                             mode_of(uid), now)
+    ]
+    # A reader that reported, recently, an event other than the one its
+    # window says is current is on the wrong event: red, like offline in
+    # session.
+    checks = checks or {}
+    wrong_event = [
+        uid for uid in in_use
+        if uid not in offline and isinstance(checks.get(uid), Mapping)
+        and checks[uid].get("fresh") is True
+        and checks[uid].get("event") != expected_event(
+            [item for item in sessions if item.reader_uid == uid], mode_of(uid), now)
     ]
     read_times = [datetime.fromisoformat(summary.get(uid, {}).get("schedule_as_of") or refreshed_at)
                   for uid in in_use]
     last_read = min([datetime.fromisoformat(refreshed_at), *read_times])
     link_stale = now - last_read > LINK_STALE_AFTER
 
-    if critical:
+    if critical or wrong_event:
         tone = "bad"
     elif offline or unconfirmed or link_stale:
         tone = "warn"
     else:
         tone = "ok"
 
-    if offline:
+    if wrong_event and not critical:
+        title = f"{_count(len(wrong_event), 'room reader')} on the wrong event"
+    elif offline:
         title = f"{_count(len(offline), 'room reader')} offline"
     elif link_stale:
         title = "BHL link not answering"
@@ -150,10 +164,10 @@ def compose_tile(
         "name": "BHL",
         "context": f"{_count(len(events), 'event')} today · {where}",
         "state": {"title": title, "detail": detail},
-        "alx": dict(ALX_ACTIVITY),
+        "alx": dict(activity) if activity else dict(ALX_ACTIVITY),
         "chips": [
             {"icon": "reader", "value": f"{len(in_use) - len(offline)}/{len(in_use)}",
-             "tone": "bad" if critical else ("warn" if offline else "ok"),
+             "tone": "bad" if critical or wrong_event else ("warn" if offline else "ok"),
              "label": "Room readers online"},
             {"icon": "link", "value": "BHL link", "tone": "warn" if link_stale else "ok",
              "label": f"Schedules last read from BehaviorLive at {_clock(last_read, local)}"},
@@ -162,12 +176,15 @@ def compose_tile(
 
 
 def tile_source(
-    calendar: Any, clock: Callable[[], datetime], local: tzinfo | None = None
+    calendar: Any, clock: Callable[[], datetime], local: tzinfo | None = None,
+    monitor: Any = None,
 ) -> Callable[[], dict[str, Any] | None]:
     def current() -> dict[str, Any] | None:
         at = clock()
         snapshot = calendar.snapshot(at)
         sent = {item["reader_uid"]: calendar.sent(item["reader_uid"]) for item in snapshot[2]}
-        return compose_tile(snapshot, at, local, sent)
+        checks = monitor.checks(at) if monitor is not None else None
+        activity = monitor.activity(at, local) if monitor is not None else None
+        return compose_tile(snapshot, at, local, sent, checks, activity)
 
     return current

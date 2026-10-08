@@ -46,12 +46,15 @@ from alx.contracts.readers import (
     ReaderSession,
     reader_event,
     session_fingerprint,
+    still_to_run,
 )
 
 
 REFRESH_READER_CALENDAR = "refresh_reader_calendar"
 READ_READER_CALENDAR = "read_reader_calendar"
 SEND_READER_SCHEDULE = "send_reader_schedule"
+READ_READER_LOG = "read_reader_log"
+_MAX_LOG_STEPS = 1000
 
 # The reader-side contract, docs/READER_SCHEDULE_PROTOCOL.md. Messages stay
 # under every Device OS's function-argument limit (622 bytes before 6.3), and
@@ -151,7 +154,26 @@ SEND_DEFINITION = CapabilityDefinition(
     ),
 )
 
-DEFINITIONS = (REFRESH_DEFINITION, READ_DEFINITION, SEND_DEFINITION)
+LOG_DEFINITION = CapabilityDefinition(
+    READ_READER_LOG,
+    "Read every step taken with the BHL readers in a window (from/to, ISO 8601; default the last 24 hours), optionally for one reader_uid, oldest first: schedule requests from readers, deliveries and what triggered them, schedules sent or not and why, each reader's reported status (schedule version v, current event e, event count n, battery, clock), readers on a different event than their window says, and readers going online or offline. Up to 1000 steps; truncated says when more exist. For accounting for an event afterwards.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"from": _STRING, "to": _STRING, "reader_uid": _STRING},
+        (),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"steps": _OBJECTS, "truncated": StructuredSchema(ValueKind.BOOLEAN)},
+        ("steps", "truncated"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+DEFINITIONS = (REFRESH_DEFINITION, READ_DEFINITION, SEND_DEFINITION, LOG_DEFINITION)
 
 
 def _time(value: Any) -> datetime | None:
@@ -261,25 +283,32 @@ def _session(item: ReaderSession) -> dict[str, Any]:
     }
 
 
+def _seconds(start: datetime, end: datetime) -> float:
+    return round((end - start).total_seconds(), 1)
+
+
 def _message(fields: Mapping[str, Any]) -> str:
     return json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
 
 
 def schedule_messages(
-    room: str, mode: int, offset_hours: int, sessions: Sequence[ReaderSession]
+    room: str, mode: int, offset_hours: int,
+    events: Sequence[tuple[ReaderSession, tuple[int, int]]],
 ) -> tuple[str, tuple[str, ...]]:
     """(version, messages) for one reader: begin, one per event, commit.
 
-    The version is a digest of exactly what the reader will hold, so the same
-    schedule always has the same version and any change gives a new one.
+    Each event carries its window ("a" to "u"), the time in which the reader
+    treats it as current. The version is a digest of exactly what the reader
+    will hold, so the same schedule always has the same version and any
+    change gives a new one.
     """
-    events = [reader_event(item) for item in sessions]
-    header = {"n": len(events), "m": mode, "r": room[:TITLE_CHARACTERS], "o": offset_hours}
-    version = hashlib.sha256(_message({**header, "events": events}).encode()).hexdigest()[:8]
+    payload = [reader_event(item, window) for item, window in events]
+    header = {"n": len(payload), "m": mode, "r": room[:TITLE_CHARACTERS], "o": offset_hours}
+    version = hashlib.sha256(_message({**header, "events": payload}).encode()).hexdigest()[:8]
     messages = [_message({"op": "begin", "v": version, **header})]
     messages.extend(
         _message({"op": "event", "v": version, "i": index, **event})
-        for index, event in enumerate(events)
+        for index, event in enumerate(payload)
     )
     messages.append(_message({"op": "commit", "v": version}))
     return version, tuple(messages)
@@ -425,21 +454,27 @@ def build_reader_executors(
             return failed(SEND_READER_SCHEDULE, "reader_unknown")
         if reader.get("mode") not in (0, 1) or not reader.get("room"):
             return failed(SEND_READER_SCHEDULE, "reader_schedule_unusable")
-        own = [item for item in sessions if item.reader_uid == reader_uid and item.ends_at > at]
-        unknown = set(leave_out) - {item.event_id for item in own}
+        # Windows are worked out over the reader's whole day, because each
+        # depends on its neighbours; only events whose window is still open
+        # are sent.
+        day = [item for item in sessions if item.reader_uid == reader_uid]
+        unknown = set(leave_out) - {item.event_id for item in day}
         if unknown:
             return failed(SEND_READER_SCHEDULE, "arguments_unusable")
-        chosen = sorted((item for item in own if item.event_id not in set(leave_out)),
-                        key=lambda item: item.starts_at)
+        kept = sorted((item for item in day if item.event_id not in set(leave_out)),
+                      key=lambda item: item.starts_at)
         overlapping = [
             f"{before.event_id},{after.event_id}"
-            for before, after in zip(chosen, chosen[1:]) if after.starts_at < before.ends_at
+            for before, after in zip(kept, kept[1:]) if after.starts_at < before.ends_at
         ]
         if overlapping:
+            calendar.log(at, reader_uid, "schedule_not_sent",
+                         {"code": "events_overlap", "events": overlapping})
             return CapabilityResult(
                 call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
                 failure={"code": "events_overlap", "events": tuple(overlapping)},
             )
+        chosen = still_to_run(kept, reader["mode"], at)
         if len(chosen) > MAX_SCHEDULE_EVENTS:
             return failed(SEND_READER_SCHEDULE, "schedule_too_long")
         version, messages = schedule_messages(
@@ -448,6 +483,7 @@ def build_reader_executors(
             return failed(SEND_READER_SCHEDULE, "event_too_large")
         if control is None:
             return failed(SEND_READER_SCHEDULE, "permission_denied")
+        event_ids = tuple(item.event_id for item, _ in chosen)
         for position, message in enumerate(messages):
             final = position == len(messages) - 1
             try:
@@ -457,23 +493,39 @@ def build_reader_executors(
                 # Before the commit the reader still holds its previous
                 # schedule. A commit that was sent but went unanswered may
                 # have taken: only the reader's status can say which.
+                unconfirmed = final and error.code == "device_timeout"
+                done = now()
+                calendar.log(done, reader_uid, "schedule_send_failed",
+                             {"code": error.code, "version": version, "message": position,
+                              "commit_unconfirmed": unconfirmed,
+                              "started_at": at.isoformat(), "seconds": _seconds(at, done)})
                 return CapabilityResult(
                     call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
                     failure={"code": error.code, "version": version,
-                             "commit_unconfirmed": final and error.code == "device_timeout"},
-                    outcome=(ExecutionOutcome.AMBIGUOUS
-                             if final and error.code == "device_timeout" else None),
+                             "commit_unconfirmed": unconfirmed},
+                    outcome=ExecutionOutcome.AMBIGUOUS if unconfirmed else None,
                 )
             if answer != 0:
+                done = now()
+                calendar.log(done, reader_uid, "schedule_send_failed",
+                             {"code": "reader_refused", "version": version,
+                              "message": position, "return_value": answer,
+                              "started_at": at.isoformat(), "seconds": _seconds(at, done)})
                 return CapabilityResult(
                     call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
                     failure={"code": "reader_refused", "version": version,
                              "message": position, "return_value": answer},
                 )
-        event_ids = tuple(item.event_id for item in chosen)
         calendar.record_sent(reader_uid, version, at, event_ids, tuple(
-            {"fp": session_fingerprint(item), "en": int(item.ends_at.timestamp())}
-            for item in chosen))
+            {"fp": session_fingerprint(item, window), "until": window[1]}
+            for item, window in chosen))
+        # Stamped when the reader confirmed the last message, with how long
+        # the whole send took: each message is a cellular round trip.
+        done = now()
+        calendar.log(done, reader_uid, "schedule_sent",
+                     {"version": version, "event_ids": list(event_ids),
+                      "left_out": list(leave_out), "messages": len(messages),
+                      "started_at": at.isoformat(), "seconds": _seconds(at, done)})
         return CapabilityResult(
             call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.SUCCEEDED,
             {"reader_uid": reader_uid, "version": version, "sent_at": at.isoformat(),
@@ -482,5 +534,25 @@ def build_reader_executors(
             provenance=provenance(at),
         )
 
+    def read_log(arguments: StructuredData) -> CapabilityResult:
+        at = now()
+        try:
+            end = _time(arguments.get("to")) if arguments.get("to") else at
+            start = (_time(arguments.get("from")) if arguments.get("from")
+                     else (end - _DEFAULT_WINDOW if end else None))
+            if start is None or end is None or end <= start:
+                raise ValueError("window")
+            reader_uid = arguments.get("reader_uid") or ""
+            if not isinstance(reader_uid, str):
+                raise ValueError("reader_uid")
+        except ValueError:
+            return failed(READ_READER_LOG, "arguments_unusable")
+        steps, truncated = calendar.log_between(start, end, reader_uid, _MAX_LOG_STEPS)
+        return CapabilityResult(
+            call_id_source(), READ_READER_LOG, CapabilityResultState.SUCCEEDED,
+            {"steps": steps, "truncated": truncated},
+            provenance=provenance(at),
+        )
+
     return {REFRESH_READER_CALENDAR: refresh, READ_READER_CALENDAR: read,
-            SEND_READER_SCHEDULE: send}
+            SEND_READER_SCHEDULE: send, READ_READER_LOG: read_log}

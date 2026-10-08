@@ -78,7 +78,12 @@ from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
 from alx.continuity.mail_source import MailCognitionSource
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.bootstrap.documents import build_document_runtime
-from alx.bootstrap.readers import build_reader_runtime, reader_poller
+from alx.bootstrap.readers import (
+    build_reader_runtime,
+    reader_listener,
+    reader_monitor,
+    reader_poller,
+)
 from alx.interfaces.reader_tile import tile_source
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
@@ -1037,6 +1042,9 @@ async def run(repository_root: Path) -> None:
         turn_origin_sink=lambda person: person_turn_in_progress.__setitem__(0, person),
         activity=activity,
     )
+    # D-043: keeps the readers on their schedules and records every step.
+    reader_watch = None if reader_runtime is None else reader_monitor(
+        reader_runtime, _with_call_id(current_call_id, "reader-monitor"))
     server = LiveVoiceServer(
         session,
         voice_settings.host,
@@ -1044,7 +1052,7 @@ async def run(repository_root: Path) -> None:
         provider_settings.speech_to_text.sample_rate_hz,
         CODE_ROOT / "src/alx/interfaces/assets",
         reader_tile=None if reader_runtime is None else tile_source(
-            reader_runtime.calendar, lambda: datetime.now(UTC)),
+            reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch),
     )
     # Every kind of occasion reaches the Core through one producer, one
     # runner and one tick. A finished external task joins the matured requests
@@ -1181,9 +1189,13 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(due_cognition.run())
             runtime_tasks.create_task(mail_poller.run())
             if reader_runtime is not None:
-                # D-041: today's calendar, kept current for the BHL tile.
+                # D-041: today's calendar, kept current for the BHL tile; then
+                # D-043: each reader checked and kept on its schedule.
                 runtime_tasks.create_task(
-                    reader_poller(reader_runtime, _with_call_id(current_call_id, "reader-refresh")).run())
+                    reader_poller(reader_runtime, _with_call_id(current_call_id, "reader-refresh"),
+                                  reader_watch).run())
+                # D-043: readers asking for their schedule are answered.
+                runtime_tasks.create_task(reader_listener(reader_runtime, reader_watch).run())
             if task_runtime is not None:
                 runtime_tasks.create_task(task_runtime.poller.run())
             if sandbox_runtime is not None:

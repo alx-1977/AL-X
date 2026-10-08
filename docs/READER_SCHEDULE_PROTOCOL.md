@@ -24,8 +24,8 @@ A schedule is always `begin`, then `n` `event` messages in order, then
 
 ```json
 {"op":"begin","v":"1a2b3c4d","n":2,"m":0,"r":"Majestic","o":-4}
-{"op":"event","v":"1a2b3c4d","i":0,"id":3462,"st":1791381900,"en":1791385500,"t":"Ethics in practice","fn":"Pam","ln":"Beesly","hbd":0}
-{"op":"event","v":"1a2b3c4d","i":1,"id":1099,"st":1791387000,"en":1791393000,"t":"Supervision","fn":"Jim","ln":"Halpert","hbd":1}
+{"op":"event","v":"1a2b3c4d","i":0,"id":3462,"st":1791381900,"en":1791385500,"a":1791345600,"u":1791383700,"t":"Ethics in practice","fn":"Pam","ln":"Beesly","hbd":0}
+{"op":"event","v":"1a2b3c4d","i":1,"id":1099,"st":1791387000,"en":1791393000,"a":1791383700,"u":1791390000,"t":"Supervision","fn":"Jim","ln":"Halpert","hbd":1}
 {"op":"commit","v":"1a2b3c4d"}
 ```
 
@@ -39,6 +39,7 @@ A schedule is always `begin`, then `n` `event` messages in order, then
 | `i` | Position of this event, counting from 0. |
 | `id` | BehaviorLive event ID. Scans are labelled with it. |
 | `st`, `en` | Start and end, Unix seconds UTC. |
+| `a`, `u` | The window in which the reader treats this event as current, Unix seconds UTC (D-043). |
 | `t` | Title, at most 64 characters. |
 | `fn`, `ln` | Presenter's first and last name, at most 32 characters each; may be empty. |
 | `hbd` | Hybrid flag, `0` or `1`. |
@@ -72,9 +73,32 @@ exactly when the next starts) are normal.
    whole schedule when an answer was lost, and the reader simply accepts it.
 6. The running schedule survives restarts and loss of signal. With no signal
    the reader keeps running it.
-7. The reader tracks its current event by `id` and times, never by position.
+7. The reader tracks its current event by `id`, never by position. The
+   current event is the one whose window (`a` to `u`) holds the time now; with
+   none, or with the clock unset, no event is current.
 
-## Status the reader reports (next step)
+## Which event is current (D-043)
+
+AL/X decides it and sends it as each event's window, so the rule lives in one
+place and can change without a firmware update. V1's rule is kept:
+
+- **IN reader:** moves to the next event halfway through the current one, so
+  attendees can scan in ahead. Its last window closes halfway through the last
+  event.
+- **OUT reader:** moves to the next event halfway through that next event, so
+  attendees can scan out afterwards. Its last window closes 30 minutes after
+  the last event ends.
+- The first window opens at local midnight of the event day.
+
+## Asking for a schedule
+
+The reader publishes `roomreader/schedule_request` (data `{"v":"<version
+held>"}`) on every new cloud connection, and every five minutes while it holds
+nothing still to run. AL/X hears it on Particle's event stream and answers by
+sending the schedule. AL/X also sends unasked when a reader is not holding the
+schedule its calendar says it should.
+
+## Status the reader reports
 
 So AL/X can confirm what each reader holds and runs, the firmware exposes a
 Particle variable `status`:
