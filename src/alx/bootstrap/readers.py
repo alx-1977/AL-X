@@ -227,6 +227,7 @@ class ReaderMonitor:
         # last recorded for it (so a persisting one is logged once).
         self._cards: dict[str, tuple[dict[str, Any], datetime]] = {}
         self._wrong: dict[str, tuple[Any, Any] | None] = {}
+        self._last_card_at: dict[str, datetime] = {}
         self._last_action: tuple[datetime, str] | None = None
 
     # ---- what the tile reads ---------------------------------------------
@@ -368,7 +369,11 @@ class ReaderMonitor:
                 # on what it last reported, without reading or sending.
                 with self._lock:
                     held = self._cards.get(uid)
-                if held is not None:
+                    observed = self._presence(uid, at)
+                connected = observed if observed is not None else reader.get("online") is True
+                # Only on current evidence: a reader that went offline, or whose
+                # report is old, is not said to be on the wrong event.
+                if held is not None and connected and at - held[1] <= CHECK_FRESH_FOR:
                     self._judge_event(uid, held[0], held[1], own, mode, at)
                 continue
             with self._lock:
@@ -379,8 +384,9 @@ class ReaderMonitor:
                 continue
             with self._lock:
                 card = self._cards.get(uid)
-            if card is not None and at - card[1] <= CARD_FRESH_FOR:
-                report, received_at = card  # the reader's own recent card: no read
+                card_at = self._last_card_at.get(uid)
+            if card is not None and card_at is not None and at - card_at <= CARD_FRESH_FOR:
+                report, received_at = card  # a recent card from the reader: no read
             else:
                 report, received_at = self._read_status(uid, reader, at), at
             record = self._calendar.sent(uid)
@@ -433,6 +439,10 @@ class ReaderMonitor:
             return
         self._calendar.log(at, uid, "status", {**report, "via": "card"})
         self._keep_report(uid, report, at)
+        with self._lock:
+            # Only a card the reader sent itself spares the next read; a read
+            # does not, so a reader that stops sending cards is read each cycle.
+            self._last_card_at[uid] = at
         _, _, readers, sessions = self._calendar.snapshot(at)
         reader = next((item for item in readers if item.get("reader_uid") == uid), None)
         own = [item for item in sessions if item.reader_uid == uid]

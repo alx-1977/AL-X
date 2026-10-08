@@ -371,6 +371,27 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(monitor.checks(self.now[0])[UID]["wrong"])
         self.assertEqual((particle.reads, particle.calls), (0, []))
 
+    def test_a_fallback_read_does_not_stand_in_for_a_card(self) -> None:
+        particle = Particle(status={"v": "x", "e": 1, "n": 3, "clk": 1})
+        monitor = self.build(particle)
+        monitor.cycle()  # no card yet: read
+        self.now[0] += timedelta(minutes=5)
+        monitor.cycle()  # still no card: read again
+        self.assertEqual(particle.reads, 2)
+
+    def test_an_offline_reader_is_not_flagged_after_its_last_event(self) -> None:
+        particle = Particle()
+        particle.online = False
+        monitor = self.build(particle, online=True)
+        self.now[0] = at(17, 20)
+        self.card(monitor, e=3)
+        monitor.ping_cycle()  # the reader stops answering
+        self.now[0] = at(17, 40)
+        monitor.ping_cycle()
+        monitor.cycle()
+        self.assertFalse(monitor.checks(self.now[0])[UID].get("wrong"))
+        self.assertNotIn("wrong_event", self.steps())
+
     def test_an_incomplete_card_is_not_trusted(self) -> None:
         particle = Particle(status={"v": "x", "e": 1, "n": 3, "clk": 1})
         monitor = self.build(particle)
