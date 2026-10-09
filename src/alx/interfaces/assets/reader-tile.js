@@ -1,10 +1,10 @@
 // The BHL tile on the main page (D-041). The server says whether today has
-// BHL events and what the calendar shows; this only puts that on screen,
-// keeps it current, and removes it when the server returns none.
+// BHL events and what is wrong with which reader; this only puts that on
+// screen, keeps it current, and removes it when the server returns none.
 
-import { surfaceTile } from '/tile.js';
+import { surfaceReaderTraces } from '/reader-traces.js';
 
-const host = document.getElementById('tiles');
+const host = document.body;
 // Every few seconds: AL/X learns of a reader within seconds (its own messages,
 // pings, status cards), and this only asks her, on this machine.
 const EVERY_MS = 5_000;
@@ -29,7 +29,7 @@ async function check() {
   const next = JSON.stringify(data);
   if (next === shown) return;
   if (tile) tile.update(data);
-  else tile = surfaceTile(host, data);
+  else tile = surfaceReaderTraces(host, data);
   shown = next;
 }
 

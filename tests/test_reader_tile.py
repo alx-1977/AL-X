@@ -71,6 +71,11 @@ def tile(now, sessions=DAY, readers=READERS, refreshed=REFRESHED, sent=None):
     return compose_tile((refreshed, (), readers, sessions), now, UTC, sent)
 
 
+def problems(data):
+    """Each reader with a problem, and what the problem is."""
+    return {item["uid"]: item["issue"]["text"] for item in data["readers"] if item["uid"]}
+
+
 class ComposeTileTests(unittest.TestCase):
     def test_no_tile_without_a_calendar_or_without_events_today(self) -> None:
         self.assertIsNone(tile(at(14, 30), refreshed=""))
@@ -79,39 +84,43 @@ class ComposeTileTests(unittest.TestCase):
 
     def test_green_only_when_everything_is_confirmed(self) -> None:
         data = tile(at(14, 10), readers=ONLINE, sent=HOLDING)
-        self.assertEqual(data["tone"], "ok")
-        self.assertEqual(data["state"], {"title": "All systems normal",
-                                         "detail": "Event under way until 15:05 · next starts 15:30"})
-        self.assertEqual([chip["tone"] for chip in data["chips"]], ["ok", "ok"])
+        self.assertEqual((data["tone"], data["name"], data["title"], data["readers"]),
+                         ("ok", "BHL", "All OK", []))
 
     def test_online_but_never_sent_a_schedule_is_yellow(self) -> None:
         data = tile(at(14, 10), readers=ONLINE)
-        self.assertEqual(data["tone"], "warn")
-        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
+        self.assertEqual((data["tone"], data["title"]), ("warn", "2 warnings"))
+        self.assertEqual(problems(data), {"ab2d5218": "Schedule not confirmed",
+                                          "c471cf5a": "Schedule not confirmed"})
 
     def test_a_reader_offline_in_session_is_red(self) -> None:
-        data = tile(at(14, 30), sent=HOLDING)
-        self.assertEqual(data["tone"], "bad")
-        self.assertEqual(data["state"]["title"], "1 room reader offline")
-        self.assertEqual((data["chips"][0]["value"], data["chips"][0]["tone"]), ("1/2", "bad"))
+        data = tile(at(14, 30), sent=HOLDING, refreshed=at(14, 30).isoformat())
+        self.assertEqual((data["tone"], data["title"]), ("bad", "1 error"))
+        self.assertEqual(problems(data), {"c471cf5a": "Offline · event running"})
+        reader = data["readers"][0]
+        self.assertEqual(reader["issue"]["who"], "tech")
+        self.assertEqual((reader["room"], reader["event"]),
+                         ("Majestic", {"title": "Ethics", "when": "until 15:05"}))
 
     def test_offline_turns_red_30_minutes_before_its_event(self) -> None:
         self.assertEqual(tile(at(13, 34), sent=HOLDING)["tone"], "warn")
-        self.assertEqual(tile(at(13, 35), sent=HOLDING)["tone"], "bad")
+        data = tile(at(13, 35), sent=HOLDING)
+        self.assertEqual(data["tone"], "bad")
+        self.assertEqual(problems(data), {"c471cf5a": "Offline · event at 14:05"})
 
     def test_offline_between_distant_events_is_yellow(self) -> None:
         sessions = (session("c471cf5a", 1, at(9), at(10)), session("c471cf5a", 2, at(16), at(17)))
         data = tile(at(12), sessions=sessions,
                     sent={"c471cf5a": held(*sessions)})
-        self.assertEqual((data["tone"], data["chips"][0]["tone"]), ("warn", "warn"))
-        self.assertEqual(data["state"]["detail"], "Next event at 16:00")
+        self.assertEqual(data["tone"], "warn")
+        self.assertEqual(problems(data), {"c471cf5a": "Offline"})
 
     def test_an_event_moved_since_it_was_sent_is_not_confirmed(self) -> None:
         moved = (DAY[0], DAY[1],
                  session("ab2d5218", 2, at(15, 45), at(17, 10), title="Supervision"), DAY[3])
         data = tile(at(14, 10), sessions=moved, readers=ONLINE, sent=HOLDING)
-        self.assertEqual((data["tone"], data["state"]["title"]),
-                         ("warn", "Schedules not confirmed"))
+        self.assertEqual(data["tone"], "warn")
+        self.assertEqual(problems(data), {"ab2d5218": "Schedule not confirmed"})
 
     def test_an_event_moved_earlier_still_runs_on_the_reader(self) -> None:
         accepted = session("ab2d5218", 1, at(14), at(15))
@@ -119,13 +128,13 @@ class ComposeTileTests(unittest.TestCase):
         moved = (session("ab2d5218", 1, at(12), at(13)), later)
         data = tile(at(14, 10), sessions=moved, readers=ONLINE[:1],
                     sent={"ab2d5218": held(accepted, later)})
-        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
+        self.assertEqual(problems(data), {"ab2d5218": "Schedule not confirmed"})
 
     def test_an_event_deleted_from_the_calendar_still_runs_on_the_reader(self) -> None:
         kept = session("ab2d5218", 2, at(16), at(17))
         data = tile(at(14, 10), sessions=(kept,), readers=ONLINE[:1],
                     sent={"ab2d5218": held(session("ab2d5218", 1, at(14), at(15)), kept)})
-        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
+        self.assertEqual(problems(data), {"ab2d5218": "Schedule not confirmed"})
 
     def test_events_that_ended_on_both_sides_do_not_count(self) -> None:
         done = session("ab2d5218", 1, at(9), at(10))
@@ -144,25 +153,21 @@ class ComposeTileTests(unittest.TestCase):
 
     def test_a_stale_bhl_link_is_yellow(self) -> None:
         data = tile(at(14, 16), readers=ONLINE, sent=HOLDING)
-        self.assertEqual(data["tone"], "warn")
-        self.assertEqual(data["state"]["title"], "BHL link not answering")
-        self.assertEqual(data["chips"][1]["tone"], "warn")
-        self.assertEqual(data["chips"][1]["label"],
-                         "Schedules last read from BehaviorLive at 14:00")
+        self.assertEqual((data["tone"], data["title"]), ("warn", "1 warning"))
+        link = data["readers"][0]
+        self.assertEqual((link["room"], link["issue"]["text"]),
+                         ("BehaviorLive", "Schedules last read 14:00"))
 
     def test_a_kept_schedule_counts_from_when_it_was_read(self) -> None:
         readers = ({**ONLINE[0], "schedule_as_of": "2026-10-07T13:40:00+00:00"}, ONLINE[1])
-        self.assertEqual(tile(at(14, 10), readers=readers, sent=HOLDING)["state"]["title"],
-                         "BHL link not answering")
+        data = tile(at(14, 10), readers=readers, sent=HOLDING)
+        self.assertEqual(data["readers"][0]["issue"]["text"], "Schedules last read 13:40")
 
-    def test_before_the_first_event(self) -> None:
-        data = tile(at(9), readers=ONLINE, sent=HOLDING, refreshed="2026-10-07T09:00:00+00:00")
-        self.assertEqual(data["state"]["detail"], "First event at 14:05")
-
-    def test_after_the_last_event_the_day_is_finished(self) -> None:
-        data = tile(at(20), readers=ONLINE, sent=HOLDING, refreshed="2026-10-07T20:00:00+00:00")
-        self.assertEqual(data["state"]["detail"], "Today's events have finished")
-        self.assertEqual(data["tone"], "ok")
+    def test_before_the_first_and_after_the_last_event_all_is_ok(self) -> None:
+        self.assertEqual(tile(at(9), readers=ONLINE, sent=HOLDING,
+                              refreshed="2026-10-07T09:00:00+00:00")["title"], "All OK")
+        self.assertEqual(tile(at(20), readers=ONLINE, sent=HOLDING,
+                              refreshed="2026-10-07T20:00:00+00:00")["title"], "All OK")
 
     def test_today_is_the_event_s_own_day(self) -> None:
         # 01:00 UTC on the 8th is still the evening of the 7th at -4 hours.
@@ -170,21 +175,99 @@ class ComposeTileTests(unittest.TestCase):
         self.assertIsNotNone(tile(at(23, day=7), sessions=evening))
         self.assertIsNone(tile(at(23, day=8), sessions=evening))
 
-    def test_a_full_day_summarises_rooms_not_events(self) -> None:
+    def test_many_readers_count_once_each_errors_first(self) -> None:
         sessions = []
         for room in range(9):
             uid = f"{room:08x}"
-            sessions.append(session(uid, 100 + room, at(14), at(15), room=f"R{room}"))
-            if room < 6:
-                sessions.append(session(uid, 200 + room, at(15, 30), at(16), room=f"R{room}"))
-        data = tile(at(14, 30), sessions=tuple(sessions), readers=())
-        self.assertEqual(data["context"], "15 events today · 9 rooms")
-        self.assertEqual(data["state"]["detail"],
-                         "9 rooms in session · next starts 15:30 (6 rooms) · schedules not confirmed")
-        self.assertEqual(data["chips"][0]["value"], "0/9")
+            sessions.append(session(uid, 100 + room, at(16), at(17), room=f"R{room}"))
+        readers = tuple({"reader_uid": f"{room:08x}", "online": room >= 3} for room in range(9))
+        data = tile(at(16, 30), sessions=tuple(sessions), readers=readers,
+                    refreshed=at(16, 30).isoformat())
+        self.assertEqual(data["title"], "3 errors · 6 warnings")
+        self.assertEqual([item["tone"] for item in data["readers"]], ["bad"] * 3 + ["warn"] * 6)
 
-    def test_al_x_says_she_is_not_monitoring_yet(self) -> None:
-        self.assertEqual(tile(at(14, 30))["alx"], {"text": "not monitoring yet", "idle": True})
+    def test_without_the_monitor_al_x_is_not_said_to_act(self) -> None:
+        data = tile(at(14, 10), readers=ONLINE)
+        self.assertEqual({item["issue"]["action"] for item in data["readers"]}, {""})
+
+    def test_with_the_monitor_al_x_sends_the_schedule(self) -> None:
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, None, {})
+        self.assertEqual({(item["issue"]["who"], item["issue"]["action"])
+                          for item in data["readers"]}, {("alx", "Sending the schedule")})
+
+    def test_a_reader_on_the_wrong_event_is_red(self) -> None:
+        checks = {"ab2d5218": {"online": True, "fresh": True, "wrong": True}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual((data["tone"], problems(data)),
+                         ("bad", {"ab2d5218": "On the wrong event"}))
+
+    def test_low_battery_and_weak_signal_are_yellow(self) -> None:
+        checks = {"ab2d5218": {"online": True, "bat": 14, "pwr": "bat", "sig": 80},
+                  "c471cf5a": {"online": True, "bat": 113, "pwr": "usb", "sig": 18}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual(problems(data), {"ab2d5218": "Battery low · 14%",
+                                          "c471cf5a": "Weak signal · 18%"})
+        weak = data["readers"][1]
+        self.assertEqual((weak["power"], weak["signal"]),
+                         ({"source": "usb", "percent": 100}, 18))
+
+    def test_low_battery_on_usb_is_not_a_problem(self) -> None:
+        checks = {"ab2d5218": {"online": True, "bat": 14, "pwr": "usb", "sig": 80}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual(data["readers"], [])
+
+    def test_a_trace_shows_the_reader_s_last_steps(self) -> None:
+        steps = (
+            {"at": "2026-10-07T14:20:00+00:00", "kind": "status",
+             "detail": {"e": 1, "bat": 96, "sig": 52, "via": "card"}},
+            {"at": "2026-10-07T14:25:00+00:00", "kind": "offline", "detail": {"via": "ping"}},
+        )
+        asked = []
+
+        def log_of(uid):
+            asked.append(uid)
+            return steps
+
+        data = compose_tile((REFRESHED, (), READERS, DAY), at(14, 30), UTC, HOLDING, {}, log_of,
+                            lambda uid, kind, cleared_by="": f"{uid} {kind} {cleared_by}")
+        reader = data["readers"][0]
+        self.assertEqual(reader["trace"], [["14:20:00", "card · event 1 · bat 96% · sig 52%", ""],
+                                           ["14:25:00", "offline · ping unanswered", "error"]])
+        self.assertEqual(reader["since"], "c471cf5a offline online")
+        # Only the reader with a problem has its log read.
+        self.assertEqual(asked, ["c471cf5a"])
+
+    def test_a_problem_began_at_its_first_logged_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
+            uid = "c471cf5a"
+            calendar.log(at(13), uid, "schedule_sent", {})
+            calendar.log(at(14), uid, "schedule_delivery", {})
+            calendar.log(at(14, 10), uid, "schedule_delivery", {})
+            calendar.log(at(14, 5), uid, "offline", {})
+            calendar.log(at(14, 6), uid, "online", {})
+            calendar.log(at(14, 7), uid, "offline", {})
+            for minute in range(10):
+                calendar.log(at(14, 20 + minute), uid, "status", {})
+            found = (calendar.log_started(uid, "schedule_delivery", "schedule_sent"),
+                     calendar.log_started(uid, "offline", "online"),
+                     calendar.log_started(uid, "wrong_event"))
+            calendar.log(at(15), uid, "schedule_sent", {})
+            cleared = calendar.log_started(uid, "schedule_delivery", "schedule_sent")
+            calendar.close()
+        self.assertEqual(found, (at(14).isoformat(), at(14, 7).isoformat(), None))
+        self.assertIsNone(cleared)
+
+    def test_a_malformed_reading_is_unknown_not_a_failure(self) -> None:
+        checks = {"ab2d5218": {"online": True, "bat": float("nan"), "pwr": "bat",
+                               "sig": float("inf")}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual(data["readers"], [])
+
+    def test_weak_signal_is_the_reader_s_own_doing_not_al_x_s(self) -> None:
+        checks = {"ab2d5218": {"online": True, "sig": 18}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual(data["readers"][0]["issue"]["who"], "reader")
 
     def test_the_tile_reads_the_stored_calendar_and_what_was_sent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -195,6 +278,16 @@ class ComposeTileTests(unittest.TestCase):
             data = tile_source(calendar, lambda: at(14, 10), UTC)()
             calendar.close()
         self.assertEqual(data["tone"], "ok")
+
+    def test_the_last_steps_come_from_the_reader_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
+            for minute in range(8):
+                calendar.log(at(14, minute), "c471cf5a", "status", {"e": minute})
+            calendar.log(at(14, 8), "ab2d5218", "status", {"e": 99})
+            steps = calendar.log_latest("c471cf5a", 5)
+            calendar.close()
+        self.assertEqual([step["detail"]["e"] for step in steps], [3, 4, 5, 6, 7])
 
 
 class SentRecordTests(unittest.TestCase):
@@ -212,9 +305,10 @@ class SentRecordTests(unittest.TestCase):
             record = calendar.sent("ab2d5218")
             calendar.close()
         self.assertIsNone(record["held"])
-        self.assertEqual(tile(at(14, 10), readers=ONLINE, sent={"ab2d5218": record,
-                                                                "c471cf5a": HOLDING["c471cf5a"]})
-                         ["state"]["title"], "Schedules not confirmed")
+        self.assertEqual(problems(tile(at(14, 10), readers=ONLINE,
+                                       sent={"ab2d5218": record,
+                                             "c471cf5a": HOLDING["c471cf5a"]})),
+                         {"ab2d5218": "Schedule not confirmed"})
 
     def test_a_legacy_record_is_not_confirmed_after_the_last_event(self) -> None:
         # CodeRabbit on #124: an empty legacy record and an empty remainder
@@ -223,7 +317,7 @@ class SentRecordTests(unittest.TestCase):
                   "c471cf5a": {"version": "v0", "held": None}}
         data = tile(at(20), readers=ONLINE, sent=legacy,
                     refreshed="2026-10-07T20:00:00+00:00")
-        self.assertEqual(data["state"]["title"], "Schedules not confirmed")
+        self.assertEqual(set(problems(data).values()), {"Schedule not confirmed"})
 
     def test_a_genuinely_empty_day_sent_is_confirmed_after_the_last_event(self) -> None:
         empty = {"ab2d5218": {"version": "v1", "held": ()},
@@ -261,10 +355,13 @@ class ServingTests(unittest.TestCase):
 
     def test_the_main_page_carries_the_tile(self) -> None:
         page = (ASSETS / "index.html").read_text()
-        self.assertIn('href="/tile.css"', page)
-        self.assertIn('id="tiles"', page)
+        self.assertIn('href="/reader-traces.css"', page)
         self.assertIn('src="/reader-tile.js"', page)
-        self.assertEqual(self.get(self.server(None), "/reader-tile.js").status_code, 200)
+        self.assertIn("from '/reader-traces.js'", (ASSETS / "reader-tile.js").read_text())
+        for path in ("/reader-tile.js", "/reader-traces.js", "/reader-traces.css",
+                     "/reader-traces", "/reader-traces-fixtures.js"):
+            with self.subTest(path=path):
+                self.assertEqual(self.get(self.server(None), path).status_code, 200)
 
 
 class PollerTests(unittest.TestCase):

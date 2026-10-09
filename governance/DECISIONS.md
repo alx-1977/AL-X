@@ -2416,6 +2416,11 @@ This grants no authority a single goal update lacks: completion still requires s
   - **Green.** Every reader in use today is online and holds today's schedule, and the schedules are current.
   - **AL/X's line** says "not monitoring yet" until the reader health check exists; it never claims activity she is not performing.
   - **With many rooms** the status summarises rooms in session and the next start, not single events.
+- **Amended 2026-10-09: a pill and one trace per reader with a problem.** Friedl wanted the main screen kept to OK, warning or error, the readers with a problem shown when asked, "a really beautiful and modern UI", things AL/X displays to look like an overlay rather than stickers, and a client of about sixty readers to fit. From previews he chose the dark look of the AL/X Execution Trace, at two-thirds size, with LED-like status lights ("Implement option B please"); the glass-card design (option A) is parked on branch `parked/reader-cards-glass`.
+  - **Main screen.** A small pill: the status light and one line, "All OK" or the counts ("1 error · 2 warnings"). Clicking it opens and closes the traces; nothing else is shown.
+  - **One trace per problem.** For each reader with a problem, and for the BehaviorLive link when it is stale: the room, its current event, last known battery, power and signal; the problem with how long it has lasted; its last five steps from the reader log; and who acts next, AL/X or a person. Readers without a problem are not shown, so sixty readers never mean sixty boxes.
+  - **Red** adds a reader running an event other than the one its window says. **Yellow** adds a reader on battery below 20 %, and a reader whose signal is below 30 % (the reader's own poor-signal mark).
+  - **Who acts** is said only from what the reader monitor does on its own: it pings every reader each minute and sends a reader that is online its schedule again every ten minutes until it holds it. Without the monitor, AL/X is not said to act. An offline reader with its event close, a reader on the wrong event, and a low battery need a person.
 
 ## D-042 — No merge without a clean external review
 

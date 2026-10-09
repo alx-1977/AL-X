@@ -94,6 +94,8 @@ class Particle:
 
     def ping(self, product_id, device_id):
         self.pings = getattr(self, "pings", 0) + 1
+        if getattr(self, "during_ping", None):
+            self.during_ping()
         if isinstance(self.online, Exception):
             raise self.online
         return self.online
@@ -227,8 +229,10 @@ class MonitorTests(unittest.TestCase):
         monitor.ping_cycle()
         self.assertEqual(self.steps(), ["offline"])
         data = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)()
-        self.assertEqual(data["chips"][0]["value"], "0/1")
         self.assertEqual(data["tone"], "bad")  # its event is running
+        reader = data["readers"][0]
+        self.assertEqual(reader["issue"]["text"], "Offline · event running")
+        self.assertEqual(reader["trace"][-1][1:], ["offline · ping unanswered", "error"])
         # The regular check believes the ping, so it does not read or send.
         monitor.cycle()
         self.assertEqual((particle.reads, particle.calls), (0, []))
@@ -242,6 +246,26 @@ class MonitorTests(unittest.TestCase):
         self.now[0] += timedelta(minutes=1)
         monitor.ping_cycle()
         self.assertEqual(self.steps(), ["offline", "online"])
+
+    def test_a_reader_heard_then_unanswered_shows_offline_at_once(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle, online=True)
+        monitor.on_event("roomreader/scan", DEVICE, "{}", "t")
+        self.now[0] += timedelta(minutes=1)
+        particle.online = False
+        monitor.ping_cycle()
+        self.assertFalse(monitor.checks(self.now[0])[UID]["online"])
+        self.assertEqual(self.steps(), ["online", "offline"])
+
+    def test_a_reader_heard_while_the_ping_was_out_stays_online(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle, online=True)
+        particle.online = False
+        # The reader publishes while Particle is still waiting on the ping.
+        particle.during_ping = lambda: monitor.on_event("roomreader/scan", DEVICE, "{}", "t")
+        monitor.ping_cycle()
+        self.assertTrue(monitor.checks(self.now[0])[UID]["online"])
+        self.assertNotIn("offline", self.steps())
 
     def test_the_log_reads_back_in_the_order_it_was_written(self) -> None:
         # A ping that finished later can carry an earlier observation time.
@@ -455,14 +479,47 @@ class MonitorTests(unittest.TestCase):
         monitor.cycle()
         self.assertEqual((self.steps(), particle.reads), (["offline"], 0))
 
-    def test_the_tile_says_al_x_is_monitoring_and_turns_red_on_a_wrong_event(self) -> None:
+    def test_the_tile_turns_red_on_a_wrong_event_and_shows_the_step(self) -> None:
         particle = Particle(status={"v": "x", "e": 3, "n": 3, "clk": 1})
         monitor = self.build(particle)
         monitor.cycle()
         data = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)()
         self.assertEqual(data["tone"], "bad")
-        self.assertEqual(data["state"]["title"], "1 room reader on the wrong event")
-        self.assertTrue(data["alx"]["text"].startswith("monitoring"))
+        reader = data["readers"][0]
+        self.assertEqual(reader["issue"]["text"], "On the wrong event")
+        self.assertIn("error", [line[2] for line in reader["trace"]])
+        self.assertTrue(any(line[1].startswith("on event 3 · expected")
+                            for line in reader["trace"]))
+
+    def test_al_x_is_said_to_send_only_while_her_check_runs(self) -> None:
+        # Its status cannot be read either, so there is no event to judge.
+        particle = Particle(status=ReaderAccessError("device_timeout"), refuse="device_timeout")
+        monitor = self.build(particle)
+        source = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)
+        self.assertEqual(source()["readers"][0]["issue"]["action"], "")
+        monitor.cycle()
+        reader = source()["readers"][0]
+        self.assertEqual((reader["issue"]["who"], reader["issue"]["action"]),
+                         ("alx", "Sending the schedule"))
+        self.now[0] += timedelta(hours=3)
+        reader = next(item for item in source()["readers"] if item["uid"] == UID)
+        self.assertEqual(reader["issue"]["action"], "")
+
+    def test_a_reader_that_cannot_take_a_schedule_needs_a_person(self) -> None:
+        particle = Particle(refuse="function_not_exposed")
+        monitor = self.build(particle)
+        monitor.cycle()
+        data = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)()
+        self.assertEqual(data["readers"][0]["issue"]["who"], "tech")
+
+    def test_a_status_read_keeps_the_last_card_s_power_and_signal(self) -> None:
+        particle = Particle(status={"v": "x", "e": 1, "n": 1, "clk": 1, "bat": 90})
+        monitor = self.build(particle)
+        self.card(monitor, pwr="bat", sig=18, bat=50)
+        self.now[0] += timedelta(minutes=31)  # the card is old: the status is read
+        monitor.cycle()
+        held = monitor.checks(self.now[0])[UID]
+        self.assertEqual((held["bat"], held["pwr"], held["sig"]), (90, "bat", 18))
 
     def test_every_step_can_be_read_back(self) -> None:
         particle = Particle()

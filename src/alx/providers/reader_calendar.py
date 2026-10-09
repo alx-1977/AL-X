@@ -56,6 +56,10 @@ class SQLiteReaderCalendar:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS reader_log_at ON reader_log(at)"
             )
+            # The BHL tile looks up one reader's steps every few seconds.
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS reader_log_reader ON reader_log(reader_uid, kind)"
+            )
             columns = {row[1] for row in self._connection.execute(
                 "PRAGMA table_info(sent_schedules)")}
             if "fingerprints_json" not in columns:
@@ -192,6 +196,38 @@ class SQLiteReaderCalendar:
         steps = tuple({"at": r[0], "reader_uid": r[1], "kind": r[2],
                        "detail": json.loads(r[3])} for r in rows[:limit])
         return steps, len(rows) > limit
+
+    def log_latest(self, reader_uid: str, limit: int) -> tuple[dict[str, Any], ...]:
+        """One reader's last `limit` steps, oldest first."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT at, reader_uid, kind, detail_json FROM reader_log "
+                "WHERE reader_uid = ? ORDER BY rowid DESC LIMIT ?", (reader_uid, limit),
+            ).fetchall()
+        return tuple({"at": r[0], "reader_uid": r[1], "kind": r[2],
+                      "detail": json.loads(r[3])} for r in reversed(rows))
+
+    def log_started(self, reader_uid: str, kind: str, cleared_by: str = "") -> str | None:
+        """When a condition logged as `kind` began, or None if it never was.
+
+        With `cleared_by`, the first `kind` step after the last `cleared_by`
+        step (the first send attempt since the last confirmed schedule);
+        without, the last `kind` step (each is logged once, when it begins).
+        """
+        with self._lock:
+            if cleared_by:
+                row = self._connection.execute(
+                    "SELECT at FROM reader_log WHERE reader_uid = ? AND kind = ? AND rowid > "
+                    "COALESCE((SELECT MAX(rowid) FROM reader_log WHERE reader_uid = ? "
+                    "AND kind = ?), 0) ORDER BY rowid LIMIT 1",
+                    (reader_uid, kind, reader_uid, cleared_by),
+                ).fetchone()
+            else:
+                row = self._connection.execute(
+                    "SELECT at FROM reader_log WHERE reader_uid = ? AND kind = ? "
+                    "ORDER BY rowid DESC LIMIT 1", (reader_uid, kind),
+                ).fetchone()
+        return row[0] if row else None
 
     def close(self) -> None:
         self._connection.close()

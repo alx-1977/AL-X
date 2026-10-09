@@ -1,0 +1,197 @@
+/* The BHL tile (D-041, amended 2026-10-09): a pill on the main screen, and
+   one small trace per reader with a problem, in the look of the AL/X
+   Execution Trace (app.css .diagnostics) at two-thirds size. Glass: never
+   put opacity, filter, mask or clip-path on .rt, .rt-pill or an ancestor
+   while settled, or the blur loses the background. */
+
+:root {
+  --rt-ok: #3ddc84;
+  --rt-warn: #ffb547;
+  --rt-bad: #ff5c5c;
+  --rt-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --rt-glass:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.035) 46%),
+    rgba(5, 15, 25, 0.5);
+  --rt-blur: blur(26px) saturate(165%);
+}
+
+/* A status light that glows like an LED: a hot core, the colour around it,
+   and light spilling onto the glass. */
+.rt-light {
+  flex: 0 0 auto;
+  width: 0.7em;
+  height: 0.7em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 45%,
+    color-mix(in srgb, var(--tone) 25%, #fff) 0%, var(--tone) 55%,
+    color-mix(in srgb, var(--tone) 80%, #000) 100%);
+  box-shadow:
+    0 0 0.25em var(--tone),
+    0 0 0.7em var(--tone),
+    0 0 1.6em color-mix(in srgb, var(--tone) 70%, transparent),
+    0 0 3em color-mix(in srgb, var(--tone) 35%, transparent);
+}
+[data-tone="bad"] > .rt-light,
+[data-tone="bad"] > header > .rt-light { animation: rt-led 1.6s ease-in-out infinite; }
+
+[data-tone] { --tone: var(--rt-ok); }
+[data-tone="warn"] { --tone: var(--rt-warn); }
+[data-tone="bad"] { --tone: var(--rt-bad); }
+
+/* ---- the pill ------------------------------------------------------------ */
+
+.rt-pill {
+  position: fixed;
+  z-index: 2;
+  top: 1.5rem;
+  right: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  padding: 0.7em 0.8em 0.7em 1em;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: var(--rt-glass);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  color: rgba(238, 250, 255, 0.94);
+  font: 500 clamp(13px, 0.95vw, 30px) / 1.2 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-backdrop-filter: var(--rt-blur);
+  backdrop-filter: var(--rt-blur);
+  cursor: pointer;
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: rt-rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.rt-pill:hover:not(:disabled) { transform: translateY(-2px); }
+.rt-pill:disabled { cursor: default; }
+.rt-pill:focus-visible { outline: 2px solid var(--tone); outline-offset: 3px; }
+.rt-pill__text { display: flex; flex-direction: column; align-items: flex-start; gap: 0.12em; }
+.rt-pill__name { color: rgba(221, 243, 250, 0.54); font-size: 0.66em; font-weight: 650; letter-spacing: 0.18em; }
+.rt-pill__title { font-size: 0.98em; font-weight: 600; letter-spacing: -0.01em; }
+.rt-pill__chevron { display: flex; color: rgba(221, 243, 250, 0.54); transition: transform 0.25s; }
+.rt-pill__chevron svg { width: 1em; height: 1em; }
+.rt-pill[aria-expanded="true"] .rt-pill__chevron { transform: rotate(90deg); }
+.rt-pill:disabled .rt-pill__chevron { display: none; }
+
+/* ---- the traces ---------------------------------------------------------- */
+
+.rt-panel {
+  position: fixed;
+  z-index: 2;
+  top: calc(1.5rem + clamp(13px, 0.95vw, 30px) * 3.8);
+  right: 1.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 0.9em;
+  width: min(52em, calc(100vw - 3rem));
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+  font: 400 calc(clamp(13px, 0.95vw, 30px) * 0.66) / 1.35 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.rt-panel[hidden] { display: none; }
+
+.rt {
+  position: relative;
+  width: 25em;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 1.2em;
+  background: var(--rt-glass);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  color: rgba(238, 250, 255, 0.94);
+  -webkit-backdrop-filter: var(--rt-blur);
+  backdrop-filter: var(--rt-blur);
+  animation: rt-rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+.rt-panel.is-settled .rt { animation: none; }
+.rt::before {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 12% 0, color-mix(in srgb, var(--tone) 22%, transparent), transparent 45%);
+  pointer-events: none;
+  content: "";
+}
+.rt > * { position: relative; }
+
+.rt__head {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  padding: 0.8em 1em 0.7em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.rt__names { display: grid; flex: 1; gap: 0.1em; min-width: 0; }
+.rt__names strong { font-size: 0.95em; letter-spacing: 0.045em; }
+.rt__names small {
+  overflow: hidden;
+  color: rgba(221, 243, 250, 0.54);
+  font-size: 0.75em;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rt-vitals { display: flex; flex: 0 0 auto; gap: 0.5em; }
+.rt-vital {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  color: rgba(221, 243, 250, 0.54);
+  font-size: 0.72em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rt-plug, .rt-battery, .rt-signal { display: inline-flex; color: rgba(221, 243, 250, 0.7); }
+.rt-plug svg, .rt-battery svg, .rt-signal svg { width: 1.25em; height: 1.25em; }
+.rt-battery[data-tone="warn"], .rt-signal[data-tone="warn"] { color: var(--rt-warn); }
+.rt-battery[data-tone="bad"] { color: var(--rt-bad); }
+
+.rt__stage {
+  display: flex;
+  justify-content: space-between;
+  gap: 1em;
+  padding: 0.6em 1em;
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  color: color-mix(in srgb, var(--tone) 45%, #fff);
+  font: 600 0.85em/1.3 var(--rt-mono);
+}
+.rt__stage time { color: rgba(255, 255, 255, 0.66); font-variant-numeric: tabular-nums; }
+
+.rt__log { padding: 0.65em 1em 0.55em; font: 0.8em/1.6 var(--rt-mono); }
+.rt__line { display: grid; grid-template-columns: 4.6em 1fr; gap: 0.6em; color: rgba(230, 247, 252, 0.72); }
+.rt__line time { color: rgba(166, 220, 234, 0.42); }
+.rt__line[data-tone="ok"] span { color: #a8f1d0; }
+.rt__line[data-tone="alx"] span { color: #cfe8ff; }
+.rt__line[data-tone="warn"] span { color: #ffe0b3; }
+.rt__line[data-tone="error"] span { color: #ffb9b9; }
+
+.rt__next {
+  display: flex;
+  gap: 0.6em;
+  padding: 0.5em 1em 0.65em;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #c9f5ff;
+  font: 0.8em/1.5 var(--rt-mono);
+}
+.rt__prompt { opacity: 0.7; white-space: nowrap; }
+.rt__next[data-who="tech"] { color: #fff; }
+.rt__next[data-who="tech"] .rt__prompt { color: #ff9a9a; opacity: 1; }
+
+@keyframes rt-rise { from { opacity: 0; transform: translateY(0.8em) scale(0.985); } }
+@keyframes rt-led {
+  50% {
+    box-shadow:
+      0 0 0.2em var(--tone),
+      0 0 0.4em var(--tone),
+      0 0 0.9em color-mix(in srgb, var(--tone) 50%, transparent),
+      0 0 1.6em color-mix(in srgb, var(--tone) 15%, transparent);
+    filter: brightness(0.8);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rt-pill, .rt-pill *, .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
+}
