@@ -38,8 +38,10 @@
 [data-tone="warn"] { --tone: var(--rt-warn); }
 [data-tone="bad"] { --tone: var(--rt-bad); }
 
-/* ---- the status bar ------------------------------------------------------
-   Across the top of the screen, in the look of a trace's status row. */
+/* ---- the bar ---------------------------------------------------------------
+   Across the top of the screen, in the manner of the macOS menu bar: thin,
+   translucent, the scene blurred through it, plain system type, colour only
+   in the status light. */
 
 .rt-bar {
   position: fixed;
@@ -49,45 +51,62 @@
   right: 0;
   display: flex;
   align-items: center;
-  gap: 0.9em;
-  padding: 0.6em 1.5rem;
-  border: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--tone) 35%, rgba(255, 255, 255, 0.12));
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--tone) 22%, transparent), color-mix(in srgb, var(--tone) 8%, transparent) 60%),
-    rgba(5, 15, 25, 0.5);
-  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.06);
-  color: color-mix(in srgb, var(--tone) 45%, #fff);
-  font: 600 calc(clamp(13px, 0.95vw, 30px) * 0.85) / 1.3 var(--rt-mono);
-  text-align: left;
-  -webkit-backdrop-filter: var(--rt-blur);
-  backdrop-filter: var(--rt-blur);
-  cursor: pointer;
-  animation: rt-drop 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  gap: 0.35em;
+  height: 1.85em;
+  padding: 0 0.9em;
+  background: rgba(18, 22, 30, 0.28);
+  box-shadow: inset 0 -0.5px 0 rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.94);
+  font: 500 13px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, system-ui, sans-serif;
+  letter-spacing: -0.005em;
+  text-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.25);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-font-smoothing: antialiased;
 }
-.rt-bar:disabled { cursor: default; }
-.rt-bar:focus-visible { outline: 2px solid var(--tone); outline-offset: -3px; }
-.rt-bar__name { color: rgba(221, 243, 250, 0.6); letter-spacing: 0.16em; }
-.rt-bar__title { flex: 1; }
-.rt-bar__chevron { display: flex; color: rgba(221, 243, 250, 0.6); transition: transform 0.25s; }
-.rt-bar__chevron svg { width: 1.1em; height: 1.1em; transform: rotate(90deg); }
-.rt-bar[aria-expanded="true"] .rt-bar__chevron { transform: rotate(180deg); }
-.rt-bar:disabled .rt-bar__chevron { display: none; }
+.rt-bar__app { padding: 0 0.6em; font-weight: 700; letter-spacing: 0.02em; }
+.rt-bar__space { flex: 1; }
+.rt-bar__clock { padding: 0 0.6em; font-variant-numeric: tabular-nums; }
+
+/* The BHL item: like a menu bar item, highlighted while open. */
+.rt-bar__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  height: 1.55em;
+  padding: 0 0.6em;
+  border: 0;
+  border-radius: 0.35em;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-shadow: inherit;
+  cursor: pointer;
+}
+.rt-bar__item:hover:not(:disabled),
+.rt-bar__item[aria-expanded="true"] { background: rgba(255, 255, 255, 0.18); }
+.rt-bar__item:disabled { cursor: default; }
+.rt-bar__item:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.6); outline-offset: -2px; }
+.rt-bar__item .rt-light { width: 0.55em; height: 0.55em; }
+.rt-bar__name { color: rgba(255, 255, 255, 0.62); font-weight: 600; letter-spacing: 0.06em; }
+.rt-bar__chevron { display: flex; opacity: 0.6; }
+.rt-bar__chevron svg { width: 0.85em; height: 0.85em; transform: rotate(90deg); }
+.rt-bar__item:disabled .rt-bar__chevron { display: none; }
 
 /* ---- the traces ---------------------------------------------------------- */
 
 .rt-panel {
   position: fixed;
   z-index: 2;
-  top: calc(clamp(13px, 0.95vw, 30px) * 2.4 + 0.9rem);
-  right: 1.5rem;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  align-items: flex-start;
+  top: calc(1.85 * 13px + 0.6rem);
+  right: 0.6rem;
+  /* Every trace the same size, the same space between them all. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 25em);
+  justify-content: end;
   gap: 0.9em;
-  width: min(52em, calc(100vw - 3rem));
-  max-height: calc(100vh - 8rem);
+  width: min(52em, calc(100vw - 1.2rem));
+  max-height: calc(100vh - 4rem);
   overflow-y: auto;
   font: 400 calc(clamp(13px, 0.95vw, 30px) * 0.66) / 1.35 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -96,6 +115,8 @@
 
 .rt {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: 25em;
   max-width: 100%;
   overflow: hidden;
@@ -163,7 +184,19 @@
 }
 .rt__stage time { color: rgba(255, 255, 255, 0.66); font-variant-numeric: tabular-nums; }
 
-.rt__log { padding: 0.65em 1em 0.55em; font: 0.8em/1.6 var(--rt-mono); }
+.rt__log {
+  flex: 1;
+  box-sizing: content-box;
+  height: calc(5 * 1.6em);
+  padding: 0.65em 1em 0.55em;
+  font: 0.8em/1.6 var(--rt-mono);
+}
+.rt__line span, .rt__next span, .rt__stage span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rt__stage span { min-width: 0; }
 .rt__line { display: grid; grid-template-columns: 6em 1fr; gap: 0.5em; color: rgba(230, 247, 252, 0.72); }
 .rt__line time { color: rgba(166, 220, 234, 0.42); white-space: nowrap; }
 .rt__line[data-tone="ok"] span { color: #a8f1d0; }
@@ -173,6 +206,7 @@
 
 .rt__next {
   display: flex;
+  min-width: 0;
   gap: 0.6em;
   padding: 0.5em 1em 0.65em;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -183,7 +217,6 @@
 .rt__next[data-who="tech"] { color: #fff; }
 .rt__next[data-who="tech"] .rt__prompt { color: #ff9a9a; opacity: 1; }
 
-@keyframes rt-drop { from { opacity: 0; transform: translateY(-100%); } }
 @keyframes rt-rise { from { opacity: 0; transform: translateY(0.8em) scale(0.985); } }
 @keyframes rt-led {
   50% {
@@ -196,5 +229,5 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .rt-bar, .rt-bar *, .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
+  .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
 }

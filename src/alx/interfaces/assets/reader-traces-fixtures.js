@@ -44,5 +44,5 @@ const DAYS = {
 
 const params = new URLSearchParams(location.search);
 const view = surfaceReaderTraces(document.body, DAYS[Object.hasOwn(DAYS, params.get('state')) ? params.get('state') : 'bad']);
-if (params.has('open')) document.querySelector('.rt-bar').click();
+if (params.has('open')) document.querySelector('.rt-bar__item').click();
 void view;

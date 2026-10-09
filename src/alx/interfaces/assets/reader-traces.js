@@ -112,35 +112,47 @@ export function buildTrace(reader, index = 0) {
   box.since = since;
   box.clock = clock;
 
-  if (reader.trace?.length) {
-    const log = el('div', 'rt__log');
-    for (const [at, text, tone] of reader.trace) {
-      const line = el('div', 'rt__line');
-      if (tone) line.dataset.tone = tone;
-      line.append(el('time', null, at), el('span', null, text));
-      log.append(line);
-    }
-    box.append(log);
+  // The log and the last line are always present, so every trace is the
+  // same size.
+  const log = el('div', 'rt__log');
+  for (const [at, text, tone] of reader.trace ?? []) {
+    const line = el('div', 'rt__line');
+    if (tone) line.dataset.tone = tone;
+    line.append(el('time', null, at), el('span', null, text));
+    log.append(line);
   }
+  box.append(log);
 
+  const next = el('footer', 'rt__next');
+  next.dataset.who = reader.issue?.who || 'alx';
   if (reader.issue?.action) {
-    const next = el('footer', 'rt__next');
-    next.dataset.who = reader.issue.who || 'alx';
     // Who acts next: words, not a prompt; nothing is typed here.
     const who = { tech: 'you', reader: 'the reader' }[next.dataset.who] ?? 'AL/X';
-    next.append(el('span', 'rt__prompt', `Next, ${who}:`),
-      el('span', null, reader.issue.action));
-    box.append(next);
+    next.append(el('span', 'rt__prompt', `Next, ${who}:`), el('span', null, reader.issue.action));
+  } else {
+    next.append(el('span', null, '\u00a0'));
   }
+  box.append(next);
   return box;
 }
 
 export function surfaceReaderTraces(host, data) {
-  const pill = el('button', 'rt-bar');
+  // A bar across the top in the manner of the macOS menu bar: AL/X's name on
+  // the left; on the right the BHL item, which opens the traces, and the time.
+  const bar = el('div', 'rt-bar');
+  const pill = el('button', 'rt-bar__item');
   pill.type = 'button';
+  const clock = el('time', 'rt-bar__clock');
+  bar.append(el('span', 'rt-bar__app', 'AL/X'), el('span', 'rt-bar__space'), pill, clock);
   const panel = el('div', 'rt-panel');
   panel.hidden = true;
-  host.append(pill, panel);
+  host.append(bar, panel);
+  const showTime = () => {
+    clock.textContent = new Date().toLocaleString(undefined, {
+      weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false
+    }).replace(/,/g, '');
+  };
+  showTime();
   let current = data;
   let open = false;
   let shown = '';
@@ -150,7 +162,7 @@ export function surfaceReaderTraces(host, data) {
     const chevron = el('span', 'rt-bar__chevron');
     chevron.innerHTML = CHEVRON;
     pill.replaceChildren(el('span', 'rt-light'), el('span', 'rt-bar__name', current.name || 'BHL'),
-      el('span', 'rt-bar__title', current.title), chevron);
+      el('span', null, current.title), chevron);
     const count = current.readers?.length ?? 0;
     pill.disabled = count === 0;
     pill.setAttribute('aria-expanded', String(open && count > 0));
@@ -176,6 +188,7 @@ export function surfaceReaderTraces(host, data) {
 
   // The timers tick where they are; the traces are not rebuilt every second.
   const ticker = setInterval(() => {
+    showTime();
     if (panel.hidden) return;
     for (const box of panel.children) {
       if (Number.isFinite(box.since)) box.clock.textContent = elapsed(box.since);
@@ -197,7 +210,7 @@ export function surfaceReaderTraces(host, data) {
     dismiss() {
       clearInterval(ticker);
       document.removeEventListener('keydown', onKey);
-      pill.remove();
+      bar.remove();
       panel.remove();
     }
   };
