@@ -1,0 +1,244 @@
+/* The BHL dashboard (mockup): opened from the BHL item in the menu bar. Over
+   the background video, blurred and darkened; the reader traces from
+   reader-traces.css sit in the bottom section. */
+
+.bd {
+  --bd-ink: #eef6fb;
+  --bd-muted: rgba(214, 232, 242, 0.62);
+  --bd-faint: rgba(214, 232, 242, 0.38);
+  --bd-line: rgba(255, 255, 255, 0.1);
+  --bd-cyan: #6ee7ff;
+  --bd-ok: #4ade80;
+  --bd-warn: #fbbf24;
+  --bd-bad: #fb6b6b;
+  --bd-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
+  --bd-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  position: fixed;
+  z-index: 3;
+  inset: calc(1.85 * 13px) 0 0;
+  overflow-y: auto;
+  padding: 2.2em 3em 2.4em;
+  background:
+    radial-gradient(ellipse at 50% 35%, rgba(30, 60, 90, 0.35), transparent 60%),
+    linear-gradient(180deg, rgba(6, 14, 26, 0.72), rgba(8, 16, 30, 0.82));
+  color: var(--bd-ink);
+  font: 400 clamp(11px, 0.78vw, 24px) / 1.35 var(--bd-display);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-font-smoothing: antialiased;
+  animation: bd-in 0.35s ease-out backwards;
+}
+.bd[hidden] { display: none; }
+
+.bd [data-tone="ok"] { --tone: var(--bd-ok); }
+.bd [data-tone="warn"] { --tone: var(--bd-warn); }
+.bd [data-tone="bad"] { --tone: var(--bd-bad); }
+
+/* ---- header ---------------------------------------------------------------- */
+
+.bd__head { display: flex; align-items: center; gap: 2em; margin-bottom: 2.2em; }
+.bd__logo { font-size: 2.6em; font-weight: 300; letter-spacing: 0.32em; }
+.bd__system { padding-left: 2em; border-left: 1px solid var(--bd-line); }
+.bd__system strong { display: block; font-size: 1.25em; font-weight: 600; letter-spacing: 0.22em; }
+.bd__system span { color: var(--bd-faint); font-size: 0.9em; letter-spacing: 0.32em; }
+.bd__space { flex: 1; }
+.bd__live { display: flex; align-items: center; gap: 0.6em; color: var(--bd-muted); font-size: 1.05em; }
+.bd__live::before {
+  content: "";
+  width: 0.55em;
+  height: 0.55em;
+  border-radius: 50%;
+  background: var(--bd-ok);
+  box-shadow: 0 0 0.6em var(--bd-ok);
+}
+.bd__clock {
+  padding-left: 1.4em;
+  border-left: 1px solid var(--bd-line);
+  font-size: 4em;
+  font-weight: 200;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+.bd__date { color: var(--bd-muted); font-size: 1em; letter-spacing: 0.2em; line-height: 1.7; text-transform: uppercase; }
+.bd__close {
+  display: grid;
+  place-items: center;
+  width: 2.6em;
+  height: 2.6em;
+  margin-left: 0.6em;
+  border: 1px solid var(--bd-line);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--bd-muted);
+  font-size: 1em;
+  cursor: pointer;
+}
+.bd__close:hover { color: var(--bd-ink); background: rgba(255, 255, 255, 0.1); }
+.bd__close svg { width: 1.1em; height: 1.1em; }
+
+/* ---- the four cards and the ring ------------------------------------------ */
+
+.bd__main {
+  display: grid;
+  grid-template-columns: 1fr minmax(20em, 0.8fr) 1fr;
+  grid-template-rows: auto auto;
+  gap: 1.6em 2.4em;
+  align-items: stretch;
+}
+.bd__ring { grid-column: 2; grid-row: 1 / span 2; }
+
+.bd-card {
+  --tone: var(--bd-cyan);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 1.6em 1.8em 1.3em;
+  border: 1px solid color-mix(in srgb, var(--tone) 28%, rgba(255, 255, 255, 0.1));
+  border-radius: 1.2em;
+  background:
+    radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--tone) 10%, transparent), transparent 55%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.bd-card__top { display: flex; align-items: flex-start; gap: 1.1em; }
+.bd-card__icon { display: flex; color: var(--tone); }
+.bd-card__icon svg { width: 2.6em; height: 2.6em; }
+.bd-card__names { flex: 1; }
+.bd-card__names strong { display: block; font-size: 1.3em; font-weight: 650; letter-spacing: 0.16em; }
+.bd-card__names span { color: var(--bd-muted); font-size: 1.05em; }
+.bd-card__big { color: var(--tone); font-size: 2.8em; font-weight: 300; letter-spacing: 0.02em; line-height: 1; white-space: nowrap; }
+.bd-card__big small { margin-left: 0.4em; color: var(--bd-muted); font-size: 0.32em; font-weight: 600; letter-spacing: 0.18em; }
+
+.bd-card__stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 1.4em 0 1.1em;
+  padding-top: 1.3em;
+  border-top: 1px solid var(--bd-line);
+}
+.bd-card__stat { padding-left: 1.3em; border-left: 1px solid var(--bd-line); }
+.bd-card__stat:first-child { padding-left: 0; border-left: 0; }
+.bd-card__stat b { display: block; font-size: 1.6em; font-weight: 550; font-variant-numeric: tabular-nums; }
+.bd-card__stat span { color: var(--bd-muted); font-size: 0.95em; }
+
+.bd-card__foot { display: flex; align-items: center; justify-content: space-between; margin-top: auto; }
+.bd-card__note { display: flex; align-items: center; gap: 0.6em; font-size: 1.05em; }
+.bd-card__note::before {
+  content: "";
+  width: 0.55em;
+  height: 0.55em;
+  border-radius: 50%;
+  background: var(--note, var(--bd-ok));
+  box-shadow: 0 0 0.6em var(--note, var(--bd-ok));
+}
+.bd-card__note[data-tone] { --note: var(--tone); color: color-mix(in srgb, var(--tone) 70%, #fff); }
+
+/* Not monitored yet: present, so the picture is complete, and plainly idle. */
+.bd-card[data-idle] {
+  --tone: rgba(214, 232, 242, 0.5);
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--bd-faint);
+}
+.bd-card[data-idle] .bd-card__names strong { color: var(--bd-muted); }
+.bd-card[data-idle] .bd-card__big { color: var(--bd-faint); font-size: 1.05em; font-weight: 650; letter-spacing: 0.18em; padding-top: 0.5em; }
+.bd-card[data-idle] .bd-card__stat b { color: var(--bd-faint); }
+.bd-card[data-idle] .bd-card__note::before { background: var(--bd-faint); box-shadow: none; }
+
+/* The ring: every reader, in its colours, round one circle. */
+.bd__ring { position: relative; display: grid; place-items: center; }
+.bd__ring svg { width: 100%; max-width: 30em; aspect-ratio: 1; overflow: visible; }
+.bd__ring-track { fill: none; stroke: rgba(255, 255, 255, 0.06); stroke-width: 7; }
+.bd__ring-ticks { fill: none; stroke: rgba(255, 255, 255, 0.16); stroke-width: 1; stroke-dasharray: 0.6 5.4; }
+.bd__ring-arc { fill: none; stroke-width: 7; stroke-linecap: round; filter: drop-shadow(0 0 6px var(--glow)); }
+.bd__ring-core { fill: rgba(8, 14, 26, 0.55); stroke: rgba(255, 255, 255, 0.07); }
+.bd__ring-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7em;
+  text-align: center;
+}
+.bd__ring-icon { color: var(--tone); }
+.bd__ring-icon svg { width: 4.2em; height: 4.2em; }
+.bd__ring-title { margin: 0; font-size: 2.6em; font-weight: 300; letter-spacing: 0.08em; line-height: 1.1; }
+.bd__ring-sub { margin: 0; color: color-mix(in srgb, var(--tone) 75%, #fff); font-size: 1.15em; font-weight: 550; letter-spacing: 0.14em; text-transform: uppercase; }
+.bd__ring-meta { margin: 0; color: var(--bd-muted); font-size: 1.05em; letter-spacing: 0.04em; }
+
+/* ---- the bottom: the reader traces ------------------------------------------ */
+
+.bd__attention {
+  margin-top: 2em;
+  padding: 1.5em 1.8em 1.8em;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1.2em;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015));
+}
+.bd__attention-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1.2em; }
+.bd__attention-head strong { color: var(--tone, var(--bd-ok)); font-size: 1.05em; font-weight: 650; letter-spacing: 0.24em; }
+.bd__attention-head b { color: var(--tone, var(--bd-ok)); font-size: 1.8em; font-weight: 300; font-variant-numeric: tabular-nums; }
+/* The traces exactly as in the menu bar's drop-down (same size, same
+   type), in one row that scrolls sideways when there are more. */
+/* Five across, filling the width: each trace is the drop-down's trace scaled
+   up as a whole (a trace is 25em wide, so the type sets its width). */
+.bd__attention { container-type: inline-size; }
+.bd__traces {
+  --bd-trace: calc((100cqw - 4 * 0.9rem) / 5);
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: var(--bd-trace);
+  justify-content: start;
+  gap: 0.9rem;
+  overflow-x: auto;
+  padding-bottom: 0.6em;
+  scroll-snap-type: x proximity;
+  scrollbar-color: rgba(157, 227, 245, 0.3) transparent;
+  font: 400 calc(var(--bd-trace) / 25) / 1.35 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+.bd__traces > .rt { scroll-snap-align: start; }
+.bd__calm { margin: 0.5em 0; color: var(--bd-muted); font-size: 1.2em; }
+
+@keyframes bd-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .bd, .bd * { animation: none !important; } }
+@media (max-width: 1000px) {
+  .bd { padding: 1.5em; }
+  .bd__main { grid-template-columns: 1fr; }
+  .bd__ring { grid-column: 1; grid-row: auto; }
+}
+
+/* A card takes its tone's colour once it has one. */
+.bd-card[data-tone="ok"] { --tone: var(--bd-ok); }
+.bd-card[data-tone="warn"] { --tone: var(--bd-warn); }
+.bd-card[data-tone="bad"] { --tone: var(--bd-bad); }
+.bd-card[data-tone="ok"] .bd-card__big { color: var(--bd-ink); }
+
+/* A finer ring, its light kept close. */
+.bd__ring-track { stroke-width: 3.2; }
+.bd__ring-arc { stroke-width: 3.2; filter: drop-shadow(0 0 2.2px var(--glow)); }
+.bd__ring-core { fill: rgba(8, 14, 26, 0.35); }
+.bd__ring-title { font-size: 2.15em; }
+
+/* Friedl: no panel around the traces, only its heading over them. */
+.bd__attention { padding: 0; border: 0; background: none; }
+
+/* Friedl: the backdrop lighter and more see-through. */
+.bd {
+  background:
+    radial-gradient(ellipse at 50% 35%, rgba(40, 80, 120, 0.18), transparent 60%),
+    linear-gradient(180deg, rgba(10, 22, 40, 0.42), rgba(12, 24, 44, 0.52));
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  backdrop-filter: blur(16px) saturate(150%);
+}
+
+/* Friedl: the traces lower, the screen's height shared out evenly rather than
+   left empty at the bottom. */
+.bd { display: flex; flex-direction: column; }
+.bd__main { flex: 0 0 auto; }
+.bd__attention { margin-top: auto; padding-top: 2em; }
+.bd > .bd__head { margin-bottom: auto; padding-bottom: 2.2em; }
