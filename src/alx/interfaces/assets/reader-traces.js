@@ -1,11 +1,11 @@
-// The BHL tile (D-041, amended 2026-10-09): a small pill on the main screen
-// with one coloured light and one line, which opens one small trace per
-// reader with a problem, in the look of the AL/X Execution Trace (ES module,
-// no dependencies).
+// The BHL tile (D-041, amended 2026-10-09): a status bar across the top of
+// the main screen with one coloured light and one line, which opens one small
+// trace per reader with a problem, in the look of the AL/X Execution Trace
+// (ES module, no dependencies).
 //
-//   const view = surfaceReaderTraces(host, data);   // add the pill to host
-//   view.update(nextData);                          // same pill, new state
-//   view.dismiss();                                 // remove pill and traces
+//   const view = surfaceReaderTraces(host, data);   // add the bar to host
+//   view.update(nextData);                          // same bar, new state
+//   view.dismiss();                                 // remove bar and traces
 //
 // The renderer composes no wording and decides no state: every word and tone
 // comes from the server (interfaces/reader_tile.py). Shape:
@@ -27,7 +27,6 @@ const svg = (body) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
 const PLUG = svg('<path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5V21"/>');
-const CHEVRON = svg('<path d="M9.5 6l6 6-6 6"/>');
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -84,6 +83,7 @@ function vitals(reader) {
 function elapsed(since) {
   const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
   const hours = Math.floor(seconds / 3600);
+  if (hours >= 24) return `${Math.floor(hours / 24)}d ${hours % 24}h`;
   const pad = (value) => String(value).padStart(2, '0');
   const rest = `${pad(Math.floor((seconds % 3600) / 60))}:${pad(seconds % 60)}`;
   return hours ? `${hours}:${rest}` : rest;
@@ -104,52 +104,70 @@ export function buildTrace(reader, index = 0) {
 
   const stage = el('div', 'rt__stage');
   const clock = el('time');
-  stage.append(el('span', null, reader.issue?.text ?? ''), clock);
+  const problem = el('span', null, reader.issue?.text ?? '');
+  problem.title = reader.issue?.text ?? '';
+  stage.append(problem, clock);
   box.append(stage);
   const since = reader.since ? Date.parse(reader.since) : NaN;
   if (Number.isFinite(since)) clock.textContent = elapsed(since);
   box.since = since;
   box.clock = clock;
 
-  if (reader.trace?.length) {
-    const log = el('div', 'rt__log');
-    for (const [at, text, tone] of reader.trace) {
-      const line = el('div', 'rt__line');
-      if (tone) line.dataset.tone = tone;
-      line.append(el('time', null, at), el('span', null, text));
-      log.append(line);
-    }
-    box.append(log);
+  // The log and the last line are always present, so every trace is the
+  // same size.
+  const log = el('div', 'rt__log');
+  for (const [at, text, tone] of reader.trace ?? []) {
+    const line = el('div', 'rt__line');
+    if (tone) line.dataset.tone = tone;
+    const words = el('span', null, text);
+    words.title = text;  // a line cut short reads in full on hover
+    line.append(el('time', null, at), words);
+    log.append(line);
   }
+  box.append(log);
 
+  const next = el('footer', 'rt__next');
+  next.dataset.who = reader.issue?.who || 'alx';
   if (reader.issue?.action) {
-    const next = el('footer', 'rt__next');
-    next.dataset.who = reader.issue.who || 'alx';
-    const prompt = { tech: 'You >', reader: 'Reader >' }[next.dataset.who] ?? 'AL/X >';
-    next.append(el('span', 'rt__prompt', prompt),
-      el('span', null, reader.issue.action));
-    box.append(next);
+    // Who acts next: words, not a prompt; nothing is typed here.
+    const who = { tech: 'you', reader: 'the reader' }[next.dataset.who] ?? 'AL/X';
+    const action = el('span', null, reader.issue.action);
+    action.title = reader.issue.action;
+    next.append(el('span', 'rt__prompt', `Next, ${who}:`), action);
+  } else {
+    next.append(el('span', null, '\u00a0'));
   }
+  box.append(next);
   return box;
 }
 
 export function surfaceReaderTraces(host, data) {
-  const pill = el('button', 'rt-pill');
+  // A bar across the top in the manner of the macOS menu bar: AL/X's name on
+  // the left; on the right the BHL item, which opens the traces, and the time.
+  const bar = el('div', 'rt-bar');
+  const pill = el('button', 'rt-bar__item');
   pill.type = 'button';
+  const clock = el('time', 'rt-bar__clock');
+  bar.append(el('span', 'rt-bar__app', 'AL/X'), el('span', 'rt-bar__space'), pill, clock);
   const panel = el('div', 'rt-panel');
   panel.hidden = true;
-  host.append(pill, panel);
+  host.append(bar, panel);
+  const showTime = () => {
+    clock.textContent = new Date().toLocaleString(undefined, {
+      weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false
+    }).replace(/,/g, '');
+  };
+  showTime();
   let current = data;
   let open = false;
   let shown = '';
 
   function renderPill() {
     pill.dataset.tone = current.tone || 'ok';
-    const text = el('span', 'rt-pill__text');
-    text.append(el('span', 'rt-pill__name', current.name || 'BHL'), el('span', 'rt-pill__title', current.title));
-    const chevron = el('span', 'rt-pill__chevron');
-    chevron.innerHTML = CHEVRON;
-    pill.replaceChildren(el('span', 'rt-light'), text, chevron);
+    // Friedl: only the name and the light, as a macOS menu bar item; the
+    // counts are in the traces and in the label read aloud.
+    pill.replaceChildren(el('span', 'rt-light'), el('span', 'rt-bar__name', current.name || 'BHL'));
+    pill.title = current.title;
     const count = current.readers?.length ?? 0;
     pill.disabled = count === 0;
     pill.setAttribute('aria-expanded', String(open && count > 0));
@@ -175,6 +193,7 @@ export function surfaceReaderTraces(host, data) {
 
   // The timers tick where they are; the traces are not rebuilt every second.
   const ticker = setInterval(() => {
+    showTime();
     if (panel.hidden) return;
     for (const box of panel.children) {
       if (Number.isFinite(box.since)) box.clock.textContent = elapsed(box.since);
@@ -196,7 +215,7 @@ export function surfaceReaderTraces(host, data) {
     dismiss() {
       clearInterval(ticker);
       document.removeEventListener('keydown', onKey);
-      pill.remove();
+      bar.remove();
       panel.remove();
     }
   };

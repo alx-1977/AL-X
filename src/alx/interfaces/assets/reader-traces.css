@@ -1,7 +1,7 @@
 /* The BHL tile (D-041, amended 2026-10-09): a pill on the main screen, and
    one small trace per reader with a problem, in the look of the AL/X
    Execution Trace (app.css .diagnostics) at two-thirds size. Glass: never
-   put opacity, filter, mask or clip-path on .rt, .rt-pill or an ancestor
+   put opacity, filter, mask or clip-path on .rt, .rt-bar or an ancestor
    while settled, or the blur loses the background. */
 
 :root {
@@ -38,54 +38,73 @@
 [data-tone="warn"] { --tone: var(--rt-warn); }
 [data-tone="bad"] { --tone: var(--rt-bad); }
 
-/* ---- the pill ------------------------------------------------------------ */
+/* ---- the bar ---------------------------------------------------------------
+   Across the top of the screen, in the manner of the macOS menu bar: thin,
+   translucent, the scene blurred through it, plain system type, colour only
+   in the status light. */
 
-.rt-pill {
+.rt-bar {
   position: fixed;
   z-index: 2;
-  top: 1.5rem;
-  right: 1.5rem;
+  top: 0;
+  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
-  gap: 0.75em;
-  padding: 0.7em 0.8em 0.7em 1em;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 999px;
-  background: var(--rt-glass);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
-  color: rgba(238, 250, 255, 0.94);
-  font: 500 clamp(13px, 0.95vw, 30px) / 1.2 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
-  -webkit-backdrop-filter: var(--rt-blur);
-  backdrop-filter: var(--rt-blur);
-  cursor: pointer;
-  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
-  animation: rt-rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  gap: 0.35em;
+  height: 1.85em;
+  padding: 0 0.9em;
+  background: rgba(18, 22, 30, 0.28);
+  box-shadow: inset 0 -0.5px 0 rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.94);
+  font: 500 13px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, system-ui, sans-serif;
+  letter-spacing: -0.005em;
+  text-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.25);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-font-smoothing: antialiased;
 }
-.rt-pill:hover:not(:disabled) { transform: translateY(-2px); }
-.rt-pill:disabled { cursor: default; }
-.rt-pill:focus-visible { outline: 2px solid var(--tone); outline-offset: 3px; }
-.rt-pill__text { display: flex; flex-direction: column; align-items: flex-start; gap: 0.12em; }
-.rt-pill__name { color: rgba(221, 243, 250, 0.54); font-size: 0.66em; font-weight: 650; letter-spacing: 0.18em; }
-.rt-pill__title { font-size: 0.98em; font-weight: 600; letter-spacing: -0.01em; }
-.rt-pill__chevron { display: flex; color: rgba(221, 243, 250, 0.54); transition: transform 0.25s; }
-.rt-pill__chevron svg { width: 1em; height: 1em; }
-.rt-pill[aria-expanded="true"] .rt-pill__chevron { transform: rotate(90deg); }
-.rt-pill:disabled .rt-pill__chevron { display: none; }
+.rt-bar__app { padding: 0 0.6em; font-weight: 700; letter-spacing: 0.02em; }
+.rt-bar__space { flex: 1; }
+.rt-bar__clock { padding: 0 0.6em; font-variant-numeric: tabular-nums; }
+
+/* The BHL item: like a menu bar item, highlighted while open. */
+.rt-bar__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  height: 1.55em;
+  padding: 0 0.6em;
+  border: 0;
+  border-radius: 0.35em;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-shadow: inherit;
+  cursor: pointer;
+}
+/* No box around the item: it brightens a little under the pointer. */
+.rt-bar__item:hover:not(:disabled) .rt-bar__name,
+.rt-bar__item[aria-expanded="true"] .rt-bar__name { color: #fff; }
+.rt-bar__item:disabled { cursor: default; }
+.rt-bar__item:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.6); outline-offset: -2px; }
+.rt-bar__item .rt-light { width: 0.55em; height: 0.55em; }
+.rt-bar__name { color: rgba(255, 255, 255, 0.85); font-weight: 600; letter-spacing: 0.06em; transition: color 0.15s; }
 
 /* ---- the traces ---------------------------------------------------------- */
 
 .rt-panel {
   position: fixed;
   z-index: 2;
-  top: calc(1.5rem + clamp(13px, 0.95vw, 30px) * 3.8);
-  right: 1.5rem;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  align-items: flex-start;
+  top: calc(1.85 * 13px + 0.6rem);
+  right: 0.6rem;
+  /* Every trace the same size, the same space between them all. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 25em);
+  justify-content: end;
   gap: 0.9em;
-  width: min(52em, calc(100vw - 3rem));
-  max-height: calc(100vh - 8rem);
+  width: min(52em, calc(100vw - 1.2rem));
+  max-height: calc(100vh - 4rem);
   overflow-y: auto;
   font: 400 calc(clamp(13px, 0.95vw, 30px) * 0.66) / 1.35 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -94,6 +113,8 @@
 
 .rt {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: 25em;
   max-width: 100%;
   overflow: hidden;
@@ -161,9 +182,21 @@
 }
 .rt__stage time { color: rgba(255, 255, 255, 0.66); font-variant-numeric: tabular-nums; }
 
-.rt__log { padding: 0.65em 1em 0.55em; font: 0.8em/1.6 var(--rt-mono); }
-.rt__line { display: grid; grid-template-columns: 4.6em 1fr; gap: 0.6em; color: rgba(230, 247, 252, 0.72); }
-.rt__line time { color: rgba(166, 220, 234, 0.42); }
+.rt__log {
+  flex: 1;
+  box-sizing: content-box;
+  height: calc(5 * 1.6em);
+  padding: 0.65em 1em 0.55em;
+  font: 0.8em/1.6 var(--rt-mono);
+}
+.rt__line span, .rt__next span, .rt__stage span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rt__stage span { min-width: 0; }
+.rt__line { display: grid; grid-template-columns: 6em 1fr; gap: 0.5em; color: rgba(230, 247, 252, 0.72); }
+.rt__line time { color: rgba(166, 220, 234, 0.42); white-space: nowrap; }
 .rt__line[data-tone="ok"] span { color: #a8f1d0; }
 .rt__line[data-tone="alx"] span { color: #cfe8ff; }
 .rt__line[data-tone="warn"] span { color: #ffe0b3; }
@@ -171,6 +204,7 @@
 
 .rt__next {
   display: flex;
+  min-width: 0;
   gap: 0.6em;
   padding: 0.5em 1em 0.65em;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -193,5 +227,5 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .rt-pill, .rt-pill *, .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
+  .rt-bar, .rt-bar *, .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
 }

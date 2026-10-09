@@ -14,8 +14,8 @@ tile is a view of facts AL/X already holds, coloured by rules Friedl set
   BehaviorLive for 15 minutes;
 - green: none of these.
 
-The main screen shows only the colour and one line ("All OK", "1 error ·
-2 warnings"). Opened, it shows one small trace per reader with a problem:
+The main screen shows only a status bar across the top: the colour and one
+line ("All OK", "1 error · 2 warnings"). Opened, it shows one small trace per reader with a problem:
 what is wrong, for how long, what AL/X has seen and done, and who acts
 next. It makes no judgement beyond those rules, and says AL/X is acting only
 on what the reader monitor does on its own. "Today" is the event's own day,
@@ -38,8 +38,12 @@ WARNING_BEFORE_EVENT = timedelta(minutes=30)
 LINK_STALE_AFTER = timedelta(minutes=15)
 BATTERY_LOW_PERCENT = 20
 WEAK_SIGNAL_PERCENT = 30  # the reader's own POOR_SIGNAL_PERCENT
-# What a trace shows of a reader's log: its last few steps.
+# What a trace shows of a reader's log: its last few steps, a step repeated
+# back to back shown once (an offline reader is logged offline again after
+# each restart of AL/X), from enough of the log to fill them.
 TRACE_LINES = 5
+TRACE_READ = 20
+MODE_NAMES = {0: "IN", 1: "OUT"}
 # Who acts next on a problem: AL/X, a person, or the reader by itself.
 ALX, TECHNICIAN, READER = "alx", "tech", "reader"
 
@@ -63,8 +67,12 @@ def _percent(value: Any) -> int | None:
     return min(100, int(value))
 
 
-def describe_step(step: Mapping[str, Any], local: tzinfo | None) -> list[str]:
-    """One reader log step as a trace line: time, words, tone."""
+def describe_step(step: Mapping[str, Any], local: tzinfo | None,
+                  now: datetime | None = None) -> list[str]:
+    """One reader log step as a trace line: time, words, tone.
+
+    The time carries the weekday when the step was not today.
+    """
     kind = step.get("kind", "")
     detail = step.get("detail") or {}
     via = detail.get("via")
@@ -76,7 +84,7 @@ def describe_step(step: Mapping[str, Any], local: tzinfo | None) -> list[str]:
         text = "offline · ping unanswered" if via == "ping" else "offline"
         tone = "error"
     elif kind == "status":
-        parts = ["card" if via == "card" else "status read", f"event {detail.get('e')}"]
+        parts = ["card" if via == "card" else "status read", f"ev {detail.get('e')}"]
         battery, signal = _percent(detail.get("bat")), _percent(detail.get("sig"))
         if battery is not None:
             parts.append(f"bat {battery}%")
@@ -92,7 +100,8 @@ def describe_step(step: Mapping[str, Any], local: tzinfo | None) -> list[str]:
         text = "sending schedule"
         tone = "alx"
     elif kind == "schedule_sent":
-        text = f"schedule {detail.get('version')} confirmed · {len(detail.get('event_ids') or ())} events"
+        count = len(detail.get("event_ids") or ())
+        text = f"schedule {detail.get('version')} confirmed · {_count(count, 'event')}"
         tone = "ok"
     elif kind in ("schedule_send_failed", "schedule_not_sent"):
         text = f"schedule not sent · {str(detail.get('code', '')).replace('_', ' ')}"
@@ -103,10 +112,32 @@ def describe_step(step: Mapping[str, Any], local: tzinfo | None) -> list[str]:
     else:
         text = kind.replace("_", " ")
     try:
-        when = _clock(datetime.fromisoformat(step["at"]), local, seconds=True)
+        moment = datetime.fromisoformat(step["at"]).astimezone(local)
     except (KeyError, TypeError, ValueError):
-        when = ""
-    return [when, text, tone]
+        return ["", text, tone]
+    if now is not None and moment.date() != now.astimezone(local).date():
+        return [moment.strftime("%a %H:%M"), text, tone]
+    return [moment.strftime("%H:%M:%S"), text, tone]
+
+
+def trace_lines(steps: Sequence[Mapping[str, Any]], local: tzinfo | None,
+                now: datetime) -> list[list[str]]:
+    """The last TRACE_LINES lines, a line repeated back to back shown once
+    (at its latest time, with how many times)."""
+    lines: list[list[str]] = []
+    repeats: list[int] = []
+    for step in steps:
+        line = describe_step(step, local, now)
+        if lines and lines[-1][1:] == line[1:]:
+            lines[-1][0] = line[0]
+            repeats[-1] += 1
+            continue
+        lines.append(line)
+        repeats.append(1)
+    for line, count in zip(lines, repeats):
+        if count > 1:
+            line[1] = f"{line[1]} ×{count}"
+    return lines[-TRACE_LINES:]
 
 
 def compose_tile(
@@ -200,7 +231,7 @@ def compose_tile(
                 # Nothing AL/X does: the reader keeps its scans until
                 # they are delivered.
                 issue = ("warn", f"Weak signal · {signal}%", READER,
-                         "Keeps scans until they are sent", None)
+                         "Keeps scans until sent", None)
         if issue is None:
             continue
 
@@ -224,7 +255,10 @@ def compose_tile(
                      "percent": _percent(held.get("bat"))}
         traces.append({
             "uid": uid,
-            "room": (own_today[0].room if own_today else "") or uid,
+            # One room has an IN and an OUT reader.
+            "room": " · ".join(part for part in (
+                (own_today[0].room if own_today else "") or uid, MODE_NAMES.get(mode, ""))
+                if part),
             "tone": tone,
             "event": event,
             # Last known; an offline reader reports nothing new.
@@ -232,7 +266,7 @@ def compose_tile(
             "signal": _percent(held.get("sig")),
             "issue": {"text": text, "who": who, "action": action},
             "since": began,
-            "trace": [describe_step(step, local) for step in steps],
+            "trace": trace_lines(steps, local, now),
         })
 
     read_times = [datetime.fromisoformat(summary.get(uid, {}).get("schedule_as_of") or refreshed_at)
@@ -273,7 +307,7 @@ def tile_source(
         sent = {item["reader_uid"]: calendar.sent(item["reader_uid"]) for item in snapshot[2]}
         checks = monitor.checks(at) if monitor is not None else None
         return compose_tile(snapshot, at, local, sent, checks,
-                            lambda uid: calendar.log_latest(uid, TRACE_LINES),
+                            lambda uid: calendar.log_latest(uid, TRACE_READ),
                             calendar.log_started,
                             monitoring=monitor is not None and monitor.running(at))
 
