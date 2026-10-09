@@ -228,16 +228,19 @@ class ReaderMonitor:
         self._cards: dict[str, tuple[dict[str, Any], datetime]] = {}
         self._wrong: dict[str, tuple[Any, Any] | None] = {}
         self._last_card_at: dict[str, datetime] = {}
-        self._last_action: tuple[datetime, str] | None = None
 
     # ---- what the tile reads ---------------------------------------------
 
     def checks(self, at: datetime) -> dict[str, dict[str, Any]]:
         with self._lock:
-            known = set(self._checks) | set(self._seen) | set(self._pinged)
+            known = (set(self._checks) | set(self._seen) | set(self._pinged)
+                     | self._cannot_receive)
             result: dict[str, dict[str, Any]] = {}
             for uid in known:
                 check = dict(self._checks.get(uid, {}))
+                if uid in self._cannot_receive:
+                    # A V1 reader: the monitor does not send it schedules.
+                    check["cannot_receive"] = True
                 if "at" in check:
                     check["fresh"] = at - check["at"] <= CHECK_FRESH_FOR
                 presence = self._presence(uid, at)
@@ -321,14 +324,10 @@ class ReaderMonitor:
                     self._seen[uid] = done
             self._set_online(uid, online, done, "ping")
 
-    def activity(self, at: datetime, local: Any = None) -> dict[str, Any] | None:
+    def running(self, at: datetime) -> bool:
+        """Whether the regular check has run recently: only then is AL/X said to act."""
         with self._lock:
-            if self._last_cycle is None or at - self._last_cycle > 3 * CHECK_FRESH_FOR:
-                return None
-            if self._last_action is None:
-                return {"text": "monitoring"}
-            when, what = self._last_action
-            return {"text": f"monitoring · {what} {when.astimezone(local).strftime('%H:%M')}"}
+            return self._last_cycle is not None and at - self._last_cycle <= 3 * CHECK_FRESH_FOR
 
     # ---- a reader asking ---------------------------------------------------
 
@@ -464,8 +463,11 @@ class ReaderMonitor:
             if current is not None and current[1] > received_at:
                 return  # a newer one is already held
             self._cards[uid] = (dict(report), received_at)
+            # Battery, power and signal as last reported, for the BHL tile.
             self._checks[uid] = {**self._checks.get(uid, {}), "event": report.get("e"),
-                                 "version": report.get("v"), "at": received_at}
+                                 "version": report.get("v"), "at": received_at,
+                                 "bat": report.get("bat"), "pwr": report.get("pwr"),
+                                 "sig": report.get("sig")}
             self._last_outcome.pop(uid, None)
 
     def _judge_event(self, uid: str, report: Mapping[str, Any], received_at: datetime,
@@ -544,10 +546,7 @@ class ReaderMonitor:
                 # partly delivered schedule is not immediately repeated.
                 if not started and self._last_delivery.get(uid) == at:
                     del self._last_delivery[uid]
-        if result.failure is None:
-            with self._lock:
-                self._last_action = (at, "schedule sent")
-        elif result.failure.get("code") == "function_not_exposed":
+        if result.failure is not None and result.failure.get("code") == "function_not_exposed":
             with self._lock:
                 self._cannot_receive.add(uid)
         # The send path logs what was sent, or why not.

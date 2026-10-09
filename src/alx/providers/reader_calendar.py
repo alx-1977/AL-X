@@ -193,5 +193,15 @@ class SQLiteReaderCalendar:
                        "detail": json.loads(r[3])} for r in rows[:limit])
         return steps, len(rows) > limit
 
+    def log_latest(self, reader_uid: str, limit: int) -> tuple[dict[str, Any], ...]:
+        """One reader's last `limit` steps, oldest first."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT at, reader_uid, kind, detail_json FROM reader_log "
+                "WHERE reader_uid = ? ORDER BY rowid DESC LIMIT ?", (reader_uid, limit),
+            ).fetchall()
+        return tuple({"at": r[0], "reader_uid": r[1], "kind": r[2],
+                      "detail": json.loads(r[3])} for r in reversed(rows))
+
     def close(self) -> None:
         self._connection.close()
