@@ -333,7 +333,8 @@ class MonitorTests(unittest.TestCase):
     def test_a_card_on_the_wrong_event_is_recorded_once(self) -> None:
         particle = Particle()
         monitor = self.build(particle)
-        self.card(monitor, e=3)
+        monitor.on_event("roomreader/schedule_request", DEVICE, "{}", "t")
+        self.card(monitor, v=self.calendar.sent(UID)["version"], e=3)
         monitor.cycle()
         self.now[0] += timedelta(minutes=5)
         monitor.cycle()
@@ -410,6 +411,18 @@ class MonitorTests(unittest.TestCase):
         self.assertNotIn("wrong_event", self.steps())
         self.card(monitor, v=sent, e=3)  # the new schedule, and still wrong
         self.assertIn("wrong_event", self.steps())
+
+    def test_an_earlier_warning_is_cleared_while_a_new_schedule_lands(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        self.card(monitor, v="old", e=3)  # wrong, before any schedule was sent
+        self.assertTrue(monitor.checks(self.now[0])[UID]["wrong"])
+        monitor.on_event("roomreader/schedule_request", DEVICE, '{"v":"old"}', "t")
+        sent = self.calendar.sent(UID)["version"]
+        self.card(monitor, v="old", e=3)  # still the old schedule
+        self.assertFalse(monitor.checks(self.now[0])[UID]["wrong"])
+        self.card(monitor, v=sent, e=3)  # wrong on the new schedule: recorded again
+        self.assertEqual(self.steps().count("wrong_event"), 2)
 
     def test_an_unreadable_card_is_noted(self) -> None:
         monitor = self.build(Particle())

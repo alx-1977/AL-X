@@ -472,6 +472,14 @@ class ReaderMonitor:
         # handles; which event it runs is judged against the schedule it holds.
         sent = self._calendar.sent(uid)
         if sent and report.get("v") != sent.get("version"):
+            # No verdict on this report, and none carried over from before:
+            # an earlier warning must not stay attached to it. A fault on the
+            # new schedule is then recorded afresh.
+            with self._lock:
+                held = self._cards.get(uid)
+                if held is None or held[1] == received_at:
+                    self._checks.setdefault(uid, {"at": at})["wrong"] = False
+                    self._wrong[uid] = None
             return
         reported = report.get("e")
         expected = expected_event(own, mode, at)
