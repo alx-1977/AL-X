@@ -401,6 +401,16 @@ class MonitorTests(unittest.TestCase):
         monitor.cycle()  # the status read is still used
         self.assertEqual(particle.reads, 1)
 
+    def test_a_card_about_an_older_schedule_is_not_a_wrong_event(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle)
+        monitor.on_event("roomreader/schedule_request", DEVICE, '{"v":"old"}', "t")
+        sent = self.calendar.sent(UID)["version"]
+        self.card(monitor, v="old", e=0)  # queued before the new schedule landed
+        self.assertNotIn("wrong_event", self.steps())
+        self.card(monitor, v=sent, e=3)  # the new schedule, and still wrong
+        self.assertIn("wrong_event", self.steps())
+
     def test_an_unreadable_card_is_noted(self) -> None:
         monitor = self.build(Particle())
         monitor.on_event("roomreader/status", DEVICE, "not json", "t")

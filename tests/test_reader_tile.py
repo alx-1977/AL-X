@@ -256,6 +256,9 @@ class ServingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("if (!response.ok) return;", (ASSETS / "reader-tile.js").read_text())
 
+    def test_the_page_asks_every_few_seconds(self) -> None:
+        self.assertIn("const EVERY_MS = 5_000;", (ASSETS / "reader-tile.js").read_text())
+
     def test_the_main_page_carries_the_tile(self) -> None:
         page = (ASSETS / "index.html").read_text()
         self.assertIn('href="/tile.css"', page)

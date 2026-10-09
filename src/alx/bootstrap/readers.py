@@ -467,6 +467,12 @@ class ReaderMonitor:
         Only the report still held is judged: a newer card that arrived while
         an older one was being judged has the last word.
         """
+        # A report still describing an older schedule than the one AL/X last
+        # sent says only that the new one has not landed yet, which delivery
+        # handles; which event it runs is judged against the schedule it holds.
+        sent = self._calendar.sent(uid)
+        if sent and report.get("v") != sent.get("version"):
+            return
         reported = report.get("e")
         expected = expected_event(own, mode, at)
         wrong = reported != expected and reported != expected_event(
