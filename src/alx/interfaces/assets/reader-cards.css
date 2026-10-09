@@ -1,0 +1,616 @@
+/* Room readers (D-041): the compact BHL tile and the board it opens.
+   One structure, three looks for Friedl to choose from, set by data-look on
+   <html>: "dark" (smoked glass), "frost" (light glass), "minimal" (no boxes,
+   type over the video). Glass: never put opacity, filter, mask or clip-path
+   on a glass element or an ancestor while it is settled, or the blur loses
+   the background. */
+
+:root {
+  --rb-font: "SF Pro Display", -apple-system, BlinkMacSystemFont, Inter, "Segoe UI", system-ui, sans-serif;
+  --rb-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* ---- looks --------------------------------------------------------------- */
+
+[data-look="dark"] {
+  --rb-ok: #3ddc84;
+  --rb-warn: #ffb547;
+  --rb-bad: #ff5c5c;
+  --rb-ink: #f4f7fb;
+  --rb-muted: rgba(244, 247, 251, 0.58);
+  --rb-faint: rgba(244, 247, 251, 0.32);
+  --rb-hair: rgba(255, 255, 255, 0.09);
+  --rb-glass: linear-gradient(180deg, rgba(30, 36, 48, 0.62), rgba(14, 18, 26, 0.7));
+  --rb-glass-border: rgba(255, 255, 255, 0.12);
+  --rb-glass-shadow: 0 1.4em 3em rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --rb-blur: blur(28px) saturate(160%);
+  --rb-scrim: radial-gradient(ellipse at 50% 0%, rgba(6, 10, 18, 0.35), rgba(6, 10, 18, 0.62));
+  --rb-soft: rgba(255, 255, 255, 0.06);
+  --rb-card-tint: 14%;
+  --rb-radius: 1.25em;
+}
+
+[data-look="frost"] {
+  --rb-ok: #1fb45a;
+  --rb-warn: #f29b0c;
+  --rb-bad: #e5383b;
+  --rb-ink: #0d1626;
+  --rb-muted: rgba(13, 22, 38, 0.56);
+  --rb-faint: rgba(13, 22, 38, 0.32);
+  --rb-hair: rgba(13, 22, 38, 0.08);
+  --rb-glass: linear-gradient(170deg, rgba(255, 255, 255, 0.8), rgba(246, 249, 253, 0.66));
+  --rb-glass-border: rgba(255, 255, 255, 0.85);
+  --rb-glass-shadow: 0 1.4em 3.2em rgba(14, 30, 60, 0.18), inset 0 1px 0 #fff;
+  --rb-blur: blur(30px) saturate(170%);
+  --rb-scrim: radial-gradient(ellipse at 50% 0%, rgba(230, 238, 248, 0.18), rgba(20, 35, 60, 0.3));
+  --rb-soft: rgba(13, 22, 38, 0.045);
+  --rb-card-tint: 9%;
+  --rb-radius: 1.4em;
+}
+
+[data-look="minimal"] {
+  --rb-ok: #4ade80;
+  --rb-warn: #fcc451;
+  --rb-bad: #ff6b6b;
+  --rb-ink: #ffffff;
+  --rb-muted: rgba(255, 255, 255, 0.72);
+  --rb-faint: rgba(255, 255, 255, 0.45);
+  --rb-hair: rgba(255, 255, 255, 0.22);
+  --rb-glass: transparent;
+  --rb-glass-border: transparent;
+  --rb-glass-shadow: none;
+  --rb-blur: none;
+  --rb-scrim: linear-gradient(90deg, rgba(4, 8, 16, 0.78), rgba(4, 8, 16, 0.55) 55%, rgba(4, 8, 16, 0.25));
+  --rb-soft: rgba(255, 255, 255, 0.1);
+  --rb-card-tint: 0%;
+  --rb-radius: 0;
+}
+
+/* ---- the compact tile ---------------------------------------------------- */
+
+.rb-tile {
+  --tone: var(--rb-ok);
+  position: fixed;
+  z-index: 2;
+  top: 1.5rem;
+  right: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  padding: 0.75em 0.8em 0.75em 1em;
+  border: 1px solid var(--rb-glass-border);
+  border-radius: 999px;
+  background: var(--rb-glass);
+  box-shadow: var(--rb-glass-shadow);
+  color: var(--rb-ink);
+  font: 500 clamp(13px, 0.95vw, 30px) / 1.2 var(--rb-font);
+  -webkit-backdrop-filter: var(--rb-blur);
+  backdrop-filter: var(--rb-blur);
+  cursor: pointer;
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.25s;
+  animation: rb-rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.rb-tile:hover { transform: translateY(-2px); }
+/* While the board is open it says everything the tile does. */
+body:has(.rb-board:not(.is-leaving)) .rb-tile { opacity: 0; pointer-events: none; }
+.rb-tile { transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s; }
+.rb-tile:focus-visible { outline: 2px solid var(--tone); outline-offset: 3px; }
+.rb-tile[data-tone="warn"] { --tone: var(--rb-warn); }
+.rb-tile[data-tone="bad"] { --tone: var(--rb-bad); }
+.rb-tile__text { display: flex; flex-direction: column; align-items: flex-start; gap: 0.12em; }
+.rb-tile__name { color: var(--rb-faint); font-size: 0.66em; font-weight: 650; letter-spacing: 0.18em; }
+.rb-tile__title { font-size: 0.98em; font-weight: 600; letter-spacing: -0.01em; }
+.rb-tile__chevron { display: flex; color: var(--rb-faint); }
+.rb-tile__chevron svg { width: 1em; height: 1em; }
+[data-look="minimal"] .rb-tile { padding-left: 0; text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55); }
+[data-look="minimal"] .rb-tile .rb-light { width: 0.7em; height: 0.7em; }
+
+/* The status light: the one place colour is loud. */
+.rb-light {
+  flex: 0 0 auto;
+  width: 0.6em;
+  height: 0.6em;
+  border-radius: 50%;
+  background: var(--tone, var(--rb-ok));
+  box-shadow: 0 0 0 0.22em color-mix(in srgb, var(--tone, var(--rb-ok)) 20%, transparent),
+    0 0 1em color-mix(in srgb, var(--tone, var(--rb-ok)) 55%, transparent);
+}
+[data-tone="bad"] > .rb-light,
+[data-tone="bad"] > header > .rb-light { animation: rb-pulse 1.6s ease-in-out infinite; }
+
+/* ---- the board ----------------------------------------------------------- */
+
+.rb-board {
+  position: fixed;
+  z-index: 3;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  overflow-y: auto;
+  padding: clamp(1rem, 5vh, 4rem) 1rem 3rem;
+  background: var(--rb-scrim);
+  color: var(--rb-ink);
+  font: 400 clamp(13px, 0.95vw, 30px) / 1.35 var(--rb-font);
+  -webkit-font-smoothing: antialiased;
+  animation: rb-fade 0.3s ease-out backwards;
+}
+.rb-board.is-leaving { animation: rb-fade 0.22s ease-in reverse both; }
+[data-look="minimal"] .rb-board { justify-content: flex-start; padding-left: clamp(1.5rem, 6vw, 7rem); }
+
+.rb-sheet {
+  width: min(64em, 100%);
+  padding: 1.6em 1.7em 1.8em;
+  border: 1px solid var(--rb-glass-border);
+  border-radius: calc(var(--rb-radius) * 1.3);
+  background: var(--rb-glass);
+  box-shadow: var(--rb-glass-shadow);
+  -webkit-backdrop-filter: var(--rb-blur);
+  backdrop-filter: var(--rb-blur);
+  animation: rb-rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+[data-look="minimal"] .rb-sheet { padding: 0; text-shadow: 0 1px 10px rgba(0, 0, 0, 0.35); }
+
+.rb-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1em; }
+.rb-head__title { margin: 0; font-size: 1.55em; font-weight: 650; letter-spacing: -0.025em; }
+.rb-head__context { margin: 0.2em 0 0; color: var(--rb-muted); font-size: 0.85em; }
+.rb-close {
+  display: grid;
+  place-items: center;
+  width: 2.2em;
+  height: 2.2em;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--rb-soft);
+  color: var(--rb-muted);
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.rb-close:hover { color: var(--rb-ink); background: var(--rb-hair); }
+.rb-close svg { width: 1em; height: 1em; }
+
+/* Three numbers: the whole client at a glance. */
+.rb-stats { display: flex; gap: 2.4em; margin: 1.5em 0 1.3em; }
+.rb-stat { --tone: var(--rb-ok); display: flex; flex-direction: column; gap: 0.1em; }
+.rb-stat[data-tone="warn"] { --tone: var(--rb-warn); }
+.rb-stat[data-tone="bad"] { --tone: var(--rb-bad); }
+.rb-stat__count {
+  color: var(--tone);
+  font-size: 2.3em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+.rb-stat__word { color: var(--rb-muted); font-size: 0.76em; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.rb-stat[data-zero] .rb-stat__count { color: var(--rb-faint); }
+
+/* Every reader, one dot each, grouped by room. */
+.rb-fleet {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55em;
+  padding: 1.1em 0 1.3em;
+  border-top: 1px solid var(--rb-hair);
+  border-bottom: 1px solid var(--rb-hair);
+}
+.rb-room {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  padding: 0.5em 0.65em 0.45em;
+  border-radius: 0.75em;
+  background: var(--rb-soft);
+}
+.rb-room[data-tone="warn"] { background: color-mix(in srgb, var(--rb-warn) 13%, transparent); }
+.rb-room[data-tone="bad"] { background: color-mix(in srgb, var(--rb-bad) 15%, transparent); }
+.rb-room__dots { display: flex; gap: 0.32em; }
+.rb-room__name {
+  max-width: 7.5em;
+  overflow: hidden;
+  color: var(--rb-muted);
+  font-size: 0.68em;
+  font-weight: 550;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rb-dot {
+  --tone: var(--rb-ok);
+  position: relative;
+  width: 0.62em;
+  height: 0.62em;
+  border-radius: 50%;
+  background: var(--tone);
+  cursor: default;
+}
+.rb-dot[data-tone="ok"] { opacity: 0.85; }
+.rb-dot[data-tone="warn"] { --tone: var(--rb-warn); box-shadow: 0 0 0.6em color-mix(in srgb, var(--tone) 70%, transparent); }
+.rb-dot[data-tone="bad"] { --tone: var(--rb-bad); box-shadow: 0 0 0.7em var(--tone); animation: rb-pulse 1.6s ease-in-out infinite; }
+.rb-dot::after {
+  content: attr(data-label);
+  position: absolute;
+  z-index: 1;
+  bottom: calc(100% + 0.6em);
+  left: 50%;
+  padding: 0.35em 0.6em;
+  border-radius: 0.5em;
+  background: rgba(10, 14, 22, 0.92);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 550;
+  white-space: nowrap;
+  text-shadow: none;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 0.2em);
+  transition: opacity 0.15s, transform 0.15s;
+}
+.rb-dot:hover::after { opacity: 1; transform: translate(-50%, 0); }
+[data-look="minimal"] .rb-fleet { gap: 1.4em; }
+[data-look="minimal"] .rb-room { padding: 0; background: none; }
+
+/* Only readers with a problem get a card. */
+.rb-section {
+  margin: 1.5em 0 0.8em;
+  color: var(--rb-muted);
+  font-size: 0.74em;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.rb-calm { margin: 1.6em 0 0; color: var(--rb-muted); font-size: 0.95em; }
+.rb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(17em, 1fr)); gap: 0.85em; }
+
+.rb-card {
+  --tone: var(--rb-ok);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 1em 1.1em 0.95em;
+  overflow: hidden;
+  border-radius: var(--rb-radius);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--tone) var(--rb-card-tint), transparent), transparent 60%),
+    var(--rb-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 22%, var(--rb-hair));
+  animation: rb-rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation-delay: calc(120ms + var(--i, 0) * 45ms);
+}
+.rb-sheet.is-settled, .rb-sheet.is-settled .rb-card { animation: none; }
+.rb-card[data-tone="warn"] { --tone: var(--rb-warn); }
+.rb-card[data-tone="bad"] { --tone: var(--rb-bad); }
+[data-look="minimal"] .rb-card {
+  padding: 0.2em 0 0.2em 1em;
+  border-radius: 0;
+  background: none;
+  box-shadow: inset 2px 0 0 var(--tone);
+}
+
+.rb-card__head { display: flex; align-items: center; gap: 0.55em; min-width: 0; }
+.rb-card__room {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rb-muted);
+  font-size: 0.78em;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rb-card__uid { color: var(--rb-faint); font-family: var(--rb-mono); font-size: 0.66em; }
+.rb-card__problem { margin: 0.55em 0 0; font-size: 1.12em; font-weight: 620; letter-spacing: -0.015em; line-height: 1.25; }
+.rb-card__event { display: flex; flex-wrap: wrap; gap: 0 0.45em; margin: 0.3em 0 0; color: var(--rb-muted); font-size: 0.8em; }
+.rb-card__event-title { overflow: hidden; max-width: 100%; white-space: nowrap; text-overflow: ellipsis; }
+.rb-card__when { color: var(--rb-faint); }
+.rb-card__when::before { content: "· "; }
+
+.rb-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8em;
+  margin-top: 0.9em;
+  padding-top: 0.7em;
+  border-top: 1px solid var(--rb-hair);
+}
+[data-look="minimal"] .rb-card__foot { border-top: 0; padding-top: 0; margin-top: 0.55em; }
+.rb-card__who { display: flex; align-items: center; gap: 0.4em; min-width: 0; font-size: 0.8em; font-weight: 550; }
+.rb-card__who { align-items: flex-start; line-height: 1.3; }
+.rb-card__who[data-who="alx"] { color: var(--rb-muted); }
+.rb-card__who[data-who="tech"] { color: var(--rb-bad); font-weight: 650; }
+.rb-icon { display: inline-flex; flex: 0 0 auto; }
+.rb-icon svg { width: 1.1em; height: 1.1em; }
+
+.rb-vitals { display: flex; gap: 0.75em; flex: 0 0 auto; }
+.rb-vital {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  color: var(--rb-faint);
+  font-size: 0.72em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rb-vital .rb-icon svg, .rb-battery svg, .rb-signal svg { width: 1.25em; height: 1.25em; }
+.rb-battery, .rb-signal { display: inline-flex; color: var(--rb-muted); }
+.rb-battery[data-tone="warn"], .rb-signal[data-tone="warn"] { color: var(--rb-warn); }
+.rb-battery[data-tone="bad"] { color: var(--rb-bad); }
+
+@keyframes rb-fade { from { opacity: 0; } }
+@keyframes rb-rise { from { opacity: 0; transform: translateY(0.8em) scale(0.985); } }
+@keyframes rb-pulse {
+  50% { box-shadow: 0 0 0 0.4em color-mix(in srgb, var(--tone) 6%, transparent), 0 0 1.4em color-mix(in srgb, var(--tone) 70%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rb-board, .rb-board *, .rb-tile, .rb-tile * { animation: none !important; transition: none !important; }
+}
+@media (max-width: 640px) {
+  .rb-stats { gap: 1.4em; }
+  .rb-sheet { padding: 1.2em; }
+}
+
+/* ---- preview only: the look switcher ------------------------------------- */
+
+.rb-looks {
+  position: fixed;
+  z-index: 10;
+  bottom: 1.5rem;
+  left: 50%;
+  display: flex;
+  gap: 0.2em;
+  padding: 0.25em;
+  border-radius: 999px;
+  background: rgba(10, 14, 22, 0.75);
+  font: 600 13px/1 var(--rb-font);
+  transform: translateX(-50%);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+.rb-looks button {
+  padding: 0.65em 1.1em;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font: inherit;
+  cursor: pointer;
+}
+.rb-looks button[aria-pressed="true"] { background: #fff; color: #0d1626; }
+
+/* ---- Friedl, 2026-10-09: dark glass, cards only, two-thirds size ------------ */
+
+[data-look="dark"] .rb-board {
+  justify-content: flex-end;
+  padding: 1.5rem;
+  background: linear-gradient(270deg, rgba(6, 10, 18, 0.45), rgba(6, 10, 18, 0.1) 70%);
+  font-size: calc(clamp(13px, 0.95vw, 30px) * 0.66);
+}
+[data-look="dark"] .rb-sheet {
+  width: min(56em, 100%);
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  animation: none;
+}
+[data-look="dark"] .rb-grid { grid-template-columns: repeat(auto-fill, minmax(20em, 1fr)); gap: 0.9em; }
+[data-look="dark"] .rb-card {
+  border: 1px solid color-mix(in srgb, var(--tone) 30%, var(--rb-glass-border));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--tone) 16%, transparent), transparent 55%),
+    var(--rb-glass);
+  box-shadow: var(--rb-glass-shadow);
+  -webkit-backdrop-filter: var(--rb-blur);
+  backdrop-filter: var(--rb-blur);
+}
+[data-look="dark"] .rb-calm {
+  padding: 1em 1.3em;
+  border: 1px solid var(--rb-glass-border);
+  border-radius: var(--rb-radius);
+  background: var(--rb-glass);
+  -webkit-backdrop-filter: var(--rb-blur);
+  backdrop-filter: var(--rb-blur);
+}
+
+/* ---- Friedl, 2026-10-09: an overlay on the scene, not a sticker on it ----
+   No drop shadow (a shadow says "lifted off the page"), no solid border,
+   a fill so thin the scene shows through, the scene behind dimmed and
+   blurred rather than covered, and light catching the top edge only. */
+
+[data-look="dark"] {
+  --rb-overlay: linear-gradient(180deg, rgba(8, 12, 20, 0.30), rgba(8, 12, 20, 0.16));
+  --rb-overlay-blur: blur(18px) saturate(135%) brightness(0.82);
+  --rb-overlay-edge:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+[data-look="dark"] .rb-board { background: none; }
+[data-look="dark"] .rb-card,
+[data-look="dark"] .rb-calm,
+[data-look="dark"] .rb-tile {
+  border: 0;
+  background: var(--rb-overlay);
+  box-shadow: var(--rb-overlay-edge);
+  -webkit-backdrop-filter: var(--rb-overlay-blur);
+  backdrop-filter: var(--rb-overlay-blur);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+}
+/* The tone is light in the glass, not paint on it. */
+[data-look="dark"] .rb-card {
+  background:
+    radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--tone) 16%, transparent), transparent 60%),
+    var(--rb-overlay);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--tone) 35%, rgba(255, 255, 255, 0.16)),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+[data-look="dark"] .rb-card__foot { border-top-color: rgba(255, 255, 255, 0.07); }
+[data-look="dark"] { --rb-overlay-blur: blur(20px) saturate(130%) brightness(0.72); }
+[data-look="dark"] .rb-card__who[data-who="tech"] { color: #ff9a9a; }
+
+/* Friedl, 2026-10-09: lighter, more like glass. */
+[data-look="dark"] {
+  --rb-overlay: linear-gradient(165deg, rgba(255, 255, 255, 0.20), rgba(255, 255, 255, 0.07) 60%, rgba(255, 255, 255, 0.10));
+  --rb-overlay-blur: blur(24px) saturate(180%) brightness(0.92);
+  --rb-overlay-edge:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  --rb-muted: rgba(255, 255, 255, 0.78);
+  --rb-faint: rgba(255, 255, 255, 0.55);
+}
+[data-look="dark"] .rb-card,
+[data-look="dark"] .rb-calm,
+[data-look="dark"] .rb-tile { text-shadow: 0 1px 6px rgba(0, 20, 40, 0.45); }
+[data-look="dark"] .rb-card {
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--tone) 40%, rgba(255, 255, 255, 0.38)),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+[data-look="dark"] .rb-card__foot { border-top-color: rgba(255, 255, 255, 0.14); }
+/* On light glass red text drowns in the red glow: white words, red icon. */
+[data-look="dark"] .rb-card__who[data-who="tech"] { color: #fff; }
+[data-look="dark"] .rb-card__who[data-who="tech"] .rb-icon { color: #ff7070; }
+
+/* Friedl, 2026-10-09: status lights that glow like LEDs: a hot, nearly white
+   core, the colour around it, and light spilling onto the glass. */
+[data-look="dark"] .rb-light {
+  width: 0.7em;
+  height: 0.7em;
+  background: radial-gradient(circle at 50% 45%,
+    color-mix(in srgb, var(--tone, var(--rb-ok)) 25%, #fff) 0%,
+    var(--tone, var(--rb-ok)) 55%,
+    color-mix(in srgb, var(--tone, var(--rb-ok)) 80%, #000) 100%);
+  box-shadow:
+    0 0 0.25em var(--tone, var(--rb-ok)),
+    0 0 0.7em var(--tone, var(--rb-ok)),
+    0 0 1.6em color-mix(in srgb, var(--tone, var(--rb-ok)) 70%, transparent),
+    0 0 3em color-mix(in srgb, var(--tone, var(--rb-ok)) 35%, transparent);
+}
+[data-look="dark"] [data-tone="bad"] > .rb-light,
+[data-look="dark"] [data-tone="bad"] > header > .rb-light { animation: rb-led 1.6s ease-in-out infinite; }
+@keyframes rb-led {
+  50% {
+    box-shadow:
+      0 0 0.2em var(--tone),
+      0 0 0.4em var(--tone),
+      0 0 0.9em color-mix(in srgb, var(--tone) 50%, transparent),
+      0 0 1.6em color-mix(in srgb, var(--tone) 15%, transparent);
+    filter: brightness(0.8);
+  }
+}
+
+/* ---- concept B: a small Execution Trace per reader ------------------------
+   The look of the AL/X Execution Trace panel (app.css .diagnostics), at
+   two-thirds size: smoked glass, a cyan sheen top left, monospace lines. */
+
+.rt {
+  --tone: var(--rb-ok);
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 1.2em;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.035) 46%),
+    rgba(5, 15, 25, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  color: rgba(238, 250, 255, 0.94);
+  -webkit-backdrop-filter: blur(26px) saturate(165%);
+  backdrop-filter: blur(26px) saturate(165%);
+  animation: rb-rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation-delay: calc(120ms + var(--i, 0) * 45ms);
+}
+.rt::before {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 12% 0, color-mix(in srgb, var(--tone) 22%, transparent), transparent 45%);
+  pointer-events: none;
+  content: "";
+}
+.rt[data-tone="warn"] { --tone: var(--rb-warn); }
+.rt[data-tone="bad"] { --tone: var(--rb-bad); }
+.rt > * { position: relative; }
+
+.rt__head {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  padding: 0.8em 1em 0.7em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.rt__names { display: grid; flex: 1; gap: 0.1em; min-width: 0; }
+.rt__names strong { font-size: 0.95em; letter-spacing: 0.045em; }
+.rt__names small {
+  overflow: hidden;
+  color: rgba(221, 243, 250, 0.54);
+  font-size: 0.75em;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rt .rb-vital { color: rgba(221, 243, 250, 0.54); }
+
+.rt__stage {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.6em 1em;
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  color: color-mix(in srgb, var(--tone) 45%, #fff);
+  font: 600 0.85em/1.3 var(--rb-mono);
+}
+.rt__stage time { color: rgba(255, 255, 255, 0.66); font-variant-numeric: tabular-nums; }
+
+.rt__log { padding: 0.65em 1em 0.55em; font: 0.8em/1.6 var(--rb-mono); }
+.rt__line { display: grid; grid-template-columns: 5.6em 1fr; gap: 0.6em; color: rgba(230, 247, 252, 0.72); }
+.rt__line time { color: rgba(166, 220, 234, 0.42); }
+.rt__line[data-tone="ok"] span { color: #a8f1d0; }
+.rt__line[data-tone="active"] span { color: #aeeeff; }
+.rt__line[data-tone="alx"] span { color: #cfe8ff; }
+.rt__line[data-tone="warn"] span { color: #ffe0b3; }
+.rt__line[data-tone="error"] span { color: #ffb9b9; }
+
+.rt__next {
+  display: flex;
+  gap: 0.6em;
+  padding: 0.5em 1em 0.65em;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #c9f5ff;
+  font: 0.8em/1.5 var(--rb-mono);
+}
+.rt__prompt { opacity: 0.7; white-space: nowrap; }
+.rt__next[data-who="tech"] { color: #fff; }
+.rt__next[data-who="tech"] .rt__prompt { color: #ff9a9a; opacity: 1; }
+
+/* ---- preview only: the two concepts side by side -------------------------- */
+
+.rb-compare {
+  position: fixed;
+  z-index: 3;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  overflow-y: auto;
+  padding: 1.5rem;
+  font: 400 calc(clamp(13px, 0.95vw, 30px) * 0.66) / 1.35 var(--rb-font);
+  -webkit-font-smoothing: antialiased;
+}
+.rb-compare__label {
+  margin: 0 0 0.9rem;
+  color: #fff;
+  font: 650 13px/1 var(--rb-font);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+}
+.rb-compare__column { display: flex; flex-direction: column; align-items: stretch; }
+.rb-compare .rb-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9em; }
+
+/* Friedl, 2026-10-09: the traces narrower. */
+.rb-compare__column:last-child .rb-grid { grid-template-columns: repeat(auto-fill, 25em); justify-content: start; }
+.rt__line { grid-template-columns: 4.6em 1fr; }
+.rt .rb-vitals { gap: 0.5em; }
