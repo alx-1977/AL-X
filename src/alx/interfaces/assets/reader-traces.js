@@ -104,7 +104,9 @@ export function buildTrace(reader, index = 0) {
 
   const stage = el('div', 'rt__stage');
   const clock = el('time');
-  stage.append(el('span', null, reader.issue?.text ?? ''), clock);
+  const problem = el('span', null, reader.issue?.text ?? '');
+  problem.title = reader.issue?.text ?? '';
+  stage.append(problem, clock);
   box.append(stage);
   const since = reader.since ? Date.parse(reader.since) : NaN;
   if (Number.isFinite(since)) clock.textContent = elapsed(since);
@@ -117,7 +119,9 @@ export function buildTrace(reader, index = 0) {
   for (const [at, text, tone] of reader.trace ?? []) {
     const line = el('div', 'rt__line');
     if (tone) line.dataset.tone = tone;
-    line.append(el('time', null, at), el('span', null, text));
+    const words = el('span', null, text);
+    words.title = text;  // a line cut short reads in full on hover
+    line.append(el('time', null, at), words);
     log.append(line);
   }
   box.append(log);
@@ -127,7 +131,9 @@ export function buildTrace(reader, index = 0) {
   if (reader.issue?.action) {
     // Who acts next: words, not a prompt; nothing is typed here.
     const who = { tech: 'you', reader: 'the reader' }[next.dataset.who] ?? 'AL/X';
-    next.append(el('span', 'rt__prompt', `Next, ${who}:`), el('span', null, reader.issue.action));
+    const action = el('span', null, reader.issue.action);
+    action.title = reader.issue.action;
+    next.append(el('span', 'rt__prompt', `Next, ${who}:`), action);
   } else {
     next.append(el('span', null, '\u00a0'));
   }

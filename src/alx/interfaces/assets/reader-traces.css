@@ -227,5 +227,5 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
+  .rt-bar, .rt-bar *, .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
 }
