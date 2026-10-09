@@ -83,15 +83,13 @@
   text-shadow: inherit;
   cursor: pointer;
 }
-.rt-bar__item:hover:not(:disabled),
-.rt-bar__item[aria-expanded="true"] { background: rgba(255, 255, 255, 0.18); }
+/* No box around the item: it brightens a little under the pointer. */
+.rt-bar__item:hover:not(:disabled) .rt-bar__name,
+.rt-bar__item[aria-expanded="true"] .rt-bar__name { color: #fff; }
 .rt-bar__item:disabled { cursor: default; }
 .rt-bar__item:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.6); outline-offset: -2px; }
 .rt-bar__item .rt-light { width: 0.55em; height: 0.55em; }
-.rt-bar__name { color: rgba(255, 255, 255, 0.62); font-weight: 600; letter-spacing: 0.06em; }
-.rt-bar__chevron { display: flex; opacity: 0.6; }
-.rt-bar__chevron svg { width: 0.85em; height: 0.85em; transform: rotate(90deg); }
-.rt-bar__item:disabled .rt-bar__chevron { display: none; }
+.rt-bar__name { color: rgba(255, 255, 255, 0.85); font-weight: 600; letter-spacing: 0.06em; transition: color 0.15s; }
 
 /* ---- the traces ---------------------------------------------------------- */
 

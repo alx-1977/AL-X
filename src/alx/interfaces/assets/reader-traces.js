@@ -27,7 +27,6 @@ const svg = (body) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
 const PLUG = svg('<path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5V21"/>');
-const CHEVRON = svg('<path d="M9.5 6l6 6-6 6"/>');
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -159,10 +158,10 @@ export function surfaceReaderTraces(host, data) {
 
   function renderPill() {
     pill.dataset.tone = current.tone || 'ok';
-    const chevron = el('span', 'rt-bar__chevron');
-    chevron.innerHTML = CHEVRON;
-    pill.replaceChildren(el('span', 'rt-light'), el('span', 'rt-bar__name', current.name || 'BHL'),
-      el('span', null, current.title), chevron);
+    // Friedl: only the name and the light, as a macOS menu bar item; the
+    // counts are in the traces and in the label read aloud.
+    pill.replaceChildren(el('span', 'rt-light'), el('span', 'rt-bar__name', current.name || 'BHL'));
+    pill.title = current.title;
     const count = current.readers?.length ?? 0;
     pill.disabled = count === 0;
     pill.setAttribute('aria-expanded', String(open && count > 0));
