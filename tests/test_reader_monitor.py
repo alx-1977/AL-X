@@ -94,6 +94,8 @@ class Particle:
 
     def ping(self, product_id, device_id):
         self.pings = getattr(self, "pings", 0) + 1
+        if getattr(self, "during_ping", None):
+            self.during_ping()
         if isinstance(self.online, Exception):
             raise self.online
         return self.online
@@ -242,6 +244,26 @@ class MonitorTests(unittest.TestCase):
         self.now[0] += timedelta(minutes=1)
         monitor.ping_cycle()
         self.assertEqual(self.steps(), ["offline", "online"])
+
+    def test_a_reader_heard_then_unanswered_shows_offline_at_once(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle, online=True)
+        monitor.on_event("roomreader/scan", DEVICE, "{}", "t")
+        self.now[0] += timedelta(minutes=1)
+        particle.online = False
+        monitor.ping_cycle()
+        self.assertFalse(monitor.checks(self.now[0])[UID]["online"])
+        self.assertEqual(self.steps(), ["online", "offline"])
+
+    def test_a_reader_heard_while_the_ping_was_out_stays_online(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle, online=True)
+        particle.online = False
+        # The reader publishes while Particle is still waiting on the ping.
+        particle.during_ping = lambda: monitor.on_event("roomreader/scan", DEVICE, "{}", "t")
+        monitor.ping_cycle()
+        self.assertTrue(monitor.checks(self.now[0])[UID]["online"])
+        self.assertNotIn("offline", self.steps())
 
     def test_the_log_reads_back_in_the_order_it_was_written(self) -> None:
         # A ping that finished later can carry an earlier observation time.

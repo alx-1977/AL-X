@@ -248,12 +248,15 @@ class ReaderMonitor:
 
     def _presence(self, uid: str, at: datetime) -> bool | None:
         """Online from what AL/X observed herself, or None when she has nothing recent."""
+        # The newest observation wins: a reader heard a minute ago that has
+        # since failed to answer a ping has gone.
         seen = self._seen.get(uid)
+        pinged = self._pinged.get(uid)
+        if pinged is not None and at - pinged[1] <= PRESENCE_FRESH_FOR and (
+                seen is None or pinged[1] >= seen):
+            return pinged[0]
         if seen is not None and at - seen <= PRESENCE_FRESH_FOR:
             return True
-        pinged = self._pinged.get(uid)
-        if pinged is not None and at - pinged[1] <= PRESENCE_FRESH_FOR:
-            return pinged[0]
         return None
 
     def _set_online(self, uid: str, online: bool, at: datetime, via: str) -> None:
@@ -308,6 +311,11 @@ class ReaderMonitor:
             if online is None:
                 continue
             with self._lock:
+                # Heard from while the ping was out: the reader is connected,
+                # whatever the ping says.
+                heard = self._seen.get(uid)
+                if not online and heard is not None and heard >= at:
+                    continue
                 self._pinged[uid] = (online, done)
                 if online:
                     self._seen[uid] = done
