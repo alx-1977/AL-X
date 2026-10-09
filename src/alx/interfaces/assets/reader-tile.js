@@ -5,7 +5,9 @@
 import { surfaceTile } from '/tile.js';
 
 const host = document.getElementById('tiles');
-const EVERY_MS = 60_000;
+// Every few seconds: AL/X learns of a reader within seconds (its own messages,
+// pings, status cards), and this only asks her, on this machine.
+const EVERY_MS = 5_000;
 let tile = null;
 let shown = '';
 
