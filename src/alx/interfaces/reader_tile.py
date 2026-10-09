@@ -25,6 +25,7 @@ time, Friedl's.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
@@ -39,8 +40,8 @@ BATTERY_LOW_PERCENT = 20
 WEAK_SIGNAL_PERCENT = 30  # the reader's own POOR_SIGNAL_PERCENT
 # What a trace shows of a reader's log: its last few steps.
 TRACE_LINES = 5
-# Who acts next on a problem.
-ALX, TECHNICIAN = "alx", "tech"
+# Who acts next on a problem: AL/X, a person, or the reader by itself.
+ALX, TECHNICIAN, READER = "alx", "tech", "reader"
 
 
 def _event_day(moment: datetime, offset_hours: int):
@@ -56,7 +57,8 @@ def _count(count: int, word: str) -> str:
 
 
 def _percent(value: Any) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
         return None
     return min(100, int(value))
 
@@ -107,14 +109,6 @@ def describe_step(step: Mapping[str, Any], local: tzinfo | None) -> list[str]:
     return [when, text, tone]
 
 
-def _since(steps: Sequence[Mapping[str, Any]], kind: str) -> str | None:
-    """When the latest step of this kind was recorded, if there is one."""
-    for step in reversed(steps):
-        if step.get("kind") == kind:
-            return step.get("at")
-    return None
-
-
 def compose_tile(
     snapshot: tuple[str, Sequence[str], Sequence[Mapping[str, Any]], Sequence[ReaderSession]],
     now: datetime,
@@ -124,9 +118,10 @@ def compose_tile(
     # observed of them, from the reader monitor. Absent when it is not
     # running: then nothing is said to be under way on AL/X's side.
     checks: Mapping[str, Mapping[str, Any]] | None = None,
-    # A reader's last log steps, oldest first; asked only for readers with
-    # a problem.
+    # A reader's last log steps, oldest first, and when a logged condition
+    # began (calendar.log_started); asked only for readers with a problem.
     log_of: Callable[[str], Sequence[Mapping[str, Any]]] | None = None,
+    started: Callable[..., str | None] | None = None,
     # Whether the monitor's regular check is running; None: whenever the
     # monitor's observations are given.
     monitoring: bool | None = None,
@@ -171,19 +166,21 @@ def compose_tile(
         close = next((item for item in own_today
                       if item.starts_at - WARNING_BEFORE_EVENT <= now < item.ends_at), None)
 
-        steps = list(log_of(uid)) if log_of is not None else []
+        def since(kind: str, cleared_by: str = "", uid: str = uid) -> str | None:
+            return started(uid, kind, cleared_by) if started is not None else None
+
         issue: tuple[str, str, str, str, str | None] | None = None  # tone, text, who, action, since
         if not online and close is not None:
             text = ("Offline · event running" if running is not None
                     else f"Offline · event at {_clock(close.starts_at, local)}")
             issue = ("bad", text, TECHNICIAN, "Check the reader in the room",
-                     _since(steps, "offline"))
+                     since("offline", "online"))
         elif online and held.get("fresh") is True and held.get("wrong") is True:
             issue = ("bad", "On the wrong event", TECHNICIAN, "Check the reader in the room",
-                     _since(steps, "wrong_event"))
+                     since("wrong_event"))
         elif not online:
             issue = ("warn", "Offline", ALX, "Pinging it every minute" if monitoring else "",
-                     _since(steps, "offline"))
+                     since("offline", "online"))
         elif not holds_current(sent.get(uid) or {}, own, mode, now):
             # The monitor sends a reader that is online its schedule again,
             # every ten minutes until it holds it; not one that cannot take
@@ -194,18 +191,21 @@ def compose_tile(
             else:
                 issue = ("warn", "Schedule not confirmed", ALX,
                          "Sending the schedule" if monitoring else "",
-                         _since(steps, "schedule_delivery"))
+                         since("schedule_delivery", "schedule_sent"))
         else:
             battery, signal = _percent(held.get("bat")), _percent(held.get("sig"))
             if held.get("pwr") == "bat" and battery is not None and battery < BATTERY_LOW_PERCENT:
                 issue = ("warn", f"Battery low · {battery}%", TECHNICIAN, "Plug it into USB", None)
             elif signal is not None and signal < WEAK_SIGNAL_PERCENT:
-                issue = ("warn", f"Weak signal · {signal}%", ALX,
-                         "Scans wait on the reader until sent", None)
+                # Nothing AL/X does: the reader keeps its scans until
+                # they are delivered.
+                issue = ("warn", f"Weak signal · {signal}%", READER,
+                         "Keeps scans until they are sent", None)
         if issue is None:
             continue
 
-        tone, text, who, action, since = issue
+        tone, text, who, action, began = issue
+        steps = list(log_of(uid)) if log_of is not None else []
         current = expected_event(own, mode, now)
         shown = next((item for item in own if item.event_id == current), None) or running or next(
             (item for item in own_today if item.starts_at > now), None)
@@ -231,7 +231,7 @@ def compose_tile(
             "power": power,
             "signal": _percent(held.get("sig")),
             "issue": {"text": text, "who": who, "action": action},
-            "since": since,
+            "since": began,
             "trace": [describe_step(step, local) for step in steps],
         })
 
@@ -274,6 +274,7 @@ def tile_source(
         checks = monitor.checks(at) if monitor is not None else None
         return compose_tile(snapshot, at, local, sent, checks,
                             lambda uid: calendar.log_latest(uid, TRACE_LINES),
+                            calendar.log_started,
                             monitoring=monitor is not None and monitor.running(at))
 
     return current

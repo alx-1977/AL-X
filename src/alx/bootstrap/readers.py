@@ -464,10 +464,12 @@ class ReaderMonitor:
                 return  # a newer one is already held
             self._cards[uid] = (dict(report), received_at)
             # Battery, power and signal as last reported, for the BHL tile.
+            # A status read carries no power or signal: what a card said
+            # stands until a report says otherwise.
             self._checks[uid] = {**self._checks.get(uid, {}), "event": report.get("e"),
                                  "version": report.get("v"), "at": received_at,
-                                 "bat": report.get("bat"), "pwr": report.get("pwr"),
-                                 "sig": report.get("sig")}
+                                 **{field: report[field] for field in ("bat", "pwr", "sig")
+                                    if field in report}}
             self._last_outcome.pop(uid, None)
 
     def _judge_event(self, uid: str, report: Mapping[str, Any], received_at: datetime,

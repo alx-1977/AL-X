@@ -512,6 +512,15 @@ class MonitorTests(unittest.TestCase):
         data = tile_source(self.calendar, lambda: self.now[0], UTC, monitor=monitor)()
         self.assertEqual(data["readers"][0]["issue"]["who"], "tech")
 
+    def test_a_status_read_keeps_the_last_card_s_power_and_signal(self) -> None:
+        particle = Particle(status={"v": "x", "e": 1, "n": 1, "clk": 1, "bat": 90})
+        monitor = self.build(particle)
+        self.card(monitor, pwr="bat", sig=18, bat=50)
+        self.now[0] += timedelta(minutes=31)  # the card is old: the status is read
+        monitor.cycle()
+        held = monitor.checks(self.now[0])[UID]
+        self.assertEqual((held["bat"], held["pwr"], held["sig"]), (90, "bat", 18))
+
     def test_every_step_can_be_read_back(self) -> None:
         particle = Particle()
         monitor = self.build(particle)

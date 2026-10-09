@@ -17,7 +17,7 @@
 //       event:  { title: 'Leadership Workshop', when: 'until 14:30' } | null,
 //       power:  { source: 'usb' | 'battery', percent: 82 } | null,
 //       signal: 64 | null,
-//       issue:  { text: 'Schedule not confirmed', who: 'alx' | 'tech', action: 'Sending the schedule' },
+//       issue:  { text: 'Schedule not confirmed', who: 'alx' | 'tech' | 'reader', action: 'Sending the schedule' },
 //       since:  '2026-10-09T14:46:31+00:00' | null,
 //       trace:  [['14:46:31', 'sending schedule', 'alx'], ...]
 //     }]
@@ -125,7 +125,8 @@ export function buildTrace(reader, index = 0) {
   if (reader.issue?.action) {
     const next = el('footer', 'rt__next');
     next.dataset.who = reader.issue.who || 'alx';
-    next.append(el('span', 'rt__prompt', next.dataset.who === 'tech' ? 'You >' : 'AL/X >'),
+    const prompt = { tech: 'You >', reader: 'Reader >' }[next.dataset.who] ?? 'AL/X >';
+    next.append(el('span', 'rt__prompt', prompt),
       el('span', null, reader.issue.action));
     box.append(next);
   }

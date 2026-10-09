@@ -15,7 +15,7 @@ const WARNINGS = [
       ['14:31:07', 'card · event 1102 · bat 14% · sig 85%', '']] },
   { uid: '234689c8', room: 'Atrium', tone: 'warn', event: { title: 'Parent Training Essentials', when: 'until 15:45' },
     power: { source: 'usb', percent: 100 }, signal: 18, since: null,
-    issue: { text: 'Weak signal · 18%', who: 'alx', action: 'Scans wait on the reader until sent' },
+    issue: { text: 'Weak signal · 18%', who: 'reader', action: 'Keeps scans until they are sent' },
     trace: [['14:40:02', 'card · event 1099 · bat 100% · sig 18%', '']] },
   { uid: 'bdbbeefa', room: 'Studio', tone: 'warn', event: { title: 'Supervision Round Table', when: 'at 15:30' },
     power: { source: 'usb', percent: 100 }, signal: 77, since: ago(3),

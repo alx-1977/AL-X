@@ -222,12 +222,52 @@ class ComposeTileTests(unittest.TestCase):
              "detail": {"e": 1, "bat": 96, "sig": 52, "via": "card"}},
             {"at": "2026-10-07T14:25:00+00:00", "kind": "offline", "detail": {"via": "ping"}},
         )
-        data = compose_tile((REFRESHED, (), READERS, DAY), at(14, 30), UTC, HOLDING, {},
-                            lambda uid: steps if uid == "c471cf5a" else ())
+        asked = []
+
+        def log_of(uid):
+            asked.append(uid)
+            return steps
+
+        data = compose_tile((REFRESHED, (), READERS, DAY), at(14, 30), UTC, HOLDING, {}, log_of,
+                            lambda uid, kind, cleared_by="": f"{uid} {kind} {cleared_by}")
         reader = data["readers"][0]
         self.assertEqual(reader["trace"], [["14:20:00", "card · event 1 · bat 96% · sig 52%", ""],
                                            ["14:25:00", "offline · ping unanswered", "error"]])
-        self.assertEqual(reader["since"], "2026-10-07T14:25:00+00:00")
+        self.assertEqual(reader["since"], "c471cf5a offline online")
+        # Only the reader with a problem has its log read.
+        self.assertEqual(asked, ["c471cf5a"])
+
+    def test_a_problem_began_at_its_first_logged_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
+            uid = "c471cf5a"
+            calendar.log(at(13), uid, "schedule_sent", {})
+            calendar.log(at(14), uid, "schedule_delivery", {})
+            calendar.log(at(14, 10), uid, "schedule_delivery", {})
+            calendar.log(at(14, 5), uid, "offline", {})
+            calendar.log(at(14, 6), uid, "online", {})
+            calendar.log(at(14, 7), uid, "offline", {})
+            for minute in range(10):
+                calendar.log(at(14, 20 + minute), uid, "status", {})
+            found = (calendar.log_started(uid, "schedule_delivery", "schedule_sent"),
+                     calendar.log_started(uid, "offline", "online"),
+                     calendar.log_started(uid, "wrong_event"))
+            calendar.log(at(15), uid, "schedule_sent", {})
+            cleared = calendar.log_started(uid, "schedule_delivery", "schedule_sent")
+            calendar.close()
+        self.assertEqual(found, (at(14).isoformat(), at(14, 7).isoformat(), None))
+        self.assertIsNone(cleared)
+
+    def test_a_malformed_reading_is_unknown_not_a_failure(self) -> None:
+        checks = {"ab2d5218": {"online": True, "bat": float("nan"), "pwr": "bat",
+                               "sig": float("inf")}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual(data["readers"], [])
+
+    def test_weak_signal_is_the_reader_s_own_doing_not_al_x_s(self) -> None:
+        checks = {"ab2d5218": {"online": True, "sig": 18}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual(data["readers"][0]["issue"]["who"], "reader")
 
     def test_the_tile_reads_the_stored_calendar_and_what_was_sent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
