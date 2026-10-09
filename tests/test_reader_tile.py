@@ -29,7 +29,7 @@ from alx.contracts.readers import (  # noqa: E402
     active_windows,
     session_fingerprint,
 )
-from alx.interfaces.reader_tile import compose_tile, tile_source  # noqa: E402
+from alx.interfaces.reader_tile import compose_tile, tile_source, trace_lines  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.providers.reader_calendar import SQLiteReaderCalendar  # noqa: E402
 
@@ -100,7 +100,7 @@ class ComposeTileTests(unittest.TestCase):
         reader = data["readers"][0]
         self.assertEqual(reader["issue"]["who"], "tech")
         self.assertEqual((reader["room"], reader["event"]),
-                         ("Majestic", {"title": "Ethics", "when": "until 15:05"}))
+                         ("Majestic · IN", {"title": "Ethics", "when": "until 15:05"}))
 
     def test_offline_turns_red_30_minutes_before_its_event(self) -> None:
         self.assertEqual(tile(at(13, 34), sent=HOLDING)["tone"], "warn")
@@ -231,11 +231,29 @@ class ComposeTileTests(unittest.TestCase):
         data = compose_tile((REFRESHED, (), READERS, DAY), at(14, 30), UTC, HOLDING, {}, log_of,
                             lambda uid, kind, cleared_by="": f"{uid} {kind} {cleared_by}")
         reader = data["readers"][0]
-        self.assertEqual(reader["trace"], [["14:20:00", "card · event 1 · bat 96% · sig 52%", ""],
+        self.assertEqual(reader["trace"], [["14:20:00", "card · ev 1 · bat 96% · sig 52%", ""],
                                            ["14:25:00", "offline · ping unanswered", "error"]])
         self.assertEqual(reader["since"], "c471cf5a offline online")
         # Only the reader with a problem has its log read.
         self.assertEqual(asked, ["c471cf5a"])
+
+    def test_repeats_are_shown_once_and_older_days_carry_the_weekday(self) -> None:
+        steps = [{"at": at(19, day=5).isoformat(), "kind": "offline", "detail": {"via": "ping"}},
+                 {"at": at(21, day=6).isoformat(), "kind": "offline", "detail": {"via": "ping"}},
+                 {"at": at(14, 25).isoformat(), "kind": "offline", "detail": {"via": "ping"}},
+                 {"at": at(14, 26).isoformat(), "kind": "schedule_sent",
+                  "detail": {"version": "v1", "event_ids": [1]}}]
+        self.assertEqual(trace_lines(steps, UTC, at(14, 30)),
+                         [["14:25:00", "offline · ping unanswered ×3", "error"],
+                          ["14:26:00", "schedule v1 confirmed · 1 event", "ok"]])
+        self.assertEqual(trace_lines(steps[:1], UTC, at(14, 30)),
+                         [["Mon 19:00", "offline · ping unanswered", "error"]])
+
+    def test_the_out_reader_is_named_as_such(self) -> None:
+        readers = ({**ONLINE[0], "mode": 0}, {**ONLINE[1], "mode": 1})
+        data = tile(at(14, 10), readers=readers)
+        self.assertEqual(sorted(item["room"] for item in data["readers"]),
+                         ["Majestic · IN", "Majestic · OUT"])
 
     def test_a_problem_began_at_its_first_logged_step(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

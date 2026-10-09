@@ -1,11 +1,11 @@
-// The BHL tile (D-041, amended 2026-10-09): a small pill on the main screen
-// with one coloured light and one line, which opens one small trace per
-// reader with a problem, in the look of the AL/X Execution Trace (ES module,
-// no dependencies).
+// The BHL tile (D-041, amended 2026-10-09): a status bar across the top of
+// the main screen with one coloured light and one line, which opens one small
+// trace per reader with a problem, in the look of the AL/X Execution Trace
+// (ES module, no dependencies).
 //
-//   const view = surfaceReaderTraces(host, data);   // add the pill to host
-//   view.update(nextData);                          // same pill, new state
-//   view.dismiss();                                 // remove pill and traces
+//   const view = surfaceReaderTraces(host, data);   // add the bar to host
+//   view.update(nextData);                          // same bar, new state
+//   view.dismiss();                                 // remove bar and traces
 //
 // The renderer composes no wording and decides no state: every word and tone
 // comes from the server (interfaces/reader_tile.py). Shape:
@@ -84,6 +84,7 @@ function vitals(reader) {
 function elapsed(since) {
   const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
   const hours = Math.floor(seconds / 3600);
+  if (hours >= 24) return `${Math.floor(hours / 24)}d ${hours % 24}h`;
   const pad = (value) => String(value).padStart(2, '0');
   const rest = `${pad(Math.floor((seconds % 3600) / 60))}:${pad(seconds % 60)}`;
   return hours ? `${hours}:${rest}` : rest;
@@ -125,8 +126,9 @@ export function buildTrace(reader, index = 0) {
   if (reader.issue?.action) {
     const next = el('footer', 'rt__next');
     next.dataset.who = reader.issue.who || 'alx';
-    const prompt = { tech: 'You >', reader: 'Reader >' }[next.dataset.who] ?? 'AL/X >';
-    next.append(el('span', 'rt__prompt', prompt),
+    // Who acts next: words, not a prompt; nothing is typed here.
+    const who = { tech: 'you', reader: 'the reader' }[next.dataset.who] ?? 'AL/X';
+    next.append(el('span', 'rt__prompt', `Next, ${who}:`),
       el('span', null, reader.issue.action));
     box.append(next);
   }
@@ -134,7 +136,7 @@ export function buildTrace(reader, index = 0) {
 }
 
 export function surfaceReaderTraces(host, data) {
-  const pill = el('button', 'rt-pill');
+  const pill = el('button', 'rt-bar');
   pill.type = 'button';
   const panel = el('div', 'rt-panel');
   panel.hidden = true;
@@ -145,11 +147,10 @@ export function surfaceReaderTraces(host, data) {
 
   function renderPill() {
     pill.dataset.tone = current.tone || 'ok';
-    const text = el('span', 'rt-pill__text');
-    text.append(el('span', 'rt-pill__name', current.name || 'BHL'), el('span', 'rt-pill__title', current.title));
-    const chevron = el('span', 'rt-pill__chevron');
+    const chevron = el('span', 'rt-bar__chevron');
     chevron.innerHTML = CHEVRON;
-    pill.replaceChildren(el('span', 'rt-light'), text, chevron);
+    pill.replaceChildren(el('span', 'rt-light'), el('span', 'rt-bar__name', current.name || 'BHL'),
+      el('span', 'rt-bar__title', current.title), chevron);
     const count = current.readers?.length ?? 0;
     pill.disabled = count === 0;
     pill.setAttribute('aria-expanded', String(open && count > 0));
