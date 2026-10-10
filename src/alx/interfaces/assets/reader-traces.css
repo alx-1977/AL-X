@@ -100,7 +100,8 @@
   right: 0.6rem;
   /* Every trace the same size, the same space between them all. */
   display: grid;
-  grid-template-columns: repeat(auto-fill, 25em);
+  /* A window narrower than one trace shrinks it rather than clipping it. */
+  grid-template-columns: repeat(auto-fill, min(25em, 100%));
   justify-content: end;
   gap: 0.9em;
   width: min(52em, calc(100vw - 1.2rem));
