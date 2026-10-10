@@ -100,13 +100,17 @@
   right: 0.6rem;
   /* Every trace the same size, the same space between them all. */
   display: grid;
-  grid-template-columns: repeat(auto-fill, 25em);
+  /* A window narrower than one trace shrinks it rather than clipping it. */
+  grid-template-columns: repeat(auto-fill, min(25em, 100%));
   justify-content: end;
   gap: 0.9em;
   width: min(52em, calc(100vw - 1.2rem));
   max-height: calc(100vh - 4rem);
   overflow-y: auto;
-  font: 400 calc(clamp(13px, 0.95vw, 30px) * 0.66) / 1.35 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* The Execution Trace's own sizes (app.css), not scaled with the screen:
+     at 0.85rem a trace's log and next line are its .68rem, its status row
+     .72rem and its small lines .64rem. */
+  font: 400 0.85rem / 1.35 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 .rt-panel[hidden] { display: none; }
