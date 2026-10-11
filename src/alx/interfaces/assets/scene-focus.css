@@ -1,0 +1,219 @@
+/* Mockup: the BHL display as part of the scene, not stacked on it.
+   1. The scene's edges glow amber or red when something is wrong.
+   2. Opening BHL pulls focus: the video blurs and dims, and the information
+      appears in that space as light, with no boxes. */
+
+:root {
+  --sf-ok: #4ade80;
+  --sf-warn: #fbbf24;
+  --sf-bad: #ff6b6b;
+  --sf-ink: #f3f8fc;
+  --sf-muted: rgba(232, 242, 250, 0.68);
+  --sf-faint: rgba(232, 242, 250, 0.42);
+  --sf-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
+  --sf-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+[data-tone="ok"] { --tone: var(--sf-ok); }
+[data-tone="warn"] { --tone: var(--sf-warn); }
+[data-tone="bad"] { --tone: var(--sf-bad); }
+
+/* ---- 1. the scene's edges take the colour of the day ---------------------- */
+
+.sf-glow {
+  position: fixed;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 6vw color-mix(in srgb, var(--tone) 34%, transparent),
+    inset 0 0 18vw color-mix(in srgb, var(--tone) 14%, transparent);
+  opacity: 0;
+  transition: opacity 1.2s ease;
+}
+.sf-glow[data-tone="warn"], .sf-glow[data-tone="bad"] { opacity: 1; }
+.sf-glow[data-tone="bad"] { animation: sf-breathe 4s ease-in-out infinite; }
+
+/* ---- 2. focus pull --------------------------------------------------------- */
+
+/* One fixed blur that fades in: the browser only changes the layer's
+   opacity, which the graphics card does smoothly. (Changing the blur
+   itself every frame recomputes it each time and stutters.) */
+.sf-focus {
+  position: fixed;
+  z-index: 2;
+  inset: 0;
+  background: rgba(4, 10, 20, 0.38);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+  backdrop-filter: blur(18px) saturate(120%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: opacity;
+}
+.sf-focus.is-on { opacity: 1; pointer-events: auto; }
+
+/* The information: type and light directly on the softened scene. */
+.sf-info {
+  position: fixed;
+  z-index: 3;
+  inset: calc(1.85 * 13px) 0 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 5vh 5vw 6vh;
+  color: var(--sf-ink);
+  font: 400 clamp(12px, 0.85vw, 24px) / 1.35 var(--sf-display);
+  text-shadow: 0 1px 14px rgba(0, 6, 16, 0.55), 0 0 2px rgba(0, 6, 16, 0.35);
+  -webkit-font-smoothing: antialiased;
+  pointer-events: none;
+  visibility: hidden;
+}
+.sf-info.is-on { visibility: visible; }
+.sf-info:not(.is-on) { transition: visibility 0s 0.15s; }
+.sf-info:not(.is-on) > * { transition-duration: 0.15s; }
+.sf-info > * { opacity: 0; transform: translateY(0.4em); transition: opacity 0.25s ease, transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.sf-info.is-on > * { opacity: 1; transform: none; }
+.sf-info.is-on > :nth-child(1) { transition-delay: 0.15s; }
+.sf-info.is-on > :nth-child(2) { transition-delay: 0.19s; }
+.sf-info.is-on > :nth-child(3) { transition-delay: 0.23s; }
+
+/* A shade with no edges behind each block, so type reads over any part
+   of the scene without a box. */
+.sf-shade { position: relative; }
+.sf-shade::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -3em -4em;
+  background: radial-gradient(closest-side, rgba(2, 8, 18, 0.42), transparent);
+  pointer-events: none;
+}
+
+/* Top: the day at a glance. */
+.sf-top { display: flex; align-items: flex-end; gap: 5vw; }
+.sf-hero__label { margin: 0 0 0.4em; color: var(--sf-muted); font-size: 0.95em; font-weight: 600; letter-spacing: 0.32em; }
+.sf-hero__state { display: flex; align-items: center; gap: 0.5em; margin: 0; font-size: 1.5em; font-weight: 300; letter-spacing: 0.06em; }
+.sf-hero__figure { margin: 0.05em 0 0; font-size: 6.5em; font-weight: 100; letter-spacing: -0.02em; line-height: 1; }
+.sf-hero__figure small { margin-left: 0.25em; color: var(--sf-muted); font-size: 0.16em; font-weight: 500; letter-spacing: 0.24em; }
+.sf-facts { display: flex; gap: 3.2vw; margin-bottom: 1.1em; }
+.sf-fact b { display: block; font-size: 2.1em; font-weight: 200; font-variant-numeric: tabular-nums; }
+.sf-fact span { color: var(--sf-muted); font-size: 0.9em; letter-spacing: 0.04em; }
+.sf-fact[data-idle] b { color: var(--sf-faint); font-size: 1.1em; font-weight: 500; letter-spacing: 0.16em; padding: 0.55em 0 0.35em; }
+
+/* LEDs, as before. */
+.sf-led {
+  flex: 0 0 auto;
+  width: 0.55em;
+  height: 0.55em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--tone) 25%, #fff), var(--tone) 55%);
+  box-shadow: 0 0 0.3em var(--tone), 0 0 0.9em var(--tone), 0 0 2.2em color-mix(in srgb, var(--tone) 60%, transparent);
+}
+[data-tone="bad"] > .sf-led, [data-tone="bad"] .sf-room > .sf-led { animation: sf-led 1.6s ease-in-out infinite; }
+
+/* Bottom: one column of light per reader with a problem. */
+.sf-readers { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3vw; }
+.sf-reader { min-width: 0; }
+.sf-reader::after {
+  /* the reader's colour as a line of light above it */
+  content: "";
+  position: absolute;
+  top: -1.1em;
+  left: 0;
+  width: 3em;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--tone);
+  box-shadow: 0 0 0.8em var(--tone);
+}
+.sf-room { display: flex; align-items: center; gap: 0.6em; margin: 0; font-size: 1.15em; font-weight: 600; letter-spacing: 0.03em; }
+.sf-problem {
+  display: flex;
+  justify-content: space-between;
+  gap: 1em;
+  margin: 0.35em 0 0;
+  color: color-mix(in srgb, var(--tone) 55%, #fff);
+  font: 600 0.95em/1.3 var(--sf-mono);
+}
+.sf-problem time { color: var(--sf-muted); font-weight: 500; }
+.sf-event { margin: 0.25em 0 0.7em; overflow: hidden; color: var(--sf-faint); font-size: 0.85em; white-space: nowrap; text-overflow: ellipsis; }
+.sf-log { margin: 0; padding: 0; list-style: none; font: 0.8em/1.65 var(--sf-mono); color: var(--sf-muted); }
+.sf-log li { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sf-log time { margin-right: 0.8em; color: var(--sf-faint); }
+.sf-log [data-tone="error"] { color: #ffb4b4; }
+.sf-log [data-tone="warn"] { color: #ffe0b3; }
+.sf-log [data-tone="alx"] { color: #cfe8ff; }
+/* The last line, alive: a terminal cursor after the last word, in the
+   text's own colour, blinking at a steady pace. Friedl: the same on every
+   line; the blink already says it is live, and colour stays for status. */
+.sf-next { margin: 0.8em 0 0; font: 0.82em/1.45 var(--sf-mono); color: var(--sf-ink); }
+.sf-next__cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  margin-left: 0.3em;
+  border-radius: 1px;
+  vertical-align: -0.18em;
+  background: currentColor;
+  animation: sf-blink 0.8s steps(1, end) infinite;
+}
+
+@keyframes sf-blink { 50% { opacity: 0; } }
+
+
+.sf-calm { color: var(--sf-muted); font-size: 1.3em; font-weight: 300; letter-spacing: 0.04em; }
+
+/* The menu bar, as live. */
+.sf-bar {
+  position: fixed;
+  z-index: 4;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  height: calc(1.85 * 13px);
+  padding: 0 0.9em;
+  background: rgba(18, 22, 30, 0.28);
+  box-shadow: inset 0 -0.5px 0 rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.94);
+  font: 500 13px/1 -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  backdrop-filter: blur(30px) saturate(180%);
+}
+.sf-bar__app { padding: 0 0.6em; font-weight: 700; }
+.sf-bar__space { flex: 1; }
+.sf-bar__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0 0.6em;
+  border: 0;
+  background: none;
+  color: rgba(255, 255, 255, 0.85);
+  font: 600 13px/1 -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.sf-bar__item:hover, .sf-bar__item[aria-expanded="true"] { color: #fff; }
+.sf-bar__clock { padding: 0 0.6em; font-variant-numeric: tabular-nums; }
+
+/* Preview only. */
+.sf-hint {
+  position: fixed;
+  z-index: 5;
+  bottom: 1rem;
+  left: 50%;
+  padding: 0.5em 1em;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  color: rgba(255, 255, 255, 0.8);
+  font: 500 12px/1 -apple-system, system-ui, sans-serif;
+  transform: translateX(-50%);
+}
+
+@keyframes sf-breathe { 50% { opacity: 0.55; } }
+@keyframes sf-led { 50% { box-shadow: 0 0 0.2em var(--tone), 0 0 0.4em var(--tone); filter: brightness(0.8); } }
+@media (prefers-reduced-motion: reduce) {
+  .sf-glow, .sf-led, .sf-focus, .sf-info > *, .sf-next * { animation: none !important; transition: none !important; }
+}

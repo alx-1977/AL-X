@@ -1,0 +1,931 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>AL/X · Operations</title>
+<style>
+:root {
+  --ink: #edf4fa;
+  --muted: #a7b6c7;
+  --green: #86f3b6;
+  --amber: #ffc475;
+  --red: #ff786d;
+  --status: var(--red);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: #071321;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, [tabindex]:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 6px;
+}
+::selection { background: #536779; color: white; }
+
+.scene {
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 72% 30%, #24445b55, transparent 50%),
+    linear-gradient(145deg, #142e46, #081829 55%, #020811);
+  transition: filter .3s, transform .3s;
+}
+video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+body.focused .scene {
+  filter: blur(15px) brightness(.38);
+  transform: scale(1.045);
+}
+.shade {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .3s;
+  background:
+    radial-gradient(ellipse at 40% 45%, #020b17b3, transparent 85%),
+    linear-gradient(0deg, #030b15cc, transparent);
+}
+body.focused .shade { opacity: 1; }
+
+.edge {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  box-shadow:
+    inset 0 0 70px -24px var(--status),
+    inset 0 0 8px -4px var(--status);
+  opacity: .28;
+}
+body[data-status="error"] .edge {
+  animation: breathe 5s ease-in-out infinite;
+}
+body[data-status="warning"] { --status: var(--amber); }
+body[data-status="ok"] { --status: var(--green); }
+body[data-status="ok"] .edge { display: none; }
+@keyframes breathe { 50% { opacity: .55; } }
+
+.menu {
+  height: 34px;
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: #06111d48;
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  font-size: 12px;
+  letter-spacing: .025em;
+}
+.brand {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: .13em;
+}
+.menu-right { display: flex; align-items: center; gap: 25px; }
+.menu time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: none;
+  border: 0;
+  padding: 7px 0;
+  font-size: 12px;
+}
+.led {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status);
+  box-shadow:
+    0 0 3px 1px var(--status),
+    0 0 11px 3px color-mix(in srgb, var(--status) 40%, transparent);
+  position: relative;
+}
+.led::after {
+  content: "";
+  position: absolute;
+  inset: 1px 2px 3px 1px;
+  border-radius: 50%;
+  background: #fff9;
+}
+
+#operations {
+  position: fixed;
+  inset: 34px 0 0;
+  z-index: 6;
+  overflow: auto;
+  padding: clamp(32px, 5vh, 64px) clamp(26px, 5.2vw, 100px) 24px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(8px);
+  transition: opacity .3s, transform .3s, visibility .3s;
+  scrollbar-color: #7b8c9c55 transparent;
+  scrollbar-width: thin;
+}
+body.focused #operations {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+}
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+}
+.overview {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 28px;
+  margin-bottom: 36px;
+}
+.overview h1 {
+  font-size: clamp(30px, 3.2vw, 50px);
+  font-weight: 250;
+  letter-spacing: -.035em;
+  margin: 10px 0 0;
+}
+.overview h1 span { color: var(--red); }
+.metrics { display: flex; gap: clamp(25px, 4vw, 70px); }
+.metric { display: flex; flex-direction: column; gap: 7px; }
+.number {
+  font-size: clamp(34px, 3.7vw, 58px);
+  font-weight: 200;
+  line-height: 1;
+  letter-spacing: -.045em;
+  font-variant-numeric: tabular-nums;
+}
+.number small {
+  font-size: .39em;
+  color: var(--muted);
+  font-weight: 300;
+  letter-spacing: -.02em;
+}
+.metric .label { font-size: 11px; color: var(--muted); }
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  margin-bottom: 23px;
+}
+.section-head .hint { font-size: 11px; color: var(--muted); }
+
+.readers {
+  display: flex;
+  gap: 42px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  overscroll-behavior-x: contain;
+  padding: 4px 2px 20px;
+  margin: 0 -2px;
+  scrollbar-width: thin;
+  scrollbar-color: #92a1b844 transparent;
+}
+.reader {
+  flex: 0 0 calc((100% - 168px) / 5);
+  min-width: 270px;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  --status: var(--amber);
+}
+.reader.error { --status: var(--red); }
+.reader-top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--status);
+  font-size: 10px;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+.reader h2 {
+  font-size: 23px;
+  letter-spacing: -.035em;
+  font-weight: 400;
+  margin: 17px 0 6px;
+  white-space: nowrap;
+}
+.direction {
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: .08em;
+  color: var(--muted);
+  margin-left: 9px;
+}
+.problem { font-size: 13px; color: var(--status); margin: 0; }
+.problem span { color: var(--muted); }
+.reading {
+  font-size: 46px;
+  font-weight: 200;
+  letter-spacing: -.04em;
+  color: var(--status);
+  margin: 17px 0 16px;
+  line-height: 1.08;
+}
+.reading small { font-size: 20px; letter-spacing: 0; }
+.expected {
+  font-size: 12px;
+  line-height: 1.7;
+  min-height: 62px;
+  margin: 0 0 17px;
+}
+.expected span {
+  display: block;
+  font-size: 9px;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.logs {
+  font: 10px/1.9 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  margin: 0 0 20px;
+  white-space: pre-wrap;
+}
+.now {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--status);
+  margin: auto 0 0;
+  min-height: 65px;
+  max-width: 290px;
+}
+.cursor {
+  display: inline-block;
+  width: 6px;
+  height: 1em;
+  background: currentColor;
+  margin-left: 5px;
+  vertical-align: -.15em;
+  animation: blink 1.1s step-end infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+.day { margin-top: 28px; }
+.day .section-head { margin-bottom: 16px; }
+.day-grid { min-width: 710px; }
+.day-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #92a1b844 transparent;
+}
+.axis, .room-row {
+  display: grid;
+  grid-template-columns: 125px 1fr 210px;
+  gap: 22px;
+}
+.axis { font-size: 9px; color: var(--muted); margin-bottom: 12px; }
+.hours {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+}
+.axis > span:last-child { text-align: right; }
+.room-row { align-items: center; height: 23px; font-size: 11px; }
+.room-name { color: var(--muted); }
+.room-name.affected { color: var(--ink); }
+.track {
+  height: 100%;
+  position: relative;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(10% - 1px),
+    #c2d7ec09 calc(10% - 1px),
+    #c2d7ec09 10%
+  );
+}
+.session {
+  position: absolute;
+  top: 10px;
+  height: 2px;
+  background: #e5eff966;
+  outline-offset: 4px !important;
+}
+.session.past { background: #d4e4f02b; }
+.session.active {
+  height: 3px;
+  background: #e6f1fa;
+  box-shadow: 0 0 7px #e1edf533;
+}
+.session.troubled {
+  background: var(--amber);
+  box-shadow: 0 0 8px #ffc47533;
+}
+.session.critical {
+  background: var(--red);
+  box-shadow: 0 0 8px #ff786d44;
+}
+.session:hover, .session:focus-visible { height: 6px; top: 8px; }
+.snapshot {
+  position: absolute;
+  left: 71.6667%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #e4f3ff52;
+  pointer-events: none;
+}
+.current-session {
+  font-size: 10px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.session-detail {
+  min-height: 24px;
+  font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--ink);
+  margin: 12px 0 0;
+}
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 22px;
+}
+footer span { opacity: .8; }
+
+@media (min-width: 1800px) {
+  .reader { min-width: 0; }
+  .reader h2 { font-size: 26px; }
+  .logs { font-size: 11px; }
+  .room-row { height: 25px; }
+}
+@media (max-width: 850px) {
+  .overview { align-items: start; flex-direction: column; gap: 27px; }
+  .metrics { width: 100%; justify-content: space-between; }
+  .overview h1 { font-size: 34px; }
+  .reader { min-width: 275px; }
+  .section-head { align-items: start; }
+  .axis, .room-row {
+    grid-template-columns: 100px 1fr 160px;
+    gap: 14px;
+  }
+  .menu { padding: 0 16px; }
+  .menu-right { gap: 17px; }
+  .day { margin-top: 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+  .scene video { visibility: hidden; }
+  .cursor { opacity: 1; }
+}
+</style>
+</head>
+
+<body data-status="error">
+<div class="scene" aria-hidden="true">
+  <video id="film" autoplay muted loop playsinline preload="metadata">
+    <source src="background.mp4" type="video/mp4">
+  </video>
+</div>
+<div class="shade" aria-hidden="true"></div>
+<div class="edge" aria-hidden="true"></div>
+
+<header class="menu">
+  <span class="brand">AL/X</span>
+  <div class="menu-right">
+    <button id="toggle"
+            aria-expanded="false"
+            aria-controls="operations"
+            aria-label="BHL operations, errors need attention">
+      <i class="led" aria-hidden="true"></i>BHL
+    </button>
+    <time id="clock"></time>
+  </div>
+</header>
+
+<main id="operations"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="heading"
+      aria-hidden="true"
+      inert
+      tabindex="-1">
+
+  <header class="overview">
+    <div>
+      <p class="eyebrow">BHL / Room operations · sample data</p>
+      <h1 id="heading"><span>3 rooms</span> need a person.</h1>
+    </div>
+    <div class="metrics" aria-label="Reader statistics">
+      <div class="metric">
+        <span class="number">59<small> / 60</small></span>
+        <span class="label">readers online</span>
+      </div>
+      <div class="metric">
+        <span class="number">58<small> / 60</small></span>
+        <span class="label">on correct session</span>
+      </div>
+      <div class="metric">
+        <span class="number">1,790</span>
+        <span class="label">scans today</span>
+      </div>
+    </div>
+  </header>
+
+  <section aria-labelledby="attention-heading">
+    <div class="section-head">
+      <h2 class="eyebrow" id="attention-heading">Attention / 5 readers</h2>
+      <span class="hint" id="scroll-hint">
+        Scroll sideways to inspect all readers →
+      </span>
+    </div>
+    <div class="readers"
+         id="readers"
+         tabindex="0"
+         aria-label="Readers needing attention; scroll horizontally"></div>
+  </section>
+
+  <section class="day" aria-labelledby="day-heading">
+    <div class="section-head">
+      <h2 class="eyebrow" id="day-heading">The day / 15 rooms</h2>
+      <span class="hint">Schedules read 14:52</span>
+    </div>
+    <div class="day-scroll">
+      <div class="day-grid">
+        <div class="axis">
+          <span>ROOM</span>
+          <div class="hours">
+            <span>08</span><span>09</span><span>10</span>
+            <span>11</span><span>12</span><span>13</span>
+            <span>14</span><span>15</span><span>16</span>
+            <span>17</span><span>18</span>
+          </div>
+          <span>SESSION AT SNAPSHOT</span>
+        </div>
+        <div id="schedule"></div>
+      </div>
+    </div>
+    <p class="session-detail" id="session-detail">
+      Hover or focus a session trace to read its title and scheduled time.
+    </p>
+  </section>
+
+  <footer>
+    <span>
+      Sample telemetry · 2 IN + 2 OUT per room · Scanners &amp; PSUs not monitored
+    </span>
+    <span>Click the scene or press Esc to return</span>
+  </footer>
+</main>
+
+<script>
+'use strict';
+
+// Presentation fixture only: no device commands, polling or simulated repairs.
+// Production must render authoritative state and prose supplied by AL/X Core.
+
+const issues = [
+  {
+    room: 'Majestic',
+    dir: 'OUT 02',
+    level: 'error',
+    owner: 'Needs a person',
+    problem: 'Offline during session',
+    duration: '10 min',
+    value: 'Offline',
+    unit: '',
+    session: '14:30–15:30 · The connected venue',
+    logs: [
+      '14:59:58  heartbeat received',
+      '15:00:02  connection lost',
+      '15:09:58  heartbeat timeout'
+    ],
+    now: 'A person is needed at the exit to check power and the connection.'
+  },
+  {
+    room: 'Conference B',
+    dir: 'IN 01',
+    level: 'error',
+    owner: 'Needs a person',
+    problem: 'Wrong session',
+    duration: '7 min',
+    value: 'B-03',
+    unit: '→ B-04',
+    session: '15:00–16:00 · Identity at the edge',
+    logs: [
+      '15:00:00  expected session B-04',
+      '15:03:11  reported session B-03',
+      '15:09:44  mismatch persists'
+    ],
+    now: 'A person is needed at the entrance to check the reader’s session.'
+  },
+  {
+    room: 'Terrace',
+    dir: 'IN 02',
+    level: 'warning',
+    owner: 'Needs a person',
+    problem: 'Low battery before next session',
+    duration: '4 min',
+    value: '14',
+    unit: '% battery',
+    session: '16:30–17:30 · Sunset networking',
+    logs: [
+      '15:02:00  battery 16%',
+      '15:06:00  battery 14%',
+      '15:09:51  next session T-05'
+    ],
+    now: 'A person is needed to charge or replace this reader before 16:30.'
+  },
+  {
+    room: 'Atrium',
+    dir: 'OUT 01',
+    level: 'warning',
+    owner: 'Holding scans',
+    problem: 'Weak signal',
+    duration: '12 min',
+    value: '18',
+    unit: '% signal',
+    session: '14:30–15:30 · Designing for flow',
+    logs: [
+      '14:58:05  signal fell to 18%',
+      '15:08:42  scan saved locally',
+      '15:09:57  upload retry pending'
+    ],
+    now: 'The reader is holding scans locally until they can be sent.'
+  },
+  {
+    room: 'Studio',
+    dir: 'IN 01',
+    level: 'warning',
+    owner: 'AL/X handling',
+    problem: 'Next schedule unconfirmed',
+    duration: '2 min',
+    value: 'Pending',
+    unit: '',
+    session: '15:30–16:30 · Prototyping lab',
+    logs: [
+      '14:52:00  schedule read complete',
+      '15:08:03  confirmation missing',
+      '15:09:56  schedule resend queued'
+    ],
+    now: 'AL/X is resending the schedule and waiting for confirmation.'
+  }
+];
+
+const rooms = [
+  ['Majestic',
+    'Opening keynote', 'Future cities',
+    'The connected venue', 'Closing keynote'],
+  ['Conference A',
+    'Leadership forum', 'Scaling teams',
+    'Operational resilience', 'Leadership clinic'],
+  ['Conference B',
+    'Digital trust', 'Connected credentials',
+    'Identity at the edge', 'Privacy workshop'],
+  ['Terrace',
+    'Morning connections', 'Partner conversations',
+    'Open networking', 'Sunset networking'],
+  ['Atrium',
+    'Welcome exchange', 'Visitor journeys',
+    'Designing for flow', 'Community exchange'],
+  ['Studio',
+    'Design systems', 'Rapid experiments',
+    'Hands-on interfaces', 'Prototyping lab'],
+  ['Summit',
+    'Market outlook', 'Growth strategy',
+    'Emerging markets', 'Investor roundtable'],
+  ['Horizon',
+    'Energy futures', 'Climate technology',
+    'Low-carbon venues', 'Future infrastructure'],
+  ['Orchid',
+    'People first', 'Inclusive events',
+    'Accessible experiences', 'Culture workshop'],
+  ['Cedar',
+    'Secure foundations', 'Device security',
+    'Network resilience', 'Security clinic'],
+  ['Maple',
+    'Data foundations', 'Useful analytics',
+    'Measuring attendance', 'Data workshop'],
+  ['Willow',
+    'Customer stories', 'Service design',
+    'Better support', 'Service clinic'],
+  ['Gallery',
+    'Creative futures', 'Visual storytelling',
+    'Immersive spaces', 'Creative exchange'],
+  ['Forum',
+    'Policy briefing', 'Industry standards',
+    'Open collaboration', 'Industry roundtable'],
+  ['Pavilion',
+    'Partner welcome', 'Product showcases',
+    'Deployment lessons', 'Partner wrap-up']
+];
+
+const minute = time => {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+// The telemetry and schedule marker share a fixed sample snapshot.
+// The menu clock independently shows the computer's actual date and time.
+const snapshot = minute('15:10');
+
+const escapeHTML = value => String(value).replace(
+  /[&<>"']/g,
+  character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[character])
+);
+
+const readers = document.getElementById('readers');
+
+readers.innerHTML = issues.map(reader => `
+  <article class="reader ${reader.level}"
+           aria-label="${escapeHTML(
+             reader.room + ' ' + reader.dir + '; ' + reader.problem
+           )}">
+    <div class="reader-top">
+      <i class="led" aria-hidden="true"></i>
+      ${escapeHTML(reader.owner)}
+    </div>
+    <h2>
+      ${escapeHTML(reader.room)}
+      <span class="direction">${escapeHTML(reader.dir)}</span>
+    </h2>
+    <p class="problem">
+      ${escapeHTML(reader.problem)}
+      <span>· ${escapeHTML(reader.duration)}</span>
+    </p>
+    <div class="reading">
+      ${escapeHTML(reader.value)}<small> ${escapeHTML(reader.unit)}</small>
+    </div>
+    <p class="expected">
+      <span>Expected session</span>
+      ${escapeHTML(reader.session)}
+    </p>
+    <pre class="logs">${reader.logs.map(escapeHTML).join('\n')}</pre>
+    <p class="now">
+      ${escapeHTML(reader.now)}<span class="cursor" aria-hidden="true"></span>
+    </p>
+  </article>
+`).join('');
+
+const detail = document.getElementById('session-detail');
+const schedule = document.getElementById('schedule');
+const defaultDetail = detail.textContent;
+
+rooms.forEach(([name, ...titles], index) => {
+  const times = index % 2 === 0
+    ? [
+        ['08:00', '09:00'],
+        ['10:00', '11:30'],
+        ['14:30', '15:30'],
+        ['16:00', '17:00']
+      ]
+    : [
+        ['08:30', '09:30'],
+        ['10:30', '12:00'],
+        ['15:00', '16:00'],
+        ['16:30', '17:30']
+      ];
+
+  if (name === 'Conference B') {
+    times[2] = ['15:00', '16:00'];
+    times[3] = ['16:30', '17:30'];
+  }
+  if (name === 'Terrace') {
+    times[2] = ['13:00', '14:00'];
+  }
+  if (name === 'Studio') {
+    times[2] = ['13:30', '14:30'];
+    times[3] = ['15:30', '16:30'];
+  }
+
+  const sessions = times.map(([start, end], i) => ({
+    start,
+    end,
+    title: titles[i]
+  }));
+
+  sessions.splice(2, 0, {
+    start: '12:15',
+    end: '13:00',
+    title: 'Hosted lunch & discussion'
+  });
+
+  const active = sessions.find(session =>
+    minute(session.start) <= snapshot &&
+    minute(session.end) > snapshot
+  );
+  const next = sessions.find(session => minute(session.start) > snapshot);
+  const issue = issues.find(reader => reader.room === name);
+  const row = document.createElement('div');
+
+  row.className = 'room-row';
+  row.innerHTML = `
+    <span class="room-name ${issue ? 'affected' : ''}">
+      ${escapeHTML(name)}
+    </span>
+    <div class="track">
+      <span class="snapshot" aria-hidden="true"></span>
+    </div>
+    <span class="current-session">
+      ${escapeHTML(
+        active ? active.title :
+        next ? 'Next · ' + next.title :
+        'Day complete'
+      )}
+    </span>
+  `;
+
+  const track = row.querySelector('.track');
+
+  sessions.forEach(session => {
+    const start = minute(session.start);
+    const end = minute(session.end);
+    const relevant = issue && (
+      session === active || (!active && session === next)
+    );
+
+    const trace = document.createElement('span');
+    trace.className =
+      'session' +
+      (end <= snapshot ? ' past' : session === active ? ' active' : '') +
+      (relevant ? issue.level === 'error' ? ' critical' : ' troubled' : '');
+
+    trace.style.left = ((start - 480) / 600 * 100) + '%';
+    trace.style.width = ((end - start) / 600 * 100) + '%';
+    trace.tabIndex = 0;
+
+    const description =
+      `${name} · ${session.start}–${session.end} · ${session.title}`;
+
+    trace.setAttribute('aria-label', description);
+    trace.title = description;
+
+    trace.addEventListener('mouseenter', () => {
+      detail.textContent = description;
+    });
+    trace.addEventListener('mouseleave', () => {
+      if (document.activeElement !== trace) {
+        detail.textContent = defaultDetail;
+      }
+    });
+    trace.addEventListener('focus', () => {
+      detail.textContent = description;
+    });
+    trace.addEventListener('blur', () => {
+      detail.textContent = defaultDetail;
+    });
+
+    track.append(trace);
+  });
+
+  schedule.append(row);
+});
+
+const toggle = document.getElementById('toggle');
+const operations = document.getElementById('operations');
+
+function setOpen(open) {
+  document.body.classList.toggle('focused', open);
+  toggle.setAttribute('aria-expanded', String(open));
+  operations.setAttribute('aria-hidden', String(!open));
+  operations.inert = !open;
+
+  if (open) {
+    operations.focus({ preventScroll: true });
+    updateScrollHint();
+  } else {
+    toggle.focus({ preventScroll: true });
+  }
+}
+
+toggle.addEventListener('click', () => {
+  setOpen(!document.body.classList.contains('focused'));
+});
+
+let pointerStart;
+
+operations.addEventListener('pointerdown', event => {
+  pointerStart = { x: event.clientX, y: event.clientY };
+});
+
+operations.addEventListener('click', event => {
+  // Empty-scene clicks close; logs remain selectable and traces inspectable.
+  if (event.target.closest('.reader, .session, .session-detail')) return;
+  if (window.getSelection().toString()) return;
+
+  if (pointerStart && Math.hypot(
+    event.clientX - pointerStart.x,
+    event.clientY - pointerStart.y
+  ) > 8) return;
+
+  setOpen(false);
+});
+
+document.addEventListener('keydown', event => {
+  if (!document.body.classList.contains('focused')) return;
+
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    setOpen(false);
+  }
+
+  if (event.key === 'Tab') {
+    const stops = [
+      toggle,
+      readers,
+      ...schedule.querySelectorAll('[tabindex="0"]')
+    ];
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+
+    if (event.shiftKey && (
+      document.activeElement === first ||
+      document.activeElement === operations
+    )) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+});
+
+readers.addEventListener('keydown', event => {
+  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+    event.preventDefault();
+    readers.scrollBy({
+      left: (event.key === 'ArrowRight' ? 1 : -1) * 312,
+      behavior: motion.matches ? 'instant' : 'smooth'
+    });
+  }
+});
+
+function updateScrollHint() {
+  document.getElementById('scroll-hint').hidden =
+    readers.scrollWidth <= readers.clientWidth + 2;
+}
+window.addEventListener('resize', updateScrollHint);
+
+const clock = document.getElementById('clock');
+
+function tick() {
+  const now = new Date();
+  clock.dateTime = now.toISOString();
+  clock.textContent = new Intl.DateTimeFormat('en-GB', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).format(now);
+}
+tick();
+setInterval(tick, 1000);
+
+const film = document.getElementById('film');
+const motion = matchMedia('(prefers-reduced-motion: reduce)');
+
+function syncMotion() {
+  if (motion.matches || document.hidden) {
+    film.pause();
+  } else {
+    film.play().catch(() => {});
+  }
+}
+
+motion.addEventListener('change', syncMotion);
+document.addEventListener('visibilitychange', syncMotion);
+syncMotion();
+</script>
+</body>
+</html>

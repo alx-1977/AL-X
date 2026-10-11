@@ -1,0 +1,99 @@
+/* Blank-canvas mockup: the event day as light on the scene.
+   Builds on scene-focus.css (menu bar, edge glow, focus pull, LEDs, the
+   boxless reader columns). New here: one sentence that says what matters,
+   and the day itself as lanes of light, a lane per room, with "now" as a
+   line of light running down through them. */
+
+/* The page's own arrangement inside .sf-info. */
+.cv { display: grid; grid-template-rows: auto 1fr auto; gap: 4.5vh; height: 100%; }
+
+/* ---- the one sentence ------------------------------------------------------ */
+
+.cv-say { display: flex; align-items: flex-end; justify-content: space-between; gap: 4vw; }
+.cv-say__line { margin: 0; font-size: 3.4em; font-weight: 200; letter-spacing: -0.01em; line-height: 1.05; }
+.cv-say__line em { font-style: normal; color: color-mix(in srgb, var(--tone) 70%, #fff); }
+.cv-say__facts { margin: 0.9em 0 0; color: var(--sf-muted); font: 0.95em/1.4 var(--sf-mono); letter-spacing: 0.02em; }
+.cv-say__facts b { color: var(--sf-ink); font-weight: 500; }
+.cv-say__facts span + span::before { content: "  ·  "; color: var(--sf-faint); white-space: pre; }
+.cv-say__idle { margin: 0; color: var(--sf-faint); font: 0.85em/1.5 var(--sf-mono); text-align: right; }
+
+/* ---- the day ----------------------------------------------------------------- */
+
+.cv-day { position: relative; display: grid; grid-template-columns: 9em 1fr; align-self: center; min-height: 0; }
+.cv-hours {
+  grid-column: 2;
+  position: relative;
+  height: 1.6em;
+  color: var(--sf-faint);
+  font: 0.75em/1 var(--sf-mono);
+}
+.cv-hours span { position: absolute; top: 0; transform: translateX(-50%); }
+.cv-lanes { display: contents; }
+.cv-room {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  height: 1.75em;
+  overflow: hidden;
+  color: var(--sf-muted);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.cv-room[data-tone="warn"], .cv-room[data-tone="bad"] { color: var(--sf-ink); }
+.cv-room .sf-led { width: 0.5em; height: 0.5em; }
+.cv-lane { grid-column: 2; position: relative; height: 1.75em; font-size: 0.85em; }
+.cv-lane::before {
+  /* the lane itself: barely there */
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(232, 242, 250, 0.08);
+}
+.cv-session {
+  position: absolute;
+  top: calc(50% - 2px);
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(232, 242, 250, 0.22);
+}
+.cv-session[data-when="past"] { background: rgba(232, 242, 250, 0.1); }
+.cv-session[data-when="now"] {
+  background: rgba(240, 248, 255, 0.85);
+  box-shadow: 0 0 0.7em rgba(200, 230, 255, 0.55);
+}
+.cv-session[data-when="now"][data-tone="warn"], .cv-session[data-when="now"][data-tone="bad"] {
+  background: var(--tone);
+  box-shadow: 0 0 0.8em var(--tone), 0 0 1.8em color-mix(in srgb, var(--tone) 50%, transparent);
+}
+.cv-session[data-when="next"][data-tone="warn"], .cv-session[data-when="next"][data-tone="bad"] {
+  background: color-mix(in srgb, var(--tone) 55%, transparent);
+}
+
+/* Now: a line of light down through the day. */
+.cv-now {
+  position: absolute;
+  z-index: 1;
+  top: 1.4em;
+  bottom: -0.6em;
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(240, 248, 255, 0.85) 8%, rgba(240, 248, 255, 0.85) 92%, transparent);
+  box-shadow: 0 0 0.8em rgba(200, 230, 255, 0.6);
+  pointer-events: none;
+}
+.cv-now span {
+  position: absolute;
+  bottom: -1.5em;
+  left: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  color: var(--sf-ink);
+  font: 600 0.75em/1 var(--sf-mono);
+}
+
+/* ---- the readers that need attention --------------------------------------- */
+
+.cv-need { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3vw; }
