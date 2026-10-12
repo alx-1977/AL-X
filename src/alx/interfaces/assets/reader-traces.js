@@ -161,6 +161,35 @@ export function surfaceReaderTraces(host, data) {
   let current = data;
   let open = false;
   let shown = '';
+  // D-041, 2026-10-12: the BHL item opens either these traces or the
+  // full-screen signal field, as ALX_BHL_DISPLAY says; ?bhl=field or
+  // ?bhl=traces on the page tries the other without a restart.
+  const override = new URLSearchParams(location.search).get('bhl');
+  const fieldMode = () => (override === 'field' || override === 'traces' ? override : current.display) === 'field';
+  let field = null;
+  let shade = null;
+  function setField(next) {
+    if (next && !field) {
+      // Friedl: an overlay, not a page: the scene stays, softened and dimmed.
+      shade = el('div', 'rt-field-shade');
+      host.append(shade);
+      field = el('iframe', 'rt-field');
+      field.src = '/bhl-field';
+      field.title = 'BHL signal field';
+      host.append(field);
+      field.addEventListener('load', () => field?.contentWindow?.focus());
+    } else if (!next && field) {
+      field.remove();
+      field = null;
+      shade?.remove();
+      shade = null;
+    }
+    pill.setAttribute('aria-expanded', String(Boolean(field)));
+  }
+  const onMessage = (event) => {
+    if (event.source === field?.contentWindow && event.data?.type === 'bhl-field-close') setField(false);
+  };
+  window.addEventListener('message', onMessage);
 
   function renderPill() {
     pill.dataset.tone = current.tone || 'ok';
@@ -169,8 +198,9 @@ export function surfaceReaderTraces(host, data) {
     pill.replaceChildren(el('span', 'rt-light'), el('span', 'rt-bar__name', current.name || 'BHL'));
     pill.title = current.title;
     const count = current.readers?.length ?? 0;
-    pill.disabled = count === 0;
-    pill.setAttribute('aria-expanded', String(open && count > 0));
+    // The field shows the whole fleet, so it opens even when all is well.
+    pill.disabled = count === 0 && !fieldMode();
+    pill.setAttribute('aria-expanded', String(fieldMode() ? Boolean(field) : open && count > 0));
     pill.setAttribute('aria-label', `${current.name || 'BHL'}: ${current.title}`);
   }
 
@@ -200,8 +230,12 @@ export function surfaceReaderTraces(host, data) {
     }
   }, 1000);
 
-  const onKey = (event) => { if (event.key === 'Escape' && open) setOpen(false); };
-  pill.addEventListener('click', () => setOpen(!open));
+  const onKey = (event) => {
+    if (event.key !== 'Escape') return;
+    if (field) setField(false);
+    else if (open) setOpen(false);
+  };
+  pill.addEventListener('click', () => (fieldMode() ? setField(!field) : setOpen(!open)));
   document.addEventListener('keydown', onKey);
   renderPill();
 
@@ -215,6 +249,8 @@ export function surfaceReaderTraces(host, data) {
     dismiss() {
       clearInterval(ticker);
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('message', onMessage);
+      setField(false);
       bar.remove();
       panel.remove();
     }

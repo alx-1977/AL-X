@@ -140,6 +140,15 @@ def trace_lines(steps: Sequence[Mapping[str, Any]], local: tzinfo | None,
     return lines[-TRACE_LINES:]
 
 
+def _alerted(alerted_at: str | None, began: str | None) -> bool:
+    if not alerted_at:
+        return False
+    try:
+        return began is None or datetime.fromisoformat(alerted_at) >= datetime.fromisoformat(began)
+    except ValueError:
+        return False
+
+
 def compose_tile(
     snapshot: tuple[str, Sequence[str], Sequence[Mapping[str, Any]], Sequence[ReaderSession]],
     now: datetime,
@@ -186,6 +195,8 @@ def compose_tile(
         return summary.get(uid, {}).get("online") is True
 
     traces: list[dict[str, Any]] = []
+    # Every reader in use today, for a view that shows the whole fleet.
+    fleet: list[dict[str, Any]] = []
     for uid in in_use:
         own = sorted((item for item in sessions if item.reader_uid == uid),
                      key=lambda item: item.starts_at)
@@ -232,6 +243,9 @@ def compose_tile(
                 # they are delivered.
                 issue = ("warn", f"Weak signal · {signal}%", READER,
                          "Keeps scans until sent", None)
+        fleet.append({"uid": uid, "room": (own_today[0].room if own_today else "") or uid,
+                      "way": MODE_NAMES.get(mode, ""), "online": online,
+                      "tone": issue[0] if issue is not None else "ok"})
         if issue is None:
             continue
 
@@ -266,6 +280,9 @@ def compose_tile(
             "signal": _percent(held.get("sig")),
             "issue": {"text": text, "who": who, "action": action},
             "since": began,
+            # A problem that needs a person, which AL/X has told Friedl
+            # about: a "friedl_alerted" step logged since it began (D-041).
+            "alerted": who == TECHNICIAN and _alerted(since("friedl_alerted"), began),
             "trace": trace_lines(steps, local, now),
         })
 
@@ -294,21 +311,28 @@ def compose_tile(
         "name": "BHL",
         "title": " · ".join(parts) or "All OK",
         "readers": traces,
+        "fleet": fleet,
     }
 
 
 def tile_source(
     calendar: Any, clock: Callable[[], datetime], local: tzinfo | None = None,
     monitor: Any = None,
+    # Which view the page opens from the BHL item: "traces" (the drop-down
+    # windows) or "field" (the full-screen signal field). ALX_BHL_DISPLAY.
+    display: str = "traces",
 ) -> Callable[[], dict[str, Any] | None]:
     def current() -> dict[str, Any] | None:
         at = clock()
         snapshot = calendar.snapshot(at)
         sent = {item["reader_uid"]: calendar.sent(item["reader_uid"]) for item in snapshot[2]}
         checks = monitor.checks(at) if monitor is not None else None
-        return compose_tile(snapshot, at, local, sent, checks,
+        data = compose_tile(snapshot, at, local, sent, checks,
                             lambda uid: calendar.log_latest(uid, TRACE_READ),
                             calendar.log_started,
                             monitoring=monitor is not None and monitor.running(at))
+        if data is not None:
+            data["display"] = display
+        return data
 
     return current

@@ -233,3 +233,31 @@
 @media (prefers-reduced-motion: reduce) {
   .rt-bar, .rt-bar *, .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
 }
+
+/* ---- the signal field (ALX_BHL_DISPLAY=field): full screen under the bar ---- */
+.rt-field {
+  position: fixed;
+  z-index: 3;
+  top: calc(1.85 * 13px);
+  left: 0;
+  width: 100%;
+  height: calc(100% - 1.85 * 13px);
+  border: 0;
+  background: transparent;
+  color-scheme: normal;
+  animation: rt-field-in 0.35s ease-out backwards;
+}
+/* The scene behind the field: still there, blurred and dimmed. */
+.rt-field-shade {
+  position: fixed;
+  z-index: 3;
+  top: calc(1.85 * 13px);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(1, 7, 16, 0.38);
+  -webkit-backdrop-filter: blur(14px) saturate(120%) brightness(0.62);
+  backdrop-filter: blur(14px) saturate(120%) brightness(0.62);
+  animation: rt-field-in 0.35s ease-out backwards;
+}
+@keyframes rt-field-in { from { opacity: 0; } }

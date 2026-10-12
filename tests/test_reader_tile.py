@@ -22,7 +22,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.readers import ReaderCalendarPoller  # noqa: E402
-from alx.config import ReaderSettings  # noqa: E402
+from alx.config import ConfigurationError, ReaderSettings  # noqa: E402
 from alx.contracts import CapabilityResult, CapabilityResultState  # noqa: E402
 from alx.contracts.readers import (  # noqa: E402
     ReaderSession,
@@ -255,6 +255,47 @@ class ComposeTileTests(unittest.TestCase):
         self.assertEqual(sorted(item["room"] for item in data["readers"]),
                          ["Majestic · IN", "Majestic · OUT"])
 
+    def test_the_whole_fleet_is_listed_for_the_field(self) -> None:
+        readers = ({**ONLINE[0], "mode": 0}, {**READERS[1], "mode": 1})
+        data = tile(at(14, 30), readers=readers, sent=HOLDING, refreshed=at(14, 30).isoformat())
+        self.assertEqual(data["fleet"], [
+            {"uid": "ab2d5218", "room": "Majestic", "way": "IN", "online": True, "tone": "ok"},
+            {"uid": "c471cf5a", "room": "Majestic", "way": "OUT", "online": False, "tone": "bad"},
+        ])
+
+    def test_the_tile_says_which_view_to_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
+            calendar.replace(at(14), list(ONLINE), list(DAY), ())
+            views = [tile_source(calendar, lambda: at(14, 10), UTC, display=d)()["display"]
+                     for d in ("traces", "field")]
+            calendar.close()
+        self.assertEqual(views, ["traces", "field"])
+
+    def test_the_view_is_chosen_in_the_environment(self) -> None:
+        base = {"PARTICLE_ACCESS_TOKEN": "t", "ALX_READER_PRODUCT_IDS": "1"}
+        self.assertEqual(ReaderSettings.from_environment(base).display, "traces")
+        self.assertEqual(ReaderSettings.from_environment({**base, "ALX_BHL_DISPLAY": "Field"}).display,
+                         "field")
+        with self.assertRaises(ConfigurationError):
+            ReaderSettings.from_environment({**base, "ALX_BHL_DISPLAY": "cube"})
+
+    def test_a_problem_needing_a_person_is_alerted_once_friedl_is_told(self) -> None:
+        def started(when):
+            return lambda uid, kind, cleared_by="": {
+                "offline": "2026-10-07T14:25:00+00:00", "friedl_alerted": when}.get(kind)
+        for when, expected in ((None, False), ("2026-10-07T14:20:00+00:00", False),
+                               ("2026-10-07T14:26:00+00:00", True)):
+            with self.subTest(alerted_at=when):
+                data = compose_tile((REFRESHED, (), READERS, DAY), at(14, 30), UTC, HOLDING, {},
+                                    lambda uid: (), started(when))
+                self.assertEqual(data["readers"][0]["alerted"], expected)
+
+    def test_a_problem_al_x_handles_is_never_marked_alerted(self) -> None:
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, None, {}, lambda uid: (),
+                            lambda uid, kind, cleared_by="": "2026-10-07T14:09:00+00:00")
+        self.assertEqual({item["alerted"] for item in data["readers"]}, {False})
+
     def test_a_problem_began_at_its_first_logged_step(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")
@@ -377,7 +418,7 @@ class ServingTests(unittest.TestCase):
         self.assertIn('src="/reader-tile.js"', page)
         self.assertIn("from '/reader-traces.js'", (ASSETS / "reader-tile.js").read_text())
         for path in ("/reader-tile.js", "/reader-traces.js", "/reader-traces.css",
-                     "/reader-traces", "/reader-traces-fixtures.js"):
+                     "/reader-traces", "/reader-traces-fixtures.js", "/bhl-field"):
             with self.subTest(path=path):
                 self.assertEqual(self.get(self.server(None), path).status_code, 200)
 
