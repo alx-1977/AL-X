@@ -5,13 +5,15 @@ he does not have to remember it, small enough to stay out of the way. The
 tile is a view of facts AL/X already holds, coloured by rules Friedl set
 (D-041, amended 2026-10-07 and 2026-10-09):
 
-- red: a reader whose event is running, or starts within 30 minutes, is
-  offline; or a reader runs an event other than the one it should;
-- yellow: anything else not confirmed: a reader offline with no event close,
-  a reader whose schedule from AL/X, as it can still run it, is not exactly
-  what the calendar has left, a reader on battery below 20 %, a reader whose
-  signal is below 30 %, or schedules that could not be read from
-  BehaviorLive for 15 minutes;
+- red: a problem that needs a person: a reader whose event is running, or
+  starts within 30 minutes, is offline; a reader runs an event other than the
+  one it should; a reader on battery below 20 %; a reader that cannot take a
+  schedule from AL/X;
+- yellow: anything else not confirmed, which AL/X can still work on or which
+  rights itself: a reader offline with no event close, a reader whose
+  schedule from AL/X, as it can still run it, is not exactly what the
+  calendar has left, a reader whose signal is below 15 %, or schedules that
+  could not be read from BehaviorLive for 15 minutes;
 - green: none of these.
 
 The main screen shows only a status bar across the top: the colour and one
@@ -37,7 +39,7 @@ from alx.contracts.readers import MODE_IN, ReaderSession, expected_event, holds_
 WARNING_BEFORE_EVENT = timedelta(minutes=30)
 LINK_STALE_AFTER = timedelta(minutes=15)
 BATTERY_LOW_PERCENT = 20
-WEAK_SIGNAL_PERCENT = 30  # the reader's own POOR_SIGNAL_PERCENT
+WEAK_SIGNAL_PERCENT = 15  # Friedl, 2026-10-12
 # What a trace shows of a reader's log: its last few steps, a step repeated
 # back to back shown once (an offline reader is logged offline again after
 # each restart of AL/X), from enough of the log to fill them.
@@ -212,6 +214,8 @@ def compose_tile(
             return started(uid, kind, cleared_by) if started is not None else None
 
         issue: tuple[str, str, str, str, str | None] | None = None  # tone, text, who, action, since
+        # Whether putting it right is AL/X's own work (resending a schedule).
+        fixable = False
         if not online and close is not None:
             text = ("Offline · event running" if running is not None
                     else f"Offline · event at {_clock(close.starts_at, local)}")
@@ -234,6 +238,7 @@ def compose_tile(
                 issue = ("warn", "Schedule not confirmed", ALX,
                          "Sending the schedule" if monitoring else "",
                          since("schedule_delivery", "schedule_sent"))
+                fixable = monitoring
         else:
             battery, signal = _percent(held.get("bat")), _percent(held.get("sig"))
             if held.get("pwr") == "bat" and battery is not None and battery < BATTERY_LOW_PERCENT:
@@ -243,6 +248,11 @@ def compose_tile(
                 # they are delivered.
                 issue = ("warn", f"Weak signal · {signal}%", READER,
                          "Keeps scans until sent", None)
+        if issue is not None:
+            # Friedl, 2026-10-12: red is for problems that need a person;
+            # everything AL/X can still work on, or that rights itself, is
+            # amber.
+            issue = ("bad" if issue[2] == TECHNICIAN else "warn", *issue[1:])
         fleet.append({"uid": uid, "room": (own_today[0].room if own_today else "") or uid,
                       "way": MODE_NAMES.get(mode, ""), "online": online,
                       "tone": issue[0] if issue is not None else "ok"})
@@ -283,6 +293,7 @@ def compose_tile(
             # A problem that needs a person, which AL/X has told Friedl
             # about: a "friedl_alerted" step logged since it began (D-041).
             "alerted": who == TECHNICIAN and _alerted(since("friedl_alerted"), began),
+            "fixable": fixable,
             "trace": trace_lines(steps, local, now),
         })
 

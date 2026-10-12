@@ -201,15 +201,31 @@ class ComposeTileTests(unittest.TestCase):
         self.assertEqual((data["tone"], problems(data)),
                          ("bad", {"ab2d5218": "On the wrong event"}))
 
-    def test_low_battery_and_weak_signal_are_yellow(self) -> None:
+    def test_red_only_for_problems_that_need_a_person(self) -> None:
+        # Friedl, 2026-10-12: a low battery needs a person (red); a weak
+        # signal rights itself (amber).
         checks = {"ab2d5218": {"online": True, "bat": 14, "pwr": "bat", "sig": 80},
-                  "c471cf5a": {"online": True, "bat": 113, "pwr": "usb", "sig": 18}}
+                  "c471cf5a": {"online": True, "bat": 113, "pwr": "usb", "sig": 12}}
         data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
         self.assertEqual(problems(data), {"ab2d5218": "Battery low · 14%",
-                                          "c471cf5a": "Weak signal · 18%"})
-        weak = data["readers"][1]
+                                          "c471cf5a": "Weak signal · 12%"})
+        self.assertEqual({item["uid"]: item["tone"] for item in data["readers"]},
+                         {"ab2d5218": "bad", "c471cf5a": "warn"})
+        self.assertEqual(data["title"], "1 error · 1 warning")
+        weak = next(item for item in data["readers"] if item["uid"] == "c471cf5a")
         self.assertEqual((weak["power"], weak["signal"]),
-                         ({"source": "usb", "percent": 100}, 18))
+                         ({"source": "usb", "percent": 100}, 12))
+
+    def test_a_signal_of_fifteen_percent_or_more_is_not_weak(self) -> None:
+        checks = {"ab2d5218": {"online": True, "sig": 15}, "c471cf5a": {"online": True, "sig": 14}}
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
+        self.assertEqual(problems(data), {"c471cf5a": "Weak signal · 14%"})
+
+    def test_only_al_x_s_own_work_is_fixable(self) -> None:
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, None, {})
+        self.assertEqual({item["fixable"] for item in data["readers"]}, {True})
+        offline = compose_tile((REFRESHED, (), READERS, DAY), at(14, 30), UTC, HOLDING, {})
+        self.assertEqual({item["fixable"] for item in offline["readers"] if item["uid"]}, {False})
 
     def test_low_battery_on_usb_is_not_a_problem(self) -> None:
         checks = {"ab2d5218": {"online": True, "bat": 14, "pwr": "usb", "sig": 80}}
@@ -324,7 +340,7 @@ class ComposeTileTests(unittest.TestCase):
         self.assertEqual(data["readers"], [])
 
     def test_weak_signal_is_the_reader_s_own_doing_not_al_x_s(self) -> None:
-        checks = {"ab2d5218": {"online": True, "sig": 18}}
+        checks = {"ab2d5218": {"online": True, "sig": 12}}
         data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING, checks)
         self.assertEqual(data["readers"][0]["issue"]["who"], "reader")
 

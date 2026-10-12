@@ -9,7 +9,7 @@
 :root{--ice:#e9fbff;--pale:#b1d5e0;--muted:#66889a;--hair:rgba(104,195,226,.24);--blue:#00cfff;--amber:#ffac00;--red:#ff254f;--green:#00ffc6}
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{color:var(--ice);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
 #matrix{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,transparent 58%,rgba(1,7,16,.3) 68%,rgba(1,7,16,.58) 78%,rgba(1,7,16,.62)),linear-gradient(180deg,rgba(1,7,16,.5),transparent 25%,transparent 80%,rgba(1,7,16,.17));}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,transparent 67%,rgba(1,7,16,.32) 71%,rgba(1,7,16,.58) 75%,rgba(1,7,16,.62)),linear-gradient(180deg,rgba(1,7,16,.5),transparent 25%,transparent 80%,rgba(1,7,16,.17));}
 .shell{position:fixed;inset:0;z-index:3;pointer-events:none}
 .mast{position:absolute;left:clamp(26px,4.3vw,82px);top:clamp(24px,4.4vh,62px)}
 .brand{font-weight:200;font-size:clamp(26px,2.8vw,42px);line-height:1;letter-spacing:-.09em;text-shadow:0 0 28px rgba(103,219,249,.19)}.brand span{color:#63d7f6;padding:0 .09em;font-weight:100}.brand-sub{font:9px/1.9 "Courier New",monospace;letter-spacing:.35em;color:#7ca9b8;margin-top:17px}
@@ -52,10 +52,12 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .metric.danger .metric-num{color:#ffb21a;text-shadow:0 0 22px rgba(255,170,0,.45)}
 .field-id{font-size:12px;color:#8fb6c6}.demo-label{font-size:10px}
 .tags{position:fixed;inset:0;z-index:2;pointer-events:none}
-.tag{position:absolute;transform:translate(26px,calc(-100% - 30px));white-space:nowrap;padding:3px 0 3px 10px;border-left:1px solid currentColor;font:600 12px/1.3 "Courier New",monospace;letter-spacing:.12em;text-transform:uppercase;text-shadow:0 0 3px #000,0 0 8px #000,0 0 14px rgba(0,0,0,.9);transition:opacity .4s}
-.tag::before{content:"";position:absolute;left:-27px;bottom:-30px;/* reader (bottom left) to the foot of the label's line (top right) */width:27px;height:30px;background:linear-gradient(to bottom right,transparent calc(50% - .6px),currentColor 50%,transparent calc(50% + .6px));opacity:.75}
+.tag{position:absolute;transform:translate(26px,calc(-100% - 30px - var(--lift,0px)));white-space:nowrap;padding:3px 0 3px 10px;border-left:1px solid currentColor;font:600 12px/1.3 "Courier New",monospace;letter-spacing:.12em;text-transform:uppercase;text-shadow:0 0 3px #000,0 0 8px #000,0 0 14px rgba(0,0,0,.9);transition:opacity .4s}
+.tag::before{content:"";position:absolute;left:-27px;bottom:calc(-30px - var(--lift,0px));height:calc(30px + var(--lift,0px)) !important;/* reader (bottom left) to the foot of the label's line (top right) */width:27px;height:30px;background:linear-gradient(to bottom right,transparent calc(50% - .6px),currentColor 50%,transparent calc(50% + .6px));opacity:.75}
 .tag small{display:block;font-weight:400;font-size:11px;letter-spacing:.06em;color:#e8f6fa;text-transform:none}
-.tag.red{color:#ff5a78}.tag.amber{color:#ffc24a}.tag.focus{opacity:0}.tag.hidden{display:none}
+.tag.red{color:#ff5a78}.tag.amber{color:#ffc24a}.tag.focus{opacity:0}
+.tag.left{transform:translate(calc(-100% - 26px),calc(-100% - 30px - var(--lift,0px)));padding:3px 10px 3px 0;border-left:0;border-right:1px solid currentColor;text-align:right}
+.tag.left::before{left:auto;right:-27px;background:linear-gradient(to bottom left,transparent calc(50% - .6px),currentColor 50%,transparent calc(50% + .6px))}.tag.hidden{display:none}
 
 /* the live line is the newest row of the log */
 .log{min-height:0;margin-top:14px}
@@ -149,8 +151,10 @@ const states={'healthy':'NOMINAL','bad':'ERROR','warn':'WARNING'};
 const tone=s=>s==='bad'?1:s==='healthy'?0:2;
 const readers=[],byUid=new Map(),views=new Map();
 let fleetInfo={rooms:0,readers:0,online:0},haveTile=false;
-// Friedl, 2026-10-12: a reader stays in focus until it is resolved, or it
-// needs a person and AL/X has told him. Never on a timer alone.
+// Friedl, 2026-10-12: a problem AL/X is putting right herself stays in
+// focus until it is resolved. Anything else (waiting on a person, the
+// signal, the reader) is shown for a while and she moves on, coming back on
+// her next round; it stays lit and labelled on the field throughout.
 const HOLD_MS=9000,RESOLVED_HOLD_MS=2600;
 let resolvedAt=0;
 const fract=n=>n-Math.floor(n);
@@ -166,7 +170,7 @@ function viewOf(t){
  return {issue:t.issue?.text||'',session:t.event?`${t.event.title} · ${t.event.when}`:'—',
   last:t.since?`since ${hhmm(t.since)}`:'—',
   vitals:[t.power?`${t.power.source==='usb'?'usb':'battery'}${Number.isFinite(t.power.percent)?' '+t.power.percent+'%':''}`:'',Number.isFinite(t.signal)?`signal ${t.signal}%`:''].filter(Boolean).join(' · ')||'—',log:(t.trace||[]).map(([a,b])=>[a,b]),
-  stages:[[t.alerted?'FRIEDL ALERTED':who,t.issue?.action||t.issue?.text||'']],alerted:Boolean(t.alerted)};
+  stages:[[t.alerted?'FRIEDL ALERTED':who,t.issue?.action||t.issue?.text||'']],alerted:Boolean(t.alerted),fixable:Boolean(t.fixable)};
 }
 const example=r=>views.get(r.id);
 // The first eight faults shape the field: the shader takes eight, and the
@@ -226,7 +230,7 @@ function tickTyping(now){
  while(n<actionTyping.marks.length&&t>=actionTyping.marks[n])n++;
  if(n!==actionTyping.shown){actionTyping.shown=n;e('action').textContent=actionTyping.text.slice(0,n);}
 }
-function present(r){if(!r){e('side').classList.add('visible');e('side').classList.remove('readout-visible','acquiring');e('mode').textContent='AL/X / ALL SIGNALS NOMINAL';return;}e('side').classList.add('visible');const d=example(r);e('mode').textContent='AL/X';e('signalId').textContent=r.state==='healthy'?'ROOM READER':'IN FOCUS';
+function present(r){if(!r){e('side').classList.add('visible');e('side').classList.remove('readout-visible','acquiring');e('mode').textContent='AL/X · all readers OK';return;}e('side').classList.add('visible');const d=example(r);e('mode').textContent='AL/X';e('signalId').textContent=r.state==='healthy'?'ROOM READER':'IN FOCUS';
 // Readout is entirely text — never data rendered into the graphics surface.
  e('name').textContent=r.room;const way=document.createElement('span');way.className='way';way.textContent=r.side;e('name').append(way);
  const issue=e('issue');issue.textContent=r.state==='healthy'?'RESOLVED':(d?.issue||states[r.state]).toUpperCase();issue.className=`side-issue ${tone(r.state)===1?'critical':r.state==='healthy'?'healthy':''}`;
@@ -363,8 +367,26 @@ function syncTags(){
   const panel=e('side').getBoundingClientRect();
   // the label's box: above and right of the reader (see .tag)
   const x0=r.x+16,x1=r.x+26+230,y0=r.y-80,y1=r.y-20;
-  el.classList.toggle('hidden',x1>panel.left&&x0<panel.right&&y1>panel.top&&y0<panel.bottom);
+  // Over the readout on the right: the label opens to the left of its
+  // reader instead; hidden only if neither side is clear.
+  const hits=(a0,a1)=>a1>panel.left&&a0<panel.right&&y1>panel.top&&y0<panel.bottom;
+  const left=hits(x0,x1);
+  el.classList.toggle('left',left);
+  el.classList.toggle('hidden',left&&hits(r.x-256,r.x-16));
   el.style.left=r.x+'px';el.style.top=r.y+'px';
+ }
+ // Labels never cover each other: a label that would, rises above the one
+ // it meets, and its leader line stretches to reach its reader.
+ const placed=[];
+ for(const r of list.slice().sort((a,b)=>b.y-a.y)){
+  const el=tagEls.get(r.id);if(!el||el.classList.contains('hidden')||el.classList.contains('focus'))continue;
+  const w=el.offsetWidth,h=el.offsetHeight,left=el.classList.contains('left');
+  const bx0=left?r.x-26-w:r.x+26,bx1=bx0+w;let lift=0;
+  for(let moved=true,n=0;moved&&n<12;n++){moved=false;
+   const by1=r.y-30-lift,by0=by1-h;
+   for(const p of placed)if(bx0<p.x1+8&&bx1>p.x0-8&&by0<p.y1+4&&by1>p.y0-4){lift+=by1-p.y0+6;moved=true;break;}}
+  el.style.setProperty('--lift',lift+'px');
+  placed.push({x0:bx0,x1:bx1,y0:r.y-30-lift-h,y1:r.y-30-lift});
  }
 }
 function syncScreenCoordinates(){for(const r of readers){const y=terrain(r.wx,r.wz,time)+.06;const p=projected(r.wx,r.wz,y);r.x=p.x;r.y=p.y;}drawLock();syncTags();}
@@ -419,6 +441,37 @@ const easeOut=u=>1-Math.pow(1-u,3);
 const easeBack=u=>{const c=1.7;return 1+(c+1)*Math.pow(u-1,3)+c*Math.pow(u-1,2);};
 const clamp01=u=>Math.max(0,Math.min(1,u));
 let fixFlashAt=0,lastFixed=false;
+let bend=0,bendGoal=0,bendAt=0,routeFor=null;
+// The route is chosen on a timer, not per frame: labels move with the field
+// and appear as data arrives, and the choice must not wait on a slow frame.
+setInterval(()=>{
+ if(!focus||veinPhase==='idle'||focus.x<=0)return;
+ const led=e('focusLed').getBoundingClientRect();
+ const rEdge=(segMode?.63:lockSvg.classList.contains('simple')?1.25:1.62)*R;
+ bendGoal=chooseBend({x:led.left+led.width/2,y:led.top+led.height/2},{x:focus.x,y:focus.y},rEdge);
+},300);
+function curveFor(a,d,rEdge,k){
+ const dx=a.x-d.x;
+ const p1={x:a.x-dx*.42,y:a.y+k};
+ const p2={x:d.x+dx*.22,y:d.y-70+k*.55};
+ const ux=p2.x-d.x,uy=p2.y-d.y,ul=Math.hypot(ux,uy)||1;
+ return {p1,p2,end:{x:d.x+ux/ul*rEdge,y:d.y+uy/ul*rEdge}};
+}
+function bez(a,p1,p2,b,t){const u=1-t;return {x:u*u*u*a.x+3*u*u*t*p1.x+3*u*t*t*p2.x+t*t*t*b.x,y:u*u*u*a.y+3*u*u*t*p1.y+3*u*t*t*p2.y+t*t*t*b.y};}
+// The bend that crosses the fewest labels; among equals, the gentlest.
+function chooseBend(a,d,rEdge){
+ const boxes=[];
+ for(const el of tagEls.values())if(!el.classList.contains('hidden')&&!el.classList.contains('focus'))boxes.push(el.getBoundingClientRect());
+ if(L.box&&L.box.style.opacity!=='0')boxes.push(L.box.getBoundingClientRect());
+ let best=0,bestHits=Infinity;
+ for(const k of [0,-40,40,-80,80,-130,130,-190,190,-260,260]){
+  const c=curveFor(a,d,rEdge,k);let hits=0;
+  for(let i=1;i<40;i++){const p=bez(a,c.p1,c.p2,c.end,i/40);
+   for(const r of boxes)if(p.x>r.left-8&&p.x<r.right+8&&p.y>r.top-8&&p.y<r.bottom+8){hits++;break;}}
+  if(hits<bestHits){bestHits=hits;best=k;if(!hits)break;}
+ }
+ return best;
+}
 function drawLock(){
  const now=performance.now();
  if(!focus||veinPhase==='idle'||focus.x<=0){lockSvg.style.opacity=0;L.box.style.opacity=0;lastFixed=false;return;}
@@ -435,11 +488,14 @@ function drawLock(){
  let tin=1,ln=1,out=0;
  if(veinPhase==='extending'){tin=clamp01(dt/.7);ln=clamp01((dt-.45)/1.4);}
  else if(veinPhase==='retracting'){const u=clamp01(dt/1.27);out=easeOut(clamp01(u/.55));ln=1-easeOut(u);}
- // the trace: left from the readout, then 45° to the outer ring
- const ang=-Math.PI/4,rEdge=(segMode?.63:lockSvg.classList.contains('simple')?1.25:1.62)*R;
- const end={x:d.x+rEdge*Math.cos(ang),y:d.y+rEdge*Math.sin(ang)};
- let mx=end.x+Math.abs(a.y-end.y);mx=Math.min(mx,a.x-24);
- const path=`M ${a.x} ${a.y} L ${mx} ${a.y} L ${end.x} ${end.y}`;
+ // the trace: one smooth freehand curve from the readout to the ring,
+ // bent up or down so it does not run over the labels (Friedl, 2026-10-12)
+ const rEdge=(segMode?.63:lockSvg.classList.contains('simple')?1.25:1.62)*R;
+ if(routeFor!==focus.id){routeFor=focus.id;bendGoal=chooseBend(a,d,rEdge);}
+ // eased by time, not by frame, so a slow frame still arrives
+ bend+=(bendGoal-bend)*Math.min(1,(now-(bendAt||now))/160);bendAt=now;
+ const cv=curveFor(a,d,rEdge,bend);
+ const path=`M ${a.x} ${a.y} C ${cv.p1.x} ${cv.p1.y} ${cv.p2.x} ${cv.p2.y} ${cv.end.x} ${cv.end.y}`;
  L.wire.setAttribute('d',path);L.flow.setAttribute('d',path);
  const len=L.wire.getTotalLength()||1;
  L.wire.style.strokeDasharray=`${len} ${len}`;L.wire.style.strokeDashoffset=String(len*(1-ln));
@@ -532,8 +588,8 @@ function triage(now){
  const v=example(focus),delta=now-focusStarted;
  const resolved=focus.state==='healthy',alerted=Boolean(v?.alerted);
  // Waiting: the bar sweeps; resolved or alerted: it is full.
- e('progressRule').style.setProperty('--progress',resolved||alerted?'100%':`${(delta/22)%100}%`);
- const release=resolved?resolvedAt&&now-resolvedAt>RESOLVED_HOLD_MS:alerted&&delta>HOLD_MS;
+ e('progressRule').style.setProperty('--progress',resolved||alerted?'100%':v?.fixable?`${(delta/22)%100}%`:`${Math.min(100,delta/HOLD_MS*100)}%`);
+ const release=resolved?resolvedAt&&now-resolvedAt>RESOLVED_HOLD_MS:!v?.fixable&&delta>HOLD_MS;
  if(release)beginRetract(now);
 }
 
@@ -602,16 +658,17 @@ void main(){
  vec4 clip=perspective(vec3(p.x,h,p.y));gl_Position=clip;
  float z=clip.w;
  float crest=clamp((h+.45)*.50,0.,1.);
- float near=mix(.22,1.,smoothstep(22.,7.,z));
- float striation=pow(abs(sin(p.x*2.6+p.y*.65+uTime*.13)),19.);
+ float near=mix(.5,1.,smoothstep(22.,7.,z));
+ // Friedl: no diagonal striping across the field.
+ float striation=0.;
  float skyline=exp(-pow((p.x-1.1+sin(p.y*.35)*1.25)/2.4,2.));
  float glitter=fract(sin(float(col)*72.17+float(row)*138.73)*31247.341);
  float gleam=clamp(crest*.58+striation*.25+skyline*.28,0.,1.);
  vHot=clamp(gleam+.22*f,0.,1.);
- vTint=mix(vec3(.01,.16,.95),vec3(.06,.78,1.0),pow(crest,.85));
+ vTint=mix(vec3(.05,.32,1.0),vec3(.06,.78,1.0),pow(crest,.85));
  vTint=mix(vTint,vec3(.62,.90,1.0),striation*.32+gleam*.18);
  vTint=mix(vTint,light*1.75,min(.95,f*1.1));
- vAlpha=clamp(((.13+.58*near)*(.50+crest*.78)+glitter*.11+f*.55)*1.2,.08,1.0);
+ vAlpha=clamp(((.24+.52*near)*(.66+crest*.66)+glitter*.11+f*.55)*1.25,.12,1.0);
  gl_PointSize=clamp((6.4+gleam*4.0+f*4.2)*(14.0/z)*(uMobile>.5?1.15:1.0),2.,14.);
  vNoise=glitter;
 }`;
@@ -678,7 +735,7 @@ void main(){vec3 scene=texture(uScene,vUV).rgb;
  vec3 bloom=texture(uBloom,vUV).rgb;
  vec3 c=scene+bloom*uBloomGain*uBloomEnabled;
  float v=length((vUV-vec2(.43,.52))*vec2(.88,.85));
- c*=1.-.28*smoothstep(.40,.80,v);
+ c*=1.-.12*smoothstep(.45,.85,v);
  // Compress brightness without shifting hue: per-channel compression let
  // bright blue clip while green kept rising, turning crests green-yellow.
  float m=max(c.r,max(c.g,c.b));c*=m>1e-4?(1.-exp(-m*1.16))/m:1.16;
