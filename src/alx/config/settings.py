@@ -338,6 +338,13 @@ def _absolute_http_url(value: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def _bhl_display(environment: Mapping[str, str]) -> str:
+    value = environment.get("ALX_BHL_DISPLAY", "").strip().lower() or "traces"
+    if value not in ("traces", "field"):
+        raise ConfigurationError("ALX_BHL_DISPLAY must be traces or field")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ReaderSettings:
     """D-039: which Particle products hold BHL room readers, and their schedules.
@@ -352,6 +359,9 @@ class ReaderSettings:
     # D-041: how often the calendar is refreshed in the background, so the BHL
     # tile reflects today without anyone asking.
     refresh_seconds: int = 300
+    # D-041: which view the BHL item opens, "traces" or "field". Friedl wants
+    # to try both before choosing (2026-10-12).
+    display: str = "traces"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "ReaderSettings":
@@ -370,6 +380,7 @@ class ReaderSettings:
             ).strip(),
             timeout_seconds=_positive_integer(environment, "ALX_READER_TIMEOUT_SECONDS", 20),
             refresh_seconds=_positive_integer(environment, "ALX_READER_REFRESH_SECONDS", 300),
+            display=_bhl_display(environment),
         )
 
     @property

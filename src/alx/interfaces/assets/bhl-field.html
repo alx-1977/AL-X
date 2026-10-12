@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#010710">
+<title>AL/X · BHL signal field</title>
+<style>
+:root{color-scheme:dark;--ice:#e9fbff;--pale:#b1d5e0;--muted:#66889a;--hair:rgba(104,195,226,.24);--blue:#00cfff;--amber:#ffac00;--red:#ff254f;--green:#00ffc6}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#010710}body{color:var(--ice);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
+#matrix{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,transparent 58%,rgba(1,7,16,.45) 68%,rgba(1,7,16,.86) 78%,rgba(1,7,16,.9)),linear-gradient(180deg,rgba(1,7,16,.5),transparent 25%,transparent 80%,rgba(1,7,16,.17));}
+.shell{position:fixed;inset:0;z-index:3;pointer-events:none}
+.mast{position:absolute;left:clamp(26px,4.3vw,82px);top:clamp(24px,4.4vh,62px)}
+.brand{font-weight:200;font-size:clamp(26px,2.8vw,42px);line-height:1;letter-spacing:-.09em;text-shadow:0 0 28px rgba(103,219,249,.19)}.brand span{color:#63d7f6;padding:0 .09em;font-weight:100}.brand-sub{font:9px/1.9 "Courier New",monospace;letter-spacing:.35em;color:#7ca9b8;margin-top:17px}
+.metrics{position:absolute;top:clamp(33px,5.4vh,72px);right:clamp(28px,4.3vw,82px);display:flex;gap:clamp(24px,3vw,60px);align-items:flex-start;text-align:right}
+.metric-num{font-weight:200;font-size:clamp(23px,2.65vw,39px);line-height:1;letter-spacing:-.06em}.metric-num small{font-size:.51em;color:#7aa4b4;letter-spacing:0}.metric-label{font:9px/2 "Courier New",monospace;letter-spacing:.17em;color:#668b9a;margin-top:9px}.metric.danger .metric-num{color:var(--amber)}
+.field-id{position:absolute;left:clamp(26px,4.3vw,82px);bottom:clamp(26px,6vh,86px);font:10px/1.9 "Courier New",monospace;letter-spacing:.13em;color:#7196aa}.field-id b{font-weight:400;color:#b9e9f5}.field-id .live{width:5px;height:5px;display:inline-block;border-radius:50%;background:var(--blue);box-shadow:0 0 8px 2px rgba(52,205,255,.44);margin-right:11px;vertical-align:2px}
+.demo-label{position:absolute;right:clamp(28px,4.3vw,82px);bottom:clamp(25px,5vh,78px);font:9px/1.6 "Courier New",monospace;letter-spacing:.12em;color:rgba(113,153,165,.50);text-align:right}
+.side{position:absolute;right:clamp(29px,4.6vw,94px);top:27%;width:clamp(268px,23vw,390px);min-height:410px;opacity:0;transform:translateX(13px);transition:opacity .5s ease,transform .5s ease;pointer-events:auto}.side.visible{opacity:1;transform:translateX(0)}
+.case-body{opacity:0;visibility:hidden;transform:translateY(12px);transition:opacity .26s ease,transform .4s ease,visibility 0s .4s;pointer-events:none}
+.side.readout-visible .case-body{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto;transition:opacity .55s ease,transform .55s cubic-bezier(.16,1,.3,1),visibility 0s}
+.side.readout-visible .case-body>*{animation:terminalEntry .54s both cubic-bezier(.2,1,.32,1);animation-delay:var(--delay,0ms)}
+@keyframes terminalEntry{from{opacity:0;transform:translateY(8px);filter:blur(3px)}to{opacity:1;transform:translateY(0);filter:blur(0)}}
+.focus-led{position:relative;z-index:1}
+.side.acquiring .focus-led{box-shadow:0 0 7px 2px rgba(116,238,255,.67),0 0 29px 4px rgba(92,215,255,.29)}
+.side-head{display:flex;gap:12px;align-items:center;font:10px/1.5 "Courier New",monospace;letter-spacing:.18em;color:#80b4c4}.focus-led{display:inline-block;flex:none;width:5px;height:5px;border-radius:50%;background:#9deeff;box-shadow:0 0 9px 2px rgba(72,212,255,.65)}
+.side-meta{font:10px/1.6 "Courier New",monospace;letter-spacing:.18em;color:#6d99ac;margin-top:43px}.side-name{font-weight:200;font-size:clamp(31px,3vw,48px);line-height:1.05;letter-spacing:-.058em;margin:12px 0 10px;text-shadow:0 0 40px rgba(90,230,255,.12)}
+.side-issue{font:11px/1.8 "Courier New",monospace;letter-spacing:.07em;color:var(--amber)}.side-issue.critical{color:var(--red)}.side-issue.recovering{color:var(--green)}.side-issue.healthy{color:var(--green)}
+.side-context{font:10px/2.0 "Courier New",monospace;color:#98bcca;margin-top:23px;letter-spacing:.015em}.side-context span{color:#618aa0}
+.progress-rule{position:relative;width:100%;height:1px;background:linear-gradient(90deg,rgba(74,191,221,.55),rgba(74,191,221,.15),transparent);margin:24px 0 20px}.progress-rule:before{content:"";position:absolute;top:-1px;left:0;width:var(--progress,10%);height:2px;background:var(--tone,var(--blue));box-shadow:0 0 12px 2px var(--tone,var(--blue));transition:width .8s ease}
+.action-header{font:9px/1.6 "Courier New",monospace;letter-spacing:.16em;color:#7cabbd}.action-text{min-height:50px;margin-top:10px;font:14px/1.55 "Courier New",monospace;font-weight:400;color:#d4edf1;max-width:33ch}.cursor{display:inline-block;width:7px;height:13px;vertical-align:-2px;margin-left:5px;background:#d4edf1;animation:cursor 1.1s steps(1,end) infinite}@keyframes cursor{50%{opacity:0}}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.log{margin-top:22px;font:10px/1.88 "Courier New",monospace;color:rgba(141,179,191,.66);letter-spacing:.012em;min-height:86px}.log-row{display:flex;gap:14px}.log-row time{color:#517c8f;flex:none}.log-row span{flex:1}
+.manual{margin-top:18px;font:9px/1.5 "Courier New",monospace;letter-spacing:.09em;color:rgba(113,170,186,.54)}
+.keyline{position:absolute;left:clamp(26px,4.3vw,82px);bottom:21%;display:flex;gap:15px;align-items:center;font:9px/1.7 "Courier New",monospace;letter-spacing:.10em;color:rgba(111,174,193,.54)}.keyline:before{content:"";display:block;width:34px;height:1px;background:rgba(75,177,199,.44)}
+@media (max-width:1050px){.side{right:36px;top:31%;width:275px}.side-name{font-size:35px}.field-id{bottom:32px}.keyline{bottom:17%}.metrics{gap:24px}}
+@media (max-width:740px){body:before{background:linear-gradient(180deg,rgba(1,7,16,.26) 0%,transparent 24%,rgba(1,7,16,.45) 38%,rgba(1,7,16,.82) 60%,rgba(1,7,16,.83) 77%,rgba(1,7,16,.36) 94%)}.mast{top:23px;left:24px}.brand{font-size:30px}.brand-sub{font-size:7px;margin-top:11px;letter-spacing:.10em;max-width:172px}.metrics{top:26px;right:21px;gap:14px}.metric-num{font-size:23px}.metric-label{font-size:7px;letter-spacing:.04em}.side{left:24px;right:24px;top:auto;bottom:16%;width:auto;min-height:0;max-width:370px}.side-meta{margin-top:17px}.side-name{font-size:32px}.side-context{margin-top:12px;font-size:9px}.progress-rule{margin:13px 0}.action-text{font-size:12px;min-height:0}.log{font-size:9px;line-height:1.5;margin-top:10px;min-height:0}.log-row:nth-child(-n+2){display:none}.keyline,.manual,.demo-label{display:none}.field-id{bottom:14px;left:24px;font-size:8px}}
+
+/* ---- pass 1: readable readout, labels on the field ---- */
+.side-head{font-size:12px;color:#a9d8e6}
+.side-meta{font-size:11px;color:#8fb8c8;margin-top:34px}
+.side-name .way{margin-left:.35em;font-size:.42em;letter-spacing:.18em;color:#8fc4d4;vertical-align:.55em}
+.side-name{font-size:clamp(36px,3.4vw,54px);letter-spacing:-.04em;text-shadow:0 0 30px rgba(90,230,255,.25)}
+.side-issue{font-size:14px;letter-spacing:.05em;text-shadow:0 0 14px currentColor}
+.side-context{font-size:13px;line-height:1.9;color:#c4e2ea}.side-context span{color:#7fa8b8}
+.action-header{font-size:11px;color:#9fd2e2;letter-spacing:.2em}
+.action-text{font-size:17px;line-height:1.5;color:#effcff;max-width:30ch}
+.cursor{height:16px;width:8px;background:#effcff}
+.log{font-size:13px;color:rgba(178,214,224,.8)}.log-row time{color:#6f9db0}
+.metric-num{font-size:clamp(28px,3vw,46px)}.metric-label{font-size:10px;color:#89b2c2}
+.metric.danger .metric-num{color:#ffb21a;text-shadow:0 0 22px rgba(255,170,0,.45)}
+.field-id{font-size:12px;color:#8fb6c6}.demo-label{font-size:10px}
+.tags{position:fixed;inset:0;z-index:2;pointer-events:none}
+.tag{position:absolute;transform:translate(26px,calc(-100% - 30px));white-space:nowrap;padding:3px 0 3px 10px;border-left:1px solid currentColor;font:600 12px/1.3 "Courier New",monospace;letter-spacing:.12em;text-transform:uppercase;text-shadow:0 0 3px #000,0 0 8px #000,0 0 14px rgba(0,0,0,.9);transition:opacity .4s}
+.tag::before{content:"";position:absolute;left:-27px;bottom:-30px;/* reader (bottom left) to the foot of the label's line (top right) */width:27px;height:30px;background:linear-gradient(to bottom right,transparent calc(50% - .6px),currentColor 50%,transparent calc(50% + .6px));opacity:.75}
+.tag small{display:block;font-weight:400;font-size:11px;letter-spacing:.06em;color:#e8f6fa;text-transform:none}
+.tag.red{color:#ff5a78}.tag.amber{color:#ffc24a}.tag.focus{opacity:0}.tag.hidden{display:none}
+
+/* the live line is the newest row of the log */
+.log{min-height:0;margin-top:14px}
+.action-text{display:flex;gap:14px;min-height:0;max-width:none;margin-top:0;font:13px/1.88 "Courier New",monospace;color:#effcff;text-shadow:0 0 10px rgba(120,230,255,.35)}
+.action-text time{flex:none;color:#9fd2e2}
+.action-words{flex:1}
+.cursor{height:13px;width:7px;vertical-align:-2px}
+
+/* ---- the lock-on: crisp HUD geometry instead of the vein ---- */
+.lock{position:fixed;inset:0;width:100%;height:100%;z-index:2;pointer-events:none;overflow:visible}
+.lock *{vector-effect:non-scaling-stroke}
+.lock .wire{fill:none;stroke:#7fe9ff;stroke-width:1.5;filter:drop-shadow(0 0 3px rgba(80,220,255,.9))}
+.lock .flow{fill:none;stroke:#eaffff;stroke-width:1.6;stroke-dasharray:3 26;filter:drop-shadow(0 0 4px #7fe9ff)}
+.lock .node{fill:#eaffff;filter:drop-shadow(0 0 4px #7fe9ff)}
+.lock .target{color:#3fe2ff}
+.lock .target g{fill:none;stroke:currentColor;filter:drop-shadow(0 0 1px #000) drop-shadow(0 0 5px rgba(63,226,255,.85))}
+.lock .t-outer{stroke-width:7}
+.lock .t-thin{stroke-width:2;opacity:.85}
+.lock .t-dots circle{stroke-width:2.4;stroke-dasharray:.1 6;stroke-linecap:round}
+.lock .t-mid circle{stroke-width:1.2;opacity:.8}
+.lock .t-mid .block{stroke-width:6;opacity:.25;transition:opacity .4s}
+.lock .t-mid .block.on{opacity:1}
+.lock .t-status{stroke-width:3.4;stroke-linecap:round}
+.lock .t-cross line{stroke-width:1.4}
+.lock .t-cross .mark{stroke:#ff4fd8;stroke-width:2}
+/* the segmented ring */
+.lock .t-seg,.lock .t-dot{display:none}
+.lock.ring .t-seg{display:inline;stroke-width:3;stroke-linecap:butt;color:#5ff0ff}
+.lock.ring .t-seg line{transition:stroke .3s}
+.lock.ring .t-dot{display:inline;filter:drop-shadow(0 0 8px currentColor)}
+.lock.ring .t-seg{filter:drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000) drop-shadow(0 0 5px rgba(63,226,255,.85))}
+.lock.ring .t-outer,.lock.ring .t-thin,.lock.ring .t-dots,.lock.ring .t-mid,.lock.ring .t-status,.lock.ring .t-cross{display:none}
+/* the simple target: one fine ring with four gaps, the status arcs, a crosshair */
+.lock.simple .t-outer,.lock.simple .t-thin,.lock.simple .t-dots,.lock.simple .t-cross .mark,.lock.simple .t-mid .block{display:none}
+.lock.simple .t-mid circle{stroke-width:1.6;opacity:1;stroke-dasharray:62 10.25;transform:scale(1.25)}
+.lock.simple .t-status{stroke-width:2.6}
+.lock .t-outer,.lock .t-thin,.lock .t-dots,.lock .t-mid,.lock .t-cross{color:#3fe2ff}
+.lock .tag-bg{fill:rgba(1,8,16,.78)}
+.lock text{font:600 12px "Courier New",monospace;letter-spacing:.16em;fill:#7fe9ff}
+.lock text.sub{font-weight:400;font-size:11.5px;fill:#d9f3fa;letter-spacing:.08em}
+#matrix:focus-visible{outline:none} .render-note{position:fixed;inset:auto 12vw 35vh;text-align:center;color:#8ebed0;font:13px/2 "Courier New",monospace;letter-spacing:.12em;z-index:3;pointer-events:none} @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<canvas id="matrix" aria-label="Live 3D luminous particle wave with 60 selectable conference reader lights"></canvas>
+
+<div class="tags" id="tags"></div>
+<svg id="lock" class="lock" aria-hidden="true"></svg>
+<main class="shell">
+  <header class="mast"><div class="brand">AL<span>/</span>X</div></header>
+  <div class="metrics" aria-live="polite"><div class="metric"><div class="metric-num"><span id="onlineCount">00</span><small id="totalCount">/0</small></div><div class="metric-label">ONLINE</div></div><div class="metric danger"><div class="metric-num" id="issueCount">00</div><div class="metric-label">NEED ATTENTION</div></div></div>
+  
+  <aside class="side visible" id="side" aria-live="off">
+    <div class="side-head"><span class="focus-led" id="focusLed"></span><span id="mode">AL/X</span></div>
+    <div class="case-body" id="caseBody">
+    <div class="side-meta" id="signalId" style="--delay:0ms">SIGNAL 002 &nbsp;·&nbsp; INCIDENT 01 / 05</div>
+    <h1 class="side-name" id="name" style="--delay:70ms">—</h1>
+    <div class="side-issue critical" id="issue" style="--delay:130ms"></div>
+    <div class="side-context" style="--delay:190ms"><div><span>EXPECTED</span> &nbsp;<strong id="session" style="font-weight:400">—</strong></div><div><span>SINCE</span> &nbsp;&nbsp;&nbsp;&nbsp;<strong id="lastSeen" style="font-weight:400">—</strong></div></div>
+    <div class="progress-rule" id="progressRule" style="--delay:270ms"></div>
+    <div class="action-header" id="actionHeader" style="--delay:330ms">AL/X / INVESTIGATING</div>
+    <div class="log" id="logs" style="--delay:390ms"></div>
+    <div class="action-text" style="--delay:500ms"><time id="actionTime"></time><span class="action-words"><span id="action" aria-hidden="true"></span><span class="sr-only" id="actionA11y" role="status" aria-live="polite"></span><i class="cursor" aria-hidden="true"></i></span></div>
+    <div class="manual" id="manualHint" hidden></div>
+    </div>
+  </aside>
+  <div class="field-id"><span class="live"></span><b>BHL</b> &nbsp;·&nbsp; <span id="fleetLine"></span></div>
+  
+</main>
+<script>
+/*
+ AL/X · BHL signal field (D-041, amended 2026-10-12): the readers in use
+ today as lights on a living particle field, the ones with a problem burning
+ red or amber and labelled. AL/X takes them in turn: a HUD ring locks on,
+ a trace runs from her readout, and the readout shows the problem, its log
+ and what happens next. Live data from /reader-tile.json, every 5 seconds.
+ Opened from the BHL item when ALX_BHL_DISPLAY=field; Esc closes it.
+
+ window.ALXSignalField: getReaders(), selectReader(uid), resumeAuto(), getDiagnostics()
+*/
+(() => {
+'use strict';
+const canvas=document.querySelector('#matrix');
+const e=id=>document.getElementById(id);
+const reduced=matchMedia('(prefers-reduced-motion: reduce)');
+// Live: the fleet and its problems come from AL/X (/reader-tile.json), the
+// same data as the drop-down traces (D-041).
+const states={'healthy':'NOMINAL','bad':'ERROR','warn':'WARNING'};
+const tone=s=>s==='bad'?1:s==='healthy'?0:2;
+const readers=[],byUid=new Map(),views=new Map();
+let fleetInfo={rooms:0,readers:0,online:0},haveTile=false;
+const HOLD_MS=9000;
+const fract=n=>n-Math.floor(n);
+const hash=n=>fract(Math.sin(n*127.17+13.51)*43758.5453);
+// Spread the readers over the field: a loose grid, each place nudged.
+function layoutReader(r,i,n){const cols=Math.max(1,Math.ceil(Math.sqrt(n*1.8))),rows=Math.max(1,Math.ceil(n/cols));
+ const col=i%cols,row=Math.floor(i/cols);
+ r.u=.07+(col+.5+(hash(i*3.1)-.5)*.5)/cols*.86;r.v=.12+(rows>1?row/(rows-1):.5)*.72+(hash(i*7.3)-.5)*.05;
+ r.wx=-7.6+r.u*15.2;r.wz=-6.7+r.v*13.4;}
+const hhmm=iso=>{const d=new Date(iso);return isNaN(d)?'':d.toTimeString().slice(0,5);};
+function viewOf(t){
+ const who={alx:'AL/X',tech:'NEEDS A PERSON',reader:'THE READER'}[t.issue?.who]||'AL/X';
+ return {issue:t.issue?.text||'',session:t.event?`${t.event.title} · ${t.event.when}`:'—',
+  last:t.since?`since ${hhmm(t.since)}`:'—',log:(t.trace||[]).map(([a,b])=>[a,b]),
+  stages:[[who,t.issue?.action||t.issue?.text||'']]};
+}
+const example=r=>views.get(r.id);
+const faults=()=>readers.filter(x=>x.state!=='healthy').sort((a,b)=>tone(a.state)===tone(b.state)?a.index-b.index:tone(a.state)===1?-1:1);
+let focus=null,stage=0,auto=true,manualUntil=0,focusStarted=0,hover=null;
+let veinPhase='idle',veinSince=0,queuedFocus=null,contactSince=-1;
+let actionTyping=null; // extends → energizes → holds → disperses → retracts
+let width=1,height=1,dpr=1,aspect=1,time=0,last=0,frame=0,fps=0,paused=false,dirty=true;
+let gl,resources,programs,vaos,buffer,redrawNodes=true,bloomAvailable=false;
+let mode='webgl2',errorMessage='';
+const VEIN_EXTEND_MS=2050, VEIN_WRAP_MS=900, VEIN_UNWRAP_MS=640, VEIN_RETRACT_MS=1270, STAGE_MS=4100;
+const triageHoldMs=d=>d?Math.max(10400,d.stages.length*STAGE_MS+1100):10400;
+function veinProgress(now){if(reduced.matches)return veinPhase==='holding'?1:0;
+ const dt=Math.max(0,now-veinSince);
+ if(veinPhase==='holding'||veinPhase==='wrapping'||veinPhase==='unwrapping')return 1;
+ if(veinPhase==='extending'){const u=Math.min(1,dt/VEIN_EXTEND_MS);return u*u*(3-2*u);}
+ if(veinPhase==='retracting'){const u=Math.min(1,dt/VEIN_RETRACT_MS);return 1-u*u*(3-2*u);}
+ return 0;
+}
+function curlProgress(now){
+ if(reduced.matches)return veinPhase==='holding'?1:0;
+ const ease=u=>u*u*(3-2*u);
+ if(veinPhase==='holding')return 1;
+ if(veinPhase==='wrapping')return ease(Math.min(1,(now-veinSince)/VEIN_WRAP_MS));
+ if(veinPhase==='unwrapping')return 1-ease(Math.min(1,(now-veinSince)/VEIN_UNWRAP_MS));
+ return 0;
+}
+const $=x=>e(x);
+function counts(){e('issueCount').textContent=String(faults().length).padStart(2,'0');e('onlineCount').textContent=String(fleetInfo.online).padStart(2,'0');e('totalCount').textContent='/'+fleetInfo.readers;e('fleetLine').textContent=haveTile?`${fleetInfo.rooms} rooms · ${fleetInfo.readers} readers`:'no BHL events today';}
+function getReaders(){return readers.map(({id,room,side,pair,state,minutes,x,y})=>({id,room,side,pair,state,minutes,x,y}));}
+function getDiagnostics(){return {renderer:mode,webgl2:!!gl,bloom:bloomAvailable,dimensions:[width,height],resolution:dpr,fps:Number(fps.toFixed(1)),readers:readers.length,issues:faults().length,auto,focus:focus?.id||null,stage,veinPhase,veinProgress:Number(veinProgress(performance.now()).toFixed(3)),curlProgress:Number(curlProgress(performance.now()).toFixed(3)),fluidStrength:Number(curlProgress(performance.now()).toFixed(3)),networkStrength:Number(curlProgress(performance.now()).toFixed(3)),terminalVisible:e('side').classList.contains('readout-visible'),typedCharacters:e('action').textContent.length,actionCharacters:actionTyping?.text.length||0,typingFinished:!actionTyping||e('action').textContent.length===actionTyping.text.length};}
+let liveHistory=[],baseLog=[];
+// The log: the reader's history, then AL/X's finished steps, newest last.
+function showLogs(entries){if(entries)baseLog=entries;const box=e('logs');box.replaceChildren();for(const [stamp,msg] of [...baseLog,...liveHistory].slice(-6)){const row=document.createElement('div');row.className='log-row';const t=document.createElement('time');t.textContent=stamp;const text=document.createElement('span');text.textContent=msg;row.append(t,text);box.append(row);}}
+// Action text is typed at a measured pace. Variable cadence at punctuation
+// avoids the harsh character-at-a-time "typewriter demo" appearance.
+function startActionTyping(key,message){
+ if(actionTyping?.key===key)return;
+ // A finished step stays: it moves into the log with its own time, and the
+ // next step starts a new line beneath it.
+ if(actionTyping&&actionTyping.key.split(':')[0]===key.split(':')[0]){
+  liveHistory.push([e('actionTime').textContent,actionTyping.text]);showLogs();
+ }
+ const arrival=performance.now();let ms=80;const marks=[];
+ for(let i=0;i<message.length;i++){
+  const ch=message[i];
+  ms+=ch===' '?25:ch===','||ch===';'?170:ch==='.'||ch===':'?150:41+((i*13)%9);
+  marks.push(ms);
+ }
+ actionTyping={key,text:message,marks,start:arrival,shown:0};
+ e('actionTime').textContent=new Date().toTimeString().slice(0,8);
+ e('action').textContent=reduced.matches?message:'';
+ e('actionA11y').textContent=message;
+}
+function tickTyping(now){
+ if(!actionTyping||reduced.matches)return;
+ const t=now-actionTyping.start;let n=actionTyping.shown;
+ while(n<actionTyping.marks.length&&t>=actionTyping.marks[n])n++;
+ if(n!==actionTyping.shown){actionTyping.shown=n;e('action').textContent=actionTyping.text.slice(0,n);}
+}
+function present(r){if(!r){e('side').classList.add('visible');e('side').classList.remove('readout-visible','acquiring');e('mode').textContent='AL/X / ALL SIGNALS NOMINAL';return;}e('side').classList.add('visible');const d=example(r),list=faults(),n=list.indexOf(r);e('mode').textContent='AL/X';e('signalId').textContent=n<0?'ROOM READER':`${n+1} OF ${list.length} NEEDING ATTENTION`;
+// Readout is entirely text — never data rendered into the graphics surface.
+ e('name').textContent=r.room;const way=document.createElement('span');way.className='way';way.textContent=r.side;e('name').append(way);
+ const issue=e('issue');issue.textContent=r.state==='healthy'?'RESOLVED':(d?.issue||states[r.state]).toUpperCase();issue.className=`side-issue ${tone(r.state)===1?'critical':r.state==='healthy'?'healthy':''}`;
+ e('session').textContent=d?d.session:'—';e('lastSeen').textContent=d?d.last.replace(/^since /,''):'—';
+ showLogs(d?d.log:[]);
+ const stages=r.state==='healthy'?[['RESOLVED','Back to normal.']]:(d?.stages||[['AL/X','Looking at this reader.']]);const curr=stages[Math.min(stage,stages.length-1)];e('actionHeader').textContent=curr[0];startActionTyping(`${r.id}:${stage}:${curr[1]}`,curr[1]);
+ e('progressRule').style.setProperty('--tone',tone(r.state)===1?'#ff254f':tone(r.state)===2?'#ffac00':'#00ffc6');
+ e('manualHint').textContent=auto?'CLICK A SIGNAL TO INSPECT · ESC TO RESUME AUTO':'MANUAL SELECTION · ESC TO RESUME AUTOMATIC TRIAGE';
+ // The AL/X LED is the cyan origin of the vein, not a second fault-status LED.
+ const led=e('focusLed');led.style.background='#e4ffff';led.style.boxShadow='0 0 0 2px rgba(208,252,255,.24),0 0 13px 4px rgba(114,234,255,.86),0 0 34px 8px rgba(52,187,255,.34)';
+ dirty=true;redrawNodes=true;
+}
+function beginFocus(r,now=performance.now()){
+ if(!r){focus=null;veinPhase='idle';present(null);dirty=true;redrawNodes=true;return;}
+ focus=r;stage=0;focusStarted=now;veinSince=now;veinPhase='extending';contactSince=-1;actionTyping=null;liveHistory=[];e('action').textContent='';
+ const side=e('side');side.classList.add('visible','acquiring');side.classList.remove('readout-visible');
+ e('mode').textContent='AL/X · reaching the reader';
+ redrawNodes=true;dirty=true;
+ if(reduced.matches)arriveFocus(now);
+}
+function beginWrap(now=performance.now()){
+ if(!focus)return;
+ veinPhase='wrapping';veinSince=now;contactSince=now;
+ e('mode').textContent='AL/X · connecting';
+ dirty=true;
+ if(reduced.matches)arriveFocus(now);
+}
+function arriveFocus(now=performance.now()){
+ if(!focus)return;
+ veinPhase='holding';veinSince=now;focusStarted=now;stage=0;
+ e('side').classList.remove('acquiring');
+ present(focus);e('side').classList.add('readout-visible');
+ redrawNodes=true;dirty=true;
+}
+function beginRetract(now=performance.now()){
+ if(veinPhase==='idle'||veinPhase==='retracting'||veinPhase==='unwrapping')return;
+ e('side').classList.remove('readout-visible','acquiring');
+ e('mode').textContent='AL/X';
+ if(reduced.matches){startRetraction(now);return;}
+ // The flowing energy dissolves first, then the fine filament retracts.
+ if(veinPhase==='wrapping'||veinPhase==='holding'){
+  veinPhase='unwrapping';veinSince=now;dirty=true;return;
+ }
+ startRetraction(now);
+}
+function startRetraction(now=performance.now()){
+ veinPhase='retracting';veinSince=now;dirty=true;redrawNodes=true;
+ if(reduced.matches)finishRetract(now);
+}
+function finishRetract(now=performance.now()){
+ veinPhase='idle';e('side').classList.remove('readout-visible','acquiring');
+ if(queuedFocus){const queued=queuedFocus;queuedFocus=null;beginFocus(queued,now);return;}
+ if(auto){nextFocus(now);return;}
+ focus=null;e('mode').textContent='AL/X / SELECT A SIGNAL';
+ redrawNodes=true;dirty=true;
+}
+function nextFocus(now=performance.now()){
+ const list=faults();if(!list.length){beginFocus(null,now);return;}
+ const previous=focus;const i=previous?list.indexOf(previous):-1;
+ const chosen=!previous?(list[0]):list[i<0?0:(i+1)%list.length];
+ beginFocus(chosen,now);
+}
+function selectReader(id){
+ const r=readers.find(x=>x.id===id||x.index===id);if(!r)return false;
+ const now=performance.now();auto=false;manualUntil=now+21000;
+ if(focus===r&&veinPhase!=='retracting'){
+  if(veinPhase==='holding')present(r);
+  e('mode').textContent=veinPhase==='holding'?'AL/X / MANUAL INSPECTION':'AL/X / MANUAL ACQUISITION';
+  return true;
+ }
+ if(focus&&veinPhase!=='idle'){
+  queuedFocus=r;beginRetract(now);
+ }else{queuedFocus=null;beginFocus(r,now);}
+ return true;
+}
+function resumeAuto(){
+ auto=true;manualUntil=0;queuedFocus=null;
+ if(focus&&veinPhase!=='idle'){beginRetract(performance.now());}else nextFocus();
+ return true;
+}
+function applyTile(tile){
+ haveTile=Boolean(tile);
+ const fleet=tile?.fleet||[];
+ const problems=new Map((tile?.readers||[]).filter(t=>t.uid).map(t=>[t.uid,t]));
+ for(const f of fleet){
+  let r=byUid.get(f.uid);
+  if(!r){r={id:f.uid,index:readers.length,room:f.room,side:f.way,pair:'',state:'healthy',minutes:0,x:0,y:0};readers.push(r);byUid.set(f.uid,r);}
+  r.room=f.room;r.side=f.way;r.online=f.online;
+  const t=problems.get(f.uid);
+  r.state=t?(t.tone==='bad'?'bad':'warn'):'healthy';
+  if(t)views.set(f.uid,viewOf(t));else views.delete(f.uid);
+ }
+ for(let i=readers.length-1;i>=0;i--)if(!fleet.some(f=>f.uid===readers[i].id)){byUid.delete(readers[i].id);readers.splice(i,1);}
+ readers.forEach((r,i)=>{r.index=i;layoutReader(r,i,readers.length);});
+ fleetInfo={rooms:new Set(fleet.map(f=>f.room)).size,readers:fleet.length,online:fleet.filter(f=>f.online).length};
+ counts();redrawNodes=true;dirty=true;
+ if(focus&&!byUid.has(focus.id)){focus=null;veinPhase='idle';}
+ if(focus&&veinPhase==='holding')present(focus);
+ if(!focus&&veinPhase==='idle'&&auto)nextFocus();
+}
+async function poll(){
+ try{const response=await fetch('/reader-tile.json',{cache:'no-store'});if(!response.ok)return;applyTile((await response.json()).tile);}
+ catch{/* AL/X restarting: keep what is shown */}
+}
+window.ALXSignalField={getReaders,selectReader,resumeAuto,getDiagnostics};
+
+// CPU counterpart to the vertex-shader height field: keeps hit testing exact.
+function terrain(x,z,t){let a=Math.sin(x*.71+z*.26-t*.23)*.42;
+ let b=Math.sin(x*1.33-z*.48+t*.17)*.22;
+ let ridge=1.15*Math.exp(-Math.pow((x+2.1+Math.sin(z*.4+t*.1)*.6)/2.55,2))*(.8+.2*Math.sin(z*.63+t*.15));
+ let ridge2=.96*Math.exp(-Math.pow((x-1.9-Math.cos(z*.46+t*.07)*.63)/2.22,2))*(.7+.3*Math.sin(z*.36-t*.15+1.4));
+ let trough=-.2*Math.exp(-Math.pow((x-.2)/.75,2));
+ let y=-.3+a+b+ridge+ridge2+trough;
+ for(const r of readers){if(r.state==='healthy')continue;const d=Math.hypot((x-r.wx), (z-r.wz)*1.1);if(d>4)continue;const strength=tone(r.state)===1?1:.6;y+=.16*Math.exp(-d*d*.85)*Math.sin(d*4.8-t*1.35)*strength;}
+ return y;
+}
+function projected(x,z,y){const sy=.362,cy=.932,depth=14.3-z*cy-y*sy;const xx=x*2.5/(aspect*depth)*(aspect<.90?aspect/.90:1);const yy=(y*cy-z*sy)*2.5/depth;
+ return {x:(xx*.5+.5)*width,y:(.5-yy*.5)*height,depth};}
+const tagBox=e('tags'),tagEls=new Map();
+function syncTags(){
+ const list=faults();const keep=new Set(list.map(r=>r.id));
+ for(const [id,el] of tagEls)if(!keep.has(id)){el.remove();tagEls.delete(id);}
+ for(const r of list){let el=tagEls.get(r.id);
+  if(!el){el=document.createElement('div');tagBox.append(el);tagEls.set(r.id,el);}
+  el.className=`tag ${tone(r.state)===1?'red':'amber'}${r===focus&&veinPhase!=='idle'?' focus':''}`;
+  const what=(example(r)?.issue||states[r.state]).toLowerCase();
+  if(el.dataset.key!==r.room+r.side+what){el.dataset.key=r.room+r.side+what;el.textContent=`${r.room} · ${r.side}`;const sm=document.createElement('small');sm.textContent=what;el.append(sm);}
+  const panel=e('side').getBoundingClientRect();el.classList.toggle('hidden',r.x+220>panel.left);
+  el.style.left=r.x+'px';el.style.top=r.y+'px';
+ }
+}
+function syncScreenCoordinates(){for(const r of readers){const y=terrain(r.wx,r.wz,time)+.06;const p=projected(r.wx,r.wz,y);r.x=p.x;r.y=p.y;}drawLock();syncTags();}
+
+// ---- the lock-on ---------------------------------------------------------------
+// Acquire: corner brackets snap in around the reader, a crosshair settles.
+// Connect: a trace draws from AL/X's readout with one 45° bend; light flows
+// along it to the reader. Work: a ticked ring turns; an arc fills with her
+// progress. Release: a fixed reader's ring closes mint; the brackets spring
+// out and fade; the trace withdraws into the readout.
+const lockSvg=e('lock');
+// `?simple`: the plainer target (one ring, the status arcs, a crosshair).
+// `?ring`: a segmented ring, like a loading spinner, with a status dot.
+const segMode=true;lockSvg.classList.add('ring');
+const NS='http://www.w3.org/2000/svg';
+function mk(tag,attrs,parent=lockSvg){const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);parent.append(n);return n;}
+const L={};
+L.wire=mk('path',{class:'wire'});L.flow=mk('path',{class:'flow'});L.node=mk('circle',{class:'node',r:2.4});
+// The target: built once around (0,0), moved and turned every frame.
+const R=46;
+const arc=(r,f0,f1)=>{const a0=f0*2*Math.PI-Math.PI/2,a1=f1*2*Math.PI-Math.PI/2;
+ return `M ${(r*Math.cos(a0)).toFixed(2)} ${(r*Math.sin(a0)).toFixed(2)} A ${r} ${r} 0 ${f1-f0>.5?1:0} 1 ${(r*Math.cos(a1)).toFixed(2)} ${(r*Math.sin(a1)).toFixed(2)}`;};
+L.g=mk('g',{class:'target'});
+const layer=(cls)=>mk('g',{class:cls},L.g);
+// outer: thick broken arcs
+L.outer=layer('t-outer');
+for(const [a,b] of [[.015,.17],[.20,.27],[.31,.47],[.52,.585],[.62,.79],[.83,.965]])mk('path',{d:arc(1.62*R,a,b)},L.outer);
+// thin partial arcs just inside
+L.thin=layer('t-thin');
+for(const [a,b] of [[.04,.21],[.42,.5],[.6,.77]])mk('path',{d:arc(1.4*R,a,b)},L.thin);
+// dotted ring
+L.dots=layer('t-dots');mk('circle',{r:1.22*R},L.dots);
+// middle ring with four block segments: they light one by one with her progress
+L.mid=layer('t-mid');mk('circle',{r:R},L.mid);
+L.blocks=[[.09,.16],[.34,.41],[.59,.66],[.84,.91]].map(([a,b])=>mk('path',{d:arc(.9*R,a,b),class:'block'},L.mid));
+// inner status arcs: the one element in the reader's colour
+L.status=layer('t-status');
+for(const [a,b] of [[.07,.43],[.57,.93]])mk('path',{d:arc(.62*R,a,b)},L.status);
+// crosshair
+L.cross=layer('t-cross');
+for(const [x1,y1,x2,y2] of [[0,-.14,0,-.48],[0,.14,0,.48],[-.14,0,-.48,0],[.14,0,.48,0]])mk('line',{x1:x1*R,y1:y1*R,x2:x2*R,y2:y2*R},L.cross);
+for(const [x,y] of [[-.28,-.06],[.28,.06]])mk('line',{x1:x*R,y1:(y-.05)*R,x2:x*R,y2:(y+.05)*R,class:'mark'},L.cross);
+L.seg=layer('t-seg');
+L.segs=Array.from({length:36},(_,i)=>{const th=i/36*2*Math.PI-Math.PI/2;
+ return mk('line',{x1:(.48*R*Math.cos(th)).toFixed(2),y1:(.48*R*Math.sin(th)).toFixed(2),x2:(.61*R*Math.cos(th)).toFixed(2),y2:(.61*R*Math.sin(th)).toFixed(2)},L.seg);});
+let segShown=0,segAt=0;
+L.dot=mk('circle',{r:2.8,class:'t-dot'},L.g);
+L.tagBg=mk('rect',{class:'tag-bg'});
+L.tag=mk('text',{});L.tagSub=mk('text',{class:'sub'});
+const easeOut=u=>1-Math.pow(1-u,3);
+const easeBack=u=>{const c=1.7;return 1+(c+1)*Math.pow(u-1,3)+c*Math.pow(u-1,2);};
+const clamp01=u=>Math.max(0,Math.min(1,u));
+let fixFlashAt=0,lastFixed=false;
+function drawLock(){
+ const now=performance.now();
+ if(!focus||veinPhase==='idle'||focus.x<=0){lockSvg.style.opacity=0;lastFixed=false;return;}
+ lockSvg.style.opacity=1;
+ const dt=(now-veinSince)/1000;
+ const fixed=focus.state==='healthy';
+ if(fixed&&!lastFixed)fixFlashAt=now;lastFixed=fixed;
+ const status=fixed?'#2dffa0':tone(focus.state)===1?'#ff3d63':'#ffb21a';
+ L.status.style.color=status;
+ const led=e('focusLed').getBoundingClientRect();
+ const a={x:led.left+led.width/2,y:led.top+led.height/2};
+ const d={x:focus.x,y:focus.y};
+ // phases: acquire (target in), line drawn, release (target out)
+ let tin=1,ln=1,out=0;
+ if(veinPhase==='extending'){tin=clamp01(dt/.7);ln=clamp01((dt-.45)/1.4);}
+ else if(veinPhase==='retracting'){const u=clamp01(dt/1.27);out=easeOut(clamp01(u/.55));ln=1-easeOut(u);}
+ // the trace: left from the readout, then 45° to the outer ring
+ const ang=-Math.PI/4,rEdge=(segMode?.63:lockSvg.classList.contains('simple')?1.25:1.62)*R;
+ const end={x:d.x+rEdge*Math.cos(ang),y:d.y+rEdge*Math.sin(ang)};
+ let mx=end.x+Math.abs(a.y-end.y);mx=Math.min(mx,a.x-24);
+ const path=`M ${a.x} ${a.y} L ${mx} ${a.y} L ${end.x} ${end.y}`;
+ L.wire.setAttribute('d',path);L.flow.setAttribute('d',path);
+ const len=L.wire.getTotalLength()||1;
+ L.wire.style.strokeDasharray=`${len} ${len}`;L.wire.style.strokeDashoffset=String(len*(1-ln));
+ L.flow.style.opacity=0; // Friedl: no dots running along the trace
+ L.flow.style.strokeDashoffset=String(-(now*.06)%29);
+ const head=L.wire.getPointAtLength(len*ln);
+ L.node.setAttribute('cx',ln<1?head.x:a.x);L.node.setAttribute('cy',ln<1?head.y:a.y);
+ L.node.style.opacity=ln>0?1:0;
+ // the target: each ring arrives a little after the last, from larger and turning
+ const t=now/1000;
+ const ring=(g,delay,speed,base)=>{
+  const k=clamp01((tin-delay)/(1-delay));
+  const sc=(1.9-0.9*easeBack(k))*(1+out*.55);
+  const rot=base+t*speed*(1+out*3)+(1-k)*speed*-2.4;
+  g.setAttribute('transform',`translate(${d.x} ${d.y}) rotate(${(rot*57.2958).toFixed(2)}) scale(${sc.toFixed(3)})`);
+  g.style.opacity=String(Math.min(1,k*1.3)*(1-out));
+ };
+ ring(L.outer,0,.18,0);ring(L.thin,.08,-.32,.6);ring(L.dots,.16,-.12,0);ring(L.mid,.24,.4,0);
+ ring(L.status,.36,-.55,0);ring(L.cross,.3,0,0);ring(L.seg,0,0,0);
+ if(segMode){
+  // A progress bar round the reader: blocks fill clockwise from the top as
+  // she moves through her steps, easing up to each new step; the newest
+  // block shimmers; done, the whole ring is green.
+  const target=fixed?36:veinPhase==='holding'?Math.round(clamp01((now-focusStarted)/HOLD_MS)*36):0;
+  const fdt=segAt?Math.min(.25,(now-segAt)/1000):0;segAt=now;
+  segShown+=(target-segShown)*Math.min(1,fdt*3.5);
+  if(veinPhase==='extending'&&dt<.05)segShown=0;
+  const full=Math.floor(segShown),part=segShown-full;
+  L.segs.forEach((g,i)=>{
+   let o=i<full?1:i===full?Math.max(.22,part):.22;
+   if(!fixed&&i===full-1)o=.55+.45*Math.abs(Math.sin(t*5));
+   g.style.opacity=String(o);
+   g.style.stroke=fixed&&segShown>35.5?'#2dffa0':'';});
+  L.dot.setAttribute('cx',d.x);L.dot.setAttribute('cy',d.y);
+  L.dot.style.fill=status;L.dot.style.color=status;
+  L.dot.style.opacity=String((fixed?1:.82+.18*Math.sin(t*4))*clamp01((tin-.3)/.7)*(1-out));
+  L.dot.setAttribute('r',String(2.8+clamp01(1-(now-fixFlashAt)/700)*2.5));
+ }
+ // progress: the four blocks light one by one with her steps
+ const ex=example(focus);const steps=ex?ex.stages.length:1;
+ const lit=fixed?4:Math.max(1,Math.round(((stage+1)/steps)*4));
+ L.blocks.forEach((b,i)=>b.classList.toggle('on',i<lit));
+ // the status arcs breathe; at the fix they flash and swell once
+ const flash=clamp01(1-(now-fixFlashAt)/700);
+ L.status.style.strokeWidth=String(3.4+flash*3);
+ L.status.style.filter=`drop-shadow(0 0 1px #000) drop-shadow(0 0 ${5+flash*12}px currentColor)`;
+ L.status.style.opacity=String((fixed?1:.7+.3*Math.sin(t*4))*Math.min(1,clamp01((tin-.36)/.64)*1.3)*(1-out));
+ // the tag below the target
+ const stepName=ex?ex.stages[Math.min(stage,ex.stages.length-1)][0]:'MONITORING';
+ const tx=d.x-1.2*R,ty=d.y+(segMode?.62:1.62)*R+34;
+ L.tag.textContent=`${focus.room.toUpperCase()} · ${focus.side}`;
+ L.tagSub.textContent=fixed?'resolved':stepName.toLowerCase();
+ L.tagSub.style.fill=fixed?'#8dffd0':'';
+ L.tag.setAttribute('x',tx);L.tag.setAttribute('y',ty-15);
+ L.tagSub.setAttribute('x',tx);L.tagSub.setAttribute('y',ty);
+ const w=Math.max(L.tag.getComputedTextLength?L.tag.getComputedTextLength():120,90)+12;
+ L.tagBg.setAttribute('x',tx-7);L.tagBg.setAttribute('y',ty-30);L.tagBg.setAttribute('width',w+4);L.tagBg.setAttribute('height',37);
+ const tagOn=String(clamp01((tin-.5)/.5)*(1-out));L.tag.style.opacity=tagOn;L.tagSub.style.opacity=tagOn;L.tagBg.style.opacity=tagOn;
+}
+function nearest(x,y){let choice=null,dist=innerWidth<740?32:22;for(const r of readers){const d=Math.hypot(x-r.x,y-r.y);if(d<dist){choice=r;dist=d;}}return choice;}
+canvas.addEventListener('pointermove',ev=>{const r=nearest(ev.clientX,ev.clientY);if(r!==hover){hover=r;canvas.style.cursor=r?'pointer':'crosshair';}});
+canvas.addEventListener('click',ev=>{const r=nearest(ev.clientX,ev.clientY);if(r)selectReader(r.id);});
+window.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if(window.parent!==window)window.parent.postMessage({type:'bhl-field-close'},'*');else resumeAuto();}if(ev.code==='Space'&&!ev.repeat){ev.preventDefault();paused=!paused;dirty=true;}});
+function triage(now){
+ if(!focus)return;
+ if(!auto&&manualUntil&&now>=manualUntil){auto=true;manualUntil=0;queuedFocus=null;beginRetract(now);}
+ if(veinPhase==='extending'){
+  if(reduced.matches||now-veinSince>=VEIN_EXTEND_MS)beginWrap(now);
+  else dirty=true;
+  return;
+ }
+ if(veinPhase==='wrapping'){
+  if(reduced.matches||now-veinSince>=VEIN_WRAP_MS)arriveFocus(now);
+  else dirty=true;
+  return;
+ }
+ if(veinPhase==='unwrapping'){
+  if(reduced.matches||now-veinSince>=VEIN_UNWRAP_MS)startRetraction(now);
+  else dirty=true;
+  return;
+ }
+ if(veinPhase==='retracting'){
+  if(reduced.matches||now-veinSince>=VEIN_RETRACT_MS)finishRetract(now);
+  else dirty=true;
+  return;
+ }
+ if(veinPhase!=='holding'||!auto)return;
+ const delta=now-focusStarted;
+ e('progressRule').style.setProperty('--progress',`${Math.min(100,delta/HOLD_MS*100)}%`);
+ if(delta>HOLD_MS)beginRetract(now);
+}
+
+// Every shader is embedded right here. Native WebGL2 / GLSL ES 3.00.
+const waveGLSL=`
+uniform float uTime;
+uniform float uAspect;
+uniform float uMobile;
+uniform vec4 uFaults[8]; // worldX, worldZ, tone(1 red/2 amber), enabled
+uniform vec4 uFocus;     // worldX, worldZ, tone, selected
+float waveHeight(vec2 p){
+ float x=p.x,z=p.y;
+ float a=sin(x*.71+z*.26-uTime*.23)*.42;
+ float b=sin(x*1.33-z*.48+uTime*.17)*.22;
+ float ridge=1.15*exp(-pow((x+2.1+sin(z*.4+uTime*.1)*.6)/2.55,2.))*(.8+.2*sin(z*.63+uTime*.15));
+ float ridge2=.96*exp(-pow((x-1.9-cos(z*.46+uTime*.07)*.63)/2.22,2.))*(.7+.3*sin(z*.36-uTime*.15+1.4));
+ float trough=-.2*exp(-pow((x-.2)/.75,2.));
+ float h=-.3+a+b+ridge+ridge2+trough;
+ for(int i=0;i<8;i++){vec4 f=uFaults[i];if(f.w<.5)continue;
+  float d=distance(p*vec2(1.,1.1),f.xy*vec2(1.,1.1));
+  h+=.16*exp(-d*d*.85)*sin(d*4.8-uTime*1.35)*mix(.6,1.,1.-step(1.5,f.z));
+ }
+ return h;
+}
+float faultLight(vec2 p,out vec3 light){
+ vec3 acc=vec3(0.);float amount=0.;
+ for(int i=0;i<8;i++){vec4 f=uFaults[i];if(f.w<.5)continue;
+  float d=distance(p*vec2(1.,1.05),f.xy*vec2(1.,1.05));float v=exp(-d*d*.74);
+  vec3 c=mix(vec3(1.0,.02,.22),vec3(1.0,.62,.0),step(1.5,f.z));
+  acc+=c*v;amount+=v;
+ }
+ light=acc;return min(amount,1.4);
+}
+vec4 perspective(vec3 p){
+ float cy=.932,sy=.362;float z=14.3-p.z*cy-p.y*sy;
+ float px=p.x*2.5/uAspect*mix(1.,uAspect/.90,uMobile);
+ float py=(p.y*cy-p.z*sy)*2.5;
+ return vec4(px,py,0.,z);
+}
+`;
+const fullscreenVertex=`#version 300 es
+precision highp float;
+out vec2 vUV;
+void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));vUV=p;gl_Position=vec4(p*2.-1.,0,1);}`;
+const bgFragment=`#version 300 es
+precision highp float;
+in vec2 vUV;out vec4 o;uniform float uTime;
+void main(){vec2 uv=vUV;float horizon=smoothstep(.58,.10,uv.y);
+ float nocturne=pow(max(0.,1.-length((uv-vec2(.40,.54))*vec2(1.1,1.0))),2.);
+ vec3 col=vec3(.0015,.004,.012);
+ col+=vec3(.001,.022,.056)*nocturne;
+ col+=vec3(.002,.027,.052)*horizon*.18;
+ float haze=exp(-pow((uv.y-.40)*6.,2.))*exp(-pow((uv.x-.40)*2.0,2.));col+=vec3(.004,.035,.075)*haze;
+ o=vec4(col,1.);
+}`;
+const particleVertex=`#version 300 es
+precision highp float;
+${waveGLSL}
+uniform int uCols;uniform int uRows;
+out vec3 vTint;out float vAlpha;out float vHot;out float vNoise;
+void main(){
+ int col=gl_VertexID%uCols,row=gl_VertexID/uCols;
+ float u=float(col)/float(uCols-1),v=float(row)/float(uRows-1);
+ vec2 p=vec2(mix(-8.45,8.45,u),mix(-7.6,7.5,pow(v,1.10)));
+ float h=waveHeight(p);vec3 light;float f=faultLight(p,light);
+ vec4 clip=perspective(vec3(p.x,h,p.y));gl_Position=clip;
+ float z=clip.w;
+ float crest=clamp((h+.45)*.50,0.,1.);
+ float near=mix(.22,1.,smoothstep(22.,7.,z));
+ float striation=pow(abs(sin(p.x*2.6+p.y*.65+uTime*.13)),19.);
+ float skyline=exp(-pow((p.x-1.1+sin(p.y*.35)*1.25)/2.4,2.));
+ float glitter=fract(sin(float(col)*72.17+float(row)*138.73)*31247.341);
+ float gleam=clamp(crest*.58+striation*.25+skyline*.28,0.,1.);
+ vHot=clamp(gleam+.22*f,0.,1.);
+ vTint=mix(vec3(.01,.16,.95),vec3(.10,.95,1.0),pow(crest,.85));
+ vTint=mix(vTint,vec3(.45,1.0,1.0),striation*.5+gleam*.3);
+ vTint=mix(vTint,light*1.75,min(.95,f*1.1));
+ vAlpha=clamp(((.13+.58*near)*(.50+crest*.78)+glitter*.11+f*.55)*1.2,.08,1.0);
+ gl_PointSize=clamp((6.4+gleam*4.0+f*4.2)*(14.0/z)*(uMobile>.5?1.15:1.0),2.,14.);
+ vNoise=glitter;
+}`;
+const particleFragment=`#version 300 es
+precision highp float;
+in vec3 vTint;in float vAlpha;in float vHot;in float vNoise;out vec4 o;
+void main(){float r=length(gl_PointCoord-.5)*2.;if(r>1.)discard;
+ float core=exp(-r*r*31.);float inner=exp(-r*r*7.);float haze=exp(-r*r*2.2);
+ float alpha=vAlpha*(core*.84+inner*.25+haze*.055);
+ vec3 col=vTint*(.70+vHot*.48)+vec3(.23,.61,.67)*core*vHot*.7;
+ o=vec4(col,alpha);
+}`;
+const nodeVertex=`#version 300 es
+precision highp float;
+${waveGLSL}
+layout(location=0)in vec4 aNode; // worldX, worldZ, status 0/1/2, selected 0/1
+out vec3 vColor;out float vProblem;out float vSelected;
+void main(){vec2 p=aNode.xy;vec4 clip=perspective(vec3(p.x,waveHeight(p)+.065,p.y));gl_Position=clip;
+ vProblem=step(.5,aNode.z);vSelected=aNode.w;
+ vColor=aNode.z<.5?vec3(.25,.95,1.):aNode.z<1.5?vec3(1.,.08,.22):vec3(1.,.64,.04);
+ gl_PointSize=clamp((aNode.z<.5?30.:66.)*14./clip.w+(aNode.w>0.5?24.:0.),18.,120.);
+}`;
+const nodeFragment=`#version 300 es
+precision highp float;
+in vec3 vColor;in float vProblem;in float vSelected;out vec4 o;
+uniform float uTime;
+void main(){float d=length(gl_PointCoord-.5)*2.;if(d>1.)discard;
+ float center=exp(-d*d*180.),inner=exp(-d*d*52.),outer=exp(-d*d*5.8);
+ float pulse=1.+.12*sin(uTime*2.0+vProblem*2.);
+ vec3 c=vColor*(.35*outer+.76*inner+2.0*center);
+ c+=vec3(1.)*center*.54;
+ float a=(.10*outer+.45*inner+1.0*center)*pulse*(vProblem>.5?1.15:1.);
+ o=vec4(c,a);
+}`;
+const bloomExtract=`#version 300 es
+precision highp float;
+in vec2 vUV;out vec4 o;uniform sampler2D uTexture;uniform vec2 uTexel;
+void main(){vec3 c=vec3(0.);float w=0.;
+ for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++){
+ float k=(x==0&&y==0)?4.:1.;vec3 sampleColor=texture(uTexture,vUV+vec2(float(x),float(y))*uTexel).rgb;
+ float l=max(sampleColor.r,max(sampleColor.g,sampleColor.b));
+ vec3 bright=sampleColor*smoothstep(.12,.70,l);
+ c+=bright*k;w+=k;
+ }
+ o=vec4(c/w,1.);
+}`;
+const blurFragment=`#version 300 es
+precision highp float;
+in vec2 vUV;out vec4 o;uniform sampler2D uTexture;uniform vec2 uDirection;
+void main(){vec3 c=texture(uTexture,vUV).rgb*.227027;
+ c+=texture(uTexture,vUV+uDirection*1.384615).rgb*.316216;
+ c+=texture(uTexture,vUV-uDirection*1.384615).rgb*.316216;
+ c+=texture(uTexture,vUV+uDirection*3.230769).rgb*.070270;
+ c+=texture(uTexture,vUV-uDirection*3.230769).rgb*.070270;
+ o=vec4(c,1.);
+}`;
+const compositeFragment=`#version 300 es
+precision highp float;
+in vec2 vUV;out vec4 o;
+uniform sampler2D uScene;uniform sampler2D uBloom;
+uniform float uGrain;uniform float uBloomGain;uniform float uBloomEnabled;
+float rand(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453123);}
+void main(){vec3 scene=texture(uScene,vUV).rgb;
+ vec3 bloom=texture(uBloom,vUV).rgb;
+ vec3 c=scene+bloom*uBloomGain*uBloomEnabled;
+ float v=length((vUV-vec2(.43,.52))*vec2(.88,.85));
+ c*=1.-.28*smoothstep(.40,.80,v);
+ c=vec3(1.)-exp(-c*1.16);
+ c=pow(c,vec3(.88));
+ float lum=dot(c,vec3(.2126,.7152,.0722));c=max(mix(vec3(lum),c,1.28),vec3(0.));
+ float n=(rand(vUV*vec2(1540.,1120.)+uGrain)-.5)*.010;
+ o=vec4(max(c+n,vec3(0.)),1.);
+}`;
+function compile(type,source){const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const msg=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw Error('GLSL shader compilation failed: '+msg);}return shader;}
+function makeProgram(vs,fs){const program=gl.createProgram(),v=compile(gl.VERTEX_SHADER,vs),f=compile(gl.FRAGMENT_SHADER,fs);gl.attachShader(program,v);gl.attachShader(program,f);gl.linkProgram(program);gl.deleteShader(v);gl.deleteShader(f);if(!gl.getProgramParameter(program,gl.LINK_STATUS)){const msg=gl.getProgramInfoLog(program);throw Error('GLSL link failed: '+msg);}return {p:program,u:new Map()};}
+function loc(P,name){if(!P.u.has(name))P.u.set(name,gl.getUniformLocation(P.p,name));return P.u.get(name);}
+function uniform1(P,name,v){const l=loc(P,name);if(l!==null)gl.uniform1f(l,v);}
+function uniform2(P,name,x,y){const l=loc(P,name);if(l!==null)gl.uniform2f(l,x,y);}
+function uniform1i(P,name,x){const l=loc(P,name);if(l!==null)gl.uniform1i(l,x);}
+function uniform4(P,name,arr){const l=loc(P,name);if(l!==null)gl.uniform4fv(l,arr);}
+function applyCommon(P){uniform1(P,'uTime',time);uniform1(P,'uAspect',aspect);uniform1(P,'uMobile',aspect<.90?1:0);uniform4(P,'uFaults[0]',faultUniform);uniform4(P,'uFocus',focus?[focus.wx,focus.wz,tone(focus.state),1]:[0,0,0,0]);}
+let faultUniform=new Float32Array(32);
+function updateFaultUniform(){faultUniform.fill(0);faults().slice(0,8).forEach((r,i)=>{faultUniform[i*4]=r.wx;faultUniform[i*4+1]=r.wz;faultUniform[i*4+2]=tone(r.state);faultUniform[i*4+3]=1;});}
+function renderNodesBuffer(){const vertices=new Float32Array(readers.length*4);readers.forEach((r,i)=>{vertices[i*4]=r.wx;vertices[i*4+1]=r.wz;vertices[i*4+2]=tone(r.state);vertices[i*4+3]=focus===r&&veinPhase==='holding'?1:0;});gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,vertices);redrawNodes=false;}
+function makeTarget(w,h){let tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+ const fb=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+ if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Framebuffer unsupported');return {tex,fb,w,h};}
+function dropTarget(t){if(t){gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fb);}}
+function use(P){gl.useProgram(P.p);}
+function quad(P){use(P);gl.bindVertexArray(vaos.empty);gl.drawArrays(gl.TRIANGLES,0,3);}
+function initGL(){
+ gl=canvas.getContext('webgl2',{alpha:false,antialias:false,depth:false,stencil:false,preserveDrawingBuffer:false,powerPreference:'high-performance'});
+ if(!gl)throw Error('This browser does not support WebGL2');
+ programs={background:makeProgram(fullscreenVertex,bgFragment),particles:makeProgram(particleVertex,particleFragment),nodes:makeProgram(nodeVertex,nodeFragment),extract:makeProgram(fullscreenVertex,bloomExtract),blur:makeProgram(fullscreenVertex,blurFragment),composite:makeProgram(fullscreenVertex,compositeFragment)};
+ vaos={empty:gl.createVertexArray(),nodes:gl.createVertexArray()};buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(256*4),gl.DYNAMIC_DRAW);gl.bindVertexArray(vaos.nodes);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,16,0);gl.bindVertexArray(null);
+ gl.disable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);
+ }
+function resize(){width=Math.max(1,innerWidth);height=Math.max(1,innerHeight);aspect=width/height;dpr=Math.min(window.devicePixelRatio||1,width>1600?1.3:width<740?1.5:1.45);
+ const w=Math.round(width*dpr),h=Math.round(height*dpr);canvas.width=w;canvas.height=h;canvas.style.width=width+'px';canvas.style.height=height+'px';
+ if(!gl)return;
+ if(resources){dropTarget(resources.scene);dropTarget(resources.a);dropTarget(resources.b);}
+ try{const scene=makeTarget(w,h),bw=Math.max(1,Math.round(w*.43)),bh=Math.max(1,Math.round(h*.43));const a=makeTarget(bw,bh),b=makeTarget(bw,bh);resources={scene,a,b};bloomAvailable=true;}catch(err){console.warn('Bloom unavailable; rendering direct scene',err);bloomAvailable=false;resources=null;}
+ dirty=true;syncScreenCoordinates();
+}
+function bindTarget(target){gl.bindFramebuffer(gl.FRAMEBUFFER,target?.fb||null);gl.viewport(0,0,target?.w||canvas.width,target?.h||canvas.height);}
+function bindTex(P,name,tex,slot){gl.activeTexture(gl.TEXTURE0+slot);gl.bindTexture(gl.TEXTURE_2D,tex);uniform1i(P,name,slot);}
+function drawScene(){
+ const {background,particles,nodes}=programs;
+ gl.disable(gl.BLEND);quad(background);
+ gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+ gl.bindVertexArray(vaos.empty);
+ // Atmospheric mesh: 40,320 independent 3D particle sprites. No CPU-per-dot work.
+ use(particles);applyCommon(particles);uniform1i(particles,'uCols',280);uniform1i(particles,'uRows',144);gl.drawArrays(gl.POINTS,0,280*144);
+ // No decorative horizontal ribbons: the illuminated particle crests define the wave.
+ if(redrawNodes)renderNodesBuffer();use(nodes);applyCommon(nodes);gl.bindVertexArray(vaos.nodes);gl.drawArrays(gl.POINTS,0,readers.length);
+
+ gl.disable(gl.BLEND);
+}
+function drawPost(){const {extract,blur,composite}=programs,{scene,a,b}=resources;
+ bindTarget(a);use(extract);bindTex(extract,'uTexture',scene.tex,0);uniform2(extract,'uTexel',1/scene.w,1/scene.h);quad(extract);
+ for(let i=0;i<3;i++){
+  bindTarget(b);use(blur);bindTex(blur,'uTexture',a.tex,0);uniform2(blur,'uDirection',1/a.w,0);quad(blur);
+  bindTarget(a);use(blur);bindTex(blur,'uTexture',b.tex,0);uniform2(blur,'uDirection',0,1/a.h);quad(blur);
+ }
+ bindTarget(null);use(composite);bindTex(composite,'uScene',scene.tex,0);bindTex(composite,'uBloom',a.tex,1);uniform1(composite,'uGrain',time);uniform1(composite,'uBloomGain',2.3);uniform1(composite,'uBloomEnabled',1);quad(composite);
+}
+function draw(){if(!gl)return;const start=performance.now();updateFaultUniform();
+ if(bloomAvailable){bindTarget(resources.scene);drawScene();drawPost();}else{bindTarget(null);drawScene();}
+ syncScreenCoordinates();window.__signalFieldDrawMs=+(performance.now()-start).toFixed(1);dirty=false;}
+function loop(now){requestAnimationFrame(loop);if(document.hidden)return;if(!last)last=now;const dt=now-last;if(dt<32&&!dirty)return;last=now;fps=fps*.92+(1000/Math.max(1,dt))*.08;frame++;if(!reduced.matches&&!paused)time+=Math.min(dt,55)/1000;if(!reduced.matches||dirty)draw();}
+window.addEventListener('resize',resize,{passive:true});reduced.addEventListener('change',()=>{dirty=true;draw();});
+canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();mode='context-lost';errorMessage='Graphics context interrupted. Waiting for recovery.';});
+canvas.addEventListener('webglcontextrestored',()=>{try{initGL();resize();mode='webgl2';}catch(err){console.error(err);}});
+poll();setInterval(poll,5000);
+// Triage and terminal typing run independently of graphics frame rate.
+// A busy GPU or low-FPS software fallback must never strand a connection.
+setInterval(()=>{const now=performance.now();triage(now);tickTyping(now);},50);
+try{initGL();resize();draw();requestAnimationFrame(loop);}catch(err){
+ console.warn('WebGL2 not ready; trying Canvas fallback:',err.message);mode='canvas2d';
+ const ctx=canvas.getContext('2d',{alpha:false});
+ if(ctx){
+  let lastFallback=0;
+  function canvasFallback(now){requestAnimationFrame(canvasFallback);if(document.hidden)return;if(now-lastFallback<44&&!dirty)return;const dt=lastFallback?Math.min(55,now-lastFallback):0;lastFallback=now;if(!reduced.matches&&!paused)time+=dt/1000;
+   width=innerWidth;height=innerHeight;aspect=width/height;dpr=Math.min(devicePixelRatio||1,1.4);const w=Math.round(width*dpr),h=Math.round(height*dpr);
+   if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;canvas.style.width=width+'px';canvas.style.height=height+'px';}
+   ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#010813';ctx.fillRect(0,0,width,height);
+   const g=ctx.createRadialGradient(width*.42,height*.54,0,width*.42,height*.56,width*.75);g.addColorStop(0,'#082238');g.addColorStop(1,'#010813');ctx.fillStyle=g;ctx.fillRect(0,0,width,height);
+   const cols=width<750?82:135,rows=76;
+   for(let row=0;row<rows;row++){const z=-7.6+15.1*Math.pow(row/(rows-1),1.1),near=row/(rows-1);
+    for(let col=0;col<cols;col++){const x=-8.45+16.9*col/(cols-1);const y=terrain(x,z,time);const p=projected(x,z,y);const crest=Math.max(0,Math.min(1,(y+.45)*.5));const radius=(.45+near*.92)*(width<750?.75:1);
+     ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fillStyle=`rgba(${Math.round(38+crest*122)},${Math.round(132+crest*110)},255,${(.15+near*.57)*(.40+crest*.6)})`;ctx.fill();}
+   }
+   syncScreenCoordinates();
+   for(const r of readers){const c=tone(r.state)===1?'255,22,62':tone(r.state)===2?'255,161,0':'0,216,255';const rr=r.state==='healthy'?21:39;const glow=ctx.createRadialGradient(r.x,r.y,0,r.x,r.y,rr);glow.addColorStop(0,`rgba(${c},.82)`);glow.addColorStop(.16,`rgba(${c},.38)`);glow.addColorStop(1,`rgba(${c},0)`);ctx.fillStyle=glow;ctx.beginPath();ctx.arc(r.x,r.y,rr,0,Math.PI*2);ctx.fill();ctx.fillStyle='#eeffff';ctx.beginPath();ctx.arc(r.x,r.y,r.state==='healthy'?1.4:2.6,0,Math.PI*2);ctx.fill();}
+   dirty=false;
+  }
+  resize();requestAnimationFrame(canvasFallback);
+ }else{mode='unavailable';errorMessage=err.message;console.error('AL/X Signal Matrix renderer:',err);const note=document.createElement('p');note.className='render-note';note.textContent='GPU SIGNAL FIELD UNAVAILABLE · '+err.message;document.body.append(note);}
+}
+})();
+</script>
+</body>
+</html>

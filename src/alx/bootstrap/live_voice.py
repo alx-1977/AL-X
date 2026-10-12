@@ -1053,7 +1053,8 @@ async def run(repository_root: Path) -> None:
         provider_settings.speech_to_text.sample_rate_hz,
         CODE_ROOT / "src/alx/interfaces/assets",
         reader_tile=None if reader_runtime is None else tile_source(
-            reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch),
+            reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch,
+            display=ReaderSettings.from_environment(environment).display),
         # D-044: replies made in a thread nobody listens on reach Friedl's
         # session, and wait for his next one when none is open.
         relay=gateway.relay_response,

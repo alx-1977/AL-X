@@ -233,3 +233,17 @@
 @media (prefers-reduced-motion: reduce) {
   .rt-bar, .rt-bar *, .rt-panel, .rt-panel * { animation: none !important; transition: none !important; }
 }
+
+/* ---- the signal field (ALX_BHL_DISPLAY=field): full screen under the bar ---- */
+.rt-field {
+  position: fixed;
+  z-index: 3;
+  top: calc(1.85 * 13px);
+  left: 0;
+  width: 100%;
+  height: calc(100% - 1.85 * 13px);
+  border: 0;
+  background: #010710;
+  animation: rt-field-in 0.35s ease-out backwards;
+}
+@keyframes rt-field-in { from { opacity: 0; } }

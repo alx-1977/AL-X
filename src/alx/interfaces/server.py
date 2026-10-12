@@ -643,6 +643,7 @@ class LiveVoiceServer:
             "/reader-traces.js": "reader-traces.js",
             "/reader-traces": "reader-traces.html",
             "/reader-traces-fixtures.js": "reader-traces-fixtures.js",
+            "/bhl-field": "bhl-field.html",
         }.get(parsed.path)
         if relative is None:
             return self._response(404, b"Not found", "text/plain; charset=utf-8")
