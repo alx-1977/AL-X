@@ -169,6 +169,9 @@ function viewOf(t){
   stages:[[t.alerted?'FRIEDL ALERTED':who,t.issue?.action||t.issue?.text||'']],alerted:Boolean(t.alerted)};
 }
 const example=r=>views.get(r.id);
+// The first eight faults shape the field: the shader takes eight, and the
+// labels, rings and clicks must sit on the same surface. Set per update.
+let shapeFaults=[];
 const faults=()=>readers.filter(x=>x.state!=='healthy').sort((a,b)=>tone(a.state)===tone(b.state)?a.index-b.index:tone(a.state)===1?-1:1);
 let focus=null,stage=0,auto=true,manualUntil=0,focusStarted=0,hover=null;
 let veinPhase='idle',veinSince=0,queuedFocus=null,contactSince=-1;
@@ -323,6 +326,7 @@ function applyTile(tile){
  for(let i=readers.length-1;i>=0;i--)if(!fleet.some(f=>f.uid===readers[i].id)){byUid.delete(readers[i].id);readers.splice(i,1);}
  readers.forEach((r,i)=>{r.index=i;layoutReader(r,i,readers.length);});
  fleetInfo={rooms:new Set(fleet.map(f=>f.room)).size,readers:fleet.length,online:fleet.filter(f=>f.online).length};
+ shapeFaults=faults().slice(0,8);
  counts();redrawNodes=true;dirty=true;
  if(focus&&!wasHealthy&&focus.state==='healthy')resolvedAt=performance.now();
  if(focus&&!byUid.has(focus.id)){focus=null;veinPhase='idle';}
@@ -342,7 +346,7 @@ function terrain(x,z,t){let a=Math.sin(x*.71+z*.26-t*.23)*.42;
  let ridge2=.96*Math.exp(-Math.pow((x-1.9-Math.cos(z*.46+t*.07)*.63)/2.22,2))*(.7+.3*Math.sin(z*.36-t*.15+1.4));
  let trough=-.2*Math.exp(-Math.pow((x-.2)/.75,2));
  let y=-.3+a+b+ridge+ridge2+trough;
- for(const r of faults().slice(0,8)){const d=Math.hypot((x-r.wx), (z-r.wz)*1.1);if(d>4)continue;const strength=tone(r.state)===1?1:.6;y+=.16*Math.exp(-d*d*.85)*Math.sin(d*4.8-t*1.35)*strength;}
+ for(const r of shapeFaults){const d=Math.hypot((x-r.wx), (z-r.wz)*1.1);if(d>4)continue;const strength=tone(r.state)===1?1:.6;y+=.16*Math.exp(-d*d*.85)*Math.sin(d*4.8-t*1.35)*strength;}
  return y;
 }
 function projected(x,z,y){const sy=.362,cy=.932,depth=14.3-z*cy-y*sy;const xx=x*2.5/(aspect*depth)*(aspect<.90?aspect/.90:1);const yy=(y*cy-z*sy)*2.5/depth;
@@ -694,7 +698,7 @@ function uniform1i(P,name,x){const l=loc(P,name);if(l!==null)gl.uniform1i(l,x);}
 function uniform4(P,name,arr){const l=loc(P,name);if(l!==null)gl.uniform4fv(l,arr);}
 function applyCommon(P){uniform1(P,'uTime',time);uniform1(P,'uAspect',aspect);uniform1(P,'uMobile',aspect<.90?1:0);uniform4(P,'uFaults[0]',faultUniform);uniform4(P,'uFocus',focus?[focus.wx,focus.wz,tone(focus.state),1]:[0,0,0,0]);}
 let faultUniform=new Float32Array(32);
-function updateFaultUniform(){faultUniform.fill(0);faults().slice(0,8).forEach((r,i)=>{faultUniform[i*4]=r.wx;faultUniform[i*4+1]=r.wz;faultUniform[i*4+2]=tone(r.state);faultUniform[i*4+3]=1;});}
+function updateFaultUniform(){faultUniform.fill(0);shapeFaults.forEach((r,i)=>{faultUniform[i*4]=r.wx;faultUniform[i*4+1]=r.wz;faultUniform[i*4+2]=tone(r.state);faultUniform[i*4+3]=1;});}
 let nodeCapacity=256;
 function renderNodesBuffer(){if(readers.length>nodeCapacity){nodeCapacity=Math.ceil(readers.length/64)*64;gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(nodeCapacity*4),gl.DYNAMIC_DRAW);}const vertices=new Float32Array(readers.length*4);readers.forEach((r,i)=>{vertices[i*4]=r.wx;vertices[i*4+1]=r.wz;vertices[i*4+2]=tone(r.state);vertices[i*4+3]=focus===r&&veinPhase==='holding'?1:0;});gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,vertices);redrawNodes=false;}
 function makeTarget(w,h){let tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
@@ -707,7 +711,7 @@ function initGL(){
  gl=canvas.getContext('webgl2',{alpha:true,premultipliedAlpha:true,antialias:false,depth:false,stencil:false,preserveDrawingBuffer:false,powerPreference:'high-performance'});
  if(!gl)throw Error('This browser does not support WebGL2');
  programs={background:makeProgram(fullscreenVertex,bgFragment),particles:makeProgram(particleVertex,particleFragment),nodes:makeProgram(nodeVertex,nodeFragment),extract:makeProgram(fullscreenVertex,bloomExtract),blur:makeProgram(fullscreenVertex,blurFragment),composite:makeProgram(fullscreenVertex,compositeFragment)};
- vaos={empty:gl.createVertexArray(),nodes:gl.createVertexArray()};buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(256*4),gl.DYNAMIC_DRAW);gl.bindVertexArray(vaos.nodes);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,16,0);gl.bindVertexArray(null);
+ vaos={empty:gl.createVertexArray(),nodes:gl.createVertexArray()};buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(nodeCapacity*4),gl.DYNAMIC_DRAW);gl.bindVertexArray(vaos.nodes);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,16,0);gl.bindVertexArray(null);
  gl.disable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);
  }
 function resize(){width=Math.max(1,innerWidth);height=Math.max(1,innerHeight);aspect=width/height;dpr=Math.min(window.devicePixelRatio||1,width>1600?1.3:width<740?1.5:1.45);
