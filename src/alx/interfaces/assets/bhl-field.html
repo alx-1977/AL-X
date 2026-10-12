@@ -96,6 +96,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .lock .tag-bg{fill:rgba(1,8,16,.78)}
 .lock text{font:600 12px "Courier New",monospace;letter-spacing:.16em;fill:#7fe9ff}
 .lock text.sub{font-weight:400;font-size:11.5px;fill:#d9f3fa;letter-spacing:.08em}
+.link-warn{position:absolute;top:clamp(110px,15vh,150px);right:clamp(28px,4.3vw,82px);font:600 12px/1.4 "Courier New",monospace;letter-spacing:.12em;color:#ffc24a;text-shadow:0 0 10px rgba(255,170,0,.5);text-align:right}
 #matrix:focus-visible{outline:none} .render-note{position:fixed;inset:auto 12vw 35vh;text-align:center;color:#8ebed0;font:13px/2 "Courier New",monospace;letter-spacing:.12em;z-index:3;pointer-events:none} @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -106,6 +107,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 <svg id="lock" class="lock" aria-hidden="true"></svg>
 <main class="shell">
   <header class="mast"><div class="brand">AL<span>/</span>X</div></header>
+  <div class="link-warn" id="linkWarn" hidden></div>
   <div class="metrics" aria-live="polite"><div class="metric"><div class="metric-num"><span id="onlineCount">00</span><small id="totalCount">/0</small></div><div class="metric-label">ONLINE</div></div><div class="metric danger"><div class="metric-num" id="issueCount">00</div><div class="metric-label">NEED ATTENTION</div></div></div>
   
   <aside class="side visible" id="side" aria-live="off">
@@ -114,7 +116,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
     <div class="side-meta" id="signalId" style="--delay:0ms">SIGNAL 002 &nbsp;·&nbsp; INCIDENT 01 / 05</div>
     <h1 class="side-name" id="name" style="--delay:70ms">—</h1>
     <div class="side-issue critical" id="issue" style="--delay:130ms"></div>
-    <div class="side-context" style="--delay:190ms"><div><span>EXPECTED</span> &nbsp;<strong id="session" style="font-weight:400">—</strong></div><div><span>SINCE</span> &nbsp;&nbsp;&nbsp;&nbsp;<strong id="lastSeen" style="font-weight:400">—</strong></div></div>
+    <div class="side-context" style="--delay:190ms"><div><span>EXPECTED</span> &nbsp;<strong id="session" style="font-weight:400">—</strong></div><div><span>SINCE</span> &nbsp;&nbsp;&nbsp;&nbsp;<strong id="lastSeen" style="font-weight:400">—</strong></div><div><span>VITALS</span> &nbsp;&nbsp;&nbsp;<strong id="vitals" style="font-weight:400">—</strong></div></div>
     <div class="progress-rule" id="progressRule" style="--delay:270ms"></div>
     <div class="action-header" id="actionHeader" style="--delay:330ms">AL/X / INVESTIGATING</div>
     <div class="log" id="logs" style="--delay:390ms"></div>
@@ -138,7 +140,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 */
 (() => {
 'use strict';
-const canvas=document.querySelector('#matrix');
+let canvas=document.querySelector('#matrix');
 const e=id=>document.getElementById(id);
 const reduced=matchMedia('(prefers-reduced-motion: reduce)');
 // Live: the fleet and its problems come from AL/X (/reader-tile.json), the
@@ -162,7 +164,8 @@ const hhmm=iso=>{const d=new Date(iso);return isNaN(d)?'':d.toTimeString().slice
 function viewOf(t){
  const who={alx:'AL/X',tech:'NEEDS A PERSON',reader:'THE READER'}[t.issue?.who]||'AL/X';
  return {issue:t.issue?.text||'',session:t.event?`${t.event.title} · ${t.event.when}`:'—',
-  last:t.since?`since ${hhmm(t.since)}`:'—',log:(t.trace||[]).map(([a,b])=>[a,b]),
+  last:t.since?`since ${hhmm(t.since)}`:'—',
+  vitals:[t.power?`${t.power.source==='usb'?'usb':'battery'}${Number.isFinite(t.power.percent)?' '+t.power.percent+'%':''}`:'',Number.isFinite(t.signal)?`signal ${t.signal}%`:''].filter(Boolean).join(' · ')||'—',log:(t.trace||[]).map(([a,b])=>[a,b]),
   stages:[[t.alerted?'FRIEDL ALERTED':who,t.issue?.action||t.issue?.text||'']],alerted:Boolean(t.alerted)};
 }
 const example=r=>views.get(r.id);
@@ -194,18 +197,15 @@ const $=x=>e(x);
 function counts(){e('issueCount').textContent=String(faults().length).padStart(2,'0');e('onlineCount').textContent=String(fleetInfo.online).padStart(2,'0');e('totalCount').textContent='/'+fleetInfo.readers;e('fleetLine').textContent=haveTile?`${fleetInfo.rooms} rooms · ${fleetInfo.readers} readers`:'no BHL events today';}
 function getReaders(){return readers.map(({id,room,side,pair,state,minutes,x,y})=>({id,room,side,pair,state,minutes,x,y}));}
 function getDiagnostics(){return {renderer:mode,webgl2:!!gl,bloom:bloomAvailable,dimensions:[width,height],resolution:dpr,fps:Number(fps.toFixed(1)),readers:readers.length,issues:faults().length,auto,focus:focus?.id||null,stage,veinPhase,veinProgress:Number(veinProgress(performance.now()).toFixed(3)),curlProgress:Number(curlProgress(performance.now()).toFixed(3)),fluidStrength:Number(curlProgress(performance.now()).toFixed(3)),networkStrength:Number(curlProgress(performance.now()).toFixed(3)),terminalVisible:e('side').classList.contains('readout-visible'),typedCharacters:e('action').textContent.length,actionCharacters:actionTyping?.text.length||0,typingFinished:!actionTyping||e('action').textContent.length===actionTyping.text.length};}
-let liveHistory=[],baseLog=[];
+let baseLog=[];
 // The log: the reader's history, then AL/X's finished steps, newest last.
-function showLogs(entries){if(entries)baseLog=entries;const box=e('logs');box.replaceChildren();for(const [stamp,msg] of [...baseLog,...liveHistory].slice(-6)){const row=document.createElement('div');row.className='log-row';const t=document.createElement('time');t.textContent=stamp;const text=document.createElement('span');text.textContent=msg;row.append(t,text);box.append(row);}}
+function showLogs(entries){if(entries)baseLog=entries;const box=e('logs');box.replaceChildren();for(const [stamp,msg] of baseLog.slice(-6)){const row=document.createElement('div');row.className='log-row';const t=document.createElement('time');t.textContent=stamp;const text=document.createElement('span');text.textContent=msg;row.append(t,text);box.append(row);}}
 // Action text is typed at a measured pace. Variable cadence at punctuation
 // avoids the harsh character-at-a-time "typewriter demo" appearance.
 function startActionTyping(key,message){
  if(actionTyping?.key===key)return;
- // A finished step stays: it moves into the log with its own time, and the
- // next step starts a new line beneath it.
- if(actionTyping&&actionTyping.key.split(':')[0]===key.split(':')[0]){
-  liveHistory.push([e('actionTime').textContent,actionTyping.text]);showLogs();
- }
+ // The live line is what happens next, never a recorded step: the log above
+ // it holds only steps the reader log recorded.
  const arrival=performance.now();let ms=80;const marks=[];
  for(let i=0;i<message.length;i++){
   const ch=message[i];
@@ -213,7 +213,7 @@ function startActionTyping(key,message){
   marks.push(ms);
  }
  actionTyping={key,text:message,marks,start:arrival,shown:0};
- e('actionTime').textContent=new Date().toTimeString().slice(0,8);
+ e('actionTime').textContent='next';
  e('action').textContent=reduced.matches?message:'';
  e('actionA11y').textContent=message;
 }
@@ -227,7 +227,7 @@ function present(r){if(!r){e('side').classList.add('visible');e('side').classLis
 // Readout is entirely text — never data rendered into the graphics surface.
  e('name').textContent=r.room;const way=document.createElement('span');way.className='way';way.textContent=r.side;e('name').append(way);
  const issue=e('issue');issue.textContent=r.state==='healthy'?'RESOLVED':(d?.issue||states[r.state]).toUpperCase();issue.className=`side-issue ${tone(r.state)===1?'critical':r.state==='healthy'?'healthy':''}`;
- e('session').textContent=d?d.session:'—';e('lastSeen').textContent=d?d.last.replace(/^since /,''):'—';
+ e('session').textContent=d?d.session:'—';e('vitals').textContent=d?d.vitals:'—';e('lastSeen').textContent=d?d.last.replace(/^since /,''):'—';
  showLogs(d?d.log:[]);
  const stages=r.state==='healthy'?[['RESOLVED','Back to normal.']]:(d?.stages||[['AL/X','Looking at this reader.']]);const curr=stages[Math.min(stage,stages.length-1)];e('actionHeader').textContent=curr[0];startActionTyping(`${r.id}:${stage}:${curr[1]}`,curr[1]);
  e('progressRule').style.setProperty('--tone',tone(r.state)===1?'#ff254f':tone(r.state)===2?'#ffac00':'#00ffc6');
@@ -238,7 +238,7 @@ function present(r){if(!r){e('side').classList.add('visible');e('side').classLis
 }
 function beginFocus(r,now=performance.now()){
  if(!r){focus=null;veinPhase='idle';present(null);dirty=true;redrawNodes=true;return;}
- focus=r;stage=0;focusStarted=now;veinSince=now;veinPhase='extending';contactSince=-1;actionTyping=null;liveHistory=[];e('action').textContent='';
+ focus=r;stage=0;focusStarted=now;veinSince=now;veinPhase='extending';contactSince=-1;actionTyping=null;e('action').textContent='';
  const side=e('side');side.classList.add('visible','acquiring');side.classList.remove('readout-visible');
  e('mode').textContent='AL/X · reaching the reader';
  redrawNodes=true;dirty=true;
@@ -308,6 +308,9 @@ function applyTile(tile){
  haveTile=Boolean(tile);
  const fleet=tile?.fleet||[];
  const problems=new Map((tile?.readers||[]).filter(t=>t.uid).map(t=>[t.uid,t]));
+ // Not a reader: schedules not read from BehaviorLive lately (D-041).
+ const link=(tile?.readers||[]).find(t=>!t.uid);
+ e('linkWarn').hidden=!link;e('linkWarn').textContent=link?`BEHAVIORLIVE · ${link.issue?.text||''}`.toUpperCase():'';
  const wasHealthy=focus?focus.state==='healthy':true;
  for(const f of fleet){
   let r=byUid.get(f.uid);
@@ -339,7 +342,7 @@ function terrain(x,z,t){let a=Math.sin(x*.71+z*.26-t*.23)*.42;
  let ridge2=.96*Math.exp(-Math.pow((x-1.9-Math.cos(z*.46+t*.07)*.63)/2.22,2))*(.7+.3*Math.sin(z*.36-t*.15+1.4));
  let trough=-.2*Math.exp(-Math.pow((x-.2)/.75,2));
  let y=-.3+a+b+ridge+ridge2+trough;
- for(const r of readers){if(r.state==='healthy')continue;const d=Math.hypot((x-r.wx), (z-r.wz)*1.1);if(d>4)continue;const strength=tone(r.state)===1?1:.6;y+=.16*Math.exp(-d*d*.85)*Math.sin(d*4.8-t*1.35)*strength;}
+ for(const r of faults().slice(0,8)){const d=Math.hypot((x-r.wx), (z-r.wz)*1.1);if(d>4)continue;const strength=tone(r.state)===1?1:.6;y+=.16*Math.exp(-d*d*.85)*Math.sin(d*4.8-t*1.35)*strength;}
  return y;
 }
 function projected(x,z,y){const sy=.362,cy=.932,depth=14.3-z*cy-y*sy;const xx=x*2.5/(aspect*depth)*(aspect<.90?aspect/.90:1);const yy=(y*cy-z*sy)*2.5/depth;
@@ -353,7 +356,10 @@ function syncTags(){
   el.className=`tag ${tone(r.state)===1?'red':'amber'}${r===focus&&veinPhase!=='idle'?' focus':''}`;
   const what=(example(r)?.issue||states[r.state]).toLowerCase();
   if(el.dataset.key!==r.room+r.side+what){el.dataset.key=r.room+r.side+what;el.textContent=`${r.room} · ${r.side}`;const sm=document.createElement('small');sm.textContent=what;el.append(sm);}
-  const panel=e('side').getBoundingClientRect();el.classList.toggle('hidden',r.x+220>panel.left);
+  const panel=e('side').getBoundingClientRect();
+  // the label's box: above and right of the reader (see .tag)
+  const x0=r.x+16,x1=r.x+26+230,y0=r.y-80,y1=r.y-20;
+  el.classList.toggle('hidden',x1>panel.left&&x0<panel.right&&y1>panel.top&&y0<panel.bottom);
   el.style.left=r.x+'px';el.style.top=r.y+'px';
  }
 }
@@ -492,8 +498,10 @@ function drawLock(){
  const tagOn=String(clamp01((tin-.5)/.5)*(1-out));L.tag.style.opacity=tagOn;L.tagSub.style.opacity=tagOn;L.tagBg.style.opacity=tagOn;
 }
 function nearest(x,y){let choice=null,dist=innerWidth<740?32:22;for(const r of readers){const d=Math.hypot(x-r.x,y-r.y);if(d<dist){choice=r;dist=d;}}return choice;}
-canvas.addEventListener('pointermove',ev=>{const r=nearest(ev.clientX,ev.clientY);if(r!==hover){hover=r;canvas.style.cursor=r?'pointer':'crosshair';}});
-canvas.addEventListener('click',ev=>{const r=nearest(ev.clientX,ev.clientY);if(r)selectReader(r.id);});
+function onPointer(ev){const r=nearest(ev.clientX,ev.clientY);if(r!==hover){hover=r;canvas.style.cursor=r?'pointer':'crosshair';}}
+function onSelect(ev){const r=nearest(ev.clientX,ev.clientY);if(r)selectReader(r.id);}
+canvas.addEventListener('pointermove',onPointer);
+canvas.addEventListener('click',onSelect);
 window.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if(window.parent!==window)window.parent.postMessage({type:'bhl-field-close'},'*');else resumeAuto();}if(ev.code==='Space'&&!ev.repeat){ev.preventDefault();paused=!paused;dirty=true;}});
 function triage(now){
  if(!focus)return;
@@ -687,7 +695,8 @@ function uniform4(P,name,arr){const l=loc(P,name);if(l!==null)gl.uniform4fv(l,ar
 function applyCommon(P){uniform1(P,'uTime',time);uniform1(P,'uAspect',aspect);uniform1(P,'uMobile',aspect<.90?1:0);uniform4(P,'uFaults[0]',faultUniform);uniform4(P,'uFocus',focus?[focus.wx,focus.wz,tone(focus.state),1]:[0,0,0,0]);}
 let faultUniform=new Float32Array(32);
 function updateFaultUniform(){faultUniform.fill(0);faults().slice(0,8).forEach((r,i)=>{faultUniform[i*4]=r.wx;faultUniform[i*4+1]=r.wz;faultUniform[i*4+2]=tone(r.state);faultUniform[i*4+3]=1;});}
-function renderNodesBuffer(){const vertices=new Float32Array(readers.length*4);readers.forEach((r,i)=>{vertices[i*4]=r.wx;vertices[i*4+1]=r.wz;vertices[i*4+2]=tone(r.state);vertices[i*4+3]=focus===r&&veinPhase==='holding'?1:0;});gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,vertices);redrawNodes=false;}
+let nodeCapacity=256;
+function renderNodesBuffer(){if(readers.length>nodeCapacity){nodeCapacity=Math.ceil(readers.length/64)*64;gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(nodeCapacity*4),gl.DYNAMIC_DRAW);}const vertices=new Float32Array(readers.length*4);readers.forEach((r,i)=>{vertices[i*4]=r.wx;vertices[i*4+1]=r.wz;vertices[i*4+2]=tone(r.state);vertices[i*4+3]=focus===r&&veinPhase==='holding'?1:0;});gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,vertices);redrawNodes=false;}
 function makeTarget(w,h){let tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
  const fb=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Framebuffer unsupported');return {tex,fb,w,h};}
@@ -743,7 +752,10 @@ poll();setInterval(poll,5000);
 setInterval(()=>{const now=performance.now();triage(now);tickTyping(now);},50);
 try{initGL();resize();draw();requestAnimationFrame(loop);}catch(err){
  console.warn('WebGL2 not ready; trying Canvas fallback:',err.message);mode='canvas2d';
- const ctx=canvas.getContext('2d',{alpha:false});
+ // A canvas that has given out a WebGL2 context cannot give a 2D one.
+ const fresh=canvas.cloneNode(false);canvas.replaceWith(fresh);canvas=fresh;
+ canvas.addEventListener('pointermove',onPointer);canvas.addEventListener('click',onSelect);
+ const ctx=canvas.getContext('2d');
  if(ctx){
   let lastFallback=0;
   function canvasFallback(now){requestAnimationFrame(canvasFallback);if(document.hidden)return;if(now-lastFallback<44&&!dirty)return;const dt=lastFallback?Math.min(55,now-lastFallback):0;lastFallback=now;if(!reduced.matches&&!paused)time+=dt/1000;
