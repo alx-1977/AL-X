@@ -140,6 +140,15 @@ def trace_lines(steps: Sequence[Mapping[str, Any]], local: tzinfo | None,
     return lines[-TRACE_LINES:]
 
 
+def _alerted(alerted_at: str | None, began: str | None) -> bool:
+    if not alerted_at:
+        return False
+    try:
+        return began is None or datetime.fromisoformat(alerted_at) >= datetime.fromisoformat(began)
+    except ValueError:
+        return False
+
+
 def compose_tile(
     snapshot: tuple[str, Sequence[str], Sequence[Mapping[str, Any]], Sequence[ReaderSession]],
     now: datetime,
@@ -271,6 +280,9 @@ def compose_tile(
             "signal": _percent(held.get("sig")),
             "issue": {"text": text, "who": who, "action": action},
             "since": began,
+            # A problem that needs a person, which AL/X has told Friedl
+            # about: a "friedl_alerted" step logged since it began (D-041).
+            "alerted": who == TECHNICIAN and _alerted(since("friedl_alerted"), began),
             "trace": trace_lines(steps, local, now),
         })
 

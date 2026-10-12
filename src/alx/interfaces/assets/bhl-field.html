@@ -6,10 +6,10 @@
 <meta name="theme-color" content="#010710">
 <title>AL/X · BHL signal field</title>
 <style>
-:root{color-scheme:dark;--ice:#e9fbff;--pale:#b1d5e0;--muted:#66889a;--hair:rgba(104,195,226,.24);--blue:#00cfff;--amber:#ffac00;--red:#ff254f;--green:#00ffc6}
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#010710}body{color:var(--ice);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
+:root{--ice:#e9fbff;--pale:#b1d5e0;--muted:#66889a;--hair:rgba(104,195,226,.24);--blue:#00cfff;--amber:#ffac00;--red:#ff254f;--green:#00ffc6}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{color:var(--ice);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
 #matrix{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,transparent 58%,rgba(1,7,16,.45) 68%,rgba(1,7,16,.86) 78%,rgba(1,7,16,.9)),linear-gradient(180deg,rgba(1,7,16,.5),transparent 25%,transparent 80%,rgba(1,7,16,.17));}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,transparent 58%,rgba(1,7,16,.3) 68%,rgba(1,7,16,.58) 78%,rgba(1,7,16,.62)),linear-gradient(180deg,rgba(1,7,16,.5),transparent 25%,transparent 80%,rgba(1,7,16,.17));}
 .shell{position:fixed;inset:0;z-index:3;pointer-events:none}
 .mast{position:absolute;left:clamp(26px,4.3vw,82px);top:clamp(24px,4.4vh,62px)}
 .brand{font-weight:200;font-size:clamp(26px,2.8vw,42px);line-height:1;letter-spacing:-.09em;text-shadow:0 0 28px rgba(103,219,249,.19)}.brand span{color:#63d7f6;padding:0 .09em;font-weight:100}.brand-sub{font:9px/1.9 "Courier New",monospace;letter-spacing:.35em;color:#7ca9b8;margin-top:17px}
@@ -147,7 +147,10 @@ const states={'healthy':'NOMINAL','bad':'ERROR','warn':'WARNING'};
 const tone=s=>s==='bad'?1:s==='healthy'?0:2;
 const readers=[],byUid=new Map(),views=new Map();
 let fleetInfo={rooms:0,readers:0,online:0},haveTile=false;
-const HOLD_MS=9000;
+// Friedl, 2026-10-12: a reader stays in focus until it is resolved, or it
+// needs a person and AL/X has told him. Never on a timer alone.
+const HOLD_MS=9000,RESOLVED_HOLD_MS=2600;
+let resolvedAt=0;
 const fract=n=>n-Math.floor(n);
 const hash=n=>fract(Math.sin(n*127.17+13.51)*43758.5453);
 // Spread the readers over the field: a loose grid, each place nudged.
@@ -160,7 +163,7 @@ function viewOf(t){
  const who={alx:'AL/X',tech:'NEEDS A PERSON',reader:'THE READER'}[t.issue?.who]||'AL/X';
  return {issue:t.issue?.text||'',session:t.event?`${t.event.title} · ${t.event.when}`:'—',
   last:t.since?`since ${hhmm(t.since)}`:'—',log:(t.trace||[]).map(([a,b])=>[a,b]),
-  stages:[[who,t.issue?.action||t.issue?.text||'']]};
+  stages:[[t.alerted?'FRIEDL ALERTED':who,t.issue?.action||t.issue?.text||'']],alerted:Boolean(t.alerted)};
 }
 const example=r=>views.get(r.id);
 const faults=()=>readers.filter(x=>x.state!=='healthy').sort((a,b)=>tone(a.state)===tone(b.state)?a.index-b.index:tone(a.state)===1?-1:1);
@@ -305,6 +308,7 @@ function applyTile(tile){
  haveTile=Boolean(tile);
  const fleet=tile?.fleet||[];
  const problems=new Map((tile?.readers||[]).filter(t=>t.uid).map(t=>[t.uid,t]));
+ const wasHealthy=focus?focus.state==='healthy':true;
  for(const f of fleet){
   let r=byUid.get(f.uid);
   if(!r){r={id:f.uid,index:readers.length,room:f.room,side:f.way,pair:'',state:'healthy',minutes:0,x:0,y:0};readers.push(r);byUid.set(f.uid,r);}
@@ -317,6 +321,7 @@ function applyTile(tile){
  readers.forEach((r,i)=>{r.index=i;layoutReader(r,i,readers.length);});
  fleetInfo={rooms:new Set(fleet.map(f=>f.room)).size,readers:fleet.length,online:fleet.filter(f=>f.online).length};
  counts();redrawNodes=true;dirty=true;
+ if(focus&&!wasHealthy&&focus.state==='healthy')resolvedAt=performance.now();
  if(focus&&!byUid.has(focus.id)){focus=null;veinPhase='idle';}
  if(focus&&veinPhase==='holding')present(focus);
  if(!focus&&veinPhase==='idle'&&auto)nextFocus();
@@ -447,14 +452,17 @@ function drawLock(){
   // A progress bar round the reader: blocks fill clockwise from the top as
   // she moves through her steps, easing up to each new step; the newest
   // block shimmers; done, the whole ring is green.
-  const target=fixed?36:veinPhase==='holding'?Math.round(clamp01((now-focusStarted)/HOLD_MS)*36):0;
+  const alertedNow=Boolean(example(focus)?.alerted),waiting=!fixed&&!alertedNow;
+  const target=fixed||alertedNow?36:0;
   const fdt=segAt?Math.min(.25,(now-segAt)/1000):0;segAt=now;
   segShown+=(target-segShown)*Math.min(1,fdt*3.5);
   if(veinPhase==='extending'&&dt<.05)segShown=0;
   const full=Math.floor(segShown),part=segShown-full;
+  const head=Math.floor((t*16)%36);
   L.segs.forEach((g,i)=>{
-   let o=i<full?1:i===full?Math.max(.22,part):.22;
-   if(!fixed&&i===full-1)o=.55+.45*Math.abs(Math.sin(t*5));
+   let o;
+   if(waiting&&veinPhase==='holding'){const back=(head-i+36)%36;o=back<10?1-back/12:.22;}
+   else o=i<full?1:i===full?Math.max(.22,part):.22;
    g.style.opacity=String(o);
    g.style.stroke=fixed&&segShown>35.5?'#2dffa0':'';});
   L.dot.setAttribute('cx',d.x);L.dot.setAttribute('cy',d.y);
@@ -475,7 +483,7 @@ function drawLock(){
  const stepName=ex?ex.stages[Math.min(stage,ex.stages.length-1)][0]:'MONITORING';
  const tx=d.x-1.2*R,ty=d.y+(segMode?.62:1.62)*R+34;
  L.tag.textContent=`${focus.room.toUpperCase()} · ${focus.side}`;
- L.tagSub.textContent=fixed?'resolved':stepName.toLowerCase();
+ L.tagSub.textContent=fixed?'resolved':example(focus)?.alerted?'friedl alerted':stepName.toLowerCase();
  L.tagSub.style.fill=fixed?'#8dffd0':'';
  L.tag.setAttribute('x',tx);L.tag.setAttribute('y',ty-15);
  L.tagSub.setAttribute('x',tx);L.tagSub.setAttribute('y',ty);
@@ -511,9 +519,12 @@ function triage(now){
   return;
  }
  if(veinPhase!=='holding'||!auto)return;
- const delta=now-focusStarted;
- e('progressRule').style.setProperty('--progress',`${Math.min(100,delta/HOLD_MS*100)}%`);
- if(delta>HOLD_MS)beginRetract(now);
+ const v=example(focus),delta=now-focusStarted;
+ const resolved=focus.state==='healthy',alerted=Boolean(v?.alerted);
+ // Waiting: the bar sweeps; resolved or alerted: it is full.
+ e('progressRule').style.setProperty('--progress',resolved||alerted?'100%':`${(delta/22)%100}%`);
+ const release=resolved?resolvedAt&&now-resolvedAt>RESOLVED_HOLD_MS:alerted&&delta>HOLD_MS;
+ if(release)beginRetract(now);
 }
 
 // Every shader is embedded right here. Native WebGL2 / GLSL ES 3.00.
@@ -662,7 +673,9 @@ void main(){vec3 scene=texture(uScene,vUV).rgb;
  c=pow(c,vec3(.88));
  float lum=dot(c,vec3(.2126,.7152,.0722));c=max(mix(vec3(lum),c,1.28),vec3(0.));
  float n=(rand(vUV*vec2(1540.,1120.)+uGrain)-.5)*.010;
- o=vec4(max(c+n,vec3(0.)),1.);
+ c=max(c+n*step(.02,max(c.r,max(c.g,c.b))),vec3(0.));
+ float a=clamp(max(c.r,max(c.g,c.b))*1.6,0.,1.);
+ o=vec4(c,a);
 }`;
 function compile(type,source){const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const msg=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw Error('GLSL shader compilation failed: '+msg);}return shader;}
 function makeProgram(vs,fs){const program=gl.createProgram(),v=compile(gl.VERTEX_SHADER,vs),f=compile(gl.FRAGMENT_SHADER,fs);gl.attachShader(program,v);gl.attachShader(program,f);gl.linkProgram(program);gl.deleteShader(v);gl.deleteShader(f);if(!gl.getProgramParameter(program,gl.LINK_STATUS)){const msg=gl.getProgramInfoLog(program);throw Error('GLSL link failed: '+msg);}return {p:program,u:new Map()};}
@@ -682,7 +695,7 @@ function dropTarget(t){if(t){gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fb);
 function use(P){gl.useProgram(P.p);}
 function quad(P){use(P);gl.bindVertexArray(vaos.empty);gl.drawArrays(gl.TRIANGLES,0,3);}
 function initGL(){
- gl=canvas.getContext('webgl2',{alpha:false,antialias:false,depth:false,stencil:false,preserveDrawingBuffer:false,powerPreference:'high-performance'});
+ gl=canvas.getContext('webgl2',{alpha:true,premultipliedAlpha:true,antialias:false,depth:false,stencil:false,preserveDrawingBuffer:false,powerPreference:'high-performance'});
  if(!gl)throw Error('This browser does not support WebGL2');
  programs={background:makeProgram(fullscreenVertex,bgFragment),particles:makeProgram(particleVertex,particleFragment),nodes:makeProgram(nodeVertex,nodeFragment),extract:makeProgram(fullscreenVertex,bloomExtract),blur:makeProgram(fullscreenVertex,blurFragment),composite:makeProgram(fullscreenVertex,compositeFragment)};
  vaos={empty:gl.createVertexArray(),nodes:gl.createVertexArray()};buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(256*4),gl.DYNAMIC_DRAW);gl.bindVertexArray(vaos.nodes);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,16,0);gl.bindVertexArray(null);
@@ -699,7 +712,7 @@ function bindTarget(target){gl.bindFramebuffer(gl.FRAMEBUFFER,target?.fb||null);
 function bindTex(P,name,tex,slot){gl.activeTexture(gl.TEXTURE0+slot);gl.bindTexture(gl.TEXTURE_2D,tex);uniform1i(P,name,slot);}
 function drawScene(){
  const {background,particles,nodes}=programs;
- gl.disable(gl.BLEND);quad(background);
+ gl.disable(gl.BLEND);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
  gl.bindVertexArray(vaos.empty);
  // Atmospheric mesh: 40,320 independent 3D particle sprites. No CPU-per-dot work.
@@ -736,8 +749,8 @@ try{initGL();resize();draw();requestAnimationFrame(loop);}catch(err){
   function canvasFallback(now){requestAnimationFrame(canvasFallback);if(document.hidden)return;if(now-lastFallback<44&&!dirty)return;const dt=lastFallback?Math.min(55,now-lastFallback):0;lastFallback=now;if(!reduced.matches&&!paused)time+=dt/1000;
    width=innerWidth;height=innerHeight;aspect=width/height;dpr=Math.min(devicePixelRatio||1,1.4);const w=Math.round(width*dpr),h=Math.round(height*dpr);
    if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;canvas.style.width=width+'px';canvas.style.height=height+'px';}
-   ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#010813';ctx.fillRect(0,0,width,height);
-   const g=ctx.createRadialGradient(width*.42,height*.54,0,width*.42,height*.56,width*.75);g.addColorStop(0,'#082238');g.addColorStop(1,'#010813');ctx.fillStyle=g;ctx.fillRect(0,0,width,height);
+   ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);
+   // transparent: the scene behind shows through
    const cols=width<750?82:135,rows=76;
    for(let row=0;row<rows;row++){const z=-7.6+15.1*Math.pow(row/(rows-1),1.1),near=row/(rows-1);
     for(let col=0;col<cols;col++){const x=-8.45+16.9*col/(cols-1);const y=terrain(x,z,time);const p=projected(x,z,y);const crest=Math.max(0,Math.min(1,(y+.45)*.5));const radius=(.45+near*.92)*(width<750?.75:1);

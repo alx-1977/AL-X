@@ -280,6 +280,22 @@ class ComposeTileTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             ReaderSettings.from_environment({**base, "ALX_BHL_DISPLAY": "cube"})
 
+    def test_a_problem_needing_a_person_is_alerted_once_friedl_is_told(self) -> None:
+        def started(when):
+            return lambda uid, kind, cleared_by="": {
+                "offline": "2026-10-07T14:25:00+00:00", "friedl_alerted": when}.get(kind)
+        for when, expected in ((None, False), ("2026-10-07T14:20:00+00:00", False),
+                               ("2026-10-07T14:26:00+00:00", True)):
+            with self.subTest(alerted_at=when):
+                data = compose_tile((REFRESHED, (), READERS, DAY), at(14, 30), UTC, HOLDING, {},
+                                    lambda uid: (), started(when))
+                self.assertEqual(data["readers"][0]["alerted"], expected)
+
+    def test_a_problem_al_x_handles_is_never_marked_alerted(self) -> None:
+        data = compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, None, {}, lambda uid: (),
+                            lambda uid, kind, cleared_by="": "2026-10-07T14:09:00+00:00")
+        self.assertEqual({item["alerted"] for item in data["readers"]}, {False})
+
     def test_a_problem_began_at_its_first_logged_step(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             calendar = SQLiteReaderCalendar(Path(directory) / "calendar.sqlite3")

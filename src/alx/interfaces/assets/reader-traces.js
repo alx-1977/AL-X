@@ -167,8 +167,12 @@ export function surfaceReaderTraces(host, data) {
   const override = new URLSearchParams(location.search).get('bhl');
   const fieldMode = () => (override === 'field' || override === 'traces' ? override : current.display) === 'field';
   let field = null;
+  let shade = null;
   function setField(next) {
     if (next && !field) {
+      // Friedl: an overlay, not a page: the scene stays, softened and dimmed.
+      shade = el('div', 'rt-field-shade');
+      host.append(shade);
       field = el('iframe', 'rt-field');
       field.src = '/bhl-field';
       field.title = 'BHL signal field';
@@ -177,6 +181,8 @@ export function surfaceReaderTraces(host, data) {
     } else if (!next && field) {
       field.remove();
       field = null;
+      shade?.remove();
+      shade = null;
     }
     pill.setAttribute('aria-expanded', String(Boolean(field)));
   }
