@@ -49,7 +49,7 @@ function battery(percent) {
 function signal(percent) {
   const node = el('span', 'rt-signal');
   const lit = percent <= 0 ? 0 : Math.min(4, Math.ceil(percent / 25));
-  node.dataset.tone = percent < 30 ? 'warn' : 'ok';
+  node.dataset.tone = percent < 15 ? 'warn' : 'ok';
   node.innerHTML = svg([0, 1, 2, 3].map((i) =>
     `<rect x="${3.5 + i * 4.5}" y="${16 - i * 3.5}" width="3" height="${4 + i * 3.5}" rx="1.2" ` +
     `fill="currentColor" stroke="none" opacity="${i < lit ? 1 : 0.25}"/>`).join(''));
@@ -175,7 +175,7 @@ export function surfaceReaderTraces(host, data) {
       host.append(shade);
       field = el('iframe', 'rt-field');
       field.src = '/bhl-field';
-      field.title = 'BHL signal field';
+      field.setAttribute('aria-label', 'BHL signal field');
       host.append(field);
       field.addEventListener('load', () => field?.contentWindow?.focus());
     } else if (!next && field) {
