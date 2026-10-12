@@ -175,7 +175,7 @@ export function surfaceReaderTraces(host, data) {
       host.append(shade);
       field = el('iframe', 'rt-field');
       field.src = '/bhl-field';
-      field.title = 'BHL signal field';
+      field.setAttribute('aria-label', 'BHL signal field');
       host.append(field);
       field.addEventListener('load', () => field?.contentWindow?.focus());
     } else if (!next && field) {
