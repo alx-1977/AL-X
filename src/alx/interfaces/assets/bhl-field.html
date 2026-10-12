@@ -197,7 +197,7 @@ function curlProgress(now){
  return 0;
 }
 const $=x=>e(x);
-function counts(){e('issueCount').textContent=String(faults().length).padStart(2,'0');e('onlineCount').textContent=String(fleetInfo.online).padStart(2,'0');e('totalCount').textContent='/'+fleetInfo.readers;e('fleetLine').textContent=haveTile?`${fleetInfo.rooms} rooms · ${fleetInfo.readers} readers`:'no BHL events today';}
+function counts(){e('issueCount').textContent=String(faults().length).padStart(2,'0');e('onlineCount').textContent=String(fleetInfo.online).padStart(2,'0');e('totalCount').textContent='/'+fleetInfo.readers;e('fleetLine').textContent=haveTile?`${fleetInfo.rooms} ${fleetInfo.rooms===1?'room':'rooms'} · ${fleetInfo.readers} ${fleetInfo.readers===1?'reader':'readers'}`:'no BHL events today';}
 function getReaders(){return readers.map(({id,room,side,pair,state,minutes,x,y})=>({id,room,side,pair,state,minutes,x,y}));}
 function getDiagnostics(){return {renderer:mode,webgl2:!!gl,bloom:bloomAvailable,dimensions:[width,height],resolution:dpr,fps:Number(fps.toFixed(1)),readers:readers.length,issues:faults().length,auto,focus:focus?.id||null,stage,veinPhase,veinProgress:Number(veinProgress(performance.now()).toFixed(3)),curlProgress:Number(curlProgress(performance.now()).toFixed(3)),fluidStrength:Number(curlProgress(performance.now()).toFixed(3)),networkStrength:Number(curlProgress(performance.now()).toFixed(3)),terminalVisible:e('side').classList.contains('readout-visible'),typedCharacters:e('action').textContent.length,actionCharacters:actionTyping?.text.length||0,typingFinished:!actionTyping||e('action').textContent.length===actionTyping.text.length};}
 let baseLog=[];
@@ -216,7 +216,7 @@ function startActionTyping(key,message){
   marks.push(ms);
  }
  actionTyping={key,text:message,marks,start:arrival,shown:0};
- e('actionTime').textContent='next';
+ e('actionTime').textContent='AL/X';
  e('action').textContent=reduced.matches?message:'';
  e('actionA11y').textContent=message;
 }
@@ -226,7 +226,7 @@ function tickTyping(now){
  while(n<actionTyping.marks.length&&t>=actionTyping.marks[n])n++;
  if(n!==actionTyping.shown){actionTyping.shown=n;e('action').textContent=actionTyping.text.slice(0,n);}
 }
-function present(r){if(!r){e('side').classList.add('visible');e('side').classList.remove('readout-visible','acquiring');e('mode').textContent='AL/X / ALL SIGNALS NOMINAL';return;}e('side').classList.add('visible');const d=example(r),list=faults(),n=list.indexOf(r);e('mode').textContent='AL/X';e('signalId').textContent=n<0?'ROOM READER':`${n+1} OF ${list.length} NEEDING ATTENTION`;
+function present(r){if(!r){e('side').classList.add('visible');e('side').classList.remove('readout-visible','acquiring');e('mode').textContent='AL/X / ALL SIGNALS NOMINAL';return;}e('side').classList.add('visible');const d=example(r);e('mode').textContent='AL/X';e('signalId').textContent=r.state==='healthy'?'ROOM READER':'IN FOCUS';
 // Readout is entirely text — never data rendered into the graphics surface.
  e('name').textContent=r.room;const way=document.createElement('span');way.className='way';way.textContent=r.side;e('name').append(way);
  const issue=e('issue');issue.textContent=r.state==='healthy'?'RESOLVED':(d?.issue||states[r.state]).toUpperCase();issue.className=`side-issue ${tone(r.state)===1?'critical':r.state==='healthy'?'healthy':''}`;
@@ -608,8 +608,8 @@ void main(){
  float glitter=fract(sin(float(col)*72.17+float(row)*138.73)*31247.341);
  float gleam=clamp(crest*.58+striation*.25+skyline*.28,0.,1.);
  vHot=clamp(gleam+.22*f,0.,1.);
- vTint=mix(vec3(.01,.16,.95),vec3(.10,.95,1.0),pow(crest,.85));
- vTint=mix(vTint,vec3(.45,1.0,1.0),striation*.5+gleam*.3);
+ vTint=mix(vec3(.01,.16,.95),vec3(.06,.78,1.0),pow(crest,.85));
+ vTint=mix(vTint,vec3(.62,.90,1.0),striation*.32+gleam*.18);
  vTint=mix(vTint,light*1.75,min(.95,f*1.1));
  vAlpha=clamp(((.13+.58*near)*(.50+crest*.78)+glitter*.11+f*.55)*1.2,.08,1.0);
  gl_PointSize=clamp((6.4+gleam*4.0+f*4.2)*(14.0/z)*(uMobile>.5?1.15:1.0),2.,14.);
@@ -621,7 +621,7 @@ in vec3 vTint;in float vAlpha;in float vHot;in float vNoise;out vec4 o;
 void main(){float r=length(gl_PointCoord-.5)*2.;if(r>1.)discard;
  float core=exp(-r*r*31.);float inner=exp(-r*r*7.);float haze=exp(-r*r*2.2);
  float alpha=vAlpha*(core*.84+inner*.25+haze*.055);
- vec3 col=vTint*(.70+vHot*.48)+vec3(.23,.61,.67)*core*vHot*.7;
+ vec3 col=vTint*(.70+vHot*.48)+vec3(.50,.78,1.0)*core*vHot*.7;
  o=vec4(col,alpha);
 }`;
 const nodeVertex=`#version 300 es
@@ -679,9 +679,11 @@ void main(){vec3 scene=texture(uScene,vUV).rgb;
  vec3 c=scene+bloom*uBloomGain*uBloomEnabled;
  float v=length((vUV-vec2(.43,.52))*vec2(.88,.85));
  c*=1.-.28*smoothstep(.40,.80,v);
- c=vec3(1.)-exp(-c*1.16);
+ // Compress brightness without shifting hue: per-channel compression let
+ // bright blue clip while green kept rising, turning crests green-yellow.
+ float m=max(c.r,max(c.g,c.b));c*=m>1e-4?(1.-exp(-m*1.16))/m:1.16;
  c=pow(c,vec3(.88));
- float lum=dot(c,vec3(.2126,.7152,.0722));c=max(mix(vec3(lum),c,1.28),vec3(0.));
+ float lum=dot(c,vec3(.2126,.7152,.0722));c=max(mix(vec3(lum),c,1.12),vec3(0.));
  float n=(rand(vUV*vec2(1540.,1120.)+uGrain)-.5)*.010;
  c=max(c+n*step(.02,max(c.r,max(c.g,c.b))),vec3(0.));
  float a=clamp(max(c.r,max(c.g,c.b))*1.6,0.,1.);
@@ -697,9 +699,9 @@ function uniform4(P,name,arr){const l=loc(P,name);if(l!==null)gl.uniform4fv(l,ar
 function applyCommon(P){uniform1(P,'uTime',time);uniform1(P,'uAspect',aspect);uniform1(P,'uMobile',aspect<.90?1:0);uniform4(P,'uFaults[0]',faultUniform);uniform4(P,'uFocus',focus?[focus.wx,focus.wz,tone(focus.state),1]:[0,0,0,0]);}
 let faultUniform=new Float32Array(32);
 function updateFaultUniform(){faultUniform.fill(0);shapeFaults.forEach((r,i)=>{faultUniform[i*4]=r.wx;faultUniform[i*4+1]=r.wz;faultUniform[i*4+2]=tone(r.state);faultUniform[i*4+3]=1;});}
-let nodeCapacity=256;
+let nodeCapacity=256,floatTargets=false;
 function renderNodesBuffer(){if(readers.length>nodeCapacity){nodeCapacity=Math.ceil(readers.length/64)*64;gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(nodeCapacity*4),gl.DYNAMIC_DRAW);}const vertices=new Float32Array(readers.length*4);readers.forEach((r,i)=>{vertices[i*4]=r.wx;vertices[i*4+1]=r.wz;vertices[i*4+2]=tone(r.state);vertices[i*4+3]=focus===r&&veinPhase==='holding'?1:0;});gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,vertices);redrawNodes=false;}
-function makeTarget(w,h){let tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+function makeTarget(w,h){let tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);if(floatTargets)gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);else gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
  const fb=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Framebuffer unsupported');return {tex,fb,w,h};}
 function dropTarget(t){if(t){gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fb);}}
@@ -708,6 +710,10 @@ function quad(P){use(P);gl.bindVertexArray(vaos.empty);gl.drawArrays(gl.TRIANGLE
 function initGL(){
  gl=canvas.getContext('webgl2',{alpha:true,premultipliedAlpha:true,antialias:false,depth:false,stencil:false,preserveDrawingBuffer:false,powerPreference:'high-performance'});
  if(!gl)throw Error('This browser does not support WebGL2');
+ // Thousands of particles add up: in an 8-bit target blue clips at 1 while
+ // green keeps rising, so dense crests turned green-yellow. Half-float
+ // targets keep the sum, and the composite compresses it without a hue shift.
+ floatTargets=Boolean(gl.getExtension('EXT_color_buffer_float'));
  programs={background:makeProgram(fullscreenVertex,bgFragment),particles:makeProgram(particleVertex,particleFragment),nodes:makeProgram(nodeVertex,nodeFragment),extract:makeProgram(fullscreenVertex,bloomExtract),blur:makeProgram(fullscreenVertex,blurFragment),composite:makeProgram(fullscreenVertex,compositeFragment)};
  vaos={empty:gl.createVertexArray(),nodes:gl.createVertexArray()};buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(nodeCapacity*4),gl.DYNAMIC_DRAW);gl.bindVertexArray(vaos.nodes);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,16,0);gl.bindVertexArray(null);
  gl.disable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);
