@@ -377,16 +377,29 @@ function syncTags(){
  }
  // Labels never cover each other: a label that would, rises above the one
  // it meets, and its leader line stretches to reach its reader.
- const placed=[];
+ // A label may only rise as far as it stays on screen and clear of the
+ // readout; if it cannot, it tries the other side; only then is it hidden.
+ const placed=[];const panel=e('side').getBoundingClientRect();const TOP=70;
  for(const r of list.slice().sort((a,b)=>b.y-a.y)){
-  const el=tagEls.get(r.id);if(!el||el.classList.contains('hidden')||el.classList.contains('focus'))continue;
-  const w=el.offsetWidth,h=el.offsetHeight,left=el.classList.contains('left');
-  const bx0=left?r.x-26-w:r.x+26,bx1=bx0+w;let lift=0;
-  for(let moved=true,n=0;moved&&n<12;n++){moved=false;
-   const by1=r.y-30-lift,by0=by1-h;
-   for(const p of placed)if(bx0<p.x1+8&&bx1>p.x0-8&&by0<p.y1+4&&by1>p.y0-4){lift+=by1-p.y0+6;moved=true;break;}}
-  el.style.setProperty('--lift',lift+'px');
-  placed.push({x0:bx0,x1:bx1,y0:r.y-30-lift-h,y1:r.y-30-lift});
+  const el=tagEls.get(r.id);if(!el||el.classList.contains('focus'))continue;
+  el.classList.remove('hidden');
+  const w=el.offsetWidth,h=el.offsetHeight;
+  const sides=el.classList.contains('left')?[true,false]:[false,true];
+  let chosen=null;
+  for(const left of sides){
+   const bx0=left?r.x-26-w:r.x+26,bx1=bx0+w;let lift=0;
+   for(let moved=true,n=0;moved&&n<12;n++){moved=false;
+    const by1=r.y-30-lift,by0=by1-h;
+    for(const p of placed)if(bx0<p.x1+8&&bx1>p.x0-8&&by0<p.y1+4&&by1>p.y0-4){lift+=by1-p.y0+6;moved=true;break;}}
+   const y1=r.y-30-lift,y0=y1-h;
+   const onScreen=y0>=TOP&&bx0>=0&&bx1<=innerWidth;
+   const clear=!(bx1>panel.left&&bx0<panel.right&&y1>panel.top&&y0<panel.bottom);
+   if(onScreen&&clear){chosen={left,lift,bx0,bx1,y0,y1};break;}
+  }
+  if(!chosen){el.classList.add('hidden');continue;}
+  el.classList.toggle('left',chosen.left);
+  el.style.setProperty('--lift',chosen.lift+'px');
+  placed.push({x0:chosen.bx0,x1:chosen.bx1,y0:chosen.y0,y1:chosen.y1});
  }
 }
 function syncScreenCoordinates(){for(const r of readers){const y=terrain(r.wx,r.wz,time)+.06;const p=projected(r.wx,r.wz,y);r.x=p.x;r.y=p.y;}drawLock();syncTags();}
