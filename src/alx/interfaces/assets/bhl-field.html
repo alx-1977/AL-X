@@ -96,12 +96,16 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .lock.simple .t-status{stroke-width:2.6}
 .lock .t-outer,.lock .t-thin,.lock .t-dots,.lock .t-mid,.lock .t-cross{color:#3fe2ff}
 /* the next start today, under AL/X */
-.next{margin-top:clamp(22px,3.4vh,40px);font:13px/1.9 "Courier New",monospace;letter-spacing:.06em;color:#c4e2ea;max-width:min(360px,40vw);text-shadow:0 0 3px #000,0 0 10px rgba(0,0,0,.8)}
-.next-head{font-size:12px;letter-spacing:.18em;color:#8fb8c8}.next-head b{font-weight:400;color:#e9fbff}
-.next-event{margin-top:6px;color:#e9fbff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.next-event span{color:#7fa8b8}
-.next-reader{display:flex;align-items:center;gap:10px;white-space:nowrap}.next-reader i{flex:none;width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 7px var(--green)}
-.next-reader.warn i{background:var(--amber);box-shadow:0 0 7px var(--amber)}.next-reader.bad i{background:var(--red);box-shadow:0 0 7px var(--red)}
-.next-reader.warn{color:#ffd48a}.next-reader.bad{color:#ff8fa3}.next-more{color:#7fa8b8}
+.next{margin-top:clamp(22px,3.4vh,40px);font:13px/1.9 "Courier New",monospace;letter-spacing:.04em;color:#c4e2ea;width:min(440px,40vw);text-shadow:0 0 3px #000,0 0 10px rgba(0,0,0,.8)}
+.next-head{font-size:12px;letter-spacing:.18em;color:#8fb8c8;margin-bottom:6px}.next-head b{font-weight:400;color:#e9fbff}
+.next-grid{display:grid;grid-template-columns:auto 1fr auto;column-gap:16px}
+.next-row{display:contents}.next-row>*{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.next-room{color:#e9fbff}.next-title{color:#7fa8b8}.next-count{display:flex;align-items:center;gap:8px;justify-content:flex-end;color:#e9fbff}
+.next i{flex:none;display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 7px var(--green)}
+.next-row.warn .next-count{color:#ffd48a}.next-row.bad .next-count{color:#ff8fa3}
+.next-row.warn i,.next-reader.warn i{background:var(--amber);box-shadow:0 0 7px var(--amber)}.next-row.bad i,.next-reader.bad i{background:var(--red);box-shadow:0 0 7px var(--red)}
+.next-reader{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding-left:14px;white-space:nowrap;font-size:12px}
+.next-reader.warn{color:#ffd48a}.next-reader.bad{color:#ff8fa3}.next-more{grid-column:1/-1;color:#7fa8b8;font-size:12px}
 @media (max-width:740px){.next{display:none}}
 .link-warn{position:absolute;top:clamp(110px,15vh,150px);right:clamp(28px,4.3vw,82px);font:600 12px/1.4 "Courier New",monospace;letter-spacing:.12em;color:#ffc24a;text-shadow:0 0 10px rgba(255,170,0,.5);text-align:right}
 #matrix:focus-visible{outline:none} .render-note{position:fixed;inset:auto 12vw 35vh;text-align:center;color:#8ebed0;font:13px/2 "Courier New",monospace;letter-spacing:.12em;z-index:3;pointer-events:none} @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
@@ -235,7 +239,7 @@ function tickTyping(now){
  while(n<actionTyping.marks.length&&t>=actionTyping.marks[n])n++;
  if(n!==actionTyping.shown){actionTyping.shown=n;e('action').textContent=actionTyping.text.slice(0,n);}
 }
-function present(r){if(!r){e('side').classList.add('visible');e('side').classList.remove('readout-visible','acquiring');e('mode').textContent='AL/X · all readers OK';return;}e('side').classList.add('visible');const d=example(r);e('mode').textContent='AL/X';e('signalId').textContent=r.state==='healthy'?'ROOM READER':'IN FOCUS';
+function present(r){if(!r){e('side').classList.add('visible');e('side').classList.remove('readout-visible','acquiring');e('mode').textContent='AL/X · all readers OK';return;}e('side').classList.add('visible');const d=example(r);e('mode').textContent='AL/X';e('signalId').textContent=`${r.state==='healthy'?'ROOM READER':'IN FOCUS'} · ${r.id}`;
 // Readout is entirely text — never data rendered into the graphics surface.
  e('name').textContent=r.room;const way=document.createElement('span');way.className='way';way.textContent=r.side;e('name').append(way);
  const issue=e('issue');issue.textContent=r.state==='healthy'?'RESOLVED':(d?.issue||states[r.state]).toUpperCase();issue.className=`side-issue ${tone(r.state)===1?'critical':r.state==='healthy'?'healthy':''}`;
@@ -316,29 +320,42 @@ function resumeAuto(){
  if(focus&&veinPhase!=='idle'){beginRetract(performance.now());}else nextFocus();
  return true;
 }
-// The next start today, under AL/X: its events and whether their readers are
-// ready (online, holding the schedule, nothing wrong). Several rooms at once
-// fold into one line and only the readers not ready are listed.
-let nextStart=null;const NEXT_LIST=4;
+// The next start today, under AL/X: one line per event with how many of its
+// readers are ready (online, holding the schedule, nothing wrong), coloured by
+// the worst; the readers not ready named under it, with their UID as the
+// reader's own screen shows it. Past NEXT_EVENTS events the rest fold into one
+// line; past NEXT_READERS names, a count.
+let nextStart=null;const NEXT_EVENTS=5,NEXT_READERS=6;
+const RANK={bad:2,warn:1,ok:0};
 function nextIn(at){const m=Math.round((Date.parse(at)-Date.now())/60000);if(!(m>0))return 'now';if(m<60)return `in ${m} min`;const h=Math.floor(m/60),r=m%60;return r?`in ${h} h ${r} min`:`in ${h} h`;}
 function renderNext(){
  const box=e('next');const n=nextStart;
  box.hidden=!n;box.replaceChildren();if(!n)return;
- const el=(cls,text)=>{const d=document.createElement('div');d.className=cls;if(text!=null)d.textContent=text;return d;};
- const head=el('next-head');head.append('NEXT · ');const b=document.createElement('b');b.textContent=n.at;head.append(b,` · ${nextIn(n.starts_at)}`);box.append(head);
- const reader=(x,label)=>{const d=el(`next-reader ${x.tone==='ok'?'':x.tone}`);d.append(document.createElement('i'),label);return d;};
- const events=n.events||[];const all=events.flatMap(v=>v.readers.map(x=>({...x,room:v.room})));
- const word=x=>x.tone==='ok'?'ready':x.tone==='bad'?'needs a person':'not ready';
- if(events.length===1){
-  const v=events[0];const t=el('next-event');t.textContent=v.title;if(v.room){const sp=document.createElement('span');sp.textContent=` · ${v.room}`;t.append(sp);}box.append(t);
-  for(const x of v.readers)box.append(reader(x,`${v.room} ${x.way}`.trim()+` · ${word(x)}`));
-  return;
+ const el=(tag,cls,text)=>{const d=document.createElement(tag);d.className=cls;if(text!=null)d.textContent=text;return d;};
+ const worst=list=>list.reduce((w,x)=>RANK[x.tone]>RANK[w]?x.tone:w,'ok');
+ const head=el('div','next-head');head.append('NEXT · ',el('b','',n.at),` · ${nextIn(n.starts_at)}`);box.append(head);
+ const events=(n.events||[]).map(v=>({...v,tone:worst(v.readers)}))
+  .sort((a,b)=>RANK[b.tone]-RANK[a.tone]||a.room.localeCompare(b.room));
+ const shown=events.slice(0,NEXT_EVENTS),rest=events.slice(NEXT_EVENTS);
+ const word=x=>x.tone==='bad'?'needs a person':'not ready';
+ let named=0;
+ const grid=el('div','next-grid');box.append(grid);
+ for(const v of shown){
+  const ready=v.readers.filter(x=>x.tone==='ok').length;
+  const row=el('div',`next-row ${v.tone}`);
+  row.append(el('span','next-room',v.room),el('span','next-title',v.title));
+  const c=el('span','next-count');c.append(el('i',''),`${ready}/${v.readers.length}`);row.append(c);
+  grid.append(row);
+  const late=v.readers.filter(x=>x.tone!=='ok').sort((a,b)=>RANK[b.tone]-RANK[a.tone]);
+  for(const x of late){
+   if(named>=NEXT_READERS)break;named++;
+   const d=el('div',`next-reader ${x.tone}`);d.append(el('i',''),`${x.way} · ${x.uid} · ${word(x)}`);grid.append(d);
+  }
  }
- const ready=all.filter(x=>x.tone==='ok').length;
- box.append(el('next-event',`${events.length} events · ${ready}/${all.length} readers ready`));
- const late=all.filter(x=>x.tone!=='ok').sort((a,b)=>(a.tone!=='bad')-(b.tone!=='bad'));
- for(const x of late.slice(0,NEXT_LIST))box.append(reader(x,`${x.room} ${x.way}`.trim()+` · ${word(x)}`));
- if(late.length>NEXT_LIST)box.append(el('next-more',`+${late.length-NEXT_LIST} more`));
+ const left=events.flatMap(v=>v.readers).filter(x=>x.tone!=='ok').length-named;
+ if(rest.length){const bad=rest.filter(v=>v.tone!=='ok').length;
+  grid.append(el('div','next-more',`+${rest.length} more event${rest.length>1?'s':''} · ${bad?`${bad} not ready`:'all ready'}`));}
+ else if(left>0)grid.append(el('div','next-more',`+${left} more readers not ready`));
 }
 setInterval(()=>{if(nextStart)renderNext();},20000);
 function applyTile(tile){
@@ -394,7 +411,7 @@ function syncTags(){
   if(!el){el=document.createElement('div');tagBox.append(el);tagEls.set(r.id,el);}
   el.className=`tag ${tone(r.state)===1?'red':'amber'}${r===focus&&veinPhase!=='idle'?' focus':''}`;
   const what=(example(r)?.issue||states[r.state]).toLowerCase();
-  if(el.dataset.key!==r.room+r.side+what){el.dataset.key=r.room+r.side+what;el.textContent=`${r.room} · ${r.side}`;const sm=document.createElement('small');sm.textContent=what;el.append(sm);}
+  if(el.dataset.key!==r.room+r.side+what){el.dataset.key=r.room+r.side+what;el.textContent=`${r.room} · ${r.side}`;const sm=document.createElement('small');sm.textContent=`${r.id} · ${what}`;el.append(sm);}
   const panel=e('side').getBoundingClientRect();
   // the label's box: above and right of the reader (see .tag)
   const x0=r.x+16,x1=r.x+26+230,y0=r.y-80,y1=r.y-20;
