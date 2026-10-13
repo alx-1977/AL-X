@@ -293,6 +293,12 @@ class ComposeTileTests(unittest.TestCase):
                  "readers": [{"uid": "ab2d5218", "way": "IN", "tone": "ok"},
                              {"uid": "c471cf5a", "way": "OUT", "tone": "bad"}]},
             ]})
+        # Two events in one room with the same title stay two rows.
+        twin = (*DAY, session("e0000002", 4, at(15, 30), at(16), title="Supervision"))
+        rows = tile(at(14, 30), sessions=twin, readers=readers, sent=HOLDING,
+                    refreshed=at(14, 30).isoformat())["next"]["events"]
+        self.assertEqual([[r["uid"] for r in v["readers"]] for v in rows],
+                         [["ab2d5218", "c471cf5a"], ["e0000002"]])
         # Nothing more starts today.
         self.assertIsNone(tile(at(16), readers=ONLINE, sent=HOLDING,
                                refreshed=at(16).isoformat())["next"])

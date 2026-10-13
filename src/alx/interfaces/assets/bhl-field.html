@@ -72,7 +72,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .lock .wire{fill:none;stroke:#7fe9ff;stroke-width:1.5;filter:drop-shadow(0 0 3px rgba(80,220,255,.9))}
 .lock .flow{fill:none;stroke:#eaffff;stroke-width:1.6;stroke-dasharray:3 26;filter:drop-shadow(0 0 4px #7fe9ff)}
 /* the front of the trace: the same glowing dot as AL/X's own (Friedl, 2026-10-13) */
-.lock .node{fill:#9deeff;filter:drop-shadow(0 0 3px rgba(72,212,255,.95)) drop-shadow(0 0 8px rgba(72,212,255,.65))}
+.lock .node{fill:#f2feff;filter:drop-shadow(0 0 2px #9deeff) drop-shadow(0 0 6px rgba(116,238,255,.95))}
 .lock .target{color:#3fe2ff}
 .lock .target g{fill:none;stroke:currentColor;filter:drop-shadow(0 0 1px #000) drop-shadow(0 0 5px rgba(63,226,255,.85))}
 .lock .t-outer{stroke-width:7}
@@ -355,9 +355,11 @@ function renderNext(){
    const d=el('div',`next-reader ${x.tone}`);d.append(el('i',''),`${x.way} · ${x.uid} · ${word(x)}`);grid.append(d);
   }
  }
- const left=events.flatMap(v=>v.readers).filter(x=>x.tone!=='ok').length-named;
+ // readers not ready in the events shown that were not named, and the events
+ // not shown, each counted on its own
+ const left=shown.flatMap(v=>v.readers).filter(x=>x.tone!=='ok').length-named;
+ if(left>0)grid.append(el('div','next-more',`+${left} more reader${left>1?'s':''} not ready`));
  if(rest.length)grid.append(el('div','next-more',`+${rest.length} event${rest.length>1?'s':''}`));
- else if(left>0)grid.append(el('div','next-more',`+${left} more readers not ready`));
 }
 setInterval(()=>{if(nextStart)renderNext();},20000);
 function applyTile(tile){
@@ -467,7 +469,11 @@ const segMode=true;lockSvg.classList.add('ring');
 const NS='http://www.w3.org/2000/svg';
 function mk(tag,attrs,parent=lockSvg){const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);parent.append(n);return n;}
 const L={};
-L.wire=mk('path',{class:'wire'});L.flow=mk('path',{class:'flow'});L.node=mk('circle',{class:'node',r:2.6});
+L.wire=mk('path',{class:'wire'});L.flow=mk('path',{class:'flow'});
+// a soft halo under the dot: a gradient, so it glows over the bright field too
+{const g=mk('radialGradient',{id:'nodeHalo'},mk('defs',{}));
+ for(const [o,c,a] of [[0,'#e6fdff',1],[.18,'#9deeff',.85],[.45,'#48d4ff',.35],[1,'#48d4ff',0]])mk('stop',{offset:o,'stop-color':c,'stop-opacity':a},g);}
+L.halo=mk('circle',{class:'halo',r:16,fill:'url(#nodeHalo)'});L.node=mk('circle',{class:'node',r:3});
 // The target: built once around (0,0), moved and turned every frame.
 const R=46;
 const arc=(r,f0,f1)=>{const a0=f0*2*Math.PI-Math.PI/2,a1=f1*2*Math.PI-Math.PI/2;
@@ -561,8 +567,9 @@ function drawLock(){
  L.flow.style.opacity=0; // Friedl: no dots running along the trace
  L.flow.style.strokeDashoffset=String(-(now*.06)%29);
  const head=L.wire.getPointAtLength(len*ln);
- L.node.setAttribute('cx',head.x);L.node.setAttribute('cy',head.y);
- L.node.style.opacity=ln>0?1:0;
+ // over the ring, not under it
+ if(L.node.nextSibling)lockSvg.append(L.halo,L.node);
+ for(const n of [L.halo,L.node]){n.setAttribute('cx',head.x);n.setAttribute('cy',head.y);n.style.opacity=ln>0?1:0;}
  // the target: each ring arrives a little after the last, from larger and turning
  const t=now/1000;
  const ring=(g,delay,speed,base)=>{

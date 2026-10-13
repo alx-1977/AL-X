@@ -338,11 +338,12 @@ def _next_start(today: Sequence[ReaderSession], now: datetime, local: tzinfo | N
         return None
     first = min(item.starts_at for item in ahead)
     tone = {item["uid"]: item for item in fleet}
-    events: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    # One row per event: two events can share a room and a title.
+    events: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
     for item in sorted((item for item in ahead if item.starts_at == first),
-                       key=lambda item: (item.room, item.title, item.mode)):
+                       key=lambda item: (item.room, item.title, item.event_id, item.mode)):
         reader = tone.get(item.reader_uid, {})
-        events.setdefault((item.room, item.title), []).append({
+        events.setdefault((item.room, item.title, item.event_id), []).append({
             "uid": item.reader_uid,
             "way": reader.get("way") or MODE_NAMES.get(item.mode, ""),
             "tone": reader.get("tone", "ok"),
@@ -351,7 +352,7 @@ def _next_start(today: Sequence[ReaderSession], now: datetime, local: tzinfo | N
         "at": _clock(first, local),
         "starts_at": first.isoformat(),
         "events": [{"room": room or "", "title": title, "readers": readers}
-                   for (room, title), readers in events.items()],
+                   for (room, title, _event), readers in events.items()],
     }
 
 
