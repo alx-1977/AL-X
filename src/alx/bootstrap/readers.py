@@ -442,7 +442,7 @@ class ReaderMonitor:
         self._calendar.log(at, uid, "status", report)
         self._heard(uid, at, "status")
         self._keep_report(uid, report, at)
-        self._judge_screen(uid, report, at)
+        self._judge_screen(uid, report, at, at)
         return report
 
     def _scan(self, uid: str, data: str, published_at: str, at: datetime) -> None:
@@ -480,7 +480,7 @@ class ReaderMonitor:
         own = [item for item in sessions if item.reader_uid == uid]
         if reader is not None and own and reader.get("mode") in (0, 1):
             self._judge_event(uid, report, at, own, reader["mode"], at)
-        self._judge_screen(uid, report, at)
+        self._judge_screen(uid, report, at, at)
 
     def _keep_report(self, uid: str, report: Mapping[str, Any], received_at: datetime) -> None:
         """The reader's latest report, whether its own card or a read, and when."""
@@ -536,13 +536,16 @@ class ReaderMonitor:
             self._calendar.log(at, uid, "wrong_event",
                                {"expected": expected, "reported": reported})
 
-    def _judge_screen(self, uid: str, report: Mapping[str, Any], at: datetime) -> None:
+    def _judge_screen(self, uid: str, report: Mapping[str, Any], received_at: datetime,
+                      at: datetime) -> None:
         """Whether the reader's display refreshed and shows the event it runs.
 
         The reader times each refresh from the panel's BUSY line and reports
         it with the event on the screen ("scr"); it sends the card only after
         the refresh, so a running reader's screen should show its event.
         Recorded once per change. Firmware without the report is not judged.
+        Only the report still held is judged: a newer card that arrived while
+        an older status read was under way has the last word.
         """
         screen = report.get("scr")
         if not isinstance(screen, dict):
@@ -555,6 +558,9 @@ class ReaderMonitor:
         else:
             fault = None
         with self._lock:
+            held = self._cards.get(uid)
+            if held is not None and held[1] != received_at:
+                return
             previous = self._screens.get(uid)
             self._screens[uid] = fault
             self._checks.setdefault(uid, {"at": at})["screen_fault"] = fault is not None

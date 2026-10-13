@@ -105,6 +105,8 @@ class Particle:
 
     def read_variable(self, product_id, device_id, name):
         self.reads += 1
+        if getattr(self, "during_read", None):
+            self.during_read()
         if isinstance(self.status, Exception):
             raise self.status
         return json.dumps(self.status)
@@ -579,6 +581,24 @@ class MonitorTests(unittest.TestCase):
         self.card(monitor, st="running", scr={"e": 1, "ok": 1, "ms": 1100})
         self.card(monitor, st="running", scr={"e": 1, "ok": 0, "ms": 0})
         self.assertEqual(len(self.detail("screen_failed")), 2)
+
+    def test_a_card_that_arrives_during_a_status_read_has_the_last_word(self) -> None:
+        for read_ok, card_ok in ((0, 1), (1, 0)):
+            with self.subTest(read_ok=read_ok, card_ok=card_ok):
+                self.setUp()
+                particle = Particle(status={"v": "x", "e": 1, "n": 3, "clk": 1, "st": "running",
+                                            "scr": {"e": 1, "ok": read_ok, "ms": 0}})
+                monitor = self.build(particle)
+
+                def newer_card():
+                    self.now[0] += timedelta(seconds=5)
+                    self.card(monitor, st="running", scr={"e": 1, "ok": card_ok, "ms": 1100})
+
+                particle.during_read = newer_card
+                monitor.cycle()
+                self.assertEqual(particle.reads, 1)
+                self.assertEqual(len(self.detail("screen_failed")), 1 - card_ok)
+                self.assertEqual(monitor.checks(self.now[0])[UID]["screen_fault"], not card_ok)
 
     def test_firmware_without_a_display_report_is_not_judged(self) -> None:
         monitor = self.build(Particle())
