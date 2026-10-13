@@ -95,9 +95,6 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .lock.simple .t-mid circle{stroke-width:1.6;opacity:1;stroke-dasharray:62 10.25;transform:scale(1.25)}
 .lock.simple .t-status{stroke-width:2.6}
 .lock .t-outer,.lock .t-thin,.lock .t-dots,.lock .t-mid,.lock .t-cross{color:#3fe2ff}
-.lock-tag{position:fixed;z-index:2;pointer-events:none;padding:5px 9px 6px 7px;background:rgba(1,8,16,.78);white-space:nowrap;opacity:0}
-.lock-tag b{display:block;font:600 12px/1.35 "Courier New",monospace;letter-spacing:.16em;color:#7fe9ff}
-.lock-tag span{display:block;font:400 11.5px/1.35 "Courier New",monospace;letter-spacing:.08em;color:#d9f3fa}
 .link-warn{position:absolute;top:clamp(110px,15vh,150px);right:clamp(28px,4.3vw,82px);font:600 12px/1.4 "Courier New",monospace;letter-spacing:.12em;color:#ffc24a;text-shadow:0 0 10px rgba(255,170,0,.5);text-align:right}
 #matrix:focus-visible{outline:none} .render-note{position:fixed;inset:auto 12vw 35vh;text-align:center;color:#8ebed0;font:13px/2 "Courier New",monospace;letter-spacing:.12em;z-index:3;pointer-events:none} @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
 </style>
@@ -447,9 +444,6 @@ L.segs=Array.from({length:36},(_,i)=>{const th=i/36*2*Math.PI-Math.PI/2;
  return mk('line',{x1:(.48*R*Math.cos(th)).toFixed(2),y1:(.48*R*Math.sin(th)).toFixed(2),x2:(.61*R*Math.cos(th)).toFixed(2),y2:(.61*R*Math.sin(th)).toFixed(2)},L.seg);});
 let segShown=0,segAt=0;
 L.dot=mk('circle',{r:2.8,class:'t-dot'},L.g);
-L.box=document.createElement('div');L.box.className='lock-tag';
-L.tag=document.createElement('b');L.tagSub=document.createElement('span');
-L.box.append(L.tag,L.tagSub);document.body.append(L.box);
 const easeOut=u=>1-Math.pow(1-u,3);
 const easeBack=u=>{const c=1.7;return 1+(c+1)*Math.pow(u-1,3)+c*Math.pow(u-1,2);};
 const clamp01=u=>Math.max(0,Math.min(1,u));
@@ -475,7 +469,6 @@ function bez(a,p1,p2,b,t){const u=1-t;return {x:u*u*u*a.x+3*u*u*t*p1.x+3*u*t*t*p
 function chooseBend(a,d,rEdge){
  const boxes=[];
  for(const el of tagEls.values())if(!el.classList.contains('hidden')&&!el.classList.contains('focus'))boxes.push(el.getBoundingClientRect());
- if(L.box&&L.box.style.opacity!=='0')boxes.push(L.box.getBoundingClientRect());
  let best=0,bestHits=Infinity;
  for(const k of [0,-40,40,-80,80,-130,130,-190,190,-260,260]){
   const c=curveFor(a,d,rEdge,k);let hits=0;
@@ -487,7 +480,7 @@ function chooseBend(a,d,rEdge){
 }
 function drawLock(){
  const now=performance.now();
- if(!focus||veinPhase==='idle'||focus.x<=0){lockSvg.style.opacity=0;L.box.style.opacity=0;lastFixed=false;return;}
+ if(!focus||veinPhase==='idle'||focus.x<=0){lockSvg.style.opacity=0;lastFixed=false;return;}
  lockSvg.style.opacity=1;
  const dt=(now-veinSince)/1000;
  const fixed=focus.state==='healthy';
@@ -559,14 +552,6 @@ function drawLock(){
  L.status.style.strokeWidth=String(3.4+flash*3);
  L.status.style.filter=`drop-shadow(0 0 1px #000) drop-shadow(0 0 ${5+flash*12}px currentColor)`;
  L.status.style.opacity=String((fixed?1:.7+.3*Math.sin(t*4))*Math.min(1,clamp01((tin-.36)/.64)*1.3)*(1-out));
- // the tag below the target
- const stepName=ex?ex.stages[Math.min(stage,ex.stages.length-1)][0]:'MONITORING';
- const tx=d.x-1.2*R,ty=d.y+(segMode?.62:1.62)*R+34;
- L.tag.textContent=`${focus.room.toUpperCase()} · ${focus.side}`;
- L.tagSub.textContent=fixed?'resolved':example(focus)?.alerted?'friedl alerted':(example(focus)?.issue||stepName).toLowerCase();
- L.tagSub.style.color=fixed?'#8dffd0':'';
- L.box.style.left=`${tx-7}px`;L.box.style.top=`${ty-30}px`;
- L.box.style.opacity=String(clamp01((tin-.5)/.5)*(1-out));
 }
 function nearest(x,y){let choice=null,dist=innerWidth<740?32:22;for(const r of readers){const d=Math.hypot(x-r.x,y-r.y);if(d<dist){choice=r;dist=d;}}return choice;}
 function onPointer(ev){const r=nearest(ev.clientX,ev.clientY);if(r!==hover){hover=r;canvas.style.cursor=r?'pointer':'crosshair';}}
