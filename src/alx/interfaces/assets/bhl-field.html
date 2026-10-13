@@ -105,6 +105,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .next-row.warn .next-count{color:#ffd48a}.next-row.bad .next-count{color:#ff8fa3}
 .next-row.warn i,.next-reader.warn i{background:var(--amber);box-shadow:0 0 7px var(--amber)}.next-row.bad i,.next-reader.bad i{background:var(--red);box-shadow:0 0 7px var(--red)}
 .next-reader{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding-left:14px;white-space:nowrap;font-size:12px}
+.next-sep{grid-column:1/-1;height:1px;margin:6px 0;background:linear-gradient(90deg,rgba(104,195,226,.28),rgba(104,195,226,.06))}.next-more{margin-top:6px}
 .next-reader.warn{color:#ffd48a}.next-reader.bad{color:#ff8fa3}.next-more{grid-column:1/-1;color:#7fa8b8;font-size:12px}
 @media (max-width:740px){.next{display:none}}
 .link-warn{position:absolute;top:clamp(110px,15vh,150px);right:clamp(28px,4.3vw,82px);font:600 12px/1.4 "Courier New",monospace;letter-spacing:.12em;color:#ffc24a;text-shadow:0 0 10px rgba(255,170,0,.5);text-align:right}
@@ -323,8 +324,8 @@ function resumeAuto(){
 // The next start today, under AL/X: one line per event with how many of its
 // readers are ready (online, holding the schedule, nothing wrong), coloured by
 // the worst; the readers not ready named under it, with their UID as the
-// reader's own screen shows it. Past NEXT_EVENTS events the rest fold into one
-// line; past NEXT_READERS names, a count.
+// reader's own screen shows it. Past NEXT_EVENTS events the rest are counted
+// ("+n events"); past NEXT_READERS names, a count.
 let nextStart=null;const NEXT_EVENTS=5,NEXT_READERS=6;
 const RANK={bad:2,warn:1,ok:0};
 function nextIn(at){const m=Math.round((Date.parse(at)-Date.now())/60000);if(!(m>0))return 'now';if(m<60)return `in ${m} min`;const h=Math.floor(m/60),r=m%60;return r?`in ${h} h ${r} min`:`in ${h} h`;}
@@ -342,6 +343,7 @@ function renderNext(){
  const grid=el('div','next-grid');box.append(grid);
  for(const v of shown){
   const ready=v.readers.filter(x=>x.tone==='ok').length;
+  if(grid.childElementCount)grid.append(el('div','next-sep'));
   const row=el('div',`next-row ${v.tone}`);
   row.append(el('span','next-room',v.room),el('span','next-title',v.title));
   const c=el('span','next-count');c.append(el('i',''),`${ready}/${v.readers.length}`);row.append(c);
@@ -353,8 +355,7 @@ function renderNext(){
   }
  }
  const left=events.flatMap(v=>v.readers).filter(x=>x.tone!=='ok').length-named;
- if(rest.length){const bad=rest.filter(v=>v.tone!=='ok').length;
-  grid.append(el('div','next-more',`+${rest.length} more event${rest.length>1?'s':''} · ${bad?`${bad} not ready`:'all ready'}`));}
+ if(rest.length)grid.append(el('div','next-more',`+${rest.length} event${rest.length>1?'s':''}`));
  else if(left>0)grid.append(el('div','next-more',`+${left} more readers not ready`));
 }
 setInterval(()=>{if(nextStart)renderNext();},20000);
