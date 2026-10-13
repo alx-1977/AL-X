@@ -100,14 +100,48 @@ schedule its calendar says it should.
 
 ## Status the reader reports
 
-So AL/X can confirm what each reader holds and runs, the firmware exposes a
-Particle variable `status`:
+So AL/X can confirm what each reader holds, runs and shows, the firmware
+publishes a status card (`roomreader/status`) whenever something on it
+changes, and exposes the same JSON as the Particle variable `status`:
 
 ```json
-{"v":"1a2b3c4d","e":3462,"n":2,"bat":87,"clk":1,"fw":"5.00"}
+{"v":"1a2b3c4d","e":3462,"n":2,"bat":87,"pwr":"bat","sig":60,"sq":55,"clk":1,"st":"running","scr":{"e":3462,"ok":1,"ms":1123},"fw":"5.03"}
 ```
 
-`v` is the version running, `e` the event ID it is labelling scans with now
-(`0` for none), `n` its event count, `bat` battery percent, `clk` `1` when
-the clock is set, `fw` the firmware version. Signal and online state come from
-Particle itself.
+| Field | Meaning |
+|---|---|
+| `v` | Schedule version running. |
+| `e` | Event ID it is labelling scans with now, `0` for none. |
+| `n` | Its event count. |
+| `bat` | Battery percent (at most 100), `-1` unknown. |
+| `pwr` | `usb` or `bat`. |
+| `sig`, `sq` | Cellular signal strength and quality in percent, `-1` unknown. |
+| `clk` | `1` when the clock is set. |
+| `st` | Reader state: `starting`, `running`, `waiting` (between events), `fault-reader`, `fault-clock`, `fault-signal`, or `sleeping`. |
+| `scr` | The display: `e` the event ID on it (`0` for none), `ok` `1` when its last refresh worked (judged from the panel's BUSY line), `ms` how long BUSY was held. `null` before the first refresh. |
+| `fw` | Firmware version. |
+
+The card waits for a display refresh in progress (up to 30 seconds), so the
+refresh result goes out in the same publish.
+
+## What the reader does in each state
+
+- **running**: an event's window holds the time now. Only in this state does
+  the card reader run; every card read is sent for that event.
+- **starting**, **waiting**, **fault-…**: the card reader is off, so no card
+  can be taken without an event to credit it to. A fault shows solid red.
+- **sleeping**: nothing left to run today (AL/X answered, or did not answer
+  within three minutes). The reader sends its last card, sleeps, and wakes
+  at 05:00 local or on a button press, then asks for its schedule again.
+
+## Scans
+
+Each card read is published as `send_data` (V1's payload, which
+BehaviorLive's webhook takes unchanged), queued in flash until sent:
+
+```json
+{"READER_ID":"ab2d5218/scans","e":3462,"rm":0,"s":[{"Ts":"2026-10-13T10:20:25Z","Id":"4abb4ed3"}]}
+```
+
+AL/X hears the same publish on the product's event stream, at no extra data
+operation, and records it in the reader log.
