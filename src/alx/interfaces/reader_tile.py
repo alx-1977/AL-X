@@ -19,7 +19,8 @@ tile is a view of facts AL/X already holds, coloured by rules Friedl set
 The main screen shows only a status bar across the top: the colour and one
 line ("All OK", "1 error · 2 warnings"). Opened, it shows one small trace per reader with a problem:
 what is wrong, for how long, what AL/X has seen and done, and who acts
-next. It makes no judgement beyond those rules, and says AL/X is acting only
+next. The field also shows the next start today, the events starting then
+and whether their readers are ready. It makes no judgement beyond those rules, and says AL/X is acting only
 on what the reader monitor does on its own. "Today" is the event's own day,
 taken in its schedule's offset. Times shown are in this machine's local
 time, Friedl's.
@@ -323,6 +324,35 @@ def compose_tile(
         "title": " · ".join(parts) or "All OK",
         "readers": traces,
         "fleet": fleet,
+        "next": _next_start(today, now, local, fleet),
+    }
+
+
+def _next_start(today: Sequence[ReaderSession], now: datetime, local: tzinfo | None,
+                fleet: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The next start today and the events starting then, each with its
+    readers and their colour (Friedl, 2026-10-13), or None when nothing more
+    starts today."""
+    ahead = [item for item in today if item.starts_at > now]
+    if not ahead:
+        return None
+    first = min(item.starts_at for item in ahead)
+    tone = {item["uid"]: item for item in fleet}
+    # One row per event: two events can share a room and a title.
+    events: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    for item in sorted((item for item in ahead if item.starts_at == first),
+                       key=lambda item: (item.room, item.title, item.event_id, item.mode)):
+        reader = tone.get(item.reader_uid, {})
+        events.setdefault((item.room, item.title, item.event_id), []).append({
+            "uid": item.reader_uid,
+            "way": reader.get("way") or MODE_NAMES.get(item.mode, ""),
+            "tone": reader.get("tone", "ok"),
+        })
+    return {
+        "at": _clock(first, local),
+        "starts_at": first.isoformat(),
+        "events": [{"room": room or "", "title": title, "readers": readers}
+                   for (room, title, _event), readers in events.items()],
     }
 
 
