@@ -71,7 +71,8 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .lock *{vector-effect:non-scaling-stroke}
 .lock .wire{fill:none;stroke:#7fe9ff;stroke-width:1.5;filter:drop-shadow(0 0 3px rgba(80,220,255,.9))}
 .lock .flow{fill:none;stroke:#eaffff;stroke-width:1.6;stroke-dasharray:3 26;filter:drop-shadow(0 0 4px #7fe9ff)}
-.lock .node{fill:#eaffff;filter:drop-shadow(0 0 4px #7fe9ff)}
+/* the front of the trace: the same glowing dot as AL/X's own (Friedl, 2026-10-13) */
+.lock .node{fill:#9deeff;filter:drop-shadow(0 0 3px rgba(72,212,255,.95)) drop-shadow(0 0 8px rgba(72,212,255,.65))}
 .lock .target{color:#3fe2ff}
 .lock .target g{fill:none;stroke:currentColor;filter:drop-shadow(0 0 1px #000) drop-shadow(0 0 5px rgba(63,226,255,.85))}
 .lock .t-outer{stroke-width:7}
@@ -466,7 +467,7 @@ const segMode=true;lockSvg.classList.add('ring');
 const NS='http://www.w3.org/2000/svg';
 function mk(tag,attrs,parent=lockSvg){const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);parent.append(n);return n;}
 const L={};
-L.wire=mk('path',{class:'wire'});L.flow=mk('path',{class:'flow'});L.node=mk('circle',{class:'node',r:2.4});
+L.wire=mk('path',{class:'wire'});L.flow=mk('path',{class:'flow'});L.node=mk('circle',{class:'node',r:2.6});
 // The target: built once around (0,0), moved and turned every frame.
 const R=46;
 const arc=(r,f0,f1)=>{const a0=f0*2*Math.PI-Math.PI/2,a1=f1*2*Math.PI-Math.PI/2;
@@ -560,7 +561,7 @@ function drawLock(){
  L.flow.style.opacity=0; // Friedl: no dots running along the trace
  L.flow.style.strokeDashoffset=String(-(now*.06)%29);
  const head=L.wire.getPointAtLength(len*ln);
- L.node.setAttribute('cx',ln<1?head.x:a.x);L.node.setAttribute('cy',ln<1?head.y:a.y);
+ L.node.setAttribute('cx',head.x);L.node.setAttribute('cy',head.y);
  L.node.style.opacity=ln>0?1:0;
  // the target: each ring arrives a little after the last, from larger and turning
  const t=now/1000;
