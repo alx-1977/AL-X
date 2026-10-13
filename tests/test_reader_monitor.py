@@ -4,19 +4,22 @@ These tests prove the switching windows follow V1's rule; a reader asking for
 its schedule is answered through the one send path; the regular check reads
 each reader's status, notices a reader on the wrong event, and delivers a
 schedule a reader is not holding, without repeating itself; readers without
-schedule firmware are left alone until they ask; the event stream is parsed
-and reconnects; and every step can be read back for a report.
+schedule firmware are left alone until they ask; every scan a reader sends is
+recorded; a display that did not refresh, or shows another event than the one
+running, is recorded once; the event stream is parsed and reconnects, for
+reader events and scans alike; and every step can be read back for a report.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -102,6 +105,8 @@ class Particle:
 
     def read_variable(self, product_id, device_id, name):
         self.reads += 1
+        if getattr(self, "during_read", None):
+            self.during_read()
         if isinstance(self.status, Exception):
             raise self.status
         return json.dumps(self.status)
@@ -521,6 +526,85 @@ class MonitorTests(unittest.TestCase):
         held = monitor.checks(self.now[0])[UID]
         self.assertEqual((held["bat"], held["pwr"], held["sig"]), (90, "bat", 18))
 
+    def detail(self, kind):
+        return [s["detail"] for s in self.calendar.log_between(at(0), at(23))[0]
+                if s["kind"] == kind]
+
+    def test_a_scan_is_recorded_and_shows_the_reader_is_connected(self) -> None:
+        particle = Particle()
+        monitor = self.build(particle, online=False)
+        payload = {"READER_ID": f"{UID}/scans", "e": 1, "rm": 0,
+                   "s": [{"Ts": "2026-10-07T14:20:25Z", "Id": "4abb4ed3"}]}
+        monitor.on_event("send_data", DEVICE, json.dumps(payload), "2026-10-07T14:20:26Z")
+        self.assertEqual(self.steps(), ["online", "scan"])
+        self.assertEqual(self.detail("scan"), [{
+            "event": 1, "mode": 0, "scans": [{"card": "4abb4ed3", "at": "2026-10-07T14:20:25Z"}],
+            "published_at": "2026-10-07T14:20:26Z"}])
+        self.assertEqual(particle.calls, [])
+
+    def test_a_batch_of_scans_is_recorded_whole(self) -> None:
+        monitor = self.build(Particle())
+        payload = {"READER_ID": f"{UID}/scans", "e": 2, "rm": 1,
+                   "s": [{"Ts": "a", "Id": "01"}, {"Ts": "b", "Id": "02"}]}
+        monitor.on_event("send_data", DEVICE, json.dumps(payload), "t")
+        self.assertEqual([scan["card"] for scan in self.detail("scan")[0]["scans"]],
+                         ["01", "02"])
+
+    def test_a_scan_that_cannot_be_read_is_kept_as_received(self) -> None:
+        monitor = self.build(Particle())
+        monitor.on_event("send_data", DEVICE, '{"e":1,"s":"AB%#"}', "t")
+        self.assertEqual(self.detail("scan_unreadable"),
+                         [{"data": '{"e":1,"s":"AB%#"}', "published_at": "t"}])
+
+    def test_a_display_that_did_not_refresh_is_recorded_once(self) -> None:
+        monitor = self.build(Particle())
+        for _ in range(2):
+            self.card(monitor, st="running", scr={"e": 1, "ok": 0, "ms": 3})
+        self.assertEqual(self.detail("screen_failed"), [{"shows": 1, "busy_ms": 3}])
+        self.assertTrue(monitor.checks(self.now[0])[UID]["screen_fault"])
+
+    def test_a_display_on_another_event_is_recorded(self) -> None:
+        monitor = self.build(Particle())
+        self.card(monitor, e=1, st="running", scr={"e": 3, "ok": 1, "ms": 1100})
+        self.assertEqual(self.detail("screen_wrong"), [{"shows": 3, "running": 1}])
+
+    def test_a_display_that_refreshed_on_the_running_event_is_fine(self) -> None:
+        monitor = self.build(Particle())
+        self.card(monitor, e=1, st="running", scr={"e": 1, "ok": 1, "ms": 1100})
+        self.card(monitor, e=0, st="sleeping", scr={"e": 0, "ok": 1, "ms": 1000})
+        self.assertEqual(self.detail("screen_wrong") + self.detail("screen_failed"), [])
+        self.assertFalse(monitor.checks(self.now[0])[UID]["screen_fault"])
+
+    def test_a_display_fault_is_recorded_again_after_it_cleared(self) -> None:
+        monitor = self.build(Particle())
+        self.card(monitor, st="running", scr={"e": 1, "ok": 0, "ms": 0})
+        self.card(monitor, st="running", scr={"e": 1, "ok": 1, "ms": 1100})
+        self.card(monitor, st="running", scr={"e": 1, "ok": 0, "ms": 0})
+        self.assertEqual(len(self.detail("screen_failed")), 2)
+
+    def test_a_card_that_arrives_during_a_status_read_has_the_last_word(self) -> None:
+        for read_ok, card_ok in ((0, 1), (1, 0)):
+            with self.subTest(read_ok=read_ok, card_ok=card_ok):
+                self.setUp()
+                particle = Particle(status={"v": "x", "e": 1, "n": 3, "clk": 1, "st": "running",
+                                            "scr": {"e": 1, "ok": read_ok, "ms": 0}})
+                monitor = self.build(particle)
+
+                def newer_card():
+                    self.now[0] += timedelta(seconds=5)
+                    self.card(monitor, st="running", scr={"e": 1, "ok": card_ok, "ms": 1100})
+
+                particle.during_read = newer_card
+                monitor.cycle()
+                self.assertEqual(particle.reads, 1)
+                self.assertEqual(len(self.detail("screen_failed")), 1 - card_ok)
+                self.assertEqual(monitor.checks(self.now[0])[UID]["screen_fault"], not card_ok)
+
+    def test_firmware_without_a_display_report_is_not_judged(self) -> None:
+        monitor = self.build(Particle())
+        self.card(monitor, e=1)
+        self.assertNotIn("screen_fault", monitor.checks(self.now[0])[UID])
+
     def test_every_step_can_be_read_back(self) -> None:
         particle = Particle()
         monitor = self.build(particle)
@@ -560,6 +644,25 @@ class StreamTests(unittest.TestCase):
         ReaderRequestListener(particle, (45984,), Mock(), sleep=waits.append).listen(45984, 3)
         self.assertEqual(particle.stream_events.call_count, 3)
         self.assertEqual(waits, [10.0, 20.0, 40.0])
+
+    def test_reader_events_and_scans_each_get_a_stream_per_product(self) -> None:
+        started = []
+        never = Mock()
+        never.return_value.wait = AsyncMock()
+        with patch("alx.bootstrap.readers.threading.Thread") as thread, \
+                patch("alx.bootstrap.readers.asyncio.Event", never):
+            thread.side_effect = lambda **kw: started.append(kw.get("args", ())) or Mock()
+            asyncio.run(ReaderRequestListener(Mock(), (45984, 1), Mock()).run())
+        self.assertEqual(sorted(args for args in started if args), [
+            (1, None, "roomreader"), (1, None, "send_data"),
+            (45984, None, "roomreader"), (45984, None, "send_data")])
+
+    def test_a_listener_streams_the_prefix_it_was_given(self) -> None:
+        particle = Mock()
+        particle.stream_events.side_effect = ReaderAccessError("connection_failed")
+        ReaderRequestListener(particle, (45984,), Mock(), sleep=lambda _: None).listen(
+            45984, 1, prefix="send_data")
+        self.assertEqual(particle.stream_events.call_args.args[:2], (45984, "send_data"))
 
     def test_a_ping_reports_whether_the_device_answered(self) -> None:
         for body, expected in (({"online": True, "ok": True}, True),

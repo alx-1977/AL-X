@@ -163,9 +163,14 @@ CARD_FRESH_FOR = timedelta(minutes=30)
 # AL/X's own clock has moved on; the event before stays acceptable this long.
 CHANGEOVER_GRACE = timedelta(minutes=2)
 # Every event a reader publishes starts with this. Hearing any of them (a
-# scan, a battery report, a request) shows the reader is connected; listening
-# costs no data operations.
+# battery report, a request) shows the reader is connected; listening costs
+# no data operations.
 READER_EVENTS = "roomreader"
+# A scan, in V1's payload for BehaviorLive's webhook. AL/X hears the same
+# publish on the stream, at no extra data operation, and records it.
+SCAN_EVENT = "send_data"
+# The event streams opened for each product.
+READER_EVENT_PREFIXES = (READER_EVENTS, SCAN_EVENT)
 # Each reader in use is pinged this often. A ping is free of data operations
 # and costs about 122 bytes; Particle gives up on an unanswered one after about
 # 30 seconds, so a reader that loses power shows offline within ~90 seconds.
@@ -227,6 +232,8 @@ class ReaderMonitor:
         # last recorded for it (so a persisting one is logged once).
         self._cards: dict[str, tuple[dict[str, Any], datetime]] = {}
         self._wrong: dict[str, tuple[Any, Any] | None] = {}
+        # The display fault last recorded for each reader, likewise once.
+        self._screens: dict[str, tuple[str, dict[str, Any]] | None] = {}
         self._last_card_at: dict[str, datetime] = {}
 
     # ---- what the tile reads ---------------------------------------------
@@ -337,6 +344,9 @@ class ReaderMonitor:
         uid = device_id[-READER_UID_LENGTH:]
         at = self._now()
         self._heard(uid, at, "event")
+        if name == SCAN_EVENT:
+            self._scan(uid, data, published_at, at)
+            return
         if name == STATUS_EVENT:
             self._card(uid, data, at)
             return
@@ -432,7 +442,22 @@ class ReaderMonitor:
         self._calendar.log(at, uid, "status", report)
         self._heard(uid, at, "status")
         self._keep_report(uid, report, at)
+        self._judge_screen(uid, report, at, at)
         return report
+
+    def _scan(self, uid: str, data: str, published_at: str, at: datetime) -> None:
+        """A scan the reader sent to BehaviorLive, recorded as it was sent."""
+        try:
+            payload = json.loads(data) if data else None
+            scans = [{"card": item["Id"], "at": item["Ts"]} for item in payload["s"]]
+            detail = {"event": payload["e"], "mode": payload["rm"], "scans": scans,
+                      "published_at": published_at}
+        except (ValueError, KeyError, TypeError):
+            # Kept as received: a scan is never dropped from the record.
+            detail = {"data": data, "published_at": published_at}
+            self._calendar.log(at, uid, "scan_unreadable", detail)
+            return
+        self._calendar.log(at, uid, "scan", detail)
 
     def _card(self, uid: str, data: str, at: datetime) -> None:
         """A status card the reader published itself: recorded and judged."""
@@ -455,6 +480,7 @@ class ReaderMonitor:
         own = [item for item in sessions if item.reader_uid == uid]
         if reader is not None and own and reader.get("mode") in (0, 1):
             self._judge_event(uid, report, at, own, reader["mode"], at)
+        self._judge_screen(uid, report, at, at)
 
     def _keep_report(self, uid: str, report: Mapping[str, Any], received_at: datetime) -> None:
         """The reader's latest report, whether its own card or a read, and when."""
@@ -509,6 +535,37 @@ class ReaderMonitor:
         if wrong and previous != (reported, expected):
             self._calendar.log(at, uid, "wrong_event",
                                {"expected": expected, "reported": reported})
+
+    def _judge_screen(self, uid: str, report: Mapping[str, Any], received_at: datetime,
+                      at: datetime) -> None:
+        """Whether the reader's display refreshed and shows the event it runs.
+
+        The reader times each refresh from the panel's BUSY line and reports
+        it with the event on the screen ("scr"); it sends the card only after
+        the refresh, so a running reader's screen should show its event.
+        Recorded once per change. Firmware without the report is not judged.
+        Only the report still held is judged: a newer card that arrived while
+        an older status read was under way has the last word.
+        """
+        screen = report.get("scr")
+        if not isinstance(screen, dict):
+            return
+        shows = screen.get("e")
+        if screen.get("ok") == 0:
+            fault = ("screen_failed", {"shows": shows, "busy_ms": screen.get("ms")})
+        elif report.get("st") == "running" and shows != report.get("e"):
+            fault = ("screen_wrong", {"shows": shows, "running": report.get("e")})
+        else:
+            fault = None
+        with self._lock:
+            held = self._cards.get(uid)
+            if held is not None and held[1] != received_at:
+                return
+            previous = self._screens.get(uid)
+            self._screens[uid] = fault
+            self._checks.setdefault(uid, {"at": at})["screen_fault"] = fault is not None
+        if fault is not None and fault != previous:
+            self._calendar.log(at, uid, fault[0], fault[1])
 
     def _note(self, uid: str, at: datetime, kind: str, detail: Mapping[str, Any]) -> None:
         """Log a repeated failure once, not on every cycle."""
@@ -574,13 +631,14 @@ class ReaderRequestListener:
         self._monitor = monitor
         self._sleep = sleep
 
-    def listen(self, product_id: int, rounds: int | None = None) -> None:
+    def listen(self, product_id: int, rounds: int | None = None,
+               prefix: str = READER_EVENTS) -> None:
         delay = 5.0
         done = 0
         while rounds is None or done < rounds:
             done += 1
             try:
-                self._particle.stream_events(product_id, READER_EVENTS, self._monitor.on_event)
+                self._particle.stream_events(product_id, prefix, self._monitor.on_event)
                 delay = 5.0  # a stream that ran and ended is not a failure
             except ReaderAccessError as error:
                 LOGGER.info("Reader request stream for %s ended: %s", product_id, error.code)
@@ -606,8 +664,10 @@ class ReaderRequestListener:
         # thread: hearing readers and pinging them are the same job, knowing
         # which readers are connected right now.
         for product_id in self._products:
-            threading.Thread(target=self.listen, args=(product_id,), daemon=True,
-                             name=f"reader-events-{product_id}").start()
+            for prefix in READER_EVENT_PREFIXES:
+                threading.Thread(target=self.listen, args=(product_id, None, prefix),
+                                 daemon=True,
+                                 name=f"reader-events-{product_id}-{prefix}").start()
         threading.Thread(target=self.ping_forever, daemon=True, name="reader-pings").start()
         await asyncio.Event().wait()
 
