@@ -389,6 +389,53 @@ class ComposeTileTests(unittest.TestCase):
         self.assertEqual([step["detail"]["e"] for step in steps], [3, 4, 5, 6, 7])
 
 
+class ScreenFaultTests(unittest.TestCase):
+    """Friedl, 2026-10-14: which screen failure it is, and who acts on it."""
+
+    def compose(self, screen, step=None):
+        check = {"online": True, "screen_fault": True, "screen": screen, "sig": 80}
+        if step:
+            check["screen_step"] = step
+        return compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING,
+                            {"ab2d5218": check})
+
+    def test_the_failure_is_named(self) -> None:
+        for screen, words in (
+            ({"kind": "screen_failed", "why": "none", "boot": True}, "screen did not initialise"),
+            ({"kind": "screen_failed", "why": "none", "boot": False}, "screen not responding"),
+            ({"kind": "screen_failed", "why": "stuck"}, "screen stuck busy"),
+            ({"kind": "screen_failed", "why": "short"}, "screen did not refresh"),
+            ({"kind": "screen_failed", "busy_ms": 0}, "screen not responding"),
+            ({"kind": "screen_wrong"}, "screen shows another event"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(problems(self.compose(screen)),
+                                 {"ab2d5218": f"Not scanning · {words}"})
+
+    def test_al_x_acts_first_then_a_person(self) -> None:
+        screen = {"kind": "screen_failed", "why": "none"}
+        working = self.compose(screen, "restart")["readers"][0]
+        self.assertEqual((working["tone"], working["issue"]["who"], working["issue"]["action"]),
+                         ("warn", "alx", "Restarting the reader"))
+        done = self.compose(screen, "technician")["readers"][0]
+        self.assertEqual((done["tone"], done["issue"]["who"], done["issue"]["action"]),
+                         ("bad", "tech", "Check the screen"))
+
+    def test_her_steps_show_in_the_trace(self) -> None:
+        steps = [
+            {"at": "2026-10-14T14:00:00+00:00", "kind": "screen_failed",
+             "detail": {"why": "none", "boot": True}},
+            {"at": "2026-10-14T14:01:00+00:00", "kind": "screen_recovery",
+             "detail": {"step": "screen"}},
+            {"at": "2026-10-14T14:07:00+00:00", "kind": "screen_recovery",
+             "detail": {"step": "restart"}},
+            {"at": "2026-10-14T14:09:00+00:00", "kind": "screen_recovered", "detail": {}},
+        ]
+        lines = [line[1] for line in trace_lines(steps, UTC, at(14, 10))]
+        self.assertEqual(lines, ["screen did not initialise", "AL/X · resetting the screen",
+                                 "AL/X · restarting the reader", "screen working again"])
+
+
 class SentRecordTests(unittest.TestCase):
     def test_a_record_from_before_this_check_confirms_nothing(self) -> None:
         import sqlite3

@@ -179,6 +179,32 @@ PING_INTERVAL_SECONDS = 60
 # device list says (it can lag a lost connection by most of an hour).
 PRESENCE_FRESH_FOR = timedelta(minutes=3)
 STATUS_VARIABLE = "status"
+# The reader's function that puts a fault right: "screen" resets and redraws
+# the display, "restart" restarts the reader (firmware 5.13).
+RECOVER_FUNCTION = "recover"
+# Friedl, 2026-10-14: a reader whose screen fails takes no scans, and AL/X
+# resolves it. Each step is taken once this long after the fault was first
+# seen, while it lasts and the reader is online: reset the screen, again,
+# restart the reader, then it needs a person.
+SCREEN_RECOVERY_STEPS = (
+    (timedelta(0), "screen"),
+    (timedelta(minutes=3), "screen"),
+    (timedelta(minutes=6), "restart"),
+    (timedelta(minutes=12), "technician"),
+)
+
+
+def screen_failure(screen: Mapping[str, Any]) -> tuple[str, bool]:
+    """Why a refresh failed ("none", "stuck", "short"), and whether at start-up.
+
+    Firmware 5.13 says so; before it, the BUSY timing is read the same way.
+    """
+    why = screen.get("why")
+    if why not in ("none", "stuck", "short"):
+        busy = screen.get("ms")
+        busy = busy if isinstance(busy, int) and not isinstance(busy, bool) else 0
+        why = "none" if busy == 0 else "stuck" if busy >= 10_000 else "short"
+    return why, screen.get("boot") == 1
 
 
 def _usable_report(report: Any) -> bool:
@@ -235,6 +261,9 @@ class ReaderMonitor:
         # The display fault last recorded for each reader, likewise once.
         self._screens: dict[str, tuple[str, dict[str, Any]] | None] = {}
         self._last_card_at: dict[str, datetime] = {}
+        # Readers whose screen is at fault: when it was first seen, and how
+        # many of SCREEN_RECOVERY_STEPS have been taken.
+        self._screen_recovery: dict[str, dict[str, Any]] = {}
 
     # ---- what the tile reads ---------------------------------------------
 
@@ -330,6 +359,7 @@ class ReaderMonitor:
                 if online:
                     self._seen[uid] = done
             self._set_online(uid, online, done, "ping")
+        self.recover_screens()
 
     def running(self, at: datetime) -> bool:
         """Whether the regular check has run recently: only then is AL/X said to act."""
@@ -552,7 +582,9 @@ class ReaderMonitor:
             return
         shows = screen.get("e")
         if screen.get("ok") == 0:
-            fault = ("screen_failed", {"shows": shows, "busy_ms": screen.get("ms")})
+            why, boot = screen_failure(screen)
+            fault = ("screen_failed", {"shows": shows, "busy_ms": screen.get("ms"),
+                                       "why": why, "boot": boot})
         elif report.get("st") == "running" and shows != report.get("e"):
             fault = ("screen_wrong", {"shows": shows, "running": report.get("e")})
         else:
@@ -563,9 +595,71 @@ class ReaderMonitor:
                 return
             previous = self._screens.get(uid)
             self._screens[uid] = fault
-            self._checks.setdefault(uid, {"at": at})["screen_fault"] = fault is not None
+            check = self._checks.setdefault(uid, {"at": at})
+            check["screen_fault"] = fault is not None
+            check["screen"] = None if fault is None else {"kind": fault[0], **fault[1]}
+            recovering = self._screen_recovery.get(uid)
+            if fault is None:
+                self._screen_recovery.pop(uid, None)
+                check.pop("screen_step", None)
+            elif recovering is None:
+                self._screen_recovery[uid] = {"since": at, "done": 0}
         if fault is not None and fault != previous:
             self._calendar.log(at, uid, fault[0], fault[1])
+        if fault is None and recovering is not None:
+            self._calendar.log(at, uid, "screen_recovered", {})
+
+    def recover_screens(self) -> None:
+        """Take the next due step for each reader whose screen is at fault.
+
+        Mechanical, like a schedule delivery: the steps and their times are
+        Friedl's (SCREEN_RECOVERY_STEPS). A reader that is offline waits; one
+        whose firmware has no recover function needs a person at once.
+        """
+        at = self._now()
+        _, _, readers, _ = self._calendar.snapshot(at)
+        found = {reader.get("reader_uid"): reader for reader in readers}
+        with self._lock:
+            due = []
+            for uid, recovering in self._screen_recovery.items():
+                done = recovering["done"]
+                if done >= len(SCREEN_RECOVERY_STEPS):
+                    continue
+                after, step = SCREEN_RECOVERY_STEPS[done]
+                if at - recovering["since"] < after:
+                    continue
+                if step != "technician" and self._presence(uid, at) is not True:
+                    continue
+                recovering["done"] = done + 1
+                due.append((uid, step))
+        for uid, step in due:
+            reader = found.get(uid)
+            if step != "technician" and reader is not None and reader.get("device_id"):
+                self._calendar.log(at, uid, "screen_recovery", {"step": step})
+                try:
+                    self._particle.call_function(int(reader["product_id"]),
+                                                 reader["device_id"], RECOVER_FUNCTION, step)
+                except ReaderAccessError as error:
+                    self._calendar.log(at, uid, "screen_recovery",
+                                       {"step": step, "code": error.code})
+                    if error.code != "function_not_exposed":
+                        self._mark_step(uid, step)
+                        continue
+                    step = "technician"
+                    with self._lock:
+                        if uid in self._screen_recovery:
+                            self._screen_recovery[uid]["done"] = len(SCREEN_RECOVERY_STEPS)
+                else:
+                    self._mark_step(uid, step)
+                    continue
+            if step == "technician":
+                self._calendar.log(at, uid, "screen_recovery", {"step": "technician"})
+                self._mark_step(uid, step)
+
+    def _mark_step(self, uid: str, step: str) -> None:
+        with self._lock:
+            if uid in self._screen_recovery:
+                self._checks.setdefault(uid, {"at": self._now()})["screen_step"] = step
 
     def _note(self, uid: str, at: datetime, kind: str, detail: Mapping[str, Any]) -> None:
         """Log a repeated failure once, not on every cycle."""

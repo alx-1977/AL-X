@@ -560,7 +560,8 @@ class MonitorTests(unittest.TestCase):
         monitor = self.build(Particle())
         for _ in range(2):
             self.card(monitor, st="running", scr={"e": 1, "ok": 0, "ms": 3})
-        self.assertEqual(self.detail("screen_failed"), [{"shows": 1, "busy_ms": 3}])
+        self.assertEqual(self.detail("screen_failed"),
+                         [{"shows": 1, "busy_ms": 3, "why": "short", "boot": False}])
         self.assertTrue(monitor.checks(self.now[0])[UID]["screen_fault"])
 
     def test_a_display_on_another_event_is_recorded(self) -> None:
@@ -680,6 +681,89 @@ class StreamTests(unittest.TestCase):
             self.assertEqual(ParticleCloud("token").read_variable(45984, DEVICE, "status"),
                              '{"v":"x"}')
         self.assertTrue(get.call_args.args[0].endswith(f"/devices/{DEVICE}/status"))
+
+
+
+class RecoveringParticle(Particle):
+    """A reader whose recover function is called."""
+
+    def __init__(self, refuse_recover=None):
+        super().__init__()
+        self.recovers = []
+        self.refuse_recover = refuse_recover
+
+    def call_function(self, product_id, device_id, function, argument):
+        if function != "recover":
+            return super().call_function(product_id, device_id, function, argument)
+        if self.refuse_recover:
+            raise ReaderAccessError(self.refuse_recover)
+        self.recovers.append(argument)
+        return 0
+
+
+class ScreenRecoveryTests(unittest.TestCase):
+    """Friedl, 2026-10-14: a failed screen stops scanning, and AL/X resolves it."""
+
+    setUp = MonitorTests.setUp
+    build = MonitorTests.build
+    card = MonitorTests.card
+    detail = MonitorTests.detail
+
+    def fail(self, monitor, **screen):
+        self.card(monitor, st="fault-screen", scr={"e": 0, "ok": 0, "ms": 0, **screen})
+
+    def advance(self, monitor, minutes):
+        self.now[0] += timedelta(minutes=minutes)
+        monitor.ping_cycle()
+
+    def test_the_steps_run_in_order_while_the_fault_lasts(self) -> None:
+        particle = RecoveringParticle()
+        monitor = self.build(particle)
+        self.fail(monitor, why="none", boot=1)
+        monitor.ping_cycle()
+        self.assertEqual(particle.recovers, ["screen"])
+        self.advance(monitor, 3)
+        self.advance(monitor, 3)
+        self.assertEqual(particle.recovers, ["screen", "screen", "restart"])
+        self.advance(monitor, 6)
+        self.assertEqual([step["step"] for step in self.detail("screen_recovery")],
+                         ["screen", "screen", "restart", "technician"])
+        self.assertEqual(monitor.checks(self.now[0])[UID]["screen_step"], "technician")
+        self.advance(monitor, 30)
+        self.assertEqual(len(self.detail("screen_recovery")), 4)
+
+    def test_a_working_refresh_ends_the_recovery(self) -> None:
+        particle = RecoveringParticle()
+        monitor = self.build(particle)
+        self.fail(monitor, why="stuck")
+        monitor.ping_cycle()
+        self.card(monitor, st="running", scr={"e": 1, "ok": 1, "ms": 1100})
+        self.advance(monitor, 10)
+        self.assertEqual(particle.recovers, ["screen"])
+        self.assertEqual(len(self.detail("screen_recovered")), 1)
+        self.assertFalse(monitor.checks(self.now[0])[UID]["screen_fault"])
+
+    def test_an_offline_reader_waits(self) -> None:
+        particle = RecoveringParticle()
+        monitor = self.build(particle)
+        self.fail(monitor)
+        particle.online = False
+        self.advance(monitor, 4)
+        self.assertEqual(particle.recovers, [])
+
+    def test_firmware_without_the_function_needs_a_person_at_once(self) -> None:
+        particle = RecoveringParticle(refuse_recover="function_not_exposed")
+        monitor = self.build(particle)
+        self.fail(monitor)
+        monitor.ping_cycle()
+        self.assertEqual([step["step"] for step in self.detail("screen_recovery")],
+                         ["screen", "screen", "technician"])
+        self.assertEqual(monitor.checks(self.now[0])[UID]["screen_step"], "technician")
+
+    def test_the_reason_is_read_from_older_firmware_too(self) -> None:
+        monitor = self.build(RecoveringParticle())
+        self.card(monitor, st="running", scr={"e": 1, "ok": 0, "ms": 28079})
+        self.assertEqual(self.detail("screen_failed")[0]["why"], "stuck")
 
 
 if __name__ == "__main__":
