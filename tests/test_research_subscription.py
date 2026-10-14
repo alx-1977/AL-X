@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.config import ConfigurationError  # noqa: E402
+from alx.bootstrap.research import build_research_specialist  # noqa: E402
 from alx.config.settings import _research_settings  # noqa: E402
 from alx.observability.pricing import ConfiguredPricingWorstCase  # noqa: E402
 from alx.observability.research_budget import (  # noqa: E402
@@ -33,6 +34,8 @@ SUBSCRIPTION = {
     "RESEARCH_DAILY_BUDGET_USD": "1",
     "RESEARCH_PER_REQUEST_MAX_USD": "0.1",
     "ALX_SPECIALIST_PROVIDER": "none",
+    "HOME": "/Users/test",
+    "ALX_CLAUDE_ACCOUNT": "alx@example.com",
 }
 
 
@@ -46,6 +49,26 @@ class SubscriptionTierTests(unittest.TestCase):
         )
         self.assertEqual(settings.judge.model, "claude-opus-5-5")
         self.assertEqual(settings.limits.daily_calls, 30)
+        self.assertEqual(
+            settings.claude_identity, ("/Users/test/.claude-alx", "alx@example.com")
+        )
+
+    def test_a_subscription_tier_needs_a_daily_call_cap(self) -> None:
+        environment = dict(SUBSCRIPTION)
+        del environment["ALX_RESEARCH_DAILY_CALLS"]
+        with self.assertRaises(ConfigurationError):
+            _research_settings(environment, "claude_subscription")
+
+    def test_research_reasons_as_her_own_claude_login(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        settings = _research_settings(SUBSCRIPTION, "claude_subscription")
+        specialist = build_research_specialist(settings, Path(directory.name))
+        self.assertIsNotNone(specialist)
+        for tier in specialist._tiers.values():
+            with self.subTest(model=tier.model):
+                self.assertEqual(tier.transport._config_dir, "/Users/test/.claude-alx")
+                self.assertEqual(tier.transport._expected_account, "alx@example.com")
 
     def test_a_key_set_for_a_subscription_tier_is_refused(self) -> None:
         with self.assertRaises(ConfigurationError):

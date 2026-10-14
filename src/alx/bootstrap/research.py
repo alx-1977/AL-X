@@ -23,7 +23,7 @@ from alx.observability import (
 )
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.providers import (
-    ClaudeSubscriptionReasoningModel,
+    ClaudeSubscriptionResearchModel,
     OpenAIReasoningModel,
     XAIReasoningModel,
 )
@@ -47,7 +47,9 @@ RESEARCH_MAX_OUTPUT_TOKENS = 4_000
 RESEARCH_SPEND_PERMISSION = "research.spend"
 
 
-def _transport(settings: Any, telemetry_sink: Any) -> Any:
+def _transport(
+    settings: Any, telemetry_sink: Any, claude_identity: tuple[str, str] | None = None
+) -> Any:
     if settings.provider == "openai":
         return OpenAIReasoningModel(
             settings.model,
@@ -61,8 +63,16 @@ def _transport(settings: Any, telemetry_sink: Any) -> Any:
         )
     if settings.provider == "claude_subscription":
         # Her own Claude subscription (D-023, amended 2026-10-14).
-        return ClaudeSubscriptionReasoningModel(
-            settings.model, settings.timeout_seconds, telemetry_sink=telemetry_sink,
+        if claude_identity is None:
+            raise ConfigurationError(
+                "research on the Claude subscription requires AL/X's own Claude login"
+            )
+        return ClaudeSubscriptionResearchModel(
+            settings.model,
+            settings.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+            config_dir=claude_identity[0],
+            expected_account=claude_identity[1],
         )
     if settings.provider in ("xai", "kimi"):
         return XAIReasoningModel(
@@ -108,7 +118,7 @@ def build_research_specialist(
         tiers[tier] = ResearchTierModel(
             tier_settings.provider,
             tier_settings.model,
-            _transport(tier_settings, telemetry_sink),
+            _transport(tier_settings, telemetry_sink, settings.claude_identity),
         )
         LOGGER.info(
             "Research tier %s enabled: %s %s",

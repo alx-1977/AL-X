@@ -875,6 +875,9 @@ class ResearchSettings:
     # unconstructed rather than merely unaffordable, because price is not a
     # permission and all three fit the configured ceiling.
     enabled_tiers: frozenset[str] = frozenset()
+    # AL/X's own Claude configuration directory and account, when a tier runs
+    # on her subscription: research reasons as her, never as Friedl's login.
+    claude_identity: tuple[str, str] | None = None
 
 
 def _enabled_tiers(environment: Mapping[str, str]) -> frozenset[str]:
@@ -928,10 +931,21 @@ def _research_settings(
             raise ConfigurationError(
                 f"enabled research tier {name} requires a usable provider, model and credential"
             )
+    limits = _research_budget(environment)
+    on_subscription = any(
+        tiers[name].provider == CLAUDE_SUBSCRIPTION_PROVIDER for name in enabled
+    )
+    # A subscription call is priced at zero, so the dollar ceiling cannot bound
+    # it; the daily call cap is what does.
+    if on_subscription and limits.daily_calls <= 0:
+        raise ConfigurationError(
+            "research on the Claude subscription requires ALX_RESEARCH_DAILY_CALLS"
+        )
     return ResearchSettings(
         **tiers,
-        limits=_research_budget(environment),
+        limits=limits,
         enabled_tiers=enabled,
+        claude_identity=core_claude_identity(environment) if on_subscription else None,
     )
 
 
