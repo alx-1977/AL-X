@@ -562,6 +562,24 @@ class FakeMail:
             ),
         }
 
+    # The processed mailbox: orange-flagged messages and the attachment keys
+    # each holds, for finding a drafted import's documents email later.
+    flagged: dict = {}
+
+    def flagged_messages(self, mailbox, colour):
+        from alx.contracts import MailReference
+
+        assert colour == "orange"
+        return tuple(
+            MailReference(mailbox, "888", uid) for uid in self.flagged.get(mailbox, {})
+        )
+
+    def list_attachments(self, reference):
+        return tuple(
+            self.read_attachment(reference, key)[0]
+            for key in self.flagged.get(reference.mailbox_id, {}).get(reference.uid, ())
+        )
+
     def read_attachment(self, _reference, attachment_id):
         filename, media_type, payload = self.payloads[attachment_id]
         digest = hashlib.sha256(payload).hexdigest()
@@ -903,7 +921,7 @@ def source_for(mail: "FakeMail", attachment_id: str, uid: str) -> dict:
     }
 
 
-def executor_for(mail, xero, supplier_name: str = "DHL EXPRESS"):
+def executor_for(mail, xero, supplier_name: str = "DHL EXPRESS", processed_mailbox: str = ""):
     return build_dhl_executors(
         mail,
         DhlImportAnalyzerAdapter(),
@@ -914,6 +932,7 @@ def executor_for(mail, xero, supplier_name: str = "DHL EXPRESS"):
         "425",
         supplier_name,
         clock=lambda: datetime(2026, 8, 31, tzinfo=UTC),
+        processed_mailbox=processed_mailbox,
     )[PROCESS_DHL_IMPORT]
 
 
@@ -1352,6 +1371,85 @@ class DhlImportLifecycleTests(unittest.TestCase):
         result = self.invoice()
         self.assertTrue(result.values["completed"], result.values)
         self.assertEqual(self.xero.created, 1)
+
+    def test_a_drafted_import_names_the_email_it_processed(self) -> None:
+        """D-020 (2026-10-14): that email is then flagged orange and filed."""
+        result = self.pre_clearance()
+        self.assertEqual(
+            [dict(item) for item in result.values["source_mail"]],
+            [{"mailbox_id": "INBOX", "uid_validity": "777", "uid": "13"}],
+        )
+
+    def test_the_authorised_bill_names_its_flagged_documents_email(self) -> None:
+        """Found in the processed mailbox by the exact documents on the bill."""
+        self.mail.flagged = {"FireFli/Processed": {
+            "41": ("pre_worksheet", "pre_sad"),   # this shipment's documents
+            "42": ("worksheet",),                 # some other flagged import
+        }}
+        executor = executor_for(self.mail, self.xero, processed_mailbox="FireFli/Processed")
+        self.assertTrue(executor({"documents": [
+            source_for(self.mail, "pre_worksheet", "13"),
+            source_for(self.mail, "pre_sad", "13"),
+        ]}).values["completed"])
+        result = executor({"documents": [source_for(self.mail, "invoice", "10")]})
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(
+            [dict(item) for item in result.values["customs_mail"]],
+            [{"mailbox_id": "FireFli/Processed", "uid_validity": "888", "uid": "41"}],
+        )
+        self.assertEqual(
+            [dict(item) for item in result.values["source_mail"]],
+            [{"mailbox_id": "INBOX", "uid_validity": "777", "uid": "10"}],
+        )
+
+    def test_an_email_whose_documents_were_unused_is_not_named(self) -> None:
+        """Greptile on #138: only an email the stage used may be filed.
+        Here a scanned air waybill from another email is left unused."""
+        self.mail.payloads["awb"] = ("AWB & INV.pdf", "application/pdf", b"%PDF-1.4 scanned")
+        result = self.executor({"documents": [
+            source_for(self.mail, "pre_worksheet", "13"),
+            source_for(self.mail, "pre_sad", "13"),
+            source_for(self.mail, "awb", "51"),
+        ]})
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(
+            [item["uid"] for item in result.values["source_mail"]], ["13"]
+        )
+
+    def test_the_mybill_csv_email_that_verified_the_invoice_is_named(self) -> None:
+        """Greptile on #138: the CSV is used, so its email is filed too."""
+        self.customs()
+        result = self.executor({"documents": [
+            source_for(self.mail, "customs_csv", "60"),
+            source_for(self.mail, "invoice", "61"),
+        ]})
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(
+            sorted(item["uid"] for item in result.values["source_mail"]), ["60", "61"]
+        )
+
+    def test_a_mail_timeout_after_authorisation_keeps_the_completed_bill(self) -> None:
+        """Greptile on #138: the optional lookup must not replace the result."""
+        def timeout(*_args):
+            raise TimeoutError("imap read timed out")
+
+        self.mail.flagged_messages = timeout
+        executor = executor_for(self.mail, self.xero, processed_mailbox="FireFli/Processed")
+        executor({"documents": [source_for(self.mail, "worksheet", "11"),
+                                source_for(self.mail, "sad", "12")]})
+        result = executor({"documents": [source_for(self.mail, "invoice", "10")]})
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(tuple(result.values["customs_mail"]), ())
+
+    def test_a_missing_documents_email_never_affects_the_authorised_bill(self) -> None:
+        self.mail.flagged = {}
+        executor = executor_for(self.mail, self.xero, processed_mailbox="FireFli/Processed")
+        executor({"documents": [source_for(self.mail, "worksheet", "11"),
+                                source_for(self.mail, "sad", "12")]})
+        result = executor({"documents": [source_for(self.mail, "invoice", "10")]})
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(tuple(result.values["customs_mail"]), ())
 
     def test_the_provisional_bill_is_dated_from_the_declaration(self) -> None:
         """Xero requires a date; an empty one must never be sent."""

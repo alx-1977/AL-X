@@ -72,6 +72,12 @@ _SOURCE = StructuredSchema(
 # What each supplied document was read as, by its attachment ID. Every result
 # that read the documents carries it, so AL/X sees which were used and which
 # were left unused, rather than retrying combinations blind.
+_MAIL = StructuredSchema(
+    ValueKind.OBJECT,
+    {"mailbox_id": _STRING, "uid_validity": _STRING, "uid": _STRING},
+    ("mailbox_id", "uid_validity", "uid"),
+    extra_properties=False,
+)
 _CLASSIFIED = StructuredSchema(
     ValueKind.OBJECT,
     {"attachment_id": _STRING, "kind": _STRING},
@@ -81,7 +87,7 @@ _CLASSIFIED = StructuredSchema(
 
 DEFINITION = CapabilityDefinition(
     PROCESS_DHL_IMPORT,
-    "Process the exact DHL documents supplied: customs evidence and its invoice form one two-stage import; a reconciled duty-tax-paid invoice posts directly; freight returns unposted. The branch follows from document evidence. A whole DHL notification may be supplied: documents that are not DHL evidence, such as the air waybill, the shipper's commercial invoice or a release notice, are left unused, and documents lists what each was read as.",
+    "Process the exact DHL documents supplied: customs evidence and its invoice form one two-stage import; a reconciled duty-tax-paid invoice posts directly; freight returns unposted. The branch follows from document evidence. A whole DHL notification may be supplied: documents that are not DHL evidence, such as the air waybill, the shipper's commercial invoice or a release notice, are left unused, and documents lists what each was read as. A completed stage names in source_mail the emails it processed, which may then be filed; after a provisional draft each is first flagged orange, and once the bill is authorised customs_mail names the documents emails whose orange flag may be cleared.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"documents": StructuredSchema(ValueKind.ARRAY, items=_SOURCE)},
@@ -100,6 +106,8 @@ DEFINITION = CapabilityDefinition(
             "attached": StructuredSchema(ValueKind.ARRAY, items=_STRING),
             "steps": StructuredSchema(ValueKind.ARRAY, items=_STRING),
             "documents": StructuredSchema(ValueKind.ARRAY, items=_CLASSIFIED),
+            "source_mail": StructuredSchema(ValueKind.ARRAY, items=_MAIL),
+            "customs_mail": StructuredSchema(ValueKind.ARRAY, items=_MAIL),
         },
         (
             "completed",
@@ -175,6 +183,7 @@ def build_dhl_executors(
     clearance_account: str,
     supplier_name: str = "",
     clock: Callable[[], datetime] | None = None,
+    processed_mailbox: str = "",
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     """The one DHL import path.
 
@@ -493,6 +502,49 @@ def build_dhl_executors(
             )
         return ""
 
+    def _mail(references: Sequence[MailReference]) -> tuple[dict[str, str], ...]:
+        """The distinct emails the given documents came from.
+
+        Given only the documents a stage used, so an email whose attachments
+        were all left unused is never named and so never filed or flagged.
+        """
+        seen: list[dict[str, str]] = []
+        for reference in references:
+            item = {
+                "mailbox_id": reference.mailbox_id,
+                "uid_validity": reference.uid_validity,
+                "uid": reference.uid,
+            }
+            if item not in seen:
+                seen.append(item)
+        return tuple(seen)
+
+    def _documents_mail(digests: set[str]) -> tuple[dict[str, str], ...]:
+        """The documents emails flagged orange when the bill was drafted.
+
+        Found in the processed mailbox by the exact customs documents stored
+        on the bill, byte for byte, so only the email this bill came from is
+        named. Looking for it never affects the bill: the bill is already
+        authorised, and an email that cannot be found is simply not named.
+        """
+        if not processed_mailbox or not digests:
+            return ()
+        # Any failure here, a timeout included, only leaves the email unnamed:
+        # it runs after authorisation and must never replace that result.
+        try:
+            candidates = mail.flagged_messages(processed_mailbox, "orange")
+        except Exception:  # noqa: BLE001 - an optional lookup after the bill
+            return ()
+        found: list[MailReference] = []
+        for reference in candidates:
+            try:
+                attachments = mail.list_attachments(reference)
+            except Exception:  # noqa: BLE001 - as above
+                continue
+            if digests & {attachment.sha256 for attachment in attachments}:
+                found.append(reference)
+        return _mail(found)
+
     def customs_stage(
         contact_id: str,
         documents: Sequence[tuple[MailReference, Any, bytes]],
@@ -646,6 +698,7 @@ def build_dhl_executors(
                 "bill": dict(final),
                 "attached": tuple(a.filename for _r, a, _p in documents),
                 "steps": tuple(steps),
+                "source_mail": _mail([reference for reference, _a, _p in documents]),
             },
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
         )
@@ -654,6 +707,7 @@ def build_dhl_executors(
         contact_id: str,
         invoice: tuple[MailReference, Any, bytes],
         references: Sequence[MailReference],
+        also_used: Sequence[MailReference] = (),
     ) -> CapabilityResult:
         steps = ["read_documents"]
         _reference, attachment, payload = invoice
@@ -733,6 +787,7 @@ def build_dhl_executors(
             if analyzer.classify(stored) in ("customs_worksheet", "sad_500"):
                 customs_records.append((item, stored))
         customs_payloads = [stored for _item, stored in customs_records]
+        customs_digests = {hashlib.sha256(stored).hexdigest() for stored in customs_payloads}
         if not customs_payloads:
             return returned(
                 "dhl_invoice",
@@ -960,6 +1015,9 @@ def build_dhl_executors(
                 "bill": dict(final),
                 "attached": (attachment.filename,),
                 "steps": tuple(steps),
+                # The invoice, and the MyBill CSV that verified it, if any.
+                "source_mail": _mail([invoice[0], *also_used]),
+                "customs_mail": _documents_mail(customs_digests),
             },
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
         )
@@ -1220,6 +1278,7 @@ def build_dhl_executors(
                 "bill": dict(final),
                 "attached": (pdf_attachment.filename,),
                 "steps": tuple(steps),
+                "source_mail": _mail([structured[0], invoice[0]]),
             },
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
         )
@@ -1360,7 +1419,9 @@ def build_dhl_executors(
                     "the MyBill CSV and PDF do not identify the same invoice",
                     references=references,
                 )
-            return invoice_stage(contact_id, invoices[0], references)
+            return invoice_stage(
+                contact_id, invoices[0], references, also_used=(structured_customs[0][0],)
+            )
         if invoices and customs:
             return returned(
                 "",

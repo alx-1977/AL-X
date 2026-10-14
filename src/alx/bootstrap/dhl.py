@@ -42,6 +42,7 @@ def build_dhl_runtime(
     clearance_account: str,
     supplier_name: str = "",
     unattended: bool = False,
+    processed_mailbox: str = "",
 ) -> DhlRuntime:
     """Build the single DHL import capability.
 
@@ -66,6 +67,7 @@ def build_dhl_runtime(
             customs_duty_account,
             clearance_account,
             supplier_name,
+            processed_mailbox=processed_mailbox,
         ),
         frozenset({DHL_IMPORT_PERMISSION}),
     )

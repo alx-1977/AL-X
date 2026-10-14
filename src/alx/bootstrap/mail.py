@@ -25,11 +25,13 @@ from alx.providers import (
 from alx.safety import AuthorityPolicy
 from alx.tools import (
     CAPTURE_SUPPLIER_INVOICE,
+    PROCESS_DHL_IMPORT,
     ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
     MARK_MAIL_MESSAGE_SEEN,
     LIST_MAIL_ATTACHMENTS,
     FILE_PROCESSED_MAIL_MESSAGE,
+    SET_MAIL_FLAG_COLOUR,
     MOVE_MAIL_MESSAGE_TO_TRASH,
     READ_MAIL_MESSAGE,
     READ_MAIL_ATTACHMENT,
@@ -92,6 +94,55 @@ def captured_invoice_filing_scopes(
         scope = ApprovalScope(FILE_PROCESSED_MAIL_MESSAGE, reference)
         if scope not in scopes:
             scopes.append(scope)
+    return tuple(scopes)
+
+
+def dhl_mail_scopes(state: GoalState | None) -> tuple[ApprovalScope, ...]:
+    """Derive filing and flag authority from a DHL import that completed.
+
+    Friedl, 2026-10-14 (D-020 amended): the email a DHL stage processed is
+    filed; while the bill is a provisional draft its documents email is
+    flagged orange, and the flag is cleared once the bill is authorised.
+    Each scope names the exact message and colour the capability result
+    reported, so neither a model assertion nor a message AL/X merely looked
+    at can be filed or flagged, and an orange scope cannot clear a flag.
+    """
+    if state is None:
+        return ()
+    scopes: list[ApprovalScope] = []
+
+    def add(scope: ApprovalScope) -> None:
+        if scope not in scopes:
+            scopes.append(scope)
+
+    def references(values: Any) -> list[dict[str, str]]:
+        found = []
+        for item in values if isinstance(values, (list, tuple)) else ():
+            reference = {
+                name: item.get(name) for name in ("mailbox_id", "uid_validity", "uid")
+            } if isinstance(item, Mapping) else {}
+            if reference and all(isinstance(v, str) and v for v in reference.values()):
+                found.append(reference)
+        return found
+
+    for attempt in state.attempts:
+        call = attempt.call
+        result = attempt.result
+        if (
+            call is None
+            or call.capability_id != PROCESS_DHL_IMPORT
+            or result is None
+            or result.state is not CapabilityResultState.SUCCEEDED
+            or result.values.get("completed") is not True
+        ):
+            continue
+        drafted = result.values.get("stage") == "customs_documents"
+        for reference in references(result.values.get("source_mail")):
+            add(ApprovalScope(FILE_PROCESSED_MAIL_MESSAGE, reference))
+            if drafted:
+                add(ApprovalScope(SET_MAIL_FLAG_COLOUR, {**reference, "colour": "orange"}))
+        for reference in references(result.values.get("customs_mail")):
+            add(ApprovalScope(SET_MAIL_FLAG_COLOUR, {**reference, "colour": "none"}))
     return tuple(scopes)
 
 
@@ -208,6 +259,13 @@ def mail_authority_policies() -> dict[str, AuthorityPolicy]:
         # D-020 authorises filing a *processed* invoice. Granting it outright
         # let any identified message be moved, so authority is instead derived
         # from a capture that actually succeeded on that exact message.
+        # Flag colours follow the same rule: authority comes from a DHL
+        # import result naming the exact message and colour (D-020).
+        SET_MAIL_FLAG_COLOUR: AuthorityPolicy(
+            frozenset({MAIL_SEEN_PERMISSION}),
+            approval_required=True,
+            standing_scope_allowed=True,
+        ),
         FILE_PROCESSED_MAIL_MESSAGE: AuthorityPolicy(
             frozenset({MAIL_TRASH_PERMISSION}),
             approval_required=True,

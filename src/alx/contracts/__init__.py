@@ -209,6 +209,7 @@ from alx.contracts.memory import (
     MAX_RETRIEVAL_LIMIT as MAX_MEMORY_RETRIEVAL_LIMIT,
 )
 from alx.contracts.mail import (
+    MAIL_FLAG_COLOURS,
     MailAccessError,
     MailAccount,
     MailAttachment,
@@ -349,7 +350,7 @@ __all__ = [
     "MemoryMatchReason", "MemoryProposal", "MemoryQuery", "MemorySupersession",
     "MAX_MEMORY_RETRIEVAL_LIMIT",
     "MemoryRevision", "MemorySnapshot", "MemorySourceMatch",
-    "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
+    "MAIL_FLAG_COLOURS", "MailAccessError", "MailAccount", "MailAttachment", "MailContent",
     "MailObservationControl", "MailParticipants", "MailReference", "MailMoveResult",
     "MailSearchCriteria", "MailSearchResult",
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",

@@ -17,6 +17,7 @@ from alx.bootstrap.mail import (
     build_mail_runtime,
     build_mail_send_runtime,
     captured_invoice_filing_scopes,
+    dhl_mail_scopes,
     mail_post_reply_standing_scopes,
 )
 from alx.bootstrap.research import build_research_runtime
@@ -818,6 +819,7 @@ async def run(repository_root: Path) -> None:
             xero_settings.clearance_account,
             xero_settings.dhl_supplier_name,
             xero_settings.unattended_bill_writes,
+            processed_mailbox=mail_settings.processed_mailbox,
         )
         register(dhl_runtime.definitions, TraceSubsystem.DHL)
         policies.update(dhl_runtime.policies)
@@ -877,6 +879,7 @@ async def run(repository_root: Path) -> None:
                     standing_scopes=(
                         *mail_post_reply_standing_scopes(state),
                         *captured_invoice_filing_scopes(state),
+                        *dhl_mail_scopes(state),
                     ),
                 ),
             )
