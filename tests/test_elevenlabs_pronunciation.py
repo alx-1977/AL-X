@@ -25,7 +25,7 @@ class PronunciationVocabularyTests(unittest.TestCase):
     def test_canonical_vocabulary_is_versioned_unique_and_alias_only(self) -> None:
         vocabulary = load_vocabulary(VOCABULARY)
         self.assertEqual(vocabulary.schema_version, 1)
-        self.assertEqual(vocabulary.vocabulary_version, "1.0.0")
+        self.assertEqual(vocabulary.vocabulary_version, "1.1.0")
         rules = [rule.as_elevenlabs_rule() for rule in vocabulary.rules]
         self.assertTrue(all(rule["type"] == "alias" for rule in rules))
         self.assertEqual(len(rules), len({rule["string_to_replace"] for rule in rules}))
