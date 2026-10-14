@@ -52,6 +52,23 @@ Work in meaningful ways but not complete enough to call finished.
 Existing functionality whose architecture or behaviour is known to be
 inadequate.
 
+- [ ] **Waiting replies are read out unchecked and all at once (D-044).**
+  2026-10-13: with no session open since about 9 October, 30 mail replies
+  were kept, then spoken back to back when Friedl opened AL/X, including
+  replies about emails he had already deleted and pairs where a later reply
+  retracted an earlier one. The inbox check from #13 runs when mail is
+  picked up, not when a kept reply is handed over. A reply records every
+  email it drew on (often 6-10), so code cannot tell which one it is about.
+  Proposed (needs Friedl's approval; amends D-044): at session start, give
+  AL/X the waiting replies with the current inbox presence of their emails,
+  and let her give one short catch-up of what still needs him, dropping
+  what he has already dealt with.
+- [ ] **Reference numbers read aloud.** Friedl, 2026-10-13: AL/X reads
+  order, quote, waybill, part and payment-reference numbers badly and
+  should stop reading them out. Tighten the Core's speech guidance: name
+  the thing ("your JLCPCB order") and say the number is in the email;
+  read one only when he asks.
+
 - [ ] **Diary / self-directed research** is not working as intended.
   Storage and tooling exist — `tools/notebook.py`, `bootstrap/notebook.py`,
   `contracts/notebook.py`, four test files, and a live

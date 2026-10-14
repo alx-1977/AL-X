@@ -37,6 +37,7 @@ def worksheet_pdf(
     vat: str = "1100.55",
     total: str = "1116.15",
     waybill: str = "1234567890",
+    declaration: str = "DFM202604215028901",
     extra_lines: tuple[str, ...] = (),
 ) -> bytes:
     writer = PdfWriter()
@@ -51,12 +52,15 @@ def worksheet_pdf(
     page[NameObject("/Resources")] = DictionaryObject(
         {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
     )
+    # Below the totals block, so an extra line never shares a baseline with
+    # a total.
     extra_content = "".join(
-        f"0 -20 Td ({line}) Tj\n" for line in extra_lines
+        f"1 0 0 1 100 {600 - 20 * index} Tm ({line}) Tj\n"
+        for index, line in enumerate(extra_lines)
     )
     content = f"""BT /F1 10 Tf
 1 0 0 1 100 760 Tm (CUSTOMS WORKSHEET) Tj
-0 -20 Td (DFM202604215028901) Tj
+0 -20 Td ({declaration}) Tj
 0 -20 Td ({waybill}) Tj
 {extra_content}
 1 0 0 1 458 700 Tm (TOTAL DUTY 15.60) Tj
@@ -72,7 +76,7 @@ ET""".encode()
     return output.getvalue()
 
 
-def sad500_pdf(*, declaration: str = "DFM202604215028901") -> bytes:
+def sad500_pdf(*, declaration: str = "DFM202604215028901", waybill: str = "") -> bytes:
     writer = PdfWriter()
     page = writer.add_blank_page(width=612, height=792)
     font = DictionaryObject(
@@ -87,12 +91,22 @@ def sad500_pdf(*, declaration: str = "DFM202604215028901") -> bytes:
     )
     stream = DecodedStreamObject()
     stream.set_data(
-        f"BT /F1 10 Tf 1 0 0 1 100 760 Tm (SAD 500 CUSTOMS DECLARATION {declaration}) Tj ET".encode()
+        f"BT /F1 10 Tf 1 0 0 1 100 760 Tm (SAD 500 CUSTOMS DECLARATION {declaration} {waybill}) Tj ET".encode()
     )
     page[NameObject("/Contents")] = stream
     output = io.BytesIO()
     writer.write(output)
     return output.getvalue()
+
+
+def pre_clearance_worksheet(**overrides) -> bytes:
+    """DHL's worksheet sent with its arrival notification, before the duty is
+    paid: no customs entry number yet, and one stated date."""
+    return worksheet_pdf(declaration="", extra_lines=("12/10/2026",), **overrides)
+
+
+def pre_clearance_sad500(waybill: str = "1234567890") -> bytes:
+    return sad500_pdf(declaration="", waybill=waybill)
 
 
 class DhlAnalyzerTests(unittest.TestCase):
@@ -337,6 +351,101 @@ class DhlAnalyzerTests(unittest.TestCase):
         self.assertFalse(result["verified"])
         self.assertTrue(any("does not balance" in item for item in result["problems"]))
 
+    def test_a_pre_clearance_pack_is_paired_by_waybill_and_dated_by_the_worksheet(self) -> None:
+        """DHL sends the worksheet and SAD 500 before payment, without an
+        entry number. The waybill identifies the shipment (2026-10-14)."""
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [pre_clearance_worksheet(), pre_clearance_sad500()]
+        )
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["waybill"], "1234567890")
+        self.assertEqual(result["declaration"], "")
+        self.assertFalse(result["cleared"])
+        self.assertEqual(result["assessed_on"], "2026-10-12")
+        self.assertEqual((result["duty"], result["vat"]), ("15.60", "1100.55"))
+        self.assertIn("pending clearance", result["reference"])
+
+    def test_pre_clearance_documents_for_different_waybills_are_refused(self) -> None:
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [pre_clearance_worksheet(), pre_clearance_sad500("9999999999")]
+        )
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("waybill" in item for item in result["problems"]))
+
+    def test_a_cleared_worksheet_does_not_match_a_pre_clearance_sad500(self) -> None:
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [worksheet_pdf(), pre_clearance_sad500()]
+        )
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("declaration" in item for item in result["problems"]))
+
+    def test_a_pre_clearance_worksheet_without_a_single_date_is_not_dated(self) -> None:
+        for lines in ((), ("12/10/2026", "13/10/2026")):
+            with self.subTest(lines=lines):
+                result = DhlImportAnalyzerAdapter().customs_evidence(
+                    [worksheet_pdf(declaration="", extra_lines=lines), pre_clearance_sad500()]
+                )
+                self.assertEqual(result["assessed_on"], "")
+
+    def test_a_worksheet_with_two_entry_numbers_is_ambiguous(self) -> None:
+        from alx.providers.dhl import _parse_worksheet
+
+        with self.assertRaises(DhlDocumentError) as captured:
+            _parse_worksheet(worksheet_pdf(extra_lines=("DFM202607195025382",)))
+        self.assertEqual(captured.exception.code, "worksheet_identity_ambiguous")
+
+    def test_a_sad500_with_neither_entry_number_nor_waybill_is_refused(self) -> None:
+        with self.assertRaises(DhlDocumentError) as captured:
+            _classify_customs_document(sad500_pdf(declaration=""))
+        self.assertEqual(captured.exception.code, "sad500_identity_ambiguous")
+
+    def test_the_cleared_pair_is_the_evidence_once_both_are_present(self) -> None:
+        """A bill drafted before payment later carries the cleared documents
+        too; the cleared pair then dates and identifies it."""
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [pre_clearance_worksheet(), pre_clearance_sad500(), worksheet_pdf(), sad500_pdf()]
+        )
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["cleared"])
+        self.assertEqual(result["declaration"], "DFM202604215028901")
+        self.assertEqual(result["assessed_on"], "2026-04-21")
+
+    def test_cleared_figures_that_differ_from_the_pre_clearance_ones_are_refused(self) -> None:
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [
+                pre_clearance_worksheet(vat="1000.00", total="1015.60"),
+                pre_clearance_sad500(),
+                worksheet_pdf(),
+                sad500_pdf(),
+            ]
+        )
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("pre-clearance" in item for item in result["problems"]))
+
+    def test_a_pre_clearance_worksheet_that_does_not_balance_is_refused_beside_a_cleared_one(self) -> None:
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [
+                pre_clearance_worksheet(total="999.00"),
+                pre_clearance_sad500(),
+                worksheet_pdf(),
+                sad500_pdf(),
+            ]
+        )
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("does not balance" in item for item in result["problems"]))
+
+    def test_two_cleared_pairs_are_still_ambiguous(self) -> None:
+        with self.assertRaises(DhlDocumentError) as captured:
+            DhlImportAnalyzerAdapter().customs_evidence(
+                [
+                    worksheet_pdf(),
+                    sad500_pdf(),
+                    worksheet_pdf(declaration="DFM202607195025382"),
+                    sad500_pdf(declaration="DFM202607195025382"),
+                ]
+            )
+        self.assertEqual(captured.exception.code, "customs_evidence_ambiguous")
+
     def test_a_sad500_for_another_declaration_is_refused(self) -> None:
         result = DhlImportAnalyzerAdapter().customs_evidence(
             [worksheet_pdf(), sad500_pdf(declaration="DFM202607195025382")]
@@ -428,6 +537,8 @@ class FakeMail:
             ),
             "worksheet": ("worksheet.pdf", "application/pdf", worksheet_pdf()),
             "sad": ("sad500.pdf", "application/pdf", sad500_pdf()),
+            "pre_worksheet": ("Customs Worksheet.pdf", "application/pdf", pre_clearance_worksheet()),
+            "pre_sad": ("SAD_500.pdf", "application/pdf", pre_clearance_sad500()),
             "duty_csv": (
                 "CPTIR00273840.csv",
                 "text/csv",
@@ -1203,6 +1314,44 @@ class DhlImportLifecycleTests(unittest.TestCase):
         self.assertEqual(bill["InvoiceNumber"], "DHL-WAYBILL-1234567890")
         self.assertEqual(bill["Status"], "DRAFT")
         self.assertEqual(Decimal(bill["Total"]), Decimal("1116.15"))
+
+    def pre_clearance(self):
+        return self.executor(
+            {
+                "documents": [
+                    source_for(self.mail, "pre_worksheet", "13"),
+                    source_for(self.mail, "pre_sad", "13"),
+                ]
+            }
+        )
+
+    def test_a_pre_clearance_pack_drafts_the_provisional_bill(self) -> None:
+        """Friedl, 2026-10-14: the pack DHL sends before payment has the
+        waybill on every document but no entry number yet."""
+        result = self.pre_clearance()
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(result.values["stage"], "customs_documents")
+        self.assertIn("before customs clearance", result.values["detail"])
+        stored = self.xero.bills["bill-1"]
+        self.assertEqual(stored["InvoiceNumber"], "DHL-WAYBILL-1234567890")
+        self.assertEqual(stored["Date"], "2026-10-12")
+        self.assertIn("pending clearance", stored["Reference"])
+
+    def test_a_bill_drafted_before_clearance_is_completed_by_the_invoice(self) -> None:
+        """Pre-clearance pack, then the cleared documents, then the invoice:
+        one bill throughout."""
+        self.assertTrue(self.pre_clearance().values["completed"])
+        self.assertTrue(self.customs().values["completed"])
+        result = self.invoice()
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(result.values["stage"], "dhl_invoice")
+        self.assertEqual(self.xero.created, 1)
+
+    def test_the_invoice_completes_a_bill_with_only_the_pre_clearance_pack(self) -> None:
+        self.assertTrue(self.pre_clearance().values["completed"])
+        result = self.invoice()
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(self.xero.created, 1)
 
     def test_the_provisional_bill_is_dated_from_the_declaration(self) -> None:
         """Xero requires a date; an empty one must never be sent."""
