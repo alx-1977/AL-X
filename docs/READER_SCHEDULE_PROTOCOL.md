@@ -118,7 +118,7 @@ changes, and exposes the same JSON as the Particle variable `status`:
 | `sig`, `sq` | Cellular signal strength and quality in percent, `-1` unknown. |
 | `clk` | `1` when the clock is set. |
 | `st` | Reader state: `starting`, `running`, `waiting` (between events), `fault-reader`, `fault-clock`, `fault-signal`, or `sleeping`. |
-| `scr` | The display: `e` the event ID on it (`0` for none), `ok` `1` when its last refresh worked (judged from the panel's BUSY line), `ms` how long BUSY was held. `null` before the first refresh. |
+| `scr` | The display: `e` the event ID on it (`0` for none), `ok` `1` when its last refresh worked (judged from the panel's BUSY line), `ms` how long BUSY was held. A failed refresh (firmware 5.13) adds `why`: `none` (BUSY never asserted: no panel, or it did not respond), `stuck` (BUSY still asserted at the end), `short` (too brief for a refresh); and `boot` `1` when it was the first refresh since start-up (the panel did not initialise). `null` before the first refresh. |
 | `fw` | Firmware version. |
 
 The card waits for a display refresh in progress (up to 30 seconds), so the
@@ -130,6 +130,9 @@ refresh result goes out in the same publish.
   the card reader run; every card read is sent for that event.
 - **starting**, **waiting**, **fault-…**: the card reader is off, so no card
   can be taken without an event to credit it to. A fault shows solid red.
+- **fault-screen** (5.13): the last display refresh failed while the reader
+  has events. No scans until a refresh works (Friedl, 2026-10-14). The
+  reader resets and redraws its panel every five minutes on its own.
 - **sleeping**: nothing left to run today (AL/X answered, or did not answer
   within three minutes). The reader sends its last card, sleeps, and wakes
   at 05:00 local or on a button press, then asks for its schedule again.
@@ -145,3 +148,13 @@ BehaviorLive's webhook takes unchanged), queued in flash until sent:
 
 AL/X hears the same publish on the product's event stream, at no extra data
 operation, and records it in the reader log.
+
+## Putting a fault right (firmware 5.13)
+
+The `recover` function takes `screen` (reset the display panel and redraw it)
+or `restart` (queue the open scans and restart the reader), and returns `0`
+when accepted, `-1` otherwise. AL/X's reader monitor uses it for a screen
+fault, once each step falls due while the fault lasts and the reader is
+online: `screen` at once, `screen` again after 3 minutes, `restart` after 6;
+after 12 minutes the reader needs a person (red). Each step is logged
+(`screen_recovery`), and so is the fault clearing (`screen_recovered`).

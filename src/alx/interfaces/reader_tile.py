@@ -8,9 +8,11 @@ tile is a view of facts AL/X already holds, coloured by rules Friedl set
 - red: a problem that needs a person: a reader whose event is running, or
   starts within 30 minutes, is offline; a reader runs an event other than the
   one it should; a reader on battery below 20 %; a reader that cannot take a
-  schedule from AL/X;
+  schedule from AL/X; a reader whose screen AL/X could not bring back
+  (2026-10-14);
 - yellow: anything else not confirmed, which AL/X can still work on or which
-  rights itself: a reader offline with no event close, a reader whose
+  rights itself: a reader whose screen failed while AL/X is still putting it
+  right (it takes no scans meanwhile), a reader offline with no event close, a reader whose
   schedule from AL/X, as it can still run it, is not exactly what the
   calendar has left, a reader whose signal is below 15 %, or schedules that
   could not be read from BehaviorLive for 15 minutes;
@@ -49,6 +51,33 @@ TRACE_READ = 20
 MODE_NAMES = {0: "IN", 1: "OUT"}
 # Who acts next on a problem: AL/X, a person, or the reader by itself.
 ALX, TECHNICIAN, READER = "alx", "tech", "reader"
+
+
+# What a failed screen refresh means, by the reason the reader gives.
+SCREEN_PROBLEMS = {
+    "none": "screen not responding",
+    "stuck": "screen stuck busy",
+    "short": "screen did not refresh",
+}
+# What each of AL/X's recovery steps shows (SCREEN_RECOVERY_STEPS).
+SCREEN_STEPS = {
+    "screen": "resetting the screen",
+    "restart": "restarting the reader",
+    "technician": "needs a person: check the screen",
+}
+
+
+def screen_problem(detail: Mapping[str, Any]) -> str:
+    """The screen fault in words: which failure, or the wrong event shown."""
+    if detail.get("kind") == "screen_wrong":
+        return "screen shows another event"
+    why = detail.get("why")
+    if why == "none" and detail.get("boot"):
+        return "screen did not initialise"
+    if why not in SCREEN_PROBLEMS:
+        busy = detail.get("busy_ms")
+        why = "none" if busy == 0 else "stuck" if isinstance(busy, int) and busy >= 10_000 else "short"
+    return SCREEN_PROBLEMS[why]
 
 
 def _event_day(moment: datetime, offset_hours: int):
@@ -109,6 +138,21 @@ def describe_step(step: Mapping[str, Any], local: tzinfo | None,
     elif kind in ("schedule_send_failed", "schedule_not_sent"):
         text = f"schedule not sent · {str(detail.get('code', '')).replace('_', ' ')}"
         tone = "warn"
+    elif kind == "screen_failed":
+        text = screen_problem(detail)
+        tone = "error"
+    elif kind == "screen_wrong":
+        text = f"screen shows ev {detail.get('shows')} · running {detail.get('running')}"
+        tone = "error"
+    elif kind == "screen_recovery":
+        step = str(detail.get("step", ""))
+        text = f"AL/X · {SCREEN_STEPS.get(step, step)}"
+        if detail.get("code"):
+            text += f" · {str(detail['code']).replace('_', ' ')}"
+        tone = "error" if step == "technician" else "alx"
+    elif kind == "screen_recovered":
+        text = "screen working again"
+        tone = "ok"
     elif kind == "status_unavailable":
         text = f"status unavailable · {str(detail.get('code', '')).replace('_', ' ')}"
         tone = "warn"
@@ -217,7 +261,16 @@ def compose_tile(
         issue: tuple[str, str, str, str, str | None] | None = None  # tone, text, who, action, since
         # Whether putting it right is AL/X's own work (resending a schedule).
         fixable = False
-        if not online and close is not None:
+        screen_fault = held.get("screen_fault") is True
+        screen_words = screen_problem(held.get("screen") or {})
+        screen_text = (f"Not scanning · {screen_words}" if held.get("screen_stops_scans")
+                       else f"Screen fault · {screen_words}")
+        screen_step = held.get("screen_step")
+        if screen_fault and screen_step == "technician":
+            # D-047: AL/X's steps have run out. It needs a person, offline or not.
+            issue = ("bad", screen_text, TECHNICIAN, "Check the screen",
+                     since("screen_failed", "screen_recovered"))
+        elif not online and close is not None:
             text = ("Offline · event running" if running is not None
                     else f"Offline · event at {_clock(close.starts_at, local)}")
             issue = ("bad", text, TECHNICIAN, "Check the reader in the room",
@@ -225,6 +278,13 @@ def compose_tile(
         elif online and held.get("fresh") is True and held.get("wrong") is True:
             issue = ("bad", "On the wrong event", TECHNICIAN, "Check the reader in the room",
                      since("wrong_event"))
+        elif online and screen_fault:
+            # Friedl, 2026-10-14: no scans until the screen works, and AL/X
+            # resolves it; a person once her steps have run out (above).
+            issue = ("warn", screen_text, ALX,
+                     "Restarting the reader" if screen_step == "restart"
+                     else "Resetting the screen",
+                     since("screen_failed", "screen_recovered"))
         elif not online:
             issue = ("warn", "Offline", ALX, "Pinging it every minute" if monitoring else "",
                      since("offline", "online"))
