@@ -787,6 +787,23 @@ class ScreenRecoveryTests(unittest.TestCase):
         restarted.ping_cycle()
         self.assertEqual(particle.recovers, ["screen", "screen", "restart"])
 
+    def test_a_working_screen_after_a_restart_closes_the_old_fault(self) -> None:
+        particle = RecoveringParticle()
+        monitor = self.build(particle)
+        self.break_screen(monitor)
+        for _ in range(4):
+            self.advance(monitor, 4)
+        self.assertIn("technician", [step["step"] for step in self.detail("screen_recovery")])
+        restarted = self.build(particle)
+        self.card(restarted, st="running", scr={"e": 1, "ok": 1, "ms": 1100})
+        self.assertEqual(len(self.detail("screen_recovered")), 1)
+        # A new fault gets its own steps from the start.
+        particle.recovers.clear()
+        self.now[0] += timedelta(minutes=1)
+        self.break_screen(restarted)
+        restarted.ping_cycle()
+        self.assertEqual(particle.recovers, ["screen"])
+
     def test_the_reason_is_read_from_older_firmware_too(self) -> None:
         monitor = self.build(RecoveringParticle())
         self.card(monitor, st="running", scr={"e": 1, "ok": 0, "ms": 28079})

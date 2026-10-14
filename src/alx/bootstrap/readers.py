@@ -262,7 +262,9 @@ class ReaderMonitor:
         self._screens: dict[str, tuple[str, dict[str, Any]] | None] = {}
         self._last_card_at: dict[str, datetime] = {}
         # Readers whose screen is at fault: when it was first seen, and how
-        # many of SCREEN_RECOVERY_STEPS have been taken.
+        # many of SCREEN_RECOVERY_STEPS have been taken. Held in memory, and
+        # restored from the reader log (_restore_recovery) when AL/X restarts
+        # during a fault, so its steps carry on rather than start again.
         self._screen_recovery: dict[str, dict[str, Any]] = {}
 
     # ---- what the tile reads ---------------------------------------------
@@ -591,12 +593,18 @@ class ReaderMonitor:
             fault = None
         # A fault already under way before AL/X restarted carries on where
         # it was, from the reader log, rather than starting its steps again.
+        # A working screen closes one the log still holds open, so a later
+        # fault starts its own steps rather than inheriting the old one's.
         restored = None
-        if fault is not None:
-            with self._lock:
-                known = uid in self._screen_recovery
-            if not known:
+        logged_open = False
+        with self._lock:
+            known = uid in self._screen_recovery
+        if not known:
+            if fault is not None:
                 restored = self._restore_recovery(uid, at)
+            else:
+                logged_open = self._calendar.log_started(
+                    uid, "screen_failed", "screen_recovered") is not None
         with self._lock:
             held = self._cards.get(uid)
             if held is not None and held[1] != received_at:
@@ -619,7 +627,7 @@ class ReaderMonitor:
                     check["screen_step"] = restored["step"]
         if fault is not None and fault != previous:
             self._calendar.log(at, uid, fault[0], fault[1])
-        if fault is None and recovering is not None:
+        if fault is None and (recovering is not None or logged_open):
             self._calendar.log(at, uid, "screen_recovered", {})
 
     def recover_screens(self) -> None:
