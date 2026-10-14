@@ -422,6 +422,18 @@ class DhlAnalyzerTests(unittest.TestCase):
         self.assertFalse(result["verified"])
         self.assertTrue(any("pre-clearance" in item for item in result["problems"]))
 
+    def test_a_pre_clearance_worksheet_that_does_not_balance_is_refused_beside_a_cleared_one(self) -> None:
+        result = DhlImportAnalyzerAdapter().customs_evidence(
+            [
+                pre_clearance_worksheet(total="999.00"),
+                pre_clearance_sad500(),
+                worksheet_pdf(),
+                sad500_pdf(),
+            ]
+        )
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("does not balance" in item for item in result["problems"]))
+
     def test_two_cleared_pairs_are_still_ambiguous(self) -> None:
         with self.assertRaises(DhlDocumentError) as captured:
             DhlImportAnalyzerAdapter().customs_evidence(

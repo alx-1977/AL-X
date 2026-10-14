@@ -693,11 +693,13 @@ class DhlImportAnalyzerAdapter:
                     f"pre-clearance duty {before.duty} and VAT {before.vat} differ "
                     f"from the cleared duty {worksheet.duty} and VAT {worksheet.vat}"
                 )
-        if not _agree(worksheet.duty + worksheet.vat, worksheet.total):
-            errors.append(
-                f"worksheet does not balance: duty {worksheet.duty} + VAT "
-                f"{worksheet.vat} != {worksheet.total}"
-            )
+        # Every worksheet supplied must balance, not only the one chosen.
+        for checked, _sad in pairs:
+            if not _agree(checked.duty + checked.vat, checked.total):
+                errors.append(
+                    f"worksheet does not balance: duty {checked.duty} + VAT "
+                    f"{checked.vat} != {checked.total}"
+                )
         lines: list[dict[str, Any]] = []
         if worksheet.vat:
             lines.append(
