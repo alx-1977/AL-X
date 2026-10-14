@@ -526,16 +526,19 @@ def build_dhl_executors(
                 references=references,
             )
 
-        # Xero requires a date. The assessment date is stated by the
-        # declaration identifier; without one, nothing is guessed.
+        # Xero requires a date. Once cleared, the declaration identifier
+        # states it; before clearance, the worksheet's own date. Without one,
+        # nothing is guessed.
+        declaration = str(evidence.get("declaration") or "")
         assessed_on = str(evidence.get("assessed_on") or "")
         if not assessed_on:
             return returned(
                 "customs_documents",
                 "assessment_date_missing",
                 (
-                    f"declaration {evidence['declaration']} does not state an "
-                    "assessment date"
+                    f"declaration {declaration} does not state an assessment date"
+                    if declaration else
+                    "the pre-clearance worksheet does not state a single date"
                 ),
                 waybill,
                 steps=steps,
@@ -583,7 +586,7 @@ def build_dhl_executors(
                     "CurrencyCode": "ZAR",
                     "Reference": (
                         f"DHL import; waybill {waybill}; "
-                        f"declaration {evidence['declaration']}"
+                        f"declaration {declaration or 'pending clearance'}"
                     ),
                     "LineAmountTypes": "NoTax",
                     "LineItems": lines,
@@ -636,6 +639,8 @@ def build_dhl_executors(
                 "detail": (
                     f"provisional bill {number} drafted for duty {duty} and "
                     f"import VAT {vat}; awaiting the DHL invoice"
+                    + ("" if declaration else
+                       "; drafted before customs clearance (no entry number yet)")
                 ),
                 "waybill": waybill,
                 "bill": dict(final),

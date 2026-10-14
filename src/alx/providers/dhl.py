@@ -55,11 +55,23 @@ _MONEY_PATTERN = r"[\d,]+\.\d{2}"
 
 @dataclass(frozen=True, slots=True)
 class Worksheet:
+    # Empty on a pre-clearance worksheet: DHL sends the worksheet and SAD 500
+    # with its arrival notification before the duty is paid, and the customs
+    # entry is registered only after payment.
     declaration: str
     waybill: str
     duty: Decimal
     vat: Decimal
     total: Decimal
+    # The one date the worksheet states (day/month/year), "" unless exactly
+    # one; dates a pre-clearance bill, which has no entry number to date it.
+    dated: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Sad500:
+    declaration: str   # empty before clearance, as on the worksheet
+    waybill: str       # the single 10-digit number on it, "" unless one
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,13 +194,6 @@ def _first_value(pages: Sequence[Sequence[_Run]], label: str) -> Decimal | None:
     return None
 
 
-def _one_identifier(pattern: str, joined: str, code: str) -> str:
-    values = tuple(dict.fromkeys(re.findall(pattern, joined)))
-    if len(values) != 1:
-        raise DhlDocumentError(code)
-    return values[0]
-
-
 _WORKSHEET_WAYBILL = re.compile(
     r"\bWAYBILL(?:\s*(?:NO\.?|NUMBER))?\b[^0-9]{0,25}(\d{10})\b",
     re.IGNORECASE,
@@ -203,12 +208,32 @@ def _worksheet_waybill(joined: str) -> str:
     return values[0]
 
 
+_DECLARATION = r"\b([A-Z]{3}\d{15,})\b"
+
+
+def _optional_declaration(joined: str, code: str) -> str:
+    """The customs entry number, or "" before clearance; two is ambiguous."""
+    values = tuple(dict.fromkeys(re.findall(_DECLARATION, joined)))
+    if len(values) > 1:
+        raise DhlDocumentError(code)
+    return values[0] if values else ""
+
+
+def _stated_date(joined: str) -> str:
+    """The single day/month/year date a document states, as ISO, else ""."""
+    values = tuple(dict.fromkeys(re.findall(r"\b(\d{2}/\d{2}/\d{4})\b", joined)))
+    if len(values) != 1:
+        return ""
+    try:
+        return datetime.strptime(values[0], "%d/%m/%Y").date().isoformat()
+    except ValueError:
+        return ""
+
+
 def _worksheet_from_pages(pages: Sequence[Sequence[_Run]]) -> Worksheet:
     runs = [run for page in pages for run in page]
     joined = " ".join(run.text for run in runs)
-    declaration = _one_identifier(
-        r"\b([A-Z]{3}\d{15,})\b", joined, "worksheet_identity_ambiguous"
-    )
+    declaration = _optional_declaration(joined, "worksheet_identity_ambiguous")
     waybills = tuple(dict.fromkeys(re.findall(r"\b(\d{10})\b", joined)))
     if len(waybills) == 1:
         waybill = waybills[0]
@@ -233,7 +258,7 @@ def _worksheet_from_pages(pages: Sequence[Sequence[_Run]]) -> Worksheet:
                 break
     if total is None:
         raise DhlDocumentError("worksheet_total_missing")
-    return Worksheet(declaration, waybill, duty, vat, total)
+    return Worksheet(declaration, waybill, duty, vat, total, _stated_date(joined))
 
 
 def _parse_worksheet(payload: bytes) -> Worksheet:
@@ -463,18 +488,51 @@ def parse_mybill_invoice(payload: bytes) -> dict[str, Any]:
     }
 
 
-def _classify_customs_document(payload: bytes) -> tuple[str, Worksheet | str]:
+def _classify_customs_document(payload: bytes) -> tuple[str, Worksheet | Sad500]:
     pages = _runs_by_page(payload)
     joined = " ".join(run.text for page in pages for run in page)
     upper = joined.upper()
     if "CUSTOMS WORKSHEET" in upper:
         return "customs_worksheet", _worksheet_from_pages(pages)
     if "SAD 500" in upper or "CUSTOMS DECLARATION" in upper:
-        declaration = _one_identifier(
-            r"\b([A-Z]{3}\d{15,})\b", joined, "sad500_identity_ambiguous"
-        )
-        return "sad_500", declaration
+        declaration = _optional_declaration(joined, "sad500_identity_ambiguous")
+        waybills = tuple(dict.fromkeys(re.findall(r"\b(\d{10})\b", joined)))
+        waybill = waybills[0] if len(waybills) == 1 else ""
+        if not declaration and not waybill:
+            raise DhlDocumentError("sad500_identity_ambiguous")
+        return "sad_500", Sad500(declaration, waybill)
     raise DhlDocumentError("customs_document_unrecognised")
+
+
+def _pair_customs_documents(
+    worksheets: Sequence[Worksheet], declarations: Sequence[Sad500]
+) -> tuple[tuple[Worksheet, Sad500], ...]:
+    """Each worksheet with its own SAD 500, or refuse.
+
+    After clearance the two share the customs entry number. Before clearance
+    neither has one, and they share the waybill instead. Every document must
+    belong to exactly one pair.
+    """
+    # One of each is a pair by definition; whether its identities agree is
+    # then reported as a problem, not hidden as ambiguity.
+    if len(worksheets) == 1 and len(declarations) == 1:
+        return ((worksheets[0], declarations[0]),)
+    pairs: list[tuple[Worksheet, Sad500]] = []
+    unused = list(declarations)
+    for worksheet in worksheets:
+        if worksheet.declaration:
+            matches = [d for d in unused if d.declaration == worksheet.declaration]
+        else:
+            matches = [
+                d for d in unused if not d.declaration and d.waybill == worksheet.waybill
+            ]
+        if len(matches) != 1:
+            raise DhlDocumentError("customs_evidence_ambiguous")
+        unused.remove(matches[0])
+        pairs.append((worksheet, matches[0]))
+    if unused or not pairs:
+        raise DhlDocumentError("customs_evidence_ambiguous")
+    return tuple(pairs)
 
 
 def _agree(left: Decimal, right: Decimal) -> bool:
@@ -595,24 +653,46 @@ class DhlImportAnalyzerAdapter:
             _classify_customs_document(payload) for payload in customs_documents
         )
         worksheets = tuple(
-            value for kind, value in classified if kind == "customs_worksheet"
+            value for kind, value in classified
+            if kind == "customs_worksheet" and isinstance(value, Worksheet)
         )
         sad_declarations = tuple(
-            value for kind, value in classified if kind == "sad_500"
+            value for kind, value in classified
+            if kind == "sad_500" and isinstance(value, Sad500)
         )
-        if len(worksheets) != 1 or len(sad_declarations) != 1:
+        if len(worksheets) + len(sad_declarations) != len(classified):
             raise DhlDocumentError("customs_evidence_ambiguous")
-        worksheet = worksheets[0]
-        if not isinstance(worksheet, Worksheet) or not isinstance(
-            sad_declarations[0], str
-        ):
+        # One pair, or the pre-clearance pair and the cleared pair of the same
+        # shipment: a bill drafted before payment is later given the cleared
+        # documents too. The cleared pair is the evidence; the figures of the
+        # two must agree.
+        pairs = _pair_customs_documents(worksheets, sad_declarations)
+        cleared = [pair for pair in pairs if pair[0].declaration]
+        pending = [pair for pair in pairs if not pair[0].declaration]
+        if len(cleared) > 1 or len(pending) > 1:
             raise DhlDocumentError("customs_evidence_ambiguous")
+        worksheet = (cleared or pending)[0][0]
         errors: list[str] = []
-        if worksheet.declaration != sad_declarations[0]:
-            errors.append(
-                f"SAD 500 declaration {sad_declarations[0]} != worksheet "
-                f"{worksheet.declaration}"
-            )
+        for paired_worksheet, sad in pairs:
+            if sad.declaration != paired_worksheet.declaration:
+                errors.append(
+                    f"SAD 500 declaration {sad.declaration or 'none'} != worksheet "
+                    f"{paired_worksheet.declaration or 'none'}"
+                )
+            elif not sad.declaration and sad.waybill != paired_worksheet.waybill:
+                errors.append(
+                    f"SAD 500 waybill {sad.waybill or 'none'} != worksheet "
+                    f"{paired_worksheet.waybill}"
+                )
+        if any(other.waybill != worksheet.waybill for other, _sad in pairs):
+            errors.append("the customs documents are for different waybills")
+        if cleared and pending:
+            before = pending[0][0]
+            if not (_agree(before.duty, worksheet.duty) and _agree(before.vat, worksheet.vat)):
+                errors.append(
+                    f"pre-clearance duty {before.duty} and VAT {before.vat} differ "
+                    f"from the cleared duty {worksheet.duty} and VAT {worksheet.vat}"
+                )
         if not _agree(worksheet.duty + worksheet.vat, worksheet.total):
             errors.append(
                 f"worksheet does not balance: duty {worksheet.duty} + VAT "
@@ -643,7 +723,13 @@ class DhlImportAnalyzerAdapter:
             # because import VAT is claimable and duty is not.
             "duty": format(worksheet.duty, "f"),
             "vat": format(worksheet.vat, "f"),
-            "assessed_on": _assessed_on(worksheet.declaration),
+            # Dated by the entry number once cleared; before clearance, by the
+            # one date the worksheet states.
+            "assessed_on": (
+                _assessed_on(worksheet.declaration)
+                if worksheet.declaration else worksheet.dated
+            ),
+            "cleared": bool(worksheet.declaration),
             "problems": tuple(errors),
             "provisional_invoice_number": f"DHL-WAYBILL-{worksheet.waybill}",
             "currency": "ZAR",
@@ -652,7 +738,8 @@ class DhlImportAnalyzerAdapter:
             "declaration": worksheet.declaration,
             "reference": (
                 f"DHL import; waybill {worksheet.waybill}; "
-                f"declaration {worksheet.declaration}; invoice pending"
+                f"declaration {worksheet.declaration or 'pending clearance'}; "
+                "invoice pending"
             ),
             "lines": tuple(lines),
             "document_kinds": tuple(kind for kind, _value in classified),
