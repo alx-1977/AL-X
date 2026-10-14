@@ -7,6 +7,11 @@ recorded here - one that only joined a round already on the head asked for
 nothing and is not - and the next request is refused once either count is
 reached. Past that, a review needs Friedl's word for that exact request.
 
+A review is counted before its trigger is posted, never after: a request whose
+outcome is unclear (the trigger may have gone out) stays counted, and only one
+GitHub definitely refused is released. Counting afterwards let a review that
+went out go uncounted when anything between the post and the record failed.
+
 The month is the calendar month in local time, as Friedl reads it.
 """
 
@@ -45,6 +50,14 @@ class ReviewAllowanceState:
             "month_reviews": self.month_reviews,
             "reviews_per_month": self.per_month,
         }
+
+
+class ReviewAllowanceReached(Exception):
+    """Raised instead of counting a review that does not fit the allowance."""
+
+    def __init__(self, state: ReviewAllowanceState) -> None:
+        self.state = state
+        super().__init__("review allowance reached")
 
 
 class SQLiteReviewAllowance:
@@ -93,17 +106,51 @@ class SQLiteReviewAllowance:
             int(pull_request), int(month), self._per_pull_request, self._per_month
         )
 
-    def record(self, pull_request_number: int, head_sha: str, at: datetime) -> None:
+    def reserve(
+        self, pull_request_number: int, head_sha: str, at: datetime, enforce: bool = True
+    ) -> int:
+        """Count one review about to be asked for, and return its record.
+
+        With `enforce`, refuses (ReviewAllowanceReached) instead of counting
+        when the allowance is already used; checked and counted in one
+        transaction, so two requests cannot both take the last review.
+        Without it - a review Friedl approved past the allowance - it counts.
+        """
+        month = self._month(at)
         with self._lock, self._connect() as connection:
-            connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            if enforce:
+                state = ReviewAllowanceState(
+                    int(connection.execute(
+                        "SELECT COUNT(*) FROM review_requests "
+                        "WHERE pull_request_number = ?",
+                        (pull_request_number,),
+                    ).fetchone()[0]),
+                    int(connection.execute(
+                        "SELECT COUNT(*) FROM review_requests WHERE month = ?",
+                        (month,),
+                    ).fetchone()[0]),
+                    self._per_pull_request,
+                    self._per_month,
+                )
+                if state.reached:
+                    raise ReviewAllowanceReached(state)
+            cursor = connection.execute(
                 "INSERT INTO review_requests VALUES (?, ?, ?, ?)",
-                (pull_request_number, head_sha, at.isoformat(), self._month(at)),
+                (pull_request_number, head_sha, at.isoformat(), month),
             )
+            return int(cursor.lastrowid)
+
+    def release(self, record: int) -> None:
+        """Uncount a review that was certainly never asked for."""
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM review_requests WHERE rowid = ?", (record,))
 
 
 __all__ = [
     "REVIEWS_PER_MONTH",
     "REVIEWS_PER_PULL_REQUEST",
+    "ReviewAllowanceReached",
     "ReviewAllowanceState",
     "SQLiteReviewAllowance",
 ]

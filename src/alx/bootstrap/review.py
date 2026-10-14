@@ -26,6 +26,7 @@ from typing import Any
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
 from alx.contracts.review import ReviewError, ReviewRequest
 from alx.contracts.review_provider import ReviewProvider, profile_for
+from alx.observability.review_allowance import ReviewAllowanceReached
 from alx.providers.github_review import GitHubReviewProvider
 from alx.safety import AuthorityPolicy
 from alx.tools.review import (
@@ -60,6 +61,33 @@ COMPLETED_ROUND = "success"
 ALREADY_REVIEWED = "already_reviewed"
 
 
+class _AllowanceLedger:
+    """Counts reviews against Friedl's allowance for the provider."""
+
+    def __init__(self, allowance: Any, enforce: bool) -> None:
+        self._allowance = allowance
+        self._enforce = enforce
+
+    def reserve(self, number: int, head_sha: str) -> int:
+        try:
+            return self._allowance.reserve(
+                number, head_sha, datetime.now(UTC), enforce=self._enforce
+            )
+        except ReviewAllowanceReached as reached:
+            raise ReviewError(
+                "review_allowance_reached", reached.state.as_values()
+            ) from None
+        except Exception as error:  # noqa: BLE001 - fail closed, say why
+            LOGGER.warning("Review allowance unreadable: %s", type(error).__name__)
+            raise ReviewError("review_unavailable") from None
+
+    def release(self, record: int) -> None:
+        try:
+            self._allowance.release(record)
+        except Exception as error:  # noqa: BLE001 - stays counted
+            LOGGER.warning("Review count not released: %s", type(error).__name__)
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewRuntime:
     """The one review-request capability, or nothing at all."""
@@ -90,9 +118,8 @@ def build_review_runtime(
     # request at this head. Supplied by the composition that holds the task
     # store; absent, a joined finished round is always waited on.
     delivered: Callable[[int, str, datetime], bool] | None = None,
-    # Friedl's review allowance: `state(number, at)` and
-    # `record(number, head_sha, at)`. Without it nothing limits requests and
-    # no beyond-allowance capability is offered.
+    # Friedl's review allowance (`SQLiteReviewAllowance`). Without it nothing
+    # limits requests and no beyond-allowance capability is offered.
     allowance: Any = None,
 ) -> ReviewRuntime | None:
     """Compose review requesting, or leave it unregistered."""
@@ -122,20 +149,20 @@ def build_review_runtime(
                 )
                 reviewer = ReviewProvider.GREPTILE
 
-        def within_allowance(number: int) -> None:
-            state = allowance.state(number, datetime.now(UTC))
-            if state.reached:
-                raise ReviewError("review_allowance_reached", state.as_values())
-
         # One provider requests and reads: both are GitHub calls about the
-        # same pull request by the same reviewer. The ordinary request is
-        # stopped at the allowance just before its trigger would be posted;
-        # the beyond-allowance one, already approved by Friedl, is not.
+        # same pull request by the same reviewer. Each review is counted just
+        # before its trigger is posted; the ordinary request is stopped there
+        # at the allowance, the beyond-allowance one, approved by Friedl, is
+        # not. A count that cannot be made stops the request: the allowance
+        # fails closed.
         composed = GitHubReviewProvider(
             repository, token, profile_for(reviewer),
-            before_trigger=None if allowance is None else within_allowance,
+            trigger_ledger=None if allowance is None else _AllowanceLedger(allowance, True),
         )
-        unlimited = GitHubReviewProvider(repository, token, profile_for(reviewer))
+        unlimited = GitHubReviewProvider(
+            repository, token, profile_for(reviewer),
+            trigger_ledger=None if allowance is None else _AllowanceLedger(allowance, False),
+        )
         selected = provider or composed
         beyond = provider or unlimited
         reader = content_provider or composed
@@ -151,16 +178,6 @@ def build_review_runtime(
         local_requested_at = datetime.now(UTC)
         outcome = (through or selected).request(review)
         requested_at = outcome.requested_at or local_requested_at
-        if outcome.requested and allowance is not None:
-            # Counted once it is asked for; a joined round asked for nothing.
-            try:
-                allowance.record(
-                    outcome.pull_request_number, outcome.head_sha, requested_at
-                )
-            except Exception as error:  # noqa: BLE001 - the review stands
-                LOGGER.warning(
-                    "Review allowance not recorded: %s", type(error).__name__
-                )
         # Joined a round that had already finished, and whose verdict an
         # earlier task already took. The reviewer does not review an unchanged
         # head again, so nothing further will arrive for a wait to observe;

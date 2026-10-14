@@ -210,6 +210,62 @@ def migrate_legacy_conversations(
 
 
 
+# The model and speech services her providers may be, by configured name:
+# what to call each and the code that talks to it.
+_SERVICES: dict[str, tuple[str, str]] = {
+    "claude_subscription": ("Claude", "src/alx/providers/claude_subscription.py"),
+    "openai": ("OpenAI", "src/alx/providers/openai.py"),
+    "xai": ("xAI", "src/alx/providers/xai.py"),
+    "kimi": ("Kimi", "src/alx/providers/xai.py"),
+    "codex_subscription": ("OpenAI Codex", "src/alx/providers/codex_subscription.py"),
+    "grok_subscription": ("Grok", "src/alx/providers/grok_subscription.py"),
+    "elevenlabs": ("ElevenLabs", "src/alx/providers/elevenlabs.py, "
+                   "src/alx/providers/elevenlabs_pronunciation.py"),
+    "cartesia": ("Cartesia", "src/alx/providers/cartesia.py"),
+}
+
+
+def _integrations(
+    provider_settings: Any,
+    research_settings: Any,
+    others: tuple[tuple[str, str, str, bool], ...],
+) -> list[dict[str, str]]:
+    """What she is built on, each with the code that talks to it.
+
+    For her setup facts, so she can keep them current: Friedl, 2026-10-14,
+    "ALX should always look for the latest and best way any of her current
+    integrations are built on". Read from what this runtime composed: a
+    service she does not use is not listed.
+    """
+    uses: dict[str, list[str]] = {}
+
+    def use(provider: str, purpose: str) -> None:
+        if provider in _SERVICES and purpose not in uses.setdefault(provider, []):
+            uses[provider].append(purpose)
+
+    reasoning = provider_settings.reasoning
+    use(reasoning.provider, f"reasoning ({reasoning.model})")
+    if research_settings is not None:
+        for name in sorted(research_settings.enabled_tiers):
+            tier = getattr(research_settings, name)
+            use(tier.provider, f"{name} research ({tier.model})")
+    speech = provider_settings.text_to_speech
+    use(speech.provider, f"your voice ({speech.model})")
+    hearing = provider_settings.speech_to_text
+    use(hearing.provider, f"hearing Friedl ({hearing.model})")
+    listed = [
+        {"name": _SERVICES[provider][0], "for": ", ".join(purposes),
+         "code": _SERVICES[provider][1]}
+        for provider, purposes in uses.items()
+    ]
+    listed.extend(
+        {"name": name, "for": purpose, "code": code}
+        for name, purpose, code, composed in others
+        if composed
+    )
+    return listed
+
+
 def _reviewer_name(review_runtime: Any) -> str:
     """The reviewer a composed runtime actually uses.
 
@@ -994,53 +1050,35 @@ async def run(repository_root: Path) -> None:
         # What she is built on, each with the code that talks to it, so she can
         # keep them current: Friedl, 2026-10-14, "ALX should always look for
         # the latest and best way any of her current integrations are built on".
-        "integrations": [
-            item for item, composed in (
-                ({"name": "Claude", "for": "reasoning and research, on your own "
-                  "subscription through the Claude Code CLI",
-                  "code": "src/alx/providers/claude_subscription.py"}, True),
-                ({"name": "ElevenLabs", "for": "your voice: streaming text to "
-                  f"speech ({provider_settings.text_to_speech.model}) and the "
-                  "pronunciation dictionary",
-                  "code": "src/alx/providers/elevenlabs.py, "
-                  "src/alx/providers/elevenlabs_pronunciation.py"}, True),
-                ({"name": provider_settings.speech_to_text.provider.capitalize(),
-                  "for": "hearing Friedl: streaming speech to text "
-                  f"({provider_settings.speech_to_text.model})",
-                  "code": "src/alx/providers/cartesia.py"}, True),
-                ({"name": "iCloud Mail", "for": "reading, flagging, filing and "
-                  "sending mail over IMAP and SMTP",
-                  "code": "src/alx/providers/icloud_mail.py, "
-                  "src/alx/providers/icloud_mail_send.py"}, True),
-                ({"name": "Xero", "for": "contacts, quotes, invoices and bills "
-                  "through the Accounting API",
-                  "code": "src/alx/providers/xero.py"}, xero_composed),
-                ({"name": "DHL", "for": "import duty bills from DHL's emails "
-                  "and documents", "code": "src/alx/providers/dhl.py"},
-                 xero_composed),
-                ({"name": "LlamaParse", "for": "reading invoices and other "
-                  "documents", "code": "src/alx/providers/llamaparse.py"},
-                 documents_composed),
-                ({"name": "Particle", "for": "the BHL readers: Cloud API, "
-                  "event streams and usage",
-                  "code": "src/alx/providers/particle.py"},
+        "integrations": _integrations(
+            provider_settings,
+            research_settings if research_runtime is not None else None,
+            (
+                ("iCloud Mail", "reading, flagging, filing and sending mail over "
+                 "IMAP and SMTP", "src/alx/providers/icloud_mail.py, "
+                 "src/alx/providers/icloud_mail_send.py", True),
+                ("Xero", "contacts, quotes, invoices and bills through the "
+                 "Accounting API", "src/alx/providers/xero.py", xero_composed),
+                ("DHL", "import duty bills from DHL's emails and documents",
+                 "src/alx/providers/dhl.py", xero_composed),
+                ("LlamaParse", "reading invoices and other documents",
+                 "src/alx/providers/llamaparse.py", documents_composed),
+                ("Particle", "the BHL readers: Cloud API, event streams and "
+                 "usage", "src/alx/providers/particle.py",
                  reader_runtime is not None),
-                ({"name": "BehaviorLive", "for": "the BHL session calendar",
-                  "code": "src/alx/providers/behaviorlive.py"},
-                 reader_runtime is not None),
-                ({"name": "Web search", "for": "searching the public web; pages are read "
-                  "directly", "code": "src/alx/providers/web_search.py, "
-                  "src/alx/providers/web_fetch.py"}, web_runtime is not None),
-                ({"name": "GitHub", "for": "your repository: pull requests, "
-                  "checks and merges",
-                  "code": "src/alx/providers/github_merge.py, "
-                  "src/alx/providers/github_pull_request.py"},
+                ("BehaviorLive", "the BHL session calendar",
+                 "src/alx/providers/behaviorlive.py", reader_runtime is not None),
+                ("Web search", "searching the public web; pages are read "
+                 "directly", "src/alx/providers/web_search.py, "
+                 "src/alx/providers/web_fetch.py", web_runtime is not None),
+                ("GitHub", "your repository: pull requests, checks and merges",
+                 "src/alx/providers/github_merge.py, "
+                 "src/alx/providers/github_pull_request.py",
                  merge_runtime is not None),
-                ({"name": "Greptile", "for": "external code review through "
-                  "GitHub", "code": "src/alx/providers/github_review.py"},
-                 review_runtime is not None),
-            ) if composed
-        ],
+                ("Greptile", "external code review through GitHub",
+                 "src/alx/providers/github_review.py", review_runtime is not None),
+            ),
+        ),
         "runs_without_you": [
             "mail is scanned and new mail reaches you as events",
             *(

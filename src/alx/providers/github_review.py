@@ -136,10 +136,12 @@ class GitHubReviewProvider:
         profile: ReviewProviderProfile,
         api_root: str = API_ROOT,
         clock: Any = None,
-        # Asked just before a trigger is posted, with the pull request number;
-        # raises a ReviewError to stop it. Joining a round already on the head
-        # asks for nothing and is never stopped.
-        before_trigger: Any = None,
+        # Counts a review just before its trigger is posted:
+        # `reserve(number, head_sha)` returns a record, or raises a
+        # ReviewError to stop it; `release(record)` uncounts one GitHub
+        # certainly refused. Joining a round already on the head asks for
+        # nothing and is never counted.
+        trigger_ledger: Any = None,
     ) -> None:
         owner, _, name = repository.strip().partition("/")
         if not _SEGMENT.match(owner) or not _SEGMENT.match(name):
@@ -153,7 +155,7 @@ class GitHubReviewProvider:
         self._profile = profile
         self._api_root = api_root.rstrip("/")
         self._now = clock or (lambda: datetime.now(UTC))
-        self._before_trigger = before_trigger
+        self._trigger_ledger = trigger_ledger
 
     @property
     def reviewer(self) -> str:
@@ -230,16 +232,8 @@ class GitHubReviewProvider:
         what tells a round that ended before a request from one that answers
         it.
         """
-        found = self._call(
-            "GET",
-            f"/repos/{self._repository}/commits/{head_sha}/check-runs"
-            "?filter=all&per_page=100",
-        )
-        listed = found.get("check_runs") if isinstance(found, dict) else None
-        if not isinstance(listed, list):
-            raise _Unavailable()
         rounds = []
-        for item in listed:
+        for item in self._check_runs(head_sha):
             if not (
                 isinstance(item, dict)
                 and item.get("name") == self._profile.check_run_name
@@ -260,6 +254,28 @@ class GitHubReviewProvider:
         return max(
             rounds, key=lambda found: found.at or datetime.min.replace(tzinfo=UTC)
         )
+
+    def _check_runs(self, head_sha: str) -> list[Any]:
+        """Every check run on this revision, page by page.
+
+        Bounded like `_pages`, and closed the same way: a full last page at
+        the cap means more exist, and a round on an unread page would read as
+        no round at all, which waits forever or asks for a review again.
+        """
+        runs: list[Any] = []
+        for page in range(1, MAX_PAGES + 1):
+            found = self._call(
+                "GET",
+                f"/repos/{self._repository}/commits/{head_sha}/check-runs"
+                f"?filter=all&per_page=100&page={page}",
+            )
+            listed = found.get("check_runs") if isinstance(found, dict) else None
+            if not isinstance(listed, list):
+                raise _Unavailable()
+            runs.extend(listed)
+            if len(listed) < 100:
+                return runs
+        raise _Unavailable()
 
     # ---- requesting -----------------------------------------------------
 
@@ -305,13 +321,22 @@ class GitHubReviewProvider:
                         requested_at=requested_at,
                         attached_round=awaited.state,
                     )
-            if self._before_trigger is not None:
-                self._before_trigger(number)
-            self._call(
-                "POST",
-                f"/repos/{self._repository}/issues/{number}/comments",
-                {"body": self._profile.trigger},
+            record = (
+                None if self._trigger_ledger is None
+                else self._trigger_ledger.reserve(number, head)
             )
+            try:
+                self._call(
+                    "POST",
+                    f"/repos/{self._repository}/issues/{number}/comments",
+                    {"body": self._profile.trigger},
+                )
+            except _Refused:
+                # Refused outright: nothing was asked for. Unavailable is not
+                # released: the trigger may have gone out.
+                if record is not None:
+                    self._trigger_ledger.release(record)
+                raise
             # Read again after the comment lands. If the head moved while the
             # request was going out, the revision the reviewer will examine is
             # not established, and saying so is better than naming the commit

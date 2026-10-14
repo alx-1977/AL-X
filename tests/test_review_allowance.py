@@ -40,9 +40,9 @@ class LedgerTests(unittest.TestCase):
     def test_three_reviews_of_one_pull_request_reach_it(self) -> None:
         ledger = self.ledger()
         for _ in range(2):
-            ledger.record(7, HEAD, NOW)
+            ledger.reserve(7, HEAD, NOW)
         self.assertFalse(ledger.state(7, NOW).reached)
-        ledger.record(7, HEAD, NOW)
+        ledger.reserve(7, HEAD, NOW)
         self.assertTrue(ledger.state(7, NOW).reached)
         # Another pull request still has its own three.
         self.assertFalse(ledger.state(8, NOW).reached)
@@ -50,7 +50,7 @@ class LedgerTests(unittest.TestCase):
     def test_twelve_reviews_in_a_month_reach_it(self) -> None:
         ledger = self.ledger()
         for number in range(12):
-            ledger.record(100 + number, HEAD, NOW)
+            ledger.reserve(100 + number, HEAD, NOW)
         state = ledger.state(200, NOW)
         self.assertEqual(state.month_reviews, 12)
         self.assertTrue(state.reached)
@@ -61,7 +61,7 @@ class LedgerTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "reviews.sqlite3"
-        SQLiteReviewAllowance(path).record(7, HEAD, NOW)
+        SQLiteReviewAllowance(path).reserve(7, HEAD, NOW)
         self.assertEqual(SQLiteReviewAllowance(path).state(7, NOW).pull_request_reviews, 1)
 
 
@@ -114,6 +114,61 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(result.values["requested"])
         self.assertEqual(self.github.posted, [])
         self.assertEqual(self.allowance.state(42, datetime.now(UTC)).pull_request_reviews, 0)
+
+    def test_a_count_is_taken_before_the_trigger_goes_out(self) -> None:
+        counted = []
+        original = self.github
+
+        def watching(method, url, **keywords):
+            if method == "POST":
+                counted.append(
+                    self.allowance.state(42, datetime.now(UTC)).pull_request_reviews
+                )
+            return original(method, url, **keywords)
+
+        github_review.httpx.request = watching
+        self.ask()
+        self.assertEqual(counted, [1])
+
+    def test_a_refused_trigger_is_uncounted(self) -> None:
+        self.post_answers(403)
+        self.assertEqual(self.ask().failure["code"], "review_refused")
+        self.assertEqual(self.allowance.state(42, datetime.now(UTC)).pull_request_reviews, 0)
+
+    def test_a_trigger_that_may_have_gone_out_stays_counted(self) -> None:
+        self.post_answers(502)
+        self.assertEqual(self.ask().failure["code"], "review_unavailable")
+        self.assertEqual(self.allowance.state(42, datetime.now(UTC)).pull_request_reviews, 1)
+
+    def test_an_unusable_count_stops_the_request(self) -> None:
+        class Broken:
+            def reserve(self, *arguments, **keywords):
+                raise OSError("disk")
+
+        runtime = build_review_runtime(
+            True, "owner/repo", "token", lambda: "call-1",
+            started=lambda number, sha, at: "completed", allowance=Broken(),
+        )
+        result = runtime.executors[REQUEST_EXTERNAL_REVIEW]({"pull_request_number": 42})
+        self.assertEqual(result.failure["code"], "review_unavailable")
+        self.assertEqual(self.github.posted, [])
+
+    def post_answers(self, status: int) -> None:
+        original = self.github
+
+        class Answer:
+            status_code = status
+            headers: dict = {}
+
+            def json(self):
+                return {"message": "no"}
+
+        def answering(method, url, **keywords):
+            if method == "POST":
+                return Answer()
+            return original(method, url, **keywords)
+
+        github_review.httpx.request = answering
 
     def test_without_an_allowance_no_beyond_capability_is_offered(self) -> None:
         runtime = build_review_runtime(
