@@ -261,7 +261,16 @@ def compose_tile(
         issue: tuple[str, str, str, str, str | None] | None = None  # tone, text, who, action, since
         # Whether putting it right is AL/X's own work (resending a schedule).
         fixable = False
-        if not online and close is not None:
+        screen_fault = held.get("screen_fault") is True
+        screen_words = screen_problem(held.get("screen") or {})
+        screen_text = (f"Not scanning · {screen_words}" if held.get("screen_stops_scans")
+                       else f"Screen fault · {screen_words}")
+        screen_step = held.get("screen_step")
+        if screen_fault and screen_step == "technician":
+            # D-047: AL/X's steps have run out. It needs a person, offline or not.
+            issue = ("bad", screen_text, TECHNICIAN, "Check the screen",
+                     since("screen_failed", "screen_recovered"))
+        elif not online and close is not None:
             text = ("Offline · event running" if running is not None
                     else f"Offline · event at {_clock(close.starts_at, local)}")
             issue = ("bad", text, TECHNICIAN, "Check the reader in the room",
@@ -269,18 +278,13 @@ def compose_tile(
         elif online and held.get("fresh") is True and held.get("wrong") is True:
             issue = ("bad", "On the wrong event", TECHNICIAN, "Check the reader in the room",
                      since("wrong_event"))
-        elif online and held.get("screen_fault") is True:
+        elif online and screen_fault:
             # Friedl, 2026-10-14: no scans until the screen works, and AL/X
-            # resolves it; a person only once her steps have run out.
-            problem = screen_problem(held.get("screen") or {})
-            step = held.get("screen_step")
-            if step == "technician":
-                issue = ("bad", f"Not scanning · {problem}", TECHNICIAN, "Check the screen",
-                         since("screen_failed", "screen_recovered"))
-            else:
-                issue = ("warn", f"Not scanning · {problem}", ALX,
-                         "Restarting the reader" if step == "restart" else "Resetting the screen",
-                         since("screen_failed", "screen_recovered"))
+            # resolves it; a person once her steps have run out (above).
+            issue = ("warn", screen_text, ALX,
+                     "Restarting the reader" if screen_step == "restart"
+                     else "Resetting the screen",
+                     since("screen_failed", "screen_recovered"))
         elif not online:
             issue = ("warn", "Offline", ALX, "Pinging it every minute" if monitoring else "",
                      since("offline", "online"))

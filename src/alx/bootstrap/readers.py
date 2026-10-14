@@ -589,6 +589,14 @@ class ReaderMonitor:
             fault = ("screen_wrong", {"shows": shows, "running": report.get("e")})
         else:
             fault = None
+        # A fault already under way before AL/X restarted carries on where
+        # it was, from the reader log, rather than starting its steps again.
+        restored = None
+        if fault is not None:
+            with self._lock:
+                known = uid in self._screen_recovery
+            if not known:
+                restored = self._restore_recovery(uid, at)
         with self._lock:
             held = self._cards.get(uid)
             if held is not None and held[1] != received_at:
@@ -598,12 +606,17 @@ class ReaderMonitor:
             check = self._checks.setdefault(uid, {"at": at})
             check["screen_fault"] = fault is not None
             check["screen"] = None if fault is None else {"kind": fault[0], **fault[1]}
+            # Only a reader that says so has stopped scanning; older firmware,
+            # or a screen on the wrong event, still scans.
+            check["screen_stops_scans"] = report.get("st") == "fault-screen"
             recovering = self._screen_recovery.get(uid)
             if fault is None:
                 self._screen_recovery.pop(uid, None)
                 check.pop("screen_step", None)
             elif recovering is None:
-                self._screen_recovery[uid] = {"since": at, "done": 0}
+                self._screen_recovery[uid] = restored or {"since": at, "done": 0}
+                if restored and restored.get("step"):
+                    check["screen_step"] = restored["step"]
         if fault is not None and fault != previous:
             self._calendar.log(at, uid, fault[0], fault[1])
         if fault is None and recovering is not None:
@@ -631,14 +644,22 @@ class ReaderMonitor:
                 if step != "technician" and self._presence(uid, at) is not True:
                     continue
                 recovering["done"] = done + 1
-                due.append((uid, step))
-        for uid, step in due:
+                due.append((uid, step, recovering))
+        for uid, step, recovering in due:
+            # Calls to other readers may have taken a while: act only on the
+            # fault this step was due for, if it still stands.
+            with self._lock:
+                if self._screen_recovery.get(uid) is not recovering:
+                    continue
             reader = found.get(uid)
             if step != "technician" and reader is not None and reader.get("device_id"):
                 self._calendar.log(at, uid, "screen_recovery", {"step": step})
                 try:
-                    self._particle.call_function(int(reader["product_id"]),
-                                                 reader["device_id"], RECOVER_FUNCTION, step)
+                    answer = self._particle.call_function(
+                        int(reader["product_id"]), reader["device_id"], RECOVER_FUNCTION, step)
+                    if answer != 0:
+                        self._calendar.log(at, uid, "screen_recovery",
+                                           {"step": step, "code": "refused"})
                 except ReaderAccessError as error:
                     self._calendar.log(at, uid, "screen_recovery",
                                        {"step": step, "code": error.code})
@@ -655,6 +676,22 @@ class ReaderMonitor:
             if step == "technician":
                 self._calendar.log(at, uid, "screen_recovery", {"step": "technician"})
                 self._mark_step(uid, step)
+
+    def _restore_recovery(self, uid: str, at: datetime) -> dict[str, Any] | None:
+        """A screen fault's start and steps taken, from the reader log."""
+        began = self._calendar.log_started(uid, "screen_failed", "screen_recovered")
+        if began is None:
+            return None
+        try:
+            since = datetime.fromisoformat(began)
+        except ValueError:
+            return None
+        steps, _ = self._calendar.log_between(since, at + timedelta(seconds=1), uid)
+        taken = [step["detail"].get("step") for step in steps
+                 if step["kind"] == "screen_recovery" and not step["detail"].get("code")]
+        done = (len(SCREEN_RECOVERY_STEPS) if "technician" in taken
+                else min(len(taken), len(SCREEN_RECOVERY_STEPS)))
+        return {"since": since, "done": done, "step": taken[-1] if taken else None}
 
     def _mark_step(self, uid: str, step: str) -> None:
         with self._lock:

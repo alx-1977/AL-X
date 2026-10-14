@@ -392,8 +392,9 @@ class ComposeTileTests(unittest.TestCase):
 class ScreenFaultTests(unittest.TestCase):
     """Friedl, 2026-10-14: which screen failure it is, and who acts on it."""
 
-    def compose(self, screen, step=None):
-        check = {"online": True, "screen_fault": True, "screen": screen, "sig": 80}
+    def compose(self, screen, step=None, stops=True, online=True):
+        check = {"online": online, "screen_fault": True, "screen": screen, "sig": 80,
+                 "screen_stops_scans": stops}
         if step:
             check["screen_step"] = step
         return compose_tile((REFRESHED, (), ONLINE, DAY), at(14, 10), UTC, HOLDING,
@@ -411,6 +412,15 @@ class ScreenFaultTests(unittest.TestCase):
             with self.subTest(words=words):
                 self.assertEqual(problems(self.compose(screen)),
                                  {"ab2d5218": f"Not scanning · {words}"})
+
+    def test_only_a_reader_that_stopped_scanning_says_so(self) -> None:
+        data = self.compose({"kind": "screen_wrong"}, stops=False)
+        self.assertEqual(problems(data), {"ab2d5218": "Screen fault · screen shows another event"})
+
+    def test_a_reader_needing_a_person_stays_red_offline(self) -> None:
+        data = self.compose({"kind": "screen_failed", "why": "none"}, "technician", online=False)
+        reader = data["readers"][0]
+        self.assertEqual((reader["tone"], reader["issue"]["action"]), ("bad", "Check the screen"))
 
     def test_al_x_acts_first_then_a_person(self) -> None:
         screen = {"kind": "screen_failed", "why": "none"}
