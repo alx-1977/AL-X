@@ -118,7 +118,7 @@ class PostCodingTests(unittest.TestCase):
             True, self.checkout, 'owner/repo', 30, lambda: self.call_id[0],
             authority=authority,
         )
-        reader = GitHubReviewProvider('owner/repo', 'token', profile_for(ReviewProvider.CODERABBIT))
+        reader = GitHubReviewProvider('owner/repo', 'token', profile_for(ReviewProvider.GREPTILE))
         self.tasks = build_task_runtime(self.root / 'state', 'owner/repo', 'token',
                                        lambda *a: None, lambda *a: None,
                                        interval_seconds=0.001, review_provider=reader)
@@ -205,29 +205,32 @@ class PostCodingTests(unittest.TestCase):
                              'base': {'sha': self.base, 'ref': 'main'}, 'state': 'open',
                              'merged': self.merged, 'merge_commit_sha': self.merge_sha,
                              'mergeable': True, 'mergeable_state': 'clean'})
-        if path.startswith(f'/commits/{self.head}/statuses'):
+        if path.startswith(f'/commits/{self.head}/check-runs?filter=all'):
             # The reviewer's own round marker: nothing until the trigger goes
-            # out, pending for the first `review_pending` looks at it, then
-            # completed. The round advances as the waiter polls its status,
-            # because the reader fetches no content until the round ends.
+            # out, running for the first `review_pending` looks at it, then
+            # completed. The round advances as the waiter polls it, because
+            # the reader fetches no content until the round ends.
             # D-042: a merge reads the review of its exact head first. Tests
             # about what happens at merge time start from a head that was
             # already reviewed clean; tests that request a review say so.
-            if (not self.request_count and not self.already_reviewed) or 'page=1' not in path:
-                return Response([])
+            if not self.request_count and not self.already_reviewed:
+                return Response({'total_count': 0, 'check_runs': []})
             self.review_reads += 1
             prior = self.already_reviewed and not self.request_count
-            state = 'pending' if self.review_reads <= self.review_pending and not prior else 'success'
-            return Response([{'context': 'CodeRabbit', 'state': state,
-                              'creator': {'login': 'coderabbitai[bot]'},
-                              'created_at': self.now.isoformat()}])
+            running = self.review_reads <= self.review_pending and not prior
+            return Response({'total_count': 1, 'check_runs': [{
+                'name': 'Greptile Review', 'app': {'slug': 'greptile-apps'},
+                'status': 'in_progress' if running else 'completed',
+                'conclusion': None if running else 'success',
+                'started_at': self.now.isoformat(),
+                'completed_at': None if running else self.now.isoformat()}]})
         if path.startswith('/issues/72/comments'):
             prior = self.already_reviewed and not self.request_count
             if self.review_reads <= self.review_pending and not prior:
-                return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
+                return Response([{'id': 1, 'user': {'login': 'greptile-apps[bot]'},
                                   'body': 'Review in progress', 'created_at': self.now.isoformat()}])
-            return Response([{'id': 1, 'user': {'login': 'coderabbitai[bot]'},
-                              'body': f'No actionable comments were generated in the recent review. Reviewed {self.head}',
+            return Response([{'id': 1, 'user': {'login': 'greptile-apps[bot]'},
+                              'body': f'<h2>Confidence Score: 5/5</h2>\n<!-- greptile_confidence_score:5 -->\nLast reviewed commit: https://github.com/owner/repo/commit/{self.head}',
                               'created_at': self.now.isoformat()}])
         if path.startswith('/pulls/72/comments') or path.startswith('/pulls/72/reviews'):
             return Response([])

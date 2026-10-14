@@ -3,7 +3,10 @@
 from alx.providers.repository_authority import RepositoryAuthority
 from alx.providers.cartesia import CartesiaTranscriber
 from alx.providers.elevenlabs import ElevenLabsSynthesizer
-from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
+from alx.providers.claude_subscription import (
+    ClaudeSubscriptionReasoningModel,
+    ClaudeSubscriptionResearchModel,
+)
 from alx.providers.codex_subscription import CodexSubscriptionReasoningModel
 from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
 from alx.providers.openai import OpenAIReasoningModel
@@ -47,6 +50,7 @@ __all__ = [
     "CartesiaTranscriber",
     "ElevenLabsSynthesizer",
     "ClaudeSubscriptionReasoningModel",
+    "ClaudeSubscriptionResearchModel",
     "GrokSubscriptionReasoningModel",
     "CodexSubscriptionReasoningModel",
     "OpenAIReasoningModel",

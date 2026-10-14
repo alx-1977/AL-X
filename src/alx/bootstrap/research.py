@@ -22,7 +22,11 @@ from alx.observability import (
     SQLiteResearchLedger,
 )
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
-from alx.providers import OpenAIReasoningModel, XAIReasoningModel
+from alx.providers import (
+    ClaudeSubscriptionResearchModel,
+    OpenAIReasoningModel,
+    XAIReasoningModel,
+)
 from alx.safety import AuthorityPolicy
 from alx.specialists import ResearchSpecialist, ResearchTierModel
 from alx.tools import ASK_RESEARCH_QUESTION, RESEARCH_DEFINITION, build_research_executors
@@ -43,7 +47,9 @@ RESEARCH_MAX_OUTPUT_TOKENS = 4_000
 RESEARCH_SPEND_PERMISSION = "research.spend"
 
 
-def _transport(settings: Any, telemetry_sink: Any) -> Any:
+def _transport(
+    settings: Any, telemetry_sink: Any, claude_identity: tuple[str, str] | None = None
+) -> Any:
     if settings.provider == "openai":
         return OpenAIReasoningModel(
             settings.model,
@@ -54,6 +60,19 @@ def _transport(settings: Any, telemetry_sink: Any) -> Any:
             service_tier=settings.service_tier,
             reasoning_effort=settings.effort,
             telemetry_sink=telemetry_sink,
+        )
+    if settings.provider == "claude_subscription":
+        # Her own Claude subscription (D-023, amended 2026-10-14).
+        if claude_identity is None:
+            raise ConfigurationError(
+                "research on the Claude subscription requires AL/X's own Claude login"
+            )
+        return ClaudeSubscriptionResearchModel(
+            settings.model,
+            settings.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+            config_dir=claude_identity[0],
+            expected_account=claude_identity[1],
         )
     if settings.provider in ("xai", "kimi"):
         return XAIReasoningModel(
@@ -99,7 +118,7 @@ def build_research_specialist(
         tiers[tier] = ResearchTierModel(
             tier_settings.provider,
             tier_settings.model,
-            _transport(tier_settings, telemetry_sink),
+            _transport(tier_settings, telemetry_sink, settings.claude_identity),
         )
         LOGGER.info(
             "Research tier %s enabled: %s %s",
@@ -115,6 +134,7 @@ def build_research_specialist(
         ResearchBudget(
             daily_usd=settings.limits.daily_usd,
             per_request_max_usd=settings.limits.per_request_max_usd,
+            daily_calls=settings.limits.daily_calls,
         ),
     )
     return ResearchSpecialist(

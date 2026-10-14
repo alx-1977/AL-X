@@ -51,6 +51,19 @@ class ResearchBudgetExceeded(Exception):
         )
 
 
+class ResearchCallsExhausted(Exception):
+    """Raised before dispatch when today's research calls are used up.
+
+    The cap that bounds research on a subscription, where no per-token price
+    exists for a dollar ceiling to measure: it shares its usage limits with
+    every conversation, so it is counted in calls (D-023, amended 2026-10-14).
+    """
+
+    def __init__(self, daily_calls: int) -> None:
+        self.daily_calls = daily_calls
+        super().__init__(f"research calls exhausted: {daily_calls} a day")
+
+
 @dataclass(frozen=True, slots=True)
 class Reservation:
     """A withdrawal held against the day until the real cost is known."""
@@ -65,8 +78,12 @@ class ResearchBudget:
 
     daily_usd: float
     per_request_max_usd: float
+    # Research calls a day; 0 sets no call cap. Counts every reservation.
+    daily_calls: int = 0
 
     def __post_init__(self) -> None:
+        if self.daily_calls < 0:
+            raise ValueError("daily_calls must not be negative")
         if not isfinite(self.daily_usd) or not isfinite(self.per_request_max_usd):
             raise ValueError("research budgets must be finite")
         if self.daily_usd < 0:
@@ -230,6 +247,13 @@ class SQLiteResearchLedger:
                 if committed_micros + required_micros > daily_ceiling_micros:
                     database.rollback()
                     raise ResearchBudgetExceeded(max(0.0, remaining), required)
+                if self._budget.daily_calls:
+                    calls = database.execute(
+                        "SELECT COUNT(*) FROM research_spend WHERE day = ?", (day,)
+                    ).fetchone()[0]
+                    if calls >= self._budget.daily_calls:
+                        database.rollback()
+                        raise ResearchCallsExhausted(self._budget.daily_calls)
                 reservation_id = uuid4().hex
                 database.execute(
                     "INSERT INTO research_spend(reservation_id, day, opened_at, "

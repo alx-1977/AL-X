@@ -24,6 +24,7 @@ from alx.contracts import (
     ValueKind,
 )
 from alx.contracts.continuity import (
+    MAX_OWN_TIMES,
     CarriedThought,
     CarriedThoughtNotFound,
     DuplicateCarriedThought,
@@ -39,6 +40,7 @@ RECORD_CARRIED_THOUGHT = "record_carried_thought"
 WITHDRAW_CARRIED_THOUGHT = "withdraw_carried_thought"
 MARK_CARRIED_THOUGHT_RAISED = "mark_carried_thought_raised"
 RESOLVE_UNDELIVERED_RESPONSE = "resolve_undelivered_response"
+SET_OWN_TIME = "set_own_time"
 
 # How many open thoughts one reasoning turn is shown. A fixed uniform bound, so
 # a long list is trimmed by count rather than by anyone deciding which of her
@@ -224,7 +226,30 @@ RESOLVE_UNDELIVERED_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+OWN_TIME_DEFINITION = CapabilityDefinition(
+    SET_OWN_TIME,
+    "Set the local times of day your own time comes round: occasions that are "
+    "yours, with nothing expected of them. Give every time you want, as HH:MM, "
+    "up to six; an empty list means none. It replaces the schedule you had. "
+    "A time already past today first comes round tomorrow.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"times": _STRINGS},
+        ("times",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"times": _STRINGS},
+        ("times",),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
 DEFINITIONS = (
+    OWN_TIME_DEFINITION,
     REQUEST_DEFINITION,
     WITHDRAW_DEFINITION,
     RECORD_THOUGHT_DEFINITION,
@@ -388,7 +413,37 @@ def build_continuity_executors(
             durable_values={"opportunity_id": opportunity_id},
         )
 
+    def set_own_time(values: Mapping[str, Any]) -> CapabilityResult:
+        call_id = call_id_source()
+        try:
+            raw = values["times"]
+            if not isinstance(raw, (list, tuple)) or len(raw) > MAX_OWN_TIMES:
+                raise ValueError("times")
+            times: list[str] = []
+            for item in raw:
+                hour, minute = str(item).split(":")
+                if not (hour.isdigit() and minute.isdigit() and len(minute) == 2):
+                    raise ValueError("times")
+                if not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+                    raise ValueError("times")
+                value = f"{int(hour):02d}:{minute}"
+                if value not in times:
+                    times.append(value)
+            stored = store.set_own_time(tuple(sorted(times)), now_of())
+        except (KeyError, TypeError, ValueError):
+            return _failed(call_id, SET_OWN_TIME, "arguments_unusable")
+        except Exception:
+            return _failed(call_id, SET_OWN_TIME, "storage_failed")
+        return CapabilityResult(
+            call_id,
+            SET_OWN_TIME,
+            CapabilityResultState.SUCCEEDED,
+            {"times": list(stored)},
+            durable_values={"times": list(stored)},
+        )
+
     return {
+        SET_OWN_TIME: set_own_time,
         RESOLVE_UNDELIVERED_RESPONSE: resolve_undelivered,
         REQUEST_FUTURE_COGNITION: request,
         WITHDRAW_FUTURE_COGNITION: withdraw,

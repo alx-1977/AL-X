@@ -36,9 +36,12 @@ from enum import Enum
 
 
 class ReviewProvider(str, Enum):
-    """The external reviewers this system supports."""
+    """The external reviewer this system supports.
 
-    CODERABBIT = "coderabbit"
+    Greptile alone since 2026-10-14: Friedl, "please add Greptile and
+    completely remove CR. I do not think we need both."
+    """
+
     GREPTILE = "greptile"
 
 
@@ -46,17 +49,12 @@ class ReviewProvider(str, Enum):
 class ReviewProviderProfile:
     """The provider-specific facts of one GitHub-native reviewer.
 
-    `allowed_logins` is an exact set, and that is the whole point. It began as a
-    prefix, chosen because Greptile publishes under more than one bot login and
-    a prefix covered both without my having to know which. That traded
-    authentication for convenience: `coderabbit-evil[bot]` and `coderabbitXYZ`
-    both start with `coderabbit`, so any account somebody could register under
-    a lookalike name would have passed as the reviewer.
-
-    That matters more here than it looks. Review evidence reaches AL/X's
-    reasoning and can complete a watched task, so an account that passes this
-    check can put findings in front of her that she will weigh as a reviewer's.
-    Matching a revision exactly does not authenticate who wrote about it.
+    `allowed_logins` is an exact set, and that is the whole point. A prefix
+    would admit any account somebody could register under a lookalike name,
+    and review evidence reaches AL/X's reasoning and decides merges, so an
+    account that passes this check can put findings in front of her that she
+    will weigh as a reviewer's. Matching a revision exactly does not
+    authenticate who wrote about it.
 
     Each login is listed because it was verified, not because it was guessed.
     """
@@ -64,30 +62,28 @@ class ReviewProviderProfile:
     provider: ReviewProvider
     # What the result calls this reviewer. Provenance for AL/X, never a branch.
     reviewer: str
-    # The comment that asks for another look at the current head. Every one of
-    # these reviewers reviews a new pull request without being asked; this is
-    # what gets a fresh review after a corrective commit.
+    # The comment that asks for a review of the current head.
     trigger: str
     # The exact GitHub logins this reviewer publishes under.
     allowed_logins: frozenset[str]
-    # The commit-status context this reviewer publishes on the revision it is
-    # reviewing, when that is verified. It is the reviewer's own structured
-    # statement of where a review round stands — pending while it works,
-    # terminal once it has finished — and it is the only one: a summary
-    # comment is posted as a placeholder the moment a round starts and edited
-    # in place afterwards, so its existence says a review began, not that one
-    # finished. Empty where no status has been verified for this reviewer.
-    status_context: str = ""
+    # The check run this reviewer publishes on the exact commit it reviews, and
+    # the GitHub App that publishes it. It is the reviewer's own structured
+    # statement of where a review round stands - running while it works,
+    # completed once it has finished - and the only one: a summary comment is
+    # edited in place across rounds, so its existence says a review began, not
+    # that one finished. Empty where no check run has been verified.
+    check_run_name: str = ""
+    check_run_app: str = ""
     # D-042: how this reviewer states, in its own fixed format, that a review
-    # raised nothing, and the statements that contradict that. A merge needs
-    # one of the first and none of the second in the review of its exact head.
-    # Empty where no such format has been verified, and then no review by this
+    # is clean, and the statements that contradict that. A merge needs one of
+    # the first and none of the second in the review of its exact head. Empty
+    # where no such format has been verified, and then no review by this
     # reviewer can show itself clean: the merge is refused rather than assumed.
     no_findings_statements: tuple[str, ...] = ()
     finding_statements: tuple[str, ...] = ()
 
     def states_no_findings(self, summary: str) -> bool:
-        """Whether this summary is the reviewer saying it raised nothing.
+        """Whether this summary is the reviewer saying the review is clean.
 
         A protocol check on the reviewer's own fixed wording, never a reading
         of what a finding means. Fails closed: no verified format, no clean
@@ -104,59 +100,45 @@ class ReviewProviderProfile:
 
         Compared lowercase and stripped, which is the only normalisation
         GitHub's identity semantics actually require: logins are
-        case-insensitive, so `CodeRabbitAI[bot]` is the same account. Nothing
-        else is normalised, because every further liberty taken here is a
-        family of accounts somebody else can register.
+        case-insensitive. Nothing else is normalised, because every further
+        liberty taken here is a family of accounts somebody else can register.
         """
         if not isinstance(login, str):
             return False
         return login.strip().lower() in self.allowed_logins
 
+    def published_by_reviewer(self, app: object) -> bool:
+        """Whether this check run's GitHub App is the configured reviewer's."""
+        if not isinstance(app, dict) or not self.check_run_app:
+            return False
+        slug = app.get("slug")
+        return isinstance(slug, str) and slug.strip().lower() == self.check_run_app
+
 
 PROFILES: dict[ReviewProvider, ReviewProviderProfile] = {
-    # Verified against this repository: CodeRabbit reviews a pull request
-    # within seconds of it being opened, publishes a `CodeRabbit` commit
-    # status, and re-reviews when asked by this comment.
-    ReviewProvider.CODERABBIT: ReviewProviderProfile(
-        provider=ReviewProvider.CODERABBIT,
-        reviewer="coderabbit",
-        trigger="@coderabbitai review",
-        # Verified against this repository: every review CodeRabbit has
-        # published here came from this account (id 136622811).
-        allowed_logins=frozenset({"coderabbitai[bot]"}),
-        # Verified on PR #77: `pending` "Review in progress" when a round
-        # starts, `success` "Review completed" once its findings are
-        # published, each on the exact commit reviewed and created by the
-        # account above.
-        status_context="CodeRabbit",
-        # Verified on PRs #119-#123: a round with findings publishes a review
-        # headed "Actionable comments posted: N"; a round without edits the
-        # summary to "No actionable comments were generated in the recent
-        # review"; a round refused by the review limit still marks the commit
-        # status `success` ("Review rate limited") and says "rate limited" in
-        # the summary, which is not a review. Findings outside the changed
-        # lines are listed under "Outside diff range comments (N)".
-        no_findings_statements=(
-            r"No actionable comments were generated",
-            r"Actionable comments posted: 0\b",
-        ),
-        finding_statements=(
-            r"Actionable comments posted: [1-9]",
-            r"Outside diff range comments \([1-9]",
-            r"(?i)rate limited",
-        ),
-    ),
-    # Greptile's documented trigger. It has published no review here yet, so
-    # both accounts it is known to publish under are listed rather than one
-    # being guessed at: `greptile-apps[bot]` (id 165735046) and `greptile[bot]`
-    # (id 271099122) both exist on GitHub, and the documentation does not say
-    # which posts reviews. Listing both is exact; a prefix covering them was
-    # not. If a third appears, it is added here after being verified.
+    # Verified against this repository on PRs #136-#138 and the firmware
+    # repository's PR #1:
+    # - every summary, review and inline finding came from `greptile-apps[bot]`;
+    # - each round publishes a `Greptile Review` check run by the
+    #   `greptile-apps` app on the exact commit reviewed, `in_progress` while
+    #   it works and `completed` when done, concluding `success` at the
+    #   required 5/5 and `failure` below it ("Confidence 3/5 - below your
+    #   required 5/5"), which is still a finished review;
+    # - the summary comment is edited in place each round and carries
+    #   `<!-- greptile_confidence_score:N -->` and "Last reviewed commit"
+    #   linking the full SHA of the commit it reviewed;
+    # - it reviews only when asked here: no round appeared on PR #139 unasked.
+    # The trigger names no review tier on purpose: naming one, even to
+    # decline it, ran that tier.
     ReviewProvider.GREPTILE: ReviewProviderProfile(
         provider=ReviewProvider.GREPTILE,
         reviewer="greptile",
-        trigger="@greptileai",
-        allowed_logins=frozenset({"greptile-apps[bot]", "greptile[bot]"}),
+        trigger="@greptileai review",
+        allowed_logins=frozenset({"greptile-apps[bot]"}),
+        check_run_name="Greptile Review",
+        check_run_app="greptile-apps",
+        no_findings_statements=(r"<!-- greptile_confidence_score:5 -->",),
+        finding_statements=(r"<!-- greptile_confidence_score:[0-4] -->",),
     ),
 }
 

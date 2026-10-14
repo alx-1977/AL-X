@@ -33,7 +33,7 @@ def _thread(identifier: str, resolved: bool = False) -> dict:
         "isOutdated": False,
         "path": "src/alx/thing.py",
         "line": 12,
-        "comments": {"nodes": [{"author": {"login": "coderabbitai[bot]"},
+        "comments": {"nodes": [{"author": {"login": "greptile-apps[bot]"},
                                 "body": "a finding"}]},
     }
 

@@ -241,6 +241,7 @@ def reasoning_purpose(
             CognitionOrigin.EXTERNAL_EVENT: ReasoningPurpose.ASSESSING_EVENT,
             CognitionOrigin.WORK_COMPLETED: ReasoningPurpose.REVIEWING_COMPLETED_WORK,
             CognitionOrigin.SELF_REQUESTED: ReasoningPurpose.REVISITING_FOLLOW_UP,
+            CognitionOrigin.OWN_TIME: ReasoningPurpose.TAKING_OWN_TIME,
         }[origin], None
     if marks.refused > previous.refused:
         if marks.last_refusal == "decision_rejected":
@@ -295,7 +296,7 @@ class CoreAgent:
                  bind_dispatch: Callable[[str], None] | None = None,
                  trace: TraceSink | None = None,
                  principal_person_id: str | None = None,
-                 runtime_facts: Callable[[], Mapping[str, str]] | None = None) -> None:
+                 runtime_facts: Callable[[], Mapping[str, Any]] | None = None) -> None:
         self._store = store
         # Whom an occasion with no person turn answers to: a background
         # event's response reaches the principal, so her relationship
@@ -3273,7 +3274,7 @@ class CoreAgent:
                     return "relationship_person_mismatch"
         return None
 
-    def _read_runtime_facts(self) -> Mapping[str, str]:
+    def _read_runtime_facts(self) -> Mapping[str, Any]:
         try:
             return dict(self._runtime_facts())
         except Exception:

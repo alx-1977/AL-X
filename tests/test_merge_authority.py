@@ -71,10 +71,10 @@ class RecordingProvider:
 class Reviews:
     """Stands in for the configured reviewer's account of one head."""
 
-    CLEAN = "No actionable comments were generated in the recent review. 🎉"
+    CLEAN = "<h2>Confidence Score: 5/5</h2>\n<!-- greptile_confidence_score:5 -->"
 
     def __init__(self, available=True, findings=0, error=False, reason="",
-                 summary=CLEAN, reviewer="coderabbit") -> None:
+                 summary=CLEAN, reviewer="greptile") -> None:
         self.available, self.findings, self.error, self.reason = available, findings, error, reason
         self.summary, self.reviewer = summary, reviewer
         self.read_for: list[tuple[int, str]] = []
@@ -261,8 +261,17 @@ class MergeAuthorityTest(unittest.TestCase):
         self.assertIsNone(build_repository_runtime(True, "owner/repo", "", lambda: "c"))
 
 
+def _scored(score: int) -> str:
+    return (f"<h2>Confidence Score: {score}/5</h2>\n"
+            f"<!-- greptile_confidence_score:{score} -->")
+
+
 class CleanReviewRequiredTest(unittest.TestCase):
-    """D-042: no merge without a finished review of the exact head that found nothing."""
+    """D-042: no merge without the reviewer's clean verdict on the exact head.
+
+    Amended 2026-10-14: clean is Greptile's 5/5 ("She can merge but only after
+    code passed tests and Greptile give 5/5").
+    """
 
     def _merge(self, reviews):
         provider = RecordingProvider()
@@ -285,7 +294,7 @@ class CleanReviewRequiredTest(unittest.TestCase):
             (None, "review_missing"),
             (Reviews(available=False, reason="no_review_for_revision"), "review_missing"),
             (Reviews(error=True), "review_missing"),
-            (Reviews(findings=1), "review_has_findings"),
+            (Reviews(findings=1, summary=_scored(4)), "review_has_findings"),
         ):
             with self.subTest(code=code, reviews=reviews and vars(reviews)):
                 result, provider = self._merge(reviews)
@@ -295,10 +304,12 @@ class CleanReviewRequiredTest(unittest.TestCase):
 
     def test_only_the_reviewer_s_own_no_findings_statement_is_clean(self) -> None:
         for summary in (
-            # A round refused by CodeRabbit's limit still reports itself done.
-            "Review rate limited. Reviewed between abc and def.",
-            "**Actionable comments posted: 1**",
-            "No actionable comments were generated. ⚠️ Outside diff range comments (1)",
+            _scored(4),
+            _scored(0),
+            # Prose saying 5/5 is not the reviewer's marker.
+            "<h2>Confidence Score: 5/5</h2>",
+            # A 5 beside a lower marker is not clean.
+            _scored(5) + "\n<!-- greptile_confidence_score:3 -->",
             "Reviewed.",
             "",
         ):
@@ -307,19 +318,26 @@ class CleanReviewRequiredTest(unittest.TestCase):
                 self.assertEqual(result.failure["code"], "review_has_findings")
                 self.assertEqual(provider.requests, [])
 
-    def test_findings_stated_only_in_the_summary_are_counted(self) -> None:
-        result, _ = self._merge(Reviews(summary="**Actionable comments posted: 2**"))
-        self.assertEqual((result.failure["code"], result.failure["findings"]),
-                         ("review_has_findings", 2))
+    def test_the_confidence_is_reported_for_al_x(self) -> None:
+        result, _ = self._merge(Reviews(summary=_scored(3)))
+        self.assertEqual((result.failure["code"], result.failure["confidence"]),
+                         ("review_has_findings", 3))
 
-    def test_a_reviewer_without_a_verified_format_is_never_clean(self) -> None:
-        result, provider = self._merge(Reviews(reviewer="greptile"))
+    def test_an_unknown_reviewer_is_never_clean(self) -> None:
+        result, provider = self._merge(Reviews(reviewer="someone-else"))
         self.assertEqual(result.failure["code"], "review_has_findings")
         self.assertEqual(provider.requests, [])
 
     def test_the_findings_are_counted_for_al_x(self) -> None:
-        result, _ = self._merge(Reviews(findings=2))
+        result, _ = self._merge(Reviews(findings=2, summary=_scored(4)))
         self.assertEqual(result.failure["findings"], 2)
+
+    def test_five_of_five_is_clean_whatever_remarks_it_left(self) -> None:
+        # Friedl's criterion is the score; remarks left beside a 5/5 are hers
+        # to weigh, not a refusal.
+        result, provider = self._merge(Reviews(findings=1))
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(len(provider.requests), 1)
 
 
 class MergeProviderTest(unittest.TestCase):

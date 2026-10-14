@@ -769,6 +769,18 @@ class ClaudeSubscriptionReasoningModel:
             LOGGER.info("Reasoning telemetry sink failed")
 
 
+class ClaudeSubscriptionResearchModel(ClaudeSubscriptionReasoningModel):
+    """The same transport, offered for research on AL/X's own subscription.
+
+    D-023, amended 2026-10-14. A subscription call has no per-token price, so
+    research on it is priced at zero and bounded instead by the daily call cap
+    the research ledger enforces. Settings refuse a subscription research tier
+    without that cap, which is what makes the bound declared here true.
+    """
+
+    supports_bounded_research = True
+
+
 def subscription_cli_present(executable: str = "claude") -> bool:
     """Whether the Claude Code CLI can be found at all.
 

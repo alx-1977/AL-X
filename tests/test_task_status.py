@@ -53,7 +53,7 @@ HEAD = "a" * 40
 OTHER = "b" * 40
 OTHER_HEAD = OTHER
 # The configured reviewer's name, as the task store records the service.
-REVIEWER = "coderabbit"
+REVIEWER = "greptile"
 
 
 def _task(state: TaskState = TaskState.REQUESTED, **overrides) -> ExternalTask:
@@ -499,7 +499,7 @@ class ReviewObserverTests(unittest.TestCase):
     protocol it described.
     """
 
-    def _observer(self, reviews, comments, provider=ReviewProvider.CODERABBIT,
+    def _observer(self, reviews, comments, provider=ReviewProvider.GREPTILE,
                   pull_state="open", merged=False, statuses=None):
         normalised = []
         for index, review in enumerate(reviews, 1):
@@ -555,7 +555,7 @@ class ReviewObserverTests(unittest.TestCase):
             with self.subTest(repository=repository):
                 with self.assertRaises(ValueError):
                     GitHubReviewProvider(
-                        repository, "token", profile_for(ReviewProvider.CODERABBIT)
+                        repository, "token", profile_for(ReviewProvider.GREPTILE)
                     )
 
     def test_a_review_at_the_exact_revision_completes(self) -> None:
@@ -625,14 +625,15 @@ class ReviewObserverTests(unittest.TestCase):
         self.assertIs(observed.state, TaskState.WAITING_FOR_RESULT)
 
     def test_the_configured_reviewer_decides_whose_word_counts(self) -> None:
-        """Switching provider changes which account completes a task."""
+        """Only the reviewer's own account completes a task."""
         comment = [{
             "id": 5,
             "user": {"login": "greptile-apps[bot]"},
             "body": f"Reviewed up to {HEAD}.",
             "created_at": PUBLISHED_AT,
         }]
-        waiting = self._observer([], comment, provider=ReviewProvider.CODERABBIT)
+        lookalike = [dict(comment[0], user={"login": "greptile-apps-evil[bot]"})]
+        waiting = self._observer([], lookalike, provider=ReviewProvider.GREPTILE)
         self.assertIs(
             waiting.observe(subject_reference(21, HEAD)).state,
             TaskState.WAITING_FOR_RESULT,
@@ -647,7 +648,7 @@ class ReviewObserverTests(unittest.TestCase):
         """Unreadable is not incomplete: nothing is claimed either way."""
 
         class Failing:
-            reviewer = "coderabbit"
+            reviewer = "greptile"
 
             def read(self, request):
                 raise ReviewReadError("review_unavailable")
@@ -853,7 +854,7 @@ class ReviewFindingRegressions(unittest.TestCase):
         self.addCleanup(setattr, github_review.httpx, "request", original)
         observer = ReviewStatusObserver(
             GitHubReviewProvider(
-                "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+                "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
             )
         )
         self.assertIs(
@@ -1480,15 +1481,15 @@ class ProductionWatcherWiringTests(unittest.TestCase):
         nothing — a review requested, stored, and never polled.
         """
         for configured, canonical in (
-            ("coderabbit", "coderabbit"),
-            ("CodeRabbit", "coderabbit"),
-            ("  CODERABBIT  ", "coderabbit"),
+            ("greptile", "greptile"),
+            ("CodeRabbit", "greptile"),
+            ("  CODERABBIT  ", "greptile"),
             ("greptile", "greptile"),
             ("Greptile", "greptile"),
             # Unknown names fall back rather than leaving review unavailable.
-            ("greptil", "coderabbit"),
-            ("qodo", "coderabbit"),
-            ("", "coderabbit"),
+            ("greptil", "greptile"),
+            ("qodo", "greptile"),
+            ("", "greptile"),
         ):
             with self.subTest(configured=configured):
                 runtime = build_review_runtime(
@@ -1601,7 +1602,7 @@ class ConsumedVerdictTests(unittest.TestCase):
         self.addCleanup(setattr, github_review.httpx, "request", original)
         return ReviewStatusObserver(
             GitHubReviewProvider(
-                "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+                "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
             )
         )
 

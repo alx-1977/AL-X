@@ -38,6 +38,7 @@ from alx.contracts.review_content import (  # noqa: E402
 )
 from alx.contracts.review_provider import ReviewProvider, profile_for  # noqa: E402
 from alx.providers import github_review  # noqa: E402
+from tests.review_transcript import status as transcript_status  # noqa: E402
 from alx.providers.github_review import (  # noqa: E402
     NO_REVIEW_FOR_REVISION,
     GitHubReviewProvider,
@@ -51,7 +52,7 @@ from alx.tools.review_content import (  # noqa: E402
 
 HEAD = "a" * 40
 STALE = "b" * 40
-REVIEWER_LOGIN = "coderabbitai[bot]"
+REVIEWER_LOGIN = "greptile-apps[bot]"
 SOMEONE_ELSE = "alx-1977"
 
 
@@ -80,20 +81,14 @@ def _review(
 
 
 def _status(state: str = "success", when: str = "2026-09-06T20:11:30Z",
-            login: str = REVIEWER_LOGIN, context: str = "CodeRabbit") -> dict:
-    """One commit status, as GitHub lists it for a revision.
+            login: str = REVIEWER_LOGIN, context: str = "Greptile Review") -> dict:
+    """One check run, as GitHub lists it for a revision.
 
-    `success` is how CodeRabbit marks a review round ended; `pending` is the
-    round still running. Every fake reviewer here publishes one, because the
-    real one does on every revision it reviews.
+    `success` is a review round that ended; `pending` the round still running.
+    Every fake reviewer here publishes one, because the real one does on every
+    revision it reviews.
     """
-    return {
-        "context": context,
-        "state": state,
-        "description": "Review completed" if state == "success" else "Review in progress",
-        "creator": {"login": login},
-        "created_at": when,
-    }
+    return transcript_status(state, when, login, context)
 
 
 def summary_of(body: str, sha: str) -> str:
@@ -117,7 +112,7 @@ class FakeGitHub:
         statuses: dict[str, list] | None = None,
     ) -> None:
         self._reviews = reviews
-        # Commit statuses by revision. Absent, every revision's round has
+        # Check runs by revision. Absent, every revision's round has
         # ended, which is the state every read test before the terminal
         # signal existed was describing.
         self.statuses = statuses
@@ -136,13 +131,13 @@ class FakeGitHub:
             raise AssertionError(f"the reader must not {method}")
         base = url.split("?")[0]
         first = "page=1" in url
-        if base.endswith("/statuses"):
+        if base.endswith("/check-runs"):
             sha = base.split("/")[-2]
             listed = (
                 [_status()] if self.statuses is None
                 else self.statuses.get(sha, [])
             )
-            return _Response(listed if first else [])
+            return _Response({"total_count": len(listed), "check_runs": listed})
         if base.endswith("/reviews"):
             return _Response(self._reviews if first else [])
         if "/issues/" in base and base.endswith("/comments"):
@@ -171,7 +166,7 @@ class ProviderTestCase(unittest.TestCase):
         github_review.httpx.request = self.github.request
         self.addCleanup(setattr, github_review.httpx, "request", original)
         return GitHubReviewProvider(
-            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
         )
 
 
@@ -217,9 +212,9 @@ class FindingsWithoutEmailTests(ProviderTestCase):
             self.assertIn("/repos/owner/repo/", url)
             self.assertTrue(
                 "/pulls/21" in url or "/issues/21/comments" in url
-                # The reviewer's status on the exact revision asked about,
+                # The reviewer's check run on the exact revision asked about,
                 # and on no other.
-                or f"/commits/{HEAD}/statuses" in url
+                or f"/commits/{HEAD}/check-runs" in url
             )
 
     def test_a_clean_review_is_retrieved_the_same_way(self) -> None:
@@ -288,7 +283,7 @@ class ExactRevisionTests(ProviderTestCase):
         github_review.httpx.request = failing
         self.addCleanup(setattr, github_review.httpx, "request", original)
         provider = GitHubReviewProvider(
-            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
         )
 
         with self.assertRaises(ReviewReadError) as raised:
@@ -418,7 +413,7 @@ class ExternalEvidenceTests(unittest.TestCase):
         values = dict(
             pull_request_number=21,
             head_sha=HEAD,
-            reviewer="coderabbit",
+            reviewer="greptile",
             available=True,
             summary="Three medium issues.",
             comments=(ReviewComment("Handover can be lost.", "a.py", 3),),
@@ -544,7 +539,7 @@ class AuthorityTests(unittest.TestCase):
         from alx.bootstrap.review import build_review_runtime
 
         class Requester:
-            reviewer = "coderabbit"
+            reviewer = "greptile"
 
             def request(self, review):  # pragma: no cover - never called here
                 raise AssertionError("no review is requested in these tests")
@@ -706,7 +701,7 @@ class InlineCommentReviewBindingTests(ProviderTestCase):
             {self.R2: [
                 self.inline(self.R2, id=1, user={"login": "attacker"}),
                 self.inline(self.R2, id=2,
-                            user={"login": "coderabbit-evil[bot]"}),
+                            user={"login": "greptile-evil[bot]"}),
             ]},
             self.B,
         )
@@ -777,11 +772,11 @@ class InlineCommentReviewBindingTests(ProviderTestCase):
         """8. Provider-neutral: the rule is the contract's, not one adapter's."""
         self.github = FakeGitHub(
             [_review(self.B, "Summary.", review_id=self.R2,
-                     user="greptile[bot]")],
+                     user="greptile-apps[bot]")],
             {self.R2: [
-                self.inline(self.R2, id=1, user={"login": "greptile[bot]"},
+                self.inline(self.R2, id=1, user={"login": "greptile-apps[bot]"},
                             body="written in R2"),
-                self.inline(self.R1, id=2, user={"login": "greptile[bot]"},
+                self.inline(self.R1, id=2, user={"login": "greptile-apps[bot]"},
                             body="carried from R1"),
             ]},
         )
@@ -883,7 +878,7 @@ class AuthoritativeHeadBindingTests(ProviderTestCase):
         github_review.httpx.request = self.github.request
         self.addCleanup(setattr, github_review.httpx, "request", original)
         content = GitHubReviewProvider(
-            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
         ).read(ReviewContentRequest(21, self.B))
 
         self.assertTrue(content.available)
@@ -977,9 +972,9 @@ class PaginationFailsClosedTests(unittest.TestCase):
 
         def request(method, url, **keywords):
             base = url.split("?")[0]
+            if base.endswith("/check-runs"):
+                return Response({"total_count": 1, "check_runs": [_status()]})
             page = int(url.rsplit("&page=", 1)[1])
-            if base.endswith("/statuses"):
-                return Response([_status()] if page == 1 else [])
             if base.endswith("/reviews"):
                 return Response([_review(HEAD, "Summary.")] if page == 1 else [])
             if "/issues/" in base:
@@ -993,7 +988,7 @@ class PaginationFailsClosedTests(unittest.TestCase):
         github_review.httpx.request = request
         self.addCleanup(setattr, github_review.httpx, "request", original)
         return GitHubReviewProvider(
-            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
         )
 
     @staticmethod

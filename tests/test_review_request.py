@@ -64,7 +64,7 @@ APPROVAL = "approval-1"
 class RecordingReviewer:
     """Stands in for the configured reviewer, counting how often asked."""
 
-    reviewer = "coderabbit"
+    reviewer = "greptile"
 
     def __init__(self, error: str | None = None, head: str = HEAD) -> None:
         self.requests: list[ReviewRequest] = []
@@ -98,7 +98,7 @@ class WatchWindowTest(unittest.TestCase):
         posted_at: list[datetime] = []
 
         class SlowProvider:
-            reviewer = "coderabbit"
+            reviewer = "greptile"
 
             def request(self, review: ReviewRequest) -> ReviewOutcome:
                 posted_at.append(datetime.now(UTC))
@@ -106,7 +106,7 @@ class WatchWindowTest(unittest.TestCase):
                     pull_request_number=review.pull_request_number,
                     head_sha="a" * 40,
                     requested=True,
-                    reviewer="coderabbit",
+                    reviewer="greptile",
                 )
 
         watched: list[datetime] = []
@@ -183,7 +183,7 @@ class ReviewRequestTest(unittest.TestCase):
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(attempt.result.values["requested"])
-        self.assertEqual(attempt.result.values["reviewer"], "coderabbit")
+        self.assertEqual(attempt.result.values["reviewer"], "greptile")
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(provider.requests[0].pull_request_number, 21)
         # The revision comes back from the provider, not from the caller.
@@ -336,7 +336,7 @@ class ConfiguredProviderTest(unittest.TestCase):
         post_status: int = 201,
         after: str | None = None,
         post_headers: dict | None = None,
-        provider: ReviewProvider = ReviewProvider.CODERABBIT,
+        provider: ReviewProvider = ReviewProvider.GREPTILE,
         statuses: dict[str, list] | None = None,
     ):
         """`after` is the head on the second read, when it differs.
@@ -383,18 +383,18 @@ class ConfiguredProviderTest(unittest.TestCase):
         provider, calls = self._provider(head=HEAD)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertTrue(outcome.requested)
-        self.assertEqual(outcome.reviewer, "coderabbit")
+        self.assertEqual(outcome.reviewer, "greptile")
         self.assertEqual(len(calls["post"]), 1)
         url, body = calls["post"][0]
         self.assertIn("/issues/21/comments", url)
-        self.assertEqual(body, {"body": "@coderabbitai review"})
+        self.assertEqual(body, {"body": "@greptileai review"})
 
     def test_the_configured_reviewer_decides_the_trigger_and_the_name(self) -> None:
         """Switching provider changes the comment and the provenance, nothing else."""
         provider, calls = self._provider(head=HEAD, provider=ReviewProvider.GREPTILE)
         outcome = provider.request(ReviewRequest(pull_request_number=21))
         self.assertEqual(outcome.reviewer, "greptile")
-        self.assertEqual(calls["post"][0][1], {"body": "@greptileai"})
+        self.assertEqual(calls["post"][0][1], {"body": "@greptileai review"})
         # Same class, same contract, same call shape.
         self.assertIn("/issues/21/comments", calls["post"][0][0])
 
@@ -475,7 +475,7 @@ class ConfiguredProviderTest(unittest.TestCase):
             with self.subTest(repository=repository):
                 with self.assertRaises(ValueError):
                     GitHubReviewProvider(
-                        repository, "token", profile_for(ReviewProvider.CODERABBIT)
+                        repository, "token", profile_for(ReviewProvider.GREPTILE)
                     )
 
 
@@ -532,7 +532,7 @@ class RequestBoundaryTests(unittest.TestCase):
             if base.endswith("/reviews"):
                 return Response([{
                     "id": 5001,
-                    "user": {"login": "coderabbitai[bot]"},
+                    "user": {"login": "greptile-apps[bot]"},
                     "body": f"Reviewed up to {HEAD}.",
                     "state": "COMMENTED",
                     "commit_id": HEAD,
@@ -549,7 +549,7 @@ class RequestBoundaryTests(unittest.TestCase):
         module.httpx.request = request
         self.addCleanup(setattr, module.httpx, "request", original)
         provider = GitHubReviewProvider(
-            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
         )
         provider._now = clock_next  # type: ignore[method-assign]
         return provider

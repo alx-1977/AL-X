@@ -52,16 +52,16 @@ class RepositoryRuntime:
 
 
 def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
-    """Refuse a merge unless this exact head has a finished review with no findings.
+    """Refuse a merge unless this exact head has a finished, clean review.
 
     D-042, Friedl 2026-10-07: AL/X may never merge without a clean external
-    review unless he says so. Clean means: a finished review of this head,
-    no findings on its lines, and the reviewer's own statement that it raised
-    nothing (which a rate-limited round never carries). Whether the reviewer's findings matter is
-    otherwise her judgement; here it is not. Resolving a review thread does
-    not make a review clean: the findings are the reviewer's, published in
-    its review of this head, and only a new head with a new review replaces
-    them.
+    review unless he says so. Amended 2026-10-14: "She can merge but only
+    after code passed tests and Greptile give 5/5." Clean is therefore the
+    reviewer's own verdict on this exact head, read from its fixed format
+    (Greptile's confidence score of 5), never her reading of the findings.
+    The tests are GitHub's required `law-gates` check, which the merge
+    provider waits on. Resolving a review thread does not make a review
+    clean: only a new head with a new review replaces the verdict.
     """
     if review_reader is None:
         raise MergeError("review_missing", github_message="No external reviewer is configured")
@@ -73,21 +73,16 @@ def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
     if not content.available:
         raise MergeError("review_missing", github_message=content.unavailable_reason
                          or "No finished review of this head")
-    if content.comments:
-        raise MergeError("review_has_findings", findings=len(content.comments))
-    # Findings can sit in the summary rather than on lines, and a round the
-    # reviewer refused still reports itself complete. So clean needs the
-    # reviewer's own statement that it raised nothing about this head.
     try:
         profile = profile_for(ReviewProvider(content.reviewer))
     except ValueError:
         profile = None
     if profile is None or not profile.states_no_findings(content.summary):
-        stated = re.search(r"Actionable comments posted: (\d+)", content.summary or "")
-        details = {"findings": int(stated.group(1))} if stated else {}
+        stated = re.search(r"greptile_confidence_score:(\d)", content.summary or "")
+        details = {"confidence": int(stated.group(1))} if stated else {}
         raise MergeError("review_has_findings",
-                         github_message="The review does not state that it raised nothing",
-                         **details)
+                         github_message="The review is not the reviewer's clean verdict",
+                         findings=len(content.comments), **details)
 
 
 def build_repository_runtime(

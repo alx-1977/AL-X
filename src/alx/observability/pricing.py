@@ -82,6 +82,10 @@ USD_PER_MILLION: dict[tuple[str, str], ModelPrice] = {
     # turn as dispatched, and recovery relies on the mark never to replay one.
     # The USD fuse therefore bounds nothing here; D-024a says what does.
     ("claude_subscription", "claude-opus-5-5"): ModelPrice(0.0, 0.0, 0.0, None),
+    # Research on the same subscription (D-023, amended 2026-10-14): the
+    # daily research call cap bounds it, since the plan has no per-token rate.
+    ("claude_subscription", "claude-sonnet-5-5"): ModelPrice(0.0, 0.0, 0.0, None),
+    ("claude_subscription", "claude-haiku-5-5"): ModelPrice(0.0, 0.0, 0.0, None),
 }
 
 # Exact provider identities that Friedl approved to inherit an existing price.

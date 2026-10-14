@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from alx.contracts.continuity import (
+    DEFAULT_OWN_TIME,
     CarriedThought,
     CarriedThoughtNotFound,
     CarriedThoughtStatus,
@@ -72,6 +73,17 @@ class SQLiteContinuityStore:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS future_cognition_due "
                 "ON future_cognition(status, not_before)"
+            )
+            # Her own time (D-024, amended 2026-10-14): the local times of day
+            # an occasion of her own comes round. One row, which she sets.
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS own_time (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    times TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
             self._connection.execute(
                 """
@@ -304,3 +316,28 @@ class SQLiteContinuityStore:
             (CarriedThoughtStatus.OPEN.value, limit),
         ).fetchall()
         return tuple(self._row_to_thought(row) for row in rows)
+
+    def own_time(self) -> tuple[tuple[str, ...], datetime | None]:
+        """Her own-time schedule and when she last set it.
+
+        The local times of day ("HH:MM") her own occasions come round, and
+        None for the time it was set while she has never changed the default.
+        """
+        row = self._connection.execute(
+            "SELECT times, updated_at FROM own_time WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return DEFAULT_OWN_TIME, None
+        times = tuple(item for item in str(row["times"]).split(",") if item)
+        return times, datetime.fromisoformat(str(row["updated_at"]))
+
+    def set_own_time(self, times: tuple[str, ...], now: datetime) -> tuple[str, ...]:
+        """Replace her own-time schedule. Empty means none."""
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO own_time(id, times, updated_at) VALUES (1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET times = excluded.times, "
+                "updated_at = excluded.updated_at",
+                (",".join(times), now.isoformat()),
+            )
+        return times

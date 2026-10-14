@@ -87,6 +87,7 @@ from alx.bootstrap.readers import (
 )
 from alx.interfaces.reader_tile import tile_source
 from alx.continuity.pending_messages import SQLitePendingMessages
+from alx.continuity.own_time_source import OwnTimeSource
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
@@ -97,6 +98,7 @@ from alx.continuity import (
 from alx.observability import ConfiguredPricingWorstCase
 from alx.providers import MailPoller
 from alx.observability.autonomous_budget import SQLiteAutonomousLedger
+from alx.observability.review_allowance import SQLiteReviewAllowance
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
@@ -206,6 +208,62 @@ def migrate_legacy_conversations(
         for turn in turns:
             snapshot = conversation_store.append(turn, retention, snapshot.revision)
 
+
+
+# The model and speech services her providers may be, by configured name:
+# what to call each and the code that talks to it.
+_SERVICES: dict[str, tuple[str, str]] = {
+    "claude_subscription": ("Claude", "src/alx/providers/claude_subscription.py"),
+    "openai": ("OpenAI", "src/alx/providers/openai.py"),
+    "xai": ("xAI", "src/alx/providers/xai.py"),
+    "kimi": ("Kimi", "src/alx/providers/xai.py"),
+    "codex_subscription": ("OpenAI Codex", "src/alx/providers/codex_subscription.py"),
+    "grok_subscription": ("Grok", "src/alx/providers/grok_subscription.py"),
+    "elevenlabs": ("ElevenLabs", "src/alx/providers/elevenlabs.py, "
+                   "src/alx/providers/elevenlabs_pronunciation.py"),
+    "cartesia": ("Cartesia", "src/alx/providers/cartesia.py"),
+}
+
+
+def _integrations(
+    provider_settings: Any,
+    research_settings: Any,
+    others: tuple[tuple[str, str, str, bool], ...],
+) -> list[dict[str, str]]:
+    """What she is built on, each with the code that talks to it.
+
+    For her setup facts, so she can keep them current: Friedl, 2026-10-14,
+    "ALX should always look for the latest and best way any of her current
+    integrations are built on". Read from what this runtime composed: a
+    service she does not use is not listed.
+    """
+    uses: dict[str, list[str]] = {}
+
+    def use(provider: str, purpose: str) -> None:
+        if provider in _SERVICES and purpose not in uses.setdefault(provider, []):
+            uses[provider].append(purpose)
+
+    reasoning = provider_settings.reasoning
+    use(reasoning.provider, f"reasoning ({reasoning.model})")
+    if research_settings is not None:
+        for name in sorted(research_settings.enabled_tiers):
+            tier = getattr(research_settings, name)
+            use(tier.provider, f"{name} research ({tier.model})")
+    speech = provider_settings.text_to_speech
+    use(speech.provider, f"your voice ({speech.model})")
+    hearing = provider_settings.speech_to_text
+    use(hearing.provider, f"hearing Friedl ({hearing.model})")
+    listed = [
+        {"name": _SERVICES[provider][0], "for": ", ".join(purposes),
+         "code": _SERVICES[provider][1]}
+        for provider, purposes in uses.items()
+    ]
+    listed.extend(
+        {"name": name, "for": purpose, "code": code}
+        for name, purpose, code, composed in others
+        if composed
+    )
+    return listed
 
 
 def _reviewer_name(review_runtime: Any) -> str:
@@ -583,8 +641,9 @@ async def run(repository_root: Path) -> None:
         executors.update(sandbox_runtime.executors)
         permissions.update(sandbox_runtime.permissions)
 
-    # Requesting an external review is effectful and may spend review credits,
-    # so its policy requires an approval grounded in Friedl's own turn.
+    # Requesting an external review is effectful and spends paid reviews, so
+    # the ones AL/X asks for are counted against Friedl's allowance (three a
+    # pull request, twelve a month); past it, one more needs his approval.
     # Compose the sole waiter before publishing the capabilities. The callback
     # runs only after composition; neither a holder nor a second observer is needed.
     review_runtime = build_review_runtime(
@@ -593,6 +652,7 @@ async def run(repository_root: Path) -> None:
         review_configuration.token,
         current_call_id.get,
         reviewer=review_configuration.reviewer,
+        allowance=SQLiteReviewAllowance(storage_root / "review-requests.sqlite3"),
         started=lambda number, sha, requested_at: _watch_review(
             task_runtime,
             current_conversation_id.get(),
@@ -601,8 +661,8 @@ async def run(repository_root: Path) -> None:
             requested_at,
             # The resolved reviewer, read from the provider that was actually
             # composed — never the configured string. Selection normalises
-            # case and falls back on an unknown name, so `CodeRabbit` and a
-            # typo both compose the coderabbit provider while the raw value
+            # case and falls back on an unknown name, so `Greptile` and a
+            # typo both compose the greptile provider while the raw value
             # says otherwise. The watcher registers its observer under the
             # provider's own name, and the poller finds an observer by the
             # task's service: recording the raw value meant a lookup that
@@ -779,11 +839,17 @@ async def run(repository_root: Path) -> None:
         permissions.update(reader_runtime.permissions)
 
     xero_approval_ttl_seconds: int | None = None
+    # For her own setup facts: whether D-018's standing bill authority is on,
+    # and which of these integrations were composed.
+    unattended_bills = False
+    xero_composed = False
+    documents_composed = False
     try:
         xero_settings = XeroSettings.from_environment(environment)
     except ConfigurationError as error:
         LOGGER.info("Xero unavailable: %s", error)
     else:
+        unattended_bills = xero_settings.unattended_bill_writes
         # Extraction is a bounded LlamaCloud document read. When LlamaParse
         # is not configured the extractor stays absent and capture is not
         # advertised: answering it through the Core or the generic specialist
@@ -795,6 +861,8 @@ async def run(repository_root: Path) -> None:
             )
         except ConfigurationError as error:
             LOGGER.info("Supplier invoice extraction unavailable: %s", error)
+        documents_composed = extractor is not None
+        xero_composed = True
         xero_runtime = build_xero_runtime(
             xero_settings,
             storage_root,
@@ -944,13 +1012,93 @@ async def run(repository_root: Path) -> None:
     )
     running_commit = running_commit_of(CODE_ROOT, repository_reader)
 
-    def runtime_facts() -> dict[str, str]:
+    # What she runs on, what she may do without asking, and what runs
+    # without her: facts of this runtime's composition, so she never has to
+    # guess or search her memory for her own setup.
+    research_settings = provider_settings.research
+    setup: dict[str, Any] = {
+        "reasoning_model": (
+            f"{provider_settings.reasoning.provider} {provider_settings.reasoning.model}"
+        ),
+        "voice_model": provider_settings.text_to_speech.model,
+        "speech_recognition": (
+            f"{provider_settings.speech_to_text.provider} "
+            f"{provider_settings.speech_to_text.model}"
+        ),
+        "thinking_of_your_own": (
+            "available: your own time and request_future_cognition wake you"
+            if providers.autonomous is not None else "unavailable in this runtime"
+        ),
+        "research": (
+            {
+                name: f"{tier.provider} {tier.model}"
+                for name, tier in (
+                    ("survey", research_settings.survey),
+                    ("compare", research_settings.compare),
+                    ("judge", research_settings.judge),
+                )
+                if name in research_settings.enabled_tiers
+            }
+            if research_runtime is not None else "unavailable"
+        ),
+        "research_calls_per_day": research_settings.limits.daily_calls,
+        "supplier_bills": (
+            "you create and authorise supplier and DHL bills of any amount "
+            "without asking (D-018)" if unattended_bills
+            else "bill writes need Friedl's approval"
+        ),
+        # What she is built on, each with the code that talks to it, so she can
+        # keep them current: Friedl, 2026-10-14, "ALX should always look for
+        # the latest and best way any of her current integrations are built on".
+        "integrations": _integrations(
+            provider_settings,
+            research_settings if research_runtime is not None else None,
+            (
+                ("iCloud Mail", "reading, flagging, filing and sending mail over "
+                 "IMAP and SMTP", "src/alx/providers/icloud_mail.py, "
+                 "src/alx/providers/icloud_mail_send.py", True),
+                ("Xero", "contacts, quotes, invoices and bills through the "
+                 "Accounting API", "src/alx/providers/xero.py", xero_composed),
+                ("DHL", "import duty bills from DHL's emails and documents",
+                 "src/alx/providers/dhl.py", xero_composed),
+                ("LlamaParse", "reading invoices and other documents",
+                 "src/alx/providers/llamaparse.py", documents_composed),
+                ("Particle", "the BHL readers: Cloud API, event streams and "
+                 "usage", "src/alx/providers/particle.py",
+                 reader_runtime is not None),
+                ("BehaviorLive", "the BHL session calendar",
+                 "src/alx/providers/behaviorlive.py", reader_runtime is not None),
+                ("Web search", "searching the public web; pages are read "
+                 "directly", "src/alx/providers/web_search.py, "
+                 "src/alx/providers/web_fetch.py", web_runtime is not None),
+                ("GitHub", "your repository: pull requests, checks and merges",
+                 "src/alx/providers/github_merge.py, "
+                 "src/alx/providers/github_pull_request.py",
+                 merge_runtime is not None),
+                ("Greptile", "external code review through GitHub",
+                 "src/alx/providers/github_review.py", review_runtime is not None),
+            ),
+        ),
+        "runs_without_you": [
+            "mail is scanned and new mail reaches you as events",
+            *(
+                ["the reader monitor keeps every BHL reader on its schedule "
+                 "and records each step (D-043)"]
+                if reader_runtime is not None else []
+            ),
+        ],
+    }
+
+    def runtime_facts() -> dict[str, Any]:
+        own_times, _set_at = continuity_runtime.store.own_time()
         return {
             "started_at": process_started_at.isoformat(timespec="seconds"),
             "running_commit": running_commit,
             "main_commit": (
                 "" if repository_reader is None else repository_reader.main_commit()
             ),
+            "setup": setup,
+            "own_time": list(own_times),
         }
 
     core = CoreAgent(
@@ -1147,6 +1295,13 @@ async def run(repository_root: Path) -> None:
     )
     runtime_started_source.recover(autonomous_budget)
     occasion_sources.append(runtime_started_source)
+    # Her own time of day (D-024, amended 2026-10-14).
+    own_time_source = OwnTimeSource(
+        continuity_runtime.store, opportunity_ledger,
+        enabled=providers.autonomous is not None,
+    )
+    own_time_source.recover(autonomous_budget)
+    occasion_sources.append(own_time_source)
     occasion_source: Any = (
         occasion_sources[0]
         if len(occasion_sources) == 1

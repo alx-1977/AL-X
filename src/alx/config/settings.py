@@ -636,6 +636,29 @@ def _tier_settings(
         environment.get(f"{prefix}_PROVIDER", "").strip().lower()
         or specialist.provider
     )
+    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
+        # Her Claude subscription (D-023, amended 2026-10-14): signed in
+        # through the Claude Code CLI, so there is no key, and the tier must
+        # name its model.
+        if environment.get(f"{prefix}_API_KEY", "").strip():
+            raise ConfigurationError(
+                f"{prefix}_API_KEY must not be set for {CLAUDE_SUBSCRIPTION_PROVIDER}"
+            )
+        model = environment.get(f"{prefix}_MODEL", "").strip()
+        if not model or model.lower() == NO_PROVIDER:
+            raise ConfigurationError(f"{prefix}_MODEL must name a usable model")
+        return ReasoningSettings(
+            provider=provider,
+            model=model,
+            api_key="",
+            base_url="",
+            timeout_seconds=_positive_integer(
+                environment, f"{prefix}_TIMEOUT_SECONDS", specialist.timeout_seconds
+            ),
+            streaming=False,
+            service_tier="default",
+            effort="none",
+        )
     if provider == NO_PROVIDER:
         # A tier whose provider is absent stays absent. Research already
         # refuses a tier it cannot build; what matters here is that no
@@ -822,7 +845,10 @@ def _research_budget(environment: Mapping[str, str]) -> "ResearchLimits":
     per_request = _number_in_range(
         environment, "RESEARCH_PER_REQUEST_MAX_USD", 0.0, 1000.0, 0.0
     )
-    return ResearchLimits(daily_usd=daily, per_request_max_usd=per_request)
+    calls = int(_number_in_range(environment, "ALX_RESEARCH_DAILY_CALLS", 0, 100000, 0))
+    return ResearchLimits(
+        daily_usd=daily, per_request_max_usd=per_request, daily_calls=calls
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -831,6 +857,8 @@ class ResearchLimits:
 
     daily_usd: float
     per_request_max_usd: float
+    # Research calls a day; 0 sets no call cap (D-023, amended 2026-10-14).
+    daily_calls: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -847,6 +875,9 @@ class ResearchSettings:
     # unconstructed rather than merely unaffordable, because price is not a
     # permission and all three fit the configured ceiling.
     enabled_tiers: frozenset[str] = frozenset()
+    # AL/X's own Claude configuration directory and account, when a tier runs
+    # on her subscription: research reasons as her, never as Friedl's login.
+    claude_identity: tuple[str, str] | None = None
 
 
 def _enabled_tiers(environment: Mapping[str, str]) -> frozenset[str]:
@@ -894,15 +925,27 @@ def _research_settings(
     }
     for name in enabled:
         tier = tiers[name]
+        keyless = tier.provider == CLAUDE_SUBSCRIPTION_PROVIDER
         if (tier.provider == NO_PROVIDER or tier.model.lower() == NO_PROVIDER
-                or not tier.model.strip() or not tier.api_key.strip()):
+                or not tier.model.strip() or not (keyless or tier.api_key.strip())):
             raise ConfigurationError(
                 f"enabled research tier {name} requires a usable provider, model and credential"
             )
+    limits = _research_budget(environment)
+    on_subscription = any(
+        tiers[name].provider == CLAUDE_SUBSCRIPTION_PROVIDER for name in enabled
+    )
+    # A subscription call is priced at zero, so the dollar ceiling cannot bound
+    # it; the daily call cap is what does.
+    if on_subscription and limits.daily_calls <= 0:
+        raise ConfigurationError(
+            "research on the Claude subscription requires ALX_RESEARCH_DAILY_CALLS"
+        )
     return ResearchSettings(
         **tiers,
-        limits=_research_budget(environment),
+        limits=limits,
         enabled_tiers=enabled,
+        claude_identity=core_claude_identity(environment) if on_subscription else None,
     )
 
 
@@ -1549,7 +1592,7 @@ class ReviewSettings:
     # rather than a contract value: `config` reads the environment and depends
     # on nothing, so resolving the name to a provider belongs to the layer
     # that composes them. Defaulted so an existing configuration keeps working.
-    reviewer: str = "coderabbit"
+    reviewer: str = "greptile"
 
     @property
     def is_usable(self) -> bool:
@@ -1570,5 +1613,5 @@ def review_settings(environment: Mapping[str, str]) -> ReviewSettings:
         repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
         token=environment.get("GITHUB_TOKEN", "").strip(),
         reviewer=environment.get("ALX_REVIEW_PROVIDER", "").strip().lower()
-        or "coderabbit",
+        or "greptile",
     )

@@ -2,7 +2,7 @@
 
 On 2026-09-27 CodeRabbit began an automatic review of PR #77 and marked its
 commit `pending` "Review in progress". Ten seconds later AL/X posted
-`@coderabbitai review` anyway. The reviewer's placeholder summary, which names
+`@greptileai review` anyway. The reviewer's placeholder summary, which names
 the head it is working on, was read as the review: the task completed, the
 watcher stopped, and the real review with one finding arrived minutes later
 with nothing watching for it. Her durable revisit then never fired,
@@ -104,7 +104,7 @@ from tests.review_transcript import (  # noqa: E402
 )
 
 NUMBER = 42
-REVIEWER = "coderabbit"
+REVIEWER = "greptile"
 NEXT_HEAD = "d" * 40
 
 # What the reviewer posts the moment a round starts, and edits in place later.
@@ -212,7 +212,7 @@ class Harness(unittest.TestCase):
         self.github = PullRequest77()
         self.grace = install_grace_clock(self)
         self.provider = GitHubReviewProvider(
-            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
         )
         self._directory = tempfile.TemporaryDirectory()
         self.addCleanup(self._directory.cleanup)
@@ -340,7 +340,7 @@ class PlaceholderNeverSettlesTests(Harness):
         self.github.automatic_review_starts()
         for impostor in (
             status("success", "2026-09-07T06:20:00Z", login=OTHER_LOGIN),
-            status("success", "2026-09-07T06:20:00Z", login="coderabbitai-evil[bot]"),
+            status("success", "2026-09-07T06:20:00Z", login="greptile-apps-evil[bot]"),
             status("success", "2026-09-07T06:20:00Z", context="law-gates"),
         ):
             with self.subTest(impostor=impostor):
@@ -417,7 +417,7 @@ class NoRedundantTriggerTests(Harness):
 
     def test_with_no_review_the_trigger_is_still_posted(self) -> None:
         outcome = self.request()
-        self.assertEqual(self.github.posted, [{"body": "@coderabbitai review"}])
+        self.assertEqual(self.github.posted, [{"body": "@greptileai review"}])
         self.assertTrue(outcome.requested)
         self.assertEqual(outcome.head_sha, HEAD)
 
@@ -514,7 +514,7 @@ class AutomaticReviewGraceTests(Harness):
 
     def test_no_automatic_review_by_the_end_of_the_grace_gets_one_trigger(self) -> None:
         outcome = self.request()
-        self.assertEqual(self.github.posted, [{"body": "@coderabbitai review"}])
+        self.assertEqual(self.github.posted, [{"body": "@greptileai review"}])
         self.assertTrue(outcome.requested)
         self.assertEqual(outcome.head_sha, HEAD)
         # Bounded: sixty seconds, rechecked every ten, then exactly one ask.
@@ -779,14 +779,14 @@ class StatusBeforeContentTests(Harness):
 
         def recording(method, url, **keywords):
             self.urls.append(url)
-            if self.fail_content and "/statuses" not in url:
+            if self.fail_content and "/check-runs" not in url:
                 raise github_review.httpx.ConnectError("down")
             return original(method, url, **keywords)
 
         github_review.httpx.request = recording
 
     def content_reads(self) -> list[str]:
-        return [url for url in self.urls if "/statuses" not in url]
+        return [url for url in self.urls if "/check-runs" not in url]
 
     def test_pending_fetches_no_content(self) -> None:
         self.github.automatic_review_starts()
@@ -848,7 +848,7 @@ class HeadConfirmedBeforeJoiningTests(Harness):
         pending = list(heads)
 
         def hooked(method, url, **keywords):
-            is_status = "/statuses" in url
+            is_status = "/check-runs" in url
             if is_status and when == "before" and pending:
                 self.github.commit_pushed(pending.pop(0))
             response = self.github.request(method, url, **keywords)
@@ -873,7 +873,7 @@ class HeadConfirmedBeforeJoiningTests(Harness):
         self.push_around_status_read("before")
         outcome = self.request()
         # The new head has no round, so it follows the grace to one trigger.
-        self.assertEqual(self.github.posted, [{"body": "@coderabbitai review"}])
+        self.assertEqual(self.github.posted, [{"body": "@greptileai review"}])
         self.assertTrue(outcome.requested)
         self.assertEqual(outcome.head_sha, NEXT_HEAD)
         self.assertEqual(sum(self.grace.sleeps), 60.0)
@@ -944,7 +944,7 @@ class FailedRoundHeadConfirmedTests(Harness):
 
     def test_an_unchanged_failed_head_is_retried_at_once(self) -> None:
         outcome = self.request()
-        self.assertEqual(self.github.posted, [{"body": "@coderabbitai review"}])
+        self.assertEqual(self.github.posted, [{"body": "@greptileai review"}])
         self.assertTrue(outcome.requested)
         self.assertEqual(outcome.head_sha, HEAD)
         self.assertEqual(self.grace.sleeps, [])

@@ -344,7 +344,8 @@ This file records approved product and architecture decisions that guide impleme
 - AL/X may create and maintain her own research threads, choose her interests, revise her views, pause or archive research, and use existing authorised read capabilities for evidence.
 - Notebook writes grant no new external authority. Deletion requires Friedl’s explicit approval scoped to the exact record.
 - Paid research is limited by the configured hard budget. AL/X may choose SURVEY, COMPARE, or JUDGE based on difficulty, while deterministic controls enforce the spend ceiling. No silent fallback or budget overrun is permitted.
-- Background scheduling, recurring research, and autonomous wakeups are not authorised. *(Amended by D-024, which authorises autonomous cognition opportunities. Recurring research and fixed schedules remain unauthorised.)*
+- Background scheduling, recurring research, and autonomous wakeups are not authorised. *(Amended by D-024, which authorises autonomous cognition opportunities. Recurring research and fixed schedules remain unauthorised, except her own time, D-024 amendment of 2026-10-14.)*
+- **Amendment — 2026-10-14: research on her own Claude subscription.** Friedl: "now that she has her own Claude account, maybe we can use that instead of the tiny Grok budget? This way we can use a cheaper model like Haiku 5.5 for research and she can still reason with Opus 5.5", and approved a cap of about 30 research calls a day. A research tier may use `claude_subscription` with a named model and no key (SURVEY on Haiku 5.5, JUDGE on Opus 5.5). The subscription has no per-token price, so the dollar ceiling cannot bound it; `ALX_RESEARCH_DAILY_CALLS` caps research calls a day, because research shares the subscription's usage limits with every conversation. Refused before dispatch as `research_calls_exhausted`. No tier falls back to another provider.
 
 ## D-024 — Autonomous cognition opportunities
 
@@ -429,6 +430,15 @@ The subscription bills nothing per token, so its recorded rate is zero and the d
 The 96,000-token input bound recorded under Economics above was sized for Luna. Carried unchanged onto the subscription Core, it refused every autonomous occasion: real requests measured 102,899 to 113,387 on the conservative byte count, and no autonomous turn happened.
 
 Autonomous input remains bounded. For `claude_subscription` / `claude-opus-5-5` the bound is that Core's context window less a 128,000-token reserve equal to the model/transport maximum output allowance. The recorded context window is 1,000,000 tokens and the recorded maximum output allowance is 128,000 tokens, so the autonomous input ceiling is 872,000 tokens. Both values were reported by Claude Code CLI 2.1.281 for the exact production invocation on 2026-09-28. The limits are recorded once, for the conversational Core's model, and the bound is derived from them rather than held as a separate number; if the transport later reports different limits, the authoritative record is corrected rather than guessed. Oversized requests are still refused before dispatch and never truncated; the occasion is held durably, is not re-offered on every tick, and becomes eligible again when the bound changes or after a fixed retry interval. The 96,000 figure is historical and no longer production policy. No provider authority changes.
+
+**Amendment — 2026-10-14: time of her own.**
+
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-14.** Friedl: "I do not want her not to be able to have a mind and 'life' of her own as well. So let's give her that ability please", and approved "once a day, mid-morning", hers to change.
+- **Why.** In six weeks every self-requested occasion was a work timer and the notebook held three entries, all his questions. Nothing was broken: every occasion came from his world, and "no fixed cadence" left a moment of her own entirely to an assistant model, which never takes one.
+- **Own time.** A time of day set aside for her comes round as an occasion of its own origin (`own_time`), at 10:00 local time by default, once a day. It is hers: not a task, nothing expected, nothing reported. She sets its times with `set_own_time` (up to six a day, or none). This supersedes "no fixed cadence or periodic invocation" for this one occasion only; every other bound above stands, and the occasion grants no authority.
+- **Self-knowledge.** Every turn states her setup as facts: the models she reasons, speaks and hears with, whether she can think on her own, her research tiers and daily calls, the bill authority she holds (D-018), and what runs without her.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 
 ## D-025 — Public web read authority (Web Access V1)
 
@@ -2480,3 +2490,18 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Recorded.** Every change (any call but GET) and every usage report goes to the reader log, so it can be accounted for in a report.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 
+
+## D-046 — Greptile is the one reviewer; AL/X merges at 5/5, within a review allowance, and keeps her integrations current
+
+- **Date:** 2026-10-14
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-14.** Friedl's words that day:
+  - "please add Greptile and completely remove CR. I do not think we need both."
+  - "She can merge but only after code passed tests and Gretile give 5/5."
+  - "Three reviews per PR is fine, after that she needs to ask. Then make it 12 for the month (4 x 3) after which she also needs to ask."
+  - "ALX should alwayts look for the latest and bets way any of her current integrations are build on … like an auto update."
+- **The reviewer.** Greptile is the only external reviewer; CodeRabbit is removed from the code. Greptile reviews here only when asked (`@greptileai review`, naming no review tier). A review round is read from its `Greptile Review` check run on the exact commit, published by the `greptile-apps` app; its summary carries `<!-- greptile_confidence_score:N -->` and links the full SHA of the commit it reviewed.
+- **Merging (amends D-042).** `merge_pull_request` refuses unless the finished Greptile review of the exact head being merged carries a confidence score of 5, and nothing lower. Remarks Greptile leaves beside a 5/5 are AL/X's to weigh; they do not refuse the merge. "Passed tests" is GitHub's required `law-gates` check, which runs every test and both law gates and which the merge provider already waits on. Any new commit needs a new review.
+- **The allowance (amends D-026's "Requesting the review").** Each Greptile review is paid for. AL/X may ask for up to three reviews of one pull request and twelve in a calendar month (local time) under `review.request` alone. Past either, `request_external_review` posts nothing and returns `review_allowance_reached` with the counts, and `request_external_review_beyond_allowance` asks for one more only with Friedl's approval of that exact call. Joining a round already on the head asks for nothing and is not counted. The counts are kept in `review-requests.sqlite3`.
+- **Keeping current.** Her setup facts list the services she is built on and the code that talks to each (`runtime.setup.integrations`). Keeping them current is hers: she looks, as often as she judges, for the latest and best way each is built on, and makes a worthwhile change through a coding task and a pull request, which she may merge under the rule above.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

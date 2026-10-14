@@ -19,7 +19,10 @@ from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.contracts import (  # noqa: E402
     ResearchModelUnpriced, SpecialistError,
 )
-from alx.observability.research_budget import ResearchBudgetExceeded  # noqa: E402
+from alx.observability.research_budget import (  # noqa: E402
+    ResearchBudgetExceeded,
+    ResearchCallsExhausted,
+)
 from alx.specialists.research import (  # noqa: E402
     ResearchCeilingFailed, ResearchInputUnbounded, ResearchModelUnbounded,
 )
@@ -265,6 +268,7 @@ class ResearchFailureTranslationTests(unittest.TestCase):
             self._failure_for(error)
             for error in (
                 ResearchBudgetExceeded(0.01, 0.10),
+                ResearchCallsExhausted(30),
                 ResearchModelUnpriced("testvendor", "survey-model"),
                 ResearchModelUnbounded("testvendor", "survey-model", 1.0, 0.1),
                 ResearchInputUnbounded(),
