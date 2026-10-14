@@ -56,6 +56,13 @@ class FutureCognitionStatus(str, Enum):
     WITHDRAWN = "withdrawn"
 
 
+
+# Her own time (D-024, amended 2026-10-14). Friedl: "once a day,
+# mid-morning", hers to change. Local times of day, "HH:MM".
+DEFAULT_OWN_TIME: tuple[str, ...] = ("10:00",)
+# At most this many a day: a bound on the schedule's size, not a judgement.
+MAX_OWN_TIMES = 6
+
 @dataclass(frozen=True, slots=True)
 class FutureCognitionRequest:
     """One occasion AL/X asked for, and her private note about why.

@@ -38,6 +38,7 @@ _FAILURES = (
     "cognition_tier_unconfigured",
     # The day's budget cannot cover another request.
     "research_budget_exhausted",
+    "research_calls_exhausted",
     # A model with no configured price, or whose worst case exceeds the ceiling.
     "research_model_unavailable",
     # A provider charged more than its enforced bound allowed; research stops.
@@ -94,6 +95,7 @@ def _failure_code(error: Exception) -> str:
     """Map a research failure to a declared code, carrying no material."""
     return {
         "ResearchBudgetExceeded": "research_budget_exhausted",
+        "ResearchCallsExhausted": "research_calls_exhausted",
         "ResearchModelUnpriced": "research_model_unavailable",
         "ResearchModelUnbounded": "research_model_unavailable",
         "ResearchInputUnbounded": "arguments_unusable",

@@ -22,7 +22,11 @@ from alx.observability import (
     SQLiteResearchLedger,
 )
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
-from alx.providers import OpenAIReasoningModel, XAIReasoningModel
+from alx.providers import (
+    ClaudeSubscriptionReasoningModel,
+    OpenAIReasoningModel,
+    XAIReasoningModel,
+)
 from alx.safety import AuthorityPolicy
 from alx.specialists import ResearchSpecialist, ResearchTierModel
 from alx.tools import ASK_RESEARCH_QUESTION, RESEARCH_DEFINITION, build_research_executors
@@ -54,6 +58,11 @@ def _transport(settings: Any, telemetry_sink: Any) -> Any:
             service_tier=settings.service_tier,
             reasoning_effort=settings.effort,
             telemetry_sink=telemetry_sink,
+        )
+    if settings.provider == "claude_subscription":
+        # Her own Claude subscription (D-023, amended 2026-10-14).
+        return ClaudeSubscriptionReasoningModel(
+            settings.model, settings.timeout_seconds, telemetry_sink=telemetry_sink,
         )
     if settings.provider in ("xai", "kimi"):
         return XAIReasoningModel(
@@ -115,6 +124,7 @@ def build_research_specialist(
         ResearchBudget(
             daily_usd=settings.limits.daily_usd,
             per_request_max_usd=settings.limits.per_request_max_usd,
+            daily_calls=settings.limits.daily_calls,
         ),
     )
     return ResearchSpecialist(

@@ -59,7 +59,7 @@ class CognitionOrigin(str, Enum):
     from it about what AL/X should think. Deciding whether an occasion is worth
     pursuing is a judgement, and only the Core makes it.
 
-    This is deliberately a closed set of four facts about provenance. It is not
+    This is deliberately a closed set of facts about provenance. It is not
     a category of work, a priority, or a routing key for capabilities, goals or
     prompts: those would each be a rule about what deserves attention, which is
     Law 1 phrase routing wearing a different surface.
@@ -73,6 +73,10 @@ class CognitionOrigin(str, Enum):
     WORK_COMPLETED = "work_completed"
     # A future cognition AL/X asked for herself came due.
     SELF_REQUESTED = "self_requested"
+    # Her own time came round: a time of day set aside for her (D-024,
+    # amended 2026-10-14). It says only that the time has come, never what
+    # to do with it.
+    OWN_TIME = "own_time"
 
     @property
     def is_autonomous(self) -> bool:

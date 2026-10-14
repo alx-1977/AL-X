@@ -52,6 +52,7 @@ _OCCASION_LABELS = {
     CognitionOrigin.EXTERNAL_EVENT: "External event received",
     CognitionOrigin.WORK_COMPLETED: "Completed work received",
     CognitionOrigin.SELF_REQUESTED: "Requested follow-up due",
+    CognitionOrigin.OWN_TIME: "Own time",
 }
 
 

@@ -87,6 +87,7 @@ from alx.bootstrap.readers import (
 )
 from alx.interfaces.reader_tile import tile_source
 from alx.continuity.pending_messages import SQLitePendingMessages
+from alx.continuity.own_time_source import OwnTimeSource
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
 from alx.continuity import (
@@ -779,11 +780,14 @@ async def run(repository_root: Path) -> None:
         permissions.update(reader_runtime.permissions)
 
     xero_approval_ttl_seconds: int | None = None
+    # For her own setup facts: whether D-018's standing bill authority is on.
+    unattended_bills = False
     try:
         xero_settings = XeroSettings.from_environment(environment)
     except ConfigurationError as error:
         LOGGER.info("Xero unavailable: %s", error)
     else:
+        unattended_bills = xero_settings.unattended_bill_writes
         # Extraction is a bounded LlamaCloud document read. When LlamaParse
         # is not configured the extractor stays absent and capture is not
         # advertised: answering it through the Core or the generic specialist
@@ -944,13 +948,61 @@ async def run(repository_root: Path) -> None:
     )
     running_commit = running_commit_of(CODE_ROOT, repository_reader)
 
-    def runtime_facts() -> dict[str, str]:
+    # What she runs on, what she may do without asking, and what runs
+    # without her: facts of this runtime's composition, so she never has to
+    # guess or search her memory for her own setup.
+    research_settings = provider_settings.research
+    setup: dict[str, Any] = {
+        "reasoning_model": (
+            f"{provider_settings.reasoning.provider} {provider_settings.reasoning.model}"
+        ),
+        "voice_model": provider_settings.text_to_speech.model,
+        "speech_recognition": (
+            f"{provider_settings.speech_to_text.provider} "
+            f"{provider_settings.speech_to_text.model}"
+        ),
+        "thinking_of_your_own": (
+            "available: your own time and request_future_cognition wake you"
+            if providers.autonomous is not None else "unavailable in this runtime"
+        ),
+        "research": (
+            {
+                name: f"{tier.provider} {tier.model}"
+                for name, tier in (
+                    ("survey", research_settings.survey),
+                    ("compare", research_settings.compare),
+                    ("judge", research_settings.judge),
+                )
+                if name in research_settings.enabled_tiers
+            }
+            if research_runtime is not None else "unavailable"
+        ),
+        "research_calls_per_day": research_settings.limits.daily_calls,
+        "supplier_bills": (
+            "you create and authorise supplier and DHL bills of any amount "
+            "without asking (D-018)" if unattended_bills
+            else "bill writes need Friedl's approval"
+        ),
+        "runs_without_you": [
+            "mail is scanned and new mail reaches you as events",
+            *(
+                ["the reader monitor keeps every BHL reader on its schedule "
+                 "and records each step (D-043)"]
+                if reader_runtime is not None else []
+            ),
+        ],
+    }
+
+    def runtime_facts() -> dict[str, Any]:
+        own_times, _set_at = continuity_runtime.store.own_time()
         return {
             "started_at": process_started_at.isoformat(timespec="seconds"),
             "running_commit": running_commit,
             "main_commit": (
                 "" if repository_reader is None else repository_reader.main_commit()
             ),
+            "setup": setup,
+            "own_time": list(own_times),
         }
 
     core = CoreAgent(
@@ -1147,6 +1199,13 @@ async def run(repository_root: Path) -> None:
     )
     runtime_started_source.recover(autonomous_budget)
     occasion_sources.append(runtime_started_source)
+    # Her own time of day (D-024, amended 2026-10-14).
+    own_time_source = OwnTimeSource(
+        continuity_runtime.store, opportunity_ledger,
+        enabled=providers.autonomous is not None,
+    )
+    own_time_source.recover(autonomous_budget)
+    occasion_sources.append(own_time_source)
     occasion_source: Any = (
         occasion_sources[0]
         if len(occasion_sources) == 1

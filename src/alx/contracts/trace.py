@@ -69,6 +69,7 @@ class ReasoningPurpose(str, Enum):
     ASSESSING_EVENT = "assessing_event"
     REVIEWING_COMPLETED_WORK = "reviewing_completed_work"
     REVISITING_FOLLOW_UP = "revisiting_follow_up"
+    TAKING_OWN_TIME = "taking_own_time"
     EVALUATING_PLAN = "evaluating_plan"
     EVALUATING_GOAL_STATE = "evaluating_goal_state"
     REVIEWING_RESULT = "reviewing_result"
@@ -88,6 +89,7 @@ _PURPOSE_LABELS = {
     ReasoningPurpose.INTERPRETING_REQUEST: "Interpreting request",
     ReasoningPurpose.ASSESSING_EVENT: "Assessing external event",
     ReasoningPurpose.REVIEWING_COMPLETED_WORK: "Reviewing completed work",
+    ReasoningPurpose.TAKING_OWN_TIME: "Own time",
     ReasoningPurpose.REVISITING_FOLLOW_UP: "Revisiting requested follow-up",
     ReasoningPurpose.EVALUATING_PLAN: "Evaluating plan progress",
     ReasoningPurpose.EVALUATING_GOAL_STATE: "Evaluating goal state",
