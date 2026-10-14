@@ -12,6 +12,7 @@ from alx.contracts import (
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
+    MAIL_FLAG_COLOURS,
     MailAccessError,
     MailAccount,
     MailAttachment,
@@ -38,6 +39,7 @@ ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
 MARK_MAIL_MESSAGE_SEEN = "mark_mail_message_seen"
 MOVE_MAIL_MESSAGE_TO_TRASH = "move_mail_message_to_trash"
 FILE_PROCESSED_MAIL_MESSAGE = "file_processed_mail_message"
+SET_MAIL_FLAG_COLOUR = "set_mail_flag_colour"
 SEND_MAIL_REPLY = "send_mail_reply"
 
 _FAILURES = (
@@ -242,6 +244,25 @@ MARK_SEEN_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+FLAG_DEFINITION = CapabilityDefinition(
+    SET_MAIL_FLAG_COLOUR,
+    "Flag one identified mail item orange, or clear its flag with colour none. Orange marks mail whose processing has started and waits on something else, such as a DHL import drafted before its invoice; red stays Friedl's own. Flag a message before filing it: filing changes its reference.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {**_REFERENCE_PROPERTIES, "colour": _STRING},
+        (*_REFERENCE_PROPERTIES, "colour"),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"reference": _REFERENCE, "colour": _STRING},
+        ("reference", "colour"),
+        extra_properties=False,
+    ),
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+)
+
 FILE_DEFINITION = CapabilityDefinition(
     FILE_PROCESSED_MAIL_MESSAGE,
     "Move one identified mail item to the configured processed mailbox once its invoice is in Xero; the destination is configured, not chosen. Returns partial mail_move_unconfirmed when the move may have happened but destination confirmation is unavailable.",
@@ -327,6 +348,7 @@ DEFINITIONS = (
     READ_ATTACHMENT_DEFINITION,
     ACKNOWLEDGE_DEFINITION,
     MARK_SEEN_DEFINITION,
+    FLAG_DEFINITION,
     FILE_DEFINITION,
     TRASH_DEFINITION,
 )
@@ -657,7 +679,26 @@ def build_mail_executors(
             {"reference": _reference_values(reference), "seen": True},
         )
 
+    def set_flag_colour(arguments: StructuredData) -> CapabilityResult:
+        try:
+            reference = _reference(arguments)
+            colour = arguments.get("colour")
+            if colour not in MAIL_FLAG_COLOURS:
+                raise ValueError("colour")
+            account.set_flag_colour(reference, colour)
+        except ValueError:
+            return failed(SET_MAIL_FLAG_COLOUR, "arguments_unusable")
+        except MailAccessError as error:
+            return failed(SET_MAIL_FLAG_COLOUR, error.code)
+        return CapabilityResult(
+            call_id_source(),
+            SET_MAIL_FLAG_COLOUR,
+            CapabilityResultState.SUCCEEDED,
+            {"reference": _reference_values(reference), "colour": colour},
+        )
+
     return {
+        SET_MAIL_FLAG_COLOUR: set_flag_colour,
         SEARCH_MAIL_MESSAGES: search,
         READ_MAIL_MESSAGE: read,
         LIST_MAIL_ATTACHMENTS: list_attachments,

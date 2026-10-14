@@ -249,6 +249,12 @@ class MailSendError(Exception):
         super().__init__(code)
 
 
+# Flag colours AL/X sets (Apple Mail's coloured flags). Orange marks mail
+# whose processing is started and waits on something else; red stays
+# Friedl's own "needs my attention". "none" clears the flag.
+MAIL_FLAG_COLOURS = ("orange", "none")
+
+
 class MailAccessError(Exception):
     def __init__(self, code: str) -> None:
         _required(code, "code")
@@ -270,6 +276,14 @@ class MailAccount(Protocol):
     ) -> tuple[MailAttachment, bytes]: ...
 
     def mark_seen(self, reference: MailReference) -> None: ...
+
+    def set_flag_colour(self, reference: MailReference, colour: str) -> None:
+        """Flag one message in one of MAIL_FLAG_COLOURS; "none" clears it."""
+        ...
+
+    def flagged_messages(self, mailbox: str, colour: str) -> tuple[MailReference, ...]:
+        """The messages in a mailbox flagged exactly that colour."""
+        ...
 
     def file_message(self, reference: MailReference, mailbox: str) -> MailMoveResult: ...
 

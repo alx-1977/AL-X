@@ -1570,6 +1570,69 @@ class ICloudMailAdapter:
         finally:
             self._close(connection)
 
+    # Apple Mail stores a flag's colour as keywords beside \\Flagged; a bare
+    # \\Flagged is red.
+    _COLOUR_KEYWORDS = ("$MailFlagBit0", "$MailFlagBit1", "$MailFlagBit2")
+    _COLOUR_BITS = {"orange": ("$MailFlagBit0",)}
+
+    def set_flag_colour(self, reference: MailReference, colour: str) -> None:
+        """Flag one message exactly that colour, or clear its flag.
+
+        Every colour bit is cleared first, so the message ends up with exactly
+        the colour asked for rather than a mix with an earlier one.
+        """
+        if colour not in ("none", *self._COLOUR_BITS):
+            raise MailAccessError("flag_update_failed")
+        connection = self._open()
+        try:
+            status, _ = connection.select(
+                self._quoted(reference.mailbox_id), readonly=False
+            )
+            if status != "OK":
+                raise MailAccessError("mailbox_unavailable")
+            if _uid_validity(connection) != reference.uid_validity:
+                raise MailAccessError("identifier_stale")
+            cleared = " ".join(("\\Flagged", *self._COLOUR_KEYWORDS))
+            status, _ = connection.uid(
+                "STORE", reference.uid, "-FLAGS.SILENT", f"({cleared})"
+            )
+            if status != "OK":
+                raise MailAccessError("flag_update_failed")
+            if colour != "none":
+                flags = " ".join(("\\Flagged", *self._COLOUR_BITS[colour]))
+                status, _ = connection.uid(
+                    "STORE", reference.uid, "+FLAGS.SILENT", f"({flags})"
+                )
+                if status != "OK":
+                    raise MailAccessError("flag_update_failed")
+        finally:
+            self._close(connection)
+
+    def flagged_messages(self, mailbox: str, colour: str) -> tuple[MailReference, ...]:
+        """The messages in one mailbox flagged exactly that colour."""
+        if colour not in self._COLOUR_BITS:
+            raise MailAccessError("search_failed")
+        wanted = self._COLOUR_BITS[colour]
+        criteria = ["FLAGGED"]
+        for keyword in self._COLOUR_KEYWORDS:
+            criteria.extend(("KEYWORD" if keyword in wanted else "UNKEYWORD", keyword))
+        connection = self._open()
+        try:
+            status, _ = connection.select(self._quoted(mailbox), readonly=True)
+            if status != "OK":
+                raise MailAccessError("mailbox_unavailable")
+            validity = _uid_validity(connection)
+            status, data = connection.uid("SEARCH", None, *criteria)
+            if status != "OK":
+                raise MailAccessError("search_failed")
+            uids = (data[0] or b"").split() if data else []
+            return tuple(
+                MailReference(mailbox, validity, uid.decode() if isinstance(uid, bytes) else str(uid))
+                for uid in uids
+            )
+        finally:
+            self._close(connection)
+
     def acknowledge(self, reference: MailReference) -> None:
         self._observations.acknowledge(reference)
 

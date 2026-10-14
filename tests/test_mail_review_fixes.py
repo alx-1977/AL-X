@@ -524,9 +524,13 @@ class TrashAuthorisationTests(unittest.TestCase):
 
         effectful = [item.capability_id for item in DEFINITIONS
                      if item.side_effect is SideEffect.EFFECTFUL]
-        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE
+        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE, SET_MAIL_FLAG_COLOUR
 
-        self.assertEqual(effectful, [SEEN, FILE_PROCESSED_MAIL_MESSAGE, TRASH])
+        # The orange flag on a drafted DHL import is D-020 (amended 2026-10-14).
+        self.assertEqual(
+            effectful,
+            [SEEN, SET_MAIL_FLAG_COLOUR, FILE_PROCESSED_MAIL_MESSAGE, TRASH],
+        )
 
     def test_no_permanent_deletion_is_reachable(self) -> None:
         source = (Path(__file__).resolve().parents[1]
