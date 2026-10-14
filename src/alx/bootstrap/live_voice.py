@@ -98,6 +98,7 @@ from alx.continuity import (
 from alx.observability import ConfiguredPricingWorstCase
 from alx.providers import MailPoller
 from alx.observability.autonomous_budget import SQLiteAutonomousLedger
+from alx.observability.review_allowance import SQLiteReviewAllowance
 from alx.conversation import ConversationGateway, ConversationNotFound, SQLiteConversationStore
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
@@ -584,8 +585,9 @@ async def run(repository_root: Path) -> None:
         executors.update(sandbox_runtime.executors)
         permissions.update(sandbox_runtime.permissions)
 
-    # Requesting an external review is effectful and may spend review credits,
-    # so its policy requires an approval grounded in Friedl's own turn.
+    # Requesting an external review is effectful and spends paid reviews, so
+    # the ones AL/X asks for are counted against Friedl's allowance (three a
+    # pull request, twelve a month); past it, one more needs his approval.
     # Compose the sole waiter before publishing the capabilities. The callback
     # runs only after composition; neither a holder nor a second observer is needed.
     review_runtime = build_review_runtime(
@@ -594,6 +596,7 @@ async def run(repository_root: Path) -> None:
         review_configuration.token,
         current_call_id.get,
         reviewer=review_configuration.reviewer,
+        allowance=SQLiteReviewAllowance(storage_root / "review-requests.sqlite3"),
         started=lambda number, sha, requested_at: _watch_review(
             task_runtime,
             current_conversation_id.get(),
@@ -602,8 +605,8 @@ async def run(repository_root: Path) -> None:
             requested_at,
             # The resolved reviewer, read from the provider that was actually
             # composed — never the configured string. Selection normalises
-            # case and falls back on an unknown name, so `CodeRabbit` and a
-            # typo both compose the coderabbit provider while the raw value
+            # case and falls back on an unknown name, so `Greptile` and a
+            # typo both compose the greptile provider while the raw value
             # says otherwise. The watcher registers its observer under the
             # provider's own name, and the poller finds an observer by the
             # task's service: recording the raw value meant a lookup that
@@ -780,8 +783,11 @@ async def run(repository_root: Path) -> None:
         permissions.update(reader_runtime.permissions)
 
     xero_approval_ttl_seconds: int | None = None
-    # For her own setup facts: whether D-018's standing bill authority is on.
+    # For her own setup facts: whether D-018's standing bill authority is on,
+    # and which of these integrations were composed.
     unattended_bills = False
+    xero_composed = False
+    documents_composed = False
     try:
         xero_settings = XeroSettings.from_environment(environment)
     except ConfigurationError as error:
@@ -799,6 +805,8 @@ async def run(repository_root: Path) -> None:
             )
         except ConfigurationError as error:
             LOGGER.info("Supplier invoice extraction unavailable: %s", error)
+        documents_composed = extractor is not None
+        xero_composed = True
         xero_runtime = build_xero_runtime(
             xero_settings,
             storage_root,
@@ -983,6 +991,56 @@ async def run(repository_root: Path) -> None:
             "without asking (D-018)" if unattended_bills
             else "bill writes need Friedl's approval"
         ),
+        # What she is built on, each with the code that talks to it, so she can
+        # keep them current: Friedl, 2026-10-14, "ALX should always look for
+        # the latest and best way any of her current integrations are built on".
+        "integrations": [
+            item for item, composed in (
+                ({"name": "Claude", "for": "reasoning and research, on your own "
+                  "subscription through the Claude Code CLI",
+                  "code": "src/alx/providers/claude_subscription.py"}, True),
+                ({"name": "ElevenLabs", "for": "your voice: streaming text to "
+                  f"speech ({provider_settings.text_to_speech.model}) and the "
+                  "pronunciation dictionary",
+                  "code": "src/alx/providers/elevenlabs.py, "
+                  "src/alx/providers/elevenlabs_pronunciation.py"}, True),
+                ({"name": provider_settings.speech_to_text.provider.capitalize(),
+                  "for": "hearing Friedl: streaming speech to text "
+                  f"({provider_settings.speech_to_text.model})",
+                  "code": "src/alx/providers/cartesia.py"}, True),
+                ({"name": "iCloud Mail", "for": "reading, flagging, filing and "
+                  "sending mail over IMAP and SMTP",
+                  "code": "src/alx/providers/icloud_mail.py, "
+                  "src/alx/providers/icloud_mail_send.py"}, True),
+                ({"name": "Xero", "for": "contacts, quotes, invoices and bills "
+                  "through the Accounting API",
+                  "code": "src/alx/providers/xero.py"}, xero_composed),
+                ({"name": "DHL", "for": "import duty bills from DHL's emails "
+                  "and documents", "code": "src/alx/providers/dhl.py"},
+                 xero_composed),
+                ({"name": "LlamaParse", "for": "reading invoices and other "
+                  "documents", "code": "src/alx/providers/llamaparse.py"},
+                 documents_composed),
+                ({"name": "Particle", "for": "the BHL readers: Cloud API, "
+                  "event streams and usage",
+                  "code": "src/alx/providers/particle.py"},
+                 reader_runtime is not None),
+                ({"name": "BehaviorLive", "for": "the BHL session calendar",
+                  "code": "src/alx/providers/behaviorlive.py"},
+                 reader_runtime is not None),
+                ({"name": "Web search", "for": "searching the public web; pages are read "
+                  "directly", "code": "src/alx/providers/web_search.py, "
+                  "src/alx/providers/web_fetch.py"}, web_runtime is not None),
+                ({"name": "GitHub", "for": "your repository: pull requests, "
+                  "checks and merges",
+                  "code": "src/alx/providers/github_merge.py, "
+                  "src/alx/providers/github_pull_request.py"},
+                 merge_runtime is not None),
+                ({"name": "Greptile", "for": "external code review through "
+                  "GitHub", "code": "src/alx/providers/github_review.py"},
+                 review_runtime is not None),
+            ) if composed
+        ],
         "runs_without_you": [
             "mail is scanned and new mail reaches you as events",
             *(

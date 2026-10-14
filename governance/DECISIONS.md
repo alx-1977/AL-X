@@ -2490,3 +2490,18 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Recorded.** Every change (any call but GET) and every usage report goes to the reader log, so it can be accounted for in a report.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 
+
+## D-046 — Greptile is the one reviewer; AL/X merges at 5/5, within a review allowance, and keeps her integrations current
+
+- **Date:** 2026-10-14
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-14.** Friedl's words that day:
+  - "please add Greptile and completely remove CR. I do not think we need both."
+  - "She can merge but only after code passed tests and Gretile give 5/5."
+  - "Three reviews per PR is fine, after that she needs to ask. Then make it 12 for the month (4 x 3) after which she also needs to ask."
+  - "ALX should alwayts look for the latest and bets way any of her current integrations are build on … like an auto update."
+- **The reviewer.** Greptile is the only external reviewer; CodeRabbit is removed from the code. Greptile reviews here only when asked (`@greptileai review`, naming no review tier). A review round is read from its `Greptile Review` check run on the exact commit, published by the `greptile-apps` app; its summary carries `<!-- greptile_confidence_score:N -->` and links the full SHA of the commit it reviewed.
+- **Merging (amends D-042).** `merge_pull_request` refuses unless the finished Greptile review of the exact head being merged carries a confidence score of 5, and nothing lower. Remarks Greptile leaves beside a 5/5 are AL/X's to weigh; they do not refuse the merge. "Passed tests" is GitHub's required `law-gates` check, which runs every test and both law gates and which the merge provider already waits on. Any new commit needs a new review.
+- **The allowance (amends D-026's "Requesting the review").** Each Greptile review is paid for. AL/X may ask for up to three reviews of one pull request and twelve in a calendar month (local time) under `review.request` alone. Past either, `request_external_review` posts nothing and returns `review_allowance_reached` with the counts, and `request_external_review_beyond_allowance` asks for one more only with Friedl's approval of that exact call. Joining a round already on the head asks for nothing and is not counted. The counts are kept in `review-requests.sqlite3`.
+- **Keeping current.** Her setup facts list the services she is built on and the code that talks to each (`runtime.setup.integrations`). Keeping them current is hers: she looks, as often as she judges, for the latest and best way each is built on, and makes a worthwhile change through a coding task and a pull request, which she may merge under the rule above.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

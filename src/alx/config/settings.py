@@ -1592,7 +1592,7 @@ class ReviewSettings:
     # rather than a contract value: `config` reads the environment and depends
     # on nothing, so resolving the name to a provider belongs to the layer
     # that composes them. Defaulted so an existing configuration keeps working.
-    reviewer: str = "coderabbit"
+    reviewer: str = "greptile"
 
     @property
     def is_usable(self) -> bool:
@@ -1613,5 +1613,5 @@ def review_settings(environment: Mapping[str, str]) -> ReviewSettings:
         repository=environment.get("ALX_MERGE_REPOSITORY", "").strip(),
         token=environment.get("GITHUB_TOKEN", "").strip(),
         reviewer=environment.get("ALX_REVIEW_PROVIDER", "").strip().lower()
-        or "coderabbit",
+        or "greptile",
     )

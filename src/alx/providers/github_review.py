@@ -13,10 +13,10 @@ A new pull request is reviewed without being asked. The trigger exists for the
 other case: a corrective commit moved the head, the previous review is evidence
 about a revision that no longer exists, and a fresh look is needed. So a request
 is a comment, and the outcome records the revision the pull request pointed at
-when it was left. Where the reviewer's status shows it already reviewing or
+when it was left. Where the reviewer's check run shows it already reviewing or
 done reviewing that revision, no comment is left and the wait joins that round.
 
-A review round ends when the reviewer's commit status on the revision says so.
+A review round ends when the reviewer's check run on the revision says so.
 Until then nothing it has published about the revision is reported as a review.
 
 ## Reading
@@ -89,17 +89,23 @@ MAX_PAGES = 10
 # published about this revision — never an opinion about the code.
 NO_REVIEW_FOR_REVISION = "no_review_for_revision"
 
-# Commit-status states that end a review round. `pending` is the round still
-# running; anything GitHub adds later is not known to be an end, so it is read
-# as still running rather than as finished.
+# Where a review round stands, read from the reviewer's check run. `pending`
+# is the round still running; `success` a round that has finished, whatever
+# it found; `failure` a round that did not finish.
 _COMPLETED_STATE = "success"
 _FAILED_STATES = frozenset({"failure", "error"})
 
-# How long a request waits for the reviewer's own automatic round to show on
-# the current head before asking for one. CodeRabbit marked a freshly opened
-# pull request `pending` 7-9 seconds after it opened on seven of PR #70-#77;
-# PR #77's trigger went out 10 seconds after it did. Sixty seconds covers that
-# several times over and is a small part of the wait that follows. Rechecked
+# Check-run conclusions of a round that finished. Greptile concludes `failure`
+# when its confidence is below the 5/5 this repository requires: that is a
+# finished review with findings, not a review that failed to run. Any other
+# conclusion (cancelled, timed out, stale, ...) is a round that never produced
+# a review, and asking again is right. A run not yet `completed` is running.
+_FINISHED_CONCLUSIONS = frozenset({"success", "failure", "neutral"})
+
+# How long a request waits for an automatic round to show on the current head
+# before asking for one. Greptile reviews here only when asked, so this is
+# normally a short look that finds nothing; it still stops a request from
+# paying for a second review of a head whose round has just begun. Rechecked
 # mechanically inside this one call: nothing is scheduled and no Core turn is
 # spent.
 AUTOMATIC_REVIEW_GRACE_SECONDS = 60.0
@@ -130,6 +136,10 @@ class GitHubReviewProvider:
         profile: ReviewProviderProfile,
         api_root: str = API_ROOT,
         clock: Any = None,
+        # Asked just before a trigger is posted, with the pull request number;
+        # raises a ReviewError to stop it. Joining a round already on the head
+        # asks for nothing and is never stopped.
+        before_trigger: Any = None,
     ) -> None:
         owner, _, name = repository.strip().partition("/")
         if not _SEGMENT.match(owner) or not _SEGMENT.match(name):
@@ -143,6 +153,7 @@ class GitHubReviewProvider:
         self._profile = profile
         self._api_root = api_root.rstrip("/")
         self._now = clock or (lambda: datetime.now(UTC))
+        self._before_trigger = before_trigger
 
     @property
     def reviewer(self) -> str:
@@ -207,40 +218,48 @@ class GitHubReviewProvider:
     def _round(self, head_sha: str) -> "_Round | None":
         """Where this reviewer's latest review round of this revision stands.
 
-        Read from the commit status the reviewer publishes on the exact commit
-        it is reviewing, by its own account. That binds the round to the head
+        Read from the check run the reviewer publishes on the exact commit it
+        is reviewing, by its own GitHub App. That binds the round to the head
         by GitHub's data rather than by prose, and says whether the round has
         ended, which nothing else it publishes does: its summary comment is
-        posted as a placeholder when the round starts. Taking that placeholder
-        for a review completed the wait on PR #77 three minutes before the
-        finding it was waiting for existed.
+        edited in place as rounds come and go, so taking it for a review
+        completes a wait before the findings it was waiting for exist.
 
-        Returns the latest state and when it was published, or None when
-        this reviewer has published no status on this revision. The time is
+        Returns the latest state and when it was reached, or None when this
+        reviewer has published no check run on this revision. The time is
         what tells a round that ended before a request from one that answers
         it.
         """
-        statuses = [
-            item
-            for item in self._pages(
-                f"/repos/{self._repository}/commits/{head_sha}/statuses"
-            )
-            if isinstance(item, dict)
-            and item.get("context") == self._profile.status_context
-            and isinstance(item.get("creator"), dict)
-            and self._profile.authored_by_reviewer(item["creator"].get("login"))
-            and isinstance(item.get("state"), str)
-        ]
-        if not statuses:
-            return None
-        # GitHub lists a commit's statuses newest first, and `max` keeps the
-        # first of equals, so a same-second transition resolves to the newer.
-        latest = max(
-            statuses,
-            key=lambda item: _moment(item.get("created_at"))
-            or datetime.min.replace(tzinfo=UTC),
+        found = self._call(
+            "GET",
+            f"/repos/{self._repository}/commits/{head_sha}/check-runs"
+            "?filter=all&per_page=100",
         )
-        return _Round(latest["state"], _moment(latest.get("created_at")))
+        listed = found.get("check_runs") if isinstance(found, dict) else None
+        if not isinstance(listed, list):
+            raise _Unavailable()
+        rounds = []
+        for item in listed:
+            if not (
+                isinstance(item, dict)
+                and item.get("name") == self._profile.check_run_name
+                and item.get("head_sha", head_sha) == head_sha
+                and self._profile.published_by_reviewer(item.get("app"))
+            ):
+                continue
+            if item.get("status") != "completed":
+                rounds.append(_Round("pending", _moment(item.get("started_at"))))
+            elif item.get("conclusion") in _FINISHED_CONCLUSIONS:
+                rounds.append(_Round(_COMPLETED_STATE, _moment(item.get("completed_at"))))
+            else:
+                rounds.append(_Round("failure", _moment(item.get("completed_at"))))
+        if not rounds:
+            return None
+        # The newest round decides; of equals, the first listed (GitHub lists
+        # newest first), so a same-second transition resolves to the newer.
+        return max(
+            rounds, key=lambda found: found.at or datetime.min.replace(tzinfo=UTC)
+        )
 
     # ---- requesting -----------------------------------------------------
 
@@ -264,14 +283,14 @@ class GitHubReviewProvider:
         # refuses a review published at or before this moment, because such a
         # review answers the previous request rather than this one. Taking the
         # time afterwards put the POST and a second head lookup inside the
-        # window: a reviewer that answers quickly — CodeRabbit does, within
-        # seconds — would have its review dismissed as older than the request
+        # window: a reviewer that answers quickly would have its review
+        # dismissed as older than the request
         # that prompted it, and the task would wait forever for a review that
         # had already arrived.
         requested_at = self._now()
         try:
             head = self._head(number)
-            if self._profile.status_context:
+            if self._profile.check_run_name:
                 awaited = self._await_automatic_round(number, head)
                 head = awaited.sha
                 if awaited.state:
@@ -286,6 +305,8 @@ class GitHubReviewProvider:
                         requested_at=requested_at,
                         attached_round=awaited.state,
                     )
+            if self._before_trigger is not None:
+                self._before_trigger(number)
             self._call(
                 "POST",
                 f"/repos/{self._repository}/issues/{number}/comments",
@@ -438,8 +459,9 @@ class GitHubReviewProvider:
     def _covers(self, body: str, head_sha: str) -> bool:
         """Whether this text is the reviewer saying it looked at this revision.
 
-        Reviewers state the range they covered — CodeRabbit writes "between
-        <base> and <head>". Where such a statement is present it is what binds
+        Reviewers state what they covered - Greptile's summary links the full
+        SHA as its "Last reviewed commit". Where such a statement is present it
+        is what binds
         the review to a commit, because it is the reviewer's own account of
         what it read rather than an inference from when something was posted.
         """
@@ -457,7 +479,7 @@ class GitHubReviewProvider:
             # completed status with content fetched before the findings
             # existed.
             found = (
-                self._round(head_sha) if self._profile.status_context
+                self._round(head_sha) if self._profile.check_run_name
                 else _Round(_COMPLETED_STATE, None)
             )
         except (_Refused, _Unavailable) as error:

@@ -32,16 +32,21 @@ REVIEW_FAILURES = (
     "review_unavailable",
     # The reviewer or the transport refused the request.
     "review_refused",
+    # Friedl's review allowance is used: three a pull request, twelve a month.
+    # Nothing was asked for; another review needs his word.
+    "review_allowance_reached",
 )
 
 
 class ReviewError(Exception):
     """A review could not be requested, with a declared machine-readable code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, details: dict[str, object] | None = None) -> None:
         if code not in REVIEW_FAILURES:
             raise ValueError("review failures must be declared")
         self.code = code
+        # Facts that go with the code, such as the allowance counts.
+        self.details = dict(details or {})
         super().__init__(code)
 
 
@@ -80,7 +85,7 @@ class ReviewOutcome:
     that happened to be current a moment earlier would be a false record.
 
     `requested` is false when no trigger was posted because the reviewer's own
-    status already showed a round running or completed on `head_sha`. The
+    check run already showed a round running or completed on `head_sha`. The
     outcome then names that round's revision, and the wait attaches to it.
     """
 

@@ -107,7 +107,7 @@ class ConsoleTidyTests(unittest.TestCase):
         result = run_js(textwrap.dedent("""
             handleControl({
               type: "diagnostic", code: "task.status", task_id: "task-1",
-              state: "waiting_for_result", service: "coderabbit", subject: "PR 109",
+              state: "waiting_for_result", service: "greptile", subject: "PR 109",
               elapsed_seconds: 5, at: new Date().toISOString(),
             });
             renderStage();

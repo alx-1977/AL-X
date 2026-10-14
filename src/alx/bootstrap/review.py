@@ -4,12 +4,15 @@ Returning None leaves the capability unregistered, so AL/X cannot request a
 review at all. That is the difference between the capability being withheld and
 requesting merely failing.
 
-Which reviewer is composed is configuration. Every supported reviewer watches
-this repository through GitHub and works the same way, so one provider serves
-all of them and the profile supplies the three things that differ: the name,
-the trigger comment, and the bot account. Changing the configured reviewer
-changes nothing about the capability, the gate, the Core, or what AL/X asks
-for.
+The reviewer is Greptile, alone since 2026-10-14. It watches this repository
+through GitHub, and its profile supplies what is particular to it: the name,
+the trigger comment, the bot account and its check run.
+
+Each review is paid for, so the ones AL/X asks for are counted against
+Friedl's allowance (three a pull request, twelve a month). Past it, an
+ordinary request is refused before anything is posted, and the separate
+beyond-allowance capability asks for one more under his approval of that exact
+call.
 """
 
 from __future__ import annotations
@@ -21,13 +24,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
-from alx.contracts.review import ReviewRequest
+from alx.contracts.review import ReviewError, ReviewRequest
 from alx.contracts.review_provider import ReviewProvider, profile_for
 from alx.providers.github_review import GitHubReviewProvider
 from alx.safety import AuthorityPolicy
 from alx.tools.review import (
+    BEYOND_ALLOWANCE_DEFINITION,
     DEFINITION as REVIEW_DEFINITION,
     REQUEST_EXTERNAL_REVIEW,
+    REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE,
     build_review_executors,
 )
 from alx.tools.review_content import (
@@ -73,7 +78,7 @@ def build_review_runtime(
     call_id_source: Callable[[], str],
     # Which reviewer to compose. Configuration, never a reasoning input: AL/X
     # asks for a review, not for a particular reviewer.
-    reviewer: ReviewProvider | str = ReviewProvider.CODERABBIT,
+    reviewer: ReviewProvider | str = ReviewProvider.GREPTILE,
     provider: Any = None,
     # Reads what a reviewer published. Injected like the requesting provider,
     # so another reviewer can replace it without changing the capability.
@@ -85,6 +90,10 @@ def build_review_runtime(
     # request at this head. Supplied by the composition that holds the task
     # store; absent, a joined finished round is always waited on.
     delivered: Callable[[int, str, datetime], bool] | None = None,
+    # Friedl's review allowance: `state(number, at)` and
+    # `record(number, head_sha, at)`. Without it nothing limits requests and
+    # no beyond-allowance capability is offered.
+    allowance: Any = None,
 ) -> ReviewRuntime | None:
     """Compose review requesting, or leave it unregistered."""
     if started is None:
@@ -109,27 +118,49 @@ def build_review_runtime(
                 LOGGER.warning(
                     "Unknown review provider %r: using %s",
                     reviewer,
-                    ReviewProvider.CODERABBIT.value,
+                    ReviewProvider.GREPTILE.value,
                 )
-                reviewer = ReviewProvider.CODERABBIT
-        # One provider object requests and reads: both are GitHub calls about
-        # the same pull request by the same reviewer, and splitting them would
-        # mean two places that have to agree on which reviewer is configured.
-        composed = GitHubReviewProvider(repository, token, profile_for(reviewer))
+                reviewer = ReviewProvider.GREPTILE
+
+        def within_allowance(number: int) -> None:
+            state = allowance.state(number, datetime.now(UTC))
+            if state.reached:
+                raise ReviewError("review_allowance_reached", state.as_values())
+
+        # One provider requests and reads: both are GitHub calls about the
+        # same pull request by the same reviewer. The ordinary request is
+        # stopped at the allowance just before its trigger would be posted;
+        # the beyond-allowance one, already approved by Friedl, is not.
+        composed = GitHubReviewProvider(
+            repository, token, profile_for(reviewer),
+            before_trigger=None if allowance is None else within_allowance,
+        )
+        unlimited = GitHubReviewProvider(repository, token, profile_for(reviewer))
         selected = provider or composed
+        beyond = provider or unlimited
         reader = content_provider or composed
     except (KeyError, TypeError, ValueError):
         LOGGER.warning("External review requesting is misconfigured: no capability")
         return None
 
-    def request_review(review: ReviewRequest) -> Any:
+    def request_review(review: ReviewRequest, through: Any = None) -> Any:
         # The provider reports GitHub's timestamp for the trigger comment. It
         # is the same clock used by result comments, so local clock skew cannot
         # exclude a fast result or admit one that predates this request. An
         # injected provider without that fact falls back to the pre-call time.
         local_requested_at = datetime.now(UTC)
-        outcome = selected.request(review)
+        outcome = (through or selected).request(review)
         requested_at = outcome.requested_at or local_requested_at
+        if outcome.requested and allowance is not None:
+            # Counted once it is asked for; a joined round asked for nothing.
+            try:
+                allowance.record(
+                    outcome.pull_request_number, outcome.head_sha, requested_at
+                )
+            except Exception as error:  # noqa: BLE001 - the review stands
+                LOGGER.warning(
+                    "Review allowance not recorded: %s", type(error).__name__
+                )
         # Joined a round that had already finished, and whose verdict an
         # earlier task already took. The reviewer does not review an unchanged
         # head again, so nothing further will arrive for a wait to observe;
@@ -164,18 +195,31 @@ def build_review_runtime(
         REQUEST_EXTERNAL_REVIEW,
         getattr(selected, "reviewer", "external"),
     )
+    beyond_allowance = allowance is not None
     return ReviewRuntime(
         provider=selected,
-        definitions=(REVIEW_DEFINITION, REVIEW_CONTENT_DEFINITION),
+        definitions=(
+            (REVIEW_DEFINITION, REVIEW_CONTENT_DEFINITION)
+            + ((BEYOND_ALLOWANCE_DEFINITION,) if beyond_allowance else ())
+        ),
         policies={
             # Plain permission since 2026-10-06 (D-026, "Requesting the
             # review"): Friedl delegated when to ask for a review to AL/X, as
-            # he had delegated merging. A request on a head whose review is
-            # already running or done attaches to that round rather than
-            # asking again, which the provider enforces.
+            # he had delegated merging, within his allowance since
+            # 2026-10-14. A request on a head whose review is already running
+            # or done attaches to that round rather than asking again, which
+            # the provider enforces.
             REQUEST_EXTERNAL_REVIEW: AuthorityPolicy(
                 frozenset({REVIEW_REQUEST_PERMISSION}),
             ),
+            # Past the allowance, a review is Friedl's to allow: "after that
+            # she needs to ask" (2026-10-14). His approval binds the exact call.
+            **({
+                REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE: AuthorityPolicy(
+                    frozenset({REVIEW_REQUEST_PERMISSION}),
+                    approval_required=True,
+                ),
+            } if beyond_allowance else {}),
             # Plain permission, deliberately. Reading spends nothing and
             # changes nothing outside, so requiring Friedl's word each time
             # would ask him a question with one answer - and would leave AL/X
@@ -188,6 +232,11 @@ def build_review_runtime(
         },
         executors={
             **build_review_executors(request_review, call_id_source),
+            **(build_review_executors(
+                lambda review: request_review(review, beyond),
+                call_id_source,
+                REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE,
+            ) if beyond_allowance else {}),
             **build_review_content_executors(reader.read, call_id_source),
         },
         permissions=frozenset(

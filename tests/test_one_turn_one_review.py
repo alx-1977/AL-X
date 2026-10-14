@@ -631,7 +631,7 @@ class PolicyDerivationTests(unittest.TestCase):
         from alx.bootstrap.review import build_review_runtime
 
         class Provider:
-            reviewer = "coderabbit"
+            reviewer = "greptile"
 
             def request(self, review):  # pragma: no cover - never called
                 raise AssertionError("no provider contact in this test")

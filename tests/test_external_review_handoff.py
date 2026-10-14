@@ -48,7 +48,7 @@ from alx.tools.review_content import (
 )
 from tests.review_transcript import HEAD, PUBLISHED_AT, REVIEWER_LOGIN, statuses_route
 
-REVIEWER = "coderabbit"
+REVIEWER = "greptile"
 SUMMARY = f"Formal review body. Reviewed up to {HEAD}."
 
 
@@ -154,7 +154,7 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         github_review.httpx.request = request
         self.addCleanup(setattr, github_review.httpx, "request", original)
         provider = GitHubReviewProvider(
-            "owner/repo", "token", profile_for(ReviewProvider.CODERABBIT)
+            "owner/repo", "token", profile_for(ReviewProvider.GREPTILE)
         )
 
         task_store = SQLiteTaskStore(root / "tasks.sqlite3")

@@ -1,9 +1,10 @@
 """One realistic reviewer/GitHub transcript shared across integration tests.
 
-Shaped from what CodeRabbit actually publishes on this repository, because the
+Shaped from what Greptile actually publishes on this repository, because the
 production path reads GitHub rather than a reviewer API: a summary comment on
-the issue thread that names the range it covered, inline comments on the pull
-request, and the reviewer's own bot login on every one of them.
+the issue thread that links the commit it reviewed, inline comments on the pull
+request, a check run on the reviewed commit, and the reviewer's own bot login
+on every one of them.
 
 The head binding is the part that matters. A summary is evidence about the
 revision it names, so a transcript carrying two summaries — one for an earlier
@@ -18,7 +19,8 @@ from urllib.parse import parse_qs, urlparse
 # The reviewer's bot login, exactly as GitHub reports it. The production path
 # matches against an allowlist of exact logins, so a transcript that named a
 # lookalike would be correctly ignored.
-REVIEWER_LOGIN = "coderabbitai[bot]"
+REVIEWER_LOGIN = "greptile-apps[bot]"
+REVIEWER_APP = "greptile-apps"
 OTHER_LOGIN = "alx-1977"
 
 OLD_HEAD = "b" * 40
@@ -32,23 +34,26 @@ REVIEW_ID = 5001
 STALE_REVIEW_ID = 5000
 PUBLISHED_AT = "2026-09-07T06:15:00Z"
 STALE_PUBLISHED_AT = "2026-09-07T05:00:00Z"
-# The reviewer's own round markers on a revision, as PR #77 recorded them: a
-# `pending` status when the round starts, the findings, then `success` seconds
-# after the findings are published.
+# The reviewer's own round markers on a revision: its check run starts
+# `in_progress`, the findings are published, then it completes.
 ROUND_STARTED_AT = "2026-09-07T06:12:00Z"
 ROUND_ENDED_AT = "2026-09-07T06:15:07Z"
-STATUS_CONTEXT = "CodeRabbit"
+STATUS_CONTEXT = "Greptile Review"
 
-SUMMARY_BODY = (
-    "**Actionable comments posted: 1**\n\n"
-    f"Reviewing files that changed from the base of the PR and between {BASE} "
-    f"and {HEAD}.\n"
-)
-STALE_SUMMARY_BODY = (
-    "No actionable comments were generated in the recent review.\n\n"
-    f"Reviewing files that changed from the base of the PR and between {BASE} "
-    f"and {OLD_HEAD}.\n"
-)
+
+def greptile_summary(score: int, head: str) -> str:
+    """A Greptile summary as it reads on this repository, for one head."""
+    return (
+        f"<h2>Confidence Score: {score}/5</h2>\n\n"
+        "Summary of the change.\n\n"
+        f"<!-- greptile_confidence_score:{score} -->\n\n"
+        "<sub>Reviews (1) · Last reviewed commit: "
+        f"[\"the change\"](https://github.com/owner/repo/commit/{head})</sub>\n"
+    )
+
+
+SUMMARY_BODY = greptile_summary(3, HEAD)
+STALE_SUMMARY_BODY = greptile_summary(5, OLD_HEAD)
 INLINE_BODY = "This branch is never taken when the store is empty."
 STALE_INLINE_BODY = "The earlier revision left this cursor unclosed."
 
@@ -59,17 +64,21 @@ def _user(login: str) -> dict:
 
 def status(state: str = "success", created_at: str = ROUND_ENDED_AT,
            login: str = REVIEWER_LOGIN, context: str = STATUS_CONTEXT) -> dict:
-    """One commit status, as GitHub lists it for a revision."""
-    return {
-        "context": context,
-        "state": state,
-        "description": {
-            "pending": "Review in progress",
-            "success": "Review completed",
-        }.get(state, "Review failed"),
-        "creator": _user(login),
-        "created_at": created_at,
-    }
+    """One check run, as GitHub lists it for a revision.
+
+    Named by round state: `pending` is a round running, `success` one that
+    finished (Greptile concludes `success` or `failure` by its score, both
+    finished reviews), `failure` one that never produced a review.
+    """
+    app = REVIEWER_APP if login == REVIEWER_LOGIN else login.replace("[bot]", "")
+    run = {"name": context, "app": {"slug": app}, "started_at": created_at}
+    if state == "pending":
+        return {**run, "status": "in_progress", "conclusion": None,
+                "completed_at": None}
+    conclusion = {"success": "failure", "failure": "cancelled",
+                  "error": "timed_out"}.get(state, state)
+    return {**run, "status": "completed", "conclusion": conclusion,
+            "completed_at": created_at}
 
 
 def ended_round() -> list[dict]:
@@ -83,7 +92,7 @@ def running_round() -> list[dict]:
 
 
 def statuses_route(url: str, by_revision: dict[str, list[dict]] | None = None):
-    """The statuses listed for the revision a statuses URL names, or None.
+    """The check runs listed for the revision a check-runs URL names, or None.
 
     Every fake GitHub in the tests answers this through here. Absent a
     mapping, every revision's round has ended, which is what a reviewer that
@@ -91,13 +100,10 @@ def statuses_route(url: str, by_revision: dict[str, list[dict]] | None = None):
     """
     parsed = urlparse(url)
     parts = parsed.path.rstrip("/").split("/")
-    if len(parts) < 3 or parts[-1] != "statuses" or parts[-3] != "commits":
+    if len(parts) < 3 or parts[-1] != "check-runs" or parts[-3] != "commits":
         return None
-    if int(parse_qs(parsed.query).get("page", ["1"])[0]) != 1:
-        return []
-    if by_revision is None:
-        return ended_round()
-    return list(by_revision.get(parts[-2], []))
+    runs = ended_round() if by_revision is None else list(by_revision.get(parts[-2], []))
+    return {"total_count": len(runs), "check_runs": runs}
 
 
 class GraceClock:
@@ -307,6 +313,7 @@ __all__ = [
     "SUMMARY_BODY",
     "SUMMARY_COMMENT_ID",
     "GraceClock",
+    "greptile_summary",
     "ended_round",
     "install_grace_clock",
     "inline_comments",

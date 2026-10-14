@@ -357,7 +357,7 @@ class HeldCompletedWorkTests(unittest.TestCase):
         root = Path(directory.name)
         tasks = SQLiteTaskStore(root / "tasks.sqlite3")
         tasks.record(ExternalTask(
-            task_id="review:72:x", kind="external_review", service="coderabbit",
+            task_id="review:72:x", kind="external_review", service="greptile",
             subject_reference="pull/72@" + "a" * 40, state=TaskState.COMPLETED,
             requested_at=NOW - timedelta(hours=1), completed_at=NOW,
             conversation_id="c1",
