@@ -1402,6 +1402,34 @@ class DhlImportLifecycleTests(unittest.TestCase):
             [{"mailbox_id": "INBOX", "uid_validity": "777", "uid": "10"}],
         )
 
+    def test_an_email_whose_documents_were_unused_is_not_named(self) -> None:
+        """Greptile on #138: only an email the stage used may be filed.
+        Here a scanned air waybill from another email is left unused."""
+        self.mail.payloads["awb"] = ("AWB & INV.pdf", "application/pdf", b"%PDF-1.4 scanned")
+        result = self.executor({"documents": [
+            source_for(self.mail, "pre_worksheet", "13"),
+            source_for(self.mail, "pre_sad", "13"),
+            source_for(self.mail, "awb", "51"),
+        ]})
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(
+            [item["uid"] for item in result.values["source_mail"]], ["13"]
+        )
+
+    def test_a_mail_timeout_after_authorisation_keeps_the_completed_bill(self) -> None:
+        """Greptile on #138: the optional lookup must not replace the result."""
+        def timeout(*_args):
+            raise TimeoutError("imap read timed out")
+
+        self.mail.flagged_messages = timeout
+        executor = executor_for(self.mail, self.xero, processed_mailbox="FireFli/Processed")
+        executor({"documents": [source_for(self.mail, "worksheet", "11"),
+                                source_for(self.mail, "sad", "12")]})
+        result = executor({"documents": [source_for(self.mail, "invoice", "10")]})
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertTrue(result.values["completed"])
+        self.assertEqual(tuple(result.values["customs_mail"]), ())
+
     def test_a_missing_documents_email_never_affects_the_authorised_bill(self) -> None:
         self.mail.flagged = {}
         executor = executor_for(self.mail, self.xero, processed_mailbox="FireFli/Processed")

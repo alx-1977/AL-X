@@ -503,7 +503,11 @@ def build_dhl_executors(
         return ""
 
     def _mail(references: Sequence[MailReference]) -> tuple[dict[str, str], ...]:
-        """The distinct emails the documents came from."""
+        """The distinct emails the given documents came from.
+
+        Given only the documents a stage used, so an email whose attachments
+        were all left unused is never named and so never filed or flagged.
+        """
         seen: list[dict[str, str]] = []
         for reference in references:
             item = {
@@ -525,15 +529,17 @@ def build_dhl_executors(
         """
         if not processed_mailbox or not digests:
             return ()
+        # Any failure here, a timeout included, only leaves the email unnamed:
+        # it runs after authorisation and must never replace that result.
         try:
             candidates = mail.flagged_messages(processed_mailbox, "orange")
-        except MailAccessError:
+        except Exception:  # noqa: BLE001 - an optional lookup after the bill
             return ()
         found: list[MailReference] = []
         for reference in candidates:
             try:
                 attachments = mail.list_attachments(reference)
-            except MailAccessError:
+            except Exception:  # noqa: BLE001 - as above
                 continue
             if digests & {attachment.sha256 for attachment in attachments}:
                 found.append(reference)
@@ -692,7 +698,7 @@ def build_dhl_executors(
                 "bill": dict(final),
                 "attached": tuple(a.filename for _r, a, _p in documents),
                 "steps": tuple(steps),
-                "source_mail": _mail(references),
+                "source_mail": _mail([reference for reference, _a, _p in documents]),
             },
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
         )
@@ -1008,7 +1014,7 @@ def build_dhl_executors(
                 "bill": dict(final),
                 "attached": (attachment.filename,),
                 "steps": tuple(steps),
-                "source_mail": _mail(references),
+                "source_mail": _mail([invoice[0]]),
                 "customs_mail": _documents_mail(customs_digests),
             },
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
@@ -1270,7 +1276,7 @@ def build_dhl_executors(
                 "bill": dict(final),
                 "attached": (pdf_attachment.filename,),
                 "steps": tuple(steps),
-                "source_mail": _mail(references),
+                "source_mail": _mail([structured[0], invoice[0]]),
             },
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
         )
