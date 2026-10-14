@@ -707,6 +707,7 @@ def build_dhl_executors(
         contact_id: str,
         invoice: tuple[MailReference, Any, bytes],
         references: Sequence[MailReference],
+        also_used: Sequence[MailReference] = (),
     ) -> CapabilityResult:
         steps = ["read_documents"]
         _reference, attachment, payload = invoice
@@ -1014,7 +1015,8 @@ def build_dhl_executors(
                 "bill": dict(final),
                 "attached": (attachment.filename,),
                 "steps": tuple(steps),
-                "source_mail": _mail([invoice[0]]),
+                # The invoice, and the MyBill CSV that verified it, if any.
+                "source_mail": _mail([invoice[0], *also_used]),
                 "customs_mail": _documents_mail(customs_digests),
             },
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
@@ -1417,7 +1419,9 @@ def build_dhl_executors(
                     "the MyBill CSV and PDF do not identify the same invoice",
                     references=references,
                 )
-            return invoice_stage(contact_id, invoices[0], references)
+            return invoice_stage(
+                contact_id, invoices[0], references, also_used=(structured_customs[0][0],)
+            )
         if invoices and customs:
             return returned(
                 "",

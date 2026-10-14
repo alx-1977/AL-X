@@ -1416,6 +1416,18 @@ class DhlImportLifecycleTests(unittest.TestCase):
             [item["uid"] for item in result.values["source_mail"]], ["13"]
         )
 
+    def test_the_mybill_csv_email_that_verified_the_invoice_is_named(self) -> None:
+        """Greptile on #138: the CSV is used, so its email is filed too."""
+        self.customs()
+        result = self.executor({"documents": [
+            source_for(self.mail, "customs_csv", "60"),
+            source_for(self.mail, "invoice", "61"),
+        ]})
+        self.assertTrue(result.values["completed"], result.values)
+        self.assertEqual(
+            sorted(item["uid"] for item in result.values["source_mail"]), ["60", "61"]
+        )
+
     def test_a_mail_timeout_after_authorisation_keeps_the_completed_bill(self) -> None:
         """Greptile on #138: the optional lookup must not replace the result."""
         def timeout(*_args):
