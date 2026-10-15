@@ -499,9 +499,8 @@ class StandingScopeTests(unittest.TestCase):
             FILE_PROCESSED_MAIL_MESSAGE,
         ):
             with self.subTest(capability=capability_id):
-                # Authorised by a standing scope, so one turn does not spend it.
-                self.assertTrue(policies[capability_id].approval_required)
-                self.assertTrue(policies[capability_id].standing_scope_allowed)
+                # D-051: plain permission, so no turn ever spends it.
+                self.assertFalse(policies[capability_id].approval_required)
                 self.assertNotIn(capability_id, bound)
 
 

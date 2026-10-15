@@ -38,10 +38,16 @@
       </form>
       <footer>Content and credentials are never displayed</footer>
     </aside>
+    <div id="menubar" class="rt-bar menubar">
+      <span class="rt-bar__app">AL/X</span>
+      <span class="rt-bar__space"></span>
+      <time id="menubar-clock" class="rt-bar__clock"></time>
+    </div>
     <div id="presence" class="presence" role="status" hidden></div>
     <div id="tiles" class="alx-tile-stack"></div>
     <script type="module" src="/app.js"></script>
     <script type="module" src="/reader-tile.js"></script>
+    <script type="module" src="/menubar.js"></script>
     <script type="module" src="/presence.js"></script>
   </body>
 </html>

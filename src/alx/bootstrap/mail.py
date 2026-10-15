@@ -233,10 +233,8 @@ def mail_authority_policies() -> dict[str, AuthorityPolicy]:
     Named rather than inline so the declarations can be read without building
     a runtime, and so a test binds to the real policies instead of a copy.
 
-    The cleanup capabilities require an approval and allow a standing scope:
-    their authority is a scope that stays valid across turns, not what Friedl
-    said a moment ago. That distinction matters beyond this module - a rule
-    that treated them as turn-grounded stopped mail cleanup after one message.
+    The cleanup capabilities (mark read, flag, file, Trash) are hers under
+    plain permission since D-051: each can be undone.
     """
     return {
         SEARCH_MAIL_MESSAGES: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
@@ -246,31 +244,13 @@ def mail_authority_policies() -> dict[str, AuthorityPolicy]:
         ACKNOWLEDGE_MAIL_MESSAGE: AuthorityPolicy(
             frozenset({MAIL_OBSERVATION_PERMISSION})
         ),
-        MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(
-            frozenset({MAIL_SEEN_PERMISSION}),
-            approval_required=True,
-            standing_scope_allowed=True,
-        ),
-        MOVE_MAIL_MESSAGE_TO_TRASH: AuthorityPolicy(
-            frozenset({MAIL_TRASH_PERMISSION}),
-            approval_required=True,
-            standing_scope_allowed=True,
-        ),
-        # D-020 authorises filing a *processed* invoice. Granting it outright
-        # let any identified message be moved, so authority is instead derived
-        # from a capture that actually succeeded on that exact message.
-        # Flag colours follow the same rule: authority comes from a DHL
-        # import result naming the exact message and colour (D-020).
-        SET_MAIL_FLAG_COLOUR: AuthorityPolicy(
-            frozenset({MAIL_SEEN_PERMISSION}),
-            approval_required=True,
-            standing_scope_allowed=True,
-        ),
-        FILE_PROCESSED_MAIL_MESSAGE: AuthorityPolicy(
-            frozenset({MAIL_TRASH_PERMISSION}),
-            approval_required=True,
-            standing_scope_allowed=True,
-        ),
+        # D-051 (Friedl, 2026-10-15): mail housekeeping is hers. Marking read,
+        # flagging, filing and moving to Trash can all be undone (Trash is
+        # recoverable), so none of them waits for his approval any more.
+        MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(frozenset({MAIL_SEEN_PERMISSION})),
+        MOVE_MAIL_MESSAGE_TO_TRASH: AuthorityPolicy(frozenset({MAIL_TRASH_PERMISSION})),
+        SET_MAIL_FLAG_COLOUR: AuthorityPolicy(frozenset({MAIL_SEEN_PERMISSION})),
+        FILE_PROCESSED_MAIL_MESSAGE: AuthorityPolicy(frozenset({MAIL_TRASH_PERMISSION})),
     }
 
 

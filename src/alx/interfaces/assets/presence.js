@@ -1,5 +1,7 @@
 // Whether Friedl is here or away, as AL/X recorded it when he told her
-// (2026-10-15). A quiet indicator, not a control: she sets it.
+// (2026-10-15). A quiet indicator, not a control: she sets it. Like the BHL
+// item: the light first, green while he is here, grey while he is away, then
+// the figure; no words.
 const POLL_MS = 5000;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -19,9 +21,10 @@ function glyph() {
   return svg;
 }
 
-const label = document.createElement("span");
-const dot = document.createElement("i");
-root.append(glyph(), dot, label);
+// The same status light as the BHL item.
+const light = document.createElement("span");
+light.className = "rt-light";
+root.append(light, glyph());
 
 function clock(iso) {
   const at = new Date(iso);
@@ -39,10 +42,22 @@ function show(presence) {
   const since = presence.since ? clock(presence.since) : "";
   root.hidden = false;
   root.dataset.state = away ? "away" : "here";
-  label.textContent = away ? "Away" : "";
   root.title = `${away ? "Away" : "Here"}${since ? ` since ${since}` : ""}`;
   root.setAttribute("aria-label", root.title);
 }
+
+// In the menu bar, as a menu bar item: just left of the BHL item when it is
+// there, otherwise just left of the clock. Moved, never copied.
+function place() {
+  const bar = document.getElementById("menubar");
+  if (!bar) return;
+  const before = bar.querySelector(".rt-bar__item") || bar.querySelector(".rt-bar__clock");
+  if (root.nextSibling !== before || root.parentNode !== bar) bar.insertBefore(root, before);
+  root.classList.add("presence--bar");
+}
+place();
+new MutationObserver(place).observe(document.getElementById("menubar") || document.body,
+                                    { childList: true });
 
 async function poll() {
   try {

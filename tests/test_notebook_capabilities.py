@@ -159,6 +159,22 @@ class NotebookCapabilityTest(NotebookFixture):
         result = self.capabilities.search("call-x", {"query_id": "q-1"})
         self.assertIs(result.state, CapabilityResultState.FAILED)
         self.assertEqual(result.failure['code'], "arguments_unusable")
+        # She is told why, so she can ask again differently (2026-10-15).
+        self.assertIn("scope", result.failure["reason"])
+
+    def test_a_refused_search_says_what_was_wrong(self) -> None:
+        self.open()
+        for values, words in (
+            ({"thread_ids": ["t-1"]}, "query_id is required"),
+            ({"query_id": "q-1", "recorded_after": "2026-10-01T00:00:00+00:00"},
+             "both recorded_after and recorded_before"),
+            ({"query_id": "q-1", "thread_ids": ["t-1"], "kinds": ["diary"]},
+             "diary"),
+        ):
+            with self.subTest(values=values):
+                result = self.capabilities.search("call-x", values)
+                self.assertEqual(result.failure["code"], "arguments_unusable")
+                self.assertIn(words, result.failure["reason"])
 
     def test_search_returns_only_scoped_entries(self) -> None:
         self.open()

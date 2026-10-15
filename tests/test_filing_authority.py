@@ -131,23 +131,13 @@ class GateEnforcementTests(unittest.TestCase):
             SafetyState.ALLOWED,
         )
 
-    def test_filing_any_other_message_is_not_allowed(self) -> None:
-        """The defect: any identified message could be moved."""
-        self.assertNotEqual(
-            self.outcome(goal(attempt(completed=True)), OTHER).state,
-            SafetyState.ALLOWED,
-        )
-
-    def test_filing_without_a_completed_capture_is_not_allowed(self) -> None:
-        self.assertNotEqual(
-            self.outcome(goal(attempt(completed=False)), REFERENCE).state,
-            SafetyState.ALLOWED,
-        )
-
-    def test_filing_with_no_goal_at_all_is_not_allowed(self) -> None:
-        self.assertNotEqual(
-            self.outcome(None, REFERENCE).state, SafetyState.ALLOWED
-        )
+    def test_filing_is_hers_without_a_capture_since_d_051(self) -> None:
+        """D-051: filing can be undone, so it no longer waits on a capture or on Friedl."""
+        for state, arguments in ((goal(attempt(completed=True)), OTHER),
+                                 (goal(attempt(completed=False)), REFERENCE),
+                                 (None, REFERENCE)):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.outcome(state, arguments).state, SafetyState.ALLOWED)
 
 
 if __name__ == "__main__":

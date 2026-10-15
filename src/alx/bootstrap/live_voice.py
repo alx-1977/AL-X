@@ -114,7 +114,12 @@ from alx.interfaces import (
 from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
 from alx.observability.usage import bill_budget_for
 from alx.memories import SQLiteMemoryStore
-from alx.safety import AuthorityContext, SafetyGate
+from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
+from alx.observability.self_record import SQLiteTraceRecord, read_log
+from alx.tools.self_diagnosis import (
+    DEFINITIONS as SELF_DIAGNOSIS_DEFINITIONS,
+    build_self_diagnosis_executors,
+)
 
 
 def _bill_budget_for_turn(
@@ -366,6 +371,10 @@ async def run(repository_root: Path) -> None:
     storage_root.mkdir(parents=True, exist_ok=True)
 
     diagnostics = VoiceDiagnosticFeed()
+    # D-050: her execution trace is kept, not only shown, so she can read
+    # back what she did and what failed.
+    trace_record = SQLiteTraceRecord(storage_root / "trace.sqlite3")
+    diagnostics.subscribe(lambda _owner, event: trace_record.record(event))
     activity = VoiceActivityStatus(diagnostics)
     usage = SQLiteUsageRecorder(storage_root / "reasoning-usage.sqlite3")
     # The Core names the conversation on every budget check, so a dispatch can
@@ -531,6 +540,23 @@ async def run(repository_root: Path) -> None:
     policies.update(continuity_runtime.policies)
     executors.update(continuity_runtime.executors)
     permissions.update(continuity_runtime.permissions)
+
+    # D-050: she reads her own trace and runtime log, to see for herself what
+    # went wrong. Read-only, content-free records; plain permission.
+    register(SELF_DIAGNOSIS_DEFINITIONS, TraceSubsystem.CORE)
+    policies.update({definition.capability_id: AuthorityPolicy(frozenset({"self.read"}))
+                     for definition in SELF_DIAGNOSIS_DEFINITIONS})
+    executors.update(build_self_diagnosis_executors(
+        trace_record,
+        # Where the launcher (scripts/alx) writes the log, whatever the
+        # storage root is set to.
+        lambda start, end, level, contains, limit: read_log(
+            (repository_root / ".alx/runtime/live_voice.log.prev",
+             repository_root / ".alx/runtime/live_voice.log"),
+            start, end, level, contains, limit),
+        current_call_id.get,
+    ))
+    permissions.add("self.read")
 
     # D-024 Phases 2 and 5. The ledgers and the source are constructed here,
     # once, so the paid path is real rather than something that only exists

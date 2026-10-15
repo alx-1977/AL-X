@@ -86,6 +86,22 @@ class PresenceIconTests(unittest.TestCase):
             raise RuntimeError("store")
         self.assertEqual(self.get(broken).status_code, 503)
 
+    def test_the_icon_sits_in_the_menu_bar_like_the_bhl_item(self) -> None:
+        script = (ASSETS / "presence.js").read_text()
+        self.assertIn('document.getElementById("menubar")', script)
+        # The light first, then the figure, and no words.
+        self.assertIn('light.className = "rt-light";', script)
+        self.assertIn("root.append(light, glyph());", script)
+        self.assertNotIn("textContent", script)  # only the hover tip says "Away since …"
+        page = (ASSETS / "index.html").read_text()
+        self.assertIn('id="menubar"', page)
+        self.assertIn('src="/menubar.js"', page)
+
+    def test_the_bar_text_follows_what_is_behind_it(self) -> None:
+        script = (ASSETS / "menubar.js").read_text()
+        self.assertIn('item.dataset.ink = "dark"', script)
+        self.assertIn('item.dataset.ink = "light"', script)
+
     def test_the_icon_is_on_the_page(self) -> None:
         page = (ASSETS / "index.html").read_text()
         self.assertIn('id="presence"', page)
