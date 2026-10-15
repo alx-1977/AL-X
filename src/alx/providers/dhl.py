@@ -130,8 +130,24 @@ def _runs_by_page(payload: bytes) -> list[list[_Run]]:
                 raise _BoundExceeded("worksheet_content_too_large")
         for page_index, page in enumerate(reader.pages):
             current: list[_Run] = []
+            # The origin the latest text-positioning operator set. Copied out
+            # because pypdf keeps mutating the matrix it hands the callback.
+            placed: list[tuple[float, float] | None] = [None]
+
+            def after_operator(operator, _operands, _cm, tm, *, _placed=placed) -> None:
+                if operator in {b"Tm", b"Td", b"TD", b"T*", b"'", b'"'}:
+                    _placed[0] = (float(tm[4]), float(tm[5]))
 
             def visitor(text, _cm, tm, _font, _size, *, _page=page_index) -> None:
+                # A horizontal move inserts one leading space and then reports
+                # the previous fragment's origin. The positioning operator has
+                # already stored the real one, and it belongs to this call
+                # only: pypdf also visits with empty text when a text object
+                # begins, and a later spaced fragment keeps the matrix pypdf
+                # reports. Reusing the stored origin would drop that fragment
+                # onto an earlier label.
+                origin = placed[0]
+                placed[0] = None
                 stripped = text.strip()
                 if not stripped:
                     return
@@ -141,15 +157,20 @@ def _runs_by_page(payload: bytes) -> list[list[_Run]]:
                 if total_runs[0] >= _WORKSHEET_RUNS:
                     raise _BoundExceeded("worksheet_too_many_runs")
                 total_runs[0] += 1
+                x, y = float(tm[4]), float(tm[5])
+                if text[:1].isspace() and origin is not None:
+                    x, y = origin
                 current.append(
                     _Run(
-                        round(tm[5], 1) - _page * 100_000,
-                        round(tm[4], 1),
+                        round(y, 1) - _page * 100_000,
+                        round(x, 1),
                         stripped,
                     )
                 )
 
-            page.extract_text(visitor_text=visitor)
+            page.extract_text(
+                visitor_text=visitor, visitor_operand_after=after_operator
+            )
             pages.append(current)
     except _BoundExceeded as error:
         exceeded = error.code
@@ -604,11 +625,24 @@ def _labelled_date(
 
     An INVOICE DATE is only that label's value. A shipment run whose text is
     DATE, or DATE plus other column headings, is not an anchor. A date on
-    the DUE DATE baseline is not one, and neither is an inline match that
-    reaches the due date's value by passing that label. Two INVOICE DATE
-    baselines that name different days yield nothing; the day they agree on
-    is kept when the due date names it too. An impossible calendar date
-    yields nothing.
+    the DUE DATE baseline is not one. An inline match is not one either when
+    the gap between the label and the date passes DUE DATE or a bare DATE
+    heading; a date read from the runs still wins over that joined text.
+    Before a date token is given to an invoice label, a token that belongs
+    to a bare DATE heading is set aside. That is a run whose own text is
+    DATE, a day written at or after the DATE word in that run (`DATE
+    02/01/2026`, or both days in one run), or a day to the right of such a
+    heading on that heading's baseline when no INVOICE DATE label stands
+    between them. A day written before the DATE word in the same run stays
+    with the invoice label. A shipment column to the right of the invoice
+    label is set aside, and that only stops the joined-text window from
+    filling a label that has no day; a day already read for the label is
+    kept. Each remaining date token belongs to the single nearest INVOICE
+    DATE label within three points and to its right, by baseline distance
+    then horizontal distance. A date inside a label's own text stays with
+    that label. Two such labels that name different days yield nothing,
+    including labels a point or two apart; the day they agree on is kept.
+    An impossible calendar date yields nothing.
     """
 
     def read(token: str) -> str:
@@ -646,17 +680,20 @@ def _labelled_date(
     )
     inline_value = ""
     if own is not None:
-        between = joined[own.start():own.start(1)]
+        # The label's own word DATE is not part of this gap. A bare DATE
+        # heading here is the shipment column, the same kind of miss as
+        # reading through DUE DATE onto that label's value.
+        gap = joined[own.start() + len(label):own.start(1)]
         due = re.search(
             r"DUE DATE[^0-9]{0,15}(" + _DATE_TOKEN.pattern + r")",
             joined,
             re.IGNORECASE,
         )
-        # The window ran through the due-date label and landed on its value.
         lands_on_due = bool(
-            re.search(r"DUE DATE", between, re.IGNORECASE)
+            re.search(r"DUE DATE", gap, re.IGNORECASE)
         ) or (due is not None and own.start(1) == due.start(1))
-        if not (seeking_invoice and lands_on_due):
+        lands_on_bare_date = bool(re.search(r"\bDATE\b", gap, re.IGNORECASE))
+        if not (seeking_invoice and (lands_on_due or lands_on_bare_date)):
             inline_value = read(own.group(1))
 
     def belongs_to_due(run: _Run) -> bool:
@@ -671,51 +708,169 @@ def _labelled_date(
         return False
 
     found: list[str] = []
-    # An INVOICE DATE anchor that states a due-date value, or a value that
-    # is not a real day, has been read. The inline window must not fill in
-    # a different date afterwards.
+    # An INVOICE DATE anchor that states a due-date value, a shipment DATE
+    # value, or a value that is not a real day, has been read. The inline
+    # window must not fill in a different date afterwards.
     blocked = False
-    for anchor in runs:
-        if not is_label(anchor.text, label):
-            continue
-        candidates: list[tuple[float, int, str, _Run]] = []
-        for match in _DATE_TOKEN.finditer(anchor.text):
-            prefix = " ".join(anchor.text[: match.start()].split()).upper()
-            if prefix == label.upper():
-                candidates.append(
-                    (anchor.x, match.start(), match.group(0), anchor)
-                )
-                break
+
+    if seeking_invoice:
+        # baseline, horizontal distance, token start, token, run. The token
+        # text and the run are not ordered: a tie must not collapse two days
+        # onto the lexicographically smaller one, and comparing a run raises
+        # TypeError.
+        owned: dict[int, list[tuple[float, float, int, str, _Run]]] = {}
+        anchors: list[_Run] = []
+        for anchor in runs:
+            if not is_label(anchor.text, label):
+                continue
+            anchors.append(anchor)
+            owned[id(anchor)] = []
+            for match in _DATE_TOKEN.finditer(anchor.text):
+                prefix = " ".join(anchor.text[: match.start()].split()).upper()
+                if prefix == label.upper():
+                    owned[id(anchor)].append(
+                        (0.0, 0.0, match.start(), match.group(0), anchor)
+                    )
+                    break
+        anchor_ids = {id(anchor) for anchor in anchors}
+
+        def belongs_to_bare_date(run: _Run, token_at: int) -> bool:
+            """A shipment DATE heading owns this date token.
+
+            The heading is the run itself when the token is written at or
+            after the DATE word (`DATE` or `DATE 02/01/2026`), or a bare DATE
+            to the token's left on that heading's baseline. A day written
+            before the DATE word in the same run is the invoice value. An
+            INVOICE DATE label between a heading and the token keeps the
+            value, so a shipment column further left does not take this row.
+            """
+            if is_label(run.text, "DATE"):
+                word = re.search(r"\bDATE\b", run.text, re.IGNORECASE)
+                if word is None or token_at >= word.start():
+                    return True
+            for heading in runs:
+                if heading is run or not is_label(heading.text, "DATE"):
+                    continue
+                if run.x <= heading.x:
+                    continue
+                if abs(run.y - heading.y) > _BASELINE_TOLERANCE:
+                    continue
+                if any(
+                    heading.x < anchor.x < run.x
+                    and abs(anchor.y - run.y) <= _BASELINE_TOLERANCE
+                    for anchor in anchors
+                ):
+                    continue
+                return True
+            return False
+
         for run in runs:
-            if run is anchor or run.x <= anchor.x:
+            # A date inside a label stays with that label, so the label run
+            # is not offered to a neighbour.
+            if id(run) in anchor_ids:
                 continue
-            if abs(run.y - anchor.y) > _BASELINE_TOLERANCE:
+            matches = list(_DATE_TOKEN.finditer(run.text))
+            if not matches:
                 continue
-            match = _DATE_TOKEN.search(run.text)
-            if match is None:
+            for match in matches:
+                if belongs_to_bare_date(run, match.start()):
+                    # Joined text can list this day with no DATE word between
+                    # the label and the token. Once the runs name it as a
+                    # shipment day, that window must not fill an empty label.
+                    # A day already read for the label is kept below.
+                    if any(
+                        run.x > anchor.x
+                        and abs(run.y - anchor.y) <= _BASELINE_TOLERANCE
+                        for anchor in anchors
+                    ):
+                        blocked = True
+                    continue
+                best_rank: tuple[float, float] | None = None
+                best_anchors: list[_Run] = []
+                for anchor in anchors:
+                    if run.x <= anchor.x:
+                        continue
+                    baseline = abs(run.y - anchor.y)
+                    if baseline > _BASELINE_TOLERANCE:
+                        continue
+                    rank = (baseline, run.x - anchor.x)
+                    if best_rank is None or rank < best_rank:
+                        best_rank = rank
+                        best_anchors = [anchor]
+                    elif rank == best_rank:
+                        best_anchors.append(anchor)
+                # No single nearest label: the date names neither row.
+                if len(best_anchors) != 1 or best_rank is None:
+                    continue
+                owned[id(best_anchors[0])].append(
+                    (
+                        best_rank[0],
+                        best_rank[1],
+                        match.start(),
+                        match.group(0),
+                        run,
+                    )
+                )
+        for anchor in anchors:
+            candidates = owned[id(anchor)]
+            if not candidates:
                 continue
-            candidates.append((run.x, match.start(), match.group(0), run))
-        if not candidates:
-            continue
-        # The run itself is not ordered. Two agreeing dates in the same
-        # column tie on x, token start and token; comparing the run raises
-        # TypeError instead of keeping the day they agree on.
-        _x, _start, token, chosen = min(
-            candidates, key=lambda candidate: candidate[:3]
-        )
-        # The nearest token is the one this label states. A due-date value
-        # there is not reused, and a token that is not a real day is not
-        # replaced with the next date along the row.
-        if seeking_invoice and chosen is not anchor and belongs_to_due(chosen):
-            blocked = True
-            continue
-        parsed = read(token)
-        if parsed:
-            found.append(parsed)
-        elif seeking_invoice:
-            blocked = True
+            best_key = min((item[0], item[1], item[2]) for item in candidates)
+            nearest = [
+                item for item in candidates
+                if (item[0], item[1], item[2]) == best_key
+            ]
+            if any(
+                item[4] is not anchor and belongs_to_due(item[4])
+                for item in nearest
+            ):
+                blocked = True
+                continue
+            # The nearest token is the one this label states. A due-date
+            # value there is not reused, and a token that is not a real day
+            # is not replaced with the next date along the row.
+            parsed_days = [read(item[3]) for item in nearest]
+            if any(not day for day in parsed_days):
+                blocked = True
+                continue
+            found.extend(dict.fromkeys(parsed_days))
+    else:
+        for anchor in runs:
+            if not is_label(anchor.text, label):
+                continue
+            candidates: list[tuple[float, int, str, _Run]] = []
+            for match in _DATE_TOKEN.finditer(anchor.text):
+                prefix = " ".join(anchor.text[: match.start()].split()).upper()
+                if prefix == label.upper():
+                    candidates.append(
+                        (anchor.x, match.start(), match.group(0), anchor)
+                    )
+                    break
+            for run in runs:
+                if run is anchor or run.x <= anchor.x:
+                    continue
+                if abs(run.y - anchor.y) > _BASELINE_TOLERANCE:
+                    continue
+                match = _DATE_TOKEN.search(run.text)
+                if match is None:
+                    continue
+                candidates.append((run.x, match.start(), match.group(0), run))
+            if not candidates:
+                continue
+            # The run itself is not ordered. Two agreeing dates in the same
+            # column tie on x, token start and token; comparing the run raises
+            # TypeError instead of keeping the day they agree on.
+            _x, _start, token, chosen = min(
+                candidates, key=lambda candidate: candidate[:3]
+            )
+            parsed = read(token)
+            if parsed:
+                found.append(parsed)
     if len(set(found)) > 1:
         return ""
+    # A shipment day to the right of the label only stops the inline window
+    # from filling a label the runs left empty. It does not drop a day those
+    # runs already gave the label.
     if found:
         return found[0]
     if blocked:
@@ -766,9 +921,10 @@ def parse_invoice_pdf(payload: bytes) -> dict[str, Any]:
     runs = [run for page in pages for run in page]
     due_date = _labelled_date(joined, "DUE DATE", runs)
     # Only a run whose text is INVOICE DATE supplies the invoice date. A
-    # shipment column headed DATE, and the due date, stay out of it — the
-    # inline window included, when that window reads through into the due
-    # date. The same day stated for both labels still stands.
+    # shipment column headed DATE, including one to the right of the label,
+    # and the due date, stay out of it — the inline window included, when
+    # that window reads through either heading. Two INVOICE DATE labels keep
+    # their own days, even a point apart.
     invoice_date = _labelled_date(joined, "INVOICE DATE", runs)
 
     return {
