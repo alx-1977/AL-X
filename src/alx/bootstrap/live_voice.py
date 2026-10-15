@@ -821,7 +821,6 @@ async def run(repository_root: Path) -> None:
         providers.coding,
         current_call_id.get,
         session=providers.coding_session,
-        reviewer=providers.coding_reviewer,
         activity_sink=activity.set,
         telemetry_sink=activity.publish_coding,
         repository=coding_repository,

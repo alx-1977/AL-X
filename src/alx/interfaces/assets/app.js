@@ -25,7 +25,6 @@ const phaseLabels = {
 const activityLabels = {
   reasoning: "Reasoning",
   coding: "Coding",
-  reviewing: "Reviewing",
 };
 
 let socket;
@@ -197,8 +196,6 @@ let backgroundJob;
 const codingStageLabels = {
   plan: "Planning",
   execution: "Coding",
-  correction: "Correcting",
-  review: "Local review",
   verify: "Verifying",
   test: "Testing",
   commit: "Committing",

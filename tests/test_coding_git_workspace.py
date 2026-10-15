@@ -1234,7 +1234,7 @@ class CommitEvidenceReachesTheOutcome(unittest.TestCase):
 
         outcome = CodingOutcome(
             "succeeded", "repaired", ("target.py",), (), True, True,
-            "", "", (), False, datetime.now(UTC),
+            "", "", (), datetime.now(UTC),
             baseline=GitWorkspaceState("main", "a" * 40),
             commit=CodingCommit("repair/target", "b" * 40, ("target.py",), True),
         )
@@ -1254,7 +1254,7 @@ class CommitEvidenceReachesTheOutcome(unittest.TestCase):
 
         outcome = CodingOutcome(
             "succeeded", "repaired", ("target.py",), (), True, True,
-            "", "", (), False, datetime.now(UTC),
+            "", "", (), datetime.now(UTC),
         )
         values = outcome.durable_values()
         self.assertNotIn("branch", values)

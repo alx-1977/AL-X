@@ -500,6 +500,32 @@ class ResultIdentityTests(PlanHarness):
         self.assertEqual(self.names(), ["coding"])
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
 
+    def test_stopping_the_running_job_is_admitted_while_its_step_is_in_flight(self):
+        """2026-10-15: AL/X called stop_coding_job twice and both were refused.
+
+        The goal running the coding step admits no other call, and the stop
+        was refused as just another call, so only killing the process could
+        end a job that had been coding for two hours.
+        """
+        from alx.tools.coding import STOP_DEFINITION
+
+        agent = self.installed(step("coding"), agent=self.agent(
+            Reasoner(install(plan(step("coding")))),
+            definitions=(*DEFINITIONS, STOP_DEFINITION),
+        ))
+        (job,) = agent.advance_due_plans()
+        reasoner = Reasoner(
+            SELECT,
+            AgentDecision(call=CapabilityCall("stop", "stop_coding_job", {}),
+                          goal_id="goal"),
+            AgentDecision(response="Stopped.", goal_id="goal"),
+        )
+        self.person(self.same_process(agent, reasoner))
+        self.assertIn("stop_coding_job", self.names())
+        self.assertFalse([item for context in reasoner.contexts
+                          for item in context.refused_calls
+                          if item.get("reason") == "plan_step_in_flight"])
+
     def test_every_dispatch_has_its_own_identity_written_before_the_call(self):
         agent = self.installed(step("ci", wait=10))
         self.outputs["ci"] = [PENDING, PENDING]

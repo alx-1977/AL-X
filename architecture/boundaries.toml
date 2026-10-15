@@ -321,3 +321,10 @@ description = "Particle data operations per device per day are read from the usa
 entry = "tools/particle.py::build_particle_executors.<locals>.read_usage"
 forbidden = []
 
+[[outcomes]]
+id = "coding.job_runs_and_is_verified"
+description = "One coding job is planned, carried out by one native session, and verified by AL/X."
+entry = "providers/coding_agent.py::CodingAgent.run"
+# D-052. A second model reviewed the diff and drove correction sessions before
+# verification; it was deleted, not switched off.
+forbidden = ["_local_review_loop", "alx_coding_local_review", "LocalReviewFinding", "ReviewInfrastructureAttempt", "coding_reviewer"]

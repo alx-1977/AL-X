@@ -1230,10 +1230,15 @@ class CoreAgent:
                     response_turn_id=reply_turn,
                 )
 
-            if snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE:
+            if (snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE
+                    or (decision.call.capability_id == _STOP_CODING_JOB
+                        and self._has_pending_dispatch(snapshot.state))):
                 # Only a side-effect-free call, or stopping the running coding
                 # job, reaches here; any other effectful call without an
-                # active goal was stopped above.
+                # active goal was stopped above. A stop from the goal whose
+                # step is running the job is dispatched here too: that goal
+                # holds its one unresolved dispatch, the job itself, and the
+                # job's own result is what records the stop.
                 if any(item.call is not None and item.call.call_id == decision.call.call_id
                        for item in transient_attempts):
                     if self._already_refused(
@@ -1909,6 +1914,11 @@ class CoreAgent:
         impossible rather than merely refused, and reasoning again from the
         same state cannot make it possible.
         """
+        if call.capability_id == _STOP_CODING_JOB:
+            # Stopping the running job is the one call its own goal must still
+            # admit while that job runs. Blocking it here as an in-flight
+            # dispatch is what left AL/X unable to stop a job on 2026-10-15.
+            return None
         if state is not None and self._has_pending_dispatch(state):
             # A planned step is running on this goal in the background. One
             # dispatch at a time per goal; the plan's own result decides
@@ -1919,8 +1929,6 @@ class CoreAgent:
             SideEffect.NONE,
             SideEffect.ATTENTION_STATE,
         ):
-            return None
-        if state is None and call.capability_id == _STOP_CODING_JOB:
             return None
         if state is None or state.status is not GoalStatus.ACTIVE:
             return "active_goal_required"
@@ -3495,6 +3503,8 @@ class CoreAgent:
                 failure.get("code") == "session_failed"
                 and failure.get("reason_code") == "session_timeout"
             )
+            # Local-reviewer transport failures, recorded before D-052
+            # removed the reviewer, never reached a judgement on the work.
             and not (
                 failure.get("code") == "review_failed"
                 and failure.get("review_classification") == "infrastructure"

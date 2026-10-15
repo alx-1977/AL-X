@@ -108,8 +108,8 @@ class VoiceActivityStatus:
         self._lock = Lock()
 
     def set(self, value: str) -> None:
-        if value not in {"reasoning", "coding", "reviewing"}:
-            raise ValueError("activity must be reasoning, coding, or reviewing")
+        if value not in {"reasoning", "coding"}:
+            raise ValueError("activity must be reasoning or coding")
         with self._lock:
             if self._value == value:
                 return
@@ -178,7 +178,6 @@ class VoiceActivityStatus:
             "model": telemetry.model,
             "elapsed_seconds": elapsed, "phase_elapsed_seconds": phase_elapsed,
             "last_activity_seconds": age, "attempt": telemetry.attempt,
-            "correction_cycle": telemetry.correction_cycle,
             "in_flight": telemetry.in_flight, "waiting": telemetry.waiting,
             "terminal": telemetry.terminal, "outcome": telemetry.outcome,
             "owner_alive": owner_running, "unresponsive": unresponsive,

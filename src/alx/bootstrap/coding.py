@@ -61,7 +61,6 @@ def build_coding_runtime(
     call_id_source: Callable[[], str],
     agent: CodingAgent | None = None,
     session: CodingSession | None = None,
-    reviewer: ReasoningModel | None = None,
     activity_sink: Callable[[str], None] | None = None,
     telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
     repository: Path | None = None,
@@ -69,17 +68,15 @@ def build_coding_runtime(
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
 
-    Planning, execution, review and the configured canonical repository are
-    all required. Missing any one leaves the capability honestly absent.
+    Planning, execution and the configured canonical repository are all
+    required; missing any one leaves the capability honestly absent. There is
+    no reviewing model (D-052).
     """
     if not enabled:
         LOGGER.info("Coding agent is not enabled: no coding capability")
         return None
     if agent is None and model is None:
         LOGGER.info("Coding agent has no model: no coding capability")
-        return None
-    if agent is None and reviewer is None:
-        LOGGER.info("Coding agent has no reviewer model: no coding capability")
         return None
     if agent is None and session is None:
         LOGGER.info("Coding agent has no session: no coding capability")
@@ -89,7 +86,7 @@ def build_coding_runtime(
         return None
     try:
         selected = agent or CodingAgent(
-            model, session, reviewer, activity_sink, telemetry_sink,
+            model, session, activity_sink, telemetry_sink,
             repository=repository,
         )
     except CodingError as error:

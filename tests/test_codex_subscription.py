@@ -22,6 +22,10 @@ from alx.config.settings import RuntimeSettings  # noqa: E402
 from alx.contracts import ModelMessage, ModelRequest, ModelRole  # noqa: E402
 from alx.providers import CodexSubscriptionReasoningModel, OpenAIReasoningModel  # noqa: E402
 from alx.contracts.coding import CodingError  # noqa: E402
+from alx.providers.codex_coding_session import (  # noqa: E402
+    CodexCodingSession,
+    permission_profile,
+)
 from alx.providers.coding_process import (  # noqa: E402
     CodingCancellation,
     _deliver_input,
@@ -255,18 +259,17 @@ class LargeInputReachesEndOfFileTests(unittest.TestCase):
         self.assertLess(elapsed, 10)
 
 
-class CodexSubscriptionReviewerCompositionTests(unittest.TestCase):
-    def test_reviewer_selection_needs_no_openai_api_key_or_openai_adapter(self) -> None:
+class CodexCodingCompositionTests(unittest.TestCase):
+    def test_codex_coding_needs_no_openai_api_key_or_openai_adapter(self) -> None:
+        """D-052: Codex plans and codes; nothing else reviews."""
         environment = {
             "ALX_REASONING_PROVIDER": "claude_subscription",
             "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
             "ALX_REASONING_MODEL": "claude-haiku-4-5",
             "ALX_CODING_ENABLED": "true",
-            "ALX_CODING_PROVIDER": "grok_subscription",
-            "ALX_CODING_MODEL": "grok-4.6",
-            "ALX_CODING_REVIEWER_PROVIDER": "codex_subscription",
-            "ALX_CODING_REVIEWER_MODEL": "gpt-5.6-luna",
-            "ALX_CODING_REVIEWER_EFFORT": "high",
+            "ALX_CODING_PROVIDER": "codex_subscription",
+            "ALX_CODING_MODEL": "gpt-5.6-luna",
+            "ALX_CODING_EFFORT": "high",
             "ALX_STT_PROVIDER": "cartesia",
             "ALX_STT_MODEL": "stt-model",
             "ALX_STT_API_KEY": "stt-secret",
@@ -287,7 +290,109 @@ class CodexSubscriptionReviewerCompositionTests(unittest.TestCase):
             patch("alx.bootstrap.providers.codex_subscription_cli_present", return_value=True),
         ):
             providers = build_runtime_providers(RuntimeSettings.from_environment(environment))
-        self.assertIsInstance(providers.coding_reviewer, CodexSubscriptionReasoningModel)
-        self.assertNotIsInstance(providers.coding_reviewer, OpenAIReasoningModel)
-        self.assertEqual(providers.coding_reviewer._model, "gpt-5.6-luna")
-        self.assertEqual(providers.coding_reviewer._effort, "high")
+        self.assertIsInstance(providers.coding, CodexSubscriptionReasoningModel)
+        self.assertNotIsInstance(providers.coding, OpenAIReasoningModel)
+        self.assertEqual(providers.coding._model, "gpt-5.6-luna")
+        self.assertEqual(providers.coding._effort, "high")
+        self.assertIsInstance(providers.coding_session, CodexCodingSession)
+        self.assertTrue(providers.coding_session.has_terminal)
+        self.assertEqual(providers.coding_session.model_name, "gpt-5.6-luna")
+        self.assertFalse(hasattr(providers, "coding_reviewer"))
+
+
+class CodexCodingSessionTests(unittest.TestCase):
+    """D-052: Codex as the coding session, inside its own kernel sandbox."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.parent = Path(directory.name).resolve()
+        self.worktree = self.parent / "repo"
+        self.worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.worktree, check=True)
+        self.home = self.parent / "job" / "home"
+        self.home.mkdir(parents=True)
+        self.session = CodexCodingSession(
+            "gpt-5.6-luna", stall_seconds=60, effort="high",
+            environment={"PATH": "/bin", "HOME": str(self.parent),
+                         "OPENAI_API_KEY": "metered", "CODEX_API_KEY": "metered"},
+        )
+
+    def _prepare(self, blocked=()):
+        from types import SimpleNamespace
+        with patch("alx.providers.codex_coding_session.shutil.which",
+                   return_value="/opt/tool/bin/codex"):
+            self.session.prepare_home(
+                self.home, self.worktree, SimpleNamespace(blocked_paths=blocked))
+        return json.loads((self.home / "permissions.json").read_text())
+
+    def test_the_profile_denies_git_credentials_blocked_paths_and_network(self) -> None:
+        profile = self._prepare(blocked=("secrets/vault.txt",))
+        filesystem = profile["filesystem"]
+        self.assertEqual(profile["extends"], ":workspace")
+        self.assertEqual(filesystem[":root"], "deny")
+        self.assertEqual(filesystem[str(self.worktree / ".git")], "deny")
+        self.assertEqual(filesystem[str(self.worktree / "secrets/vault.txt")], "deny")
+        self.assertEqual(filesystem[":workspace_roots"]["**/.env"], "deny")
+        self.assertEqual(filesystem[":workspace_roots"]["**/auth.json"], "deny")
+        self.assertEqual(filesystem[str(self.home / "tmp")], "write")
+        self.assertEqual(profile["network"], {"enabled": False})
+        # Nothing outside the job, the runtime and the CLI is granted.
+        granted = {key for key, value in filesystem.items()
+                   if value in ("read", "write") and key.startswith("/")}
+        self.assertEqual(granted, {
+            str(self.home / "tmp"), str(self.session._runtime),
+            "/opt/tool/bin", "/opt/tool",
+        })
+
+    def test_the_command_ignores_personal_config_and_keeps_the_task_off_argv(self) -> None:
+        self._prepare()
+        argv = self.session.command(self.home.parent / "briefing.txt", self.worktree)
+        self.assertIn("--ignore-user-config", argv)
+        self.assertIn('default_permissions="alx_coding_job"', argv)
+        self.assertIn('approval_policy="never"', argv)
+        self.assertIn('web_search="disabled"', argv)
+        self.assertIn('model_reasoning_effort="high"', argv)
+        self.assertEqual(argv[-1], "-")
+        self.assertTrue(self.session.briefing_on_stdin())
+        self.assertTrue(self.session.has_terminal)
+
+    def test_a_missing_profile_refuses_rather_than_running_open(self) -> None:
+        with self.assertRaises(CodingError) as raised:
+            self.session.command(self.home.parent / "briefing.txt", self.worktree)
+        self.assertEqual(raised.exception.code, "sandbox_unusable")
+
+    def test_no_metered_key_reaches_the_session(self) -> None:
+        environment = self.session.child_environment(self.home)
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertNotIn("CODEX_API_KEY", environment)
+        self.assertEqual(environment["TMPDIR"], str(self.home / "tmp"))
+
+    def test_the_stream_is_read_for_its_last_message(self) -> None:
+        stream = "\n".join(json.dumps(event) for event in (
+            {"type": "thread.started"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "x" * 50}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Fixed the date."}},
+            {"type": "turn.completed", "usage": {}},
+        ))
+        kept = self.session.retained_output(stream.splitlines())
+        self.assertNotIn("command_execution", kept)
+        result = self.session.read_result(kept)
+        self.assertTrue(result.completed)
+        self.assertEqual(result.report, "Fixed the date.")
+
+    def test_an_unfinished_or_failed_stream_is_a_failed_session(self) -> None:
+        with self.assertRaises(CodingError) as unfinished:
+            self.session.read_result(json.dumps({"type": "turn.started"}))
+        self.assertEqual(unfinished.exception.details["reason_code"], "session_end_missing")
+        with self.assertRaises(CodingError) as limited:
+            self.session.read_result(json.dumps(
+                {"type": "turn.failed", "error": {"message": "You've hit your usage limit"}}))
+        self.assertEqual(limited.exception.details["reason_code"], "subscription_usage_exhausted")
+
+    def test_a_missing_login_is_named_at_start_up(self) -> None:
+        self.assertEqual(self.session.login_problem(), "subscription_unauthenticated")
+        (self.parent / ".codex").mkdir()
+        (self.parent / ".codex" / "auth.json").write_text("{}")
+        self.assertEqual(self.session.login_problem(), "")

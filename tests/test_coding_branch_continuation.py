@@ -62,9 +62,9 @@ class Ownership(unittest.TestCase):
             call = CapabilityCall(job_id, 'run_coding_task', arguments)
             result = CapabilityResult(
                 job_id, 'run_coding_task', CapabilityResultState.FAILED,
-                failure={'code': 'review_failed'},
+                failure={'code': 'required_verification_failed'},
                 durable_values={'checkpoint': json.dumps({
-                    'job_id': job_id, 'branch': 'feat/a-2', 'stage': 'review',
+                    'job_id': job_id, 'branch': 'feat/a-2', 'stage': 'test',
                 })},
             )
             return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
@@ -173,7 +173,6 @@ class ContinuationJobs(unittest.TestCase):
         self.state = goal()
         self.telemetry = []
         self.sessions = []
-        self.reviewers = []
 
     def git(self, *args):
         return subprocess.run(['git', *args], cwd=self.root, check=True,
@@ -182,10 +181,9 @@ class ContinuationJobs(unittest.TestCase):
     def run_job(self, edits=None, *, continuation=False, completed=True, branch='feat/goal'):
         identity = f'job-{len(self.state.attempts)}'
         session = RecordingSession(edits=edits, completed=completed)
-        reviewer = PlanningModel()
         runtime = build_coding_runtime(
             True, PlanningModel(), lambda: identity, session=session,
-            reviewer=reviewer, repository=self.root,
+            repository=self.root,
             goal_state_source=lambda: self.state, telemetry_sink=self.telemetry.append,
         )
         broker = CapabilityBroker(CapabilityRegistry(runtime.definitions),
@@ -197,7 +195,6 @@ class ContinuationJobs(unittest.TestCase):
         attempt = broker.dispatch(call, AuthorityContext('friedl', runtime.permissions, NOW))
         self.state = replace(self.state, attempts=(*self.state.attempts, attempt))
         self.sessions.append(session)
-        self.reviewers.append(reviewer)
         return attempt.result
 
     def first(self):
@@ -245,10 +242,6 @@ class ContinuationJobs(unittest.TestCase):
         self.assertEqual(list(result.values['commit']['committed_files']), ['notes.md'])
         self.assertEqual(list(result.values['files_changed']), ['notes.md'])
         self.assertNotIn('app.py', result.values['git_diff'])
-        reviews = [r for r in self.reviewers[-1].requests if r.output_schema_name == 'alx_coding_local_review']
-        self.assertEqual(len(reviews), 1)
-        self.assertIn('Second job only.', str(reviews[0]))
-        self.assertNotIn('return a + b', str(reviews[0]))
         self.assertFalse(result.values['tests_run'])
         self.assertTrue(result.values['all_required_verification_passed'])
         self.assertIn('BRANCH continued', [t.transition for t in self.telemetry])

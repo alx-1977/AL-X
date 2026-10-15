@@ -64,14 +64,14 @@ class BackgroundStatusBarTests(unittest.TestCase):
 
     def test_the_stage_follows_the_job_and_the_bar_returns_when_it_ends(self) -> None:
         result = run_js(JOB + textwrap.dedent("""
-            handleControl(job({ phase: "review" }));
+            handleControl(job({ phase: "verify" }));
             const review = diagnosticStage.textContent;
             handleControl({ type: "phase", value: "listening" });
             handleControl(job({ phase: "commit", terminal: true, outcome: "succeeded" }));
             const after = diagnosticStage.textContent;
             console.log(JSON.stringify({ review, after }));
         """))
-        self.assertTrue(result["review"].startswith("Local review · "))
+        self.assertTrue(result["review"].startswith("Verifying · "))
         self.assertEqual(result["after"], "Listening")
 
     def test_no_liveness_labels_are_shown(self) -> None:

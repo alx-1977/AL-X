@@ -30,6 +30,7 @@ from alx.providers.claude_subscription import (
 from alx.providers.codex_subscription import subscription_cli_present as codex_subscription_cli_present
 from alx.contracts import CodingSession
 from alx.providers.coding_session import GrokCodingSession
+from alx.providers.codex_coding_session import CodexCodingSession
 from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
 from alx.providers.gated_transcription import GatedTranscriber
 
@@ -51,9 +52,6 @@ class RuntimeProviders:
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
-    # A separate advisory model for local CA review. It must not share the
-    # coding planner instance, even when both use the same provider and model.
-    coding_reviewer: ReasoningModel | None
     # The native coding-agent session that carries a plan out in the assigned
     # worktree. None when the configured coding provider has no session
     # adapter, which leaves the capability unregistered rather than letting a
@@ -133,103 +131,62 @@ def _build_coding_session(
 ) -> "CodingSession | None":
     """The native session that executes a coding plan, or None.
 
-    Only the Grok subscription path has a session adapter. Another configured
-    coding provider can still plan, but nothing would carry the plan out, so
-    the capability is left unregistered instead.
+    Grok and Codex each have a session adapter; which one runs is
+    ALX_CODING_PROVIDER (D-052). Settings admit no other coding provider.
     """
     coding = settings.coding
     if not coding.enabled or not coding.is_usable:
         return None
-    if coding.reasoning.provider != GROK_SUBSCRIPTION_PROVIDER:
-        LOGGER.info(
-            "Coding session adapter is not installed: %s",
-            coding.reasoning.provider,
-        )
-        return None
+    adapter = {
+        GROK_SUBSCRIPTION_PROVIDER: GrokCodingSession,
+        CODEX_SUBSCRIPTION_PROVIDER: CodexCodingSession,
+    }[coding.reasoning.provider]
     # Bounded by inactivity only. Deliberately not `reasoning.timeout_seconds`:
     # that bounds one planning call, and a native session working a real
     # defect may need far longer.
-    return GrokCodingSession(
+    session = adapter(
         coding.reasoning.model,
         stall_seconds=coding.session_stall_seconds,
         effort=coding.reasoning.effort,
     )
-
-
-def _build_coding_reasoning_model(
-    reasoning,
-    telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
-    purpose: str,
-) -> ReasoningModel | None:
-    """Build one configured Coding Agent reasoning adapter.
-
-    Planning and local review deliberately call this separately, so they have
-    independent model instances and selected-provider failures cannot cross.
-    """
-    if reasoning.provider == GROK_SUBSCRIPTION_PROVIDER:
-        return GrokSubscriptionReasoningModel(
-            reasoning.model, reasoning.timeout_seconds,
-            telemetry_sink=telemetry_sink, effort=reasoning.effort,
+    problem = session.login_problem()
+    if problem:
+        # Said once, at start-up, where AL/X reads her own log. The job itself
+        # still fails with this reason if it is not fixed by then.
+        LOGGER.warning(
+            "Coding provider %s is not signed in (%s): coding jobs will fail "
+            "until Friedl signs its CLI in again",
+            coding.reasoning.provider, problem,
         )
-    if reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
-        if not subscription_cli_present():
-            raise ConfigurationError(
-                f"the Claude Code CLI is required for {purpose}"
-            )
-        return ClaudeSubscriptionReasoningModel(
-            reasoning.model, reasoning.timeout_seconds,
-            telemetry_sink=telemetry_sink,
-        )
-    if reasoning.provider == CODEX_SUBSCRIPTION_PROVIDER:
-        if not codex_subscription_cli_present():
-            raise ConfigurationError(
-                f"the Codex CLI is required for {purpose}"
-            )
-        return CodexSubscriptionReasoningModel(
-            reasoning.model,
-            reasoning.timeout_seconds,
-            telemetry_sink=telemetry_sink,
-            effort=reasoning.effort,
-        )
-    if reasoning.provider == "openai":
-        return OpenAIReasoningModel(
-            reasoning.model, reasoning.api_key,
-            reasoning.base_url, reasoning.timeout_seconds,
-            streaming=reasoning.streaming,
-            service_tier=reasoning.service_tier,
-            reasoning_effort=reasoning.effort,
-            telemetry_sink=telemetry_sink,
-        )
-    raise ConfigurationError(
-        f"{purpose} provider adapter is not installed: {reasoning.provider}"
-    )
+    return session
 
 
 def _build_coding_model(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
 ) -> ReasoningModel | None:
-    """The Coding Agent's planner model, or None when disabled."""
+    """The coding planner, or None when disabled.
+
+    The same provider then carries the plan out in its native session
+    (D-052); settings admit only the providers that have one.
+    """
     coding = settings.coding
     if not coding.enabled or not coding.is_usable:
         LOGGER.info("Coding agent reasoning is disabled by configuration")
         return None
-    return _build_coding_reasoning_model(
-        coding.reasoning, telemetry_sink, "coding"
-    )
-
-
-def _build_coding_reviewer_model(
-    settings: RuntimeSettings,
-    telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None,
-) -> ReasoningModel | None:
-    """The independent advisory local-review model, or None when disabled."""
-    coding = settings.coding
-    if not coding.enabled or not coding.is_usable:
-        LOGGER.info("Coding reviewer reasoning is disabled by configuration")
-        return None
-    return _build_coding_reasoning_model(
-        coding.reviewer, telemetry_sink, "coding reviewer"
+    reasoning = coding.reasoning
+    if reasoning.provider == GROK_SUBSCRIPTION_PROVIDER:
+        return GrokSubscriptionReasoningModel(
+            reasoning.model, reasoning.timeout_seconds,
+            telemetry_sink=telemetry_sink, effort=reasoning.effort,
+        )
+    if not codex_subscription_cli_present():
+        raise ConfigurationError("the Codex CLI is required for coding")
+    return CodexSubscriptionReasoningModel(
+        reasoning.model,
+        reasoning.timeout_seconds,
+        telemetry_sink=telemetry_sink,
+        effort=reasoning.effort,
     )
 
 
@@ -316,7 +273,6 @@ def build_runtime_providers(
         )
     )
     coding = _build_coding_model(settings, telemetry_sink)
-    coding_reviewer = _build_coding_reviewer_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)
 
     if settings.speech_to_text.provider != "cartesia":
@@ -337,7 +293,6 @@ def build_runtime_providers(
         specialist=specialist,
         autonomous=autonomous,
         coding=coding,
-        coding_reviewer=coding_reviewer,
         coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth
         # paying to transmit; what the audio means is still Cartesia's answer
