@@ -342,6 +342,7 @@ function renderNext(){
  const shown=events.slice(0,NEXT_EVENTS),rest=events.slice(NEXT_EVENTS);
  const word=x=>x.tone==='bad'?'needs a person':x.tone==='warn'?'not ready':'ready';
  let named=0;
+ let attention=shown.flatMap(v=>v.readers).filter(x=>x.tone!=='ok').length;
  const grid=el('div','next-grid');box.append(grid);
  for(const v of shown){
   const ready=v.readers.filter(x=>x.tone==='ok').length;
@@ -352,7 +353,10 @@ function renderNext(){
   grid.append(row);
   const all=[...v.readers].sort((a,b)=>RANK[b.tone]-RANK[a.tone]);
   for(const x of all){
-   if(named>=NEXT_READERS)break;named++;
+   // A ready reader never takes a place a reader needing attention under a
+   // later event would need: those are counted first.
+   if(x.tone==='ok'&&named>=NEXT_READERS-attention)continue;
+   if(named>=NEXT_READERS)break;named++;if(x.tone!=='ok')attention--;
    const d=el('div',`next-reader ${x.tone}`);d.append(el('i',''),`${x.way} · ${x.uid} · ${word(x)}`);grid.append(d);
   }
  }

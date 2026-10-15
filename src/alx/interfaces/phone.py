@@ -100,8 +100,10 @@ class PhoneLink:
         """Take what Friedl sent since last time; how many messages were taken.
 
         On first start it begins from now: what was in Messages before AL/X
-        could read it is not answered. The cursor moves past each message
-        before its turn runs, so a stop mid-turn never answers it twice.
+        could read it is not answered. The cursor moves past a message only
+        once its turn is held, so a stop while it waits for the Core loses
+        nothing; the turn's identity comes from the message, so one offered
+        again after a stop is taken once.
         """
         cursor = self._cursor()
         try:
@@ -114,12 +116,15 @@ class PhoneLink:
             return 0
         self._last_failure = ""
         for message in arrived:
-            self._save_cursor(message.row)
             await self._answer(message)
+            self._save_cursor(message.row)
         return len(arrived)
 
     async def _answer(self, message: IncomingMessage) -> None:
-        outcome = await self._session.remote_turn(PHONE_CONVERSATION_ID, message.text)
+        outcome = await self._session.remote_turn(
+            PHONE_CONVERSATION_ID, message.text, turn_id=f"imessage-{message.row}")
+        if outcome is None:
+            return  # already taken before a stop
         response = getattr(outcome, "response", None)
         if not response:
             return

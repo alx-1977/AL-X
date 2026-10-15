@@ -125,8 +125,16 @@ class LinkTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.turns = []
 
-        async def remote_turn(conversation_id, content):
-            self.turns.append(SimpleNamespace(conversation_id=conversation_id, content=content))
+        self.held = set()
+
+        async def remote_turn(conversation_id, content, turn_id=None):
+            if getattr(self, "interrupt", False):
+                raise asyncio.CancelledError
+            if turn_id in self.held:
+                return None
+            self.held.add(turn_id)
+            self.turns.append(SimpleNamespace(conversation_id=conversation_id,
+                                              content=content, turn_id=turn_id))
             return SimpleNamespace(response=response)
 
         session = SimpleNamespace(remote_turn=remote_turn)
@@ -153,6 +161,27 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(channel.sent, ["Yes, both are ready."])
         # Not answered twice.
         self.assertEqual(asyncio.run(link.poll_once()), 0)
+
+    def test_a_stop_before_the_turn_is_held_loses_nothing(self) -> None:
+        channel = FakeChannel(latest=10)
+        link = self.link(channel)
+        asyncio.run(link.poll_once())
+        channel.arrived.append(self.message(11, "Status?"))
+        self.interrupt = True
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(link.poll_once())
+        self.interrupt = False
+        self.assertEqual(asyncio.run(link.poll_once()), 1)
+        self.assertEqual([turn.turn_id for turn in self.turns], ["imessage-11"])
+
+    def test_a_message_offered_again_is_taken_once(self) -> None:
+        channel = FakeChannel(latest=10)
+        link = self.link(channel)
+        asyncio.run(link.poll_once())
+        self.held.add("imessage-11")  # held before a stop, cursor not yet moved
+        channel.arrived.append(self.message(11, "Status?"))
+        asyncio.run(link.poll_once())
+        self.assertEqual((self.turns, channel.sent), ([], []))
 
     def test_an_answer_that_cannot_be_sent_takes_the_ordinary_path(self) -> None:
         channel = FakeChannel(latest=10, fail_send=True)
@@ -188,6 +217,19 @@ class RemoteTurnTests(unittest.TestCase):
         self.assertEqual(outcome.response, "ok")
         self.assertEqual((turn.conversation_id, turn.origin, turn.content, turn.person_id, budget),
                          (PHONE_CONVERSATION_ID, ConversationOrigin.TYPED, "Status?", "friedl", 8))
+
+    def test_a_held_turn_is_not_taken_again(self) -> None:
+        from alx.interfaces.live_voice import VoiceSession
+
+        calls = []
+        gateway = SimpleNamespace(
+            holds_turn=lambda conversation_id, turn_id: True,
+            receive_conversation_turn=lambda *arguments: calls.append(arguments),
+        )
+        session = VoiceSession(gateway, Mock(), None, "friedl", 8, 30)
+        self.assertIsNone(asyncio.run(
+            session.remote_turn(PHONE_CONVERSATION_ID, "Status?", turn_id="imessage-11")))
+        self.assertEqual(calls, [])
 
 
 class DeliveryTests(unittest.TestCase):

@@ -183,6 +183,14 @@ class ConversationGateway:
             tuple(events.values()),
         )
 
+    def holds_turn(self, conversation_id: str, turn_id: str) -> bool:
+        """Whether this conversation already has the turn with this identity."""
+        try:
+            conversation = self._conversation_store.load(conversation_id)
+        except ConversationNotFound:
+            return False
+        return any(turn.turn_id == turn_id for turn in conversation.turns)
+
     def receive_conversation_turn(self, turn: ConversationTurn, step_budget: int,
                                   retention_until: datetime) -> CoreOutcome:
         """Persist a turn, then pass the same durable thread to the sole Core."""
