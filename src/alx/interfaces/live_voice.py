@@ -324,6 +324,39 @@ class VoiceSession:
         # event loop, which is also where a delivery is admitted.
         self._pending_person_turns: dict[str, int] = {}
 
+    async def remote_turn(self, conversation_id: str, content: str,
+                          turn_id: str | None = None) -> Any:
+        """One person turn that arrived outside the browser (D-049: his phone).
+
+        The same turn a typed line makes, under the same Core lock, through
+        the same gateway; only the transport differs. Returns the Core outcome,
+        or None when a turn with this `turn_id` is already held: a message
+        offered again after a stop is taken once.
+        """
+        now = self._clock()
+        turn = ConversationTurn(
+            conversation_id=conversation_id,
+            turn_id=turn_id or self._identifier_factory(),
+            origin=ConversationOrigin.TYPED,
+            content=content,
+            occurred_at=now,
+            person_id=self._person_id,
+        )
+        async with self._core_turn_lock:
+            if turn_id is not None and await run_core_worker(
+                    self._gateway.holds_turn, conversation_id, turn_id):
+                return None
+            self._turn_origin_sink(True)
+            try:
+                return await run_core_worker(
+                    self._gateway.receive_conversation_turn,
+                    turn,
+                    self._step_budget,
+                    now + timedelta(days=self._retention_days),
+                )
+            finally:
+                self._turn_origin_sink(False)
+
     def admits_unprompted_speech(self, conversation_id: str) -> bool:
         """Whether an autonomous response may be queued for speech now.
 

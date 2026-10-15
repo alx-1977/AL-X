@@ -86,6 +86,9 @@ from alx.bootstrap.readers import (
     reader_poller,
 )
 from alx.interfaces.reader_tile import tile_source
+from alx.interfaces.phone import PHONE_CONVERSATION_ID, PhoneLink
+from alx.providers.imessage import IMessageChannel
+from alx.config.settings import phone_settings
 from alx.continuity.pending_messages import SQLitePendingMessages
 from alx.continuity.own_time_source import OwnTimeSource
 from alx.continuity.runtime_source import RuntimeStartedSource
@@ -1079,6 +1082,12 @@ async def run(repository_root: Path) -> None:
                  "src/alx/providers/github_review.py", review_runtime is not None),
             ),
         ),
+        "reaching_friedl_away": (
+            "while he is away, what you say to him goes to his phone by iMessage, "
+            "and what he sends from it arrives in the phone conversation"
+            if phone_settings(environment).is_usable
+            else "unavailable: it waits for his next session"
+        ),
         "runs_without_you": [
             "mail is scanned and new mail reaches you as events",
             *(
@@ -1091,6 +1100,7 @@ async def run(repository_root: Path) -> None:
 
     def runtime_facts() -> dict[str, Any]:
         own_times, _set_at = continuity_runtime.store.own_time()
+        presence, presence_since = continuity_runtime.store.presence()
         return {
             "started_at": process_started_at.isoformat(timespec="seconds"),
             "running_commit": running_commit,
@@ -1099,6 +1109,11 @@ async def run(repository_root: Path) -> None:
             ),
             "setup": setup,
             "own_time": list(own_times),
+            "presence": {
+                "state": presence,
+                "since": "" if presence_since is None
+                else presence_since.isoformat(timespec="minutes"),
+            },
         }
 
     core = CoreAgent(
@@ -1197,6 +1212,18 @@ async def run(repository_root: Path) -> None:
     # D-043: keeps the readers on their schedules and records every step.
     reader_watch = None if reader_runtime is None else reader_monitor(
         reader_runtime, _with_call_id(current_call_id, "reader-monitor"))
+    # D-049: Friedl's phone, by iMessage. Absent unless enabled with his handle.
+    phone_configuration = phone_settings(environment)
+    phone_link = None
+    if phone_configuration.is_usable:
+        phone_link = PhoneLink(
+            IMessageChannel(phone_configuration.handle),
+            session,
+            storage_root / "phone-cursor.json",
+            continuity_runtime.store.presence,
+            poll_seconds=phone_configuration.poll_seconds,
+        )
+        LOGGER.info("Phone link enabled (iMessage)")
     server = LiveVoiceServer(
         session,
         voice_settings.host,
@@ -1211,7 +1238,12 @@ async def run(repository_root: Path) -> None:
         relay=gateway.relay_response,
         locate=gateway.locate_reply,
         pending=SQLitePendingMessages(storage_root / "pending-messages.sqlite3"),
+        # Whether Friedl is here or away, for the icon on his screen.
+        presence=continuity_runtime.store.presence,
+        phone=phone_link,
     )
+    if phone_link is not None:
+        phone_link.fallback = lambda text: server.deliver(PHONE_CONVERSATION_ID, text)
     # Every kind of occasion reaches the Core through one producer, one
     # runner and one tick. A finished external task joins the matured requests
     # here rather than bringing a second tick, which would be a competing
@@ -1353,6 +1385,8 @@ async def run(repository_root: Path) -> None:
             runtime_tasks.create_task(server.serve_forever())
             runtime_tasks.create_task(due_cognition.run())
             runtime_tasks.create_task(mail_poller.run())
+            if phone_link is not None:
+                runtime_tasks.create_task(phone_link.run())
             if reader_runtime is not None:
                 # D-041: today's calendar, kept current for the BHL tile; then
                 # D-043: each reader checked and kept on its schedule.

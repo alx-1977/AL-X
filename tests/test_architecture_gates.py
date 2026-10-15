@@ -378,6 +378,7 @@ class FrontendAuthorshipTests(unittest.TestCase):
                     "Speaking",
                     "Error",
                     "Disconnected",
+                    "Reconnecting",
                     "AL/X",
                 }
             ),

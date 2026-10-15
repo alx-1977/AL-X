@@ -62,6 +62,10 @@ class FutureCognitionStatus(str, Enum):
 DEFAULT_OWN_TIME: tuple[str, ...] = ("10:00",)
 # At most this many a day: a bound on the schedule's size, not a judgement.
 MAX_OWN_TIMES = 6
+# Whether Friedl is here or away, as he tells her (2026-10-15). Here until he
+# says otherwise.
+PRESENCE_STATES = ("here", "away")
+DEFAULT_PRESENCE = "here"
 
 @dataclass(frozen=True, slots=True)
 class FutureCognitionRequest:

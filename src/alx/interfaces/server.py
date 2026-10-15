@@ -19,6 +19,7 @@ from websockets.http11 import Request, Response
 
 from typing import Any
 
+from alx.interfaces.phone import PHONE_CONVERSATION_ID
 from alx.contracts import AudioChunk, ResponseDelivery
 from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
 
@@ -97,7 +98,13 @@ class LiveVoiceServer:
         locate: Callable[[str, str], tuple[str, Any] | None] | None = None,
         pending: Any = None,
         clock: Callable[[], datetime] | None = None,
+        # Whether Friedl is here or away: (state, since or None).
+        presence: Callable[[], tuple[str, datetime | None]] | None = None,
+        # D-049: his phone, for what she says while he is away.
+        phone: Any = None,
     ) -> None:
+        self._presence = presence
+        self._phone = phone
         self._session = session
         self._relay = relay
         self._locate = locate
@@ -149,6 +156,17 @@ class LiveVoiceServer:
         wording is the Core's own, unaltered.
         """
         source_conversation_id = conversation_id
+        phone = getattr(self, "_phone", None)
+        if phone is not None and phone.carries(conversation_id):
+            # D-049: he is away, or this is the phone thread. Sent to his
+            # phone, and copied into the phone thread so his answer there has
+            # it. If it cannot be sent it takes the ordinary path below.
+            identity = self._identify(conversation_id, response)
+            if phone.send(response):
+                if conversation_id != PHONE_CONVERSATION_ID:
+                    self._relay_into(source_conversation_id, identity,
+                                     PHONE_CONVERSATION_ID)
+                return ResponseDelivery.DELIVERED
         registered = self._delivery_queues.get(conversation_id) or []
         identity = None if registered else self._identify(conversation_id, response)
         if not registered:
@@ -628,6 +646,8 @@ class LiveVoiceServer:
             return None
         if parsed.path == "/reader-tile.json":
             return self._reader_tile_response()
+        if parsed.path == "/presence.json":
+            return self._presence_response()
         relative = {
             "/": "index.html",
             "/app.css": "app.css",
@@ -644,6 +664,7 @@ class LiveVoiceServer:
             "/reader-traces": "reader-traces.html",
             "/reader-traces-fixtures.js": "reader-traces-fixtures.js",
             "/bhl-field": "bhl-field.html",
+            "/presence.js": "presence.js",
         }.get(parsed.path)
         if relative is None:
             return self._response(404, b"Not found", "text/plain; charset=utf-8")
@@ -666,6 +687,21 @@ class LiveVoiceServer:
                 LOGGER.warning("BHL tile unavailable: %s", error)
                 return self._response(503, b'{"tile": null}', "application/json; charset=utf-8")
         body = json.dumps({"tile": tile}).encode()
+        return self._response(200, body, "application/json; charset=utf-8")
+
+    def _presence_response(self) -> Response:
+        """Here or away, and since when, for the icon (null when unknown)."""
+        presence = None
+        if self._presence is not None:
+            try:
+                state, since = self._presence()
+                presence = {"state": state,
+                            "since": None if since is None else since.isoformat()}
+            except Exception as error:  # noqa: BLE001 - the page keeps polling
+                LOGGER.warning("Presence unavailable: %s", type(error).__name__)
+                return self._response(503, b'{"presence": null}',
+                                      "application/json; charset=utf-8")
+        body = json.dumps({"presence": presence}).encode()
         return self._response(200, body, "application/json; charset=utf-8")
 
     @staticmethod

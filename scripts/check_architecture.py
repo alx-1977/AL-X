@@ -572,6 +572,7 @@ NEUTRAL_PHASE_LABELS = frozenset(
         "Speaking",
         "Error",
         "Disconnected",
+        "Reconnecting",
         "AL/X",
     }
 )

@@ -265,3 +265,46 @@ html, body {
    later SERIAL or BUILD stream needs a value here, not a new renderer. */
 .diagnostic-line[data-stream="ALX"] time { opacity: 0.5; }
 .diagnostic-line[data-stream="ALX"] span { color: #cfe8ff; }
+
+/* Here or away (2026-10-15): a quiet menu-bar style indicator, top left. */
+.presence {
+  position: fixed;
+  z-index: 3;
+  top: 1.25rem;
+  left: 1.25rem;
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  height: 1.6rem;
+  padding: 0 .55rem;
+  border-radius: .8rem;
+  background: rgba(20, 26, 34, .38);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  backdrop-filter: blur(18px) saturate(1.4);
+  color: rgba(255, 255, 255, .88);
+  font: 500 12px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  letter-spacing: .01em;
+  transition: opacity .3s ease, color .3s ease;
+}
+.presence[hidden] { display: none; }
+.presence svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+.presence svg circle { fill: currentColor; stroke: none; }
+.presence i {
+  width: 6px;
+  height: 6px;
+  margin-left: -.15rem;
+  border-radius: 50%;
+  background: #34c759;
+}
+.presence span:empty { display: none; }
+.presence[data-state="away"] { color: rgba(255, 255, 255, .5); }
+.presence[data-state="away"] svg circle { fill: none; stroke: currentColor; }
+.presence[data-state="away"] i { background: rgba(255, 255, 255, .35); }
+

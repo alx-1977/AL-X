@@ -107,7 +107,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;back
 .next-row.warn i,.next-reader.warn i{background:var(--amber);box-shadow:0 0 7px var(--amber)}.next-row.bad i,.next-reader.bad i{background:var(--red);box-shadow:0 0 7px var(--red)}
 .next-reader{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding-left:14px;white-space:nowrap;font-size:12px}
 .next-sep{grid-column:1/-1;height:1px;margin:6px 0;background:linear-gradient(90deg,rgba(104,195,226,.28),rgba(104,195,226,.06))}.next-more{margin-top:6px}
-.next-reader.warn{color:#ffd48a}.next-reader.bad{color:#ff8fa3}.next-more{grid-column:1/-1;color:#7fa8b8;font-size:12px}
+.next-reader.ok{color:#9fd8b8}.next-reader.warn{color:#ffd48a}.next-reader.bad{color:#ff8fa3}.next-more{grid-column:1/-1;color:#7fa8b8;font-size:12px}
 @media (max-width:740px){.next{display:none}}
 .link-warn{position:absolute;top:clamp(110px,15vh,150px);right:clamp(28px,4.3vw,82px);font:600 12px/1.4 "Courier New",monospace;letter-spacing:.12em;color:#ffc24a;text-shadow:0 0 10px rgba(255,170,0,.5);text-align:right}
 #matrix:focus-visible{outline:none} .render-note{position:fixed;inset:auto 12vw 35vh;text-align:center;color:#8ebed0;font:13px/2 "Courier New",monospace;letter-spacing:.12em;z-index:3;pointer-events:none} @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
@@ -324,10 +324,11 @@ function resumeAuto(){
 }
 // The next start today, under AL/X: one line per event with how many of its
 // readers are ready (online, holding the schedule, nothing wrong), coloured by
-// the worst; the readers not ready named under it, with their UID as the
-// reader's own screen shows it. Past NEXT_EVENTS events the rest are counted
-// ("+n events"); past NEXT_READERS names, a count.
-let nextStart=null;const NEXT_EVENTS=5,NEXT_READERS=6;
+// the worst; every one of its readers named under it, worst first, with their
+// UID as the reader's own screen shows it, so a reader AL/X put right stays in
+// view, now ready (Friedl, 2026-10-15). Past NEXT_EVENTS events the rest are
+// counted ("+n events"); past NEXT_READERS names, a count.
+let nextStart=null;const NEXT_EVENTS=5,NEXT_READERS=10;
 const RANK={bad:2,warn:1,ok:0};
 function nextIn(at){const m=Math.round((Date.parse(at)-Date.now())/60000);if(!(m>0))return 'now';if(m<60)return `in ${m} min`;const h=Math.floor(m/60),r=m%60;return r?`in ${h} h ${r} min`:`in ${h} h`;}
 function renderNext(){
@@ -339,8 +340,9 @@ function renderNext(){
  const events=(n.events||[]).map(v=>({...v,tone:worst(v.readers)}))
   .sort((a,b)=>RANK[b.tone]-RANK[a.tone]||a.room.localeCompare(b.room));
  const shown=events.slice(0,NEXT_EVENTS),rest=events.slice(NEXT_EVENTS);
- const word=x=>x.tone==='bad'?'needs a person':'not ready';
+ const word=x=>x.tone==='bad'?'needs a person':x.tone==='warn'?'not ready':'ready';
  let named=0;
+ let attention=shown.flatMap(v=>v.readers).filter(x=>x.tone!=='ok').length;
  const grid=el('div','next-grid');box.append(grid);
  for(const v of shown){
   const ready=v.readers.filter(x=>x.tone==='ok').length;
@@ -349,16 +351,19 @@ function renderNext(){
   row.append(el('span','next-room',v.room),el('span','next-title',v.title));
   const c=el('span','next-count');c.append(el('i',''),`${ready}/${v.readers.length}`);row.append(c);
   grid.append(row);
-  const late=v.readers.filter(x=>x.tone!=='ok').sort((a,b)=>RANK[b.tone]-RANK[a.tone]);
-  for(const x of late){
-   if(named>=NEXT_READERS)break;named++;
+  const all=[...v.readers].sort((a,b)=>RANK[b.tone]-RANK[a.tone]);
+  for(const x of all){
+   // A ready reader never takes a place a reader needing attention under a
+   // later event would need: those are counted first.
+   if(x.tone==='ok'&&named>=NEXT_READERS-attention)continue;
+   if(named>=NEXT_READERS)break;named++;if(x.tone!=='ok')attention--;
    const d=el('div',`next-reader ${x.tone}`);d.append(el('i',''),`${x.way} · ${x.uid} · ${word(x)}`);grid.append(d);
   }
  }
- // readers not ready in the events shown that were not named, and the events
- // not shown, each counted on its own
- const left=shown.flatMap(v=>v.readers).filter(x=>x.tone!=='ok').length-named;
- if(left>0)grid.append(el('div','next-more',`+${left} more reader${left>1?'s':''} not ready`));
+ // readers in the events shown that were not named, and the events not
+ // shown, each counted on its own
+ const left=shown.flatMap(v=>v.readers).length-named;
+ if(left>0)grid.append(el('div','next-more',`+${left} more reader${left>1?'s':''}`));
  if(rest.length)grid.append(el('div','next-more',`+${rest.length} event${rest.length>1?'s':''}`));
 }
 setInterval(()=>{if(nextStart)renderNext();},20000);

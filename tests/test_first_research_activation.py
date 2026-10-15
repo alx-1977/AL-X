@@ -713,7 +713,11 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         # is the same kind: it hears readers ask and hands the request to the
         # same mechanical delivery the refresh uses; it reaches no Core turn.
         rendered = [ast.dump(call) for call in scheduled]
-        self.assertEqual(len(scheduled), 7, rendered)
+        #
+        # The phone link (D-049) is the request listener's kind: it hears
+        # Friedl's messages and hands each to the same person-turn path a
+        # typed line takes; it schedules nothing and decides nothing.
+        self.assertEqual(len(scheduled), 8, rendered)
         self.assertEqual(
             sorted(
                 name
@@ -721,6 +725,7 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
                     "serve_forever",
                     "due_cognition",
                     "mail_poller",
+                    "phone_link",
                     "sandbox_runtime",
                     "task_runtime",
                     "reader_poller",
@@ -731,6 +736,7 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
             [
                 "due_cognition",
                 "mail_poller",
+                "phone_link",
                 "reader_listener",
                 "reader_poller",
                 "sandbox_runtime",

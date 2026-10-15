@@ -15,6 +15,7 @@ from typing import Any
 
 from alx.contracts.continuity import (
     DEFAULT_OWN_TIME,
+    DEFAULT_PRESENCE,
     CarriedThought,
     CarriedThoughtNotFound,
     CarriedThoughtStatus,
@@ -81,6 +82,15 @@ class SQLiteContinuityStore:
                 CREATE TABLE IF NOT EXISTS own_time (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     times TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS presence (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    state TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -330,6 +340,30 @@ class SQLiteContinuityStore:
             return DEFAULT_OWN_TIME, None
         times = tuple(item for item in str(row["times"]).split(",") if item)
         return times, datetime.fromisoformat(str(row["updated_at"]))
+
+    def presence(self) -> tuple[str, datetime | None]:
+        """Whether Friedl is here or away, and since when (None: never set)."""
+        row = self._connection.execute(
+            "SELECT state, updated_at FROM presence WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return DEFAULT_PRESENCE, None
+        return str(row["state"]), datetime.fromisoformat(str(row["updated_at"]))
+
+    def set_presence(self, state: str, now: datetime) -> tuple[str, datetime]:
+        """Record whether Friedl is here or away. A state already held keeps
+        its time: saying "I'm back" twice does not move when he came back."""
+        held, since = self.presence()
+        if held == state and since is not None:
+            return held, since
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO presence(id, state, updated_at) VALUES (1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET state = excluded.state, "
+                "updated_at = excluded.updated_at",
+                (state, now.isoformat()),
+            )
+        return state, now
 
     def set_own_time(self, times: tuple[str, ...], now: datetime) -> tuple[str, ...]:
         """Replace her own-time schedule. Empty means none."""

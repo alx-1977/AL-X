@@ -83,6 +83,11 @@ REASONING_TRANSPORT_SITES = {
     GROK_TRANSPORT_SITE,
     CODEX_TRANSPORT_SITE,
 }
+# D-049: Messages has no interface but AppleScript, so the iMessage provider
+# starts `osascript` with one fixed script, the text and the handle as
+# arguments. It runs nothing AL/X wrote; tests/test_phone.py asserts the text
+# never becomes part of the script.
+MESSAGES_TRANSPORT_SITE = PRODUCTION_ROOT / "providers" / "imessage.py"
 
 # D-028: one production site starts a process for a coding job. That is a
 # different outcome from a Sandbox experiment. The generic absence scans skip
@@ -499,7 +504,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def _is_approved_transport_import(path: Path, node: ast.AST) -> bool:
         """The one import needed to bind a subscription CLI runner."""
         return (
-            path in REASONING_TRANSPORT_SITES
+            path in REASONING_TRANSPORT_SITES | {MESSAGES_TRANSPORT_SITE}
             and isinstance(node, ast.Import)
             and len(node.names) == 1
             and node.names[0].name == "subprocess"

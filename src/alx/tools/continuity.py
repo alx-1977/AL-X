@@ -25,6 +25,7 @@ from alx.contracts import (
 )
 from alx.contracts.continuity import (
     MAX_OWN_TIMES,
+    PRESENCE_STATES,
     CarriedThought,
     CarriedThoughtNotFound,
     DuplicateCarriedThought,
@@ -41,6 +42,7 @@ WITHDRAW_CARRIED_THOUGHT = "withdraw_carried_thought"
 MARK_CARRIED_THOUGHT_RAISED = "mark_carried_thought_raised"
 RESOLVE_UNDELIVERED_RESPONSE = "resolve_undelivered_response"
 SET_OWN_TIME = "set_own_time"
+SET_PRESENCE = "set_presence"
 
 # How many open thoughts one reasoning turn is shown. A fixed uniform bound, so
 # a long list is trimmed by count rather than by anyone deciding which of her
@@ -248,8 +250,30 @@ OWN_TIME_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
+PRESENCE_DEFINITION = CapabilityDefinition(
+    SET_PRESENCE,
+    "Record whether Friedl is here or away, when he tells you he is stepping "
+    "out or is back. state is \"here\" or \"away\". It sets the presence "
+    "icon on his screen.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"state": _STRING},
+        ("state",),
+        extra_properties=False,
+    ),
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"state": _STRING, "since": _STRING},
+        ("state", "since"),
+        extra_properties=False,
+    ),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
 DEFINITIONS = (
     OWN_TIME_DEFINITION,
+    PRESENCE_DEFINITION,
     REQUEST_DEFINITION,
     WITHDRAW_DEFINITION,
     RECORD_THOUGHT_DEFINITION,
@@ -442,8 +466,26 @@ def build_continuity_executors(
             durable_values={"times": list(stored)},
         )
 
+    def set_presence(values: Mapping[str, Any]) -> CapabilityResult:
+        call_id = call_id_source()
+        try:
+            state = values["state"]
+            if state not in PRESENCE_STATES:
+                raise ValueError("state")
+            held, since = store.set_presence(state, now_of())
+        except (KeyError, TypeError, ValueError):
+            return _failed(call_id, SET_PRESENCE, "arguments_unusable")
+        except Exception:
+            return _failed(call_id, SET_PRESENCE, "storage_failed")
+        result = {"state": held, "since": since.isoformat()}
+        return CapabilityResult(
+            call_id, SET_PRESENCE, CapabilityResultState.SUCCEEDED,
+            result, durable_values=result,
+        )
+
     return {
         SET_OWN_TIME: set_own_time,
+        SET_PRESENCE: set_presence,
         RESOLVE_UNDELIVERED_RESPONSE: resolve_undelivered,
         REQUEST_FUTURE_COGNITION: request,
         WITHDRAW_FUTURE_COGNITION: withdraw,
