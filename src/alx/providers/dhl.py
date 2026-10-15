@@ -577,6 +577,44 @@ def _labelled_date(joined: str, label: str) -> str:
     return ""
 
 
+def _date_value(text: str) -> str:
+    value = text.strip()
+    for pattern in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(value, pattern).date().isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def _positioned_date(pages: list[list[_Run]], label: str) -> str:
+    """The date printed beside its label on the page, by position.
+
+    A PDF's text order need not follow the layout: on the DHL MyBill invoice of
+    15 October 2026 the date came out before its label ("2026-10-15 ...
+    INVOICE DATE"), so reading after the label found nothing. The runs carry
+    their position, so the date is taken from the same line, to the label's
+    right; failing that, from just below it.
+    """
+    for page in pages:
+        for run in page:
+            if run.text.strip().upper() != label:
+                continue
+            beside = sorted(
+                (other for other in page
+                 if abs(other.y - run.y) <= 2 and 0 < other.x - run.x <= 200),
+                key=lambda other: other.x)
+            below = sorted(
+                (other for other in page
+                 if 0 < run.y - other.y <= 25 and abs(other.x - run.x) <= 60),
+                key=lambda other: run.y - other.y)
+            for other in (*beside, *below):
+                value = _date_value(other.text)
+                if value:
+                    return value
+    return ""
+
+
 def parse_invoice_pdf(payload: bytes) -> dict[str, Any]:
     """Read the fields the invoice stage needs from a DHL MyBill invoice PDF.
 
@@ -617,11 +655,13 @@ def parse_invoice_pdf(payload: bytes) -> dict[str, Any]:
     if total is None or total <= 0:
         raise DhlDocumentError("invoice_total_missing")
 
-    due_date = _labelled_date(joined, "DUE DATE")
+    # By position first, then by text order (see _positioned_date).
+    due_date = _positioned_date(pages, "DUE DATE") or _labelled_date(joined, "DUE DATE")
     # Only a distinctly labelled invoice date is accepted. A bare "DATE" on a
     # DHL invoice matches the due-date label, which would post the due date as
     # the invoice date. Empty is better than guessed.
-    invoice_date = _labelled_date(joined, "INVOICE DATE")
+    invoice_date = (_positioned_date(pages, "INVOICE DATE")
+                    or _labelled_date(joined, "INVOICE DATE"))
     if invoice_date == due_date:
         invoice_date = ""
 
