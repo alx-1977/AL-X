@@ -38,6 +38,7 @@ from alx.tools.continuity import (
     PENDING_REVISIT_LIMIT,
     REQUEST_FUTURE_COGNITION,
     SET_OWN_TIME,
+    SET_PRESENCE,
     WITHDRAW_FUTURE_COGNITION,
     build_continuity_executors,
 )
@@ -139,6 +140,7 @@ __all__ = [
     "PENDING_REVISIT_LIMIT",
     "REQUEST_FUTURE_COGNITION",
     "SET_OWN_TIME",
+    "SET_PRESENCE",
     "WITHDRAW_FUTURE_COGNITION",
     "build_continuity_executors",
     "ACKNOWLEDGE_MAIL_MESSAGE",

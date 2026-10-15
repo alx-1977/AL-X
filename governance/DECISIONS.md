@@ -2515,3 +2515,14 @@ This grants no authority a single goal update lacks: completion still requires s
 - **AL/X.** The reader monitor takes the recovery steps mechanically, as it delivers schedules: reset the screen at once and again after 3 minutes, restart the reader after 6, and after 12 minutes the reader needs a person. A reader offline waits; firmware without `recover` needs a person at once. Each step is in the reader log and its trace, and the tile is amber while she works on it and red once a person is needed (amends D-041's colours).
 - **Not yet.** Telling Friedl unprompted when a person is needed is the separate alert path, still to be built.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-048 — Friedl tells AL/X when he is here or away
+
+- **Date:** 2026-10-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-15.** Friedl's words that day: "ALX will run on a different machine so relying on my screen or keyboard movement is not reliable. Maybe we start with me informing her I am stepping away or back", "I think by telling or typing I am stepping out is good. She then decides and sets the taskbar icon. Keep the icon minimalistic to match eg. MacOS look and feel."
+- **Presence.** Whether Friedl is here or away is what he tells her. Whether something he says means that is her judgement; she records it with `set_presence` (`here` or `away`, under the continuity permission), which keeps the time it began across restarts. Here until he says otherwise.
+- **She knows it.** `runtime.presence` gives the state and since when.
+- **He sees it.** A small indicator at the top left of his screen, in the macOS menu-bar style: a figure with a green dot when he is here, dimmed with "Away" when he is not. It is an indicator, not a control.
+- **Not yet.** Reaching him on his phone while he is away is the next step, and will use this.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

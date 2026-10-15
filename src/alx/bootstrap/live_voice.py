@@ -1091,6 +1091,7 @@ async def run(repository_root: Path) -> None:
 
     def runtime_facts() -> dict[str, Any]:
         own_times, _set_at = continuity_runtime.store.own_time()
+        presence, presence_since = continuity_runtime.store.presence()
         return {
             "started_at": process_started_at.isoformat(timespec="seconds"),
             "running_commit": running_commit,
@@ -1099,6 +1100,11 @@ async def run(repository_root: Path) -> None:
             ),
             "setup": setup,
             "own_time": list(own_times),
+            "presence": {
+                "state": presence,
+                "since": "" if presence_since is None
+                else presence_since.isoformat(timespec="minutes"),
+            },
         }
 
     core = CoreAgent(
@@ -1211,6 +1217,8 @@ async def run(repository_root: Path) -> None:
         relay=gateway.relay_response,
         locate=gateway.locate_reply,
         pending=SQLitePendingMessages(storage_root / "pending-messages.sqlite3"),
+        # Whether Friedl is here or away, for the icon on his screen.
+        presence=continuity_runtime.store.presence,
     )
     # Every kind of occasion reaches the Core through one producer, one
     # runner and one tick. A finished external task joins the matured requests
