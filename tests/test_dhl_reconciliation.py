@@ -329,6 +329,96 @@ class DhlAnalyzerTests(unittest.TestCase):
         self.assertEqual(_labelled_date("DUE DATE 07/09/2026", "DUE DATE"), "2026-09-07")
         self.assertEqual(_labelled_date("DUE DATE 2026-09-07", "DUE DATE"), "2026-09-07")
         self.assertEqual(_labelled_date("DUE DATE 32/13/2026", "DUE DATE"), "")
+        self.assertEqual(
+            _labelled_date("INVOICE DATE 15-Oct-2026", "INVOICE DATE"), "2026-10-15"
+        )
+        self.assertEqual(
+            _labelled_date("INVOICE DATE 15 Oct 2026", "INVOICE DATE"), "2026-10-15"
+        )
+        self.assertEqual(
+            _labelled_date("INVOICE DATE 15 October 2026", "INVOICE DATE"),
+            "2026-10-15",
+        )
+        self.assertEqual(_labelled_date("INVOICE DATE 31-Feb-2026", "INVOICE DATE"), "")
+        # The window that runs through the due-date label lands on the due
+        # date. The same day written beside each label is the invoice date.
+        self.assertEqual(
+            _labelled_date("INVOICE DATE DUE DATE 15/10/2026", "INVOICE DATE"), ""
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 15/10/2026 DUE DATE 15/10/2026", "INVOICE DATE"
+            ),
+            "2026-10-15",
+        )
+
+    def test_a_columnar_mybill_invoice_date_is_read_from_its_baseline(self) -> None:
+        """Duty/tax MyBill puts the date in the header column, not in the label run.
+
+        Labels are emitted before their values, so the date is not within 15
+        characters of INVOICE DATE in the extracted text. The shipment DATE
+        column and the due date are different days and must not be chosen.
+        """
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15")
+        )
+        self.assertEqual(fields["invoice_number"], "CPTZR00032240")
+        self.assertEqual(fields["waybill"], "1575091475")
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_columnar_invoice_date_accepts_the_stated_forms(self) -> None:
+        forms = {
+            "15/10/2026": "2026-10-15",
+            "15-Oct-2026": "2026-10-15",
+            "15 Oct 2026": "2026-10-15",
+            "15 October 2026": "2026-10-15",
+        }
+        for written, expected in forms.items():
+            with self.subTest(written=written):
+                fields = DhlImportAnalyzerAdapter().invoice_fields(
+                    columnar_invoice_pdf(written)
+                )
+                self.assertEqual(fields["invoice_date"], expected)
+                self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_due_date_alone_is_not_the_invoice_date(self) -> None:
+        """A due date and a shipment DATE, with no invoice-date value."""
+        fields = DhlImportAnalyzerAdapter().invoice_fields(columnar_invoice_pdf(None))
+        self.assertEqual(fields["invoice_date"], "")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_an_invoice_date_on_the_due_date_day_is_kept(self) -> None:
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", due_date="2026-10-15")
+        )
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-10-15")
+
+    def test_disagreeing_invoice_date_baselines_are_left_blank(self) -> None:
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", other_invoice_date="2026-12-01")
+        )
+        self.assertEqual(fields["invoice_date"], "")
+
+    def test_agreeing_invoice_date_baselines_are_kept(self) -> None:
+        """Two INVOICE DATE rows that name the same day, in one column.
+
+        The nearer date is chosen by x, token start and token. Those tie
+        here, and the run must not be part of that comparison.
+        """
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", agreeing_duplicate=True)
+        )
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_an_impossible_columnar_invoice_date_is_not_replaced(self) -> None:
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("31-Feb-2026")
+        )
+        self.assertEqual(fields["invoice_date"], "")
+        self.assertEqual(fields["due_date"], "2026-11-14")
 
     def test_the_assessment_date_comes_from_the_declaration(self) -> None:
         """Stated by the identifier, never guessed from the arrival date."""
@@ -485,6 +575,72 @@ def airway_bill_pdf() -> bytes:
     stream.set_data(
         b"BT /F1 10 Tf 1 0 0 1 100 760 Tm (AIR WAYBILL 1234567890 SHIPPER CONSIGNEE) Tj ET"
     )
+    page[NameObject("/Contents")] = stream
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def columnar_invoice_pdf(
+    invoice_date: str | None,
+    *,
+    due_date: str = "14/11/2026",
+    shipment_date: str = "02/01/2026",
+    other_invoice_date: str | None = None,
+    agreeing_duplicate: bool = False,
+) -> bytes:
+    """A MyBill duty/tax header: labels in one column, values beside them.
+
+    Labels are written before values, as on the live invoice, so a date is
+    not within a few characters of its label in the extracted text. A shipment
+    DATE column carries another date. `invoice_date` None leaves the invoice
+    date unstated.
+    """
+    labels = [
+        (24.0, 560.0, "DHL INTERNATIONAL (PTY) LTD"),
+        (400.0, 546.0, "CPTZR00032240"),
+        (24.0, 500.0, "HAWB 1575091475"),
+        (24.0, 424.0, "NET AMOUNT PAYABLE 4388.15"),
+        (400.0, 532.0, "INVOICE DATE"),
+        (400.0, 518.0, "DUE DATE"),
+        (24.0, 450.0, "DATE"),
+        (24.0, 436.0, "DATE SHIPMENT NUMBER"),
+    ]
+    values = [
+        (140.0, 450.0, shipment_date),
+        (520.0, 518.0, due_date),
+    ]
+    if invoice_date is not None:
+        values.append((520.0, 532.0, invoice_date))
+    # A second header row two points down still sits inside the three-point
+    # baseline window, so both dates are candidates of each invoice-date label.
+    if agreeing_duplicate and invoice_date is not None:
+        labels.append((400.0, 530.0, "INVOICE DATE"))
+        values.append((520.0, 530.0, invoice_date))
+    if other_invoice_date is not None:
+        labels.append((400.0, 470.0, "INVOICE DATE"))
+        values.append((520.0, 470.0, other_invoice_date))
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=792, height=612)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    commands = ["BT"]
+    for index, (x, y, text) in enumerate(labels + values):
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        # Alternating sizes keep separate text runs, as the sanitized fixtures do.
+        size = "8" if index % 2 == 0 else "8.001"
+        commands.append(f"/F1 {size} Tf 1 0 0 1 {x} {y} Tm ({escaped}) Tj")
+    commands.append("ET")
+    stream = DecodedStreamObject()
+    stream.set_data("\n".join(commands).encode("ascii"))
     page[NameObject("/Contents")] = stream
     output = io.BytesIO()
     writer.write(output)

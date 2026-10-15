@@ -545,6 +545,43 @@ _WAYBILL_CONTEXT = re.compile(
     r"(?:HAWB|waybill|SHIPMENT)[^0-9]{0,25}(\d{10})", re.IGNORECASE
 )
 _TOTAL_LABELS = ("NET AMOUNT PAYABLE", "GRAND TOTAL")
+# English names are fixed here. strptime %b follows the machine locale and
+# would drop a date DHL prints as 15-Oct-2026.
+_ENGLISH_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+_DATE_TOKEN = re.compile(
+    r"\d{4}-\d{2}-\d{2}"
+    r"|\d{2}/\d{2}/\d{4}"
+    r"|\d{2}-[A-Za-z]{3,9}-\d{4}"
+    r"|\d{2} [A-Za-z]{3,9} \d{4}",
+    re.IGNORECASE,
+)
+# Same baseline window the worksheet amounts already use.
+_BASELINE_TOLERANCE = 3
 
 
 def _labelled_amount(joined: str, label: str) -> Decimal | None:
@@ -554,27 +591,136 @@ def _labelled_amount(joined: str, label: str) -> Decimal | None:
     return _decimal_token(match.group(1)) if match else None
 
 
-def _labelled_date(joined: str, label: str) -> str:
+def _labelled_date(
+    joined: str, label: str, runs: Sequence[_Run] = ()
+) -> str:
     """A date stated beside its label, normalised to ISO.
 
-    DHL South Africa states dates as DD/MM/YYYY; ISO is accepted too. Only
-    these two unambiguous forms are read. A value that is not a real calendar
-    date yields nothing rather than a guess.
+    The date is DD/MM/YYYY, YYYY-MM-DD, DD-Mon-YYYY or DD Mon YYYY. Month
+    names are the English table above. It is read from within 15 non-digit
+    characters of the label, or from the same baseline as a run whose text
+    is exactly that label: y within 3 points, x to the right, including a
+    date carried in the label run itself.
+
+    An INVOICE DATE is only that label's value. A shipment run whose text is
+    DATE, or DATE plus other column headings, is not an anchor. A date on
+    the DUE DATE baseline is not one, and neither is an inline match that
+    reaches the due date's value by passing that label. Two INVOICE DATE
+    baselines that name different days yield nothing; the day they agree on
+    is kept when the due date names it too. An impossible calendar date
+    yields nothing.
     """
-    match = re.search(
-        re.escape(label) + r"[^0-9]{0,15}(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})",
+
+    def read(token: str) -> str:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+            year_text, month_text, day_text = token.split("-")
+            year, month, day = int(year_text), int(month_text), int(day_text)
+        elif re.fullmatch(r"\d{2}/\d{2}/\d{4}", token):
+            day_text, month_text, year_text = token.split("/")
+            year, month, day = int(year_text), int(month_text), int(day_text)
+        else:
+            matched = re.fullmatch(
+                r"(\d{2})[ -]([A-Za-z]{3,9})[ -](\d{4})", token
+            )
+            if matched is None:
+                return ""
+            month = _ENGLISH_MONTHS.get(matched.group(2).lower(), 0)
+            if not month:
+                return ""
+            day = int(matched.group(1))
+            year = int(matched.group(3))
+        try:
+            return datetime(year, month, day).date().isoformat()
+        except ValueError:
+            return ""
+
+    def is_label(text: str, target: str) -> bool:
+        kept = " ".join(_DATE_TOKEN.sub(" ", text).split())
+        return kept.upper() == target.upper()
+
+    seeking_invoice = is_label(label, "INVOICE DATE")
+    own = re.search(
+        re.escape(label) + r"[^0-9]{0,15}(" + _DATE_TOKEN.pattern + r")",
         joined,
         re.IGNORECASE,
     )
-    if not match:
-        return ""
-    value = match.group(1)
-    for pattern in ("%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(value, pattern).date().isoformat()
-        except ValueError:
+    inline_value = ""
+    if own is not None:
+        between = joined[own.start():own.start(1)]
+        due = re.search(
+            r"DUE DATE[^0-9]{0,15}(" + _DATE_TOKEN.pattern + r")",
+            joined,
+            re.IGNORECASE,
+        )
+        # The window ran through the due-date label and landed on its value.
+        lands_on_due = bool(
+            re.search(r"DUE DATE", between, re.IGNORECASE)
+        ) or (due is not None and own.start(1) == due.start(1))
+        if not (seeking_invoice and lands_on_due):
+            inline_value = read(own.group(1))
+
+    def belongs_to_due(run: _Run) -> bool:
+        if is_label(run.text, "DUE DATE"):
+            return True
+        for due_run in runs:
+            if not is_label(due_run.text, "DUE DATE"):
+                continue
+            on_baseline = abs(run.y - due_run.y) <= _BASELINE_TOLERANCE
+            if run is not due_run and on_baseline and run.x > due_run.x:
+                return True
+        return False
+
+    found: list[str] = []
+    # An INVOICE DATE anchor that states a due-date value, or a value that
+    # is not a real day, has been read. The inline window must not fill in
+    # a different date afterwards.
+    blocked = False
+    for anchor in runs:
+        if not is_label(anchor.text, label):
             continue
-    return ""
+        candidates: list[tuple[float, int, str, _Run]] = []
+        for match in _DATE_TOKEN.finditer(anchor.text):
+            prefix = " ".join(anchor.text[: match.start()].split()).upper()
+            if prefix == label.upper():
+                candidates.append(
+                    (anchor.x, match.start(), match.group(0), anchor)
+                )
+                break
+        for run in runs:
+            if run is anchor or run.x <= anchor.x:
+                continue
+            if abs(run.y - anchor.y) > _BASELINE_TOLERANCE:
+                continue
+            match = _DATE_TOKEN.search(run.text)
+            if match is None:
+                continue
+            candidates.append((run.x, match.start(), match.group(0), run))
+        if not candidates:
+            continue
+        # The run itself is not ordered. Two agreeing dates in the same
+        # column tie on x, token start and token; comparing the run raises
+        # TypeError instead of keeping the day they agree on.
+        _x, _start, token, chosen = min(
+            candidates, key=lambda candidate: candidate[:3]
+        )
+        # The nearest token is the one this label states. A due-date value
+        # there is not reused, and a token that is not a real day is not
+        # replaced with the next date along the row.
+        if seeking_invoice and chosen is not anchor and belongs_to_due(chosen):
+            blocked = True
+            continue
+        parsed = read(token)
+        if parsed:
+            found.append(parsed)
+        elif seeking_invoice:
+            blocked = True
+    if len(set(found)) > 1:
+        return ""
+    if found:
+        return found[0]
+    if blocked:
+        return ""
+    return inline_value
 
 
 def parse_invoice_pdf(payload: bytes) -> dict[str, Any]:
@@ -617,13 +763,13 @@ def parse_invoice_pdf(payload: bytes) -> dict[str, Any]:
     if total is None or total <= 0:
         raise DhlDocumentError("invoice_total_missing")
 
-    due_date = _labelled_date(joined, "DUE DATE")
-    # Only a distinctly labelled invoice date is accepted. A bare "DATE" on a
-    # DHL invoice matches the due-date label, which would post the due date as
-    # the invoice date. Empty is better than guessed.
-    invoice_date = _labelled_date(joined, "INVOICE DATE")
-    if invoice_date == due_date:
-        invoice_date = ""
+    runs = [run for page in pages for run in page]
+    due_date = _labelled_date(joined, "DUE DATE", runs)
+    # Only a run whose text is INVOICE DATE supplies the invoice date. A
+    # shipment column headed DATE, and the due date, stay out of it — the
+    # inline window included, when that window reads through into the due
+    # date. The same day stated for both labels still stands.
+    invoice_date = _labelled_date(joined, "INVOICE DATE", runs)
 
     return {
         "invoice_number": invoice_number,
