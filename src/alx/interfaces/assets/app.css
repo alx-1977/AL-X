@@ -296,7 +296,7 @@ html, body {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   font: inherit;
-  color: rgba(255, 255, 255, 0.85);
+  color: inherit;
 }
 .presence svg {
   width: 14px;
@@ -307,15 +307,33 @@ html, body {
   stroke-linecap: round;
 }
 .presence svg circle { fill: currentColor; stroke: none; }
-.presence i {
-  width: 6px;
-  height: 6px;
-  margin-left: -.15rem;
-  border-radius: 50%;
-  background: #34c759;
-}
-.presence span:empty { display: none; }
-.presence[data-state="away"] { color: rgba(255, 255, 255, .5); }
-.presence[data-state="away"] svg circle { fill: none; stroke: currentColor; }
-.presence[data-state="away"] i { background: rgba(255, 255, 255, .35); }
+.presence { --tone: var(--rt-ok, #3ddc84); }
+.presence .rt-light { width: 0.55em; height: 0.55em; }
+.presence[data-state="away"] { --tone: #8e8e93; }
 
+/* AL/X's menu bar (2026-10-15): always there and, like macOS, transparent;
+   the text is white or dark to suit the backdrop behind it (menubar.js),
+   with a faint shadow to lift it off a busy frame. */
+.rt-bar.menubar {
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.rt-bar.menubar > * {
+  color: rgba(255, 255, 255, .97);
+  text-shadow: 0 0 1px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .4), 0 0 9px rgba(0, 0, 0, .28);
+  transition: color .6s ease, text-shadow .6s ease;
+}
+.rt-bar.menubar > [data-ink="dark"] {
+  color: rgba(0, 0, 0, .86);
+  text-shadow: 0 0 1px rgba(255, 255, 255, .45), 0 1px 3px rgba(255, 255, 255, .3);
+}
+.rt-bar.menubar .rt-bar__name { color: inherit; opacity: .9; }
+.rt-bar.menubar .presence svg { filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, .3)); }
+.rt-bar.menubar .presence[data-ink="dark"] svg { filter: drop-shadow(0 1px 1.5px rgba(255, 255, 255, .35)); }
+/* Cards on the screen sit below the bar. */
+.alx-tile-stack { top: calc(1.85 * 13px + .9rem); }
+
+.rt-bar.menubar .rt-bar__item:hover:not(:disabled) .rt-bar__name,
+.rt-bar.menubar .rt-bar__item[aria-expanded="true"] .rt-bar__name { color: inherit; opacity: 1; }

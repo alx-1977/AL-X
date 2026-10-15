@@ -144,15 +144,26 @@ export function buildTrace(reader, index = 0) {
 export function surfaceReaderTraces(host, data) {
   // A bar across the top in the manner of the macOS menu bar: AL/X's name on
   // the left; on the right the BHL item, which opens the traces, and the time.
-  const bar = el('div', 'rt-bar');
+  // On AL/X's own screen the bar is always there (#menubar) and the BHL item
+  // joins it, before its clock; a page without one draws its own.
   const pill = el('button', 'rt-bar__item');
   pill.type = 'button';
-  const clock = el('time', 'rt-bar__clock');
-  bar.append(el('span', 'rt-bar__app', 'AL/X'), el('span', 'rt-bar__space'), pill, clock);
+  const shared = document.getElementById('menubar');
+  let bar = null;
+  let clock = null;
+  if (shared) {
+    shared.insertBefore(pill, shared.querySelector('.rt-bar__clock'));
+  } else {
+    bar = el('div', 'rt-bar');
+    clock = el('time', 'rt-bar__clock');
+    bar.append(el('span', 'rt-bar__app', 'AL/X'), el('span', 'rt-bar__space'), pill, clock);
+    host.append(bar);
+  }
   const panel = el('div', 'rt-panel');
   panel.hidden = true;
-  host.append(bar, panel);
+  host.append(panel);
   const showTime = () => {
+    if (!clock) return;
     clock.textContent = new Date().toLocaleString(undefined, {
       weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false
     }).replace(/,/g, '');
@@ -251,7 +262,8 @@ export function surfaceReaderTraces(host, data) {
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('message', onMessage);
       setField(false);
-      bar.remove();
+      if (bar) bar.remove();
+      else pill.remove();
       panel.remove();
     }
   };
