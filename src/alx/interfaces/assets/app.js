@@ -20,6 +20,7 @@ const phaseLabels = {
   speaking: "Speaking",
   error: "Error",
   disconnected: "Disconnected",
+  reconnecting: "Reconnecting",
 };
 const activityLabels = {
   reasoning: "Reasoning",
@@ -684,7 +685,38 @@ function handleControl(message) {
   setPhase(message.value);
 }
 
-begin.addEventListener("click", async () => {
+// Reconnecting. Once started, the voice link is kept: a link that drops (a
+// tab the browser put to sleep, a locked screen) is opened again on its own,
+// after RECONNECT_DELAYS_MS, the last delay repeating until it holds (Friedl,
+// 2026-10-15: "Voice transport closed" left AL/X disconnected until clicked).
+// A microphone the browser will not give back without a click stops the
+// retries and shows the button again. The delays start over only once a link
+// has held for RECONNECT_HELD_MS: one AL/X closes again at once (a provider
+// that keeps failing) is retried at the longest delay, not every two seconds.
+const RECONNECT_DELAYS_MS = [2000, 5000, 10000, 30000];
+const RECONNECT_HELD_MS = 60000;
+let keepConnected = false;
+let reconnectAttempt = 0;
+let reconnectTimer;
+let socketOpenedAt = 0;
+
+function scheduleReconnect() {
+  const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+  reconnectAttempt += 1;
+  setPhase("reconnecting");
+  diagnostic(`Reconnecting voice transport in ${Math.round(delay / 1000)} s`, "active");
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => startVoice(), delay);
+}
+
+begin.addEventListener("click", () => {
+  keepConnected = true;
+  reconnectAttempt = 0;
+  clearTimeout(reconnectTimer);
+  startVoice();
+});
+
+async function startVoice() {
   activation.hidden = true;
   setPhase("listening");
   try {
@@ -693,6 +725,7 @@ begin.addEventListener("click", async () => {
     setPhase("error");
     beginDiagnosticStage("Microphone unavailable");
     diagnostic(`Microphone access failed · ${error.name}`, "error");
+    keepConnected = false;
     activation.hidden = false;
     return;
   }
@@ -702,7 +735,10 @@ begin.addEventListener("click", async () => {
   diagnostic("Opening local voice connection", "active");
   socket = new WebSocket(`${scheme}://${location.host}/voice?conversation_id=${id}`);
   socket.binaryType = "arraybuffer";
-  socket.onopen = () => detail("Browser WebSocket opened", "ok", { subsystem: "VOICE" });
+  socket.onopen = () => {
+    socketOpenedAt = Date.now();
+    detail("Browser WebSocket opened", "ok", { subsystem: "VOICE" });
+  };
   socket.onmessage = ({ data }) => {
     if (data instanceof ArrayBuffer) {
       audioParts.push(data);
@@ -731,8 +767,14 @@ begin.addEventListener("click", async () => {
     status.textContent = phaseLabels.disconnected;
     beginDiagnosticStage("Disconnected");
     diagnostic("Voice transport closed", "error");
+    if (keepConnected) {
+      if (socketOpenedAt && Date.now() - socketOpenedAt >= RECONNECT_HELD_MS) reconnectAttempt = 0;
+      socketOpenedAt = 0;
+      activation.hidden = true;
+      scheduleReconnect();
+    }
   };
-});
+}
 
 // --- typed input ----------------------------------------------------------
 //
