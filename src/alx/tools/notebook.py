@@ -353,10 +353,20 @@ def _thread_receipt(snapshot: Any) -> dict[str, Any]:
     return {"thread_id": snapshot.thread_id, "status": snapshot.status.value}
 
 
-def _failed(call_id: str, capability_id: str, code: str) -> CapabilityResult:
-    """Report a failure as a declared code carrying no research content."""
+def _failed(call_id: str, capability_id: str, code: str,
+            reason: str = "") -> CapabilityResult:
+    """Report a failure as a declared code carrying no research content.
+
+    `reason` says what in her own arguments was unusable (2026-10-15: two
+    searches were refused as arguments_unusable with nothing to say why, so
+    the second repeated the first). It is the validation rule's own wording
+    and never research content.
+    """
+    failure = {"code": code}
+    if reason:
+        failure["reason"] = reason[:300]
     return CapabilityResult(
-        call_id, capability_id, CapabilityResultState.FAILED, {}, {"code": code}
+        call_id, capability_id, CapabilityResultState.FAILED, {}, failure
     )
 
 
@@ -544,8 +554,11 @@ class NotebookCapabilities:
                 limit=int(values.get("limit", MAX_RETRIEVAL_LIMIT)),
             )
             found = self._store.retrieve(query)
-        except (KeyError, TypeError, ValueError):
-            return _failed(call_id, SEARCH_RESEARCH, "arguments_unusable")
+        except KeyError as error:
+            return _failed(call_id, SEARCH_RESEARCH, "arguments_unusable",
+                           f"{error.args[0]} is required")
+        except (TypeError, ValueError) as error:
+            return _failed(call_id, SEARCH_RESEARCH, "arguments_unusable", str(error))
         except Exception as error:
             return _failed(call_id, SEARCH_RESEARCH, _code(error))
         return _ok(call_id, SEARCH_RESEARCH, {"entries": [_entry_values(i) for i in found]})
