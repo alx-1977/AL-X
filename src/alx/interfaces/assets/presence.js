@@ -44,6 +44,23 @@ function show(presence) {
   root.setAttribute("aria-label", root.title);
 }
 
+// In the menu bar when there is one (it is drawn on days with BHL events),
+// as a menu bar item just left of the BHL item; otherwise on its own at the
+// top left. Moved, never copied: there is one indicator.
+const corner = root.parentNode;
+function place() {
+  const bar = document.querySelector(".rt-bar");
+  if (bar) {
+    if (root.parentNode !== bar) bar.insertBefore(root, bar.querySelector(".rt-bar__item"));
+    root.classList.add("presence--bar");
+  } else if (root.parentNode !== corner) {
+    corner.append(root);
+    root.classList.remove("presence--bar");
+  }
+}
+place();
+new MutationObserver(place).observe(document.body, { childList: true, subtree: true });
+
 async function poll() {
   try {
     const response = await fetch("/presence.json", { cache: "no-store" });

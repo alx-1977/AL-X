@@ -86,6 +86,12 @@ class PresenceIconTests(unittest.TestCase):
             raise RuntimeError("store")
         self.assertEqual(self.get(broken).status_code, 503)
 
+    def test_the_icon_sits_in_the_menu_bar_when_there_is_one(self) -> None:
+        script = (ASSETS / "presence.js").read_text()
+        self.assertIn('document.querySelector(".rt-bar")', script)
+        self.assertIn('bar.insertBefore(root, bar.querySelector(".rt-bar__item"))', script)
+        self.assertIn(".presence.presence--bar", (ASSETS / "app.css").read_text())
+
     def test_the_icon_is_on_the_page(self) -> None:
         page = (ASSETS / "index.html").read_text()
         self.assertIn('id="presence"', page)

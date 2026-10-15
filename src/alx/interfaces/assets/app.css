@@ -287,6 +287,17 @@ html, body {
   transition: opacity .3s ease, color .3s ease;
 }
 .presence[hidden] { display: none; }
+/* In the menu bar: a plain item like the others, no pill of its own. */
+.presence.presence--bar {
+  position: static;
+  height: 1.55em;
+  padding: 0 0.6em;
+  background: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  font: inherit;
+  color: rgba(255, 255, 255, 0.85);
+}
 .presence svg {
   width: 14px;
   height: 14px;
