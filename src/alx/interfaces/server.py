@@ -19,6 +19,7 @@ from websockets.http11 import Request, Response
 
 from typing import Any
 
+from alx.interfaces.phone import PHONE_CONVERSATION_ID
 from alx.contracts import AudioChunk, ResponseDelivery
 from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
 
@@ -99,8 +100,11 @@ class LiveVoiceServer:
         clock: Callable[[], datetime] | None = None,
         # Whether Friedl is here or away: (state, since or None).
         presence: Callable[[], tuple[str, datetime | None]] | None = None,
+        # D-049: his phone, for what she says while he is away.
+        phone: Any = None,
     ) -> None:
         self._presence = presence
+        self._phone = phone
         self._session = session
         self._relay = relay
         self._locate = locate
@@ -152,6 +156,17 @@ class LiveVoiceServer:
         wording is the Core's own, unaltered.
         """
         source_conversation_id = conversation_id
+        phone = getattr(self, "_phone", None)
+        if phone is not None and phone.carries(conversation_id):
+            # D-049: he is away, or this is the phone thread. Sent to his
+            # phone, and copied into the phone thread so his answer there has
+            # it. If it cannot be sent it takes the ordinary path below.
+            identity = self._identify(conversation_id, response)
+            if phone.send(response):
+                if conversation_id != PHONE_CONVERSATION_ID:
+                    self._relay_into(source_conversation_id, identity,
+                                     PHONE_CONVERSATION_ID)
+                return ResponseDelivery.DELIVERED
         registered = self._delivery_queues.get(conversation_id) or []
         identity = None if registered else self._identify(conversation_id, response)
         if not registered:

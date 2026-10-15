@@ -2526,3 +2526,15 @@ This grants no authority a single goal update lacks: completion still requires s
 - **He sees it.** A small indicator at the top left of his screen, in the macOS menu-bar style: a figure with a green dot when he is here, dimmed with "Away" when he is not. It is an indicator, not a control.
 - **Not yet.** Reaching him on his phone while he is away is the next step, and will use this.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-049 — AL/X reaches Friedl's phone by iMessage while he is away
+
+- **Date:** 2026-10-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-15.** Friedl chose iMessage for "a way for ALX to reach me when I am not at my laptop", said "The last thing I want is for ALX to speak and messaged to be sent regardless", and "let's do the messaging as well then we review".
+- **One place, once.** While he is away (D-048), what she would say to him is sent to his phone instead of waiting for his next session, and is copied into the phone conversation. While he is here, nothing goes to his phone. If a message cannot be sent, it takes the ordinary path (his screen, or kept for his next session); it is never both spoken and sent.
+- **From his phone.** What he sends from his handle, one-to-one, becomes a person turn in the phone conversation, as a typed line does, and her answer goes back to his phone. Messages from anyone else, from group chats, and from before AL/X could read them are never taken in.
+- **Fixed recipient.** The only recipient and the only sender read is the handle in `ALX_IMESSAGE_TO`; she cannot choose another. Sending goes through Messages on the Mac she runs on, from the Apple ID signed in there, which should be AL/X's own so his phone shows her as a contact. The text is passed as an argument and never becomes part of the script.
+- **Setup Friedl does.** `ALX_IMESSAGE_ENABLED=true`, `ALX_IMESSAGE_TO` (his number or Apple ID), Messages signed in as AL/X, Full Disk Access for the process running AL/X (to read), and the one-time permission for it to control Messages (to send).
+- **Not yet.** Voice notes; on his phone he can dictate with the keyboard's microphone.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

@@ -1615,3 +1615,27 @@ def review_settings(environment: Mapping[str, str]) -> ReviewSettings:
         reviewer=environment.get("ALX_REVIEW_PROVIDER", "").strip().lower()
         or "greptile",
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PhoneSettings:
+    """iMessage to and from Friedl (D-049). Off unless enabled with his handle."""
+
+    enabled: bool
+    # Friedl's iMessage handle: his phone number or Apple ID email. The only
+    # recipient, and the only sender whose messages are read.
+    handle: str
+    poll_seconds: int = 10
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.enabled and self.handle.strip())
+
+
+def phone_settings(environment: Mapping[str, str]) -> PhoneSettings:
+    return PhoneSettings(
+        enabled=_boolean(environment, "ALX_IMESSAGE_ENABLED", False),
+        handle=environment.get("ALX_IMESSAGE_TO", "").strip(),
+        poll_seconds=_positive_integer(environment, "ALX_IMESSAGE_POLL_SECONDS", 10),
+    )
+
