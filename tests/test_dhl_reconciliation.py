@@ -434,6 +434,63 @@ class DhlAnalyzerTests(unittest.TestCase):
             "2026-10-15",
         )
 
+    def test_a_merged_shipment_heading_is_not_the_invoice_date(self) -> None:
+        """DATE SHIPMENT NUMBER on the invoice-date row is the shipment column.
+
+        The heading is one run, on the row or two points off it. The shipment
+        day may sit beside that heading, under it at the heading's x, or in
+        the heading run. Joined text that places the shipment day immediately
+        after INVOICE DATE must not put that day back. 15/10/2026 beside the
+        invoice label is kept.
+        """
+        from alx.providers.dhl import _Run, _labelled_date
+
+        merged = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(532.0, 560.0, "DATE SHIPMENT NUMBER"),
+            _Run(530.0, 560.0, "DATE SHIPMENT NUMBER"),
+            _Run(532.0, 640.0, "02/01/2026"),
+            _Run(530.0, 560.0, "02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 02/01/2026 DATE SHIPMENT NUMBER",
+                "INVOICE DATE",
+                merged,
+            ),
+            "",
+        )
+        in_heading = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(532.0, 560.0, "DATE SHIPMENT NUMBER 02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 02/01/2026 DATE SHIPMENT NUMBER",
+                "INVOICE DATE",
+                in_heading,
+            ),
+            "",
+        )
+        stated = merged + (_Run(532.0, 450.0, "15/10/2026"),)
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 15/10/2026 DATE SHIPMENT NUMBER",
+                "INVOICE DATE",
+                stated,
+            ),
+            "2026-10-15",
+        )
+        stated_in_heading = in_heading + (_Run(532.0, 450.0, "15/10/2026"),)
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 15/10/2026 DATE SHIPMENT NUMBER 02/01/2026",
+                "INVOICE DATE",
+                stated_in_heading,
+            ),
+            "2026-10-15",
+        )
+
     def test_a_columnar_mybill_invoice_date_is_read_from_its_baseline(self) -> None:
         """Duty/tax MyBill puts the date in the header column, not in the label run.
 
@@ -484,6 +541,24 @@ class DhlAnalyzerTests(unittest.TestCase):
         self.assertEqual(missing["due_date"], "2026-11-14")
         fields = DhlImportAnalyzerAdapter().invoice_fields(
             columnar_invoice_pdf("2026-10-15", right_hand_shipment=True)
+        )
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_merged_shipment_heading_column_is_not_the_invoice_date(self) -> None:
+        """DATE SHIPMENT NUMBER sits on the invoice-date row.
+
+        The shipment day is under that heading. With no invoice-date value,
+        that day must not fill the label. With 15/10/2026 beside the label,
+        that day is the invoice date. The due date stays 14/11/2026.
+        """
+        missing = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf(None, merged_shipment_heading=True)
+        )
+        self.assertEqual(missing["invoice_date"], "")
+        self.assertEqual(missing["due_date"], "2026-11-14")
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", merged_shipment_heading=True)
         )
         self.assertEqual(fields["invoice_date"], "2026-10-15")
         self.assertEqual(fields["due_date"], "2026-11-14")
@@ -723,6 +798,7 @@ def columnar_invoice_pdf(
     agreeing_duplicate: bool = False,
     nearby_invoice_date: str | None = None,
     right_hand_shipment: bool = False,
+    merged_shipment_heading: bool = False,
     hawb: str = "1575091475",
 ) -> bytes:
     """A MyBill duty/tax header: labels in one column, values beside them.
@@ -731,8 +807,9 @@ def columnar_invoice_pdf(
     not within a few characters of its label in the extracted text. A shipment
     DATE column carries another date. `invoice_date` None leaves the invoice
     date unstated. `right_hand_shipment` places a second DATE column on the
-    invoice-date row, to the right of that label. `hawb` defaults to the
-    parser fixture's waybill.
+    invoice-date row, to the right of that label. `merged_shipment_heading`
+    places DATE SHIPMENT NUMBER on that row and the shipment day under the
+    heading. `hawb` defaults to the parser fixture's waybill.
     """
     labels = [
         (24.0, 560.0, "DHL INTERNATIONAL (PTY) LTD"),
@@ -767,6 +844,12 @@ def columnar_invoice_pdf(
         # value beside that label. The day belongs to this DATE heading.
         labels.append((560.0, 532.0, "DATE"))
         values.append((640.0, 532.0, shipment_date))
+    if merged_shipment_heading:
+        # On the invoice-date row. The day shares this heading's x, two
+        # points down, so it sits under the merged DATE SHIPMENT NUMBER
+        # column rather than beside a bare DATE word.
+        labels.append((560.0, 532.0, "DATE SHIPMENT NUMBER"))
+        values.append((560.0, 530.0, shipment_date))
     writer = PdfWriter()
     page = writer.add_blank_page(width=792, height=612)
     font = DictionaryObject(

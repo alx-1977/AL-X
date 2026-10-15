@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -623,19 +624,23 @@ def _labelled_date(
     is exactly that label: y within 3 points, x to the right, including a
     date carried in the label run itself.
 
-    An INVOICE DATE is only that label's value. A shipment run whose text is
-    DATE, or DATE plus other column headings, is not an anchor. A date on
-    the DUE DATE baseline is not one. An inline match is not one either when
-    the gap between the label and the date passes DUE DATE or a bare DATE
-    heading; a date read from the runs still wins over that joined text.
-    Before a date token is given to an invoice label, a token that belongs
-    to a bare DATE heading is set aside. That is a run whose own text is
-    DATE, a day written at or after the DATE word in that run (`DATE
-    02/01/2026`, or both days in one run), or a day to the right of such a
-    heading on that heading's baseline when no INVOICE DATE label stands
-    between them. A day written before the DATE word in the same run stays
-    with the invoice label. A shipment column to the right of the invoice
-    label is set aside, and that only stops the joined-text window from
+    An INVOICE DATE is only that label's value. A shipment heading is the
+    first DATE word whose immediate prefix is not INVOICE or DUE: bare DATE,
+    DATE plus a day (`DATE 02/01/2026`), or a merged column heading such as
+    DATE SHIPMENT NUMBER. INVOICE DATE and DUE DATE are not shipment
+    headings. A merged DATE SHIPMENT NUMBER heading never supplies the
+    invoice date, including a day under or beside that heading on or within
+    3 points of the invoice-date row. A date on the DUE DATE baseline is
+    not one. An inline match is not one either when the gap between the
+    label and the date passes DUE DATE or a bare DATE heading; a date read
+    from the runs still wins over that joined text. Before a date token is
+    given to an invoice label, a token that belongs to a shipment DATE
+    heading is set aside. That is a day written at or after the DATE word
+    in that heading run, or a day on that heading's baseline (y within 3
+    points) at or to the right of the heading when no INVOICE DATE label
+    stands between them. A day written before the DATE word in the same
+    run stays with the invoice label. A shipment column on the invoice-date
+    row is set aside, and that only stops the joined-text window from
     filling a label that has no day; a day already read for the label is
     kept. Each remaining date token belongs to the single nearest INVOICE
     DATE label within three points and to its right, by baseline distance
@@ -696,17 +701,6 @@ def _labelled_date(
         if not (seeking_invoice and (lands_on_due or lands_on_bare_date)):
             inline_value = read(own.group(1))
 
-    def belongs_to_due(run: _Run) -> bool:
-        if is_label(run.text, "DUE DATE"):
-            return True
-        for due_run in runs:
-            if not is_label(due_run.text, "DUE DATE"):
-                continue
-            on_baseline = abs(run.y - due_run.y) <= _BASELINE_TOLERANCE
-            if run is not due_run and on_baseline and run.x > due_run.x:
-                return True
-        return False
-
     found: list[str] = []
     # An INVOICE DATE anchor that states a due-date value, a shipment DATE
     # value, or a value that is not a real day, has been read. The inline
@@ -714,6 +708,74 @@ def _labelled_date(
     blocked = False
 
     if seeking_invoice:
+
+        def shipment_date_word(heading: str) -> int | None:
+            """Start of the first DATE whose prefix is not INVOICE or DUE.
+
+            Bare DATE, `DATE 02/01/2026`, and a merged column heading such
+            as DATE SHIPMENT NUMBER qualify. INVOICE DATE and DUE DATE do
+            not. Words are split on whitespace, and punctuation around a
+            word is ignored.
+            """
+            previous = ""
+            index = 0
+            limit = len(heading)
+            while index < limit:
+                while index < limit and heading[index].isspace():
+                    index += 1
+                if index >= limit:
+                    break
+                origin = index
+                while index < limit and not heading[index].isspace():
+                    index += 1
+                token = heading[origin:index]
+                left = 0
+                right = len(token)
+                while left < right and not token[left].isalnum():
+                    left += 1
+                while right > left and not token[right - 1].isalnum():
+                    right -= 1
+                bare = token[left:right].upper()
+                if bare == "DATE" and previous not in {"INVOICE", "DUE"}:
+                    return origin + left
+                previous = bare
+            return None
+
+        def baseline_buckets(origin: float) -> range:
+            # floor(y) ± 3 covers every pair with abs(dy) <= 3, including a
+            # negative page offset. The bucket is only a candidate filter.
+            bucket = math.floor(origin)
+            return range(
+                bucket - _BASELINE_TOLERANCE,
+                bucket + _BASELINE_TOLERANCE + 1,
+            )
+
+        # Indexed once per invoice-label call. Heading checks probe these
+        # buckets instead of scanning every run for every run.
+        shipment_headings: dict[int, list[tuple[_Run, int]]] = {}
+        due_headings: dict[int, list[_Run]] = {}
+        for run in runs:
+            word_at = shipment_date_word(run.text)
+            if word_at is not None:
+                shipment_headings.setdefault(math.floor(run.y), []).append(
+                    (run, word_at)
+                )
+            if is_label(run.text, "DUE DATE"):
+                due_headings.setdefault(math.floor(run.y), []).append(run)
+
+        def belongs_to_due(run: _Run) -> bool:
+            if is_label(run.text, "DUE DATE"):
+                return True
+            for bucket in baseline_buckets(run.y):
+                for due_run in due_headings.get(bucket, ()):
+                    if run is due_run:
+                        continue
+                    if abs(run.y - due_run.y) > _BASELINE_TOLERANCE:
+                        continue
+                    if run.x > due_run.x:
+                        return True
+            return False
+
         # baseline, horizontal distance, token start, token, run. The token
         # text and the run are not ordered: a tie must not collapse two days
         # onto the lexicographically smaller one, and comparing a run raises
@@ -734,34 +796,34 @@ def _labelled_date(
                     break
         anchor_ids = {id(anchor) for anchor in anchors}
 
-        def belongs_to_bare_date(run: _Run, token_at: int) -> bool:
+        def belongs_to_shipment_date(run: _Run, token_at: int) -> bool:
             """A shipment DATE heading owns this date token.
 
-            The heading is the run itself when the token is written at or
-            after the DATE word (`DATE` or `DATE 02/01/2026`), or a bare DATE
-            to the token's left on that heading's baseline. A day written
-            before the DATE word in the same run is the invoice value. An
-            INVOICE DATE label between a heading and the token keeps the
+            The heading run owns a token at or after its DATE word (`DATE`,
+            `DATE 02/01/2026`, or `DATE SHIPMENT NUMBER`). A day written
+            before that word in the same run is not its shipment day.
+            Another heading owns a token on its baseline, at or to the right
+            of the heading, including a day under DATE SHIPMENT NUMBER. An
+            INVOICE DATE label between the heading and the token keeps the
             value, so a shipment column further left does not take this row.
             """
-            if is_label(run.text, "DATE"):
-                word = re.search(r"\bDATE\b", run.text, re.IGNORECASE)
-                if word is None or token_at >= word.start():
+            for bucket in baseline_buckets(run.y):
+                for heading, word_at in shipment_headings.get(bucket, ()):
+                    if heading is run:
+                        if token_at >= word_at:
+                            return True
+                        continue
+                    if run.x < heading.x:
+                        continue
+                    if abs(run.y - heading.y) > _BASELINE_TOLERANCE:
+                        continue
+                    if any(
+                        heading.x < anchor.x < run.x
+                        and abs(anchor.y - run.y) <= _BASELINE_TOLERANCE
+                        for anchor in anchors
+                    ):
+                        continue
                     return True
-            for heading in runs:
-                if heading is run or not is_label(heading.text, "DATE"):
-                    continue
-                if run.x <= heading.x:
-                    continue
-                if abs(run.y - heading.y) > _BASELINE_TOLERANCE:
-                    continue
-                if any(
-                    heading.x < anchor.x < run.x
-                    and abs(anchor.y - run.y) <= _BASELINE_TOLERANCE
-                    for anchor in anchors
-                ):
-                    continue
-                return True
             return False
 
         for run in runs:
@@ -773,7 +835,7 @@ def _labelled_date(
             if not matches:
                 continue
             for match in matches:
-                if belongs_to_bare_date(run, match.start()):
+                if belongs_to_shipment_date(run, match.start()):
                     # Joined text can list this day with no DATE word between
                     # the label and the token. Once the runs name it as a
                     # shipment day, that window must not fill an empty label.
@@ -921,10 +983,11 @@ def parse_invoice_pdf(payload: bytes) -> dict[str, Any]:
     runs = [run for page in pages for run in page]
     due_date = _labelled_date(joined, "DUE DATE", runs)
     # Only a run whose text is INVOICE DATE supplies the invoice date. A
-    # shipment column headed DATE, including one to the right of the label,
-    # and the due date, stay out of it — the inline window included, when
-    # that window reads through either heading. Two INVOICE DATE labels keep
-    # their own days, even a point apart.
+    # shipment column headed DATE, including a merged DATE SHIPMENT NUMBER
+    # heading and a day under or beside that heading on or within 3 points
+    # of the invoice-date row, and the due date, stay out of it — the inline
+    # window included, when that window reads through either heading. Two
+    # INVOICE DATE labels keep their own days, even a point apart.
     invoice_date = _labelled_date(joined, "INVOICE DATE", runs)
 
     return {
