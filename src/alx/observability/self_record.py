@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -98,6 +99,8 @@ _PREFIXED = re.compile(r"\b(sk|xi|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9
 # A long unbroken run of letters and digits (no slash, so never a path).
 _LONG = re.compile(r"(?<![/\w])[A-Za-z0-9+_\-]{40,}={0,2}(?![/\w])")
 MAX_LINE_CHARACTERS = 400
+# One entry with its traceback, at most.
+MAX_ENTRY_CHARACTERS = 4000
 
 
 def _mask(text: str) -> str:
@@ -118,18 +121,22 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
     threshold = _LEVELS.get(minimum_level.upper(), 20)
     local_start = start.astimezone().replace(tzinfo=None)
     local_end = end.astimezone().replace(tzinfo=None)
-    entries: list[dict] = []
+    # Only the newest `limit` are held; the rest are counted.
+    entries: deque[dict] = deque(maxlen=limit)
+    matched = 0
     current: dict | None = None
 
     def keep(entry: dict | None) -> None:
+        nonlocal matched
         if entry is None:
             return
         if _LEVELS.get(entry["level"], 20) < threshold:
             return
         if contains and contains.lower() not in entry["message"].lower():
             return
-        entry["message"] = _mask(entry["message"])[:MAX_LINE_CHARACTERS * 4]
+        entry["message"] = _mask(entry["message"])
         entries.append(entry)
+        matched += 1
 
     for path in paths:
         if not path.exists():
@@ -139,8 +146,10 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
                 line = raw.rstrip("\n")
                 match = _LINE.match(line)
                 if match is None:
-                    if current is not None and line.strip():
-                        current["message"] += "\n" + line[:MAX_LINE_CHARACTERS]
+                    if (current is not None and line.strip()
+                            and len(current["message"]) < MAX_ENTRY_CHARACTERS):
+                        current["message"] = (current["message"] + "\n"
+                                              + line[:MAX_LINE_CHARACTERS])[:MAX_ENTRY_CHARACTERS]
                     continue
                 keep(current)
                 current = None
@@ -151,7 +160,7 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
                            "source": match.group(3), "message": match.group(4)[:MAX_LINE_CHARACTERS]}
         keep(current)
         current = None
-    return entries[-limit:], len(entries) > limit
+    return list(entries), matched > limit
 
 
 def _moment(value: Any) -> datetime | None:

@@ -83,6 +83,19 @@ class LogTests(unittest.TestCase):
         self.assertIn("site-packages/websockets/server.py", entries[0]["message"])
         self.assertIn("token=[masked]", entries[1]["message"])
 
+    def test_only_the_newest_are_held_and_a_traceback_is_bounded(self) -> None:
+        local = NOW.astimezone()
+        stamp = (local - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"{stamp},000 ERROR alx.z: failure {n}" for n in range(10)]
+        lines += [f"{stamp},000 ERROR alx.z: long", *["  frame line " + "x" * 300] * 100]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "live_voice.log"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            entries, truncated = read_log((path,), NOW - timedelta(hours=1), NOW, "ERROR", limit=3)
+        self.assertTrue(truncated)
+        self.assertEqual([entry["message"][:9] for entry in entries[:2]], ["failure 8", "failure 9"])
+        self.assertLessEqual(len(entries[-1]["message"]), 4000)
+
     def test_keys_are_masked_and_paths_are_not(self) -> None:
         self.assertEqual(_mask("Authorization: Bearer abc.def"), "Authorization: [masked] [masked]")
         self.assertIn("[masked]", _mask('api_key="sk-ant-api03-abcdefghijklmnop"'))
@@ -120,6 +133,13 @@ class CapabilityTests(unittest.TestCase):
         result = self.run_[READ_OWN_TRACE]({"from": NOW.isoformat(), "to": (NOW - timedelta(hours=1)).isoformat()})
         self.assertEqual(result.failure["code"], "arguments_unusable")
         self.assertIn("later than", result.failure["reason"])
+
+    def test_the_log_is_read_where_the_launcher_writes_it(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / "scripts/alx").read_text()
+        self.assertIn('LOG="$ROOT/.alx/runtime/live_voice.log"', launcher)
+        composition = (root / "src/alx/bootstrap/live_voice.py").read_text()
+        self.assertIn('repository_root / ".alx/runtime/live_voice.log"', composition)
 
     def test_she_knows_to_look(self) -> None:
         text = " ".join(PROTOCOL_INSTRUCTIONS.split())

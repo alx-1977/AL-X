@@ -548,8 +548,11 @@ async def run(repository_root: Path) -> None:
                      for definition in SELF_DIAGNOSIS_DEFINITIONS})
     executors.update(build_self_diagnosis_executors(
         trace_record,
+        # Where the launcher (scripts/alx) writes the log, whatever the
+        # storage root is set to.
         lambda start, end, level, contains, limit: read_log(
-            (storage_root / "live_voice.log.prev", storage_root / "live_voice.log"),
+            (repository_root / ".alx/runtime/live_voice.log.prev",
+             repository_root / ".alx/runtime/live_voice.log"),
             start, end, level, contains, limit),
         current_call_id.get,
     ))
