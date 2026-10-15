@@ -2538,3 +2538,14 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Setup Friedl does.** `ALX_IMESSAGE_ENABLED=true`, `ALX_IMESSAGE_TO` (his number or Apple ID), Messages signed in as AL/X, Full Disk Access for the process running AL/X (to read), and the one-time permission for it to control Messages (to send).
 - **Not yet.** Voice notes; on his phone he can dictate with the keyboard's microphone.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-050 — AL/X reads her own trace and runtime log
+
+- **Date:** 2026-10-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-15.** Friedl's words that day: "I am getting tired of ALX not able to see things related to herself ... She should be able to diagnose herself 100%, fix code herself and make sure everything is ok", and "yes please... ALX should be self sustaining."
+- **Why.** Two of her notebook searches were refused that morning. The only record was the operator trace on Friedl's screen, and when he asked whether anything had gone wrong she truthfully said she could see nothing.
+- **Her trace is kept.** Every operator trace step (subsystem, status, label, reference, reason code, duration; content-free by construction) is stored for 30 days in `trace.sqlite3`. `read_own_trace` reads it over a window, optionally only failed and refused steps, or one subsystem.
+- **Her log is readable.** `read_own_log` reads the runtime log (this run and the one before) over a window, by minimum level or containing text, with anything shaped like a key or token masked. File paths and addresses stay readable.
+- **Authority.** Both are read-only, under a plain permission (`self.read`). What a record means, and whether and how to fix it (a coding task, review, merge under D-046), is hers.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

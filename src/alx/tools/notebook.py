@@ -171,8 +171,9 @@ REVISE_ENTRY_DEFINITION = CapabilityDefinition(
 
 SEARCH_DEFINITION = CapabilityDefinition(
     SEARCH_RESEARCH,
-    "Retrieve research entries matching a scope. A scope is required: thread, "
-    "cited source, or time window. Kind alone is not a scope.",
+    "Retrieve entries from your notebook (your diary and research notes; not "
+    "ask_research_question) matching a scope. A scope is required: thread, "
+    "cited source, or a time window with both ends. Kind alone is not a scope.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
