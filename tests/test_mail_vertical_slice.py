@@ -646,7 +646,7 @@ class MailPrimitiveTests(unittest.TestCase):
             "effectful",
         )
 
-    def test_seen_and_trash_keep_approval_and_allow_only_exact_standing_scopes(self) -> None:
+    def test_seen_and_trash_are_hers_without_approval(self) -> None:
         from alx.bootstrap.mail import build_mail_runtime
         from alx.config import MailSettings
 
@@ -662,9 +662,8 @@ class MailPrimitiveTests(unittest.TestCase):
             for capability_id in (
                 MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH,
             ):
-                policy = runtime.policies[capability_id]
-                self.assertTrue(policy.approval_required)
-                self.assertTrue(policy.standing_scope_allowed)
+                # D-051: housekeeping that can be undone needs no approval.
+                self.assertFalse(runtime.policies[capability_id].approval_required)
             runtime.observations.close()
         finally:
             directory.cleanup()

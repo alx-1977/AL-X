@@ -131,34 +131,16 @@ class GateEnforcementTests(unittest.TestCase):
             self.outcome(state, FILE_PROCESSED_MAIL_MESSAGE, DOCS), SafetyState.ALLOWED
         )
 
-    def test_an_orange_scope_cannot_clear_or_recolour(self) -> None:
+    def test_flagging_and_filing_are_hers_since_d_051(self) -> None:
+        """D-051: flags and filing can be undone, so they no longer wait on a DHL result."""
         state = goal(dhl("customs_documents"))
-        self.assertNotEqual(
-            self.outcome(state, SET_MAIL_FLAG_COLOUR, {**DOCS, "colour": "none"}),
-            SafetyState.ALLOWED,
-        )
-
-    def test_another_message_cannot_be_flagged_or_filed(self) -> None:
-        state = goal(dhl("customs_documents"))
-        self.assertNotEqual(
-            self.outcome(state, SET_MAIL_FLAG_COLOUR, {**OTHER, "colour": "orange"}),
-            SafetyState.ALLOWED,
-        )
-        self.assertNotEqual(
-            self.outcome(state, FILE_PROCESSED_MAIL_MESSAGE, OTHER), SafetyState.ALLOWED
-        )
-
-    def test_clearing_needs_the_authorised_bill(self) -> None:
-        self.assertEqual(
-            self.outcome(goal(dhl("dhl_invoice", source=(INVOICE,), customs=(FILED_DOCS,))),
-                         SET_MAIL_FLAG_COLOUR, {**FILED_DOCS, "colour": "none"}),
-            SafetyState.ALLOWED,
-        )
-        self.assertNotEqual(
-            self.outcome(goal(dhl("customs_documents")),
-                         SET_MAIL_FLAG_COLOUR, {**FILED_DOCS, "colour": "none"}),
-            SafetyState.ALLOWED,
-        )
+        for capability, arguments in (
+            (SET_MAIL_FLAG_COLOUR, {**DOCS, "colour": "none"}),
+            (SET_MAIL_FLAG_COLOUR, {**OTHER, "colour": "orange"}),
+            (FILE_PROCESSED_MAIL_MESSAGE, OTHER),
+        ):
+            with self.subTest(capability=capability, arguments=arguments):
+                self.assertEqual(self.outcome(state, capability, arguments), SafetyState.ALLOWED)
 
 
 class FlagAccount:

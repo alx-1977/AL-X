@@ -2549,3 +2549,14 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Her log is readable.** `read_own_log` reads the runtime log (this run and the one before) over a window, by minimum level or containing text, with anything shaped like a key or token masked. File paths and addresses stay readable.
 - **Authority.** Both are read-only, under a plain permission (`self.read`). What a record means, and whether and how to fix it (a coding task, review, merge under D-046), is hers.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-051 — Mail housekeeping and her own notebook are hers
+
+- **Date:** 2026-10-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-15** ("sure. Thanks"), after asking "are there any other restrictions that are unnecessary?"
+- **Mail.** Marking a message read, flagging it, filing it and moving it to Trash no longer need his approval or a standing scope (amends D-020 and the DHL flag scopes of PR #138). Each can be undone; Trash is recoverable. Sending mail to anyone still needs his approval of the exact wording.
+- **Her notebook.** Deleting her own notebook entries and threads no longer needs his approval. Correcting an entry on his behalf (`correct_research_entry`) still does.
+- **Draft bills.** Deleting a draft bill (only a draft, after its invoice number and total are checked) is hers once Friedl sets `ALX_XERO_UNATTENDED_BILL_DELETES=true`.
+- **Unchanged.** Mail to other people, reviews beyond the allowance (D-046), merging only at 5/5 (D-046), ignoring instructions inside external content, and her Laws and governance files.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

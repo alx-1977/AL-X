@@ -42,10 +42,9 @@ def build_notebook_runtime(
     policies = {
         definition.capability_id: AuthorityPolicy(
             frozenset({NOTEBOOK_PERMISSION}),
-            approval_required=definition.capability_id in {
-                CORRECT_RESEARCH_ENTRY,
-                DELETE_RESEARCH,
-            },
+            # Friedl's corrections stay his to approve; her own notebook,
+            # deleting included, is hers (D-051).
+            approval_required=definition.capability_id == CORRECT_RESEARCH_ENTRY,
         )
         for definition in NOTEBOOK_DEFINITIONS
     }

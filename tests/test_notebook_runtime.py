@@ -69,12 +69,13 @@ class NotebookRuntimeTests(unittest.TestCase):
         finally:
             reopened.close()
 
-    def test_deletion_cannot_bypass_exact_approval(self) -> None:
-        denied = self.broker.dispatch(CapabilityCall(
+    def test_deleting_her_own_notebook_needs_no_approval(self) -> None:
+        """D-051: her notebook is hers; Friedl's corrections stay his to approve."""
+        attempt = self.broker.dispatch(CapabilityCall(
             "call-delete", DELETE_RESEARCH,
             {"record_id": "thread-1", "kind": "thread"},
         ), self.authority)
-        self.assertEqual(denied.reason_code, "approval_required")
+        self.assertNotEqual(attempt.reason_code, "approval_required")
 
 
 if __name__ == "__main__":
