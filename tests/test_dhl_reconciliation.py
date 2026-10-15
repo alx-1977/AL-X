@@ -329,6 +329,304 @@ class DhlAnalyzerTests(unittest.TestCase):
         self.assertEqual(_labelled_date("DUE DATE 07/09/2026", "DUE DATE"), "2026-09-07")
         self.assertEqual(_labelled_date("DUE DATE 2026-09-07", "DUE DATE"), "2026-09-07")
         self.assertEqual(_labelled_date("DUE DATE 32/13/2026", "DUE DATE"), "")
+        self.assertEqual(
+            _labelled_date("INVOICE DATE 15-Oct-2026", "INVOICE DATE"), "2026-10-15"
+        )
+        self.assertEqual(
+            _labelled_date("INVOICE DATE 15 Oct 2026", "INVOICE DATE"), "2026-10-15"
+        )
+        self.assertEqual(
+            _labelled_date("INVOICE DATE 15 October 2026", "INVOICE DATE"),
+            "2026-10-15",
+        )
+        self.assertEqual(_labelled_date("INVOICE DATE 31-Feb-2026", "INVOICE DATE"), "")
+        # The window that runs through the due-date label lands on the due
+        # date. The same day written beside each label is the invoice date.
+        self.assertEqual(
+            _labelled_date("INVOICE DATE DUE DATE 15/10/2026", "INVOICE DATE"), ""
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 15/10/2026 DUE DATE 15/10/2026", "INVOICE DATE"
+            ),
+            "2026-10-15",
+        )
+
+    def test_an_inline_shipment_date_heading_is_not_the_invoice_date(self) -> None:
+        """Joined text `INVOICE DATE DATE 02/01/2026` is the shipment column.
+
+        The bare DATE heading sits between the label and 02/01/2026. With
+        runs present that value is not the invoice date. A 15/10/2026 run on
+        the INVOICE DATE baseline still is, and it wins over that joined text.
+        """
+        from alx.providers.dhl import _Run, _labelled_date
+
+        shipment = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(450.0, 24.0, "DATE"),
+            _Run(450.0, 140.0, "02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date("INVOICE DATE DATE 02/01/2026", "INVOICE DATE", shipment),
+            "",
+        )
+        dated = shipment + (_Run(532.0, 520.0, "15/10/2026"),)
+        self.assertEqual(
+            _labelled_date("INVOICE DATE DATE 02/01/2026", "INVOICE DATE", dated),
+            "2026-10-15",
+        )
+
+    def test_a_right_hand_shipment_date_is_not_the_invoice_date(self) -> None:
+        """A shipment DATE column to the right of INVOICE DATE is not that date.
+
+        The heading may be its own run or the same run as its day, on the
+        invoice baseline or two points off it. Joined text that places the
+        shipment day immediately after INVOICE DATE must not put that day
+        back. A 15/10/2026 value beside the invoice label is kept.
+        """
+        from alx.providers.dhl import _Run, _labelled_date
+
+        right_hand = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(532.0, 500.0, "DATE"),
+            _Run(532.0, 560.0, "02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE DATE 02/01/2026", "INVOICE DATE", right_hand
+            ),
+            "",
+        )
+        # Extraction can emit the day before the heading word, so the inline
+        # window sees INVOICE DATE and then 02/01/2026 with no DATE between.
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 02/01/2026 DATE", "INVOICE DATE", right_hand
+            ),
+            "",
+        )
+        combined = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(532.0, 500.0, "DATE 02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE DATE 02/01/2026", "INVOICE DATE", combined
+            ),
+            "",
+        )
+        offset = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(530.0, 500.0, "DATE"),
+            _Run(530.0, 560.0, "02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date("INVOICE DATE DATE 02/01/2026", "INVOICE DATE", offset),
+            "",
+        )
+        beside = right_hand + (_Run(532.0, 450.0, "15/10/2026"),)
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 15/10/2026 DATE 02/01/2026",
+                "INVOICE DATE",
+                beside,
+            ),
+            "2026-10-15",
+        )
+
+    def test_a_merged_shipment_heading_is_not_the_invoice_date(self) -> None:
+        """DATE SHIPMENT NUMBER on the invoice-date row is the shipment column.
+
+        The heading is one run, on the row or two points off it. The shipment
+        day may sit beside that heading, under it at the heading's x, or in
+        the heading run. Joined text that places the shipment day immediately
+        after INVOICE DATE must not put that day back. 15/10/2026 beside the
+        invoice label is kept.
+        """
+        from alx.providers.dhl import _Run, _labelled_date
+
+        merged = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(532.0, 560.0, "DATE SHIPMENT NUMBER"),
+            _Run(530.0, 560.0, "DATE SHIPMENT NUMBER"),
+            _Run(532.0, 640.0, "02/01/2026"),
+            _Run(530.0, 560.0, "02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 02/01/2026 DATE SHIPMENT NUMBER",
+                "INVOICE DATE",
+                merged,
+            ),
+            "",
+        )
+        in_heading = (
+            _Run(532.0, 400.0, "INVOICE DATE"),
+            _Run(532.0, 560.0, "DATE SHIPMENT NUMBER 02/01/2026"),
+        )
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 02/01/2026 DATE SHIPMENT NUMBER",
+                "INVOICE DATE",
+                in_heading,
+            ),
+            "",
+        )
+        stated = merged + (_Run(532.0, 450.0, "15/10/2026"),)
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 15/10/2026 DATE SHIPMENT NUMBER",
+                "INVOICE DATE",
+                stated,
+            ),
+            "2026-10-15",
+        )
+        stated_in_heading = in_heading + (_Run(532.0, 450.0, "15/10/2026"),)
+        self.assertEqual(
+            _labelled_date(
+                "INVOICE DATE 15/10/2026 DATE SHIPMENT NUMBER 02/01/2026",
+                "INVOICE DATE",
+                stated_in_heading,
+            ),
+            "2026-10-15",
+        )
+
+    def test_a_columnar_mybill_invoice_date_is_read_from_its_baseline(self) -> None:
+        """Duty/tax MyBill puts the date in the header column, not in the label run.
+
+        Labels are emitted before their values, so the date is not within 15
+        characters of INVOICE DATE in the extracted text. The shipment DATE
+        column and the due date are different days and must not be chosen.
+        """
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15")
+        )
+        self.assertEqual(fields["invoice_number"], "CPTZR00032240")
+        self.assertEqual(fields["waybill"], "1575091475")
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_columnar_invoice_date_accepts_the_stated_forms(self) -> None:
+        forms = {
+            "15/10/2026": "2026-10-15",
+            "15-Oct-2026": "2026-10-15",
+            "15 Oct 2026": "2026-10-15",
+            "15 October 2026": "2026-10-15",
+        }
+        for written, expected in forms.items():
+            with self.subTest(written=written):
+                fields = DhlImportAnalyzerAdapter().invoice_fields(
+                    columnar_invoice_pdf(written)
+                )
+                self.assertEqual(fields["invoice_date"], expected)
+                self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_due_date_alone_is_not_the_invoice_date(self) -> None:
+        """A due date and a shipment DATE, with no invoice-date value."""
+        fields = DhlImportAnalyzerAdapter().invoice_fields(columnar_invoice_pdf(None))
+        self.assertEqual(fields["invoice_date"], "")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_right_hand_shipment_column_is_not_the_invoice_date(self) -> None:
+        """The shipment DATE column is on the invoice-date row, to its right.
+
+        With no invoice-date value, 02/01/2026 must not fill that label.
+        With 15/10/2026 beside the label, that day is the invoice date and
+        the shipment day does not disagree with it.
+        """
+        missing = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf(None, right_hand_shipment=True)
+        )
+        self.assertEqual(missing["invoice_date"], "")
+        self.assertEqual(missing["due_date"], "2026-11-14")
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", right_hand_shipment=True)
+        )
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_merged_shipment_heading_column_is_not_the_invoice_date(self) -> None:
+        """DATE SHIPMENT NUMBER sits on the invoice-date row.
+
+        The shipment day is under that heading. With no invoice-date value,
+        that day must not fill the label. With 15/10/2026 beside the label,
+        that day is the invoice date. The due date stays 14/11/2026.
+        """
+        missing = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf(None, merged_shipment_heading=True)
+        )
+        self.assertEqual(missing["invoice_date"], "")
+        self.assertEqual(missing["due_date"], "2026-11-14")
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", merged_shipment_heading=True)
+        )
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_an_invoice_date_on_the_due_date_day_is_kept(self) -> None:
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", due_date="2026-10-15")
+        )
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-10-15")
+
+    def test_disagreeing_invoice_date_baselines_are_left_blank(self) -> None:
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", other_invoice_date="2026-12-01")
+        )
+        self.assertEqual(fields["invoice_date"], "")
+
+    def test_agreeing_invoice_date_baselines_are_kept(self) -> None:
+        """Two INVOICE DATE rows two points apart that name the same day.
+
+        Each value stays with its own label. The day they agree on is kept.
+        The run object is not part of deciding that.
+        """
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", agreeing_duplicate=True)
+        )
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_a_later_spaced_fragment_keeps_the_matrix_pypdf_reports(self) -> None:
+        """A positioning origin applies only to the next text fragment.
+
+        The invoice value follows its own Tm. A later text object shows a
+        shipment day whose raw text starts with a space and names no position
+        of its own. That day keeps the matrix pypdf reports, so it stays off
+        the invoice-date baseline. The header column still supplies
+        2026-10-15. The due date and the shipment DATE column stay out of it.
+        """
+        payload = spaced_fragment_invoice_pdf()
+        from alx.providers.dhl import _runs_by_page
+
+        runs = [run for page in _runs_by_page(payload) for run in page]
+        trapped = [run for run in runs if "03/01/2026" in run.text]
+        self.assertEqual(len(trapped), 1)
+        self.assertGreater(abs(trapped[0].y - 532.0), 3)
+        fields = DhlImportAnalyzerAdapter().invoice_fields(payload)
+        self.assertEqual(fields["invoice_date"], "2026-10-15")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_nearby_invoice_dates_that_disagree_are_left_blank(self) -> None:
+        """INVOICE DATE rows at y=532 and y=530 name different days.
+
+        Two points is inside the baseline window. Each day stays with its
+        own label, so the invoice date is left empty instead of collapsing
+        to the lexicographically smaller one.
+        """
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("2026-10-15", nearby_invoice_date="2026-12-01")
+        )
+        self.assertEqual(fields["invoice_date"], "")
+        self.assertEqual(fields["due_date"], "2026-11-14")
+
+    def test_an_impossible_columnar_invoice_date_is_not_replaced(self) -> None:
+        fields = DhlImportAnalyzerAdapter().invoice_fields(
+            columnar_invoice_pdf("31-Feb-2026")
+        )
+        self.assertEqual(fields["invoice_date"], "")
+        self.assertEqual(fields["due_date"], "2026-11-14")
 
     def test_the_assessment_date_comes_from_the_declaration(self) -> None:
         """Stated by the identifier, never guessed from the arrival date."""
@@ -485,6 +783,143 @@ def airway_bill_pdf() -> bytes:
     stream.set_data(
         b"BT /F1 10 Tf 1 0 0 1 100 760 Tm (AIR WAYBILL 1234567890 SHIPPER CONSIGNEE) Tj ET"
     )
+    page[NameObject("/Contents")] = stream
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def columnar_invoice_pdf(
+    invoice_date: str | None,
+    *,
+    due_date: str = "14/11/2026",
+    shipment_date: str = "02/01/2026",
+    other_invoice_date: str | None = None,
+    agreeing_duplicate: bool = False,
+    nearby_invoice_date: str | None = None,
+    right_hand_shipment: bool = False,
+    merged_shipment_heading: bool = False,
+    hawb: str = "1575091475",
+) -> bytes:
+    """A MyBill duty/tax header: labels in one column, values beside them.
+
+    Labels are written before values, as on the live invoice, so a date is
+    not within a few characters of its label in the extracted text. A shipment
+    DATE column carries another date. `invoice_date` None leaves the invoice
+    date unstated. `right_hand_shipment` places a second DATE column on the
+    invoice-date row, to the right of that label. `merged_shipment_heading`
+    places DATE SHIPMENT NUMBER on that row and the shipment day under the
+    heading. `hawb` defaults to the parser fixture's waybill.
+    """
+    labels = [
+        (24.0, 560.0, "DHL INTERNATIONAL (PTY) LTD"),
+        (400.0, 546.0, "CPTZR00032240"),
+        (24.0, 500.0, f"HAWB {hawb}"),
+        (24.0, 424.0, "NET AMOUNT PAYABLE 4388.15"),
+        (400.0, 532.0, "INVOICE DATE"),
+        (400.0, 518.0, "DUE DATE"),
+        (24.0, 450.0, "DATE"),
+        (24.0, 436.0, "DATE SHIPMENT NUMBER"),
+    ]
+    values = [
+        (140.0, 450.0, shipment_date),
+        (520.0, 518.0, due_date),
+    ]
+    if invoice_date is not None:
+        values.append((520.0, 532.0, invoice_date))
+    # A second header row two points down (y=530 beside y=532) still sits
+    # inside the three-point baseline window. The same day on both labels
+    # is the invoice date; a different day is a disagreement.
+    if agreeing_duplicate and invoice_date is not None:
+        labels.append((400.0, 530.0, "INVOICE DATE"))
+        values.append((520.0, 530.0, invoice_date))
+    if nearby_invoice_date is not None:
+        labels.append((400.0, 530.0, "INVOICE DATE"))
+        values.append((520.0, 530.0, nearby_invoice_date))
+    if other_invoice_date is not None:
+        labels.append((400.0, 470.0, "INVOICE DATE"))
+        values.append((520.0, 470.0, other_invoice_date))
+    if right_hand_shipment:
+        # On the invoice-date row, to the right of INVOICE DATE and of the
+        # value beside that label. The day belongs to this DATE heading.
+        labels.append((560.0, 532.0, "DATE"))
+        values.append((640.0, 532.0, shipment_date))
+    if merged_shipment_heading:
+        # On the invoice-date row. The day shares this heading's x, two
+        # points down, so it sits under the merged DATE SHIPMENT NUMBER
+        # column rather than beside a bare DATE word.
+        labels.append((560.0, 532.0, "DATE SHIPMENT NUMBER"))
+        values.append((560.0, 530.0, shipment_date))
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=792, height=612)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    commands = ["BT"]
+    for index, (x, y, text) in enumerate(labels + values):
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        # Alternating sizes keep separate text runs, as the sanitized fixtures do.
+        size = "8" if index % 2 == 0 else "8.001"
+        commands.append(f"/F1 {size} Tf 1 0 0 1 {x} {y} Tm ({escaped}) Tj")
+    commands.append("ET")
+    stream = DecodedStreamObject()
+    stream.set_data("\n".join(commands).encode("ascii"))
+    page[NameObject("/Contents")] = stream
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def spaced_fragment_invoice_pdf() -> bytes:
+    """Columnar header, then a spaced shipment day in a new text object.
+
+    Positioned runs use the same Tf/Tm/Tj shape as `columnar_invoice_pdf`.
+    The invoice value is the last of those, so its origin is the one a stale
+    placement would still be holding. The following text object shows
+    ` 03/01/2026` with no Tm or Td of its own.
+    """
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=792, height=612)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    items = (
+        (24.0, 560.0, "DHL INTERNATIONAL (PTY) LTD"),
+        (400.0, 546.0, "CPTZR00032240"),
+        (24.0, 500.0, "HAWB 1575091475"),
+        (24.0, 424.0, "NET AMOUNT PAYABLE 4388.15"),
+        (24.0, 450.0, "DATE"),
+        (140.0, 450.0, "02/01/2026"),
+        (400.0, 518.0, "DUE DATE"),
+        (520.0, 518.0, "14/11/2026"),
+        (400.0, 532.0, "INVOICE DATE"),
+        (520.0, 532.0, "15/10/2026"),
+    )
+    commands = ["BT"]
+    for index, (x, y, text) in enumerate(items):
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        size = "8" if index % 2 == 0 else "8.001"
+        commands.append(f"/F1 {size} Tf 1 0 0 1 {x} {y} Tm ({escaped}) Tj")
+    commands.append("ET")
+    commands.append("BT")
+    commands.append("( 03/01/2026) Tj")
+    commands.append("ET")
+    stream = DecodedStreamObject()
+    stream.set_data("\n".join(commands).encode("ascii"))
     page[NameObject("/Contents")] = stream
     output = io.BytesIO()
     writer.write(output)
@@ -1488,6 +1923,32 @@ class DhlImportLifecycleTests(unittest.TestCase):
         stored = self.xero.bills["bill-1"]
         self.assertEqual(stored["Date"], "2026-08-31")
         self.assertEqual(stored["DueDate"], "2026-09-07")
+
+    def test_a_columnar_mybill_header_date_completes_the_customs_draft(self) -> None:
+        """A CPTZR00032240-style header posts the column beside INVOICE DATE.
+
+        The shipment DATE column is 02/01/2026 and the due date is 14/11/2026.
+        The invoice stage takes 2026-10-15 and does not return
+        invoice_date_missing. The waybill is the provisional draft's.
+        """
+        self.customs()
+        self.mail.payloads["invoice"] = (
+            "invoice.pdf",
+            "application/pdf",
+            columnar_invoice_pdf(
+                "2026-10-15",
+                due_date="14/11/2026",
+                shipment_date="02/01/2026",
+                hawb="1234567890",
+            ),
+        )
+        result = self.invoice()
+        self.assertNotEqual(result.values.get("returned_for"), "invoice_date_missing")
+        self.assertTrue(result.values["completed"], result.values.get("detail"))
+        stored = self.xero.bills["bill-1"]
+        self.assertEqual(stored["Date"], "2026-10-15")
+        self.assertEqual(stored["DueDate"], "2026-11-14")
+        self.assertEqual(stored["InvoiceNumber"], "CPTZR00032240")
 
     def test_an_invoice_stating_no_date_is_refused(self) -> None:
         """V1's date-guessing defect must not return."""
