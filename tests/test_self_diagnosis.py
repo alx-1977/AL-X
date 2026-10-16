@@ -147,5 +147,22 @@ class CapabilityTests(unittest.TestCase):
         self.assertIn("look there before you answer", text)
 
 
+class PollingNoiseTests(unittest.TestCase):
+    """The page's five-second polls are not written to her log (2026-10-16)."""
+
+    def _record(self, status: int, phrase: str):
+        import logging
+        return logging.LogRecord("websockets.server", logging.INFO, __file__, 1,
+                                 "connection rejected (%d %s)", (status, phrase), None)
+
+    def test_an_answered_poll_is_dropped_and_a_real_refusal_is_kept(self) -> None:
+        from alx.bootstrap.live_voice import _AnsweredPageRequests
+
+        answered = _AnsweredPageRequests()
+        self.assertFalse(answered.filter(self._record(200, "OK")))
+        self.assertTrue(answered.filter(self._record(403, "Forbidden")))
+        self.assertTrue(answered.filter(self._record(500, "Internal Server Error")))
+
+
 if __name__ == "__main__":
     unittest.main()

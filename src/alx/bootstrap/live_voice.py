@@ -1457,6 +1457,24 @@ async def run(repository_root: Path) -> None:
         goal_store.close()
 
 
+class _AnsweredPageRequests(logging.Filter):
+    """Drop the websockets line for an ordinary page request it answered.
+
+    The page polls /presence.json and the reader tile every five seconds over
+    plain HTTP on the voice server. websockets logs each answered request as
+    "connection rejected (200 OK)": 2,268 lines on 2026-10-15, in the log AL/X
+    reads to diagnose herself (D-050). Only that exact record with status 200
+    is dropped; a refusal with any other status is still logged.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (
+            record.msg == "connection rejected (%d %s)"
+            and isinstance(record.args, tuple)
+            and record.args[:1] == (200,)
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     # The checkout is named, not inferred from this file: the launcher runs
     # code extracted from committed main, which lives outside the checkout
@@ -1468,6 +1486,7 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("websockets.server").addFilter(_AnsweredPageRequests())
     try:
         asyncio.run(run(repository_root))
     except KeyboardInterrupt:
