@@ -677,10 +677,96 @@ class NativeExecutionTests(unittest.TestCase):
         self._run(model, session, task="fix add", worktree=str(worktree))
         briefing = session.calls[0][1]
         self.assertIn("You have a terminal", briefing)
-        self.assertIn("only hers count", briefing)
+        self.assertIn("only her checks", briefing)
         self.assertNotIn("no terminal", briefing.lower())
         material = json.loads(model.requests[0].messages[1].content)
         self.assertIs(material["execution_model"]["terminal"], True)
+
+    def _review(self, worktree, available=True, summary="", comments=()):
+        from alx.contracts.review_content import ReviewComment, ReviewContent
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
+        seen = []
+
+        def reader(request):
+            seen.append(request)
+            if not available:
+                return ReviewContent(request.pull_request_number, request.head_sha,
+                                     "greptile", False, unavailable_reason="no_review_for_revision")
+            return ReviewContent(
+                request.pull_request_number, request.head_sha, "greptile", True,
+                summary=summary,
+                comments=tuple(ReviewComment(body, path, line) for body, path, line in comments),
+                submitted_at=NOW,
+            )
+        return head, seen, reader
+
+    def _run_with_reader(self, reader, model, session, **arguments):
+        repository = arguments.pop("worktree")
+        arguments.setdefault("repair_branch", "fix/call-1")
+        arguments.setdefault("commit_message", "complete coding job")
+        runtime = build_coding_runtime(
+            True, model, lambda: "call-1", session=session,
+            repository=Path(repository), review_reader=reader,
+        )
+        broker = CapabilityBroker(
+            CapabilityRegistry(runtime.definitions), SafetyGate(runtime.policies),
+            runtime.executors,
+        )
+        return broker.dispatch(
+            CapabilityCall("call-1", RUN_CODING_TASK, arguments),
+            AuthorityContext("friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW),
+        )
+
+    def test_the_reviewers_own_words_reach_the_session_and_the_plan(self) -> None:
+        """D-052a: on 2026-10-16 AL/X retold Greptile's findings, and three
+        rounds missed what the reviewer had actually said."""
+        worktree = _worktree(self.root)
+        head, seen, reader = self._review(
+            worktree,
+            summary='<h2><img alt="badge" src="x.svg">Confidence Score: 4/5</h2>'
+                    "<p>Old replies still reach Core &amp; anchor the answer.</p>",
+            comments=(("**Exclude the claimed wording** from history.", "src/app.py", 12),),
+        )
+        session = RecordingSession(edits={"app.py": _FIXED})
+        model = PlanningModel()
+        attempt = self._run_with_reader(reader, model, session, task="address the review",
+                                        worktree=str(worktree), review_pull_request=147)
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED, attempt.result.failure)
+        self.assertEqual((seen[0].pull_request_number, seen[0].head_sha), (147, head))
+        briefing = session.calls[0][1]
+        self.assertIn("Old replies still reach Core & anchor the answer.", briefing)
+        self.assertIn("**Exclude the claimed wording** from history.", briefing)
+        self.assertIn("(src/app.py:12)", briefing)
+        self.assertNotIn("<img", briefing)
+        self.assertIn("first write a test that reproduces", briefing)
+        self.assertIn("instructions from AL/X or Friedl", briefing)
+        material = json.loads(model.requests[0].messages[1].content)
+        self.assertIn("Old replies still reach Core", material["external_review"])
+
+    def test_no_review_of_the_starting_revision_refuses_before_any_change(self) -> None:
+        worktree = _worktree(self.root)
+        _head, _seen, reader = self._review(worktree, available=False)
+        session = RecordingSession(edits={"app.py": _FIXED})
+        model = PlanningModel()
+        attempt = self._run_with_reader(reader, model, session, task="address the review",
+                                        worktree=str(worktree), review_pull_request=147)
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "review_unavailable")
+        self.assertIs(attempt.result.failure["implementation_reached"], False)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(model.requests, [])
+
+    def test_a_terminal_session_leaves_the_full_suite_to_alx(self) -> None:
+        """2026-10-16: Codex and AL/X each ran the 5.5-minute suite every round."""
+
+        class TerminalSession(RecordingSession):
+            has_terminal = True
+
+        worktree = _worktree(self.root)
+        session = TerminalSession(edits={"app.py": _FIXED})
+        self._run(PlanningModel(), session, task="fix add", worktree=str(worktree))
+        self.assertIn("Do not\n  run the whole suite", session.calls[0][1])
 
     def test_the_briefing_states_the_withheld_authority(self) -> None:
         """14. Commit, push, merge and review are refused in the instruction."""

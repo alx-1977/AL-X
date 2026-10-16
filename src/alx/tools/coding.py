@@ -195,7 +195,13 @@ DEFINITION = CapabilityDefinition(
     "resulting tree holds any path outside that authorised set. It still does "
     "not push, merge, deploy, or request an external review. "
     "No second model reviews the diff: the checks, and the external review "
-    "you request on the pull request, are the review. "
+    "you request on the pull request, are the review. To address that review, "
+    "give review_pull_request: the job reads the reviewer's summary and "
+    "comments for the exact revision it starts from and hands them to the "
+    "session word for word, with the instruction to reproduce each finding in "
+    "a failing test before fixing it. Do not retell the findings in task; name "
+    "the pull request. If no finished review covers that revision the job "
+    "refuses with review_unavailable before changing anything. "
     "AL/X may supply only resume_job_id for a failed or cancelled call "
     "from this active goal to retry only its recorded stage after the checkout "
     "matches the durable branch, HEAD, and full state digest. With a resume of "
@@ -226,6 +232,7 @@ DEFINITION = CapabilityDefinition(
             "continue_goal_branch": _BOOLEAN,
             "resume_job_id": _STRING,
             "corrective_action": _STRING,
+            "review_pull_request": _INTEGER,
         },
         (),
         extra_properties=False,
@@ -281,7 +288,7 @@ DEFINITION = CapabilityDefinition(
         "verification_commands",
         "step_budget", "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
-        "resume_job_id", "corrective_action",
+        "resume_job_id", "corrective_action", "review_pull_request",
     ),
 )
 
@@ -664,6 +671,16 @@ def parse_coding_arguments(
     )
     if error is not None:
         return None, error
+    review_pull_request = arguments.get("review_pull_request")
+    if review_pull_request is not None and (
+        not isinstance(review_pull_request, int)
+        or isinstance(review_pull_request, bool)
+        or review_pull_request <= 0
+    ):
+        return None, _argument_failure(
+            "review_pull_request", "not_positive_integer",
+            "review_pull_request must be a positive pull request number",
+        )
     if "corrective_action" in arguments and not corrective_action.strip():
         return None, _argument_failure(
             "corrective_action", "blank", "corrective_action must be a non-blank string"
@@ -709,6 +726,7 @@ def parse_coding_arguments(
             repair_branch=branch,
             commit_message=message,
             corrective_action=corrective_action,
+            review_pull_request=review_pull_request,
         ),
         None,
     )

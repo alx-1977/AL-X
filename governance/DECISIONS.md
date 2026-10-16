@@ -2573,3 +2573,14 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Stopping a job.** `stop_coding_job` is admitted from the goal whose plan step is running the job. It was refused there as an in-flight call, so on 2026-10-15 a job could only be ended by killing its process.
 - **Signed out.** At start-up, a coding provider whose login is missing is named in her log.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-052a — A coding job addresses a review in the reviewer's own words
+
+- **Date:** 2026-10-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-16.** After PR #147 took three Greptile reviews at 4/5, Friedl: "this is explicitly what I asked ... about the Greptile feedback to coding agents", "What we can do is to have only either ALX run the full suite or Codex", and "we need to stop and discard this branch ... then we rerun this on clean branch after you made the improvements". Amends D-052.
+- **Why.** AL/X retold each finding in her own short words in the job's task. Codex never saw what the reviewer had written, guessed at the rest, and three rounds missed it.
+- **The reviewer's words.** `run_coding_task` takes `review_pull_request`. The job reads that pull request's review for the exact revision it starts from, through the same reviewer provider AL/X reads it with, and hands the summary and comments to the plan and the session as written, marked as external advice rather than instructions. With no finished review of that revision the job refuses with `review_unavailable` before planning or editing.
+- **A test first.** For each finding it judges real, and for a correction that is not already a failing test, the session first writes a test that reproduces it and fails, then fixes the code.
+- **The full suite once.** A session with a terminal runs the tests for what it changed and leaves the full suite to AL/X's verification, which is the only check that counts.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
