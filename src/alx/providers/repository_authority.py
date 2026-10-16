@@ -80,6 +80,15 @@ _SAFE_GIT_CONFIG = {
 }
 
 
+# Who a commit made through this service is by. The machine's own git
+# configuration is deliberately not read (GIT_CONFIG_GLOBAL below), so git has
+# no name to put on a commit unless one is given: every `commit` here failed
+# with "Author identity unknown" until this existed (2026-10-16). Stated, as
+# the coding job's author is, so it never depends on the host.
+COMMIT_AUTHOR_NAME = "AL/X"
+COMMIT_AUTHOR_EMAIL = "alx@alx.invalid"
+
+
 def _git_environment() -> dict[str, str]:
     """The small fixed environment every command runs under.
 
@@ -101,6 +110,10 @@ def _git_environment() -> dict[str, str]:
         "GIT_ASKPASS": os.devnull,
         "SSH_ASKPASS": os.devnull,
         "GIT_CONFIG_COUNT": str(len(_SAFE_GIT_CONFIG)),
+        "GIT_AUTHOR_NAME": COMMIT_AUTHOR_NAME,
+        "GIT_AUTHOR_EMAIL": COMMIT_AUTHOR_EMAIL,
+        "GIT_COMMITTER_NAME": COMMIT_AUTHOR_NAME,
+        "GIT_COMMITTER_EMAIL": COMMIT_AUTHOR_EMAIL,
     })
     for index, (key, value) in enumerate(_SAFE_GIT_CONFIG.items()):
         environment[f"GIT_CONFIG_KEY_{index}"] = key

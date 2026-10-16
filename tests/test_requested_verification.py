@@ -129,6 +129,23 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
         self.assertTrue(tests_run)
         self.assertIn(self._pytest("tests/test_ok.py"), [c.argv for c in commands])
 
+    def test_a_requested_command_gets_the_full_suite_bound(self) -> None:
+        """2026-10-16: her full suite timed out three times at the default bound."""
+        from unittest.mock import patch
+        from alx.contracts.coding import FULL_SUITE_COMMAND_SECONDS
+        from alx.providers import coding_agent as agent_module
+
+        seen = []
+        original = agent_module.run_permitted_command
+
+        def recording(argv, root, **keywords):
+            seen.append((tuple(argv), keywords["timeout_seconds"]))
+            return original(argv, root, **keywords)
+
+        with patch.object(agent_module, "run_permitted_command", recording):
+            self._verify(self._pytest("tests/test_ok.py"))
+        self.assertIn((self._pytest("tests/test_ok.py"), FULL_SUITE_COMMAND_SECONDS), seen)
+
     def test_a_failing_requested_command_fails_verification(self) -> None:
         evidence, _tests_run, _commands = self._verify(self._pytest("tests/test_bad.py"))
         check = next(c for c in evidence.checks if c.name == "requested_1")

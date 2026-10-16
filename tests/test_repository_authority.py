@@ -501,6 +501,24 @@ class OrdinaryOperationTests(RealRepositoryHarness):
             committed.resulting_sha,
         )
 
+    def test_a_commit_needs_no_identity_from_the_machine(self) -> None:
+        """2026-10-16: every commit here failed with "Author identity unknown".
+
+        The fixture's own user.name hid it; the real checkout has none, and the
+        machine's global configuration is deliberately not read.
+        """
+        git(self.local, "config", "--unset", "user.name")
+        git(self.local, "config", "--unset", "user.email")
+        self.assertTrue(self.perform(
+            Operation.CREATE_BRANCH, branch="feat/y", start_point="main").succeeded)
+        self.assertTrue(self.perform(Operation.SWITCH_BRANCH, branch="feat/y").succeeded)
+        (self.local / "y.txt").write_text("y\n")
+        self.perform(Operation.STAGE, paths=["y.txt"])
+        committed = self.perform(Operation.COMMIT, message="add y")
+        self.assertTrue(committed.succeeded, committed)
+        self.assertEqual(git(self.local, "log", "-1", "--format=%an <%ae>"),
+                         "AL/X <alx@alx.invalid>")
+
     def test_local_merge_cherry_pick_and_revert(self) -> None:
         self.branch("fix/thing")
         picked = git(self.local, "rev-parse", "HEAD")
